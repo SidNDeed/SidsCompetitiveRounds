@@ -322,22 +322,62 @@ namespace CompetitiveRounds
             return true;
         }
 
-        /// <summary>Consume ApiClient's series-state colour stamp (published by
-        /// the 2v2 series state poll, cleared with ActiveTeamSeriesId). Returns
-        /// true when the stamp is PRESENT and we are in the series' team_ room
-        /// — in that case the stamp is the complete answer for BOTH teams,
-        /// including a deliberately-vanilla side. Server team 1/2 map to ROUNDS
-        /// TeamID 0/1 (the same mapping the 2v2 slot machinery uses).</summary>
-        private static bool TryBuildFromServerStamp()
+        /// <summary>ROOM property carrying the series' frozen colour stamp:
+        /// "seriesId|t1name|t1hex|t2name|t2hex|decided". Codex r2 f6/f7: the
+        /// per-seat ApiClient statics reach only seats that ran the state
+        /// poll (the continuation response reaches ONLY the reporter, and a
+        /// spectator never polls at all) — the room prop is the one channel
+        /// every occupant of the room shares, and it is series-correct BY
+        /// CONSTRUCTION because it lives on the room it describes.</summary>
+        private const string PROP_TEAM_STAMP = "cr_tcol";
+
+        /// <summary>Publish the stamp to the current team_ room. Called from
+        /// the series state-poll and continuation callbacks (fighters only —
+        /// a spectator must never author identity). Idempotent: identical
+        /// values skip the network op.</summary>
+        public static void PublishSeriesStamp(string seriesId, string n1, string h1,
+                                              string n2, string h2, bool decided)
         {
-            string n1, h1, n2, h2;
             try
             {
-                n1 = ApiClient.SeriesTeam1ColorName; h1 = ApiClient.SeriesTeam1ColorHex;
-                n2 = ApiClient.SeriesTeam2ColorName; h2 = ApiClient.SeriesTeam2ColorHex;
+                if (!decided && string.IsNullOrEmpty(h1) && string.IsNullOrEmpty(h2)) return;
+                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return;
+                if (RoomActors.LocalIsSpectator) return;
+                var room = PhotonNetwork.CurrentRoom;
+                string roomName = room != null ? room.Name : null;
+                if (string.IsNullOrEmpty(roomName)
+                    || !roomName.StartsWith("team_", StringComparison.OrdinalIgnoreCase))
+                    return;
+                string Clean(string s) => (s ?? "").Replace("|", "");
+                string val = Clean(seriesId) + "|" + Clean(n1) + "|" + Clean(h1) + "|"
+                           + Clean(n2) + "|" + Clean(h2) + "|" + (decided ? "1" : "0");
+                object cur;
+                if (room.CustomProperties != null
+                    && room.CustomProperties.TryGetValue(PROP_TEAM_STAMP, out cur)
+                    && cur is string && (string)cur == val)
+                    return;
+                var ht = new ExitGames.Client.Photon.Hashtable();
+                ht[PROP_TEAM_STAMP] = val;
+                room.SetCustomProperties(ht);
+                Plugin.Log?.LogInfo($"[TEAMCOLOR] published room stamp for series {seriesId}");
             }
-            catch { return false; }
-            if (string.IsNullOrEmpty(h1) && string.IsNullOrEmpty(h2)) return false;
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning($"[TEAMCOLOR] stamp publish failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>Consume the series colour stamp. Source order (Codex r2
+        /// f6/f7): (1) the ROOM property — shared by every occupant including
+        /// spectators and late continuation seats; (2) fighters only, the
+        /// ApiClient statics from this seat's own state poll (a SPECTATOR
+        /// must never consume its own leftover statics — they describe its
+        /// previous series, not the watched room). Returns true when a stamp
+        /// answered — including a decided-VANILLA answer, which builds no
+        /// identity but must still suppress the live local fallback (freeze
+        /// means frozen). Server team 1/2 map to ROUNDS TeamID 0/1.</summary>
+        private static bool TryBuildFromServerStamp()
+        {
             try
             {
                 if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return false;
@@ -346,11 +386,41 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(roomName)
                     || !roomName.StartsWith("team_", StringComparison.OrdinalIgnoreCase))
                     return false;
+                // (1) Room prop — authoritative for everyone in the room.
+                object raw;
+                if (room.CustomProperties != null
+                    && room.CustomProperties.TryGetValue(PROP_TEAM_STAMP, out raw)
+                    && raw is string)
+                {
+                    var parts = ((string)raw).Split('|');
+                    if (parts.Length >= 6)
+                    {
+                        AddServerStamp(0, parts[1], parts[2]);
+                        AddServerStamp(1, parts[3], parts[4]);
+                        return true;   // decided-vanilla = empty teams, frozen
+                    }
+                }
+                // (2) Own statics — fighters only (f7).
+                if (RoomActors.LocalIsSpectator) return false;
+                string n1, h1, n2, h2;
+                bool decided;
+                try
+                {
+                    n1 = ApiClient.SeriesTeam1ColorName; h1 = ApiClient.SeriesTeam1ColorHex;
+                    n2 = ApiClient.SeriesTeam2ColorName; h2 = ApiClient.SeriesTeam2ColorHex;
+                    decided = ApiClient.SeriesColorDecided;
+                }
+                catch { return false; }
+                // Codex r2 f9: decided + all-empty = the server FROZE an
+                // all-vanilla identity — return true with no teams built so a
+                // mid-series colour equip can't re-open it via the live local
+                // fallback. Undecided + empty = pre-206 server, fall back.
+                if (!decided && string.IsNullOrEmpty(h1) && string.IsNullOrEmpty(h2)) return false;
+                AddServerStamp(0, n1, h1);
+                AddServerStamp(1, n2, h2);
+                return true;
             }
             catch { return false; }
-            AddServerStamp(0, n1, h1);
-            AddServerStamp(1, n2, h2);
-            return true;
         }
 
         private static void AddServerStamp(int team, string name, string hex)
@@ -560,6 +630,43 @@ namespace CompetitiveRounds
             return null;
         }
 
+        /// <summary>Set (or clear, width 0) a TMP label's outline in the given
+        /// colour — the reliable way to FATTEN small SDF glyphs (Sid: "double
+        /// the thickness" on the card-bar letters). Reached by reflection
+        /// (#15); outlineWidth/outlineColor force a per-label instance
+        /// material, which is the #303-sanctioned pattern (never mutate the
+        /// shared font material).</summary>
+        public static void SetTmpOutline(Component tmp, Color color, float width)
+        {
+            if (tmp == null) return;
+            try
+            {
+                var t = tmp.GetType();
+                var pw = t.GetProperty("outlineWidth", BindingFlags.Public | BindingFlags.Instance);
+                var pc = t.GetProperty("outlineColor", BindingFlags.Public | BindingFlags.Instance);
+                if (pw == null) return;
+                if (pc != null)
+                {
+                    // outlineColor is Color32 on TMP_Text.
+                    object c32 = pc.PropertyType == typeof(Color)
+                        ? (object)color
+                        : (object)(Color32)color;
+                    pc.SetValue(tmp, c32, null);
+                }
+                pw.SetValue(tmp, width, null);
+            }
+            catch { }
+        }
+
+        /// <summary>True when the component is a TMP text (base-type walk).</summary>
+        public static bool IsTmp(Component c)
+        {
+            if (c == null) return false;
+            for (var t = c.GetType(); t != null; t = t.BaseType)
+                if (t.Name == "TMP_Text") return true;
+            return false;
+        }
+
         /// <summary>Current <c>.text</c> of any TMP-ish component, or null.</summary>
         public static string TextOf(Component c)
         {
@@ -648,16 +755,22 @@ namespace CompetitiveRounds
                     ? I18n.TrF("{0} GOT A POINT", id.AnnounceName)
                     : I18n.TrF("{0} GOT HALF A POINT", id.AnnounceName);
 
-                Apply(__instance, text, id.TextColor);
+                // Codex r2 f11: the WORDING stays custom with Show Player
+                // Colors off (Sid: names stay custom), but the label keeps
+                // its vanilla COLOUR — a tinted announcement over vanilla
+                // bodies names a colour the viewer cannot see.
+                bool tint = TeamColorIdentity.TintsEnabled;
+                Apply(__instance, text, id.TextColor, tint);
                 if (Plugin.Instance != null)
-                    Plugin.Instance.StartCoroutine(HoldText(__instance, text, id.TextColor));
+                    Plugin.Instance.StartCoroutine(HoldText(__instance, text, id.TextColor, tint));
             }
             catch (Exception ex) { VanillaFixSupport.LogError("PointVisualizerTeamColor", ex); }
         }
 
-        private static void Apply(PointVisualizer pv, string text, Color color)
+        private static void Apply(PointVisualizer pv, string text, Color color, bool tint = true)
         {
             try { pv.m_localizedText.ResetReference(text); } catch { }
+            if (!tint) return;
             try
             {
                 Color ignored;
@@ -673,7 +786,7 @@ namespace CompetitiveRounds
         /// clears (PointVisualizer.cs:266-272) — DoWinSequence calls DoShowPoints(0,0)
         /// and Close() back to back, and without that guard this loop would paint the
         /// announcement back over the card-pick screen.</summary>
-        private static IEnumerator HoldText(PointVisualizer pv, string text, Color color)
+        private static IEnumerator HoldText(PointVisualizer pv, string text, Color color, bool tint = true)
         {
             for (int i = 0; i < 8; i++)
             {
@@ -683,7 +796,7 @@ namespace CompetitiveRounds
                 try { current = TeamColorIdentity.TextOf(TeamColorIdentity.TmpOf(pv.m_localizedText)); }
                 catch { }
                 if (current == text) continue;
-                Apply(pv, text, color);
+                Apply(pv, text, color, tint);
             }
         }
 
@@ -1200,6 +1313,13 @@ namespace CompetitiveRounds
                 TeamColorIdentity.TrySetComponentColor(label, styled, out prev);
                 if (!_tinted.ContainsKey(iid))
                     _tinted[iid] = new KeyValuePair<Component, Color>(label, prev);
+                // Aug 8 (Sid, screenshot round 3): "can you double the
+                // thickness?" — the two-letter glyphs are thin at 36px and the
+                // deep tint alone still reads faint. A same-colour TMP outline
+                // fattens every stroke (~2x visual weight). fontStyle=Bold is
+                // NOT the tool: it silently no-ops on SDF atlases without a
+                // bold variant (#48); outline renders on any SDF glyph.
+                TeamColorIdentity.SetTmpOutline(label, styled, 0.22f);
             }
             catch { }
         }
@@ -1215,6 +1335,9 @@ namespace CompetitiveRounds
                     if (comp == null) continue;   // Unity fake-null: bar cleared
                     Color ignored;
                     TeamColorIdentity.TrySetComponentColor(comp, kv.Value.Value, out ignored);
+                    // The thickness outline rides the tint — clear it with it.
+                    if (TeamColorIdentity.IsTmp(comp))
+                        TeamColorIdentity.SetTmpOutline(comp, Color.clear, 0f);
                 }
                 catch { }
             }
@@ -1254,6 +1377,8 @@ namespace CompetitiveRounds
                     {
                         Color ignored;
                         TeamColorIdentity.TrySetComponentColor(comp, rec.Value, out ignored);
+                        if (TeamColorIdentity.IsTmp(comp))
+                            TeamColorIdentity.SetTmpOutline(comp, Color.clear, 0f);
                     }
                     catch { }
                     (drop ?? (drop = new List<int>())).Add(iid);

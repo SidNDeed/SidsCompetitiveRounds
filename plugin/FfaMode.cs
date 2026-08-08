@@ -459,9 +459,10 @@ namespace CompetitiveRounds
         private static readonly Dictionary<int, float> damageDealt = new Dictionary<int, float>();
         // Cumulative CSV samples per team id, taken on GameStateWatcher's
         // existing 3s telemetry cadence so the x-axis matches hit/block.
-        private static readonly Dictionary<int, List<int>> killTimeline = new Dictionary<int, List<int>>();
-        private static readonly Dictionary<int, List<int>> damageTimeline = new Dictionary<int, List<int>>();
-        private const int FFA_TIMELINE_CAP = 128;   // 6.4 min at 3s, matches hit/block
+        // Aug 8 (Stan bug 181): DecimatedList — compresses at 128 instead of
+        // stopping, so a 10-minute FFA (prod avg 643s) records its whole game.
+        private static readonly Dictionary<int, DecimatedList<int>> killTimeline = new Dictionary<int, DecimatedList<int>>();
+        private static readonly Dictionary<int, DecimatedList<int>> damageTimeline = new Dictionary<int, DecimatedList<int>>();
 
         public static int DamageDealtFor(int teamId)
         {
@@ -504,12 +505,12 @@ namespace CompetitiveRounds
                     var p = pm.players[i];
                     if (p == null) continue;
                     int tid = p.TeamID;
-                    List<int> kl;
-                    if (!killTimeline.TryGetValue(tid, out kl)) { kl = new List<int>(32); killTimeline[tid] = kl; }
-                    if (kl.Count < FFA_TIMELINE_CAP) kl.Add(KillsFor(tid));
-                    List<int> dl;
-                    if (!damageTimeline.TryGetValue(tid, out dl)) { dl = new List<int>(32); damageTimeline[tid] = dl; }
-                    if (dl.Count < FFA_TIMELINE_CAP) dl.Add(DamageDealtFor(tid));
+                    DecimatedList<int> kl;
+                    if (!killTimeline.TryGetValue(tid, out kl)) { kl = new DecimatedList<int>(); killTimeline[tid] = kl; }
+                    kl.Add(KillsFor(tid));
+                    DecimatedList<int> dl;
+                    if (!damageTimeline.TryGetValue(tid, out dl)) { dl = new DecimatedList<int>(); damageTimeline[tid] = dl; }
+                    dl.Add(DamageDealtFor(tid));
                 }
             }
             catch { }
@@ -517,16 +518,16 @@ namespace CompetitiveRounds
 
         public static string KillTimelineFor(int teamId)
         {
-            List<int> l;
+            DecimatedList<int> l;
             if (!killTimeline.TryGetValue(teamId, out l) || l.Count == 0) return null;
-            return string.Join(",", l.ConvertAll(v => v.ToString()).ToArray());
+            return string.Join(",", l.Items.ConvertAll(v => v.ToString()).ToArray());
         }
 
         public static string DamageTimelineFor(int teamId)
         {
-            List<int> l;
+            DecimatedList<int> l;
             if (!damageTimeline.TryGetValue(teamId, out l) || l.Count == 0) return null;
-            return string.Join(",", l.ConvertAll(v => v.ToString()).ToArray());
+            return string.Join(",", l.Items.ConvertAll(v => v.ToString()).ToArray());
         }
 
         /// <summary>Kill credit at death time: the victim's

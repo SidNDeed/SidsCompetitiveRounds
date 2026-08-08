@@ -2490,6 +2490,13 @@ namespace CompetitiveRounds
                 int slotForColor=players[i]!=null?players[i].slot:-1;
                 if(slotForColor<0)slotForColor=i;
                 graph.colors[i]=FfaPlayerColor(slotForColor);
+                // Aug 8 (Sid, round 2): when the row carries the match-time
+                // body-colour stamp, the graph line adopts it — the SAME
+                // resolution the score dots use (BuildFfaRecentRowText), so
+                // the dots/graph stay a matched pair; slot palette otherwise.
+                // Resolved here, at graph-build/fill time (#265).
+                string gHex=SafeHexColor(players[i]?.color_hex);
+                if(gHex!=null&&ColorUtility.TryParseHtmlString(gHex,out Color gStamp))graph.colors[i]=gStamp;
                 graph.values[i]=new float[tokens.Length+1];
             }
             int eventIndex=0;
@@ -2592,7 +2599,15 @@ namespace CompetitiveRounds
                 int placement=player.placement;
                 bool winner=(!string.IsNullOrEmpty(match.winner_steam_id)&&player.steam_id==match.winner_steam_id)
                             ||(string.IsNullOrEmpty(match.winner_steam_id)&&placement==1);
+                // Aug 8 (Sid, round 2): the match-time body-colour stamp now
+                // drives the score DOTS too (not just the points text below) —
+                // and ParseFfaTimeline applies the same stamp to that player's
+                // graph line, so the dots/graph stay a matched pair. Pre-stamp
+                // rows (empty color_hex) keep the slot palette exactly as
+                // before. SafeHexColor validates the server hex (#156 family).
+                string stampHex=SafeHexColor(player.color_hex);
                 Color dotColor=FfaPlayerColor(player.slot);
+                if(stampHex!=null&&ColorUtility.TryParseHtmlString(stampHex,out Color stamped))dotColor=stamped;
                 UIFactory.SetText(ui.txtPlacement,placement>0?$"#{placement}":"#?");
                 // Name first, THEN the title — every other surface renders
                 // "name [title]" (leaderboards, chat); this row was the one
@@ -2611,11 +2626,8 @@ namespace CompetitiveRounds
                 int shownHalves=Math.Min(FFA_HALF_DOT_CAP,leftover);
                 FillFfaDotPool(ui.fullDots,ui.fullDotsGO,points,ffaFullDotSprite,dotColor,"P");
                 FillFfaDotPool(ui.halfDots,ui.halfDotsGO,shownHalves,ffaHalfDotSprite,dotColor,"H");
-                // Aug 8 (Sid): the match-time body-colour stamp tints the
-                // points/score readout. Pre-stamp rows (empty color_hex)
-                // render exactly as today; the slot-palette dots/graph pair
-                // stays untouched so they keep matching each other.
-                string stampHex=SafeHexColor(player.color_hex);
+                // Aug 8 (Sid): the stamp also tints the points/score readout
+                // (stampHex computed above, beside the dot colour).
                 UIFactory.SetText(ui.txtPoints,stampHex!=null?$"<color={stampHex}>{points}(P)</color>":$"{points}(P)");
                 int hiddenHalves=leftover-shownHalves;
                 if(ui.halfOverflowGO!=null)ui.halfOverflowGO.SetActive(hiddenHalves>0);
@@ -2694,9 +2706,9 @@ namespace CompetitiveRounds
                     // series with it instead of claiming the series is "you".
                     string subjectName=FfaSafeRich(Trunc(player.display_name??"?",18));
                     if(!string.IsNullOrEmpty(hitTxt))
-                        RegisterPairGraphRectFor(ui.txtHit,player.hit_timeline,false,false,null,match.timeline,ffaTabOuterViewport,subjectName);
+                        RegisterPairGraphRectFor(ui.txtHit,player.hit_timeline,false,false,null,match.timeline,ffaTabOuterViewport,subjectName,match.duration_seconds);
                     if(!string.IsNullOrEmpty(blkTxt))
-                        RegisterPairGraphRectFor(ui.txtBlock,player.block_timeline,true,false,null,match.timeline,ffaTabOuterViewport,subjectName);
+                        RegisterPairGraphRectFor(ui.txtBlock,player.block_timeline,true,false,null,match.timeline,ffaTabOuterViewport,subjectName,match.duration_seconds);
                     if(!string.IsNullOrEmpty(fpsTxt))
                         RegisterTeleGraphRectFor(ui.txtFps,player.fps_timeline,null,false,null,match.timeline,outerClip:ffaTabOuterViewport,subjectLabel:subjectName);
                     if(!string.IsNullOrEmpty(pingTxt))
@@ -3639,9 +3651,20 @@ namespace CompetitiveRounds
                 bool showStart=seated&&cli.IsHost&&!leaving;
                 startBtn.SetActive(showStart);
                 if(showStart)
-                    UIFactory.SetTextRaw(UIFactory.GetButtonText(startBtn),
-                        cli.CanStart?I18n.TrF("<b>Start Game ({0}/{1})</b>",cli.MemberCount,cli.MaxPlayers)
-                                    :I18n.TrF("<b>Start (need {0})</b>",cli.MaxPlayers));
+                {
+                    // Codex r2 f4/f6: while the host's OWN prefs write is
+                    // unacked, Start dims and no-ops (StartLobby carries the
+                    // authoritative early-return) — a Start landing mid-write
+                    // would freeze a value the host just changed (the ovt
+                    // extra-pick race).
+                    if(cli.PrefsInFlight)
+                        UIFactory.SetTextRaw(UIFactory.GetButtonText(startBtn),
+                            I18n.Tr("<b><color=#999999>Start (saving...)</color></b>"));
+                    else
+                        UIFactory.SetTextRaw(UIFactory.GetButtonText(startBtn),
+                            cli.CanStart?I18n.TrF("<b>Start Game ({0}/{1})</b>",cli.MemberCount,cli.MaxPlayers)
+                                        :I18n.TrF("<b>Start (need {0})</b>",cli.MaxPlayers));
+                }
             }
             if(leaveBtn!=null)leaveBtn.SetActive(seated||leaving);
             string browseHdr=team?I18n.Tr("<b>Hosted 2v2 Lobbies</b>"):I18n.Tr("<b>Custom 1v2 Lobbies</b>");
@@ -6574,9 +6597,29 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             int start = liveSeriesPage * LIVE_SERIES_PER_PAGE;
             int end = Math.Min(start + LIVE_SERIES_PER_PAGE, oneVOneCount);
 
+            // #245 + hosted-lobby r2 finding 10: ONE shared row budget for the
+            // WHOLE live column. It has NO bounded scroll, so the total row
+            // count is the only thing between this panel and overpainting the
+            // bet ledger below it at 21:9 (~470px of column). Arithmetic:
+            //   - each 1v1/2v2 series = 3 rows (header + 2 bet rows, 26px each)
+            //   - each FFA/1v2 spectate game = 1 row (24px)
+            //   - 16 rows x ~26px ≈ 416px; + one "+N more" line + the pager
+            //     row ≈ the ~470px budget. Per-section caps can't do this —
+            //     only the TOTAL bounds the height.
+            // Priority when over budget: 1v1 -> 2v2 -> FFA/1v2. Everything
+            // dropped collapses into ONE final "+N more live games" line.
+            const int LIVE_ROW_BUDGET = 16;
+            int demandRows = (end - start) * 3 + teamCount * 3 + liveSpec.Count;
+            // Reserve a row for the "+N more" line only when something will
+            // actually be dropped — an exactly-16-row column renders whole.
+            int rowBudget = demandRows <= LIVE_ROW_BUDGET ? LIVE_ROW_BUDGET : LIVE_ROW_BUDGET - 1;
+            int rowsUsed = 0, droppedGames = 0;
+
             int poolIdx = 0;
             for (int i = start; i < end; i++)
             {
+                if (rowsUsed + 3 > rowBudget) { droppedGames += end - i; break; }
+                rowsUsed += 3;
                 var s = list[i];
                 // Each series uses 3 rows: header, bet-on-p1 row, bet-on-p2 row.
                 var hdr = GetOrCreateLiveRow(poolIdx++);
@@ -6588,12 +6631,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
 
             // 2v2 active series — same 3-row layout (header + bet-on-team1 + bet-on-team2)
-            // appended below the 1v1 list. Always render the full team list (no
-            // pagination) — 2v2 volume is small.
+            // appended below the 1v1 list, spending the same shared budget.
             if (teamList != null)
             {
-                foreach (var ts in teamList)
+                for (int ti = 0; ti < teamList.Count; ti++)
                 {
+                    if (rowsUsed + 3 > rowBudget) { droppedGames += teamList.Count - ti; break; }
+                    rowsUsed += 3;
+                    var ts = teamList[ti];
                     var hdr = GetOrCreateLiveRow(poolIdx++);
                     ApplyTeamHeaderRow(hdr, ts);
                     var bT1 = GetOrCreateLiveRow(poolIdx++);
@@ -6603,23 +6648,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
             }
 
-            // Bug 177: live FFA / 1v2 rows (mode tag + names + WATCH). CAPPED
-            // at 4 — this column has NO bounded scroll and has overpainted
-            // before (#245); anything past the cap collapses into one "+N
-            // more" line pointing at the mode tabs. Rows stay one line.
-            if (liveSpec.Count > 0)
+            // Bug 177: live FFA / 1v2 rows (mode tag + names + WATCH), last in
+            // priority — they spend whatever budget the bet sections left.
+            for (int i = 0; i < liveSpec.Count; i++)
             {
-                int specShown = Math.Min(liveSpec.Count, LIVE_SPECTATE_ROWS_CAP);
-                for (int i = 0; i < specShown; i++)
-                    ApplySpectateLiveRow(GetOrCreateLiveRow(poolIdx++), liveSpec[i]);
-                if (liveSpec.Count > specShown)
-                {
-                    var more = GetOrCreateLiveRow(poolIdx++);
-                    var tMore = UIFactory.CreateText("more", more.transform,
-                        I18n.TrF("<color=#888>+{0} more live games - see the mode tabs</color>", liveSpec.Count - specShown),
-                        13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(384, 22));
-                    UIFactory.SetWordWrap(tMore, false);
-                }
+                if (rowsUsed + 1 > rowBudget) { droppedGames += liveSpec.Count - i; break; }
+                rowsUsed++;
+                ApplySpectateLiveRow(GetOrCreateLiveRow(poolIdx++), liveSpec[i]);
+            }
+
+            // ONE final overflow line for everything the budget dropped,
+            // whatever section it came from (finding 10: the old per-section
+            // cap only bounded the spectate rows, so 1v1+2v2 alone could
+            // still blow the column).
+            if (droppedGames > 0)
+            {
+                var more = GetOrCreateLiveRow(poolIdx++);
+                var tMore = UIFactory.CreateText("more", more.transform,
+                    I18n.TrF("<color=#888>+{0} more live games - see the mode tabs</color>", droppedGames),
+                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(384, 22));
+                UIFactory.SetWordWrap(tMore, false);
             }
 
             // Pagination controls: only visible when > one page's worth of series.
@@ -6728,11 +6776,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return row;
         }
 
-        // Bug 177 (#245): the live-bets column has no bounded scroll, so the
-        // FFA/1v2 rows are hard-capped and the remainder collapses into one
-        // "+N more" line. Keep this small — every unit is 24px of un-scrolled
-        // column height on top of the unbounded 1v1/2v2 lists above it.
-        private const int LIVE_SPECTATE_ROWS_CAP = 4;
+        // Bug 177 (#245): the per-section spectate cap that lived here was
+        // superseded by the SHARED 16-row budget in RefreshLiveSeries
+        // (hosted-lobby r2 finding 10) — a per-section cap couldn't bound the
+        // column when the 1v1/2v2 lists alone overflowed it.
 
         private static List<ApiClient.SpectateGameInfo> CollectSpectateLiveGames()
         {
@@ -8430,6 +8477,69 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return btn;
         }
 
+        /// <summary>Bug 180 (Stan): "How stats are tracked" explainer body.
+        /// PROPERTY, not const — the literal must sit inside I18n.Tr at a
+        /// call site for the extractor (#295a), and property access happens
+        /// at click time, after I18nCatalogues.Install(). Every claim below
+        /// is a VERIFIED mechanic (each was checked against code before this
+        /// shipped) — do not "fix" the wording without re-verifying.</summary>
+        private static string StatsTrackingInfo => I18n.Tr(@"How the mod counts your combat and match stats, in plain terms.
+
+<color=#FFD94D><b>HIT %</b></color>
+
+- The denominator counts BULLETS fired, not clicks.
+  One Buckshot click counts every pellet; bursts and
+  charge volleys multiply it too.
+- Clicks during reload or cooldown don't count, and
+  card-spawned shooters never count.
+- The numerator counts direct, unblocked hits on
+  enemies only. Self-hits, teammates, poison and burn
+  ticks, explosions and thorns never count.
+
+<color=#FFD94D><b>BLOCK SUCCESS</b></color>
+
+- One right-click = one attempt, and at most ONE
+  success no matter how many bullets that block absorbs.
+- Echo repeats and Shield Charge dashes belong to the
+  right-click that started them - they never add
+  attempts.
+- Abyssal / Shields Up auto-blocks are not attempts,
+  though an auto-block absorbing within the right-click's
+  short credit window can claim its success.
+- Blocking your OWN reflected bullet DOES count as a
+  success.
+
+<color=#FFD94D><b>RAGE QUIT % VS LEAVE %</b></color>
+
+- Rage Quit % (Compare tab) is CASUAL 1v1 only:
+  casual disconnects divided by casual matches plus
+  counted casual DCs.
+- The leaderboard's Leave column is the RANKED formula:
+  ranked DCs divided by ranked series wins + losses + DCs.
+
+<color=#FFD94D><b>AVG GAME LENGTH</b></color>
+
+- The clock starts when the first round's movement
+  begins (after the initial picks) and includes every
+  later card pick and transition until game over.
+
+<color=#FFD94D><b>WHAT FEEDS LIFETIME STATS</b></color>
+
+- Lifetime Hit/Block/Keys stats accumulate from 1v1
+  games only (ranked + casual), and only from the match
+  reporter's own side.
+- 2v2 and FFA record the same stats per game (visible
+  on each game's row) but they don't feed the lifetime
+  percentages.
+- FFA / 2v2 / 1v2 metrics in Compare come from their
+  own tables.
+
+<color=#FFD94D><b>TIMELINE GRAPHS</b></color>
+
+- Graphs sample every 3 seconds (longer games compress
+  older samples), so graph ratios can differ slightly
+  from the exact totals.");
+
         private static GameObject BuildSettingsTab(Transform parent)
         {
             // Outer fills the tab area; scroll view eats all extra height so the
@@ -8577,6 +8687,22 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // every locale we ship.
                 "Language  /  Idioma  /  Язык", 17f, new Color(0.7f, 0.85f, 1f),
                 sizeDelta: new Vector2(700, 24));
+
+            // -- Stats (bug 180, Stan) --
+            // One button opening the scrollable "how stats are tracked"
+            // explainer (ShowInfoPopup already carries the modal conventions:
+            // backdrop + InfoPopupOpen feeding ClickHandler.ModalBlockInput,
+            // #200, and a body ScrollView honoring #199's prefH rules).
+            var statsHelpBox = UIFactory.CreatePanel("SStatsB", panel.transform, C_PANEL);
+            UIFactory.AddVLG(statsHelpBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
+            UIFactory.AddLE(statsHelpBox, flexH: 0);
+            UIFactory.CreateText("SStatsL", statsHelpBox.transform,
+                "Stats", 17f, new Color(0.7f, 0.85f, 1f),
+                sizeDelta: new Vector2(700, 24));
+            UIFactory.CreateButton("SStatsHelp", statsHelpBox.transform,
+                "How stats are tracked", 15f, C_WHITE, C_BTN,
+                () => ShowInfoPopup(I18n.Tr("How stats are tracked"), StatsTrackingInfo),
+                sizeDelta: new Vector2(300, 28));
 
             // -- Interface --
             var intBox = UIFactory.CreatePanel("SIntB", panel.transform, C_PANEL);
@@ -9496,7 +9622,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         bool viewerReported=ViewerWasReporter(m);
         float dpsStepYou=viewerReported?DPS_STEP_LOCAL:DPS_STEP_PEER;
         float dpsStepOpp=viewerReported?DPS_STEP_PEER:DPS_STEP_LOCAL;
-        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"));if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)));}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetTextRaw(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        {I18n.Tr("Cards:")} {(_historyCardsFull ? m.cards_display : FormatCardLine(m.cards_display))}":"");UIFactory.SetTextRaw(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        {I18n.Tr("Opp:")}   {(_historyCardsFull ? m.opp_cards_display : FormatCardLine(m.opp_cards_display))}":"");if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());RegisterHoverRectFor(row.txtCards,m.cards_display,false);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true);row.root.SetActive(true);}
+        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"));if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)));}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetTextRaw(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        {I18n.Tr("Cards:")} {(_historyCardsFull ? m.cards_display : FormatCardLine(m.cards_display))}":"");UIFactory.SetTextRaw(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        {I18n.Tr("Opp:")}   {(_historyCardsFull ? m.opp_cards_display : FormatCardLine(m.opp_cards_display))}":"");if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());RegisterHoverRectFor(row.txtCards,m.cards_display,false);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true);row.root.SetActive(true);}
 
         // Resolve a TMP text component's screen-space rect via its parent
         // chain. Handles both Screen Space - Overlay (corners are screen
@@ -9643,9 +9769,13 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
         // July 22 item 1: hover a Hit%/Block% tag → that player's cumulative
         // pair chart (fired-vs-hit / dmg-vs-blocks) with point markers.
+        // Bug 181 item 2: durationSeconds (the row's real match length) rides
+        // along so the chart scales its samples across the whole game —
+        // correct for both old fixed-cadence and new decimated timelines.
         private static void RegisterPairGraphRectFor(object txt, string pairSeries, bool isBlock, bool subjectIsOpp,
                                                      string pointTimes, string pointTimeline,
-                                                     RectTransform outerClip = null, string subjectLabel = null)
+                                                     RectTransform outerClip = null, string subjectLabel = null,
+                                                     int durationSeconds = 0)
         {
             if (txt == null || string.IsNullOrEmpty(pairSeries)) return;
             try
@@ -9653,7 +9783,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 RectTransform rt; Camera cam; float frac; Rect rect; RectTransform clip;
                 if (!ResolveHoverSource(txt, out rt, out cam, out frac, out rect, out clip)) return;
                 CompetitiveUI.RegisterPairGraphRegion(rect, pairSeries, isBlock, subjectIsOpp, rt, cam, frac, clip, txt,
-                                                      pointTimes, pointTimeline, outerClip, subjectLabel);
+                                                      pointTimes, pointTimeline, outerClip, subjectLabel,
+                                                      durationSeconds);
             }
             catch { }
         }

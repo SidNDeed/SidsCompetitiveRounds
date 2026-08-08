@@ -9684,6 +9684,19 @@ async def get_recent_series(
                        else (br["payout"] or 0) > br["amount"],
             })
 
+    # Bug 179 (Stan): per-series game CODES (first 12 hex of each match uuid,
+    # the exact form /matches/by-code and the bot's /game command take) so the
+    # Discord result post can carry them. One batched query.
+    games_by_series: dict[str, list] = {}
+    if series_ids:
+        for gr in (await db.execute(text(
+            "SELECT series_id::text AS sid, id FROM matches"
+            " WHERE series_id::text = ANY(:ids) AND invalidated_at IS NULL"
+            " ORDER BY ended_at ASC"
+        ), {"ids": series_ids})).mappings().all():
+            games_by_series.setdefault(gr["sid"], []).append(
+                str(gr["id"]).replace("-", "")[:12].upper())
+
     series_list = []
     for row in rows:
         p1_streak = await get_ranked_streak(db, row["p1_steam_id"])
@@ -9691,6 +9704,7 @@ async def get_recent_series(
 
         series_list.append({
             "series_id": row["series_id"],
+            "game_codes": games_by_series.get(row["series_id"], []),
             "p1_name": row["p1_name"],
             "p1_steam_id": row["p1_steam_id"],
             "p1_discord_id": row["p1_discord_id"],
@@ -14204,6 +14218,10 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
             "t1_color_hex": (_tcolors.get(r["series_id"]) or {}).get("t1_color_hex") or "",
             "t2_color_name": (_tcolors.get(r["series_id"]) or {}).get("t2_color_name") or "",
             "t2_color_hex": (_tcolors.get(r["series_id"]) or {}).get("t2_color_hex") or "",
+            "color_decided": any(
+                v is not None for v in ((_tcolors.get(r["series_id"]) or {}).get(k)
+                                        for k in ("t1_color_name", "t1_color_hex",
+                                                  "t2_color_name", "t2_color_hex"))),
         })
     return {"series": series}
 
@@ -17024,13 +17042,12 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 WHERE id=:sid AND status='active' AND spawn_confirmations < 4"""),
             {"sid": _sid})
         await _reconcile_team_series_bets(db, _sid, "member deleted")
-        await db.execute(text(
-            """UPDATE team_queue SET status='searching', series_id=NULL, team_assigned=NULL,
-                      room_name=NULL, matched_at=NULL
-                WHERE series_id=:sid
-                  AND EXISTS (SELECT 1 FROM team_series ts WHERE ts.id=:sid
-                              AND ts.invalidation_reason='member_deleted')"""),
-            {"sid": _sid})
+        # Codex r2 f2: hosted-aware disposition, same guard as before — only
+        # when the cancel above actually landed (a live game keeps its group).
+        if (await db.execute(text(
+            "SELECT 1 FROM team_series WHERE id=:sid"
+            "   AND invalidation_reason='member_deleted'"), {"sid": _sid})).scalar():
+            await _dissolve_group_rows(db, "team", _sid)
     for _sid in _ovt_grp:
         await db.execute(text(
             """UPDATE ovt_series SET status='canceled', invalidation_reason='member_deleted',
@@ -17038,13 +17055,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 WHERE id=:sid AND status='active'
                   AND NOT EXISTS (SELECT 1 FROM ovt_matches m WHERE m.series_id=:sid)"""),
             {"sid": _sid})
-        await db.execute(text(
-            """UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,
-                      room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
-                WHERE series_id=:sid
-                  AND EXISTS (SELECT 1 FROM ovt_series s WHERE s.id=:sid
-                              AND s.invalidation_reason='member_deleted')"""),
-            {"sid": _sid})
+        # Codex r2 f2: hosted-aware disposition, same landed-cancel guard.
+        if (await db.execute(text(
+            "SELECT 1 FROM ovt_series WHERE id=:sid"
+            "   AND invalidation_reason='member_deleted'"), {"sid": _sid})).scalar():
+            await _dissolve_group_rows(db, "ovt", _sid)
     # Aug 6 item 9: promote or disband the 2v2 / 1v2 open lobbies the deleted
     # account was sitting in. Without this the lobby keeps pointing at the
     # anonymized account as host and nothing else ever repairs it (the series
@@ -19492,16 +19507,34 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
 
 
 @app.post("/api/v1/team/queue/leave", tags=["Team Queue"])
-async def team_queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def team_queue_leave(request: Request, steam_id: str = Query(...),
+                           expected_series_id: str | None = Query(None),
+                           db: AsyncSession = Depends(get_db)):
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
     await _check_steam_session(request, steam_id, db)
-    await _lease_release_by_steam(db, steam_id)
+    # Codex r2 f3: a delayed/retried leave must never tear down a NEWER
+    # enrollment. When the caller names the incarnation it is leaving, the
+    # lease release is fenced to it and the row must still carry it below —
+    # otherwise the leave is stale and no-ops. Legacy callers (no param) keep
+    # the old unfenced behaviour.
+    _exp_sid = None
+    if expected_series_id:
+        try:
+            _exp_sid = str(uuid.UUID(str(expected_series_id)))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(422, "expected_series_id is not a valid id")
+    await _lease_release_by_steam(db, steam_id, _exp_sid)
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if player:
         r = await _lock_queue_group_for_player(db, "team_queue", steam_id)
         if r is None:
             return {"status": "left"}
+        if _exp_sid is not None and str(r["series_id"] or "") != _exp_sid:
+            await db.commit()
+            print(f"[TEAM-QUEUE] stale fenced leave ignored for {steam_id} "
+                  f"(expected {_exp_sid}, row carries {r['series_id']})")
+            return {"status": "left", "stale": True}
         # If player is in a locked match (status='matched'), tearing down their row
         # alone would strand the other 3. Cascade: cancel the whole series and
         # release the other 3 back to searching, rather than leave them locked
@@ -19522,49 +19555,11 @@ async def team_queue_leave(request: Request, steam_id: str = Query(...), db: Asy
                 {"sid": r["series_id"]},
             )).scalar() or 0
             if games == 0 and not _group_game_positively_live(str(r["series_id"])):
-                # Codex r1 f1 (HIGH): a HOSTED lobby's series must not recycle
-                # its survivors into the PUBLIC matchmaking pool. These players
-                # consented to play with a specific group, and their clients are
-                # in the hosted handoff (not the searching UI) — a 'searching'
-                # reset here made them instantly lockable with unrelated
-                # auto-queue players, whose completed series would then move
-                # real Glicko/gold. Hosted-origin is detected by the lobby row
-                # that Start bound to this series; survivors' rows are DELETED
-                # (their clients see not_in_queue and surface "lobby dissolved")
-                # and their leases die with them, fenced to this series.
-                _hosted_lobby = (await db.execute(text(
-                    "SELECT id FROM team_lobbies WHERE series_id = :sid"
-                ), {"sid": r["series_id"]})).scalar()
-                if _hosted_lobby is not None:
-                    _surv = (await db.execute(text(
-                        "SELECT player_id FROM team_queue"
-                        "  WHERE series_id = :sid AND player_id != :pid"
-                    ), {"sid": r["series_id"], "pid": player.id})).scalars().all()
-                    if _surv:
-                        await db.execute(text(
-                            "DELETE FROM team_queue WHERE player_id = ANY(:ids)"),
-                            {"ids": _surv})
-                        await db.execute(text(
-                            "DELETE FROM queue_leases WHERE player_id = ANY(:ids)"
-                            "   AND mode = 'team' AND group_id = :sid"),
-                            {"ids": _surv, "sid": r["series_id"]})
-                    await db.execute(text(
-                        "UPDATE team_lobbies SET status='canceled', invalidated_at=NOW(),"
-                        "       invalidation_reason='hosted_assembly_failed'"
-                        " WHERE id = :lid AND status='active'"), {"lid": _hosted_lobby})
-                    print(f"[2v2-LOBBY] hosted assembly dissolved by leave "
-                          f"(series {r['series_id']}, {len(_surv)} survivor(s) released)")
-                else:
-                    await db.execute(
-                        text("""
-                            UPDATE team_queue
-                            SET status='searching', series_id=NULL, team_assigned=NULL,
-                                room_name=NULL, room_region=NULL, ready=false,
-                                matched_at=NULL, joined_at=NOW()
-                            WHERE series_id = :sid AND player_id != :pid
-                        """),
-                        {"sid": r["series_id"], "pid": player.id},
-                    )
+                # Codex r1 f1 (HIGH) / r2 f2: hosted survivors are RELEASED,
+                # public survivors reset — one authority (_dissolve_group_rows)
+                # decides, shared with every other pregame dissolution site.
+                await _dissolve_group_rows(db, "team", r["series_id"],
+                                           exclude_pid=player.id)
                 # Mark the series invalidated so the post-lock /matches submit can't
                 # accidentally write to it after a no-show.
                 await db.execute(
@@ -19851,17 +19846,14 @@ async def team_queue_poll(steam_id: str, request: Request,
             {"sid": me["series_id"]},
         )).scalar_one_or_none()
         if srow_chk != "active":
-            await db.execute(
-                text("""UPDATE team_queue
-                       SET status='searching', series_id=NULL, team_assigned=NULL,
-                           room_name=NULL, room_region=NULL, ready=false,
-                           matched_at=NULL, joined_at=NOW()
-                       WHERE series_id = :sid"""),
-                {"sid": me["series_id"]},
-            )
+            # Codex r2 f2: hosted-aware disposition — a hosted group is
+            # RELEASED, never fed back to the public matcher.
+            _hosted = await _dissolve_group_rows(db, "team", me["series_id"])
             await db.commit()
-            print(f"[TEAM-QUEUE] non-active series {me['series_id']} ({srow_chk}) — group reset to searching")
-            return TeamQueuePollResponse(status="searching")
+            print(f"[TEAM-QUEUE] non-active series {me['series_id']} ({srow_chk}) — "
+                  f"group {'released (hosted)' if _hosted else 'reset to searching'}")
+            return TeamQueuePollResponse(
+                status="not_in_queue" if _hosted else "searching")
         # Pull the other 3 in this series
         peers_q = await db.execute(
             text("""
@@ -19873,17 +19865,14 @@ async def team_queue_poll(steam_id: str, request: Request,
         )
         peers = list(peers_q.mappings().all())
         if len(peers) < 3:
-            # Someone left — cascade was handled in /leave; we degrade back to searching here.
-            await db.execute(
-                text("""UPDATE team_queue
-                       SET status='searching', series_id=NULL, team_assigned=NULL,
-                           room_name=NULL, room_region=NULL, ready=false,
-                           matched_at=NULL, joined_at=NOW()
-                       WHERE player_id = :pid"""),
-                {"pid": my_pid},
-            )
+            # Someone left — cascade was handled in /leave; we degrade here.
+            # Codex r2 f2: hosted-aware — a hosted survivor's row is deleted,
+            # never recycled into public searching.
+            _hosted = await _dissolve_group_rows(db, "team", me["series_id"],
+                                                 player_ids=[my_pid])
             await db.commit()
-            return TeamQueuePollResponse(status="searching")
+            return TeamQueuePollResponse(
+                status="not_in_queue" if _hosted else "searching")
 
         my_team = me["team_assigned"]
         teammates = [p for p in peers if p["team_assigned"] == my_team]
@@ -19895,23 +19884,19 @@ async def team_queue_poll(steam_id: str, request: Request,
         if me["matched_at"]:
             match_age = int((now - me["matched_at"]).total_seconds())
             if match_age > TEAM_READY_TIMEOUT_SECONDS and not all_ready:
-                # Cancel the series — boot all 4 back to searching.
+                # Cancel the series. Codex r2 f2: disposition is hosted-aware
+                # — hosted survivors are released, public ones re-search.
                 ids = [p["player_id"] for p in all_4]
-                await db.execute(
-                    text("""UPDATE team_queue
-                           SET status='searching', series_id=NULL, team_assigned=NULL,
-                               room_name=NULL, room_region=NULL, ready=false,
-                               matched_at=NULL, joined_at=NOW()
-                           WHERE player_id = ANY(:ids)"""),
-                    {"ids": ids},
-                )
+                _hosted = await _dissolve_group_rows(db, "team", me["series_id"],
+                                                     player_ids=ids)
                 await db.execute(
                     text("UPDATE team_series SET status='cancelled', invalidated_at=NOW(), invalidation_reason='ready_timeout' WHERE id = :sid"),
                     {"sid": me["series_id"]},
                 )
                 await _reconcile_team_series_bets(db, me["series_id"], "ready_timeout")
                 await db.commit()
-                return TeamQueuePollResponse(status="searching")
+                return TeamQueuePollResponse(
+                    status="not_in_queue" if _hosted else "searching")
 
         # Build response payload
         def to_member(row):
@@ -19950,15 +19935,12 @@ async def team_queue_poll(steam_id: str, request: Request,
                 if _banned_ids:
                     _innocent = [p["player_id"] for p in all_4
                                  if p["player_id"] not in _banned_ids]
+                    _hosted = False
                     if _innocent:
-                        await db.execute(
-                            text("""UPDATE team_queue
-                                   SET status='searching', series_id=NULL, team_assigned=NULL,
-                                       room_name=NULL, room_region=NULL, ready=false,
-                                       matched_at=NULL, joined_at=NOW()
-                                   WHERE player_id = ANY(:ids)"""),
-                            {"ids": _innocent},
-                        )
+                        # Codex r2 f2: hosted innocents are released, not
+                        # recycled into public searching.
+                        _hosted = await _dissolve_group_rows(
+                            db, "team", me["series_id"], player_ids=_innocent)
                     await db.execute(
                         text("DELETE FROM team_queue WHERE player_id = ANY(:ids)"),
                         {"ids": _banned_ids},
@@ -19970,7 +19952,8 @@ async def team_queue_poll(steam_id: str, request: Request,
                     )
                     await _reconcile_team_series_bets(db, me["series_id"], "member_banned")
                     await db.commit()
-                    return TeamQueuePollResponse(status="searching")
+                    return TeamQueuePollResponse(
+                        status="not_in_queue" if _hosted else "searching")
                 room_name = f"team_{uuid_mod.uuid4().hex[:12]}"
                 # Pick region by mode of the 4 region values; fallback to 'us'.
                 regions = [p["region"] for p in all_4 if p["region"]]
@@ -20645,6 +20628,7 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     # pre-migration-206 the columns are absent and the response simply omits
     # nothing (empty strings = vanilla).
     _tc = ("", "", "", "")
+    _tc_decided = False
     try:
         async with db.begin_nested():
             _tcr = (await db.execute(text(
@@ -20652,6 +20636,9 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
                 "  FROM team_series WHERE id = :sid"), {"sid": sid_uuid})).first()
             if _tcr is not None:
                 _tc = tuple((v or "") for v in _tcr)
+                # Codex r2 f9: NOT NULL = the server decided ('' = frozen
+                # vanilla); NULL = pre-feature row, client may fall back.
+                _tc_decided = any(v is not None for v in _tcr)
     except Exception:
         pass
     return {
@@ -20668,6 +20655,7 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
         "t2_series_wins": int(r[10] or 0),
         "t1_color_name": _tc[0], "t1_color_hex": _tc[1],
         "t2_color_name": _tc[2], "t2_color_hex": _tc[3],
+        "color_decided": _tc_decided,
     }
 
 
@@ -21690,7 +21678,24 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
         _live_room = (live["photon_room_id"] or "").strip()
         if _live_room and (req.room_id or "").strip() != _live_room:
             raise HTTPException(409, "Continuation refused: room does not match the sitting")
-        return {"series_id": str(live["id"]), "status": "existing"}
+        # Codex r2 f6: the idempotent branch carries the stamp too — a
+        # retrying reporter must still be able to publish it to the room.
+        _ec = ("", "", "", "")
+        _ec_decided = False
+        try:
+            async with db.begin_nested():
+                _ecr = (await db.execute(text(
+                    "SELECT t1_color_name, t1_color_hex, t2_color_name, t2_color_hex"
+                    "  FROM team_series WHERE id = :sid"), {"sid": live["id"]})).first()
+                if _ecr is not None:
+                    _ec = tuple((v or "") for v in _ecr)
+                    _ec_decided = any(v is not None for v in _ecr)
+        except Exception:
+            pass
+        return {"series_id": str(live["id"]), "status": "existing",
+                "t1_color_name": _ec[0], "t1_color_hex": _ec[1],
+                "t2_color_name": _ec[2], "t2_color_hex": _ec[3],
+                "color_decided": _ec_decided}
 
     # Otherwise require a recent COMPLETED series for the same four (proves this is a
     # real rematch of an ongoing sitting, not a fabricated pairing).
@@ -21760,7 +21765,9 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
                 SELECT t1_color_name, t1_color_hex, t2_color_name, t2_color_hex
                   FROM team_series WHERE id = :sid
             """), {"sid": prior["id"]})).first()
-            if _pc is not None and (_pc[1] or _pc[3]):
+            # Codex r2 f9: decided = any column NOT NULL ('' is a DECIDED
+            # vanilla side and must inherit as frozen-vanilla, not re-roll).
+            if _pc is not None and any(v is not None for v in _pc):
                 _swapped = _prior_t1 == _new_t2
                 _vals = ((_pc[2], _pc[3], _pc[0], _pc[1]) if _swapped
                          else (_pc[0], _pc[1], _pc[2], _pc[3]))
@@ -21769,8 +21776,8 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
                        SET t1_color_name=:t1n, t1_color_hex=:t1h,
                            t2_color_name=:t2n, t2_color_hex=:t2h
                      WHERE id = :sid
-                """), {"sid": new_id, "t1n": _vals[0], "t1h": _vals[1],
-                       "t2n": _vals[2], "t2h": _vals[3]})
+                """), {"sid": new_id, "t1n": _vals[0] or "", "t1h": _vals[1] or "",
+                       "t2n": _vals[2] or "", "t2h": _vals[3] or ""})
             else:
                 _new_t1_ids = [id_by_steam[t1[0]], id_by_steam[t1[1]]]
                 _new_t2_ids = [id_by_steam[t2[0]], id_by_steam[t2[1]]]
@@ -21779,7 +21786,25 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
         print(f"[TEAMCOLOR] continuation stamp failed for {new_id}: {_tce}")
     await db.commit()
     print(f"[TEAM-CONTINUATION] created {new_id} for {steams} room={req.room_id}")
-    return {"series_id": str(new_id), "status": "created"}
+    # Codex r2 f6: the reporter is the ONLY seat that sees this response —
+    # hand it the inherited stamp so it can publish {series, colours} to the
+    # room (Photon prop) and every seat/spectator renders the same identity.
+    _cc = ("", "", "", "")
+    _cc_decided = False
+    try:
+        async with db.begin_nested():
+            _ccr = (await db.execute(text(
+                "SELECT t1_color_name, t1_color_hex, t2_color_name, t2_color_hex"
+                "  FROM team_series WHERE id = :sid"), {"sid": new_id})).first()
+            if _ccr is not None:
+                _cc = tuple((v or "") for v in _ccr)
+                _cc_decided = any(v is not None for v in _ccr)
+    except Exception:
+        pass
+    return {"series_id": str(new_id), "status": "created",
+            "t1_color_name": _cc[0], "t1_color_hex": _cc[1],
+            "t2_color_name": _cc[2], "t2_color_hex": _cc[3],
+            "color_decided": _cc_decided}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -22035,6 +22060,7 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
 @app.post("/api/v1/ovt/queue/leave", tags=["1v2 Queue"])
 async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
                           cause: str = Query("", max_length=16),
+                          expected_series_id: str | None = Query(None),
                           db: AsyncSession = Depends(get_db)):
     """Leave the 1v2 queue. If the leaver was LOCKED into a series that never
     produced a game, the lock is dissolved: the series is canceled and the
@@ -22045,11 +22071,24 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
     match pipeline owns its lifecycle."""
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
     await _check_steam_session(request, steam_id, db)
-    await _lease_release_by_steam(db, steam_id)
+    # Codex r2 f3: incarnation fence — see team_queue_leave. Legacy callers
+    # (no param) keep the unfenced behaviour.
+    _exp_sid = None
+    if expected_series_id:
+        try:
+            _exp_sid = str(uuid.UUID(str(expected_series_id)))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(422, "expected_series_id is not a valid id")
+    await _lease_release_by_steam(db, steam_id, _exp_sid)
     me = await _lock_queue_group_for_player(db, "ovt_queue", steam_id)
     if me is None:
         await db.commit()
         return {"status": "ok"}
+    if _exp_sid is not None and str(me["series_id"] or "") != _exp_sid:
+        await db.commit()
+        print(f"[OVT-QUEUE] stale fenced leave ignored for {steam_id} "
+              f"(expected {_exp_sid}, row carries {me['series_id']})")
+        return {"status": "ok", "stale": True}
     dissolved = False
     if me["status"] in ("ready_join", "matched") and me["series_id"] is not None:
         srow = (await db.execute(text(
@@ -22092,39 +22131,11 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
                 "UPDATE ovt_series SET status='canceled', invalidation_reason='assembly_timeout',"
                 "       invalidated_at=NOW() WHERE id=:sid AND status='active'"
             ), {"sid": me["series_id"]})
-            # Codex r1 f1 (HIGH): hosted-origin survivors are DELETED, never
-            # reset to 'searching' — they consented to a specific group, and a
-            # searching row makes them lockable with unrelated consent-queue
-            # players. Same rule as the 2v2 leave; detection is the lobby row
-            # Start bound to this series.
-            _hosted_lobby = (await db.execute(text(
-                "SELECT id FROM ovt_lobbies WHERE series_id = :sid"
-            ), {"sid": me["series_id"]})).scalar()
-            if _hosted_lobby is not None:
-                _surv = (await db.execute(text(
-                    "SELECT player_id FROM ovt_queue"
-                    "  WHERE series_id = :sid AND player_id != :pid"
-                ), {"sid": me["series_id"], "pid": me["player_id"]})).scalars().all()
-                if _surv:
-                    await db.execute(text(
-                        "DELETE FROM ovt_queue WHERE player_id = ANY(:ids)"),
-                        {"ids": _surv})
-                    await db.execute(text(
-                        "DELETE FROM queue_leases WHERE player_id = ANY(:ids)"
-                        "   AND mode = 'ovt' AND group_id = :sid"),
-                        {"ids": _surv, "sid": me["series_id"]})
-                await db.execute(text(
-                    "UPDATE ovt_lobbies SET status='canceled', invalidated_at=NOW(),"
-                    "       invalidation_reason='hosted_assembly_failed'"
-                    " WHERE id = :lid AND status='active'"), {"lid": _hosted_lobby})
-                print(f"[1v2-LOBBY] hosted assembly dissolved by leave "
-                      f"(series {me['series_id']}, {len(_surv)} survivor(s) released)")
-            else:
-                await db.execute(text("""
-                    UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,
-                           room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
-                     WHERE series_id = :sid AND player_id != :pid
-                """), {"sid": me["series_id"], "pid": me["player_id"]})
+            # Codex r1 f1 (HIGH) / r2 f2: hosted survivors are RELEASED,
+            # public survivors reset — _dissolve_group_rows is the one
+            # disposition authority, shared with every dissolution site.
+            await _dissolve_group_rows(db, "ovt", me["series_id"],
+                                       exclude_pid=me["player_id"])
             dissolved = True
             print(f"[OVT-LOCK] lock dissolved by leave (series {me['series_id']}, leaver {steam_id})")
         elif srow is not None and srow["status"] == "active" and int(srow["games"] or 0) == 0:
@@ -22427,13 +22438,13 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                     "UPDATE ovt_series SET status='canceled', invalidation_reason=:rsn,"
                     "       invalidated_at=NOW() WHERE id=:sid AND status='active'"
                 ), {"sid": me["series_id"], "rsn": reason})
-            await db.execute(text("""
-                UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,
-                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
-                 WHERE series_id = :sid
-            """), {"sid": me["series_id"]})
+            # Codex r2 f2: hosted groups release, public groups re-search.
+            _hosted = await _dissolve_group_rows(db, "ovt", me["series_id"])
             await db.commit()
-            print(f"[OVT-LOCK] dead lock reset (series {me['series_id']}, age {int(lock_age)}s, assembly_failed={assembly_failed})")
+            print(f"[OVT-LOCK] dead lock {'released (hosted)' if _hosted else 'reset'} "
+                  f"(series {me['series_id']}, age {int(lock_age)}s, assembly_failed={assembly_failed})")
+            if _hosted:
+                return {"status": "not_in_queue", "queue_count": 0}
             n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
             return {"status": "searching", "queue_count": int(n)}
         await db.commit()
@@ -23903,20 +23914,76 @@ async def _stamp_team_series_colors(db: AsyncSession, series_id,
             _alt = [(n, h) for (n, h) in t2_holders
                     if (h or "").lower() != t1h.lower()]
             t2n, t2h = random.choice(_alt) if _alt else (None, None)
-        if t1h or t2h:
-            # #235: savepoint, not bare try — under asyncpg a failed UPDATE
-            # (migration 206 not applied yet) would otherwise abort the whole
-            # lock/Start transaction, not just this stamp.
-            async with db.begin_nested():
-                await db.execute(text("""
-                    UPDATE team_series
-                       SET t1_color_name=:t1n, t1_color_hex=:t1h,
-                           t2_color_name=:t2n, t2_color_hex=:t2h
-                     WHERE id = :sid
-                """), {"sid": series_id, "t1n": t1n, "t1h": t1h,
-                       "t2n": t2n, "t2h": t2h})
+        # Codex r2 f9: ALWAYS stamp, using '' for a vanilla side. NULL means
+        # "never decided" (pre-feature rows); '' means "decided vanilla —
+        # FROZEN". Without the marker, an all-vanilla decision was
+        # indistinguishable from no decision, so a mid-series colour equip
+        # re-opened the identity through the client's live local fallback.
+        # #235: savepoint, not bare try — under asyncpg a failed UPDATE
+        # (migration 206 not applied yet) would otherwise abort the whole
+        # lock/Start transaction, not just this stamp.
+        async with db.begin_nested():
+            await db.execute(text("""
+                UPDATE team_series
+                   SET t1_color_name=:t1n, t1_color_hex=:t1h,
+                       t2_color_name=:t2n, t2_color_hex=:t2h
+                 WHERE id = :sid
+            """), {"sid": series_id, "t1n": t1n or "", "t1h": t1h or "",
+                   "t2n": t2n or "", "t2h": t2h or ""})
     except Exception as _tce:
         print(f"[TEAMCOLOR] stamp failed for series {series_id}: {_tce}")
+
+
+async def _dissolve_group_rows(db: AsyncSession, mode: str, series_id,
+                               player_ids=None, exclude_pid=None) -> bool:
+    """Codex r2 f2 (HIGH): the ONE disposition authority for pregame group
+    dissolution. A HOSTED-origin group's members are RELEASED — rows deleted,
+    series-fenced leases dropped, source lobby canceled — because they
+    consented to a specific group and a 'searching' reset (which keeps
+    queue_type='manual') feeds them straight back to the public matcher,
+    where a rated/gold-bearing match with strangers can form. Public-queue
+    groups keep the classic reset-to-searching. EVERY pregame dissolution
+    site (leave cascades, ready timeouts, ban evictions, dead-lock resets,
+    account deletion) must route through here rather than writing its own
+    UPDATE ... SET status='searching'.
+
+    player_ids=None -> every row on the series (minus exclude_pid). Caller
+    holds the group locks. Returns True when the group was hosted-origin."""
+    q = "team_queue" if mode == "team" else "ovt_queue"
+    lob = "team_lobbies" if mode == "team" else "ovt_lobbies"
+    if player_ids is None:
+        _sql = f"SELECT player_id FROM {q} WHERE series_id = :sid"
+        _params = {"sid": series_id}
+        if exclude_pid is not None:
+            _sql += " AND player_id != :xpid"
+            _params["xpid"] = exclude_pid
+        player_ids = (await db.execute(text(_sql), _params)).scalars().all()
+    player_ids = list(player_ids)
+    hosted = (await db.execute(text(
+        f"SELECT id FROM {lob} WHERE series_id = :sid"), {"sid": series_id})).scalar()
+    if hosted is not None:
+        if player_ids:
+            await db.execute(text(
+                f"DELETE FROM {q} WHERE player_id = ANY(:ids)"), {"ids": player_ids})
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = ANY(:ids)"
+                "   AND mode = :m AND group_id = :sid"),
+                {"ids": player_ids, "m": mode, "sid": series_id})
+        await db.execute(text(
+            f"UPDATE {lob} SET status='canceled', invalidated_at=NOW(),"
+            f"       invalidation_reason='hosted_assembly_failed'"
+            f" WHERE id = :lid AND status='active'"), {"lid": hosted})
+        print(f"[{'2v2' if mode == 'team' else '1v2'}-LOBBY] hosted group "
+              f"{series_id} released ({len(player_ids)} row(s))")
+        return True
+    if player_ids:
+        _extra = ("team_assigned=NULL, ready=false," if mode == "team"
+                  else "side_assigned=NULL,")
+        await db.execute(text(f"""
+            UPDATE {q} SET status='searching', series_id=NULL, {_extra}
+                   room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+             WHERE player_id = ANY(:ids)"""), {"ids": player_ids})
+    return False
 
 
 async def _lobby_live_members(db: AsyncSession, mode: str, lobby_id):
@@ -27702,6 +27769,10 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 "kills": int(r["kills"] or 0),
                 "left_early": bool(r["left_early"]),
                 "rating_change": float(r["rating_change"]) if r["rating_change"] is not None else None,
+                # Bug 178 (Stan): absolute before/after — stamped at match
+                # time in the fmp row, so history stays true after later games.
+                "rating_before": float(r["rating_before"]) if r["rating_before"] is not None else None,
+                "rating_after": float(r["rating_after"]) if r["rating_after"] is not None else None,
                 "xp_gained": int(r["xp_gained"] or 0),
                 "gold_gained": int(r["gold_gained"] or 0),
                 "fps_avg": int(r["fps_avg"]) if r["fps_avg"] is not None else 0,
@@ -29522,9 +29593,21 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
         ORDER BY s.completed_at DESC
     """)
     rows = (await db.execute(q, {"mins": minutes})).mappings().all()
+    # Bug 179 (Stan): per-series game codes (12-hex uuid prefixes — the exact
+    # form the bot's /game command takes) so the announcement can carry them.
+    _codes: dict[str, list] = {}
+    if rows:
+        for gr in (await db.execute(text(
+            "SELECT series_id::text AS sid, id FROM team_matches"
+            " WHERE series_id::text = ANY(:ids) AND invalidated_at IS NULL"
+            " ORDER BY ended_at ASC"
+        ), {"ids": [str(r["series_id"]) for r in rows]})).mappings().all():
+            _codes.setdefault(gr["sid"], []).append(
+                str(gr["id"]).replace("-", "")[:12].upper())
     return {"series": [
         {
             "series_id": str(r["series_id"]),
+            "game_codes": _codes.get(str(r["series_id"]), []),
             "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
             "winner_team": r["winner_team"],
             "t1_series_wins": r["t1_series_wins"], "t2_series_wins": r["t2_series_wins"],
@@ -29732,6 +29815,9 @@ async def team_all_series_paged(
             "t1_color_hex": _tc.get("t1_color_hex") or "",
             "t2_color_name": _tc.get("t2_color_name") or "",
             "t2_color_hex": _tc.get("t2_color_hex") or "",
+            "color_decided": any(_tc.get(k) is not None
+                                 for k in ("t1_color_name", "t1_color_hex",
+                                           "t2_color_name", "t2_color_hex")),
             "matches": matches,
         })
 

@@ -3875,9 +3875,15 @@ def _csv_ints(s):
 
 
 def _pair_series(s):
-    """'a:b,a:b,...' cumulative pairs → ([a...], [b...]); ([], []) when absent."""
+    """'a:b,a:b,...' cumulative pairs → ([a...], [b...]); ([], []) when absent.
+    A "v2|" prefix (bug 181: block pairs became activated:successful instead
+    of damageTaken:successful) is stripped here — use _pair_is_v2 to pick the
+    honest panel labels."""
+    s = s or ""
+    if s.startswith("v2|"):
+        s = s[3:]
     aa, bb = [], []
-    for tok in (s or "").split(","):
+    for tok in s.split(","):
         if ":" not in tok:
             continue
         l, _, r = tok.partition(":")
@@ -3886,6 +3892,10 @@ def _pair_series(s):
         except ValueError:
             pass
     return aa, bb
+
+
+def _pair_is_v2(s):
+    return (s or "").startswith("v2|")
 
 
 def _ffa_point_series(timeline, players):
@@ -4051,14 +4061,24 @@ def _render_game_detail_png_locked(game):
                        None, 3.0, None, "time (M:SS)"))
     damage_taken_series = []
     blocks_series = []
+    # Bug 181 (Stan): v2 block pairs are activated:successful — the honest
+    # block-rate pairing. Legacy rows keep the damage-taken labels; the
+    # format is per-row, so one mixed game labels by majority.
+    _blk_v2_votes = 0
+    _blk_rows = 0
     for pi, p in enumerate(players):
         ba, bb = _pair_series(p.get("block_timeline"))
         if ba:
+            _blk_rows += 1
+            if _pair_is_v2(p.get("block_timeline")):
+                _blk_v2_votes += 1
             damage_taken_series.append((p["name"][:14], ba, "-", _pcolor(pi, p)))
             blocks_series.append((p["name"][:14], bb, "-", _pcolor(pi, p)))
+    _blk_v2 = _blk_rows > 0 and _blk_v2_votes * 2 >= _blk_rows
     if mode == "ffa":
         if damage_taken_series:
-            panels.append(("Damage taken", damage_taken_series,
+            panels.append(("Blocks activated" if _blk_v2 else "Damage taken",
+                           damage_taken_series,
                            None, 3.0, None, "time (M:SS)"))
             panels.append(("Successful blocks", blocks_series,
                            None, 3.0, None, "time (M:SS)"))
@@ -4066,10 +4086,12 @@ def _render_game_detail_png_locked(game):
         blk_series = []
         for damage, blocks in zip(damage_taken_series, blocks_series):
             label, vals, _, pi = damage
-            blk_series.append((f"{label[:12]} dmg", vals, "--", pi))
+            blk_series.append((f"{label[:12]} {'act' if _blk_v2 else 'dmg'}", vals, "--", pi))
             blk_series.append((f"{label[:12]} blocks", blocks[1], "-", pi))
-        panels.append(("Damage taken (dashed, left) vs successful blocks (solid, right)",
-                       blk_series, "dual", 3.0, None, "time (M:SS)"))
+        panels.append((
+            "Blocks activated (dashed) vs successful (solid)" if _blk_v2
+            else "Damage taken (dashed, left) vs successful blocks (solid, right)",
+            blk_series, None if _blk_v2 else "dual", 3.0, None, "time (M:SS)"))
 
     if mode == "ffa":
         kill_series = [
@@ -4805,16 +4827,25 @@ async def log_ffa_match_result(guild, m):
     for p in sorted(players, key=lambda q: q.get("placement", 99)):
         rc = p.get("rating_change")
         rc_s = "" if rc is None else (f" (+{rc:.1f})" if rc > 0 else f" ({rc:.1f})")
+        # Bug 178 (Stan): absolute before→after, like the 1v1/2v2 posts.
+        # Match-time stamps from the row, so later games can't rewrite them.
+        rb, ra = p.get("rating_before"), p.get("rating_after")
+        ba_s = f" {rb:.0f}→{ra:.0f}" if (rb is not None and ra is not None) else ""
         left = " *(left)*" if p.get("left_early") else ""
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(p.get("placement", 0), f"#{p.get('placement', '?')}")
         nm = discord.utils.escape_markdown(str(p.get("display_name") or p.get("steam_id")))
         lines.append(f"{medal} **{nm}** — {p.get('rounds_won', 0)}pt "
-                     f"{p.get('kills', 0)}k{rc_s}{left}")
+                     f"{p.get('kills', 0)}k{ba_s}{rc_s}{left}")
     embed = discord.Embed(title=f"🎯 Ranked FFA Complete — {n} players",
                           color=discord.Color.purple())
     embed.description = "\n".join(lines[:12]) or "(no players?)"
-    if dur:
-        embed.set_footer(text=f"{dur // 60}m{dur % 60:02d}s")
+    # Bug 179 (Stan): carry the /game code so nobody has to open the game.
+    _code = str(m.get("match_id") or "").replace("-", "")[:12].upper()
+    _foot = f"{dur // 60}m{dur % 60:02d}s" if dur else ""
+    if _code:
+        _foot = f"{_foot}  ·  /game {_code}" if _foot else f"/game {_code}"
+    if _foot:
+        embed.set_footer(text=_foot)
     try:
         if m.get("ended_at"):
             embed.timestamp = datetime.fromisoformat(m["ended_at"].replace("Z", "+00:00"))
@@ -5182,6 +5213,10 @@ async def log_team_series_result(guild, s):
     embed.add_field(name="Losers",
                     value=f"{fmt_player(losers[0])}\n{fmt_player(losers[1])}",
                     inline=True)
+    # Bug 179 (Stan): per-game /game codes in the footer.
+    _codes = [c for c in (s.get("game_codes") or []) if c][:5]
+    if _codes:
+        embed.set_footer(text=" · ".join(f"/game {c}" for c in _codes))
     try:
         if s.get("completed_at"):
             embed.timestamp = datetime.fromisoformat(s["completed_at"].replace("Z", "+00:00"))
@@ -5266,6 +5301,11 @@ async def log_series_result(guild, s):
                     value=f"**{s['p1_rating']:.0f}** ({rc1s}) — {r1}\n{s1}", inline=True)
     embed.add_field(name=f"{rank_emoji(r2)} {s['p2_name']}" + (" 👑" if not p1_won else ""),
                     value=f"**{s['p2_rating']:.0f}** ({rc2s}) — {r2}\n{s2}", inline=True)
+    # Bug 179 (Stan): the per-game /game codes, so nobody has to open the
+    # game to inspect a result. Server sends them oldest-first.
+    _codes = [c for c in (s.get("game_codes") or []) if c][:5]
+    if _codes:
+        embed.set_footer(text=" · ".join(f"/game {c}" for c in _codes))
     try:
         dt = datetime.fromisoformat(s["completed_at"].replace("Z", "+00:00"))
         embed.timestamp = dt
@@ -5998,9 +6038,61 @@ async def poll_anticheat_flags():
 # a rebuild window won't be auto-announced and needs /announce-release.
 _last_release_tag = None
 _release_poller_initialized = False
-# Codex r1 f14: tag -> chunks already posted, so a mid-announcement Discord
-# error resumes at the failed chunk next tick instead of truncating forever.
-_release_chunk_progress = {}
+# Codex r1 f14 + r2 f12: tag -> chunks already posted, DURABLE on the
+# container FS so a bot RESTART mid-announcement resumes instead of
+# cold-anchoring past the missing chunks. A full image rebuild loses the
+# file — that residual is accepted (rebuilds are deploys, which re-announce
+# nothing anyway) and the load/save pair degrades to in-memory-less retries.
+_RELEASE_STATE_FILE = "/tmp/release_chunks.json"
+
+
+def _release_state_load() -> dict:
+    try:
+        with open(_RELEASE_STATE_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _release_state_save(d: dict) -> None:
+    try:
+        with open(_RELEASE_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except Exception as e:
+        print(f"[RELEASES] cursor save failed: {e}")
+
+
+async def _send_release_chunks(tag: str, msgs: list) -> bool:
+    """Completion-gated sender shared by the poller AND /announce-release
+    (Codex r2 f12 — the manual path used to mark partial sends complete).
+    Resumes from the durable per-tag cursor; True only when every chunk is
+    on the channel."""
+    if not RELEASES_CHANNEL_ID:
+        return True
+    st = _release_state_load()
+    start = int(st.get(tag, 0) or 0)
+    try:
+        ch = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
+        if ch is None:
+            print(f"[RELEASES] channel {RELEASES_CHANNEL_ID} not resolvable — will retry")
+            return False
+        for i in range(start, len(msgs)):
+            await ch.send(msgs[i][:2000])
+            st = _release_state_load()
+            st[tag] = i + 1
+            _release_state_save(st)
+            await asyncio.sleep(0.4)
+        st = _release_state_load()
+        st.pop(tag, None)
+        _release_state_save(st)
+        if start:
+            print(f"[RELEASES] {tag} resumed at chunk {start + 1}")
+        return True
+    except Exception as e:
+        print(f"[RELEASES] post error after "
+              f"{_release_state_load().get(tag, 0)}/{len(msgs)} chunks of {tag}: {e}")
+        return False
 
 
 def _format_release_message(release_json):
@@ -6075,10 +6167,20 @@ async def poll_github_releases():
     if not tag:
         return
 
-    # Cold-start: don't repost on bot restart. Anchor to the current latest
-    # tag and skip posting on the first tick.
+    # Cold-start: don't repost on bot restart — EXCEPT when the durable
+    # cursor says this very tag was mid-announcement when the process died
+    # (Codex r2 f12): anchoring past it would permanently truncate the post,
+    # so drain the remaining chunks first.
     if not _release_poller_initialized:
         _release_poller_initialized = True
+        if tag in _release_state_load():
+            msgs = _format_release_message(payload)
+            if await _send_release_chunks(tag, msgs):
+                _last_release_tag = tag
+                print(f"[RELEASES] cold start: drained incomplete {tag}")
+            else:
+                print(f"[RELEASES] cold start: {tag} still incomplete — retrying next tick")
+            return
         _last_release_tag = tag
         print(f"[RELEASES] cold start, anchored at {tag}")
         return
@@ -6088,35 +6190,12 @@ async def poll_github_releases():
 
     # New release — post to #releases only (chat mirror dropped per user
     # request: "only post new releases in the Releases channel instead of both").
-    # Codex r1 f14: the tag advances ONLY once every chunk lands. A transient
-    # Discord error on chunk 3 of 4 used to log-and-advance, permanently
-    # truncating the announcement; now the per-tag chunk cursor makes the next
-    # 5-min tick resume from the failed chunk (deterministic re-chunking of
-    # the same payload keeps the indexes aligned). In-memory is the right
-    # durability tier: a bot restart re-anchors cold anyway (deliberate
-    # anti-repost), so only the live-process retry path needs the cursor.
+    # Codex r1 f14: the tag advances ONLY once every chunk lands — a transient
+    # error resumes from the cursor next tick instead of truncating forever.
     msgs = _format_release_message(payload)
-    start = _release_chunk_progress.get(tag, 0)
-    posted_all = not RELEASES_CHANNEL_ID   # nothing to post = nothing to fail
-    if RELEASES_CHANNEL_ID:
-        try:
-            ch = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
-            if ch is None:
-                print(f"[RELEASES] channel {RELEASES_CHANNEL_ID} not resolvable — will retry")
-            else:
-                for i in range(start, len(msgs)):
-                    await ch.send(msgs[i][:2000])
-                    _release_chunk_progress[tag] = i + 1
-                    await asyncio.sleep(0.4)
-                posted_all = True
-        except Exception as e:
-            print(f"[RELEASES] post error after "
-                  f"{_release_chunk_progress.get(tag, 0)}/{len(msgs)} chunks: {e}")
-    if posted_all:
+    if await _send_release_chunks(tag, msgs):
         _last_release_tag = tag
-        _release_chunk_progress.pop(tag, None)
-        print(f"[RELEASES] announced {tag} in {len(msgs)} message(s)"
-              f"{f' (resumed at chunk {start + 1})' if start else ''}")
+        print(f"[RELEASES] announced {tag} in {len(msgs)} message(s)")
     else:
         print(f"[RELEASES] {tag} incomplete — resuming next tick")
 
@@ -6152,24 +6231,17 @@ async def announce_release(ctx):
 
     tag = payload.get("tag_name") or "?"
     msgs = _format_release_message(payload)
-    posted = []
-    if RELEASES_CHANNEL_ID:
-        try:
-            ch = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
-            if ch is not None:
-                for msg in msgs:
-                    await ch.send(msg[:2000])
-                    await asyncio.sleep(0.4)
-                posted.append("#releases")
-        except Exception as e:
-            print(f"[RELEASES] manual post error: {e}")
-    # Update the anchor so the polling loop doesn't re-announce this tag.
-    _last_release_tag = tag
+    # Codex r2 f12: the manual path routes through the same completion-gated
+    # sender — a partial send no longer advances the anchor (the poller
+    # resumes the remaining chunks from the durable cursor).
     _release_poller_initialized = True
-    if posted:
-        await ctx.reply(f"Posted {tag} to {', '.join(posted)}.", ephemeral=True)
+    if await _send_release_chunks(tag, msgs):
+        _last_release_tag = tag
+        await ctx.reply(f"Posted {tag} to #releases ({len(msgs)} message(s)).", ephemeral=True)
     else:
-        await ctx.reply("No channels resolvable.", ephemeral=True)
+        await ctx.reply(
+            f"Posting {tag} stopped partway — the poller will resume the remaining "
+            f"chunks automatically.", ephemeral=True)
 
 
 # ── Tournaments ────────────────────────────────────────────────────────────

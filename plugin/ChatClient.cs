@@ -404,12 +404,20 @@ namespace CompetitiveRounds
                      * identity server-side. Same direct-send rationale as the
                      * subscribe frame above. Best-effort: no token yet (early
                      * launch) just means this socket stays unverified until
-                     * the next reconnect — messages still relay either way. */
+                     * the next reconnect — messages still relay either way.
+                     *
+                     * Codex r2 f1 (HIGH): NEVER on a plaintext socket. The
+                     * 24h session bearer over ws:// hands an on-path attacker
+                     * both a censor-strike primitive against us AND an
+                     * X-Session-Token replay. A downgraded session simply
+                     * stays unverified (censor-only, no strikes) — chat still
+                     * works. wsUrl is the exact string this socket dialed. */
                     try
                     {
                         string sid = MatchTracker.LocalSteamId;
                         string tok = SteamAuth.SessionToken;
-                        if (!string.IsNullOrEmpty(sid) && sid != "unknown" && !string.IsNullOrEmpty(tok))
+                        if (!string.IsNullOrEmpty(sid) && sid != "unknown" && !string.IsNullOrEmpty(tok)
+                            && wsUrl.StartsWith("wss://", StringComparison.OrdinalIgnoreCase))
                         {
                             string authJson = "{\"type\":\"auth\",\"steam_id\":\"" + JsonEscape(sid)
                                             + "\",\"token\":\"" + JsonEscape(tok) + "\"}";

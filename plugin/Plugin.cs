@@ -2718,10 +2718,20 @@ namespace CompetitiveRounds
                 // Wait for response or timeout, then sleep before next poll.
                 float waitUntil = Time.realtimeSinceStartup + 1.5f;
                 while (!gotResponse && Time.realtimeSinceStartup < waitUntil) yield return null;
-                // If status is 'canceled' or assembly succeeded we can stop early.
-                if (ApiClient.LastSeriesStateStatus == "canceled") yield break;
-                if (ApiClient.LastSeriesStateStatus == "active" && ApiClient.LastSeriesStateConfirmations >= 4)
-                    yield break;
+                // Codex r2 f8: the LastSeriesState* globals survive across
+                // series, so a failed FIRST poll of a new series used to let
+                // the PREVIOUS series' "active/4" terminate this loop
+                // permanently — that seat then never learned its colour stamp
+                // or an assembly cancel. Trust the cache only when it names
+                // THIS series (a late old-series callback still overwrites
+                // the value fields — the id compare is the whole guard).
+                if (ApiClient.LastSeriesStateForId == sid)
+                {
+                    // If status is 'canceled' or assembly succeeded we can stop early.
+                    if (ApiClient.LastSeriesStateStatus == "canceled") yield break;
+                    if (ApiClient.LastSeriesStateStatus == "active" && ApiClient.LastSeriesStateConfirmations >= 4)
+                        yield break;
+                }
                 yield return new WaitForSeconds(2f);
             }
         }
@@ -5653,9 +5663,16 @@ namespace CompetitiveRounds
             return __exception;
         }
 
-        static void Postfix(Block __instance, bool __state)
+        static void Postfix(Block __instance, bool __state, bool __runOriginal)
         {
             if (NativeUI.IsOpen) return;  // F5 Prefix blocked the call; don't credit it
+            // Aug 8 (bug-180 audit incidental): when ANY Prefix skipped
+            // vanilla TryBlock — the FFA spawn-grace suppressor
+            // (Block_FfaSpawnGrace_Patch) returns false during the no-combat
+            // window — no block could possibly happen, so crediting an
+            // ATTEMPT here inflated the FFA block-% denominator every round
+            // start. __runOriginal is Harmony's own "did vanilla run" flag.
+            if (!__runOriginal) return;
             try
             {
                 var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;

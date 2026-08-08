@@ -1617,6 +1617,9 @@ namespace CompetitiveRounds
             public string dc_grace_until;
             // Aug 8 (Sid): frozen body-colour team identity ("" = vanilla).
             public string t1_color_name, t1_color_hex, t2_color_name, t2_color_hex;
+            // Codex r2 f8-adjacent: true = the server DECIDED the identity
+            // (including a decided-vanilla ""); false = pre-feature row.
+            public bool color_decided;
         }
         public static List<ActiveTeamSeriesEntry> CachedActiveTeamSeries { get; private set; } = new List<ActiveTeamSeriesEntry>();
 
@@ -1676,6 +1679,7 @@ namespace CompetitiveRounds
                     t1_color_hex = ExtractJsonString(obj, "t1_color_hex") ?? "",
                     t2_color_name = ExtractJsonString(obj, "t2_color_name") ?? "",
                     t2_color_hex = ExtractJsonString(obj, "t2_color_hex") ?? "",
+                    color_decided = ExtractJsonBool(obj, "color_decided"),
                 });
             }
             CachedActiveTeamSeries = list;
@@ -8805,6 +8809,11 @@ namespace CompetitiveRounds
         // completion teardown) already flows through.
         public static string SeriesTeam1ColorName = "", SeriesTeam1ColorHex = "";
         public static string SeriesTeam2ColorName = "", SeriesTeam2ColorHex = "";
+        // Codex r2 f8-adjacent: true once the server has DECIDED the identity
+        // for the active series — a decided-vanilla answer ('' hexes) must
+        // still freeze the live local fallback, so the bool is carried
+        // separately from the hex emptiness.
+        public static bool SeriesColorDecided;
         private static string activeTeamSeriesId;
         public static string ActiveTeamSeriesId
         {
@@ -8815,6 +8824,21 @@ namespace CompetitiveRounds
                 {
                     SeriesTeam1ColorName = ""; SeriesTeam1ColorHex = "";
                     SeriesTeam2ColorName = ""; SeriesTeam2ColorHex = "";
+                    SeriesColorDecided = false;
+                    // Codex r2 f8: the series-state cache is SCOPED to the
+                    // series it described. Without this reset a failed FIRST
+                    // poll of a NEW series left stale "active/4"-style values
+                    // standing, and the assembly loop (Plugin.cs — requires
+                    // LastSeriesStateForId == current id) could terminate on
+                    // the PREVIOUS series' answer.
+                    LastSeriesStateForId = null;
+                    LastSeriesStateStatus = null;
+                    LastSeriesStateReason = null;
+                    LastSeriesStateConfirmations = 0;
+                    LastSeriesDcGraceSeconds = 0;
+                    LastSeriesDcTeamRemaining = 0;
+                    LastSeriesT1Wins = 0;
+                    LastSeriesT2Wins = 0;
                 }
                 activeTeamSeriesId = value;
             }
@@ -8841,6 +8865,13 @@ namespace CompetitiveRounds
             if (!string.IsNullOrEmpty(TeamLobby.OpenLobbyId))
             {
                 CompetitiveUI.ShowNotification(I18n.Tr("Leave your 2v2 lobby first."), new Color(1f, 0.7f, 0.3f), 5f);
+                return;
+            }
+            // Codex r2 f3: an unresolved leave (lobby or converted-seat) must
+            // fully land before a NEW queue row exists for it to race.
+            if (HostLobbyClient.HasPendingLeave("team"))
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Finishing your previous leave first..."), new Color(1f, 0.6f, 0.2f), 4f);
                 return;
             }
             // Suppress joining while a leave retry is in flight (same rationale
@@ -9312,6 +9343,11 @@ namespace CompetitiveRounds
         public static int LastSeriesDcTeamRemaining = 0;
         public static int LastSeriesT1Wins = 0;
         public static int LastSeriesT2Wins = 0;
+        // Codex r2 f8: WHICH series the LastSeriesState* fields describe. Set
+        // ONLY in PollTeamSeriesState's success callback (to the id that
+        // response was for) and reset by the ActiveTeamSeriesId setter, so a
+        // consumer can require ForId == current before trusting the cache.
+        public static string LastSeriesStateForId = null;
         // Throttled background poll of the team-series state — 2s while we
         // have an active or paused series, off otherwise.
         private static float teamSeriesStateTimer = 0f;
@@ -9355,6 +9391,25 @@ namespace CompetitiveRounds
                     {
                         ActiveTeamSeriesId = sid;
                         Plugin.Log.LogInfo($"[2v2-CONTINUATION] active series set to {sid} ({ExtractJsonString(resp, "status")})");
+                        // Codex r2 f6: BOTH continuation branches ("created" and
+                        // the idempotent "existing") now carry the frozen colour
+                        // stamp, and the reporter is the ONLY seat that sees this
+                        // response — adopt it into the statics and publish the
+                        // room property so every seat/spectator renders the same
+                        // identity without waiting for their own state poll.
+                        // Guarded to the id just adopted (the setter above wiped
+                        // the previous series' colours if the id changed).
+                        if (sid == ActiveTeamSeriesId)
+                        {
+                            SeriesTeam1ColorName = ExtractJsonString(resp, "t1_color_name") ?? "";
+                            SeriesTeam1ColorHex = ExtractJsonString(resp, "t1_color_hex") ?? "";
+                            SeriesTeam2ColorName = ExtractJsonString(resp, "t2_color_name") ?? "";
+                            SeriesTeam2ColorHex = ExtractJsonString(resp, "t2_color_hex") ?? "";
+                            SeriesColorDecided = ExtractJsonBool(resp, "color_decided");
+                            TeamColorIdentity.PublishSeriesStamp(sid,
+                                SeriesTeam1ColorName, SeriesTeam1ColorHex,
+                                SeriesTeam2ColorName, SeriesTeam2ColorHex, SeriesColorDecided);
+                        }
                     }
                 }
                 else Plugin.Log.LogWarning($"[2v2-CONTINUATION] request failed: {resp}");
@@ -9422,6 +9477,12 @@ namespace CompetitiveRounds
                 LastSeriesDcTeamRemaining = ExtractJsonInt(resp, "dc_team_remaining");
                 LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
                 LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
+                // Codex r2 f8: stamp WHICH series this answer described — the
+                // ONLY writer of this field. A late callback for a previous
+                // series overwrites the cache above, but ForId then names that
+                // previous series, so the assembly loop's ForId==current check
+                // rejects it.
+                LastSeriesStateForId = seriesId;
                 // Aug 8 (Sid): the frozen team-colour stamp rides this poll
                 // (empty = vanilla / pre-migration). Publish only while the
                 // response still describes the ACTIVE series — a late callback
@@ -9432,6 +9493,16 @@ namespace CompetitiveRounds
                     SeriesTeam1ColorHex = ExtractJsonString(resp, "t1_color_hex") ?? "";
                     SeriesTeam2ColorName = ExtractJsonString(resp, "t2_color_name") ?? "";
                     SeriesTeam2ColorHex = ExtractJsonString(resp, "t2_color_hex") ?? "";
+                    // Codex r2 f8-adjacent/f6: carry the decided bool with the
+                    // colours, and re-publish the room stamp from the poll —
+                    // idempotent (PublishSeriesStamp skips identical values
+                    // and no-ops on undecided-and-empty), and this is the one
+                    // fetch every fighter seat runs, so it reaches rooms the
+                    // continuation response (reporter-only) cannot.
+                    SeriesColorDecided = ExtractJsonBool(resp, "color_decided");
+                    TeamColorIdentity.PublishSeriesStamp(seriesId,
+                        SeriesTeam1ColorName, SeriesTeam1ColorHex,
+                        SeriesTeam2ColorName, SeriesTeam2ColorHex, SeriesColorDecided);
                 }
                 onResponse?.Invoke(status, reason, conf);
             }));
@@ -9691,6 +9762,9 @@ namespace CompetitiveRounds
             // Aug 8 (Sid): frozen body-colour team identity ("" = unstamped —
             // every series completed before migration 206 renders as today).
             public string t1_color_name, t1_color_hex, t2_color_name, t2_color_hex;
+            // Codex r2 f8-adjacent: server decided vs pre-feature (see
+            // ActiveTeamSeriesEntry.color_decided).
+            public bool color_decided;
             public TeamSeriesSlot t1a, t1b, t2a, t2b;
             public List<TeamSeriesMatch> matches = new List<TeamSeriesMatch>();
         }
@@ -9742,6 +9816,7 @@ namespace CompetitiveRounds
                     t1_color_hex = ExtractJsonString(obj, "t1_color_hex") ?? "",
                     t2_color_name = ExtractJsonString(obj, "t2_color_name") ?? "",
                     t2_color_hex = ExtractJsonString(obj, "t2_color_hex") ?? "",
+                    color_decided = ExtractJsonBool(obj, "color_decided"),
                     t1a = ParseSeriesSlot(obj, "t1a"),
                     t1b = ParseSeriesSlot(obj, "t1b"),
                     t2a = ParseSeriesSlot(obj, "t2a"),
@@ -10203,6 +10278,13 @@ namespace CompetitiveRounds
             if (!string.IsNullOrEmpty(OvtLobby.OpenLobbyId))
             {
                 CompetitiveUI.ShowNotification(I18n.Tr("Leave your custom 1v2 lobby first."), new Color(1f, 0.7f, 0.3f), 5f);
+                return;
+            }
+            // Codex r2 f3: an unresolved leave (lobby or converted-seat) must
+            // fully land before a NEW queue row exists for it to race.
+            if (HostLobbyClient.HasPendingLeave("ovt"))
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Finishing your previous leave first..."), new Color(1f, 0.6f, 0.2f), 4f);
                 return;
             }
             // Suppress joining while a leave retry is in flight (same rationale
@@ -12336,15 +12418,37 @@ namespace CompetitiveRounds
             private bool queueLeaveInFlight;
             private float queueLeaveAt = -999f, queueLeaveRetryAt = -999f;
             private int queueLeaveAttempts;
-            // Codex r1 f4/f6/f7: seated preference PATCH bookkeeping. While a
-            // prefs request is in flight the local control value outranks the
-            // state-poll hydration (the poll may still carry the old value).
+            // Codex r2 f3: the series INCARNATION the standing queue-leave is
+            // aimed at, recorded when the intent is created (from the
+            // "started" response / resolve answer that named it) and sent as
+            // expected_series_id on every attempt — a delayed retry must
+            // never tear down a NEWER enrollment. Null = legacy unfenced
+            // (the searching-row dissolution path, which has no series).
+            private string queueLeaveSeriesId;
+            // Codex r2 f4/f6: seated preference PATCHes are a GENERATION-
+            // tokened single-flight queue. One request in flight; the user's
+            // latest desired value per field coalesces in prefsPending and
+            // goes out when the ack lands; a response only clears in-flight
+            // state when its generation matches the newest request. While
+            // ANYTHING here is unacked, PrefsInFlight suppresses hydration
+            // and the host's Start button.
             private bool prefsInFlight; private float prefsAt = -999f;
+            private int prefsGen;
+            private readonly Dictionary<string, string> prefsPending = new Dictionary<string, string>();
+            private float prefsPumpRetryAt = -999f;
+            // Codex r2 f5-residual: the caller's CURRENT structured
+            // preferences — updated on every local selection (the static
+            // wrappers) AND every prefs ack echo. Recovery rejoins build
+            // their enrollment body from THESE, never from a join-time
+            // extras snapshot that a later prefs change made stale.
+            private int curPreferredTeam;              // team: 0 any / 1 / 2
+            private int curPreferredSide;              // ovt: 0 any / 1 solo / 2 duo
+            private bool curSoloExtraPick;
             // Remembered for recovery rejoins: a same-lobby rejoin of a
             // PRIVATE lobby must re-send the password or it 403s (a supplied
             // password on a public lobby is ignored server-side, so a stale
             // value is harmless).
-            private string lastPassword; private string lastExtras = "";
+            private string lastPassword;
 
             public HostLobbyClient(string mode, string label, int defaultPlayers)
             { this.mode = mode; this.label = label; MaxPlayers = defaultPlayers; }
@@ -12418,14 +12522,51 @@ namespace CompetitiveRounds
                 return true;
             }
 
+            /// <summary>Codex r2 f3: true (with toast) while a leave intent
+            /// for this mode is still unresolved — create/join/queue-join
+            /// entry points must wait for it, or the retrying teardown and
+            /// the fresh enrollment race each other.</summary>
+            public bool BlocksOnPendingLeave()
+            {
+                if (!leaveIntent && !queueLeaveIntent && Status != "leaving") return false;
+                CompetitiveUI.ShowNotification(I18n.Tr("Finishing your previous leave first..."), new Color(1f, 0.6f, 0.2f), 4f);
+                return true;
+            }
+
+            /// <summary>Codex r2 f3: static probe for the mode's PUBLIC queue
+            /// joins (JoinTeamQueue / OvtJoinQueue live outside this class).</summary>
+            public static bool HasPendingLeave(string mode)
+            {
+                HostLobbyClient c = mode == "team" ? TeamLobby : mode == "ovt" ? OvtLobby : null;
+                return c != null && (c.leaveIntent || c.queueLeaveIntent || c.Status == "leaving");
+            }
+
+            /// <summary>Codex r2 f5-residual: record the local selection as
+            /// structured values. The static wrappers call these on every
+            /// create/join/prefs click; the prefs ack echo also folds in.</summary>
+            public void SetLocalTeamPref(int preferredTeam)
+            { curPreferredTeam = (preferredTeam == 1 || preferredTeam == 2) ? preferredTeam : 0; }
+            public void SetLocalOvtSide(int side)
+            { curPreferredSide = (side == 1 || side == 2) ? side : 0; }
+            public void SetLocalOvtExtraPick(bool extraPick)
+            { curSoloExtraPick = extraPick; }
+            /// <summary>Recovery-rejoin enrollment extras, built from the
+            /// CURRENT structured preferences — never a join-time snapshot
+            /// (Codex r2 f5-residual: the snapshot replayed stale values
+            /// over any prefs change made while seated).</summary>
+            private string CurrentExtras()
+                => IsTeam ? TeamLobbyExtras(curPreferredTeam)
+                          : OvtLobbyExtras(curPreferredSide, curSoloExtraPick);
+
             public void Create(string password, string extras)
             {
                 if (SpectatorBlocksQueue()) return;
                 NoteQueueRequestInFlight();
                 if (PasswordTooLong(password)) return;
+                if (BlocksOnPendingLeave()) return;
                 if (!ActionPreflight(out string sid)) return;
                 leaveIntent = false;
-                lastPassword = password; lastExtras = extras ?? "";
+                lastPassword = password;
                 int g = ++gen;
                 ActionBegin(); int aGen = actionGen;
                 Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/create",
@@ -12444,10 +12585,11 @@ namespace CompetitiveRounds
                 NoteQueueRequestInFlight();
                 if (string.IsNullOrEmpty(lobbyId)) return;
                 if (PasswordTooLong(password)) return;
+                if (BlocksOnPendingLeave()) return;
                 if (!ActionPreflight(out string sid)) return;
                 bool wasRecovery = OpenLobbyId == lobbyId;
                 if (!wasRecovery) { leaveIntent = false; confirmedMember = false; }
-                lastPassword = password; lastExtras = extras ?? "";
+                lastPassword = password;
                 int g = ++gen;
                 ActionBegin(); int aGen = actionGen;
                 Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/join",
@@ -12537,7 +12679,7 @@ namespace CompetitiveRounds
                             CompetitiveUI.ShowNotification(wrong
                                 ? I18n.Tr("Wrong password — try again.")
                                 : I18n.TrF("That {0} lobby is private — enter its password.", label), new Color(1f, 0.7f, 0.3f), 5f);
-                            string relobby = intendedLobbyId; string reextras = lastExtras;
+                            string relobby = intendedLobbyId; string reextras = CurrentExtras();
                             if (!string.IsNullOrEmpty(relobby))
                                 CompetitiveUI.OpenArtistInput(I18n.TrF("Private {0} lobby", label),
                                     wrong ? I18n.Tr("Wrong password - try again") : I18n.Tr("Password"), "",
@@ -12588,6 +12730,11 @@ namespace CompetitiveRounds
             {
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                // Codex r2 f4/f6 gate: a Start racing the host's own unacked
+                // prefs write would freeze a value the host JUST changed (the
+                // ovt extra-pick race). The button renders dimmed
+                // "(saving...)" while this is true — this is its no-op half.
+                if (PrefsInFlight) return;
                 if (actionInFlight && Time.realtimeSinceStartup - actionAt > 30f)
                     actionInFlight = false;
                 if (actionInFlight) return;
@@ -12651,7 +12798,9 @@ namespace CompetitiveRounds
                         {
                             Plugin.Log.LogWarning($"[{label}-LOBBY] leave raced a Start (server said started) — leaving via the {label} queue");
                             ClearMembershipSilent();
-                            DirectQueueLeave();
+                            // Codex r2 f3: the "started" answer names the series
+                            // the seat converted into — record it as the fence.
+                            DirectQueueLeave(ExtractJsonString(resp ?? "", "series_id"));
                         }
                         else
                         {
@@ -12706,10 +12855,21 @@ namespace CompetitiveRounds
             /// Tick(). The mode's local queue state is disarmed here (not in
             /// the callback) because this client never adopted the started
             /// match — there is no belief to preserve, only one to prevent.</summary>
-            private void DirectQueueLeave()
+            /// <summary>Codex r2 f3: `fenceSeriesId` names the series
+            /// INCARNATION this leave is aimed at (from the "started"
+            /// response / resolve answer). Recorded into the intent when the
+            /// intent is created — or refreshed by a newer authoritative
+            /// answer — and sent as expected_series_id on every attempt so a
+            /// delayed retry can never tear down a NEWER enrollment. Null
+            /// from a caller that knows no series (searching-row dissolution)
+            /// keeps the legacy unfenced behaviour; the parameterless Tick
+            /// retry keeps whatever the intent recorded.</summary>
+            private void DirectQueueLeave(string fenceSeriesId = null)
             {
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                if (!string.IsNullOrEmpty(fenceSeriesId)) queueLeaveSeriesId = fenceSeriesId;
+                else if (!queueLeaveIntent) queueLeaveSeriesId = null;   // fresh unfenced intent
                 if (!queueLeaveIntent) queueLeaveAttempts = 0;   // fresh intent = fresh budget
                 queueLeaveIntent = true;
                 if (queueLeaveInFlight && Time.realtimeSinceStartup - queueLeaveAt > 30f)
@@ -12720,7 +12880,7 @@ namespace CompetitiveRounds
                     // Give up locally — the server's lease expiry frees the row
                     // within minutes regardless (#276's failure direction).
                     Plugin.Log.LogWarning($"[{label}-LOBBY] queue-leave retry budget exhausted — leaving cleanup to the server lease expiry");
-                    queueLeaveIntent = false;
+                    queueLeaveIntent = false; queueLeaveSeriesId = null;
                     leaveIntent = false; leaveTarget = null;
                     return;
                 }
@@ -12748,16 +12908,27 @@ namespace CompetitiveRounds
                     if (OvtQueueStatus != "leaving") OvtQueueStatus = "";
                 }
                 int g = gen;
-                Plugin.Instance.StartCoroutine(PostRequestWithRetry(
-                    $"{baseUrl}/api/v1/{mode}/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "",
+                string leaveUrl = $"{baseUrl}/api/v1/{mode}/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}";
+                // Codex r2 f3: fence every attempt to the recorded incarnation.
+                if (!string.IsNullOrEmpty(queueLeaveSeriesId))
+                    leaveUrl += $"&expected_series_id={UnityWebRequest.EscapeURL(queueLeaveSeriesId)}";
+                Plugin.Instance.StartCoroutine(PostRequestWithRetry(leaveUrl, "",
                     (ok, resp) =>
                 {
                     queueLeaveInFlight = false;
                     if (g != gen) return;   // TearDown/escape took over
                     if (ok)
                     {
-                        Plugin.Log.LogInfo($"[{label}-LOBBY] queue-leave for the converted seat acked");
+                        // Codex r2 f3: {"stale":true} = the row's CURRENT series
+                        // differs from the fenced incarnation — that incarnation
+                        // is gone, which is exactly what this leave wanted.
+                        // TERMINAL ack either way; only the log differs.
+                        if (ExtractJsonBool(resp ?? "", "stale"))
+                            Plugin.Log.LogInfo($"[{label}-LOBBY] queue-leave fence hit a newer incarnation — old seat already gone, intent satisfied");
+                        else
+                            Plugin.Log.LogInfo($"[{label}-LOBBY] queue-leave for the converted seat acked");
                         queueLeaveIntent = false; queueLeaveAttempts = 0;
+                        queueLeaveSeriesId = null;
                         leaveIntent = false; leaveTarget = null;
                     }
                     else
@@ -12798,6 +12969,13 @@ namespace CompetitiveRounds
                     if (queueLeaveIntent && !queueLeaveInFlight
                         && Time.realtimeSinceStartup >= queueLeaveRetryAt)
                         DirectQueueLeave();
+                    // Codex r2 f4: a queued prefs write whose request failed
+                    // (or whose coroutine host died) drains here after the
+                    // backoff; PumpPrefs itself enforces single-flight.
+                    if (prefsPending.Count > 0
+                        && !(prefsInFlight && Time.realtimeSinceStartup - prefsAt < 25f)
+                        && Time.realtimeSinceStartup >= prefsPumpRetryAt)
+                        PumpPrefs();
                     // Handoff window: the state poll pauses; the READ-ONLY
                     // /lobby/resolve probe settles start-vs-closed (r1 f1).
                     if (handoffUntil > 0f)
@@ -12914,6 +13092,28 @@ namespace CompetitiveRounds
                             }
                         }
                         Members = members;
+                        // Codex r2 f5-residual: keep the structured current
+                        // prefs server-true from the freshest poll — this is
+                        // what makes a RELAUNCHED client's recovery rejoin
+                        // carry its real stored prefs even though no local
+                        // selection happened this session. An unacked local
+                        // write outranks the poll (it may predate the PATCH).
+                        if (!PrefsInFlight)
+                        {
+                            string mySid = MatchTracker.LocalSteamId;
+                            foreach (var m in members)
+                            {
+                                if (m == null || m.steam_id != mySid) continue;
+                                if (IsTeam)
+                                    curPreferredTeam = (m.preferred_team == 1 || m.preferred_team == 2) ? m.preferred_team : 0;
+                                else
+                                {
+                                    curPreferredSide = (m.preferred_side == 1 || m.preferred_side == 2) ? m.preferred_side : 0;
+                                    curSoloExtraPick = m.solo_extra_pick;
+                                }
+                                break;
+                            }
+                        }
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[{label}-LOBBY] member parse: {ex.Message}"); }
                     NativeUI.MarkDirty();
@@ -12955,7 +13155,7 @@ namespace CompetitiveRounds
                         {
                             rejoinAt = Time.unscaledTime;
                             Plugin.Log.LogWarning($"[{label}-LOBBY] unconfirmed membership not found server-side — attempting same-lobby rejoin");
-                            Join(OpenLobbyId, lastPassword, lastExtras);
+                            Join(OpenLobbyId, lastPassword, CurrentExtras());
                         }
                         return;
                     }
@@ -13038,7 +13238,9 @@ namespace CompetitiveRounds
                         // the mode's /queue/leave.
                         Plugin.Log.LogInfo($"[{label}-LOBBY] resolve found a started group under a standing leave intent — leaving via the {label} queue");
                         ClearMembershipSilent();
-                        DirectQueueLeave();
+                        // Codex r2 f3: the resolve answer names the started
+                        // series — record it as the fence.
+                        DirectQueueLeave(ExtractJsonString(resp, "series_id"));
                         NativeUI.MarkDirty();
                         return;
                     }
@@ -13114,6 +13316,7 @@ namespace CompetitiveRounds
                         ClearMembershipSilent();
                         leaveIntent = false; leaveTarget = null;
                         queueLeaveIntent = false; queueLeaveAttempts = 0;
+                        queueLeaveSeriesId = null;
                         NativeUI.MarkDirty();
                         return;
                     }
@@ -13125,7 +13328,7 @@ namespace CompetitiveRounds
                     {
                         rejoinAt = Time.unscaledTime;
                         Plugin.Log.LogWarning($"[{label}-LOBBY] membership row vanished server-side — attempting same-lobby rejoin");
-                        Join(OpenLobbyId, lastPassword, lastExtras);
+                        Join(OpenLobbyId, lastPassword, CurrentExtras());
                         return;
                     }
                     ClearMembershipSilent();
@@ -13172,70 +13375,135 @@ namespace CompetitiveRounds
                 }));
             }
 
-            /// <summary>True while a preference PATCH is unresolved — the
-            /// hydration pass must not overwrite the just-clicked local value
-            /// with a state poll that predates it (Codex r1 f4).</summary>
+            /// <summary>True while ANY preference write is unacked (in flight
+            /// OR queued) — the hydration pass must not overwrite the
+            /// just-clicked local value with a state poll that predates it
+            /// (Codex r1 f4), and the host's Start button dims/no-ops so a
+            /// Start can't freeze a value the host just changed (r2 f4/f6).</summary>
             public bool PrefsInFlight
-                => prefsInFlight && Time.realtimeSinceStartup - prefsAt < 25f;
+                => (prefsInFlight && Time.realtimeSinceStartup - prefsAt < 25f)
+                   || prefsPending.Count > 0;
 
-            /// <summary>Codex r1 f4/f6/f7: seated preference PATCH — ONE
-            /// changed field per request (a whole-row resend overwrites the
-            /// sibling setting with a stale local copy, and the old full
-            /// lobby-JOIN resend raced Start). fieldJson is a leading-comma
-            /// fragment like ",\"preferred_team\":2" from the static wrappers
-            /// below — never user input. 409 not_in_open_lobby is terminal:
-            /// resolve, don't retry.</summary>
+            /// <summary>The field name a wrapper fragment PATCHes — the
+            /// coalescing key. fieldJson is code-authored (leading-comma
+            /// `,"name":value`), never user input.</summary>
+            private static string PrefFieldKey(string fieldJson)
+            {
+                int q1 = fieldJson.IndexOf('"');
+                int q2 = q1 >= 0 ? fieldJson.IndexOf('"', q1 + 1) : -1;
+                return q2 > q1 ? fieldJson.Substring(q1 + 1, q2 - q1 - 1) : fieldJson;
+            }
+
+            /// <summary>Codex r1 f4/f6/f7 + r2 f4: seated preference PATCH —
+            /// ONE changed field per request (a whole-row resend overwrites
+            /// the sibling setting with a stale local copy, and the old full
+            /// lobby-JOIN resend raced Start). r2 f4: writes are SERIALIZED —
+            /// the click coalesces into prefsPending (latest value per field
+            /// wins) and PumpPrefs keeps exactly one request in flight. 409
+            /// not_in_open_lobby is terminal: resolve, don't retry.</summary>
             public void SendPrefs(string fieldJson)
             {
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
                 if (string.IsNullOrEmpty(OpenLobbyId)) return;   // seated-only surface
+                prefsPending[PrefFieldKey(fieldJson)] = fieldJson;
+                PumpPrefs();
+            }
+
+            /// <summary>Single-flight sender. Reached from SendPrefs, from
+            /// each ack (to drain the queue), and from Tick (retry after a
+            /// transport failure / a died coroutine host).</summary>
+            private void PumpPrefs()
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown"
+                    || string.IsNullOrEmpty(OpenLobbyId))
+                {
+                    // Seat gone — a seated-only write has nothing to land on.
+                    prefsPending.Clear();
+                    prefsInFlight = false;
+                    return;
+                }
+                if (prefsInFlight && Time.realtimeSinceStartup - prefsAt < 25f) return;
+                if (prefsPending.Count == 0) { prefsInFlight = false; return; }
+                string key = null;
+                foreach (var k in prefsPending.Keys) { key = k; break; }
+                string fieldJson = prefsPending[key];
                 prefsInFlight = true; prefsAt = Time.realtimeSinceStartup;
+                // r2 f4: generation token — a response may only clear the
+                // in-flight state when it belongs to the NEWEST request (a
+                // watchdog-expired request's late answer must not release a
+                // successor's single-flight slot).
+                int pg = ++prefsGen;
                 int g = gen;
                 Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/prefs",
                     $"{{\"steam_id\":\"{Escape(sid)}\"{fieldJson}}}", (ok, resp) =>
                 {
-                    prefsInFlight = false;
                     if (g != gen) return;
+                    if (pg != prefsGen) return;   // stale generation — newest request owns the state
+                    prefsInFlight = false;
                     if (ok)
                     {
+                        // Acked: drop the pending entry unless the user changed
+                        // the field again mid-flight (the newer value then goes
+                        // out on the drain pump below).
+                        string cur;
+                        if (prefsPending.TryGetValue(key, out cur) && cur == fieldJson)
+                            prefsPending.Remove(key);
                         // Fold the echoed STORED values into our cached member
                         // row so the hydration pass can't briefly revert the
-                        // control from a state poll that predates the PATCH.
+                        // control from a state poll that predates the PATCH —
+                        // and into the structured current prefs the recovery
+                        // rejoin body is built from (r2 f5-residual).
                         try
                         {
+                            int ptEcho = IsTeam ? ExtractJsonInt(resp, "preferred_team") : 0;
+                            int psEcho = IsTeam ? 0 : ExtractJsonInt(resp, "preferred_side");
+                            bool sepEcho = !IsTeam && ExtractJsonBool(resp, "solo_extra_pick");
+                            if (IsTeam)
+                                curPreferredTeam = (ptEcho == 1 || ptEcho == 2) ? ptEcho : 0;
+                            else
+                            {
+                                curPreferredSide = (psEcho == 1 || psEcho == 2) ? psEcho : 0;
+                                curSoloExtraPick = sepEcho;
+                            }
                             if (Members != null)
                                 foreach (var m in Members)
                                 {
                                     if (m == null || m.steam_id != sid) continue;
                                     if (IsTeam)
-                                    {
-                                        int pt = ExtractJsonInt(resp, "preferred_team");
-                                        m.preferred_team = (pt == 1 || pt == 2) ? pt : 0;
-                                    }
+                                        m.preferred_team = curPreferredTeam;
                                     else
                                     {
-                                        int ps = ExtractJsonInt(resp, "preferred_side");
-                                        m.preferred_side = (ps == 1 || ps == 2) ? ps : 0;
-                                        m.solo_extra_pick = ExtractJsonBool(resp, "solo_extra_pick");
+                                        m.preferred_side = curPreferredSide;
+                                        m.solo_extra_pick = curSoloExtraPick;
                                     }
                                     break;
                                 }
                         }
                         catch { }
                         // Pull the member list now so every seat's claim tags
-                        // update within a tick.
+                        // update within a tick, then drain any queued field.
                         lastPollAt = -999f;
+                        PumpPrefs();
                         NativeUI.MarkDirty();
                         return;
                     }
                     if (resp != null && resp.Contains("not_in_open_lobby"))
                     {
+                        // Terminal: the seat is gone or the lobby started —
+                        // nothing queued can ever land.
+                        prefsPending.Clear();
                         Plugin.Log.LogWarning($"[{label}-LOBBY] prefs refused — seat gone or lobby started; resolving");
                         ResolveStaleSeat();
                     }
                     else
-                        Plugin.Log.LogWarning($"[{label}-LOBBY] prefs update failed: {resp}");
+                    {
+                        // Transport/5xx: keep the desired value queued; Tick
+                        // retries after a short backoff.
+                        prefsPumpRetryAt = Time.realtimeSinceStartup + 5f;
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] prefs update failed: {resp} — will retry");
+                    }
                     NativeUI.MarkDirty();
                 }));
             }
@@ -13329,7 +13597,9 @@ namespace CompetitiveRounds
                 Status = "";
                 leaveIntent = false; leaveTarget = null;
                 queueLeaveIntent = false; queueLeaveInFlight = false; queueLeaveAttempts = 0;
+                queueLeaveSeriesId = null;
                 prefsInFlight = false;
+                prefsPending.Clear();
                 actionInFlight = false;
             }
         }
@@ -13341,26 +13611,45 @@ namespace CompetitiveRounds
         // preferred_team (2v2) / preferred_side + solo_extra_pick (1v2 — the
         // server ORs solo_extra_pick across members at Start, main.py comment
         // at _LobbyCreateReq; omitting it would make that OR always false).
+        // Codex r2 f5-residual: every wrapper records the LOCAL SELECTION as
+        // structured values first — the recovery-rejoin body is rebuilt from
+        // those (never a join-time extras snapshot), and the prefs ack echo
+        // keeps them server-true.
         public static void TeamLobbyCreate(int preferredTeam, string password = null)
-            => TeamLobby.Create(password, TeamLobbyExtras(preferredTeam));
+        { TeamLobby.SetLocalTeamPref(preferredTeam); TeamLobby.Create(password, TeamLobbyExtras(preferredTeam)); }
         public static void TeamLobbyJoin(string lobbyId, int preferredTeam, string password = null)
-            => TeamLobby.Join(lobbyId, password, TeamLobbyExtras(preferredTeam));
+        { TeamLobby.SetLocalTeamPref(preferredTeam); TeamLobby.Join(lobbyId, password, TeamLobbyExtras(preferredTeam)); }
         private static string TeamLobbyExtras(int preferredTeam)
             => (preferredTeam == 1 || preferredTeam == 2) ? $",\"preferred_team\":{preferredTeam}" : "";
         public static void OvtLobbyCreate(int preferredSide, bool soloExtraPick, string password = null)
-            => OvtLobby.Create(password, OvtLobbyExtras(preferredSide, soloExtraPick));
+        {
+            OvtLobby.SetLocalOvtSide(preferredSide); OvtLobby.SetLocalOvtExtraPick(soloExtraPick);
+            OvtLobby.Create(password, OvtLobbyExtras(preferredSide, soloExtraPick));
+        }
         public static void OvtLobbyJoin(string lobbyId, int preferredSide, bool soloExtraPick, string password = null)
-            => OvtLobby.Join(lobbyId, password, OvtLobbyExtras(preferredSide, soloExtraPick));
+        {
+            OvtLobby.SetLocalOvtSide(preferredSide); OvtLobby.SetLocalOvtExtraPick(soloExtraPick);
+            OvtLobby.Join(lobbyId, password, OvtLobbyExtras(preferredSide, soloExtraPick));
+        }
         // Codex r1 f4/f6/f7: seated preference changes are single-field
         // PATCHes on /lobby/prefs — never a whole lobby-JOIN resend (which
         // raced Start and resent stale sibling fields). 0 is an explicit
         // "Any"/clear and IS sent (f7 — the stale claim used to stand).
         public static void TeamLobbyPrefs(int preferredTeam)
-            => TeamLobby.SendPrefs($",\"preferred_team\":{((preferredTeam == 1 || preferredTeam == 2) ? preferredTeam : 0)}");
+        {
+            TeamLobby.SetLocalTeamPref(preferredTeam);
+            TeamLobby.SendPrefs($",\"preferred_team\":{((preferredTeam == 1 || preferredTeam == 2) ? preferredTeam : 0)}");
+        }
         public static void OvtLobbyPrefsSide(int preferredSide)
-            => OvtLobby.SendPrefs($",\"preferred_side\":{((preferredSide == 1 || preferredSide == 2) ? preferredSide : 0)}");
+        {
+            OvtLobby.SetLocalOvtSide(preferredSide);
+            OvtLobby.SendPrefs($",\"preferred_side\":{((preferredSide == 1 || preferredSide == 2) ? preferredSide : 0)}");
+        }
         public static void OvtLobbyPrefsExtraPick(bool soloExtraPick)
-            => OvtLobby.SendPrefs($",\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}");
+        {
+            OvtLobby.SetLocalOvtExtraPick(soloExtraPick);
+            OvtLobby.SendPrefs($",\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}");
+        }
         private static string OvtLobbyExtras(int preferredSide, bool soloExtraPick)
             => $",\"preferred_side\":{((preferredSide == 1 || preferredSide == 2) ? preferredSide : 0)},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}";
 

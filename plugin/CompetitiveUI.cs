@@ -485,8 +485,13 @@ namespace CompetitiveRounds
                     // colour when they have one. Falls through to the vanilla slot
                     // skin (which repeats every 4 slots — see the FFA clamp in
                     // PlayerSkinBank_GetPlayerSkinColors_2v2_Patch) otherwise.
+                    // Codex r2 f11: gate on TintsEnabled — with tints off the
+                    // bodies render the vanilla slot palette, so the HUD names
+                    // and dots must match THAT, not an identity colour nothing
+                    // on screen is wearing.
                     Color equipped;
-                    if (TeamColorIdentity.TryGetColor(slot, out equipped))
+                    if (TeamColorIdentity.TintsEnabled
+                        && TeamColorIdentity.TryGetColor(slot, out equipped))
                     {
                         rawColor = equipped;
                     }
@@ -1697,6 +1702,11 @@ namespace CompetitiveRounds
             public string subjectLabel; // kind 4: player name for the popup title
             public string pointTimes;   // "12,47,..." seconds since match start (marker X)
             public string pointTimeline;// "mine:theirs,..." viewer-relative (marker color = scorer)
+            // Bug 181 (Stan) item 2: the row's real match length in seconds.
+            // >0 = the pair chart scales its samples across the whole game
+            // (x = duration * i/(n-1)) — correct for BOTH old fixed-cadence
+            // and new decimated timelines; 0 = legacy (n-1)*3s estimate.
+            public int durationSeconds;
             // F9: FFA regions also carry the whole-tab OUTER viewport — the
             // hit test clips against BOTH masks live (the inner list clip
             // alone let a row outer-scrolled under the page chrome keep a
@@ -1758,7 +1768,8 @@ namespace CompetitiveRounds
                                                    RectTransform sourceRT, Camera sourceCam, float widthFrac,
                                                    RectTransform clipRT, object sourceTxt,
                                                    string pointTimes, string pointTimeline,
-                                                   RectTransform outerClipRT = null, string subjectLabel = null)
+                                                   RectTransform outerClipRT = null, string subjectLabel = null,
+                                                   int durationSeconds = 0)
         {
             if (string.IsNullOrEmpty(pairSeries) || pairSeries.IndexOf(':') < 0) return;
             _fpsGraphRegions.Add(new FpsGraphRegion {
@@ -1766,6 +1777,7 @@ namespace CompetitiveRounds
                 kind = isBlock ? 3 : 2, myStep = 3f, subjectIsOpp = subjectIsOpp,
                 pointTimes = pointTimes, pointTimeline = pointTimeline,
                 outerClipRT = outerClipRT, subjectLabel = subjectLabel,
+                durationSeconds = durationSeconds > 0 ? durationSeconds : 0,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
                 sourceTxt = sourceTxt,
             });
@@ -2010,20 +2022,36 @@ namespace CompetitiveRounds
             drawSeries(mine, myStep, new Color(0.60f, 0.70f, 0.90f, 0.95f));
         }
 
-        // July 22 item 1: single-player cumulative pair chart.
-        // kind 2 (Hit%): shots fired (dim) vs shots hit (bright), one Y scale.
-        // kind 3 (Block%): damage taken (left scale, dim) vs successful blocks
-        // (right scale, bright) — dual axes because damage is ~100x block counts.
+        // July 22 item 1 / bug 181 (Stan) redesign: single-player cumulative
+        // pair chart.
+        // kind 2 (Hit Rate): shots fired vs shots hit, one Y scale.
+        // kind 3 (Block): TWO dialects. "v2|"-prefixed series carry cumulative
+        //   "activated:successful" pairs (the redesigned sampler) and render
+        //   as "Block Rate"; UNPREFIXED legacy series stay the honest old
+        //   "damage taken vs successful blocks" (dual axes — damage is ~100x
+        //   block counts; v2 keeps dual axes too since activations >> successes
+        //   is common but not structural).
+        // Header is two lines: identity line, then a legend whose TEXT colours
+        // are the two line colours — deliberately DISTINCT hues (amber vs
+        // cyan) instead of two shades of one side colour (Stan: "less similar
+        // colors"), and the identity line stays grey so neither collides.
         private static void DrawPairHoverGraph(FpsGraphRegion reg, Vector2 mp)
         {
-            int[] a, b;
-            if (!ParsePairSeries(reg.mySeries, out a, out b)) return;
             bool isBlock = reg.kind == 3;
-            bool oppSubject = reg.subjectIsOpp;
-            Color bright = oppSubject ? new Color(0.95f, 0.55f, 0.45f, 0.95f) : new Color(0.55f, 0.75f, 0.98f, 0.95f);
-            Color dim = oppSubject ? new Color(0.70f, 0.42f, 0.38f, 0.80f) : new Color(0.42f, 0.52f, 0.70f, 0.80f);
-            string brightHex = oppSubject ? "#F28C73" : "#8CBFFA";
-            string dimHex = oppSubject ? "#B36B61" : "#6B85B3";
+            string series = reg.mySeries ?? "";
+            bool blockV2 = false;
+            if (isBlock && series.StartsWith("v2|", StringComparison.Ordinal))
+            {
+                blockV2 = true;
+                series = series.Substring(3);
+            }
+            int[] a, b;
+            if (!ParsePairSeries(series, out a, out b)) return;
+            // A = denominator line (fired / activated / dmg taken) in amber;
+            // B = numerator line (hits / successes) in cyan.
+            Color colA = new Color(0.91f, 0.72f, 0.31f, 0.95f);
+            Color colB = new Color(0.36f, 0.78f, 0.94f, 0.95f);
+            string hexA = "#E8B84F", hexB = "#5CC7F0";
 
             if (_scoreGraphLbl == null)
                 _scoreGraphLbl = new GUIStyle(GUI.skin.label)
@@ -2032,43 +2060,71 @@ namespace CompetitiveRounds
                     clipping = TextClipping.Overflow, wordWrap = false,
                 };
 
-            float w = 360f, h = 230f, pad = 44f, padR = isBlock ? 34f : 12f;
+            // Marker probe BEFORE layout: when markers render, the marker
+            // legend gets its own third header line (never appended blindly —
+            // a translated v2 legend plus the marker glyphs cannot be assumed
+            // to fit 360px, #237).
+            int n = a.Length;
+            // Bug 181 item 2: scale samples across the row's REAL duration
+            // when the registration site knew it; legacy 3s estimate otherwise.
+            float dur = reg.durationSeconds > 0 ? reg.durationSeconds : (n - 1) * 3f;
+            if (dur < 1f) dur = 1f;
+            float step = n > 1 ? dur / (n - 1) : dur;
+            float lastMarkT = DrawPointMarkers(default(Rect), 0f, reg.pointTimes, reg.pointTimeline, false);
+            float maxT = Mathf.Max(dur, Mathf.Max(1f, lastMarkT));
+            bool hasMarkers = lastMarkT > 0f;
+
+            float headerH = hasMarkers ? 60f : 42f;   // 2 or 3 18px header lines
+            // Plot area stays ~178px tall; bottom band = 20px mm:ss ticks +
+            // 22px footer. Net h: 262 without markers, 280 with.
+            float w = 360f, h = headerH + 178f + 42f, pad = 44f, padR = isBlock ? 34f : 12f;
             float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
             float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
-            // F13: FFA rows register per-participant series with a subject
-            // label — the title names that player instead of the you/opponent
-            // phrasing. The hex holes ({1}-{3}) keep palette correctness for
-            // either subject side; tabs 0/8 never set the label → they take
-            // the unlabeled branches below.
-            bool hasSubject = !string.IsNullOrEmpty(reg.subjectLabel);
-            string subjHex = oppSubject ? "#E69988" : "#99B3E6";
-            string title;
-            if (hasSubject)
-                title = isBlock
-                    ? I18n.TrF("<color=#CCCCCC>Block — <color={1}>{0}</color></color>  <color={2}>dmg taken</color> <color=#888>·</color> <color={3}>blocks</color>", reg.subjectLabel, subjHex, dimHex, brightHex)
-                    : I18n.TrF("<color=#CCCCCC>Hit — <color={1}>{0}</color></color>  <color={2}>shots fired</color> <color=#888>·</color> <color={3}>hits</color>", reg.subjectLabel, subjHex, dimHex, brightHex);
-            // Aug 3: the unlabeled (tabs 0/8) branch is four whole templates —
-            // one per subject side — instead of one interpolating a pre-built
-            // `who` fragment. The subject WORD has to sit inside the sentence
-            // to be translatable at all (a bare "you"/"opponent" key is
-            // unusable in languages that inflect it), and the two palette
-            // hexes stay holes so a palette tweak can't retire the key.
-            else if (oppSubject)
-                title = isBlock
-                    ? I18n.TrF("<color=#CCCCCC>Block — <color=#E69988>opponent</color></color>  <color={0}>dmg taken</color> <color=#888>·</color> <color={1}>blocks</color>", dimHex, brightHex)
-                    : I18n.TrF("<color=#CCCCCC>Hit — <color=#E69988>opponent</color></color>  <color={0}>shots fired</color> <color=#888>·</color> <color={1}>hits</color>", dimHex, brightHex);
-            else
-                title = isBlock
-                    ? I18n.TrF("<color=#CCCCCC>Block — <color=#99B3E6>you</color></color>  <color={0}>dmg taken</color> <color=#888>·</color> <color={1}>blocks</color>", dimHex, brightHex)
-                    : I18n.TrF("<color=#CCCCCC>Hit — <color=#99B3E6>you</color></color>  <color={0}>shots fired</color> <color=#888>·</color> <color={1}>hits</color>", dimHex, brightHex);
-            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24), title, _scoreGraphLbl);
 
-            int n = a.Length;
-            float maxT = Mathf.Max(1f, (n - 1) * 3f);
-            float lastMarkT = DrawPointMarkers(default(Rect), 0f, reg.pointTimes, reg.pointTimeline, false);
-            if (lastMarkT > maxT) maxT = lastMarkT;
+            // Line 1 — identity. F13: FFA rows register per-participant series
+            // with a subject label; tabs 0/8 take the whole-sentence you/
+            // opponent keys (a bare "you" key is uninflectable, #295).
+            bool hasSubject = !string.IsNullOrEmpty(reg.subjectLabel);
+            string title;
+            if (isBlock && !blockV2)
+                title = hasSubject ? I18n.TrF("{0} Blocks", reg.subjectLabel)
+                    : reg.subjectIsOpp ? I18n.Tr("Opponent Blocks") : I18n.Tr("Your Blocks");
+            else if (isBlock)
+                title = hasSubject ? I18n.TrF("{0} Block Rate", reg.subjectLabel)
+                    : reg.subjectIsOpp ? I18n.Tr("Opponent Block Rate") : I18n.Tr("Your Block Rate");
+            else
+                title = hasSubject ? I18n.TrF("{0} Hit Rate", reg.subjectLabel)
+                    : reg.subjectIsOpp ? I18n.Tr("Opponent Hit Rate") : I18n.Tr("Your Hit Rate");
+            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 18), $"<color=#DDDDDD>{title}</color>", _scoreGraphLbl);
+
+            // Line 2 — series legend, coloured AS the lines.
+            string legend;
+            if (isBlock && !blockV2)
+                legend = I18n.TrF("<color={0}>damage taken</color> <color=#888>·</color> <color={1}>successful blocks</color>", hexA, hexB);
+            else if (isBlock)
+                legend = I18n.TrF("<color={0}>blocks activated</color> <color=#888>·</color> <color={1}>blocks successful</color>", hexA, hexB);
+            else
+                legend = I18n.TrF("<color={0}>shots fired</color> <color=#888>·</color> <color={1}>shots hit</color>", hexA, hexB);
+            GUI.Label(new Rect(gx + 8, gy + 20, w - 16, 18), legend, _scoreGraphLbl);
+
+            // Line 3 — marker legend, only when markers actually render (bug
+            // 181 item 4: no phantom "markers" text on markerless FFA rows).
+            // Glyph-and-label positions come from CalcSize, never guessed (#237).
+            if (hasMarkers)
+            {
+                float ly = gy + 38f, lx = gx + 8f;
+                var wonContent = new GUIContent("<color=#4CD94C>" + I18n.Tr("point won") + "</color>");
+                var lostContent = new GUIContent("<color=#E05555>" + I18n.Tr("point lost") + "</color>");
+                Vector2 wonSz = _scoreGraphLbl.CalcSize(wonContent);
+                Vector2 lostSz = _scoreGraphLbl.CalcSize(lostContent);
+                GuiLine(new Vector2(lx, ly + 9f), new Vector2(lx + 12f, ly + 9f), new Color(0.30f, 0.85f, 0.30f, 0.9f), 2f);
+                GUI.Label(new Rect(lx + 16f, ly, wonSz.x, 18f), wonContent, _scoreGraphLbl);
+                lx += 16f + wonSz.x + 14f;
+                GuiLine(new Vector2(lx, ly + 9f), new Vector2(lx + 12f, ly + 9f), new Color(0.90f, 0.30f, 0.30f, 0.9f), 2f);
+                GUI.Label(new Rect(lx + 16f, ly, lostSz.x, 18f), lostContent, _scoreGraphLbl);
+            }
 
             int maxA = 1, maxB = 1;
             foreach (var v in a) if (v > maxA) maxA = v;
@@ -2079,9 +2135,9 @@ namespace CompetitiveRounds
             int maxBAxis = isBlock ? Mathf.CeilToInt(maxB * 1.08f) : maxA;
             if (maxBAxis < 1) maxBAxis = 1;
 
-            Rect plot = new Rect(gx + pad, gy + 34f, w - pad - padR, h - 34f - 26f);
+            Rect plot = new Rect(gx + pad, gy + headerH, w - pad - padR, h - headerH - 42f);
 
-            // Left-axis gridlines from the A series (fired / damage).
+            // Left-axis gridlines from the A series (fired / activated / damage).
             int[] steps = { 1, 2, 5, 10, 20, 25, 50, 100, 150, 200, 300, 500, 1000, 2000 };
             int gstep = steps[steps.Length - 1];
             foreach (int s in steps) { if (maxA / s <= 6) { gstep = s; break; } }
@@ -2093,13 +2149,27 @@ namespace CompetitiveRounds
             }
             if (isBlock)
             {
-                // Right-axis reference for the blocks line — label the AXIS
-                // ceiling (maxBAxis, what the line is actually scaled to),
-                // not the raw series max (review [9]).
+                // Right-axis reference for the B line — label the AXIS ceiling
+                // (maxBAxis, what the line is actually scaled to), not the raw
+                // series max (review [9]).
                 GUI.Label(new Rect(plot.xMax + 4f, plot.yMin - 11f, padR - 4f, 22f),
-                    $"<color={brightHex}>{maxBAxis}</color>", _scoreGraphLbl);
+                    $"<color={hexB}>{maxBAxis}</color>", _scoreGraphLbl);
                 GUI.Label(new Rect(plot.xMax + 4f, plot.yMax - 11f, padR - 4f, 22f),
-                    $"<color={brightHex}>0</color>", _scoreGraphLbl);
+                    $"<color={hexB}>0</color>", _scoreGraphLbl);
+            }
+
+            // Bug 181 item 2: 4 mm:ss tick marks across the real time axis.
+            // Tick label rects are sized by CalcSize (#237) and clamped inside
+            // the popup so the end labels never bleed off the panel.
+            for (int ti = 0; ti <= 3; ti++)
+            {
+                float tv = maxT * ti / 3f;
+                float x = plot.xMin + plot.width * (tv / maxT);
+                GuiLine(new Vector2(x, plot.yMax), new Vector2(x, plot.yMax + 4f), new Color(1f, 1f, 1f, 0.35f), 1f);
+                var tickContent = new GUIContent($"<color=#777>{(int)(tv / 60f)}:{(int)tv % 60:00}</color>");
+                Vector2 tickSz = _scoreGraphLbl.CalcSize(tickContent);
+                float lx = Mathf.Clamp(x - tickSz.x / 2f, gx + 2f, gx + w - tickSz.x - 2f);
+                GUI.Label(new Rect(lx, plot.yMax + 4f, tickSz.x, 16f), tickContent, _scoreGraphLbl);
             }
 
             DrawPointMarkers(plot, maxT, reg.pointTimes, reg.pointTimeline, true);
@@ -2108,30 +2178,32 @@ namespace CompetitiveRounds
             {
                 for (int i = 1; i < vals.Length; i++)
                 {
-                    float x0 = plot.xMin + plot.width * ((i - 1) * 3f / maxT);
-                    float x1 = plot.xMin + plot.width * (i * 3f / maxT);
+                    float x0 = plot.xMin + plot.width * ((i - 1) * step / maxT);
+                    float x1 = plot.xMin + plot.width * (i * step / maxT);
                     float y0 = plot.yMax - plot.height * Mathf.Min(vals[i - 1], maxV) / (float)maxV;
                     float y1 = plot.yMax - plot.height * Mathf.Min(vals[i], maxV) / (float)maxV;
                     GuiLine(new Vector2(x0, y0), new Vector2(x1, y1), col, 2f);
                 }
             };
-            drawSeries(a, maxA, dim);
-            drawSeries(b, maxBAxis, bright);
+            drawSeries(a, maxA, colA);
+            drawSeries(b, maxBAxis, colB);
 
-            // Footer: final tallies + the resulting percentage. Aug 3: the two
-            // branches produced BYTE-IDENTICAL English, so the subject-labeled
-            // (FFA) split is gone and both paths share the existing key — no
-            // new key, and the tabs-0/8 path picks up the FFA translation for
-            // free. Side effect worth naming: {2:F0} now formats under
-            // InvariantCulture (TrF), where the old interpolated branch used
-            // the current culture — a comma decimal separator on an es/ru OS.
+            // Footer: final tallies only — the marker explanation moved into
+            // the header legend (bug 181 item 4), so "markers = points scored"
+            // is gone from every branch. {2:F0} formats under InvariantCulture
+            // (TrF).
             string footer;
-            if (isBlock)
-                footer = I18n.TrF("<color=#777>{0} dmg taken · {1} successful blocks · markers = points scored</color>", a[n - 1], b[n - 1]);
+            if (isBlock && !blockV2)
+                footer = I18n.TrF("<color=#777>{0} dmg taken · {1} successful blocks</color>", a[n - 1], b[n - 1]);
+            else if (isBlock)
+            {
+                float bpct = a[n - 1] > 0 ? 100f * b[n - 1] / a[n - 1] : 0f;
+                footer = I18n.TrF("<color=#777>{0} activated · {1} successful · {2:F0}%</color>", a[n - 1], b[n - 1], bpct);
+            }
             else
             {
                 float pct = a[n - 1] > 0 ? 100f * b[n - 1] / a[n - 1] : 0f;
-                footer = I18n.TrF("<color=#777>{0} fired · {1} hit · {2:F0}% · markers = points scored</color>", a[n - 1], b[n - 1], pct);
+                footer = I18n.TrF("<color=#777>{0} fired · {1} hit · {2:F0}%</color>", a[n - 1], b[n - 1], pct);
             }
             GUI.Label(new Rect(gx + 8, gy + h - 22f, w - 16, 22f), footer, _scoreGraphLbl);
         }
@@ -2144,7 +2216,14 @@ namespace CompetitiveRounds
             var ping = ParseFpsSeries(reg.oppSeries);
             int[] hA = null, hB = null, bA = null, bB = null;
             ParsePairSeries(reg.pairHit, out hA, out hB);
-            ParsePairSeries(reg.pairBlock, out bA, out bB);
+            // Bug 181 item 3: a "v2|"-prefixed block timeline carries
+            // activated:successful pairs — strip the marker before pair-
+            // parsing (the prefix would silently eat the first pair) and
+            // re-label the mini panel below.
+            string comboBlock = reg.pairBlock ?? "";
+            bool comboBlockV2 = comboBlock.StartsWith("v2|", StringComparison.Ordinal);
+            if (comboBlockV2) comboBlock = comboBlock.Substring(3);
+            ParsePairSeries(comboBlock, out bA, out bB);
             if (fps == null && ping == null && hA == null && bA == null) return;
 
             bool right = reg.subjectIsOpp;
@@ -2207,8 +2286,11 @@ namespace CompetitiveRounds
                            hA[hA.Length - 1], hB[hB.Length - 1],
                            hA[hA.Length - 1] > 0 ? 100f * hB[hB.Length - 1] / hA[hA.Length - 1] : 0f) : "";
             string blkFoot = bA != null && bA.Length > 1
-                ? I18n.TrF("<color=#777>{0} dmg / {1} blocks</color>",
-                           bA[bA.Length - 1], bB[bB.Length - 1]) : "";
+                ? (comboBlockV2
+                    ? I18n.TrF("<color=#777>{0} activated / {1} successful</color>",
+                               bA[bA.Length - 1], bB[bB.Length - 1])
+                    : I18n.TrF("<color=#777>{0} dmg / {1} blocks</color>",
+                               bA[bA.Length - 1], bB[bB.Length - 1])) : "";
             // Blocks are ~100x smaller than damage — rescale the blocks line to
             // the damage axis so the mini panel shows both trends (real numbers
             // live in the footer; the full-size 1v1 popup uses true dual axes).
@@ -2224,7 +2306,10 @@ namespace CompetitiveRounds
             panel(new Rect(gx + 10f, gy + 40f, pw, ph), I18n.Tr("<color=#CCC>FPS</color>"), fps, null, bright, bright, "");
             panel(new Rect(gx + 20f + pw, gy + 40f, pw, ph), I18n.Tr("<color=#CCC>Ping (ms)</color>"), ping, null, bright, bright, "");
             panel(new Rect(gx + 10f, gy + 44f + ph, pw, ph), I18n.Tr("<color=#CCC>Shots fired vs hits</color>"), hA, hB, dim, bright, hitFoot);
-            panel(new Rect(gx + 20f + pw, gy + 44f + ph, pw, ph), I18n.Tr("<color=#CCC>Dmg taken vs blocks</color>"), bA, bBScaled, dim, bright, blkFoot);
+            panel(new Rect(gx + 20f + pw, gy + 44f + ph, pw, ph),
+                comboBlockV2 ? I18n.Tr("<color=#CCC>Blocks vs successes</color>")
+                             : I18n.Tr("<color=#CCC>Dmg taken vs blocks</color>"),
+                bA, bBScaled, dim, bright, blkFoot);
         }
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent)
             => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, null, null, null, null, -1f, null);

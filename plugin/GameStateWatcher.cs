@@ -12,6 +12,43 @@ using Hashtable = ExitGames.Client.Photon.Hashtable;
 
 namespace CompetitiveRounds
 {
+    /// <summary>Bounded telemetry series that COMPRESSES instead of stopping
+    /// (Stan bug 181 root cause — the old hard 128-sample cap was a 6:24
+    /// recording ceiling every 2v2/FFA game overran). At the cap the series
+    /// drops every other sample and doubles its stride, so it always spans
+    /// the whole game in at most 128 entries: 6.4 min at 3s/sample, 12.8 at
+    /// 6s, 25.6 at 12s... Renderers must scale the x-axis by the real match
+    /// duration rather than assuming a fixed cadence. Shared by
+    /// GameStateWatcher and FfaMode.</summary>
+    internal sealed class DecimatedList<T>
+    {
+        public readonly List<T> Items = new List<T>();
+        private int stride = 1;
+        private int tick;
+
+        public int Count => Items.Count;
+
+        public void Add(T value)
+        {
+            if ((tick++ % stride) != 0) return;
+            Items.Add(value);
+            if (Items.Count >= 128)
+            {
+                int half = Items.Count / 2;
+                for (int i = 0; i < half; i++) Items[i] = Items[i * 2];
+                Items.RemoveRange(half, Items.Count - half);
+                stride *= 2;
+            }
+        }
+
+        public void Clear()
+        {
+            Items.Clear();
+            stride = 1;
+            tick = 0;
+        }
+    }
+
     public static class GameStateWatcher
     {
         // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -111,15 +148,15 @@ namespace CompetitiveRounds
         // aggregates, receive-gap events (deliberate NIC-cut "ghost" tell)
         // and opponent-heartbeat gaps (victim-side view of the same). All
         // advisory — never in the HMAC, never auto-invalidating.
-        private static readonly List<int> localFpsTimeline = new List<int>();   // cap 90 (7.5 min)
+        private static readonly DecimatedList<int> localFpsTimeline = new DecimatedList<int>();   // decimates at cap
         private static int tlFrames = 0;
         private static float tlAccum = 0f;
         private static int bcFrames = 0;          // frames since last 3s broadcast (instantaneous fps)
         private static float bcAccum = 0f;
         private static int gstatsSeq = 0;         // monotonic broadcast counter (heartbeat)
         private static int lastBroadcastRecentFps = 0;
-        private static readonly List<int> oppFpsTimeline = new List<int>();     // cap 128 (511 chars worst case)
-        private static readonly List<int> oppPingTimeline = new List<int>();    // July 22 item 3: opp ping via gstats field 12
+        private static readonly DecimatedList<int> oppFpsTimeline = new DecimatedList<int>();     // decimates at cap
+        private static readonly DecimatedList<int> oppPingTimeline = new DecimatedList<int>();    // July 22 item 3: opp ping via gstats field 12
         private static int lastOppGstatsSeq = -1;
         private static float lastOppSeqAdvanceTime = -1f;
         private static int localFreezeCount = 0;
@@ -138,25 +175,31 @@ namespace CompetitiveRounds
         private static readonly System.Diagnostics.Stopwatch _tickStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         // July 22 item 1 — cumulative Hit%/Block% timelines for the new history
-        // hover graphs. Own side sampled on the 3s cadence as "fired:hit" and
-        // "dmgTakenInt:blocksSucc" pairs; opponent side sampled per cr_gstats
-        // seq-advance (same rhythm their other telemetry arrives on). Damage
-        // taken includes DOT ticks — unfilterable at TakeDamage (learning
-        // #137), acceptable for a trend graph. Advisory, never in the HMAC.
-        private static readonly List<string> localHitTimeline = new List<string>();    // cap 128
-        private static readonly List<string> localBlockTimeline = new List<string>();  // cap 128
-        private static readonly List<string> oppHitTimeline = new List<string>();      // cap 128
-        private static readonly List<string> oppBlockTimeline = new List<string>();    // cap 128
+        // hover graphs. Own side sampled on the 3s cadence; opponent side per
+        // cr_gstats seq-advance (same rhythm their other telemetry arrives on).
+        // Advisory, never in the HMAC.
+        //
+        // Aug 8 (Stan bug 181 root cause): these were hard-capped at 128
+        // samples — a 6:24 recording CEILING at the 3s cadence that every
+        // 2v2/FFA game overran (prod averages 544s/643s), so graphs silently
+        // ended a third of the way through the match while the totals kept
+        // counting (41% summary vs 36% graph, off for every player). Now they
+        // DECIMATE instead of stopping: at the cap the series drops every
+        // other sample and doubles its stride, so it always spans the whole
+        // game at bounded size. The renderers scale their x-axis by the real
+        // match duration, so variable cadence is invisible to them.
+        private static readonly DecimatedList<string> localHitTimeline = new DecimatedList<string>();
+        private static readonly DecimatedList<string> localBlockTimeline = new DecimatedList<string>();
+        private static readonly DecimatedList<string> oppHitTimeline = new DecimatedList<string>();
+        private static readonly DecimatedList<string> oppBlockTimeline = new DecimatedList<string>();
         // Own fps at the 3s broadcast cadence — the 2v2 report ships this for
         // the local slot so all four players' fps series share one cadence
         // (the 1v1 report keeps using the 5s localFpsTimeline unchanged).
-        private static readonly List<int> localFps3sTimeline = new List<int>();        // cap 128
+        private static readonly DecimatedList<int> localFps3sTimeline = new DecimatedList<int>();
         // Aug 7 item 3: own cumulative damage dealt on that SAME 3s cadence,
-        // for the 2v2/1v2 reports. A peer's damage arrives one sample per
-        // cr_gstats seq advance — also 3s — so every slot in one telemetry row
-        // shares an x-axis and the DPS chart needs a single interval. The 1v1
-        // report keeps its own 5s localDamageTimeline unchanged.
-        private static readonly List<int> localDamage3sTimeline = new List<int>();     // cap 128
+        // for the 2v2/1v2 reports. The 1v1 report keeps its own 5s
+        // localDamageTimeline unchanged.
+        private static readonly DecimatedList<int> localDamage3sTimeline = new DecimatedList<int>();
         public static float LocalDamageTakenThisMatch { get; private set; }
         // Seconds-since-match-start per matchPointTimeline entry, kept in
         // LOCKSTEP with it (only appended when TimelineAppend actually
@@ -171,11 +214,11 @@ namespace CompetitiveRounds
         {
             public int lastSeq = -1;
             public string lastRaw = "";
-            public readonly List<int> fps = new List<int>();
-            public readonly List<int> ping = new List<int>();
-            public readonly List<string> hit = new List<string>();
-            public readonly List<string> block = new List<string>();
-            public readonly List<int> damage = new List<int>();   // Aug 7 item 3, cumulative
+            public readonly DecimatedList<int> fps = new DecimatedList<int>();
+            public readonly DecimatedList<int> ping = new DecimatedList<int>();
+            public readonly DecimatedList<string> hit = new DecimatedList<string>();
+            public readonly DecimatedList<string> block = new DecimatedList<string>();
+            public readonly DecimatedList<int> damage = new DecimatedList<int>();   // Aug 7 item 3, cumulative
         }
         private static readonly Dictionary<int, PeerTelemetry> peerTele = new Dictionary<int, PeerTelemetry>();
 
@@ -352,8 +395,8 @@ namespace CompetitiveRounds
         // localFpsTimeline — the DPS chart's x-axis lines up with the FPS
         // chart for free. Opp side arrives via cr_gstats field 19 (cumulative,
         // sampled per seq advance ~3s).
-        private static readonly List<int> localDamageTimeline = new List<int>();
-        private static readonly List<int> oppDamageTimeline = new List<int>();
+        private static readonly DecimatedList<int> localDamageTimeline = new DecimatedList<int>();
+        private static readonly DecimatedList<int> oppDamageTimeline = new DecimatedList<int>();
         /// <summary>True once ANY 22-field cr_gstats has been harvested from
         /// the peer this match. Codex round 1 (MEDIUM): without this, an
         /// 18-field (older) peer leaves the expanded Opp* fields at their
@@ -406,8 +449,8 @@ namespace CompetitiveRounds
             }
         }
 
-        public static string LocalDamageTimelineCsv => string.Join(",", localDamageTimeline);
-        public static string OppDamageTimelineCsv => string.Join(",", oppDamageTimeline);
+        public static string LocalDamageTimelineCsv => string.Join(",", localDamageTimeline.Items);
+        public static string OppDamageTimelineCsv => string.Join(",", oppDamageTimeline.Items);
 
         // First-fire-per-match log lines let us confirm Harmony patches attach and fire without
         // spamming on every event. Reset in OnMatchStarted alongside the counters.
@@ -1437,12 +1480,10 @@ namespace CompetitiveRounds
             tlFrames++; tlAccum += dt;
             if (tlAccum >= 5f)
             {
-                if (localFpsTimeline.Count < 90)
-                    localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));
+                localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));
                 // Aug 6 item 4: cumulative damage dealt on the same 5s grid,
                 // so the DPS chart shares the FPS chart's x-axis. Same cap.
-                if (localDamageTimeline.Count < 90)
-                    localDamageTimeline.Add((int)LocalDamageDealtThisMatch);
+                localDamageTimeline.Add((int)LocalDamageDealtThisMatch);
                 tlFrames = 0; tlAccum = 0f;
             }
             bcFrames++; bcAccum += dt;
@@ -1723,8 +1764,8 @@ namespace CompetitiveRounds
                 int recentFps = bcAccum > 0.5f ? (int)Math.Round(bcFrames / (double)bcAccum) : 0;
                 bcFrames = 0; bcAccum = 0f;
                 if (recentFps > 0) lastBroadcastRecentFps = recentFps;
-                if (recentFps > 0 && isTracking && localFps3sTimeline.Count < 128)
-                    localFps3sTimeline.Add(recentFps);
+                if (recentFps > 0 && isTracking)
+                    localFps3sTimeline.Add(recentFps);   // decimates at cap, never stops
                 // Field 12 = instantaneous ping; field 13 = cumulative damage
                 // taken. Append-only ordering keeps old clients compatible.
                 props[GSTATS_PROP_KEY] = BuildGstatsPayload(recentFps, true);
@@ -1797,16 +1838,16 @@ namespace CompetitiveRounds
                                         lastOppGstatsSeq = seq;
                                         lastOppSeqAdvanceTime = Time.unscaledTime;
                                         int rf = int.Parse(parts[6]);
-                                        if (rf > 0 && oppFpsTimeline.Count < 128) oppFpsTimeline.Add(rf);
+                                        if (rf > 0) oppFpsTimeline.Add(rf);
                                         // Field 12 (July 22 item 3) — absent on 11-field clients.
                                         if (parts.Length >= 12)
                                         {
                                             int op = int.Parse(parts[11]);
-                                            if (op > 0 && oppPingTimeline.Count < 128) oppPingTimeline.Add(op);
+                                            if (op > 0) oppPingTimeline.Add(op);
                                         }
                                         // Aug 6 item 4: opp cumulative damage-dealt series
                                         // (22-field clients), one sample per seq advance.
-                                        if (parts.Length >= 22 && oppDamageTimeline.Count < 128)
+                                        if (parts.Length >= 22)
                                         {
                                             int od;
                                             if (int.TryParse(parts[18], out od)) oppDamageTimeline.Add(od);
@@ -1816,17 +1857,18 @@ namespace CompetitiveRounds
                                         // sample got in first — restart the lists.
                                         int curFired;
                                         if (int.TryParse(parts[0], out curFired)
-                                            && oppHitTimeline.Count > 0 && curFired < LastPairFirst(oppHitTimeline))
+                                            && oppHitTimeline.Count > 0 && curFired < LastPairFirst(oppHitTimeline.Items))
                                         {
                                             oppHitTimeline.Clear();
                                             oppBlockTimeline.Clear();
                                         }
-                                        if (oppHitTimeline.Count < 128)
-                                            oppHitTimeline.Add(parts[0] + ":" + parts[1]);
-                                        // Field 13 (dmg taken) — absent on 12-field clients;
-                                        // no mixed-shape pairs, so skip block entirely then.
-                                        if (parts.Length >= 13 && oppBlockTimeline.Count < 128)
-                                            oppBlockTimeline.Add(parts[12] + ":" + parts[3]);
+                                        oppHitTimeline.Add(parts[0] + ":" + parts[1]);
+                                        // Bug 181 (Stan): v2 block pairs — "activated:
+                                        // successful" (parts[2]:parts[3], on the wire since
+                                        // day one). The old left value was damage TAKEN,
+                                        // an unrelated quantity on a block-rate graph.
+                                        if (parts.Length >= 4)
+                                            oppBlockTimeline.Add(parts[2] + ":" + parts[3]);
                                     }
                                     oppFreezeCount = int.Parse(parts[8]);
                                     oppFreezeFocusedCount = int.Parse(parts[9]);
@@ -1904,15 +1946,14 @@ namespace CompetitiveRounds
         // July 22 item 1: own cumulative pair samples on the 3s cadence.
         private static void SampleOwnStatTimelines()
         {
-            if (localHitTimeline.Count < 128)
-                localHitTimeline.Add(LocalBulletsFiredThisMatch + ":" + LocalBulletsHitThisMatch);
-            if (localBlockTimeline.Count < 128)
-                localBlockTimeline.Add((int)LocalDamageTakenThisMatch + ":" + LocalBlocksSuccessfulThisMatch);
-            // Aug 7 item 3: cumulative damage DEALT, same cadence and cap as
-            // the pair series above, so the 2v2/1v2 DPS chart shares their
-            // x-axis instead of needing a second interval.
-            if (localDamage3sTimeline.Count < 128)
-                localDamage3sTimeline.Add((int)LocalDamageDealtThisMatch);
+            localHitTimeline.Add(LocalBulletsFiredThisMatch + ":" + LocalBulletsHitThisMatch);
+            // Bug 181 (Stan): v2 block pairs — "activated:successful", the
+            // real block-rate numerator/denominator (the old left value was
+            // damage taken, an unrelated quantity on the same graph).
+            localBlockTimeline.Add(LocalBlocksActivatedThisMatch + ":" + LocalBlocksSuccessfulThisMatch);
+            // Aug 7 item 3: cumulative damage DEALT, same cadence as the pair
+            // series above, so the 2v2/1v2 DPS chart shares their x-axis.
+            localDamage3sTimeline.Add((int)LocalDamageDealtThisMatch);
         }
 
         // July 22 item 7: per-actor cumulative harvest (all peers, any room —
@@ -1945,26 +1986,27 @@ namespace CompetitiveRounds
                 // sample seeded this entry (rematch race) — restart it.
                 int curFired;
                 if (int.TryParse(parts[0], out curFired)
-                    && t.hit.Count > 0 && curFired < LastPairFirst(t.hit))
+                    && t.hit.Count > 0 && curFired < LastPairFirst(t.hit.Items))
                 {
                     t.fps.Clear(); t.ping.Clear(); t.hit.Clear(); t.block.Clear(); t.damage.Clear();
                 }
                 int rf = int.Parse(parts[6]);
-                if (rf > 0 && t.fps.Count < 128) t.fps.Add(rf);
+                if (rf > 0) t.fps.Add(rf);
                 if (parts.Length >= 12)
                 {
                     int op = int.Parse(parts[11]);
-                    if (op > 0 && t.ping.Count < 128) t.ping.Add(op);
+                    if (op > 0) t.ping.Add(op);
                 }
-                if (t.hit.Count < 128) t.hit.Add(parts[0] + ":" + parts[1]);
-                if (parts.Length >= 13 && t.block.Count < 128)
-                    t.block.Add(parts[12] + ":" + parts[3]);
+                t.hit.Add(parts[0] + ":" + parts[1]);
+                // Bug 181 (Stan): v2 block pairs (activated:successful).
+                if (parts.Length >= 4)
+                    t.block.Add(parts[2] + ":" + parts[3]);
                 // Aug 7 item 3: field 19 (index 18) = the peer's cumulative
                 // damage dealt. Same >=22 gate the 1v1 opp harvest uses (the
                 // four expanded fields ship together). A pre-Aug-6 peer sends
                 // none, so this list stays EMPTY rather than filling with
                 // zeroes — "not recorded" must not read as "dealt none" (#257).
-                if (parts.Length >= 22 && t.damage.Count < 128)
+                if (parts.Length >= 22)
                 {
                     int pd;
                     if (int.TryParse(parts[18], out pd)) t.damage.Add(pd);
@@ -1987,14 +2029,16 @@ namespace CompetitiveRounds
             {
                 var parts = t.lastRaw.Split('|');
                 if (parts.Length < 6) return false;
-                fpsTl = string.Join(",", t.fps);
-                pingTl = string.Join(",", t.ping);
-                hitTl = string.Join(",", t.hit);
-                blockTl = string.Join(",", t.block);
+                fpsTl = string.Join(",", t.fps.Items);
+                pingTl = string.Join(",", t.ping.Items);
+                hitTl = string.Join(",", t.hit.Items);
+                // "v2|" tags the activated:successful pair format so renderers
+                // keep honest labels for legacy damage-taken rows (bug 181).
+                blockTl = t.block.Count > 0 ? "v2|" + string.Join(",", t.block.Items) : "";
                 // Empty for a peer that never published damage (pre-Aug-6
                 // client) — the report must carry "" so the server can store
                 // NULL, never a synthesised 0 (#257).
-                damageTl = string.Join(",", t.damage);
+                damageTl = string.Join(",", t.damage.Items);
                 counters = new int[] {
                     int.Parse(parts[0]), int.Parse(parts[1]),
                     int.Parse(parts[2]), int.Parse(parts[3]),
@@ -4321,8 +4365,8 @@ namespace CompetitiveRounds
                     oppActiveSeconds: OppStatActiveSeconds,
                     pointTimeline: string.Join(",", matchPointTimeline.ToArray()),
                     // July 21 item 2: FPS/lag telemetry (advisory, non-HMAC).
-                    localFpsTimeline: string.Join(",", localFpsTimeline),
-                    oppFpsTimeline: string.Join(",", oppFpsTimeline),
+                    localFpsTimeline: string.Join(",", localFpsTimeline.Items),
+                    oppFpsTimeline: string.Join(",", oppFpsTimeline.Items),
                     localFreezeCount: localFreezeCount,
                     localFreezeFocusedCount: localFreezeFocusedCount,
                     localFreezeTotalSec: localFreezeTotalSec,
@@ -4330,8 +4374,8 @@ namespace CompetitiveRounds
                     localPingMax: pingSamples.Count > 0 ? pingSamples.Max() : 0,
                     // July 22 item 3: latency timelines for the history hover chart.
                     localPingTimeline: string.Join(",", pingSamples),
-                    oppPingTimeline: string.Join(",", oppPingTimeline),
-                    oppPingAvg: oppPingTimeline.Count > 0 ? (int)Math.Round(oppPingTimeline.Average()) : 0,
+                    oppPingTimeline: string.Join(",", oppPingTimeline.Items),
+                    oppPingAvg: oppPingTimeline.Count > 0 ? (int)Math.Round(oppPingTimeline.Items.Average()) : 0,
                     localRecvGapCount: localRecvGapCount,
                     localRecvGapMaxMs: localRecvGapMaxMs,
                     oppHbGapCount: oppHbGapCount,
@@ -4340,10 +4384,12 @@ namespace CompetitiveRounds
                     oppRecvGapCount: oppRecvGapCount,
                     // July 22 item 1: cumulative Hit%/Block% pair timelines +
                     // per-point timestamps for the new hover graphs.
-                    localHitTimeline: string.Join(",", localHitTimeline.ToArray()),
-                    oppHitTimeline: string.Join(",", oppHitTimeline.ToArray()),
-                    localBlockTimeline: string.Join(",", localBlockTimeline.ToArray()),
-                    oppBlockTimeline: string.Join(",", oppBlockTimeline.ToArray()),
+                    localHitTimeline: string.Join(",", localHitTimeline.Items),
+                    oppHitTimeline: string.Join(",", oppHitTimeline.Items),
+                    localBlockTimeline: localBlockTimeline.Count > 0
+                        ? "v2|" + string.Join(",", localBlockTimeline.Items) : "",
+                    oppBlockTimeline: oppBlockTimeline.Count > 0
+                        ? "v2|" + string.Join(",", oppBlockTimeline.Items) : "",
                     pointTimes: string.Join(",", pointTimes),
                     // Aug 6 items 1+4: expanded combat telemetry.
                     localDamageDealt: LocalDamageDealtThisMatch,
@@ -4526,7 +4572,7 @@ namespace CompetitiveRounds
                 // all-players tracker is FFA-gated), so a pre-Aug-6 peer simply
                 // sends nothing and stays EMPTY = NULL server-side, not 0 (#257).
                 string dmgTl = "";
-                if (pp.IsLocal) { if (localCards != null && localCards.Count > 0) picks = new List<MatchTracker.CardPickData>(localCards); int myFps = LocalAvgFps; if (myFps > 0) fps = myFps; dmgTl = string.Join(",", localDamage3sTimeline); }
+                if (pp.IsLocal) { if (localCards != null && localCards.Count > 0) picks = new List<MatchTracker.CardPickData>(localCards); int myFps = LocalAvgFps; if (myFps > 0) fps = myFps; dmgTl = string.Join(",", localDamage3sTimeline.Items); }
                 else if (TryGetPeerTelemetry(pp.ActorNumber, out _, out _, out _, out _, out string pDmg, out _)) dmgTl = pDmg ?? "";
                 info[sid] = (name, teamId, picks, fps, dmgTl);
             }
@@ -4957,11 +5003,12 @@ namespace CompetitiveRounds
                     if (LocalAvgFps > 0) fps = LocalAvgFps;
                     tele = new ApiClient.TeamTelemetry
                     {
-                        fpsTimeline = string.Join(",", localFps3sTimeline),
+                        fpsTimeline = string.Join(",", localFps3sTimeline.Items),
                         pingTimeline = string.Join(",", pingSamples),
                         pingAvg = pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
-                        hitTimeline = string.Join(",", localHitTimeline.ToArray()),
-                        blockTimeline = string.Join(",", localBlockTimeline.ToArray()),
+                        hitTimeline = string.Join(",", localHitTimeline.Items),
+                        blockTimeline = localBlockTimeline.Count > 0
+                            ? "v2|" + string.Join(",", localBlockTimeline.Items) : "",
                         bulletsFired = LocalBulletsFiredThisMatch,
                         bulletsHit = LocalBulletsHitThisMatch,
                         blocksActivated = LocalBlocksActivatedThisMatch,
@@ -5178,14 +5225,15 @@ namespace CompetitiveRounds
                     if (myFps > 0) fps = myFps;
                     teleBySid[sid] = new ApiClient.TeamTelemetry
                     {
-                        fpsTimeline = string.Join(",", localFps3sTimeline),
+                        fpsTimeline = string.Join(",", localFps3sTimeline.Items),
                         pingTimeline = string.Join(",", pingSamples),
                         pingAvg = pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
-                        hitTimeline = string.Join(",", localHitTimeline.ToArray()),
-                        blockTimeline = string.Join(",", localBlockTimeline.ToArray()),
+                        hitTimeline = string.Join(",", localHitTimeline.Items),
+                        blockTimeline = localBlockTimeline.Count > 0
+                            ? "v2|" + string.Join(",", localBlockTimeline.Items) : "",
                         // Aug 7 item 3: cumulative damage dealt on the same 3s
                         // grid as the three series above.
-                        damageTimeline = string.Join(",", localDamage3sTimeline),
+                        damageTimeline = string.Join(",", localDamage3sTimeline.Items),
                         bulletsFired = LocalBulletsFiredThisMatch,
                         bulletsHit = LocalBulletsHitThisMatch,
                         blocksActivated = LocalBlocksActivatedThisMatch,
