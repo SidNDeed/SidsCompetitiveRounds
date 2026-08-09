@@ -14446,31 +14446,15 @@ async def place_discord_bet(
     )
 
 
-async def _reject_active_spectator_bet(db: AsyncSession, steam_id: str) -> None:
-    """Spectators see live match state other bettors cannot (Codex spectator
-    r1 find 7): an account holding an ACTIVE spectator lease may not bet on
-    anything until it leaves. Fails open on infra errors — betting predates
-    the spectate tables, and a missing table must not take betting down
-    (#235 class); pre-migration the query is guarded by the savepoint."""
-    try:
-        async with db.begin_nested():
-            live = (await db.execute(text("""
-                SELECT 1 FROM spectate_leases
-                 WHERE spectator_steam_id = :sid
-                   AND ((revoked_at IS NULL AND heartbeat_expires_at > NOW())
-                        -- COOLDOWN (Codex r3 HIGH): /spectate/leave revokes
-                        -- instantly, but a modified client can keep its
-                        -- Photon seat and stay informed until the master's
-                        -- validation TTL kicks it. Bets stay blocked for the
-                        -- full propagation window after ANY lease ends.
-                        OR GREATEST(COALESCE(revoked_at, heartbeat_expires_at),
-                                    heartbeat_expires_at) > NOW() - INTERVAL '5 minutes')
-                 LIMIT 1
-            """), {"sid": steam_id})).first()
-    except Exception:
-        return
-    if live is not None:
-        raise HTTPException(status_code=409, detail="spectators_cannot_bet")
+# _reject_active_spectator_bet used to live here (Codex spectator r1 find 7:
+# an active spectator lease blocked all three bet endpoints, plus a 5-minute
+# post-leave cooldown). REMOVED per Sid's explicit design ruling (Aug 9):
+# the bet-CLOSE windows are the information gate — bets lock once a game is
+# decided, and the close time was chosen precisely so that live viewers
+# (in-mod spectators or someone watching a friend's stream, which no server
+# rule can prevent) cannot out-inform a locked bet. Spectators watch from
+# beginning to DC and bet under exactly the same windows as everyone else.
+# Do not reintroduce a spectator/bet coupling without Sid's sign-off.
 
 
 @app.post("/api/v1/bets", tags=["Betting"])
@@ -14488,7 +14472,6 @@ async def place_bet(
 ):
     """Place a bet. HMAC signs 'bet:{steam_id}:{series_id}:{bet_on_steam_id}:{amount}'."""
     await _check_steam_session(request, steam_id, db)
-    await _reject_active_spectator_bet(db, steam_id)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -14609,7 +14592,6 @@ async def place_team_bet(
     same one-bet-per-series-per-player rule, same gold debit-now /
     credit-on-settle flow."""
     await _check_steam_session(request, steam_id, db)
-    await _reject_active_spectator_bet(db, steam_id)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -14637,8 +14619,16 @@ async def place_team_bet(
         raise HTTPException(status_code=404, detail="Team series not found")
     if series["status"] != "active":
         raise HTTPException(status_code=409, detail=f"Series is {series['status']}")
-    if (series["t1_series_wins"] or 0) >= 2 or (series["t2_series_wins"] or 0) >= 2:
-        raise HTTPException(status_code=409, detail="Series already effectively concluded")
+    # Close once ANY game is decided — the same rule the live-bets listing has
+    # always displayed as locked (score_locked above at 1-0) and the same rule
+    # /bets enforces for 1v1 (#107 family). The endpoint previously only
+    # closed at >=2 wins, so a crafted request could bet on the leader after
+    # game 1 — a #159-class gap (the UI hide was never a gate), found by the
+    # spectator-bet review (Aug 9): with spectators now allowed to bet, a live
+    # watcher must not out-inform the close. This IS the information gate
+    # Sid's spectator ruling relies on.
+    if (series["t1_series_wins"] or 0) > 0 or (series["t2_series_wins"] or 0) > 0:
+        raise HTTPException(status_code=409, detail="Betting closed: series already has a decided game")
 
     # Bettor can't be a participant.
     if bettor.id in (series["t1a_id"], series["t1b_id"], series["t2a_id"], series["t2b_id"]):
@@ -28330,7 +28320,6 @@ async def place_ffa_bet(
     bet). The window is enforced HERE, not just hidden in the UI — a client-side
     hide is a rendering suggestion, not a gate (#159)."""
     await _check_steam_session(request, steam_id, db)
-    await _reject_active_spectator_bet(db, steam_id)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(

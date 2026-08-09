@@ -1595,7 +1595,6 @@ namespace CompetitiveRounds
         /// <summary>Place a bet. HMAC over "bet:{bettor}:{series_id}:{bet_on}:{amount}".</summary>
         public static void PlaceBet(string bettorSteamId, string seriesId, string betOnSteamId, int amount, Action<bool, string> callback)
         {
-            if (SpectatorBlocksBet(callback)) return;
             string sig = ComputeHmacHex($"bet:{bettorSteamId}:{seriesId}:{betOnSteamId}:{amount}");
             string url = $"{baseUrl}/api/v1/bets?steam_id={Escape(bettorSteamId)}&series_id={Escape(seriesId)}&bet_on_steam_id={Escape(betOnSteamId)}&amount={amount}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
@@ -1700,7 +1699,6 @@ namespace CompetitiveRounds
 
         public static void PlaceTeamBet(string bettorSteamId, string seriesId, int betOnTeam, int amount, Action<bool, string> callback)
         {
-            if (SpectatorBlocksBet(callback)) return;
             string sig = ComputeHmacHex($"team-bet:{bettorSteamId}:{seriesId}:{betOnTeam}:{amount}");
             string url = $"{baseUrl}/api/v1/team-bets?steam_id={Escape(bettorSteamId)}&team_series_id={Escape(seriesId)}&bet_on_team={betOnTeam}&amount={amount}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
@@ -14463,7 +14461,6 @@ namespace CompetitiveRounds
         public static void PlaceFfaBet(string bettorSteamId, string lobbyId,
             string betOnSteamId, int amount, int gameNumber, Action<bool, string> callback)
         {
-            if (SpectatorBlocksBet(callback)) return;
             // game_number is INSIDE the signature (server review find 2) so a
             // lost-response retry can never be replayed onto a later game.
             string sig = ComputeHmacHex($"ffa-bet:{bettorSteamId}:{lobbyId}:{betOnSteamId}:{amount}:{gameNumber}");
@@ -16229,16 +16226,10 @@ namespace CompetitiveRounds
             return true;
         }
 
-        /// <summary>Spectators cannot bet — they see live match state other
-        /// bettors cannot (Codex r1 find 7). The server enforces the same
-        /// rule on an active lease; this is the polite half.</summary>
-        private static bool SpectatorBlocksBet(Action<bool, string> callback)
-        {
-            if (!SpectatorSession.IsLocalSpectator) return false;
-            try { CompetitiveUI.ShowNotification(I18n.Tr("Spectators can't place bets."), Color.yellow, 4f); } catch { }
-            try { callback?.Invoke(false, "spectators_cannot_bet"); } catch { }
-            return true;
-        }
+        // SpectatorBlocksBet used to live here — removed per Sid's design
+        // ruling (Aug 9): spectators bet under the same bet-close windows as
+        // everyone else and watch from beginning to DC. The matching server
+        // rule (_reject_active_spectator_bet) was removed the same day.
 
         public class SpectateGameInfo
         {

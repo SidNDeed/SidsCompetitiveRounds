@@ -2,7 +2,21 @@
 
 ## Unreleased
 
+### Changed
+
+- **Spectators can bet.** The old rule blocked anyone holding a spectator
+  seat from placing bets (plus a 5-minute cooldown after leaving). Removed:
+  the bet-close windows are the information gate — bets lock once a game is
+  decided (or the FFA time window closes), so watching live can't out-inform
+  a locked bet. Spectators watch from the beginning of a series until
+  disconnect and bet under the same windows as everyone else.
+
 ### Fixed
+
+- **2v2 betting now actually closes at 1-0 on the server.** The live-bets
+  panel has always shown 1-0 series as locked, but the endpoint itself only
+  refused bets at 2 wins — a crafted request could bet on the leader after
+  game 1. The server now enforces the same first-decided-game close as 1v1.
 
 - **GROW's damage no longer depends on frame rate in competitive play.** The
   card's growth compounded per rendered frame, making its total multiplier
