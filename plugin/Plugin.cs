@@ -1461,8 +1461,10 @@ namespace CompetitiveRounds
             try { PoisonSync.Hook(); PoisonSync.Tick(); }
             catch { }
             // Grow capability stage retry (one-shot; compat-gated, so the
-            // first successful stage happens a few ticks after startup).
-            try { GrowNormalize.StageCapability("tick"); }
+            // first successful stage happens a few ticks after startup), plus
+            // the ranked-intent re-sync (idle states only; the pre-join fence
+            // patch covers the ordering the polling cannot).
+            try { GrowNormalize.StageCapability("tick"); GrowNormalize.SyncRankedIntent("tick"); }
             catch { }
             // Quick-chat (§2.6) rides Photon event code 48 — same
             // EventReceived hook pattern as PoisonSync (code 47).

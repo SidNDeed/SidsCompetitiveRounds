@@ -10,14 +10,16 @@
   400 FPS shooter before stacking, several times more with stacked copies, and
   a single 200 ms hitch frame multiplied damage ×2.16 by itself — the "low-FPS
   Grow nukes" reports. In queue-matched ranked 1v1, 2v2, 1v2, FFA and
-  sync-tournament rooms, growth is now normalized to
+  sync-tournament rooms — and in private/quickplay rooms where BOTH players
+  had Ranked enabled when they connected — growth is now normalized to
   a fixed 240-FPS-equivalent rate — near-identical growth per unit of distance
   flown for every player (the small remaining frame-granularity differences
-  always err toward LESS growth, never more). Casual quickplay, private
-  room-code games (rated or not — a synchronized activation protocol for
-  those needs its own pass) and the sandbox
-  keep vanilla behavior, and the fix only activates when EVERY player in the
-  room runs a version that has it (mixed rooms stay vanilla on all seats).
+  always err toward LESS growth, never more). Private/quickplay rooms with a
+  ranked-off player, rooms with an unmodded player, and the sandbox keep
+  vanilla behavior (mode rooms — queue, tournament, hosted lobbies — apply it
+  regardless of the 1v1 Ranked toggle, since entering the mode is the mode's
+  consent); the fix only activates when EVERY player in the room runs a
+  version that has it (mixed rooms stay vanilla on all seats).
 - **Drill bullets fired point-blank into a wall/box no longer vanish for the
   other players.** A same-frame race on the receiving client could drop the
   drill effect from the bullet's hit processing, so the remote copy died at

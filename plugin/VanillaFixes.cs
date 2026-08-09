@@ -1204,16 +1204,20 @@ namespace CompetitiveRounds
     /// runs untouched (distance window, stacking, slow-mo pause via Δd→0,
     /// wail intensity, trail rescale, one-shot destroy).
     ///
-    /// SCOPE (Sid asked for all rated play; the shipped scope is narrower —
-    /// see ComputeDecision): queue-issued ranked 1v1 (ranked_*), all
-    /// 2v2/1v2/FFA/sync-tournament rooms — NEVER casual quickplay, room-code
-    /// games (rated OR not — see the cut note), or offline sandbox. Gate =
-    /// whole-room capability (every fighter seat advertises <c>cr_grow1</c>,
-    /// staged pre-join — #273/#287; quorum from REPLICATED inputs only, empty
-    /// fails closed) AND mod-issued room by PURE replicated identity
-    /// (RoomIsModIssued). The decision latches PER BULLET at its first
-    /// Update: no mid-flight flips. A mixed-version room is vanilla on EVERY
-    /// seat (fair, and identical to today).
+    /// SCOPE: queue-issued ranked 1v1 (ranked_*), all 2v2/1v2/FFA/
+    /// sync-tournament rooms, AND private/quickplay rooms where every fighter
+    /// staged both the capability and RANKED INTENT pre-join (the
+    /// cr_grow_rnk doc below carries the exact scope semantics, residuals and
+    /// trust boundary — that arm is "both consented to ranked at connect",
+    /// not "this game was reported rated"). Never active with an unmodded or
+    /// mixed-version player in the room, never in the offline sandbox; the
+    /// ranked-off guarantee applies to the PRIVATE/QUICKPLAY arm only —
+    /// mod-issued rooms (including an FFA lobby whose host set casual rules)
+    /// normalize regardless of the 1v1 Ranked toggle, because entering the
+    /// mode's own room is that mode's consent (#106; intent-arm code r1
+    /// find 3). Gate = whole-room quorum from replicated inputs, empty fails
+    /// closed. The decision latches PER BULLET at its first Update: no
+    /// mid-flight flips.
     /// </summary>
     internal static class GrowNormalize
     {
@@ -1221,6 +1225,97 @@ namespace CompetitiveRounds
         /// semantics — a semantic change gets cr_grow2 (the PoisonSync rule).</summary>
         internal const string CapabilityProp = "cr_grow1";
         internal const int CapabilityValue = 1;
+
+        /// <summary>Ranked-INTENT prop (private-arm design r4, Codex-shaped):
+        /// the local Ranked toggle's value AT CONNECT TIME, staged pre-join
+        /// like the capability and re-synced only in idle states plus a
+        /// synchronous pre-join fence (GrowPreJoinSyncPatch). 1 = Ranked was
+        /// on, 0 = modded but Ranked off, absent = old/unmodded client.
+        /// Non-mod-issued rooms normalize only when EVERY fighter advertises
+        /// BOTH props — all replicated, all delivered with the player object
+        /// (#287), constant while the room is assembled, so every seat
+        /// computes the same answer and nothing can activate mid-game.
+        ///
+        /// SCOPE SEMANTICS (deliberate, Codex private-arm F1): this makes the
+        /// private/quickplay arm "both players CONSENTED TO RANKED AT
+        /// CONNECT", not "this specific game is rated". The two diverge only
+        /// when consent is toggled mid-room or the server downgrades a game
+        /// at report time; in those slivers a casual game between two
+        /// connect-time-consenting modded players plays with normalized Grow
+        /// (rule-symmetric — both seats read the same props). The
+        /// strictly-rated-only alternative requires freezing room ratedness
+        /// client+server (a report-pipeline change) and was rejected as its
+        /// own project. Grow-scoped: other systems must not consume this prop
+        /// without their own review.
+        ///
+        /// Trust boundary, stated plainly (Codex private-arm F3, widened per
+        /// intent-arm code r1 find 3): a MODIFIED client can withhold/forge
+        /// either prop — forcing any room it is in to vanilla Grow (keeping
+        /// the low-FPS advantage) or normalizing a consenting victim's
+        /// bullets in a casual room — and a modified HOST can additionally
+        /// spoof a mod-issued identity (a recognized prefix or the cr_ff
+        /// prop) to bypass a victim's ranked-off intent entirely. All of it
+        /// is the same class as forging cr_grow1/cr_pois2 or patching one's
+        /// own damage code: no client-attested protocol prevents it,
+        /// server-side anti-cheat is the only real answer (#166 family), and
+        /// the honest claim here is only that HONEST clients always agree.</summary>
+        internal const string RankedIntentProp = "cr_grow_rnk";
+
+        private static int _lastIntentMerged = -1;   // -1 = never merged
+
+        private static int CurrentIntent()
+        {
+            try { return (Plugin.RankedEnabled != null && Plugin.RankedEnabled.Value) ? 1 : 0; }
+            catch { return 0; }
+        }
+
+        /// <summary>True in the Photon states where a local property merge is
+        /// provably not mid-join (#287's actual invariant — see the comment in
+        /// StageCapability).</summary>
+        private static bool InIdleClientState()
+        {
+            var st = PhotonNetwork.NetworkClientState;
+            return st == Photon.Realtime.ClientState.Disconnected
+                || st == Photon.Realtime.ClientState.PeerCreated
+                || st == Photon.Realtime.ClientState.ConnectedToMasterServer
+                || st == Photon.Realtime.ClientState.JoinedLobby;
+        }
+
+        /// <summary>Re-merge the intent prop when the Ranked toggle changed
+        /// since the last merge. Separate state from the ONE-SHOT capability
+        /// staging (Codex private-arm F4: capability success must not suppress
+        /// intent refreshes; intent failures retry, they are not permanent).
+        /// Called from the persistent tick (idle-state polling) AND
+        /// synchronously from GrowPreJoinSyncPatch immediately before every
+        /// ordinary join/create op — the polling alone is not an ordering
+        /// fence. Never writes in-room or mid-join. RejoinOnly
+        /// (ReconnectAndRejoin) is NOT fenced — nothing in game or mod code
+        /// calls it, and a successful rejoin RESTORES the server-retained
+        /// actor properties (the last values this room already saw), so the
+        /// room's decision inputs stay consistent; it cannot inject an
+        /// unfenced NEW value (intent-arm r1 guardrail correction).</summary>
+        internal static void SyncRankedIntent(string source)
+        {
+            try
+            {
+                if (!_staged) return;                       // initial merge carries intent
+                if (Plugin.modDisabled || !PatchesLive) return;
+                if (PhotonNetwork.InRoom) return;
+                if (!InIdleClientState()) return;
+                int intent = CurrentIntent();
+                if (intent == _lastIntentMerged) return;
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { RankedIntentProp, intent }
+                });
+                _lastIntentMerged = intent;
+                Plugin.Log.LogInfo("[GROW-CAP] re-synced " + RankedIntentProp + "="
+                    + intent.ToString(CultureInfo.InvariantCulture) + " (" + source + ")");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("GrowNormalize.IntentSync", ex); }
+        }
 
         /// <summary>THE BALANCE KNOB — the growth rate every shooter gets,
         /// expressed as the scaled frame time of a reference-FPS player
@@ -1281,21 +1376,25 @@ namespace CompetitiveRounds
                 // — an equally safe state (no join in flight; the local merge
                 // rides the next join op's snapshot). Idle states only:
                 var st = PhotonNetwork.NetworkClientState;
-                if (st != Photon.Realtime.ClientState.Disconnected &&
-                    st != Photon.Realtime.ClientState.PeerCreated &&
-                    st != Photon.Realtime.ClientState.ConnectedToMasterServer &&
-                    st != Photon.Realtime.ClientState.JoinedLobby)
+                if (!InIdleClientState())
                     return;   // connecting/joining: wait for a clean moment, do not merge now
 
                 var local = PhotonNetwork.LocalPlayer;
                 if (local == null) return;
 
+                // Initial merge carries BOTH props together (Codex private-arm
+                // design Q6): capability plus the current ranked intent, so a
+                // client is never visible as capable-with-unknown-intent.
+                int intent = CurrentIntent();
                 local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
                 {
-                    { CapabilityProp, CapabilityValue }
+                    { CapabilityProp, CapabilityValue },
+                    { RankedIntentProp, intent }
                 });
                 _staged = true;
+                _lastIntentMerged = intent;
                 Plugin.Log.LogInfo("[GROW-CAP] staged " + CapabilityProp + "=" + CapabilityValue
+                    + " " + RankedIntentProp + "=" + intent.ToString(CultureInfo.InvariantCulture)
                     + " pre-join (" + source + ", state=" + st + ")");
             }
             catch (Exception ex)
@@ -1352,33 +1451,69 @@ namespace CompetitiveRounds
 
         private static string _lastLogKey = "";
 
-        /// <summary>Quorum over REPLICATED inputs only (Codex find 6): the raw
-        /// Photon PlayerList filtered by the replicated spectator role prop —
-        /// never RoomActors.ActiveFighters, whose frozen-roster filter is
-        /// LOCAL state two seats can hold differently. Empty fails closed
-        /// (every(∅) must not normalize).</summary>
-        private static bool QuorumCapable(out int missingActor, out int fighterCount)
+        /// <summary>Quorum from REPLICATED inputs ONLY, collecting both props
+        /// in one pass. Empty fails closed (every(∅) must not normalize).
+        ///
+        /// Basis: raw PhotonNetwork.PlayerList filtered by the replicated
+        /// spectator role prop. This question went back and forth across
+        /// review rounds, so the resolution is recorded here in full:
+        /// RoomActors.ActiveFighters was tried and REJECTED (intent-arm code
+        /// r1, HIGH) because its frozen-roster filter is LOCAL state — two
+        /// seats freezing at different moments classify a prop-less intruder
+        /// DIFFERENTLY, splitting rules in steady state for as long as the
+        /// intruder stays. With the raw list, every seat counts the same
+        /// actors from the same replicated data: an uninvited prop-less actor
+        /// (no cr_spec, no cr_grow1 — indistinguishable by props from an
+        /// unmodded quickplay opponent, which MUST read as incapable) makes
+        /// allCap false on EVERY seat symmetrically — the whole room drops to
+        /// vanilla, today's baseline, until the spectator system kicks it.
+        /// That is a denial-of-NORMALIZATION primitive for someone holding
+        /// the room code, not a split: fail-closed and rule-symmetric. The
+        /// only asymmetry left is the ms-scale window while a join/leave
+        /// event propagates to seats on different frames — bounded per bullet
+        /// by the latch, and it converges the moment the event lands
+        /// everywhere. Legitimate spectators carry cr_spec (replicated) and
+        /// are excluded identically on every seat.</summary>
+        private static bool Quorum(out bool allCap, out bool allRankedIntent,
+                                   out int missingActor, out int fighterCount)
         {
+            allCap = true;
+            allRankedIntent = true;
             missingActor = -1;
             fighterCount = 0;
             var list = PhotonNetwork.PlayerList;
-            if (list == null || list.Length == 0) return false;
+            if (list == null || list.Length == 0)
+            {
+                allCap = false;
+                allRankedIntent = false;
+                return false;
+            }
             for (int i = 0; i < list.Length; i++)
             {
                 var actor = list[i];
                 if (actor == null) continue;
                 if (RoomActors.IsSpectator(actor)) continue;
                 fighterCount++;
-                object v = null;
                 var props = actor.CustomProperties;
+                object v = null;
                 if (props != null) props.TryGetValue(CapabilityProp, out v);
                 if (!(v is int) || (int)v != CapabilityValue)
                 {
-                    missingActor = actor.ActorNumber;
-                    return false;
+                    allCap = false;
+                    if (missingActor < 0) missingActor = actor.ActorNumber;
                 }
+                object r = null;
+                if (props != null) props.TryGetValue(RankedIntentProp, out r);
+                if (!(r is int) || (int)r != 1)
+                    allRankedIntent = false;
             }
-            return fighterCount > 0;
+            if (fighterCount == 0)
+            {
+                allCap = false;
+                allRankedIntent = false;
+                return false;
+            }
+            return true;
         }
 
         /// <summary>PURE replicated room identity — deliberately NOT
@@ -1416,32 +1551,30 @@ namespace CompetitiveRounds
                 var room = PhotonNetwork.CurrentRoom;
                 if (room == null) return false;
 
+                bool allCap, allRankedIntent;
                 int missingActor, fighterCount;
-                bool allCap = QuorumCapable(out missingActor, out fighterCount);
+                Quorum(out allCap, out allRankedIntent, out missingActor, out fighterCount);
 
-                // MOD-ISSUED ROOMS ONLY (Codex code r2: CUT-THE-PRIVATE-ARM).
-                // Room identity is constant for the room's lifetime and
-                // replicated to every seat, so the decision can never change
-                // mid-room and every seat computes it identically. The
-                // private/room-code rated-game arm (a master-published
-                // activation prop) went through three review rounds and kept
-                // producing HIGH findings — the structural problem is that
-                // NOTHING in an eventually-consistent Photon room offers a
-                // per-game activation BARRIER, so any prop-based activation
-                // can split rules across seats for a whole rated game. Per
-                // the pre-committed criterion it was cut, not patched again.
-                // Room-code rated 1v1s therefore keep vanilla Grow this
-                // release; covering them needs a synchronized activation
-                // design (its own pass), not another heuristic.
-                bool normalize = allCap && RoomIsModIssued(room);
+                // Two arms, both computed purely from replicated, constant-
+                // while-assembled inputs (the property that killed attempts
+                // 1-3 of the private arm — nothing here can activate late, so
+                // there is no activation-barrier problem):
+                //  * mod-issued rooms (queue/tournament/lobby identity) —
+                //    intent not required; queueing is consent (#106);
+                //  * private/quickplay rooms — every fighter staged BOTH
+                //    capability and ranked intent pre-join (cr_grow_rnk doc
+                //    above has the scope semantics and the trust boundary).
+                bool modIssued = RoomIsModIssued(room);
+                bool normalize = allCap && (modIssued || allRankedIntent);
                 string n = room.Name ?? "";
 
-                string key = n + "|" + normalize + "|" + allCap;
+                string key = n + "|" + normalize + "|" + modIssued + "|" + allRankedIntent + "|" + allCap;
                 if (key != _lastLogKey)
                 {
                     _lastLogKey = key;
                     Plugin.Log.LogInfo("[GROW-NORM] " + (normalize ? "NORMALIZING" : "vanilla growth")
-                        + " room=" + n
+                        + " room=" + n + " modIssued=" + modIssued
+                        + " rankedIntent=" + allRankedIntent
                         + " allCapable=" + allCap + " fighters=" + fighterCount.ToString(CultureInfo.InvariantCulture)
                         + (missingActor >= 0 ? " (no cap: actor " + missingActor.ToString(CultureInfo.InvariantCulture) + ")" : ""));
                 }
@@ -1526,6 +1659,65 @@ namespace CompetitiveRounds
             if (original != null) return exception;
             if (exception == null) GrowNormalize.PatchesLive = true;
             return VanillaFixSupport.Cleanup("GrowFpsNormalize", exception);
+        }
+    }
+
+    /// <summary>The synchronous PRE-JOIN FENCE for the ranked-intent prop
+    /// (Codex private-arm design Q6: "a generic Update retry alone is not an
+    /// ordering fence"). Prefixes every ordinary join/create entry point —
+    /// vanilla uses CreateRoom/JoinRandomRoom/JoinRoom
+    /// (NetworkConnectionHandler.cs:232-503), the mod adds JoinOrCreateRoom —
+    /// and re-merges the intent BEFORE the op flips the client state to
+    /// Joining. SetCustomProperties outside a room is a synchronous local
+    /// merge, so the value the op's snapshot carries is exactly the current
+    /// toggle. ReconnectAndRejoin (RejoinOnly) is deliberately not fenced:
+    /// nothing in the game or mod calls it, and a successful rejoin RESTORES
+    /// the server-retained actor properties — the values the room already
+    /// saw — so the room's decision inputs stay consistent (see the
+    /// SyncRankedIntent doc; intent-arm r1 guardrail correction).</summary>
+    [HarmonyPatch]
+    internal static class GrowPreJoinSyncPatch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            var list = new List<MethodBase>();
+            foreach (var m in typeof(PhotonNetwork).GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "JoinRoom" && m.Name != "JoinOrCreateRoom"
+                    && m.Name != "CreateRoom" && m.Name != "JoinRandomRoom") continue;
+                if (m.IsGenericMethodDefinition) continue;
+                list.Add(m);
+            }
+            if (list.Count == 0)
+                throw new InvalidOperationException("GrowPreJoinSync: no PhotonNetwork join/create overloads found");
+            return list;
+        }
+
+        [HarmonyPrefix]
+        private static void BeforeJoin()
+        {
+            try
+            {
+                // Intent-arm code r1 find 2: the fence must also cover the
+                // INITIAL staging — a join racing the first post-compat tick
+                // would otherwise snapshot no Grow props at all and the seat
+                // stays incapable for that whole room. StageCapability is
+                // one-shot and self-guarded, so this is free when already
+                // staged. If the compat verdict is not in yet, both calls
+                // refuse and the room simply plays vanilla for this seat —
+                // fail-closed, and only reachable by a join within the first
+                // seconds of process startup.
+                GrowNormalize.StageCapability("pre-join");
+                GrowNormalize.SyncRankedIntent("pre-join");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("GrowPreJoinSync", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("GrowPreJoinSync", exception);
         }
     }
 
