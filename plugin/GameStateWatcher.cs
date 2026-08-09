@@ -2660,8 +2660,30 @@ namespace CompetitiveRounds
                 {
                     opponentRankChecked = true;
                     lastOpponentRankCheck = Time.realtimeSinceStartup;
+                    // Codex Grow-review find 1: this response can outlive the
+                    // room it was asked in. Unbound, a stale response landing
+                    // after a room change writes opponentIsRanked/matchIsRanked
+                    // into the NEW room's context — and anything replicating
+                    // that state (the Grow activation prop) would poison the
+                    // new room. Bind response -> request and discard on any
+                    // mismatch; the new room's own check cycle is independent.
+                    string roomAtRequest = null;
+                    try { roomAtRequest = PhotonNetwork.CurrentRoom?.Name; } catch { }
+                    string oppAtRequest = opponentSteamId;
                     ApiClient.CheckOpponentRanked(opponentSteamId, (isRanked) =>
                     {
+                        try
+                        {
+                            string roomNow = null;
+                            try { roomNow = PhotonNetwork.CurrentRoom?.Name; } catch { }
+                            if (!string.Equals(roomNow, roomAtRequest, StringComparison.Ordinal)
+                                || !string.Equals(opponentSteamId, oppAtRequest, StringComparison.Ordinal))
+                            {
+                                Plugin.Log.LogInfo("[POLL] discarded stale opponent-ranked response (room/opponent changed since request)");
+                                return;
+                            }
+                        }
+                        catch { }
                         bool oldRanked = opponentIsRanked;
                         opponentIsRanked = isRanked;
                         // 2v2 cr_ff rooms are queue-issued team rooms — definitionally

@@ -219,6 +219,21 @@ namespace CompetitiveRounds
         private static bool localPickOpen = false;     // local player's own pick UI is up
 
         public static bool PickPhaseActive => pickPhaseActive;
+
+        /// <summary>Bug #185 fence input (Codex design find 4): bumped at every
+        /// FFA round/point transition entry, at the game-over routing, and on
+        /// room reset. PhoenixRespawnPatch captures it at death and drops a
+        /// delayed Phoenix revive whose charge crossed a transition — the
+        /// transition's own RevivePlayers already restored everyone.</summary>
+        internal static int TransitionGeneration;
+
+        /// <summary>Bug #184 (Stan): true once this cycle's deadline is
+        /// master-authoritative — either we ARE the master or we read the
+        /// master's published deadline prop. A spectator whose local engine
+        /// enters a pick phase the master never runs (mid-join score drift can
+        /// make its roundOver/pickPhase math diverge) never sees this go true,
+        /// which is what the HUD banner keys on to stay silent there.</summary>
+        public static bool PickDeadlineShared => pickPhaseActive && pickDeadlineShared;
         public static bool LocalPickOpen => localPickOpen;
         /// <summary>Seconds until the local pick auto-confirms — the real
         /// deadline minus AutoPickLeadSeconds, so the HUD's "0" is exactly the
@@ -810,6 +825,7 @@ namespace CompetitiveRounds
             gameOverFired = false;
             freshGameCancelFired = false;
             deckViewRebuilds.Clear();
+            TransitionGeneration++;   // #185 fence: room reset invalidates pending charges
             pickPhaseActive = false;
             pickDeadlineRealtime = 0f;
             pickDeadlineShared = false;
@@ -1053,6 +1069,13 @@ namespace CompetitiveRounds
             try
             {
                 if (!RoomActors.LocalIsSpectator) return;
+                // Codex Grow code-review find 5: the spectator suppresses the
+                // participant transition engine, so THIS is its round
+                // boundary — advance the Phoenix fence generation here too,
+                // or a fighter-replica Phoenix charge crossing the boundary
+                // fires a stale Revive+DoBlock into the spectator's next
+                // round and corrupts its replica state.
+                TransitionGeneration++;
                 if (winnerTeam >= 0)
                 {
                     points[winnerTeam] = PointsFor(winnerTeam) + 1;
@@ -1185,6 +1208,7 @@ namespace CompetitiveRounds
                     }
                 }
                 gm.currentWinningTeamID = anchorTeam;
+                TransitionGeneration++;   // #185 fence: game-over is a transition too
                 gm.StartCoroutine(gm.GameOverTransition(anchorTeam));
                 isTransitioning = false;  // rematch flow owns state from here
                 return;
@@ -1196,6 +1220,7 @@ namespace CompetitiveRounds
 
         private static IEnumerator FfaTransition(GM_ArmsRace gm, int winnerTeam, bool roundOver)
         {
+            TransitionGeneration++;   // #185 Phoenix fence — see the field doc
             PurgeDepartedPlayers("transition start");
             yield return new WaitForSecondsRealtime(1f);
             try { MapManager.instance.LoadNextLevel(); }

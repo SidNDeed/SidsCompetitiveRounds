@@ -1558,6 +1558,13 @@ namespace CompetitiveRounds
             rankOnBtn=UIFactory.CreateButton("RankOn",row.transform,"Enable",15f,C_GREEN,C_BTN,()=>{Plugin.RankedEnabled.Value=true;var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.ToggleRanked(id,true);dirty=true;},sizeDelta:new Vector2(70,26));
             rankOffBtn=UIFactory.CreateButton("RankOff",row.transform,"Disable",15f,C_RED,C_BTN,()=>{Plugin.RankedEnabled.Value=false;var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.ToggleRanked(id,false);if(ApiClient.CurrentQueueState!=ApiClient.QueueState.Idle)ApiClient.LeaveQueue(id);}dirty=true;},sizeDelta:new Vector2(70,26));
             txtQueueInfo=UIFactory.CreateText("QI",row.transform,"",18f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,28));UIFactory.SetBold(txtQueueInfo,true);
+            /* Bug: "Searching... 6m 39s +/-800 (2 in q" — the baked 340-unit prefW
+             * clipped the status tail while ~950 units of spacer sat unused to its
+             * right. Same fix as Title/SrvSt/AlertSt above: drop the baked LE and go
+             * flexW:1 so the HLG gives the label its full rendered width (translated
+             * strings render wider through the OS-fallback atlas — a bigger constant
+             * would just be a new cliff). Global Truncate stays as the safety net. */
+            var qiGO=(txtQueueInfo as Component)?.gameObject;if(qiGO!=null&&UIFactory.tLE!=null){var qle=qiGO.GetComponent(UIFactory.tLE);if(qle!=null)UnityEngine.Object.Destroy(qle as UnityEngine.Object);}if(qiGO!=null)UIFactory.AddLE(qiGO,flexW:1,prefH:28,minH:28);
             var sp=new GameObject("S");sp.transform.SetParent(row.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);
             qMatchPanel=new GameObject("MatchPanel");qMatchPanel.transform.SetParent(parent,false);qMatchPanel.AddComponent<RectTransform>();UIFactory.AddVLG(qMatchPanel,spacing:4,padL:8);UIFactory.AddLE(qMatchPanel,prefH:50,minH:50,flexH:0);
             txtMatchFound=UIFactory.CreateText("MF",qMatchPanel.transform,"MATCH FOUND!",18f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(700,24));UIFactory.SetBold(txtMatchFound,true);/* item 7c sweep (#297): box under ~1.4x the font size, translated content. */UIFactory.FitOneLine(txtMatchFound);

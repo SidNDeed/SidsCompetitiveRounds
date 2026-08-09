@@ -341,6 +341,11 @@ namespace CompetitiveRounds
     [HarmonyPatch]
     internal static class DrillVisibilityPatch
     {
+        // viewID -> deferred-replay attempts for the pre-Start race (Codex
+        // design find 3). Bullet view ids are transient (and recycled), so
+        // the map is best-effort: cleared on success and capacity-capped.
+        private static readonly Dictionary<int, int> _drillReplays = new Dictionary<int, int>();
+
         [HarmonyPrefix]
         [HarmonyPatch(
             typeof(RayHitDrill),
@@ -412,49 +417,141 @@ namespace CompetitiveRounds
                 typeof(int),
                 typeof(bool)
             })]
-        private static void DiagnoseMissingDrillEffect(
+        private static bool DiagnoseMissingDrillEffect(
             ProjectileHit __instance,
+            Vector2 hitPoint,
+            Vector2 hitNormal,
+            Vector2 vel,
             int viewID,
-            int colliderID)
+            int colliderID,
+            bool wasBlocked)
         {
             try
             {
-                if (viewID != -1 || colliderID < 0) return;
-                // Ungated (#151): log-only.
+                if (viewID != -1 || colliderID < 0) return true;
 
                 PhotonView view = __instance.GetComponent<PhotonView>();
-                if (view == null || view.IsMine) return;
+                if (view == null || view.IsMine) return true;
 
                 RayHitDrill[] drills = __instance.GetComponentsInChildren<RayHitDrill>(true);
-                if (drills == null || drills.Length == 0) return;
+                if (drills == null || drills.Length == 0) return true;
 
-                bool missing = __instance.effects == null;
-                if (!missing)
+                /* Aug 9 upgrade (bug #186): diagnostic -> REPAIR. Seven
+                 * missing-effect detections in one FFA game proved the race is
+                 * real: on a remote client the Drill child can be instantiated
+                 * by the (possibly one-frame-late) RPCA_Init AFTER
+                 * ProjectileHit.Start snapshotted `effects`
+                 * (ProjectileHit.cs:93) — so the remote's surface-hit
+                 * processing never runs RayHitDrill.DoHitEffect: the remote
+                 * copy dies at the wall while the owner's bullet drills
+                 * through and keeps dealing damage. That IS the "drill bullet
+                 * goes invisible when fired point-blank into a wall/box"
+                 * report — a point-blank shot maximises exposure to the
+                 * registration race.
+                 *
+                 * Repair: register the missing drill(s) into effects and
+                 * re-sort via vanilla's own ResortHitEffects(), BEFORE vanilla
+                 * processes this hit. Only drills whose Start has run are
+                 * added (proj is assigned in RayHitDrill.Start; DoHitEffect
+                 * dereferences it — #211's not-Started-yet trap); a pre-Start
+                 * drill registers on the next hit instead. AnyGameScope like
+                 * the root-snap fix above: this converges the remote toward
+                 * the owner-authoritative behaviour, so a mixed roster is
+                 * harmless. */
+                if (!VanillaFixSupport.AnyGameScope()) return true;
+
+                if (__instance.effects == null)
+                    __instance.effects = new System.Collections.Generic.List<RayHitEffect>();
+
+                int repaired = 0, notReady = 0;
+                for (int i = 0; i < drills.Length; i++)
                 {
-                    for (int i = 0; i < drills.Length; i++)
-                    {
-                        if (!__instance.effects.Contains(drills[i]))
-                        {
-                            missing = true;
-                            break;
-                        }
-                    }
+                    if (drills[i] == null) continue;
+                    if (__instance.effects.Contains(drills[i])) continue;
+                    if (drills[i].proj == null) { notReady++; continue; }
+                    __instance.effects.Add(drills[i]);
+                    repaired++;
                 }
 
-                if (missing)
+                if (repaired > 0)
                 {
+                    __instance.ResortHitEffects();
                     VanillaFixSupport.DiagLimited(
-                        "DrillVisibility-missing-effect",
-                        "DrillVisibility found a Drill child missing from ProjectileHit.effects" +
+                        "DrillVisibility-effect-repair",
+                        "DrillVisibility re-registered " +
+                        repaired.ToString(CultureInfo.InvariantCulture) +
+                        " Drill child(ren) missing from ProjectileHit.effects" +
                         " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
                         " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
                         20);
+                }
+
+                if (notReady > 0)
+                {
+                    /* Codex design find 3 — the point-blank same-frame race:
+                     * the Drill child exists but RayHitDrill.Start has not run
+                     * (proj/move/rpc/mainDrill unset), which happens exactly
+                     * when the instantiate + RPCA_Init + RPCA_DoHit RPCs land
+                     * in ONE dispatch batch — i.e. a shot fired with the gun
+                     * pressed against a wall (bug #186's report). Registering
+                     * it now would NRE inside DoHitEffect (#211); skipping it
+                     * lets vanilla kill the remote bullet with no next hit to
+                     * repair. So DEFER the whole hit one frame and replay it —
+                     * Start will have run by then and the repair path above
+                     * registers it. Capped at 2 replays per view id; giving up
+                     * falls back to vanilla (the pre-fix behaviour). */
+                    int attempts;
+                    _drillReplays.TryGetValue(view.ViewID, out attempts);
+                    if (attempts < 2 && Plugin.Instance != null)
+                    {
+                        if (_drillReplays.Count > 64) _drillReplays.Clear();
+                        _drillReplays[view.ViewID] = attempts + 1;
+                        Plugin.Instance.StartCoroutine(ReplayDeferredHit(
+                            __instance, hitPoint, hitNormal, vel, viewID, colliderID, wasBlocked));
+                        VanillaFixSupport.DiagLimited(
+                            "DrillVisibility-hit-deferred",
+                            "DrillVisibility deferred a pre-Start Drill hit one frame" +
+                            " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
+                            " attempt=" + (attempts + 1).ToString(CultureInfo.InvariantCulture) +
+                            " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                            20);
+                        return false;   // skip vanilla NOW; the replay re-enters this prefix
+                    }
+                    VanillaFixSupport.DiagLimited(
+                        "DrillVisibility-missing-effect",
+                        "DrillVisibility gave up on a pre-Start Drill child (replay cap)" +
+                        " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        20);
+                }
+                else
+                {
+                    // Processed normally (repaired or nothing missing) —
+                    // release the replay budget for this (possibly recycled)
+                    // view id.
+                    _drillReplays.Remove(view.ViewID);
                 }
             }
             catch (Exception ex)
             {
                 VanillaFixSupport.LogError("DrillVisibility.Diagnostic", ex);
             }
+            return true;
+        }
+
+        private static System.Collections.IEnumerator ReplayDeferredHit(
+            ProjectileHit hit, Vector2 hitPoint, Vector2 hitNormal, Vector2 vel,
+            int viewID, int colliderID, bool wasBlocked)
+        {
+            yield return null;
+            try
+            {
+                // The bullet may have died in the gap (round end, despawn) —
+                // a lost hit there matches vanilla, which also loses it.
+                if (hit != null && hit.gameObject != null)
+                    hit.RPCA_DoHit(hitPoint, hitNormal, vel, viewID, colliderID, wasBlocked);
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("DrillVisibility.Replay", ex); }
         }
 
         [HarmonyPrefix]
@@ -735,6 +832,337 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>
+    /// Bug #185 (NotNic) — the FFA "phoenix respawned me into thin air" bug.
+    ///
+    /// Vanilla <c>DeathEffect.RespawnPlayer</c> (DeathEffect.cs:82-95) resolves the
+    /// player to revive by POSITIONAL INDEX: <c>PlayerManager.instance.players
+    /// [playerIDToRevive]</c> — sound only while the list is PlayerID-indexed, which
+    /// vanilla guarantees by never removing entries. FFA breaks that invariant by
+    /// design: PurgeDepartedPlayers (#222) compacts the list when someone leaves, so
+    /// any later Phoenix death of a player whose PlayerID >= the compacted length
+    /// throws ArgumentOutOfRangeException inside the coroutine (log-proven, bug-185
+    /// bundle: 3x AOORE in DeathEffect+&lt;RespawnPlayer&gt;d__21 right after
+    /// "[ACH] Phoenix life consumed", immediately after "purged 1 departed player").
+    ///
+    /// The crash is catastrophic because <c>RPCA_Die_Phoenix</c> (HealthHandler.cs:
+    /// 390-414) never sets <c>data.dead</c> — it deactivates the GameObject, sets
+    /// <c>isRespawning=true</c> (which also gates out ALL damage, HealthHandler.cs:
+    /// 269) and trusts the coroutine to call <c>Revive</c>. Crash the coroutine and
+    /// the player is permanently alive-flagged, invisible and unhittable on EVERY
+    /// client (each one purged, each one crashed): FFA counts them as the survivor,
+    /// so everyone else must suicide to advance the round, and the state recurs on
+    /// every later Phoenix proc. NotNic's sitting died exactly this way.
+    ///
+    /// Fix: replace the coroutine with a faithful copy whose lookup is BY PlayerID
+    /// (the value vanilla put in the list at RegisterPlayer time), not by position.
+    /// Identical behaviour whenever vanilla would not have crashed, so it is ungated
+    /// (#151) like the DeadPlayerForce family. A player who genuinely left before
+    /// the 2.53s charge completes simply gets no revive (vanilla crashed there too).
+    /// Sound calls are individually guarded: the Sonigon voice pool NREs under load
+    /// (bug-186: 673 in one session, one of which aborted a damage RPC) and a lost
+    /// sound must never cost the revive.
+    /// </summary>
+    [HarmonyPatch(typeof(DeathEffect), "RespawnPlayer")]
+    internal static class PhoenixRespawnPatch
+    {
+        [HarmonyPrefix]
+        private static bool BeforeRespawn(DeathEffect __instance, int playerIDToRevive, ref System.Collections.IEnumerator __result)
+        {
+            try
+            {
+                __result = SafeRespawn(__instance, playerIDToRevive);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("PhoenixRespawn", ex);
+                return true;   // fall back to vanilla wholesale — nothing applied yet
+            }
+        }
+
+        // The Sonigon types (SoundManager/SoundEvent/SoundParameterIntensity)
+        // live in SonigonAudioEngine.Runtime, which the csproj deliberately
+        // does not reference — all sound plumbing below goes through tolerant
+        // reflection, and a failed sound must never cost the revive (the
+        // whole class exists because a crash in this coroutine strands a
+        // player; see also bug-186's Sonigon-NRE-aborts-a-damage-RPC event).
+        private static void ChargeIntensity(DeathEffect fx, float value)
+        {
+            try
+            {
+                object sp = AccessTools.Field(typeof(DeathEffect), "soundParameterChargeLoopIntensity")?.GetValue(fx);
+                if (sp == null) return;
+                var f = AccessTools.Field(sp.GetType(), "intensity");
+                if (f != null) { f.SetValue(sp, value); return; }
+                var pr = AccessTools.Property(sp.GetType(), "intensity");
+                if (pr != null && pr.CanWrite) pr.SetValue(sp, value, null);
+            }
+            catch { }
+        }
+
+        private static void PhoenixSound(DeathEffect fx, string eventField, bool stop)
+        {
+            try
+            {
+                var f = AccessTools.Field(typeof(DeathEffect), eventField);
+                object evt = f != null ? f.GetValue(fx) : null;
+                if (evt == null) return;
+                var smType = evt.GetType().Assembly.GetType("Sonigon.SoundManager");
+                if (smType == null) return;
+                object sm = AccessTools.Property(smType, "Instance")?.GetValue(null, null)
+                            ?? AccessTools.Field(smType, "Instance")?.GetValue(null);
+                if (sm == null) return;
+                string name = stop ? "Stop" : "Play";
+                // Codex code-review note: the runtime overloads carry trailing
+                // OPTIONAL parameters (Stop has an optional bool), so an exact
+                // 2-arg lookup misses them. Match by prefix (SoundEvent-
+                // compatible, Transform) with every remaining parameter
+                // optional, and invoke with their declared defaults.
+                MethodInfo m = AccessTools.Method(smType, name,
+                    new Type[] { evt.GetType(), typeof(Transform) });
+                if (m == null)
+                {
+                    foreach (var cand in smType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (cand.Name != name) continue;
+                        var ps = cand.GetParameters();
+                        if (ps.Length < 2) continue;
+                        if (!ps[0].ParameterType.IsAssignableFrom(evt.GetType())) continue;
+                        if (ps[1].ParameterType != typeof(Transform)) continue;
+                        bool restOptional = true;
+                        for (int i = 2; i < ps.Length; i++)
+                            if (!ps[i].HasDefaultValue) { restOptional = false; break; }
+                        if (!restOptional) continue;
+                        m = cand;
+                        break;
+                    }
+                }
+                if (m == null) return;
+                var pars = m.GetParameters();
+                var args = new object[pars.Length];
+                args[0] = evt;
+                args[1] = fx.transform;
+                for (int i = 2; i < pars.Length; i++) args[i] = pars[i].DefaultValue;
+                m.Invoke(sm, args);
+            }
+            catch { }
+        }
+
+        private static System.Collections.IEnumerator SafeRespawn(DeathEffect fx, int playerIDToRevive)
+        {
+            // Codex design find 4: in FFA, a Phoenix that charges across a
+            // point resolution must NOT fire its delayed Revive+DoBlock into
+            // the NEXT round (the transition's own RevivePlayers has already
+            // restored everyone; a stale revive would reset combat state and
+            // fire block-card effects outside spawn grace). Fence by FFA
+            // transition GENERATION captured at death: same-round recovery is
+            // untouched, cross-transition revives are dropped. Non-FFA rooms
+            // keep exact vanilla timing (vanilla fires the late revive too).
+            bool ffaAtStart = false;
+            int genAtStart = 0;
+            try { ffaAtStart = FfaMode.EngineActive(); genAtStart = FfaMode.TransitionGeneration; } catch { }
+
+            while (fx.respawnTimeCurrent < fx.respawnTime)
+            {
+                ChargeIntensity(fx, fx.respawnTimeCurrent / fx.respawnTime);
+                fx.respawnTimeCurrent += 0.1f;
+                yield return new WaitForSeconds(0.1f);
+            }
+            PhoenixSound(fx, "soundPhoenixRespawn", stop: false);
+            PhoenixSound(fx, "soundPhoenixChargeLoop", stop: true);
+
+            if (ffaAtStart)
+            {
+                bool stale = false;
+                try { stale = !FfaMode.EngineActive() || FfaMode.TransitionGeneration != genAtStart; }
+                catch { }
+                if (stale)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "PhoenixRespawn-transition-fence",
+                        "PhoenixRespawn: FFA transition crossed during the charge — stale revive for PlayerID=" +
+                        playerIDToRevive.ToString(CultureInfo.InvariantCulture) +
+                        " dropped (round revive already restored everyone)",
+                        10);
+                    yield break;
+                }
+            }
+
+            Player target = null;
+            try
+            {
+                var players = PlayerManager.instance != null ? PlayerManager.instance.players : null;
+                if (players != null)
+                {
+                    for (int i = 0; i < players.Count; i++)
+                    {
+                        var p = players[i];
+                        if (p != null && p.gameObject != null && p.PlayerID == playerIDToRevive)
+                        {
+                            target = p;
+                            // One-shot proof when the by-ID lookup actually
+                            // diverged from vanilla's positional read (#83/#286).
+                            if (i != playerIDToRevive)
+                                VanillaFixSupport.DiagLimited(
+                                    "PhoenixRespawn-index-divergence",
+                                    "PhoenixRespawn revived PlayerID=" +
+                                    playerIDToRevive.ToString(CultureInfo.InvariantCulture) +
+                                    " found at list index " + i.ToString(CultureInfo.InvariantCulture) +
+                                    " (vanilla would have crashed or revived the wrong player)",
+                                    10);
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("PhoenixRespawn.Lookup", ex); }
+
+            if (target == null || target.data == null || target.data.healthHandler == null)
+            {
+                VanillaFixSupport.DiagLimited(
+                    "PhoenixRespawn-target-gone",
+                    "PhoenixRespawn: PlayerID=" +
+                    playerIDToRevive.ToString(CultureInfo.InvariantCulture) +
+                    " no longer resolvable at respawn time — revive skipped",
+                    10);
+                yield break;
+            }
+
+            try
+            {
+                target.data.healthHandler.Revive(isFullRevive: false);
+                if (target.data.block != null) target.data.block.RPCA_DoBlock(firstBlock: true);
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("PhoenixRespawn.Revive", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("PhoenixRespawn", exception);
+        }
+    }
+
+    /// <summary>
+    /// Sonigon damage-path guards (bug-186 follow-up; Codex Grow-review find 4
+    /// made them load-bearing for the Phoenix fix too).
+    ///
+    /// Observed in the bug-186 bundle (~line 8520): an incoming
+    /// RPCA_SendTakeDamage aborted mid-application — DoDamage → DealtDamage →
+    /// Heal (lifesteal) → Sonigon Voice NRE — and because DoDamage calls
+    /// DealtDamage BEFORE <c>data.health -=</c>, the victim's ENTIRE health
+    /// delta was lost on that client only. ROUNDS never re-syncs health
+    /// outside death RPCs, so one sound failure produced a persistent
+    /// cross-client health desync (673 Sonigon voice NREs in that single
+    /// session). The same class can strand a Phoenix player:
+    /// RPCA_Die_Phoenix and DeathEffect.PlayDeath both play sounds between
+    /// <c>isRespawning=true</c> and StartCoroutine(RespawnPlayer) — a throw
+    /// there leaves an inactive, unrevivable player before PhoenixRespawnPatch
+    /// can ever run.
+    ///
+    /// Three swallow-and-count Finalizers, all ungated (#151): every guarded
+    /// path is one where vanilla aborts GAMEPLAY for a cosmetic failure —
+    /// swallowing is strictly better in every reachable case.
+    /// HealthHandler.DoDamage deliberately gets NO finalizer: a swallow
+    /// between its health commit and the death RPC could suppress a death —
+    /// the one place this pattern would be dangerous.
+    /// </summary>
+    [HarmonyPatch(typeof(CharacterStatModifiers), "DealtDamage")]
+    internal static class DealtDamageGuardPatch
+    {
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+                VanillaFixSupport.DiagLimited(
+                    "DealtDamageGuard-swallowed",
+                    "DealtDamage threw " + __exception.GetType().Name +
+                    " — swallowed so the victim's damage application commits (" +
+                    __exception.Message + ")",
+                    20);
+            return null;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("DealtDamageGuard", exception);
+        }
+    }
+
+    [HarmonyPatch(typeof(HealthHandler), "Heal")]
+    internal static class HealSoundGuardPatch
+    {
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+                VanillaFixSupport.DiagLimited(
+                    "HealSoundGuard-swallowed",
+                    "Heal threw " + __exception.GetType().Name +
+                    " — swallowed so the caller continues (" + __exception.Message + ")",
+                    20);
+            return null;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("HealSoundGuard", exception);
+        }
+    }
+
+    /// <summary>Every public Play/PlayAtPosition/Stop overload on
+    /// Sonigon.SoundManager (the assembly is not referenced — resolved by
+    /// name). A sound-engine throw can only ever abort its CALLER, which is
+    /// never desirable; this also covers the two Phoenix death-path calls and
+    /// DoDamage's tail lifesteal sound, and silences the rope-hum Update
+    /// aborts. Throws in TargetMethods = loud patch failure (#83), never a
+    /// silent no-op.</summary>
+    [HarmonyPatch]
+    internal static class SonigonPlayGuardPatch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            var t = AccessTools.TypeByName("Sonigon.SoundManager");
+            if (t == null)
+                throw new InvalidOperationException("SonigonPlayGuard: Sonigon.SoundManager not found");
+            var list = new List<MethodBase>();
+            foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (m.Name != "Play" && m.Name != "PlayAtPosition" && m.Name != "Stop") continue;
+                if (m.IsGenericMethodDefinition) continue;
+                list.Add(m);
+            }
+            if (list.Count == 0)
+                throw new InvalidOperationException("SonigonPlayGuard: no Play/Stop overloads found");
+            return list;
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+                VanillaFixSupport.DiagLimited(
+                    "SonigonPlayGuard-swallowed",
+                    "Sonigon Play/Stop threw " + __exception.GetType().Name +
+                    " — swallowed (a sound failure must never abort gameplay)",
+                    20);
+            return null;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("SonigonPlayGuard", exception);
+        }
+    }
+
     // DeadPlayerDotPatch used to live here — a second Harmony Prefix on
     // DamageOverTime.TakeDamageOverTime whose only job was to skip the call while the
     // host GameObject was inactive. It has been FOLDED into
@@ -745,6 +1173,361 @@ namespace CompetitiveRounds
     // poison scheduler also prefixing this method, whichever ran first would silently
     // decide whether the other ran at all. One merged prefix removes the hazard
     // outright and makes the ordering explicit and reviewable.
+
+    /// <summary>
+    /// Bug #186 (Sid) — GROW's damage growth is exponential in FRAME TIME.
+    ///
+    /// The GROW card is vanilla's <c>TrickShot</c> component. Per Update frame it
+    /// does (TrickShot.cs:66-83):
+    ///
+    ///   num  = Δdistance this frame                        (≈ v·dt)
+    ///   num2 = 1 + num · TimeHandler.deltaTime · localScale.x · muiltiplier
+    ///   projectileHit.damage *= num2;  shake *= num2;
+    ///
+    /// Over the 30-unit growth window bullet speed cancels and the total
+    /// multiplier is  M = exp(30 · dt · s · m)  — exponential in the SHOOTER's
+    /// frame time (damage is shooter-authoritative: the value crosses the wire
+    /// once via RPCA_SendTakeDamage). At s·m=1 that is ×1.07 at 400 FPS but
+    /// ×1.53 at 60 FPS and ×2.31 at 30 FPS; stacked builds SQUARE the gap
+    /// (s·m=4: ×1.29 vs ×5.47 vs ×28.5). A single 200 ms hitch frame multiplies
+    /// ×2.16 on its own (Δd and dt both spike). Hence "60-FPS players one-shot
+    /// with Grow + any explosive" while 400-FPS players see +20-40%.
+    ///
+    /// Fix: a one-load TRANSPILER on TrickShot.Update swaps its single
+    /// TimeHandler.deltaTime read for <see cref="GrowFpsNormalizePatch.EffectiveDt"/>,
+    /// which returns the compiled constant <see cref="RefScaledDt"/> for
+    /// normalized bullets and the live vanilla value otherwise — growth
+    /// becomes (to first order — see the patch-class residual note) a function
+    /// of distance flown (M ≈ exp(30·REF·s·m) for every shooter at every frame
+    /// rate), the dt² hitch amplifier disappears, and remote simulations of
+    /// the same bullet converge instead of drifting. Vanilla's body otherwise
+    /// runs untouched (distance window, stacking, slow-mo pause via Δd→0,
+    /// wail intensity, trail rescale, one-shot destroy).
+    ///
+    /// SCOPE (Sid asked for all rated play; the shipped scope is narrower —
+    /// see ComputeDecision): queue-issued ranked 1v1 (ranked_*), all
+    /// 2v2/1v2/FFA/sync-tournament rooms — NEVER casual quickplay, room-code
+    /// games (rated OR not — see the cut note), or offline sandbox. Gate =
+    /// whole-room capability (every fighter seat advertises <c>cr_grow1</c>,
+    /// staged pre-join — #273/#287; quorum from REPLICATED inputs only, empty
+    /// fails closed) AND mod-issued room by PURE replicated identity
+    /// (RoomIsModIssued). The decision latches PER BULLET at its first
+    /// Update: no mid-flight flips. A mixed-version room is vanilla on EVERY
+    /// seat (fair, and identical to today).
+    /// </summary>
+    internal static class GrowNormalize
+    {
+        /// <summary>Capability prop. cr_grow1 must never be reused for changed
+        /// semantics — a semantic change gets cr_grow2 (the PoisonSync rule).</summary>
+        internal const string CapabilityProp = "cr_grow1";
+        internal const int CapabilityValue = 1;
+
+        /// <summary>THE BALANCE KNOB — the growth rate every shooter gets,
+        /// expressed as the scaled frame time of a reference-FPS player
+        /// (TimeHandler.deltaTime = Time.deltaTime × 0.85). At 240-FPS-equivalent
+        /// a full 30-unit flight gives +11% base, +23% at s·m=2, +53% at s·m=4 —
+        /// the high-FPS experience Sid described as sane, and the card stays
+        /// meaningful. MUST remain a compiled constant: a config value would let
+        /// any client legally buff its own damage (shooter authority). Changing
+        /// it later changes rated-game balance → release-notes-worthy.</summary>
+        internal const float RefScaledDt = 0.85f / 240f;
+
+        /// <summary>Set by the patch class's [HarmonyCleanup] only when the
+        /// TrickShot patch really attached — never advertise an authority we
+        /// cannot deliver (PoisonSync rule).</summary>
+        internal static bool PatchesLive;
+        private static bool _staged;
+        private static bool _stageFailedPermanently;
+
+        /// <summary>Identical state rules to PoisonSync.StageCapability (#287):
+        /// refuse in-room, merge only while Disconnected/PeerCreated, one-shot,
+        /// retried from the persistent tick.</summary>
+        internal static void StageCapability(string source)
+        {
+            try
+            {
+                if (_staged || _stageFailedPermanently) return;
+                if (!PatchesLive)
+                {
+                    _stageFailedPermanently = true;
+                    Plugin.Log.LogError("[GROW-CAP] TrickShot patch did NOT attach — "
+                        + "Grow normalization disabled for this session (vanilla growth everywhere)");
+                    return;
+                }
+
+                // Codex code-review find 6 (design F7): advertise only AFTER
+                // the compat check has run — a capability staged at Awake and
+                // revoked in-room when another plugin is detected reaches
+                // peers late and leaves them counting us capable. The check
+                // completes seconds after startup, long before any human can
+                // join a room, so staging still always precedes the first
+                // connect. (This is why there is no "Awake" stage call for
+                // cr_grow1, unlike cr_pois2.)
+                if (!Plugin.compatCheckComplete) return;
+
+                if (PhotonNetwork.InRoom)
+                {
+                    Plugin.Log.LogError("[GROW-CAP] refusing to stage while in a room ("
+                        + source + ") — an in-room write is the racy path this protocol forbids");
+                    return;
+                }
+
+                // #287's actual invariant is "never merge MID-JOIN" (a merge
+                // landing after LoadBalancingClient snapshots enterRoomParams
+                // but before room entry is silently undelivered). PoisonSync
+                // stages at Awake where Disconnected/PeerCreated suffices;
+                // cr_grow1 stages AFTER the compat verdict (see above), by
+                // which time ROUNDS may already sit idle on the master server
+                // — an equally safe state (no join in flight; the local merge
+                // rides the next join op's snapshot). Idle states only:
+                var st = PhotonNetwork.NetworkClientState;
+                if (st != Photon.Realtime.ClientState.Disconnected &&
+                    st != Photon.Realtime.ClientState.PeerCreated &&
+                    st != Photon.Realtime.ClientState.ConnectedToMasterServer &&
+                    st != Photon.Realtime.ClientState.JoinedLobby)
+                    return;   // connecting/joining: wait for a clean moment, do not merge now
+
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, CapabilityValue }
+                });
+                _staged = true;
+                Plugin.Log.LogInfo("[GROW-CAP] staged " + CapabilityProp + "=" + CapabilityValue
+                    + " pre-join (" + source + ", state=" + st + ")");
+            }
+            catch (Exception ex)
+            {
+                _stageFailedPermanently = true;
+                Plugin.Log.LogError("[GROW-CAP] staging failed, Grow normalization disabled "
+                    + "for this session: " + ex.Message);
+            }
+        }
+
+        /// <summary>Withdraw on compat-disable, same as PoisonSync: peers must
+        /// not count us capable when the patch will not run.</summary>
+        internal static void RevokeCapability()
+        {
+            try
+            {
+                if (!_staged) return;
+                _staged = false;
+                _stageFailedPermanently = true;   // never re-stage this session
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, 0 }
+                });
+                Plugin.Log.LogWarning("[GROW-CAP] revoked " + CapabilityProp
+                    + " — mod disabled, vanilla growth everywhere");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[GROW-CAP] revoke failed: " + ex.Message); }
+        }
+
+        private sealed class Decision { internal bool Normalize; }
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TrickShot, Decision> _decisions =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<TrickShot, Decision>();
+
+        /// <summary>Per-bullet latch: computed at the bullet's first patched
+        /// Update, immutable for its flight, dies with the component (no room
+        /// bookkeeping). Roster changes affect only later bullets, and #273's
+        /// all-fighters rule makes a master handoff a non-event.</summary>
+        internal static bool DecideForBullet(TrickShot ts)
+        {
+            Decision d;
+            if (_decisions.TryGetValue(ts, out d)) return d.Normalize;
+            d = new Decision { Normalize = ComputeDecision() };
+            _decisions.Add(ts, d);
+            return d.Normalize;
+        }
+
+        // NOTE for the follow-up pass: "cr_grow_on" (a master-published
+        // private-room activation prop) was designed, implemented and CUT
+        // after three review rounds — see ai-collab/grow-code-review-r2.md
+        // and the ComputeDecision comment. Do not resurrect the prop name
+        // with different semantics.
+
+        private static string _lastLogKey = "";
+
+        /// <summary>Quorum over REPLICATED inputs only (Codex find 6): the raw
+        /// Photon PlayerList filtered by the replicated spectator role prop —
+        /// never RoomActors.ActiveFighters, whose frozen-roster filter is
+        /// LOCAL state two seats can hold differently. Empty fails closed
+        /// (every(∅) must not normalize).</summary>
+        private static bool QuorumCapable(out int missingActor, out int fighterCount)
+        {
+            missingActor = -1;
+            fighterCount = 0;
+            var list = PhotonNetwork.PlayerList;
+            if (list == null || list.Length == 0) return false;
+            for (int i = 0; i < list.Length; i++)
+            {
+                var actor = list[i];
+                if (actor == null) continue;
+                if (RoomActors.IsSpectator(actor)) continue;
+                fighterCount++;
+                object v = null;
+                var props = actor.CustomProperties;
+                if (props != null) props.TryGetValue(CapabilityProp, out v);
+                if (!(v is int) || (int)v != CapabilityValue)
+                {
+                    missingActor = actor.ActorNumber;
+                    return false;
+                }
+            }
+            return fighterCount > 0;
+        }
+
+        /// <summary>PURE replicated room identity — deliberately NOT
+        /// IsCompetitiveRoom(): its ffa_ arm requires local FfaMode state and
+        /// two clients could answer differently (PoisonSync.PeerWouldForce-
+        /// Bypass precedent). The ffa_ arm additionally requires the
+        /// creator-stamped cr_ffa_n room prop (Codex find 2 — FfaMode itself
+        /// treats a bare ffa_ name as spoofable; a hand-made "ffa_test" room
+        /// must not activate). ranked_/team_/sct-/ovt_ names are server-issued
+        /// with random suffixes; deliberately hand-crafting one is the #294
+        /// spoofing class, out of scope for a fix whose worst abuse is
+        /// "normalized Grow in a joke room between consenting modded users".</summary>
+        private static bool RoomIsModIssued(Photon.Realtime.Room room)
+        {
+            var rp = room.CustomProperties;
+            if (rp != null && rp.ContainsKey("cr_ff")) return true;
+            string n = room.Name ?? "";
+            if (n.StartsWith("ffa_", StringComparison.Ordinal))
+                return rp != null && rp.ContainsKey("cr_ffa_n");
+            return n.StartsWith("ranked_", StringComparison.Ordinal)
+                || n.StartsWith("team_", StringComparison.Ordinal)
+                || n.StartsWith("sct-", StringComparison.Ordinal)
+                || n.StartsWith("ovt_", StringComparison.Ordinal);
+        }
+
+        private static bool ComputeDecision()
+        {
+            try
+            {
+                // Codex find 7 fail-closed: a disabled mod (or a patch that
+                // never attached) must never normalize, even if peers still
+                // hold our stale capability advertisement.
+                if (Plugin.modDisabled || !PatchesLive) return false;
+                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return false;
+                var room = PhotonNetwork.CurrentRoom;
+                if (room == null) return false;
+
+                int missingActor, fighterCount;
+                bool allCap = QuorumCapable(out missingActor, out fighterCount);
+
+                // MOD-ISSUED ROOMS ONLY (Codex code r2: CUT-THE-PRIVATE-ARM).
+                // Room identity is constant for the room's lifetime and
+                // replicated to every seat, so the decision can never change
+                // mid-room and every seat computes it identically. The
+                // private/room-code rated-game arm (a master-published
+                // activation prop) went through three review rounds and kept
+                // producing HIGH findings — the structural problem is that
+                // NOTHING in an eventually-consistent Photon room offers a
+                // per-game activation BARRIER, so any prop-based activation
+                // can split rules across seats for a whole rated game. Per
+                // the pre-committed criterion it was cut, not patched again.
+                // Room-code rated 1v1s therefore keep vanilla Grow this
+                // release; covering them needs a synchronized activation
+                // design (its own pass), not another heuristic.
+                bool normalize = allCap && RoomIsModIssued(room);
+                string n = room.Name ?? "";
+
+                string key = n + "|" + normalize + "|" + allCap;
+                if (key != _lastLogKey)
+                {
+                    _lastLogKey = key;
+                    Plugin.Log.LogInfo("[GROW-NORM] " + (normalize ? "NORMALIZING" : "vanilla growth")
+                        + " room=" + n
+                        + " allCapable=" + allCap + " fighters=" + fighterCount.ToString(CultureInfo.InvariantCulture)
+                        + (missingActor >= 0 ? " (no cap: actor " + missingActor.ToString(CultureInfo.InvariantCulture) + ")" : ""));
+                }
+                return normalize;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("GrowNormalize.Decide", ex);
+                return false;
+            }
+        }
+
+    }
+
+    /// <summary>One-load transpiler (Codex design review, twice-recommended
+    /// structural form): TrickShot.Update reads <c>TimeHandler.deltaTime</c>
+    /// exactly once (a static-field load); replace that single load with
+    /// <c>EffectiveDt(this)</c>. Vanilla's ENTIRE body — destroy timing, the
+    /// Sonigon wail-intensity update, damage/shake ordering, trail rescale —
+    /// runs untouched, so there is no copied-body drift, no Sonigon
+    /// reflection, and no partial-mutation hazard: a decision failure just
+    /// returns the live vanilla deltaTime. The transpiler throws (= loud
+    /// patch failure, PatchesLive stays false, capability never advertised)
+    /// unless it finds exactly one load.
+    ///
+    /// Residual, documented not fixed (Codex find 9): the growth product
+    /// Π(1+k·Δd) is partition-dependent to second order — very coarse frames
+    /// UNDER-grow slightly (~4% at s·m=4, 60 FPS vs fine partitions), and a
+    /// hitch that crosses the 30-unit cap loses the final segment (~13%
+    /// worst observed direction). Both err SMALLER, never toward the nuke.</summary>
+    [HarmonyPatch(typeof(TrickShot), "Update")]
+    internal static class GrowFpsNormalizePatch
+    {
+        [HarmonyTranspiler]
+        private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var dtField = AccessTools.Field(typeof(TimeHandler), "deltaTime");
+            var hook = AccessTools.Method(typeof(GrowFpsNormalizePatch), nameof(EffectiveDt));
+            if (dtField == null || hook == null)
+                throw new InvalidOperationException(
+                    "GrowFpsNormalize: reflection targets missing (TimeHandler.deltaTime / EffectiveDt)");
+
+            int replaced = 0;
+            foreach (var ins in instructions)
+            {
+                if (ins.opcode == System.Reflection.Emit.OpCodes.Ldsfld && Equals(ins.operand, dtField))
+                {
+                    // Mutate the matched instruction in place so any labels /
+                    // exception blocks attached to it ride along untouched
+                    // (netstandard2.1 cannot name SRE.Label to copy them).
+                    ins.opcode = System.Reflection.Emit.OpCodes.Ldarg_0;
+                    ins.operand = null;
+                    yield return ins;
+                    yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Call, hook);
+                    replaced++;
+                    continue;
+                }
+                yield return ins;
+            }
+            if (replaced != 1)
+                throw new InvalidOperationException(
+                    "GrowFpsNormalize: expected exactly 1 TimeHandler.deltaTime load in TrickShot.Update, found "
+                    + replaced.ToString(CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>Called from the patched IL in place of the deltaTime load.
+        /// Public static: it is a call target inside game IL.</summary>
+        public static float EffectiveDt(TrickShot ts)
+        {
+            try
+            {
+                return GrowNormalize.DecideForBullet(ts)
+                    ? GrowNormalize.RefScaledDt
+                    : TimeHandler.deltaTime;
+            }
+            catch { return TimeHandler.deltaTime; }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) GrowNormalize.PatchesLive = true;
+            return VanillaFixSupport.Cleanup("GrowFpsNormalize", exception);
+        }
+    }
 
     [HarmonyPatch(typeof(CardChoiceVisuals), "Hide")]
     internal static class InactiveVisualsHidePatch

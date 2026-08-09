@@ -1,5 +1,50 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+### Fixed
+
+- **GROW's damage no longer depends on frame rate in competitive play.** The
+  card's growth compounded per rendered frame, making its total multiplier
+  exponential in frame TIME: a 60 FPS shooter dealt ~1.4× the Grow damage of a
+  400 FPS shooter before stacking, several times more with stacked copies, and
+  a single 200 ms hitch frame multiplied damage ×2.16 by itself — the "low-FPS
+  Grow nukes" reports. In queue-matched ranked 1v1, 2v2, 1v2, FFA and
+  sync-tournament rooms, growth is now normalized to
+  a fixed 240-FPS-equivalent rate — near-identical growth per unit of distance
+  flown for every player (the small remaining frame-granularity differences
+  always err toward LESS growth, never more). Casual quickplay, private
+  room-code games (rated or not — a synchronized activation protocol for
+  those needs its own pass) and the sandbox
+  keep vanilla behavior, and the fix only activates when EVERY player in the
+  room runs a version that has it (mixed rooms stay vanilla on all seats).
+- **Drill bullets fired point-blank into a wall/box no longer vanish for the
+  other players.** A same-frame race on the receiving client could drop the
+  drill effect from the bullet's hit processing, so the remote copy died at
+  the wall while the shooter's bullet drilled through and kept hitting —
+  an invisible bullet. The hit is now deferred one frame and the drill
+  re-registered (bug #186's second half; extends the v1.37 drill-position
+  fix).
+- **FFA: Phoenix no longer respawns players "into thin air"** (bug #185). The
+  vanilla respawn coroutine looks the player up by list POSITION, which broke
+  after any leaver in an FFA lobby — the crash left the player alive-flagged,
+  invisible and unhittable on every client (opponents had to suicide to
+  advance the round). The lookup is now by player ID, and a Phoenix whose
+  charge crosses a round transition defers to the round's own mass revive
+  instead of firing into the next round.
+- **Spectators no longer see phantom "card picking ends in Xs" banners** when
+  nobody is picking (bug #184), and a closed pick window no longer lingers at
+  0s for non-pickers.
+- **The top status strip no longer cuts off** ("2 onli", "(2 in q") — the
+  queue/online text now takes the full remaining row width (bug from the Aug 8
+  screenshots).
+- **Jump/land dust puffs now match an equipped body color** instead of staying
+  vanilla orange/blue, and the **end-of-game VICTORY / REMATCH? text** follows
+  the custom team color too (in FFA it uses the winner's color).
+- **Block stat graph uses one y-axis** (bug #182, Stan): the activated and
+  successful lines share a scale like the shots graph; only legacy
+  damage-vs-blocks rows keep dual axes.
+
 ## v1.38.0 — 2026-08-08 — Hosted lobbies, alerts, chat moderation, animated cosmetics
 
 Schema: migrations **202–206** (202 LFP modes, 203 admin alerts, 204 cosmetic

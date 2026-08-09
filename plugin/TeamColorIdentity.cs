@@ -1480,4 +1480,253 @@ namespace CompetitiveRounds
             TeamColorIdentity.FlushOutlineMaterials();
         }
     }
+
+    /// <summary>
+    /// Aug 9 (Sid) — the jump/land DUST puffs at a player's feet kept vanilla
+    /// orange/blue while the body wore an equipped colour.
+    ///
+    /// Vanilla: the puffs are prefab-serialized one-shot systems —
+    /// <c>PlayerJump.jumpPart</c> (PlayerJump.cs:78-83) and
+    /// <c>CharacterData.landParts</c> (CharacterData.cs:244-252, only when
+    /// falling faster than -20) — team-coloured ONCE at <c>Player.SetColors()</c>
+    /// via the SetTeamColor pass (SetTeamColor.cs:33-71, particle branch writes
+    /// <c>main.startColor</c>). PlayerColorCosmetic's particle sweep deliberately
+    /// skips them: their startColor is the skin's desaturated
+    /// <c>particleEffect</c> tint, which fails the IsTeamLike body-baseline
+    /// filter (PlayerColorCosmetic.cs:528-549) — so the body recoloured and the
+    /// dust did not.
+    ///
+    /// Fix, family-shaped: Prefix each PLAY SITE and recolour just before
+    /// vanilla's <c>Play()</c>, resolving <see cref="TeamColorIdentity"/> at
+    /// play time (never latched, #280). No identity / tints disabled → restore
+    /// the cached vanilla gradient → byte-for-byte vanilla. Re-asserting per
+    /// play survives Player.SetColors repaints, revive, and mid-match
+    /// equip/unequip for free. Alpha is preserved from the vanilla value so the
+    /// puffs keep their translucency.
+    /// </summary>
+    internal static class JumpDustTeamColor
+    {
+        // instanceID -> vanilla startColor, captured before our first overwrite.
+        private static readonly Dictionary<int, ParticleSystem.MinMaxGradient> _orig =
+            new Dictionary<int, ParticleSystem.MinMaxGradient>();
+        private static bool _loggedOnce;
+
+        internal static void Tint(ParticleSystem[] parts, CharacterData data, string surface)
+        {
+            if (parts == null || data == null) return;
+            var p = data.player;
+            if (p == null) return;
+            int team = p.TeamID;
+            if (team < 0) return;
+
+            TeamColorIdentity.TeamIdentity id = default(TeamColorIdentity.TeamIdentity);
+            bool have = TeamColorIdentity.TintsEnabled && TeamColorIdentity.TryGet(team, out id);
+
+            for (int i = 0; i < parts.Length; i++)
+            {
+                var ps = parts[i];
+                if (ps == null) continue;
+                int iid = ps.GetInstanceID();
+                var main = ps.main;
+                if (have)
+                {
+                    if (!_orig.ContainsKey(iid))
+                    {
+                        // Bound the cache across a long sitting (fresh player
+                        // objects each room = fresh instanceIDs; stale entries
+                        // are unrestorable anyway once the PS is destroyed).
+                        if (_orig.Count > 512) _orig.Clear();
+                        _orig[iid] = main.startColor;
+                    }
+                    var orig = _orig[iid];
+                    Color c = id.Color;
+                    c.a = orig.mode == ParticleSystemGradientMode.Color ? orig.color.a : 1f;
+                    main.startColor = new ParticleSystem.MinMaxGradient(c);
+                    if (!_loggedOnce)
+                    {
+                        _loggedOnce = true;
+                        // One-shot reachability + prefab-deduction proof
+                        // (#83/#286): records which SetTeamColor.ColorType the
+                        // prefab actually uses so a future "dust is the wrong
+                        // shade" report can be diagnosed from the log.
+                        string ct = "none";
+                        try { var stc = ps.GetComponent<SetTeamColor>(); if (stc != null) ct = stc.colorType.ToString(); } catch { }
+                        Plugin.Log?.LogInfo(
+                            $"[TEAMCOLOR] dust tinted surface={surface} team={team} parts={parts.Length} " +
+                            $"color={id.ColorName} vanillaColorType={ct}");
+                    }
+                }
+                else
+                {
+                    ParticleSystem.MinMaxGradient cached;
+                    if (_orig.TryGetValue(iid, out cached))
+                    {
+                        main.startColor = cached;
+                        _orig.Remove(iid);
+                    }
+                }
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerJump), "Jump")]
+    internal static class JumpDustTeamColorPatch
+    {
+        [HarmonyPrefix]
+        private static void BeforeJump(PlayerJump __instance)
+        {
+            try
+            {
+                if (__instance == null) return;
+                // Runs before vanilla's own early-return guard (#256) — a
+                // rejected jump gets a harmless colour write and no Play().
+                JumpDustTeamColor.Tint(__instance.jumpPart, __instance.data, "jump");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("JumpDustTeamColor.Jump", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("JumpDustTeamColor", exception);
+        }
+    }
+
+    [HarmonyPatch(typeof(CharacterData), "TouchGround")]
+    internal static class LandDustTeamColorPatch
+    {
+        [HarmonyPrefix]
+        private static void BeforeTouchGround(CharacterData __instance)
+        {
+            try
+            {
+                if (__instance == null) return;
+                // Mirror vanilla's own play condition (CharacterData.cs:244) so
+                // this does no work on the every-frame grounded calls — only on
+                // landings that will actually emit dust.
+                if (__instance.playerVel == null) return;
+                if (!(__instance.playerVel.velocity.y < -20f) || __instance.isGrounded) return;
+                JumpDustTeamColor.Tint(__instance.landParts, __instance, "land");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("JumpDustTeamColor.Land", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("LandDustTeamColor", exception);
+        }
+    }
+
+    /// <summary>
+    /// Aug 9 (Sid) — the end-of-game screen text ("VICTORY" and the looping
+    /// "REMATCH?"/"CONTINUE?" line) kept vanilla team colours.
+    ///
+    /// Vanilla renders that text as particles: <c>UIHandler.gameOverTextPart</c>,
+    /// coloured via <c>particleSettings.color</c> which is read PER EMITTED
+    /// PARTICLE (GeneralParticleSystem.cs:229-231) — so overwriting it in a
+    /// Postfix, after vanilla's own <c>Play()</c>, recolours every subsequent
+    /// glyph. Call sites (all GM_ArmsRace.cs): GameOverTransition:319 colours
+    /// VICTORY by the winning team; GameOverRematch:330/:334 colours REMATCH? by
+    /// the LOCAL team online (master=0, else 1), by the winner offline;
+    /// GameOverContinue:404 is offline-only (#138). FFA routes its game-over
+    /// through the same GameOverTransition with the winner slot as the team
+    /// (FfaMode.cs:1187-1188).
+    ///
+    /// No restore bookkeeping: every colored vanilla call rewrites
+    /// particleSettings.color itself before we run, so no-identity = the vanilla
+    /// colour that call just set.
+    /// </summary>
+    [HarmonyPatch(typeof(UIHandler), "DisplayScreenText")]
+    internal static class GameOverTextTeamColorPatch
+    {
+        private static bool _loggedOnce;
+
+        [HarmonyPostfix]
+        private static void AfterDisplay(UIHandler __instance)
+        {
+            try
+            {
+                var gm = GM_ArmsRace.instance;
+                if (__instance == null || __instance.gameOverTextPart == null || gm == null) return;
+                Recolor(__instance, gm.currentWinningTeamID, "victory");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("GameOverTextTeamColor", ex); }
+        }
+
+        internal static void Recolor(UIHandler ui, int team, string surface)
+        {
+            if (team < 0) return;
+            if (!TeamColorIdentity.TintsEnabled) return;
+            TeamColorIdentity.TeamIdentity id;
+            if (!TeamColorIdentity.TryGet(team, out id)) return;
+            ui.gameOverTextPart.particleSettings.color = id.TextColor;
+            if (!_loggedOnce)
+            {
+                _loggedOnce = true;
+                Plugin.Log?.LogInfo(
+                    $"[TEAMCOLOR] game-over text surface={surface} team={team} color={id.ColorName}");
+            }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("GameOverTextTeamColor", exception);
+        }
+    }
+
+    /// <summary>
+    /// The looping REMATCH?/CONTINUE? overload — see
+    /// <see cref="GameOverTextTeamColorPatch"/>. Separate class because the
+    /// target must be resolved by parameter count: the 2-arg overload takes a
+    /// <c>UnityEngine.Localization.LocalizedString</c>, and naming that type in
+    /// a [HarmonyPatch] attribute would add an assembly reference the csproj
+    /// does not otherwise need. The colourless 1-arg overload (WAITING) is
+    /// deliberately NOT patched — vanilla inherits the previous colour there,
+    /// which inherits our tint correctly.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class RematchTextTeamColorPatch
+    {
+        private static MethodBase TargetMethod()
+        {
+            var methods = typeof(UIHandler).GetMethods(BindingFlags.Public | BindingFlags.Instance);
+            for (int i = 0; i < methods.Length; i++)
+                if (methods[i].Name == "DisplayScreenTextLoop" && methods[i].GetParameters().Length == 2)
+                    return methods[i];
+            return null;
+        }
+
+        [HarmonyPostfix]
+        private static void AfterDisplayLoop(UIHandler __instance)
+        {
+            try
+            {
+                var gm = GM_ArmsRace.instance;
+                if (__instance == null || __instance.gameOverTextPart == null || gm == null) return;
+                // Replicate vanilla's own team choice (GameOverRematch): LOCAL
+                // team online (master=0 else 1), winner offline. In FFA the
+                // local-team convention is meaningless past two teams, so use
+                // the winner there — purely local text colour, so the FFA
+                // deviation cannot diverge anything that matters.
+                int team;
+                if (PhotonNetwork.OfflineMode) team = gm.currentWinningTeamID;
+                else if (FfaMode.EngineActive()) team = gm.currentWinningTeamID;
+                else team = PhotonNetwork.IsMasterClient ? 0 : 1;
+                GameOverTextTeamColorPatch.Recolor(__instance, team, "rematch");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("RematchTextTeamColor", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("RematchTextTeamColor", exception);
+        }
+    }
 }

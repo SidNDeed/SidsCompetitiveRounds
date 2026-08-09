@@ -680,6 +680,21 @@ namespace CompetitiveRounds
             }
 
             bool localOpen = FfaMode.LocalPickOpen;
+            // Bug #184 (Stan): spectators saw "card picking ends in XXs" when
+            // nobody was picking. Two gates: (a) a spectator only shows the
+            // banner for a cycle whose deadline was READ from the master's
+            // published prop — a phantom local pick phase (mid-join score
+            // drift) never publishes one; (b) for anyone not themselves
+            // picking, a closed window (0s left, phase lingering while the
+            // manifest settles) is bookkeeping, not information — hide it.
+            if (!localOpen &&
+                (FfaMode.PickWindowSecondsLeft <= 0f ||
+                 (RoomActors.LocalIsSpectator && !FfaMode.PickDeadlineShared)))
+            {
+                ffaPickBannerText = "";
+                ffaPickBannerSeconds = -1;
+                return;
+            }
             if (string.IsNullOrEmpty(ffaPickBannerText)
                 || now - ffaPickBannerCachedAt >= 0.25f
                 || localOpen != ffaPickBannerLocal)
@@ -2046,10 +2061,12 @@ namespace CompetitiveRounds
         // kind 2 (Hit Rate): shots fired vs shots hit, one Y scale.
         // kind 3 (Block): TWO dialects. "v2|"-prefixed series carry cumulative
         //   "activated:successful" pairs (the redesigned sampler) and render
-        //   as "Block Rate"; UNPREFIXED legacy series stay the honest old
-        //   "damage taken vs successful blocks" (dual axes — damage is ~100x
-        //   block counts; v2 keeps dual axes too since activations >> successes
-        //   is common but not structural).
+        //   as "Block Rate" on ONE shared y-scale like the shots graph (bug
+        //   #182, Stan — successes <= activations is structural enough that a
+        //   second axis just misleads); UNPREFIXED legacy series stay the
+        //   honest old "damage taken vs successful blocks" and KEEP dual axes
+        //   (damage is ~100x block counts — one scale would flatten the
+        //   success line to zero).
         // Header is two lines: identity line, then a legend whose TEXT colours
         // are the two line colours — deliberately DISTINCT hues (amber vs
         // cyan) instead of two shades of one side colour (Stan: "less similar
@@ -2096,7 +2113,7 @@ namespace CompetitiveRounds
             float headerH = hasMarkers ? 60f : 42f;   // 2 or 3 18px header lines
             // Plot area stays ~178px tall; bottom band = 20px mm:ss ticks +
             // 22px footer. Net h: 262 without markers, 280 with.
-            float w = 360f, h = headerH + 178f + 42f, pad = 44f, padR = isBlock ? 34f : 12f;
+            float w = 360f, h = headerH + 178f + 42f, pad = 44f, padR = (isBlock && !blockV2) ? 34f : 12f;
             float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
             float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
@@ -2149,9 +2166,10 @@ namespace CompetitiveRounds
             foreach (var v in a) if (v > maxA) maxA = v;
             foreach (var v in b) if (v > maxB) maxB = v;
             maxA = Mathf.CeilToInt(maxA * 1.08f);
-            // Hit chart shares one scale (hits <= fired structurally); block
-            // chart scales each line to its own max.
-            int maxBAxis = isBlock ? Mathf.CeilToInt(maxB * 1.08f) : maxA;
+            // Hit chart and the v2 block chart share one scale (numerator <=
+            // denominator structurally; bug #182); only the LEGACY block chart
+            // (damage vs blocks, ~100x apart) scales each line to its own max.
+            int maxBAxis = (isBlock && !blockV2) ? Mathf.CeilToInt(maxB * 1.08f) : maxA;
             if (maxBAxis < 1) maxBAxis = 1;
 
             Rect plot = new Rect(gx + pad, gy + headerH, w - pad - padR, h - headerH - 42f);
@@ -2166,11 +2184,12 @@ namespace CompetitiveRounds
                 GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), new Color(1f, 1f, 1f, 0.08f), 1f);
                 GUI.Label(new Rect(gx + 2, y - 11f, pad - 6f, 22f), $"<color=#777>{gl}</color>", _scoreGraphLbl);
             }
-            if (isBlock)
+            if (isBlock && !blockV2)
             {
                 // Right-axis reference for the B line — label the AXIS ceiling
                 // (maxBAxis, what the line is actually scaled to), not the raw
-                // series max (review [9]).
+                // series max (review [9]). Legacy-only since bug #182: the v2
+                // chart shares the left axis and has no right-axis reference.
                 GUI.Label(new Rect(plot.xMax + 4f, plot.yMin - 11f, padR - 4f, 22f),
                     $"<color={hexB}>{maxBAxis}</color>", _scoreGraphLbl);
                 GUI.Label(new Rect(plot.xMax + 4f, plot.yMax - 11f, padR - 4f, 22f),
@@ -2310,11 +2329,13 @@ namespace CompetitiveRounds
                                bA[bA.Length - 1], bB[bB.Length - 1])
                     : I18n.TrF("<color=#777>{0} dmg / {1} blocks</color>",
                                bA[bA.Length - 1], bB[bB.Length - 1])) : "";
-            // Blocks are ~100x smaller than damage — rescale the blocks line to
-            // the damage axis so the mini panel shows both trends (real numbers
-            // live in the footer; the full-size 1v1 popup uses true dual axes).
-            int[] bBScaled = null;
-            if (bA != null && bB != null)
+            // LEGACY series only: blocks are ~100x smaller than damage — rescale
+            // the blocks line to the damage axis so the mini panel shows both
+            // trends (real numbers live in the footer). v2 activated/successful
+            // pairs share one honest scale instead (bug #182 — stretching the
+            // success line to the activations ceiling misreads as ~100%).
+            int[] bBScaled = bB;
+            if (!comboBlockV2 && bA != null && bB != null)
             {
                 int maxDmg = 1, maxBlk = 1;
                 foreach (var v in bA) if (v > maxDmg) maxDmg = v;

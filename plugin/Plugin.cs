@@ -116,6 +116,11 @@ namespace CompetitiveRounds
 
         private static bool spawned = false;
         internal static bool modDisabled = false;
+        /// <summary>True once DoInitialize's other-mods check has produced its
+        /// verdict (either way). GrowNormalize refuses to advertise cr_grow1
+        /// before this — an advertise-then-revoke-in-room sequence reaches
+        /// peers late (Codex Grow code review find 6).</summary>
+        internal static bool compatCheckComplete = false;
 
         // Ranked queue auto-join state (on Plugin so it survives scene changes)
         private static string pendingRankedRoom = null;
@@ -692,6 +697,10 @@ namespace CompetitiveRounds
             // modDisabled/startup, and a client that advertises authority but never
             // subscribed to the commit path would never apply its OWN damage.
             try { PoisonSync.StageCapability("Awake"); PoisonSync.Hook(); } catch { }
+            // cr_grow1 deliberately has NO Awake stage call: GrowNormalize
+            // refuses to advertise before the compat verdict (Codex find 6),
+            // so its staging rides the persistent tick a few seconds later —
+            // still long before any human can join a room.
             // Spectator snapshot protocol: subscribe the Photon event handler
             // before any room can be joined (same reasoning as PoisonSync).
             try { SpectatorSync.Hook(); } catch { }
@@ -1451,6 +1460,10 @@ namespace CompetitiveRounds
             // so no join path can forget it.
             try { PoisonSync.Hook(); PoisonSync.Tick(); }
             catch { }
+            // Grow capability stage retry (one-shot; compat-gated, so the
+            // first successful stage happens a few ticks after startup).
+            try { GrowNormalize.StageCapability("tick"); }
+            catch { }
             // Quick-chat (§2.6) rides Photon event code 48 — same
             // EventReceived hook pattern as PoisonSync (code 47).
             try { QuickChat.Hook(); } catch { }
@@ -1511,11 +1524,13 @@ namespace CompetitiveRounds
                             Plugin.Log.LogError($"[COMPAT]   - {m}");
                         Plugin.Log.LogError("[COMPAT] Mod DISABLED to ensure competitive integrity.");
                         Plugin.modDisabled = true;
+                        Plugin.compatCheckComplete = true;
                         // Awake already staged the poison-authority capability, and
                         // modDisabled stops the tick that would subscribe us to the
                         // commit path — withdraw it so peers do not wait on verdicts
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
+                        try { GrowNormalize.RevokeCapability(); } catch { }
                         return;
                     }
                 }
@@ -1525,6 +1540,7 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
             }
+            Plugin.compatCheckComplete = true;
 
             ApiClient.Initialize(Plugin.ApiBaseUrl.Value);
             GameStateWatcher.Initialize();
