@@ -11487,6 +11487,16 @@ namespace CompetitiveRounds
             public int player_count, max_players, age_seconds;
             public bool has_password;   // v1.37: private lobbies are LISTED with a marker (Sid's spec)
             public List<LobbyBrowserMember> members;   // Aug 8: who's inside (null on old server)
+            // Aug 9: lobby-phase betting. Absent on an old server -> false /
+            // null, which the browser renders as "no Bet button" (defensive:
+            // never offer a bet the server can't accept).
+            public bool bets_open;
+            public List<LobbyBetTarget> bet_targets;
+            // Optional server echo of the caller's own open lobby bet. Not in
+            // the first server cut, so the browser falls back to the local
+            // belief NativeUI records at placement time.
+            public int my_bet_amount;
+            public string my_bet_targets;
         }
         public static List<FfaOpenLobbyEntry> CachedFfaLobbies = null;
         public static bool FfaLobbiesUnavailable = false;   // old server / fetch failing
@@ -11937,7 +11947,7 @@ namespace CompetitiveRounds
         {
             if (!force && Time.unscaledTime - _ffaLobbiesLastAt < 3f) return;
             _ffaLobbiesLastAt = Time.unscaledTime;
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/lobbies", (ok, resp) =>
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/lobbies?steam_id={Escape(MatchTracker.LocalSteamId)}", (ok, resp) =>
             {
                 if (!ok || string.IsNullOrEmpty(resp))
                 {
@@ -11968,6 +11978,10 @@ namespace CompetitiveRounds
                                 age_seconds = ExtractJsonInt(obj, "age_seconds"),
                                 has_password = ExtractJsonBool(obj, "has_password"),
                                 members = ParseBrowserMembers(obj),
+                                bets_open = ExtractJsonBool(obj, "bets_open"),
+                                bet_targets = ParseBetTargets(obj),
+                                my_bet_amount = ExtractJsonInt(obj, "my_bet_amount"),
+                                my_bet_targets = ExtractJsonString(obj, "my_bet_targets") ?? "",
                             };
                             if (!string.IsNullOrEmpty(e.lobby_id)) list.Add(e);
                         }
@@ -12631,6 +12645,12 @@ namespace CompetitiveRounds
             public int player_count, max_players, age_seconds;
             public bool has_password;
             public List<LobbyBrowserMember> members;   // Aug 8: who's inside (null on old server)
+            // Aug 9: lobby-phase betting (2v2 only — the server never opens
+            // bets on 1v2, and the browser gates on the mode as well).
+            public bool bets_open;
+            public List<LobbyBetTarget> bet_targets;
+            public int my_bet_amount;
+            public string my_bet_targets;
         }
 
         public sealed class HostLobbyClient
@@ -13886,7 +13906,7 @@ namespace CompetitiveRounds
             {
                 if (!force && Time.unscaledTime - lobbiesLastAt < 3f) return;
                 lobbiesLastAt = Time.unscaledTime;
-                Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/{mode}/lobbies", (ok, resp) =>
+                Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/{mode}/lobbies?steam_id={Escape(MatchTracker.LocalSteamId)}", (ok, resp) =>
                 {
                     if (!ok || string.IsNullOrEmpty(resp))
                     {
@@ -13917,6 +13937,10 @@ namespace CompetitiveRounds
                                     age_seconds = ExtractJsonInt(obj, "age_seconds"),
                                     has_password = ExtractJsonBool(obj, "has_password"),
                                     members = ParseBrowserMembers(obj),
+                                    bets_open = ExtractJsonBool(obj, "bets_open"),
+                                    bet_targets = ParseBetTargets(obj),
+                                    my_bet_amount = ExtractJsonInt(obj, "my_bet_amount"),
+                                    my_bet_targets = ExtractJsonString(obj, "my_bet_targets") ?? "",
                                 };
                                 if (!string.IsNullOrEmpty(e.lobby_id)) list.Add(e);
                             }
@@ -14022,10 +14046,13 @@ namespace CompetitiveRounds
         {
             try
             {
-                int mStart = lobbyObj.IndexOf("\"members\"", StringComparison.Ordinal);
-                if (mStart < 0) return null;   // old server — renderer degrades to one line
-                int arrStart = lobbyObj.IndexOf('[', mStart);
-                int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(lobbyObj, arrStart) : -1;
+                // Review find 10: locate the KEY string-aware. A raw IndexOf
+                // can land inside a user-authored display name that happens to
+                // contain the token, and with bet_targets now emitted before
+                // members that mis-hit would slice the wrong array (#156).
+                int arrStart = FindJsonArrayStartStringAware(lobbyObj, "members");
+                if (arrStart < 0) return null;   // old server — renderer degrades to one line
+                int arrEnd = FindMatchingBracketStringAware(lobbyObj, arrStart);
                 if (arrStart < 0 || arrEnd <= arrStart) return null;
                 var list = new List<LobbyBrowserMember>();
                 foreach (string m in SliceTopLevelObjects(lobbyObj.Substring(arrStart + 1, arrEnd - arrStart - 1)))
@@ -14042,6 +14069,120 @@ namespace CompetitiveRounds
                 return list;
             }
             catch { return null; }
+        }
+
+        /// <summary>Aug 9 (Sid): one bettable target in a lobby-phase bet. The
+        /// roster isn't final while a lobby is open, so these are the CURRENT
+        /// members and a bet on someone who ends up not playing is refunded —
+        /// the picker says so before the amount is entered.</summary>
+        public class LobbyBetTarget
+        {
+            public string id, name;
+        }
+
+        /// <summary>Read an id that the server may serialize as a JSON number
+        /// OR a quoted string. ExtractJsonInt is not usable here: a 17-digit
+        /// steam id overflows int, and its int.Parse throw is swallowed into a
+        /// silent 0 — which would post a bet against player "0".</summary>
+        private static string ExtractJsonIdToken(string json, string key)
+        {
+            try
+            {
+                string quoted = ExtractJsonString(json, key);
+                if (!string.IsNullOrEmpty(quoted)) return quoted;
+                string search = $"\"{key}\":";
+                int start = json.IndexOf(search, StringComparison.Ordinal);
+                if (start < 0) return "";
+                start += search.Length;
+                while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
+                int end = start;
+                while (end < json.Length && char.IsDigit(json[end])) end++;
+                return end > start ? json.Substring(start, end - start) : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Aug 9 (Sid): the lobby browser's "bet_targets" array. Names
+        /// are user-authored, so the array slicing is string-aware (#156) —
+        /// a display name containing '[' or '}' must not truncate the list.
+        /// Returns null when the key is absent (old server), which the browser
+        /// treats as "betting not available for this lobby".</summary>
+        private static List<LobbyBetTarget> ParseBetTargets(string lobbyObj)
+        {
+            try
+            {
+                int arrStart = FindJsonArrayStartStringAware(lobbyObj, "bet_targets");
+                if (arrStart < 0) return null;
+                int arrEnd = FindMatchingBracketStringAware(lobbyObj, arrStart);
+                if (arrEnd <= arrStart) return null;
+                var list = new List<LobbyBetTarget>();
+                foreach (string t in SliceTopLevelObjects(lobbyObj.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                {
+                    string id = ExtractJsonIdToken(t, "id");
+                    if (string.IsNullOrEmpty(id)) continue;
+                    list.Add(new LobbyBetTarget
+                    {
+                        id = id,
+                        name = ExtractJsonString(t, "name") ?? "",
+                    });
+                }
+                return list;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Aug 9 (Sid): place a bet on a lobby that hasn't started
+        /// yet. No odds are quoted at placement — the roster is not final, so
+        /// the server prices the bet when the lobby locks and refunds it when
+        /// the exact person/pair bet on isn't in the game that runs.
+        /// mode is "team" or "ffa"; targetSteams is one steam id for ffa and
+        /// the pair's two ids SORTED and joined with ':' for team.</summary>
+        public static void PlaceLobbyBet(string bettorSteamId, string mode, string lobbyId,
+            string targetSteams, int amount, Action<bool, string> callback)
+        {
+            string sig = ComputeHmacHex($"lobby-bet:{bettorSteamId}:{mode}:{lobbyId}:{targetSteams}:{amount}");
+            string url = $"{baseUrl}/api/v1/lobby-bets?steam_id={Escape(bettorSteamId)}" +
+                         $"&mode={Escape(mode)}&lobby_id={Escape(lobbyId)}" +
+                         $"&target_steams={Escape(targetSteams)}&amount={amount}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[LOBBY-BET] place {amount} on {mode} {targetSteams} (lobby {lobbyId}): ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok)
+                {
+                    FetchPlayerStats(bettorSteamId);
+                    RefreshLobbyBrowserFor(mode);
+                }
+            }));
+        }
+
+        /// <summary>Aug 9 (Sid): withdraw the caller's still-open lobby-phase
+        /// bet. One bet per lobby, so the lobby identifies it — no bet id.</summary>
+        public static void CancelLobbyBet(string bettorSteamId, string mode, string lobbyId,
+            Action<bool, string> callback)
+        {
+            string sig = ComputeHmacHex($"lobby-bet-cancel:{bettorSteamId}:{mode}:{lobbyId}");
+            string url = $"{baseUrl}/api/v1/lobby-bets/cancel?steam_id={Escape(bettorSteamId)}" +
+                         $"&mode={Escape(mode)}&lobby_id={Escape(lobbyId)}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[LOBBY-BET] cancel {mode} lobby {lobbyId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok)
+                {
+                    FetchPlayerStats(bettorSteamId);
+                    RefreshLobbyBrowserFor(mode);
+                }
+            }));
+        }
+
+        /// <summary>Re-pull the browser the bet was placed from so the row's
+        /// bet state (and any server-side my_bet echo) refreshes immediately
+        /// instead of on the next 3s throttle window.</summary>
+        private static void RefreshLobbyBrowserFor(string mode)
+        {
+            if (mode == "ffa") FetchFfaLobbies(force: true);
+            else if (mode == "team") TeamLobby.FetchLobbies(force: true);
         }
 
         /// <summary>Aug 8 (Sid): FFA host kicks a member — same contract as

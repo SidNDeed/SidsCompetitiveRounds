@@ -1251,11 +1251,16 @@ async def queue_cleanup_loop():
                          ORDER BY joined_at, player_id::text"""),
                         {"lid": ol["id"]})).mappings().all()
                     if not live:
-                        await db.execute(text("""
+                        _killed = (await db.execute(text("""
                             UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
                                    invalidation_reason='lobby_abandoned'
-                             WHERE id=:lid AND status='open'"""), {"lid": ol["id"]})
+                             WHERE id=:lid AND status='open'
+                            RETURNING id"""), {"lid": ol["id"]})).scalar()
                         print(f"[FFA-LOBBY] open lobby abandoned (no live members): {ol['id']}")
+                        # Terminal transition landed -> the lobby will never
+                        # start, so its held wagers come back (migration 207).
+                        if _killed is not None:
+                            await _refund_lobby_bets(db, "ffa", ol["id"], "lobby_abandoned")
                     elif ol["host_player_id"] not in {m["player_id"] for m in live}:
                         await db.execute(text(
                             "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
@@ -1346,12 +1351,17 @@ async def queue_cleanup_loop():
                              ORDER BY joined_at, player_id::text"""),
                             {"lid": ol["id"]})).scalars().all()
                         if not live:
-                            await db.execute(text(f"""
+                            _killed = (await db.execute(text(f"""
                                 UPDATE {_lt} SET status='canceled', invalidated_at=NOW(),
                                        invalidation_reason='lobby_abandoned'
-                                 WHERE id=:lid AND status='open'"""), {"lid": ol["id"]})
+                                 WHERE id=:lid AND status='open'
+                                RETURNING id"""), {"lid": ol["id"]})).scalar()
                             print(f"[{_tag}-LOBBY] open lobby abandoned "
                                   f"(no live members): {ol['id']}")
+                            # Terminal transition landed -> refund the held
+                            # wagers (migration 207). No-op for 'ovt'.
+                            if _killed is not None:
+                                await _refund_lobby_bets(db, _mode, ol["id"], "lobby_abandoned")
                         elif ol["host_player_id"] not in set(live):
                             await db.execute(text(
                                 f"UPDATE {_lt} SET host_player_id=:h WHERE id=:lid"
@@ -1361,6 +1371,80 @@ async def queue_cleanup_loop():
                     await db.commit()
             except Exception as e:
                 print(f"[QUEUE-CLEANUP] {_tag} lobby sweep error: {e}")
+        # ── Lobby-phase wager safety net (migration 207) ─────────────────
+        # Its OWN try/except (learning #228): one broken statement must never
+        # starve the sweeps behind it.
+        #
+        # Every wager is normally resolved by the bind at Start or by a
+        # refund on the lobby's terminal transition. This is the net under
+        # both: a refund whose post-commit flush never landed, an 'open' row
+        # whose lobby is gone (crash recovery — NOT the normal path), and the
+        # TTL for a lobby that simply never started.
+        try:
+            async with async_session() as db:
+                # (i) Retry any refund the post-Start flush did not land.
+                await _flush_lobby_bet_refunds(
+                    db, older_than_seconds=LOBBY_BET_REFUND_RETRY_SECONDS, limit=100)
+                # (ii) CRASH RECOVERY ONLY. An 'open' wager whose lobby has
+                # left 'open' (or vanished) means the bind never ran or its
+                # savepoint rolled back — the normal Start path leaves nothing
+                # here. The age floor is what makes that inference safe: it is
+                # far longer than any Start takes, so a Start in flight right
+                # now can never be read as one that failed.
+                _orphan_n = 0
+                for _m, _lt in (("team", "team_lobbies"), ("ffa", "ffa_lobbies")):
+                    # FOR UPDATE OF lb, never a bare FOR UPDATE: this subquery
+                    # has a LEFT JOIN and asyncpg raises
+                    # FeatureNotSupportedError on the nullable side (#228).
+                    orphans = (await db.execute(text(f"""
+                        SELECT lb.id FROM lobby_bets lb
+                          LEFT JOIN {_lt} l ON l.id = lb.lobby_id
+                         WHERE lb.mode = :m AND lb.status = 'open'
+                           AND lb.created_at
+                               < NOW() - MAKE_INTERVAL(mins => CAST(:mins AS int))
+                           AND (l.id IS NULL OR l.status <> 'open')
+                         ORDER BY lb.created_at
+                         LIMIT 100
+                         FOR UPDATE OF lb SKIP LOCKED
+                    """), {"m": _m, "mins": LOBBY_BET_ORPHAN_MINUTES})).scalars().all()
+                    _orphan_n += len(orphans)
+                    for _bid in orphans:
+                        await db.execute(text("""
+                            UPDATE lobby_bets
+                               SET status='refund_pending', resolved_at=NOW(),
+                                   resolve_reason='lobby_gone'
+                             WHERE id = :bid AND status = 'open'
+                        """), {"bid": _bid})
+                    if orphans:
+                        print(f"[LOBBY-BETS] {len(orphans)} orphaned {_m} wager(s) "
+                              f"queued for refund (lobby gone / already started)")
+                # (iii) TTL: a lobby that never started at all.
+                stale = (await db.execute(text("""
+                    UPDATE lobby_bets
+                       SET status='refund_pending', resolved_at=NOW(),
+                           resolve_reason='ttl_expired'
+                     WHERE id IN (
+                        SELECT id FROM lobby_bets
+                         WHERE status = 'open'
+                           AND created_at
+                               < NOW() - MAKE_INTERVAL(hours => CAST(:h AS int))
+                         ORDER BY created_at
+                         LIMIT 100
+                         FOR NO KEY UPDATE SKIP LOCKED
+                     )
+                    RETURNING id
+                """), {"h": LOBBY_BET_TTL_HOURS})).scalars().all()
+                if stale:
+                    print(f"[LOBBY-BETS] {len(stale)} wager(s) past the "
+                          f"{LOBBY_BET_TTL_HOURS}h TTL queued for refund")
+                await db.commit()
+                # Pay whatever (ii)/(iii) just queued. Own transactions, one
+                # bet each (#204) — deliberately after the commit above so a
+                # refund failure cannot roll the queuing back.
+                if _orphan_n or stale:
+                    await _flush_lobby_bet_refunds(db, limit=200)
+        except Exception as e:
+            print(f"[LOBBY-BETS] janitor sweep error: {e}")
         # ── Queue-lease hygiene (migration 174) ─────────────────────────
         # Its OWN try/except: a raise here must not kill the sweeps after it
         # (learning #228 — one shared handler once silently killed every sweep
@@ -1696,6 +1780,12 @@ _RL_SENSITIVE_PREFIXES = (
     "/api/v1/auth/steam",  # token minting — throttle floods (July 21)
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
+    # Lobby-phase wagers (migration 207). startswith also covers
+    # /lobby-bets/cancel. NOT covered by the "/api/v1/bets" entry above —
+    # startswith("/api/v1/bets") is false for "/api/v1/lobby-bets" — so
+    # without this the one bet endpoint that debits gold would sit on the
+    # loose 150/10s bucket while its three siblings are throttled.
+    "/api/v1/lobby-bets",
     "/api/v1/spectate/grant",  # seat minting — ~5/min is plenty (design §6.5)
     # L10n mutating paths ONLY (localization-design §2.5): never the bare
     # "/api/v1/i18n/" prefix — startswith matching would put the launch-time
@@ -6444,7 +6534,7 @@ async def get_gold_sources(
            -- 'admin_reverse' added Aug 9 (bet audit r1 find 10): the 1v1
            -- reversal refund returns PRINCIPAL, same as its siblings here.
            AND gt.reason NOT IN ('refund_abandoned', 'team_bet_refund', 'ffa_bet_refund',
-                                 'admin_reverse')
+                                 'admin_reverse', 'lobby_bet_refund')
          GROUP BY 1
          ORDER BY SUM(gt.amount) DESC
     """), {"pid": pid})).mappings().all()
@@ -17404,8 +17494,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # account was sitting in. Without this the lobby keeps pointing at the
     # anonymized account as host and nothing else ever repairs it (the series
     # UPDATEs above cannot — a lobby id matches no series row).
-    for _qt, _lt, _lids in (("team_queue", "team_lobbies", _team_lob),
-                            ("ovt_queue", "ovt_lobbies", _ovt_lob)):
+    for _lmode, _qt, _lt, _lids in (("team", "team_queue", "team_lobbies", _team_lob),
+                                    ("ovt", "ovt_queue", "ovt_lobbies", _ovt_lob)):
         for _lid in _lids:
             _ol = (await db.execute(text(
                 f"SELECT id, host_player_id FROM {_lt} WHERE id=:lid AND status='open'"
@@ -17418,10 +17508,16 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                  ORDER BY joined_at, player_id::text"""),
                 {"lid": _lid, "pid": pid})).scalars().all()
             if not _live:
-                await db.execute(text(
+                _killed = (await db.execute(text(
                     f"""UPDATE {_lt} SET status='canceled', invalidated_at=NOW(),
                               invalidation_reason='lobby_disbanded'
-                        WHERE id=:lid AND status='open'"""), {"lid": _lid})
+                        WHERE id=:lid AND status='open'
+                       RETURNING id"""), {"lid": _lid})).scalar()
+                # Terminal transition landed -> the lobby will never start, so
+                # its held lobby-phase wagers come back (migration 207).
+                # No-op for 'ovt'. A promotion (the elif) dissolves nothing.
+                if _killed is not None:
+                    await _refund_lobby_bets(db, _lmode, _lid, "lobby_disbanded")
             elif _ol["host_player_id"] == pid:
                 await db.execute(text(
                     f"UPDATE {_lt} SET host_player_id=:h WHERE id=:lid"
@@ -17446,10 +17542,15 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                  ORDER BY joined_at, player_id::text"""),
                 {"lid": _lid, "pid": pid})).scalars().all()
             if not _live:
-                await db.execute(text(
+                _killed = (await db.execute(text(
                     """UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
                               invalidation_reason='lobby_disbanded'
-                        WHERE id=:lid AND status='open'"""), {"lid": _lid})
+                        WHERE id=:lid AND status='open'
+                       RETURNING id"""), {"lid": _lid})).scalar()
+                # Terminal transition landed -> refund the held lobby-phase
+                # wagers (migration 207). A promotion dissolves nothing.
+                if _killed is not None:
+                    await _refund_lobby_bets(db, "ffa", _lid, "lobby_disbanded")
             elif _ol["host_player_id"] == pid:
                 await db.execute(text(
                     "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
@@ -24880,11 +24981,18 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
     """), {"lid": lobby_id})).scalars().all()
     disbanded = False
     if not remaining:
-        await db.execute(text(f"""
+        _killed = (await db.execute(text(f"""
             UPDATE {cfg['lobbies']} SET status='canceled', invalidated_at=NOW(),
                    invalidation_reason='lobby_disbanded'
-             WHERE id=:lid AND status='open'"""), {"lid": lobby_id})
+             WHERE id=:lid AND status='open'
+            RETURNING id"""), {"lid": lobby_id})).scalar()
         disbanded = True
+        # Only when the TERMINAL transition actually landed (migration 207):
+        # one member leaving a lobby that still has people in it does not
+        # dissolve anything, and refunding there would void live wagers on a
+        # lobby that is about to start. No-op for 'ovt' (no bet table).
+        if _killed is not None:
+            await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")
     else:
         # Promote only when the LEAVER was the stored host (a read never
         # persists the derived host — see _lobby_effective_host).
@@ -25048,7 +25156,30 @@ async def _lobby_browser_titles(db: AsyncSession, steam_ids) -> dict:
     return out
 
 
-async def _lobby_browser_impl(mode: str, db: AsyncSession) -> dict:
+async def _lobby_my_bet_targets(db: AsyncSession, mode: str, viewer_steam_id, lobby_ids):
+    """lobby_id -> the VIEWER's own open wager target, for the browser's
+    "you bet on X" label. Empty dict when there is no viewer, no lobbies, or
+    the lobby_bets table does not exist yet (pre-migration deploys degrade to
+    no label rather than breaking the browser — #235)."""
+    if not viewer_steam_id or not lobby_ids:
+        return {}
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text("""
+                SELECT lb.lobby_id::text AS lid, lb.target_steams, lb.amount
+                  FROM lobby_bets lb
+                  JOIN players p ON p.id = lb.player_id
+                 WHERE p.steam_id = :sid AND lb.mode = :m
+                   AND lb.status = 'open'
+                   AND lb.lobby_id = ANY(CAST(:lids AS uuid[]))
+            """), {"sid": str(viewer_steam_id), "m": mode,
+                   "lids": [str(x) for x in lobby_ids]})).mappings().all()
+        return {r["lid"]: (r["target_steams"], int(r["amount"] or 0)) for r in rows}
+    except Exception:
+        return {}
+
+
+async def _lobby_browser_impl(mode: str, db: AsyncSession, viewer_steam_id: str | None = None) -> dict:
     """Open lobbies for the browser panel. A PRIVATE lobby is still listed —
     it shows a lock and refuses joins without the password (Sid's spec).
     Hiding it would turn "where did my friend's lobby go?" into a support
@@ -25078,6 +25209,9 @@ async def _lobby_browser_impl(mode: str, db: AsyncSession) -> dict:
         lobby_live.append((l, live))
     titles = await _lobby_browser_titles(
         db, [m["steam_id"] for _, live in lobby_live for m in live])
+    # One batched lookup for the whole page (never per-lobby).
+    _my_bets = await _lobby_my_bet_targets(
+        db, mode, viewer_steam_id, [l["id"] for l, _ in lobby_live])
     out = []
     for l, live in lobby_live:
         host_id = _lobby_effective_host(l["host_player_id"], live)
@@ -25110,6 +25244,21 @@ async def _lobby_browser_impl(mode: str, db: AsyncSession) -> dict:
             "max_players": cfg["players"],
             "has_password": bool(l["has_password"]),
             "age_seconds": int((now - l["created_at"]).total_seconds()) if l["created_at"] else 0,
+            # Lobby-phase betting (migration 207). Must match exactly what
+            # POST /lobby-bets accepts (#159): the query above already pins
+            # status='open', and 1v2 has no bet table to bind into, so its
+            # mode is absent from _LOBBY_BET_PARENT and it is never bettable.
+            # Review find 6: a 'team' wager names a PAIR, so a lobby with
+            # fewer than two live members cannot produce a valid target —
+            # advertising betting there promises what the POST refuses.
+            "bets_open": (mode in _LOBBY_BET_PARENT) and len(live) >= 2,
+            "my_bet_targets": (_my_bets.get(str(l["id"])) or ("", 0))[0],
+            "my_bet_amount": (_my_bets.get(str(l["id"])) or ("", 0))[1],
+            # Explicit steam ids so a client never has to guess identity from
+            # a display name (names are not unique). Reuses the members we
+            # already fetched — no extra query.
+            "bet_targets": [{"id": m["steam_id"], "name": (m["display_name"] or "?")}
+                            for m in live],
             "members": members,
         })
     return {"lobbies": out, "count": len(out)}
@@ -25318,8 +25467,13 @@ async def team_lobby_leave(request: Request, steam_id: str = Query(...),
 
 
 @app.get("/api/v1/team/lobbies", tags=["Team Queue"])
-async def team_lobby_browser(db: AsyncSession = Depends(get_db)):
-    return await _lobby_browser_impl("team", db)
+async def team_lobby_browser(steam_id: str | None = Query(None),
+                             db: AsyncSession = Depends(get_db)):
+    # steam_id is OPTIONAL and read-only: it only decorates each lobby with
+    # the caller's own open wager (my_bet_targets) so the browser can render
+    # "you bet on X". Nothing is gated on it — a spoofed value reveals only
+    # that account's own public bet target (#159: never gate on a query param).
+    return await _lobby_browser_impl("team", db, viewer_steam_id=steam_id)
 
 
 class _LobbyStartReq(BaseModel):
@@ -25386,12 +25540,27 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
     regions = [m["region"] for m in live if m["region"]]
     region = max(set(regions), key=regions.count) if regions else None
     await _lobby_activate(db, "team", lobby_id, series_id, all4, region, None)
+    # Lobby-phase wagers resolve against the roster we just froze (migration
+    # 207). Never raises — a bet problem must not fail a Start — and only
+    # MARKS refunds; the gold moves after this transaction commits.
+    await _bind_lobby_bets(db, "team", lobby_id, {
+        "series_id": series_id,
+        "teams": {1: list(team1_ids), 2: list(team2_ids)},
+        "steam_by_pid": dict(pid_to_steam),
+    })
     # Assembly-length lease, then renewed by the authenticated in_match ping
     # for as long as battles actually run.
     await _lease_acquire_many(db, all4, "team", series_id, LEASE_TTL_ASSEMBLY)
     await db.commit()
     print(f"[2v2-LOBBY] host {req.steam_id} started lobby {lobby_id} "
           f"series {series_id} t1={team1_ids} t2={team2_ids}")
+    try:
+        await _flush_lobby_bet_refunds(db, "team", lobby_id)
+    except Exception as _lbex:
+        # Own failure domain (#187): the janitor's 60s retry owns any refund
+        # that does not land here.
+        print(f"[LOBBY-BETS] post-start refund flush failed for team lobby "
+              f"{lobby_id}: {_lbex}")
     await _evict_other_queue_searching(db, all4, "team_queue", "a 2v2 lobby")
     return {"status": "ok", "series_id": str(series_id), "lobby_id": str(lobby_id)}
 
@@ -26205,6 +26374,15 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     """), {"room": room, "reg": (region or "us")[:8], "n": len(ordered),
            "members": [r["player_id"] for r in ordered], "lid": lobby_id,
            "kt": _kills_tiebreak})
+    # Lobby-phase wagers resolve against the roster just frozen above
+    # (migration 207). The helper re-reads score_target/is_ranked from the row
+    # so it prices off the POST-clamp values, and never raises: a bet problem
+    # must not fail a Start. Refunds are only marked here; the gold moves
+    # after this transaction commits.
+    await _bind_lobby_bets(db, "ffa", lobby_id, {
+        "member_ids": [r["player_id"] for r in ordered],
+        "steam_by_pid": {r["player_id"]: r["steam_id"] for r in ordered},
+    })
     for slot, r in enumerate(ordered):
         await db.execute(text("""
             UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
@@ -26220,13 +26398,21 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
                               lobby_id, LEASE_TTL_ASSEMBLY)
     await db.commit()
     print(f"[FFA-LOBBY] host {req.steam_id} started lobby {lobby_id} room {room} n={len(ordered)}")
+    try:
+        await _flush_lobby_bet_refunds(db, "ffa", lobby_id)
+    except Exception as _lbex:
+        # Own failure domain (#187): the janitor's 60s retry owns any refund
+        # that does not land here.
+        print(f"[LOBBY-BETS] post-start refund flush failed for ffa lobby "
+              f"{lobby_id}: {_lbex}")
     await _evict_other_queue_searching(
         db, [r["player_id"] for r in ordered], "ffa_queue", "an FFA lobby")
     return await _ffa_poll_locked_payload(db, lobby_id, req.steam_id)
 
 
 @app.get("/api/v1/ffa/lobbies", tags=["FFA Queue"])
-async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
+async def ffa_lobby_browser(steam_id: str | None = Query(None),
+                            db: AsyncSession = Depends(get_db)):
     """Open host lobbies for the browser panel, WITH per-member name/title/elo
     (Aug 8 — Sid: show who is inside before joining). Read-only: effective
     host is derived, never persisted here."""
@@ -26234,13 +26420,13 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
     # zero-member husks awaiting the janitor must not consume the LIMIT and
     # crowd real lobbies out of the browser.
     lobbies = (await db.execute(text(f"""
-        SELECT l.id, l.host_player_id, l.created_at,
+        SELECT l.id, l.host_player_id, l.created_at, l.is_ranked,
                (l.password_hash IS NOT NULL) AS has_password,
                COUNT(q.player_id) FILTER (WHERE {FFA_LOBBY_MEMBER_FRESH_SQL}) AS live_n
           FROM ffa_lobbies l
           LEFT JOIN ffa_queue q ON q.series_id = l.id AND q.status = 'lobby'
          WHERE l.status = 'open'
-         GROUP BY l.id, l.host_player_id, l.created_at, l.password_hash
+         GROUP BY l.id, l.host_player_id, l.created_at, l.is_ranked, l.password_hash
         HAVING COUNT(q.player_id) FILTER (WHERE {FFA_LOBBY_MEMBER_FRESH_SQL}) > 0
          ORDER BY l.created_at DESC
          LIMIT 20
@@ -26254,6 +26440,9 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
         lobby_live.append((l, live))
     titles = await _lobby_browser_titles(
         db, [m["steam_id"] for _, live in lobby_live for m in live])
+    # One batched lookup for the whole page (never per-lobby).
+    _ffa_my_bets = await _lobby_my_bet_targets(
+        db, "ffa", steam_id, [l["id"] for l in lobbies])
     out = []
     for l, live in lobby_live:
         host_id = _ffa_effective_host(l["host_player_id"], live)
@@ -26284,6 +26473,17 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
             # make "where did my friend's lobby go?" a support question.
             "has_password": bool(l["has_password"]),
             "age_seconds": int((now - l["created_at"]).total_seconds()) if l["created_at"] else 0,
+            # Lobby-phase betting (migration 207). Mirrors exactly what
+            # POST /lobby-bets accepts (#159): the query pins status='open',
+            # and a casual sitting is not bettable because the odds are
+            # rating-derived (§6, same rule as /ffa/bettable).
+            "bets_open": bool(l["is_ranked"] if l["is_ranked"] is not None else True),
+            "my_bet_targets": (_ffa_my_bets.get(str(l["id"])) or ("", 0))[0],
+            "my_bet_amount": (_ffa_my_bets.get(str(l["id"])) or ("", 0))[1],
+            # Explicit steam ids so a client never has to guess identity from
+            # a display name. Reuses the members already fetched — no N+1.
+            "bet_targets": [{"id": m["steam_id"], "name": (m["display_name"] or "?")}
+                            for m in live],
             "members": members,
         })
     return {"lobbies": out, "count": len(out)}
@@ -26420,11 +26620,22 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         if lrow is not None and lrow["status"] == "open":
             live = await _ffa_live_lobby_members(db, lobby_id)
             if not live:
-                await db.execute(text(
+                _cancelled = (await db.execute(text(
                     """UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
                               invalidation_reason='lobby_disbanded'
-                        WHERE id=:lid AND status='open'"""), {"lid": lobby_id})
+                        WHERE id=:lid AND status='open'
+                     RETURNING id"""), {"lid": lobby_id})).scalar()
                 print(f"[FFA-LOBBY] lobby {lobby_id} disbanded (last member left: {steam_id})")
+                # Review find 1: this is a TERMINAL transition, so staged
+                # wagers must come back here rather than waiting on the
+                # 10-minute orphan janitor. Gated on the UPDATE having
+                # actually fired (the house rule: refund on the transition,
+                # never on a mere seat event).
+                if _cancelled is not None:
+                    try:
+                        await _refund_lobby_bets(db, "ffa", lobby_id, "lobby_disbanded")
+                    except Exception as _re:
+                        print(f"[FFA-LOBBY] lobby-bet refund deferred to janitor: {_re}")
             elif lrow["host_player_id"] == me["player_id"]:
                 await db.execute(text(
                     "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
@@ -28803,6 +29014,762 @@ async def place_ffa_bet(
     return {"status": "placed", "game_number": game_number, "amount": amount,
             "odds_multiplier": round(mult, 2),
             "potential_payout": int(_decimal.Decimal(amount) * _stored_mult)}
+
+
+# ── Lobby-phase betting (Sid, Aug 9 — migration 207) ───────────────────────
+#
+# The ordinary bet tables can only be written once the thing being bet on
+# EXISTS: team_bets.team_series_id is a NOT NULL FK to team_series, and
+# ffa_bets carries a game_number. Neither exists while a hosted lobby is still
+# filling, so betting used to open only at the moment the host pressed Start —
+# a window of seconds.
+#
+# lobby_bets is the waiting room. A wager is taken against a LOBBY plus an
+# explicit TARGET (one steam id for FFA, the pair for 2v2), held while the
+# roster is still moving, and at Start it is either BOUND to a real
+# team_bets/ffa_bets row — when the exact person/pair bet on is still there —
+# or refunded. Everything downstream of the bind (odds settlement, payout, the
+# gold_transactions ledger) is the existing shipped machinery, untouched.
+#
+# No odds are quoted at placement: the field the price depends on does not
+# exist yet. The price is computed at BIND time from the frozen composition
+# using the SAME helpers the live POSTs use, so a lobby wager and a normal
+# wager on the same match can never be priced differently (#159's
+# same-predicate rule applied to pricing).
+
+# mode -> parent lobby table. CLOSED SET: these names are interpolated into
+# SQL, so `mode` must be validated against this dict before any query is built
+# (#188 — a FastAPI Query(enum=[...]) kwarg validates nothing at all). 1v2
+# lobbies are deliberately absent: lobby_bets.mode is CHECKed to ('team','ffa')
+# by migration 207, and 1v2 has no bet table to bind into.
+_LOBBY_BET_PARENT = {"team": "team_lobbies", "ffa": "ffa_lobbies"}
+
+# A wager whose lobby never starts is refunded by the janitor after this.
+LOBBY_BET_TTL_HOURS = 6
+# refund_pending rows older than this get re-flushed by the janitor. The
+# post-Start flush deliberately runs OUTSIDE the Start transaction (#187), so a
+# crash, a redeploy or a lock timeout between the two leaves money owed but
+# unpaid — this is the retry that closes that window.
+LOBBY_BET_REFUND_RETRY_SECONDS = 60
+# An 'open' wager whose lobby is gone or has left 'open' is CRASH RECOVERY,
+# never the normal path: the bind resolves every wager at Start.
+LOBBY_BET_ORPHAN_MINUTES = 10
+# Admission cap — must stay BELOW the smallest resolver batch (the disband
+# refund's 100) so every accepted wager resolves in one pass at Start.
+LOBBY_BET_MAX_OPEN_PER_LOBBY = 80
+
+
+def _lobby_bet_parse_targets(raw: str) -> list[str]:
+    """Validate + canonicalize a target_steams value for STORAGE.
+
+    Canonical form is SORTED and ':'-joined (migration 207 header): the same
+    pair must always produce the same string, or two wagers on one duo compare
+    as different targets at bind time. Raises 400 — placement only."""
+    parts = [p.strip() for p in str(raw or "").split(":") if p.strip()]
+    if not parts or len(parts) > 2:
+        raise HTTPException(400, "target_steams must be one steam id, or two joined with ':'")
+    for p in parts:
+        if not p.isdigit() or len(p) > 20:
+            raise HTTPException(400, "target_steams contains a malformed steam id")
+    if len(set(parts)) != len(parts):
+        raise HTTPException(400, "target_steams names the same player twice")
+    return sorted(parts)
+
+
+def _lobby_bet_stored_targets(raw) -> list[str]:
+    """Non-raising split of a STORED target_steams value, for the bind/refund
+    paths. The value was validated at placement, so a plain split is enough —
+    and a malformed legacy row must degrade to a refund, never to an exception
+    inside a Start."""
+    return sorted(p for p in str(raw or "").split(":") if p)
+
+
+async def _lobby_bet_pay_refund(db: AsyncSession, bet_id, lobby_id) -> int:
+    """refund_pending -> refunded plus the gold movement, for ONE wager.
+
+    Claim-gated so two passes (the post-Start flush and the janitor's retry)
+    can never both pay it. resolve_reason is left ALONE on purpose: it records
+    why the money came back and must survive into the terminal state.
+
+    lobby_bets has no payout/settlement_kind columns — those live on the
+    ordinary bet tables — so 'refunded' plus the positive ledger row is the
+    refund record here. Gold direction is the house rule: gold_spent comes
+    back down (never gold_earned up, which would invent income), floored at 0.
+
+    Runs in the CALLER's transaction; the caller commits. Returns the amount
+    refunded, or 0 when another pass had already claimed it."""
+    claimed = (await db.execute(text("""
+        UPDATE lobby_bets SET status = 'refunded', resolved_at = NOW()
+         WHERE id = :bid AND status = 'refund_pending'
+        RETURNING player_id, amount
+    """), {"bid": bet_id})).mappings().first()
+    if claimed is None:
+        return 0
+    amt = int(claimed["amount"])
+    await db.execute(text(
+        "UPDATE players SET gold_spent = GREATEST(0, COALESCE(gold_spent, 0) - :amt)"
+        " WHERE id = :pid"
+    ), {"amt": amt, "pid": claimed["player_id"]})
+    db.add(GoldTransaction(player_id=claimed["player_id"], amount=amt,
+                           reason="lobby_bet_refund", reference_id=str(lobby_id)))
+    # Flush inside the caller's unit of work — an unflushed ORM add would
+    # survive a savepoint rollback and write a ledger row with no gold move
+    # behind it (#187).
+    await db.flush()
+    return amt
+
+
+async def _mark_lobby_bet_refund_pending(db: AsyncSession, bet_id, reason: str) -> bool:
+    """open -> refund_pending, claim-gated.
+
+    resolved_at MUST move in the SAME statement: lobby_bets_resolution_ck is
+    evaluated per row at end of statement, so a split "set the status, then
+    set the timestamp" aborts on the first half (migration 207 header).
+
+    Its own savepoint + never raises: this is called from inside a lobby Start
+    and from the janitor, and under asyncpg one failed statement poisons the
+    entire transaction (#235)."""
+    try:
+        async with db.begin_nested():
+            got = (await db.execute(text("""
+                UPDATE lobby_bets
+                   SET status = 'refund_pending', resolved_at = NOW(), resolve_reason = :r
+                 WHERE id = :bid AND status = 'open'
+                RETURNING id
+            """), {"bid": bet_id, "r": str(reason)[:48]})).scalar()
+        return got is not None
+    except Exception as ex:
+        print(f"[LOBBY-BETS] could not mark wager {bet_id} refund_pending ({reason}): {ex}")
+        return False
+
+
+async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
+                                   lobby_id=None, older_than_seconds: int | None = None,
+                                   limit: int = 50) -> int:
+    """Pay every refund_pending wager — ONE PER TRANSACTION.
+
+    Deliberately not one wide transaction. Each refund touches a DIFFERENT
+    players row, and holding N of them while working on the next is exactly
+    the hold-and-wait shape that deadlocks against a live settle crediting a
+    bettor outside our lock set (#204). A transaction that holds at most one
+    row of a class can never be the middle of a wait chain, and a failure
+    degrades to "skip it, the janitor retries" instead of losing the batch.
+
+    Called post-commit by each Start (scoped to that lobby) and by the janitor
+    (unscoped, with an age floor). Never raises."""
+    if mode is not None and mode not in _LOBBY_BET_PARENT:
+        return 0
+    n = 0
+    for _ in range(max(1, int(limit))):
+        try:
+            row = (await db.execute(text("""
+                SELECT id, lobby_id FROM lobby_bets
+                 WHERE status = 'refund_pending'
+                   AND (CAST(:m AS text) IS NULL OR mode = CAST(:m AS text))
+                   AND (CAST(:l AS uuid) IS NULL OR lobby_id = CAST(:l AS uuid))
+                   AND (CAST(:age AS int) IS NULL
+                        OR COALESCE(resolved_at, created_at)
+                           < NOW() - MAKE_INTERVAL(secs => CAST(:age AS int)))
+                 ORDER BY created_at, id
+                 LIMIT 1
+                 FOR NO KEY UPDATE SKIP LOCKED
+            """), {"m": mode, "l": str(lobby_id) if lobby_id is not None else None,
+                   "age": int(older_than_seconds) if older_than_seconds is not None else None
+                   })).mappings().first()
+            if row is None:
+                await db.commit()
+                break
+            paid = await _lobby_bet_pay_refund(db, row["id"], row["lobby_id"])
+            await db.commit()
+            if paid:
+                n += 1
+        except Exception as ex:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            print(f"[LOBBY-BETS] refund flush stopped early ({mode}/{lobby_id}): {ex}")
+            break
+    if n:
+        print(f"[LOBBY-BETS] refunded {n} lobby wager(s)")
+    return n
+
+
+async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str) -> int:
+    """Refund every OPEN wager on a lobby that died WITHOUT ever starting.
+
+    Runs inside the CALLER's transaction, inside a savepoint: a refund problem
+    must never take down the disband/abandon/deletion that called it (#187),
+    and under asyncpg a bare try/except would leave the caller's transaction
+    poisoned anyway (#235). If the savepoint rolls back the wagers stay 'open'
+    and the janitor's orphan sweep collects them.
+
+    Call this ONLY where the lobby's TERMINAL transition actually landed (the
+    UPDATE ... RETURNING returned a row). A kick, a stale prune or one member
+    leaving does not dissolve a lobby, and refunding there would void live
+    wagers on a lobby that is about to start.
+
+    The batch is BOUNDED because paying inline means holding one players row
+    per bettor until the caller commits, and an unbounded hold of rows outside
+    the caller's own lock set is the #204 deadlock shape. A real lobby never
+    approaches this; anything past it is picked up by the janitor's orphan
+    sweep within LOBBY_BET_ORPHAN_MINUTES."""
+    if mode not in _LOBBY_BET_PARENT or lobby_id is None:
+        return 0
+    n = 0
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text("""
+                SELECT id FROM lobby_bets
+                 WHERE mode = :m AND lobby_id = :l AND status = 'open'
+                 ORDER BY created_at, id
+                 LIMIT 100
+                 FOR NO KEY UPDATE
+            """), {"m": mode, "l": lobby_id})).scalars().all()
+            for bid in rows:
+                claimed = (await db.execute(text("""
+                    UPDATE lobby_bets
+                       SET status = 'refund_pending', resolved_at = NOW(), resolve_reason = :r
+                     WHERE id = :bid AND status = 'open'
+                    RETURNING id
+                """), {"bid": bid, "r": str(reason)[:48]})).scalar()
+                if claimed is None:
+                    continue
+                if await _lobby_bet_pay_refund(db, bid, lobby_id):
+                    n += 1
+        if n:
+            print(f"[LOBBY-BETS] refunded {n} wager(s) on {mode} lobby {lobby_id} ({reason})")
+    except Exception as ex:
+        print(f"[LOBBY-BETS] refund pass failed for {mode} lobby {lobby_id} "
+              f"({reason}) — janitor retries: {ex}")
+    return n
+
+
+async def _lobby_bet_bind_context(db: AsyncSession, mode: str, lobby_id, roster: dict):
+    """Everything the per-wager bind needs, computed ONCE for the whole lobby
+    (the odds helpers are the expensive part — the FFA race integral in
+    particular). Returns None when the frozen roster is not a shape any wager
+    can bind against, which the caller turns into refunds."""
+    steam_by_pid = {p: str(s) for p, s in (roster.get("steam_by_pid") or {}).items()}
+    if mode == "team":
+        teams = roster.get("teams") or {}
+        t1 = list(teams.get(1) or [])
+        t2 = list(teams.get(2) or [])
+        if len(t1) != 2 or len(t2) != 2 or roster.get("series_id") is None:
+            return None
+        pair_ids = t1 + t2
+        # The SAME helper the live listing and place_team_bet price with —
+        # they must never diverge again (#159, and the r1-find-9 note on
+        # _team_odds_inputs).
+        oi = await _team_odds_inputs(db, pair_ids)
+
+        def _avg(ids, idx):
+            vals = [oi.get(p, (1500.0, 350.0))[idx] for p in ids]
+            return sum(vals) / len(vals)
+
+        t1_r, t2_r = _avg(t1, 0), _avg(t2, 0)
+        t1_rd, t2_rd = _avg(t1, 1), _avg(t2, 1)
+        return {
+            "series_id": roster.get("series_id"),
+            "roster_pids": set(pair_ids),
+            "sides": {1: sorted(steam_by_pid.get(p, "") for p in t1),
+                      2: sorted(steam_by_pid.get(p, "") for p in t2)},
+            "mults": {1: _odds_multiplier(t1_r, t2_r, t1_rd, t2_rd),
+                      2: _odds_multiplier(t2_r, t1_r, t2_rd, t1_rd)},
+        }
+    member_ids = list(roster.get("member_ids") or [])
+    if not member_ids:
+        return None
+    # Read the lobby back AFTER Start wrote it: score_target may have been
+    # clamped moments ago (§7d re-validation), and pricing off a pre-clamp
+    # local would quote a race length the game will not play.
+    lrow = (await db.execute(text(
+        "SELECT score_target, is_ranked FROM ffa_lobbies WHERE id = :l"
+    ), {"l": lobby_id})).mappings().first()
+    if lrow is None:
+        return None
+    field_rows = await _ffa_lobby_field(db, member_ids)
+    if len(field_rows) < 2:
+        return None
+    field = [(f["steam_id"], f["rating"], f["rd"]) for f in field_rows]
+    return {
+        "is_ranked": bool(lrow["is_ranked"]) if lrow["is_ranked"] is not None else True,
+        "roster_pids": set(member_ids),
+        "pid_by_steam": {f["steam_id"]: f["player_id"] for f in field_rows},
+        "mults": _ffa_field_odds(field, _ffa_lobby_config(lrow)["score_target"]),
+    }
+
+
+async def _bind_one_lobby_bet(db: AsyncSession, mode: str, lobby_id, ctx: dict, bet) -> str | None:
+    """Bind ONE open wager, or return the reason it cannot bind (which the
+    caller records as the refund reason). Runs inside a per-wager savepoint,
+    so returning a reason discards anything this attempted."""
+    want = _lobby_bet_stored_targets(bet["target_steams"])
+    # They joined the lobby after betting on it — the same "can't bet on your
+    # own match" rule the live endpoints enforce, applied at freeze time.
+    if bet["player_id"] in ctx["roster_pids"]:
+        return "bettor_joined"
+
+    if mode == "team":
+        if len(want) != 2:
+            return "composition_changed"
+        if want == ctx["sides"][1]:
+            side = 1
+        elif want == ctx["sides"][2]:
+            side = 2
+        else:
+            frozen = set(ctx["sides"][1]) | set(ctx["sides"][2])
+            # Both still here but split across teams is a different story from
+            # somebody having walked out — record which.
+            return "target_left" if any(s not in frozen for s in want) else "composition_changed"
+        mult = float(ctx["mults"][side])
+        if mult < 1.10:
+            # Same floor the live POSTs enforce. A wager that would pay under
+            # 10% profit is refunded rather than silently bound at bad odds.
+            return "below_odds_floor"
+        if (await db.execute(text(
+            "SELECT 1 FROM team_bets WHERE player_id = :pid AND team_series_id = :sid"
+        ), {"pid": bet["player_id"], "sid": ctx["series_id"]})).scalar():
+            return "duplicate_bet"
+        new_id = (await db.execute(text("""
+            INSERT INTO team_bets (player_id, team_series_id, bet_on_team, amount, odds_multiplier)
+            VALUES (:pid, :sid, :tm, :amt, :mult)
+            RETURNING id
+        """), {"pid": bet["player_id"], "sid": ctx["series_id"], "tm": side,
+               "amt": bet["amount"], "mult": mult})).scalar()
+        claimed = (await db.execute(text("""
+            UPDATE lobby_bets
+               SET status = 'bound', resolved_at = NOW(), resolve_reason = 'bound',
+                   bound_team_bet_id = :tbid
+             WHERE id = :bid AND status = 'open'
+            RETURNING id
+        """), {"tbid": new_id, "bid": bet["id"]})).scalar()
+        if claimed is None:
+            # Cannot happen while we hold this row FOR NO KEY UPDATE, but if
+            # it ever does the ordinary bet row must not survive as an orphan:
+            # raising rolls this savepoint back and the caller refunds.
+            raise RuntimeError(f"lobby wager {bet['id']} left 'open' during bind")
+        return None
+
+    # FFA
+    if not ctx["is_ranked"]:
+        # §6: casual lobbies are not bettable (odds are rating-derived). A
+        # lobby can be flipped to casual after a wager was taken.
+        return "lobby_casual"
+    if len(want) != 1:
+        return "composition_changed"
+    target_pid = ctx["pid_by_steam"].get(want[0])
+    if target_pid is None:
+        return "target_left"
+    mult = float(ctx["mults"].get(want[0], 1.01))
+    if mult < 1.10:
+        return "below_odds_floor"
+    if (await db.execute(text(
+        "SELECT 1 FROM ffa_bets WHERE lobby_id = :lid AND game_number = 1 AND player_id = :pid"
+    ), {"lid": lobby_id, "pid": bet["player_id"]})).scalar():
+        return "duplicate_bet"
+    # game_number 1: a lobby wager is a wager on the sitting's FIRST game,
+    # which is the only game that exists at Start.
+    new_id = (await db.execute(text("""
+        INSERT INTO ffa_bets (lobby_id, game_number, player_id, bet_on_player_id,
+                              amount, odds_multiplier)
+        VALUES (:lid, 1, :pid, :target, :amt, :mult)
+        RETURNING id
+    """), {"lid": lobby_id, "pid": bet["player_id"], "target": target_pid,
+           "amt": bet["amount"], "mult": round(mult, 2)})).scalar()
+    claimed = (await db.execute(text("""
+        UPDATE lobby_bets
+           SET status = 'bound', resolved_at = NOW(), resolve_reason = 'bound',
+               bound_bet_id = :fbid
+         WHERE id = :bid AND status = 'open'
+        RETURNING id
+    """), {"fbid": new_id, "bid": bet["id"]})).scalar()
+    if claimed is None:
+        raise RuntimeError(f"lobby wager {bet['id']} left 'open' during bind")
+    return None
+
+
+async def _bind_lobby_bets(db: AsyncSession, mode: str, lobby_id, roster: dict) -> None:
+    """Resolve every OPEN wager on a lobby the host just started: bind the
+    ones whose target survived the freeze, mark the rest refund_pending.
+
+    NEVER raises to its caller — a bet problem must not fail a lobby Start.
+    Every step is savepoint-contained, because under asyncpg one failed
+    statement poisons the whole transaction, so a bare try/except here would
+    take the Start's own commit down with it (#235).
+
+    Refunds are only MARKED here. The money moves in
+    _flush_lobby_bet_refunds AFTER the Start commits: a gold movement must not
+    sit in the failure domain of a lobby Start (#187), and holding four
+    players' rows plus N bettors' rows in one transaction is the wide-lock
+    shape of #204."""
+    if mode not in _LOBBY_BET_PARENT or lobby_id is None:
+        return
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text("""
+                SELECT id, player_id, amount, target_steams
+                  FROM lobby_bets
+                 WHERE mode = :m AND lobby_id = :l AND status = 'open'
+                 ORDER BY created_at, id
+                 LIMIT 200
+                 FOR NO KEY UPDATE
+            """), {"m": mode, "l": lobby_id})).mappings().all()
+    except Exception as ex:
+        print(f"[LOBBY-BETS] could not read open wagers for {mode} lobby {lobby_id}: {ex}")
+        return
+    if not rows:
+        return
+    ctx = None
+    try:
+        async with db.begin_nested():
+            ctx = await _lobby_bet_bind_context(db, mode, lobby_id, roster)
+    except Exception as ex:
+        print(f"[LOBBY-BETS] bind context failed for {mode} lobby {lobby_id}: {ex}")
+        ctx = None
+    if ctx is None:
+        for b in rows:
+            await _mark_lobby_bet_refund_pending(db, b["id"], "bind_error")
+        return
+    bound = 0
+    for b in rows:
+        reason = None
+        try:
+            async with db.begin_nested():
+                reason = await _bind_one_lobby_bet(db, mode, lobby_id, ctx, b)
+        except IntegrityError:
+            # The bettor already had an ordinary wager on this series/game —
+            # the pre-check above covers the common case, this covers the race.
+            reason = "duplicate_bet"
+        except Exception as ex:
+            print(f"[LOBBY-BETS] bind failed for wager {b['id']} on {mode} "
+                  f"lobby {lobby_id}: {ex}")
+            reason = "bind_error"
+        if reason:
+            await _mark_lobby_bet_refund_pending(db, b["id"], reason)
+        else:
+            bound += 1
+    print(f"[LOBBY-BETS] {mode} lobby {lobby_id}: bound {bound}/{len(rows)} lobby wager(s)")
+
+
+@app.post("/api/v1/lobby-bets", tags=["Betting"])
+async def place_lobby_bet(
+    steam_id: str = Query(...),
+    mode: str = Query(..., max_length=8, description="'team' (2v2) or 'ffa'"),
+    lobby_id: str = Query(...),
+    target_steams: str = Query(..., max_length=64,
+                               description="FFA: one steam id. 2v2: the pair, ':'-joined"),
+    amount: int = Query(..., ge=1, le=2000),   # same 2000g ceiling as every other bet
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    # Default None so place_discord_lobby_bet's direct internal call (no HTTP
+    # request in hand) still works; FastAPI injects the real Request on the
+    # HTTP path regardless of the default.
+    request: Request = None,
+):
+    """Bet on a hosted lobby that has NOT started yet. HMAC over
+    `lobby-bet:{steam_id}:{mode}:{lobby_id}:{target_steams}:{amount}`.
+
+    No odds are quoted here — the roster is not final, so there is no field to
+    price. The wager is bound to a real bet (at the odds the frozen roster
+    produces) when the host presses Start, and refunded if the exact target is
+    no longer in the game that starts."""
+    await _check_steam_session(request, steam_id, db)
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"lobby-bet:{steam_id}:{mode}:{lobby_id}:{target_steams}:{amount}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    await _check_ban_or_raise(db, steam_id)
+
+    # Validate mode against the closed set BEFORE it reaches any interpolated
+    # SQL (#188).
+    parent = _LOBBY_BET_PARENT.get(mode)
+    if parent is None:
+        raise HTTPException(status_code=400, detail="mode must be 'team' or 'ffa'")
+    try:
+        lid = UUID(lobby_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid lobby_id")
+    targets = _lobby_bet_parse_targets(target_steams)
+    if mode == "team" and len(targets) != 2:
+        raise HTTPException(status_code=400,
+                            detail="A 2v2 lobby wager names both members of the pair")
+    if mode == "ffa" and len(targets) != 1:
+        raise HTTPException(status_code=400, detail="An FFA lobby wager names one player")
+
+    bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    # Serialize this bettor's concurrent placements on a value that exists
+    # whether or not any row does (#207), before taking any row lock.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
+
+    # FOR NO KEY UPDATE, never FOR UPDATE: both queue tables FK their
+    # series_id to these lobby rows, so every membership write takes FOR KEY
+    # SHARE on them — and FOR KEY SHARE conflicts with exactly one mode, FOR
+    # UPDATE (#202). We never touch a key column here.
+    #
+    # The status re-read UNDER this lock is what closes the race against
+    # Start: Start holds the same row (via _lock_queue_group_for_player /
+    # _lobby_activate) for the whole freeze, so a wager either lands before
+    # the freeze and is seen by _bind_lobby_bets, or is refused here.
+    lobby = (await db.execute(text(
+        f"SELECT id, status{', is_ranked' if mode == 'ffa' else ''}"
+        f"  FROM {parent} WHERE id = :lid FOR NO KEY UPDATE"
+    ), {"lid": lid})).mappings().first()
+    if lobby is None:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if lobby["status"] != "open":
+        raise HTTPException(status_code=409,
+                            detail="That lobby is no longer open — bet on the live game instead")
+    if mode == "ffa" and not bool(lobby["is_ranked"] if lobby["is_ranked"] is not None else True):
+        # Mirrors /ffa/bettable and place_ffa_bet: odds are rating-derived, so
+        # a casual sitting has nothing to price (same-predicate rule).
+        raise HTTPException(status_code=409, detail="Casual lobbies are not bettable")
+
+    # Membership before Start lives in the mode's QUEUE table as
+    # status='lobby' with series_id = the lobby id — the lobby row's
+    # member_ids is not written until Start freezes the roster. Same freshness
+    # contract (75s) every other lobby surface uses.
+    if mode == "team":
+        live = await _lobby_live_members(db, "team", lid)
+    else:
+        live = await _ffa_live_lobby_members(db, lid)
+    live_steams = {m["steam_id"] for m in live}
+    live_pids = {m["player_id"] for m in live}
+    if bettor.id in live_pids:
+        raise HTTPException(status_code=409, detail="Cannot bet on a lobby you are in")
+    missing = [s for s in targets if s not in live_steams]
+    if missing:
+        raise HTTPException(status_code=400,
+                            detail="Not in that lobby right now: " + ", ".join(missing))
+
+    # Atomic conditional debit (#148): the row-level guard IS the balance
+    # check — a read-then-write pair loses updates across two concurrent
+    # placements on different lobbies.
+    debited = (await db.execute(text("""
+        UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt
+         WHERE id = :pid
+           AND COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0) >= :amt
+        RETURNING id
+    """), {"amt": amount, "pid": bettor.id})).scalar()
+    if debited is None:
+        balance = (bettor.gold_earned or 0) - (bettor.gold_spent or 0)
+        raise HTTPException(status_code=402,
+                            detail=f"Insufficient gold: have {max(0, balance)}, need {amount}")
+    # Review find 5: bind and disband-refund each resolve a bounded batch
+    # (100/200) in one pass. Cap admission below the smaller bound so every
+    # accepted wager is guaranteed to be RESOLVED at Start rather than left
+    # for the orphan janitor — refusing a 101st wager is honest; binding
+    # only some of them is not.
+    _open_n = (await db.execute(text(
+        "SELECT COUNT(*) FROM lobby_bets WHERE mode = :m AND lobby_id = :l AND status = 'open'"
+    ), {"m": mode, "l": lid})).scalar() or 0
+    if _open_n >= LOBBY_BET_MAX_OPEN_PER_LOBBY:
+        raise HTTPException(status_code=409,
+                            detail="This lobby already has the maximum number of open bets")
+    # str(lid), never the raw query string: the refund side writes str(UUID),
+    # and a ledger whose stake and refund rows carry differently-formatted
+    # ids for the same lobby cannot be reconciled.
+    db.add(GoldTransaction(player_id=bettor.id, amount=-amount,
+                           reason="lobby_bet_stake", reference_id=str(lid)))
+    canonical_targets = ":".join(targets)
+    new_id = (await db.execute(text("""
+        INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams, status)
+        VALUES (:m, :l, :pid, :amt, :tgt, 'open')
+        ON CONFLICT (mode, lobby_id, player_id) DO NOTHING
+        RETURNING id
+    """), {"m": mode, "l": lid, "pid": bettor.id, "amt": amount,
+           "tgt": canonical_targets})).scalar()
+    if new_id is None:
+        # One wager per player per lobby. Roll back rather than issue a
+        # compensating credit: the rollback undoes the debit AND its ledger
+        # row as one act, where a compensating UPDATE would be a second money
+        # movement with its own failure mode.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Already bet on this lobby")
+    await db.commit()
+    return {
+        "status": "placed",
+        "mode": mode,
+        "lobby_id": str(lid),
+        "amount": amount,
+        "bet_id": str(new_id),
+        "target_steams": canonical_targets,
+        "note": "odds are set when the lobby starts",
+    }
+
+
+@app.post("/api/v1/lobby-bets/cancel", tags=["Betting"])
+async def cancel_lobby_bet(
+    steam_id: str = Query(...),
+    mode: str = Query(..., max_length=8),
+    lobby_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Pull a lobby wager back before the lobby starts. HMAC over
+    `lobby-bet-cancel:{steam_id}:{mode}:{lobby_id}`.
+
+    Claim + refund run in ONE transaction on purpose: either the wager is
+    cancelled and the gold is back, or nothing happened and the bettor can
+    retry. A committed refund_pending here would only widen the window in
+    which money is owed but unpaid.
+
+    Deliberately NO ban check, unlike the placement endpoints: this only ever
+    returns a player's own stake, and refusing it would strand a banned
+    account's gold with no way to get it back.
+
+    Deliberately no lobby-status check either — the 'open' claim gate below is
+    the real one. Once a lobby starts, its wagers are 'bound' or
+    'refund_pending' and this cannot touch them; the one case where a started
+    lobby still has an 'open' wager is a failed bind, where cancelling is
+    exactly the right answer."""
+    await _check_steam_session(request, steam_id, db)
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"lobby-bet-cancel:{steam_id}:{mode}:{lobby_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if mode not in _LOBBY_BET_PARENT:
+        raise HTTPException(status_code=400, detail="mode must be 'team' or 'ffa'")
+    try:
+        lid = UUID(lobby_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid lobby_id")
+    bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
+    claimed = (await db.execute(text("""
+        UPDATE lobby_bets
+           SET status = 'refund_pending', resolved_at = NOW(),
+               resolve_reason = 'cancelled_by_bettor'
+         WHERE mode = :m AND lobby_id = :l AND player_id = :pid AND status = 'open'
+        RETURNING id, amount
+    """), {"m": mode, "l": lid, "pid": bettor.id})).mappings().first()
+    if claimed is None:
+        await db.rollback()
+        raise HTTPException(status_code=404,
+                            detail="No open wager on that lobby (already bound, cancelled or refunded)")
+    refunded = await _lobby_bet_pay_refund(db, claimed["id"], lid)
+    await db.commit()
+    print(f"[LOBBY-BETS] {steam_id} cancelled their {mode} lobby wager on {lid} (-{refunded}g held)")
+    return {"status": "cancelled", "mode": mode, "lobby_id": str(lid),
+            "amount": int(claimed["amount"]), "refunded": int(refunded)}
+
+
+# ── Discord-side bet placement (bot parity) ────────────────────────────────
+# Same shape as place_discord_bet: X-Internal-Key auth, resolve the Discord
+# user to a linked player, re-sign internally, and call the SAME placement
+# function the in-game endpoint uses. Re-signing rather than re-implementing
+# is the point — no validation rule can drift between the two surfaces.
+
+@app.post("/api/v1/discord-team-bets", tags=["Betting"])
+async def place_discord_team_bet(
+    discord_user_id: str = Query(..., max_length=32),
+    team_series_id: str = Query(...),
+    bet_on_team: int = Query(..., ge=1, le=2),
+    amount: int = Query(..., ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """Bot-side 2v2 bet placement. Runs the whole /team-bets pipeline (ban
+    check, liveness + close windows, odds floor, atomic debit, one bet per
+    series)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(403, "Internal endpoint")
+    bettor = (await db.execute(
+        select(Player).where(Player.discord_id == discord_user_id)
+    )).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(404, "Discord account not linked to any player. Use !link from in-game first.")
+    sig = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"team-bet:{bettor.steam_id}:{team_series_id}:{bet_on_team}:{amount}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return await place_team_bet(
+        request=None, steam_id=bettor.steam_id, team_series_id=team_series_id,
+        bet_on_team=bet_on_team, amount=amount, sig=sig, db=db,
+    )
+
+
+@app.post("/api/v1/discord-ffa-bets", tags=["Betting"])
+async def place_discord_ffa_bet(
+    discord_user_id: str = Query(..., max_length=32),
+    lobby_id: str = Query(...),
+    bet_on_steam_id: str = Query(...),
+    amount: int = Query(..., ge=1, le=2000),
+    game_number: int = Query(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """Bot-side FFA bet placement. game_number is part of the canonical the
+    in-game client signs, so the bot must pass the one it is quoting — the
+    endpoint rejects anything but the lobby's next unreported game."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(403, "Internal endpoint")
+    bettor = (await db.execute(
+        select(Player).where(Player.discord_id == discord_user_id)
+    )).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(404, "Discord account not linked to any player. Use !link from in-game first.")
+    sig = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"ffa-bet:{bettor.steam_id}:{lobby_id}:{bet_on_steam_id}:{amount}:{game_number}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return await place_ffa_bet(
+        request=None, steam_id=bettor.steam_id, lobby_id=lobby_id,
+        bet_on_steam_id=bet_on_steam_id, amount=amount, game_number=game_number,
+        sig=sig, db=db,
+    )
+
+
+@app.post("/api/v1/discord-lobby-bets", tags=["Betting"])
+async def place_discord_lobby_bet(
+    discord_user_id: str = Query(..., max_length=32),
+    mode: str = Query(..., max_length=8),
+    lobby_id: str = Query(...),
+    target_steams: str = Query(..., max_length=64),
+    amount: int = Query(..., ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """Bot-side lobby-phase bet placement. target_steams is signed verbatim
+    and canonicalized server-side, so the bot may send the pair in either
+    order."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(403, "Internal endpoint")
+    bettor = (await db.execute(
+        select(Player).where(Player.discord_id == discord_user_id)
+    )).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(404, "Discord account not linked to any player. Use !link from in-game first.")
+    sig = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"lobby-bet:{bettor.steam_id}:{mode}:{lobby_id}:{target_steams}:{amount}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return await place_lobby_bet(
+        steam_id=bettor.steam_id, mode=mode, lobby_id=lobby_id,
+        target_steams=target_steams, amount=amount, sig=sig, db=db, request=None,
+    )
 
 
 # ── Per-player mode histories (Sid round-2 item 8) ──────────────────────────

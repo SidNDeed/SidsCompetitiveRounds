@@ -339,6 +339,7 @@ async def on_ready():
     if not poll_live_bets.is_running(): poll_live_bets.start()
     if not poll_team_live_bets.is_running(): poll_team_live_bets.start()
     if not poll_ffa_live_bets.is_running(): poll_ffa_live_bets.start()
+    if not poll_lobby_bets.is_running(): poll_lobby_bets.start()
     if not poll_gambler_pings.is_running(): poll_gambler_pings.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
@@ -7624,49 +7625,21 @@ class LiveBetButton(discord.ui.Button):
         self.on_p1 = on_p1
 
     async def callback(self, interaction: discord.Interaction):
+        # r2 find 3: delegate to the shared helper instead of duplicating the
+        # call inline — the helper acknowledges the interaction BEFORE the
+        # backend round-trip, so a placement blocked behind a lobby Start
+        # cannot commit a debit while Discord shows "interaction failed".
         bet_on_steam = self.parent_view.p1_steam if self.on_p1 else self.parent_view.p2_steam
         side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
         vs_name = self.parent_view.p2_name if self.on_p1 else self.parent_view.p1_name
-        try:
-            result = await api_post(
-                "/discord-bets",
-                params={
-                    "discord_user_id": str(interaction.user.id),
-                    "series_id": self.parent_view.series_id,
-                    "bet_on_steam_id": bet_on_steam,
-                    "amount": self.amount,
-                },
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"Bet failed: {e}", ephemeral=True)
-            return
-        if not result:
-            await interaction.response.send_message("Bet failed: backend unreachable.", ephemeral=True)
-            return
-        if isinstance(result, dict) and "error" in result:
-            err = result.get("error", "")
-            # Surface the server's reason verbatim (e.g. "not linked", "insufficient gold",
-            # "bets locked", "already bet on this series").
-            try:
-                err_obj = json.loads(err)
-                msg = err_obj.get("detail") or err
-            except Exception:
-                msg = err
-            await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
-            return
-        # Name the MATCHUP, not just the side — a player can have two live
-        # series (a stalled one + the one everyone's watching) and bettors
-        # need to know which pairing their gold landed on (bug #53).
-        await interaction.response.send_message(
-            f"✅ Bet placed: **{self.amount:,}g** on **{side_name}** (vs {vs_name}, series `{self.parent_view.series_id[:8]}`).",
-            ephemeral=True,
-        )
-
+        await _place_discord_bet(interaction, self.parent_view.series_id,
+                                 bet_on_steam, side_name, self.amount, vs_name)
 
 async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
                              bet_on_steam: str, side_name: str, amount: int,
                              vs_name: str = ""):
     """Shared bet-placement path for preset buttons + the custom modal."""
+    await _bet_ack(interaction)
     try:
         result = await api_post(
             "/discord-bets",
@@ -7678,25 +7651,89 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
             },
         )
     except Exception as e:
-        await interaction.response.send_message(f"Bet failed: {e}", ephemeral=True)
+        await _bet_reply(interaction, f"Bet failed: {e}")
         return
     if not result:
-        await interaction.response.send_message("Bet failed: backend unreachable.", ephemeral=True)
+        await _bet_reply(interaction, "Bet failed: backend unreachable.")
         return
+    # r2 find 2: these two used interaction.response.* AFTER the defer above,
+    # which raises InteractionResponded and swallowed the error entirely.
+    err = _discord_bet_error(result)
+    if err:
+        await _bet_reply(interaction, f"❌ {err}")
+        return
+    vs_part = f" (vs {vs_name}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
+    await _bet_reply(interaction,
+        f"✅ Bet placed: **{amount:,}g** on **{side_name}**{vs_part}.",)
+
+
+def _discord_bet_error(result) -> str | None:
+    """None when the POST landed, else the message to show the bettor.
+
+    Same shape as _place_discord_bet's inline handling, factored out because
+    every mode now has a Discord placement path. api_post hands back
+    {"error": <raw body>, "status": N} for any non-200 and the body is
+    FastAPI's {"detail": ...} — the server's own reason is surfaced VERBATIM
+    so a rule change (window closed, odds floor, already bet, banned) never
+    needs a matching bot change to stay truthful.
+    """
+    if not result:
+        return "Bet failed: backend unreachable."
     if isinstance(result, dict) and "error" in result:
         err = result.get("error", "")
         try:
-            err_obj = json.loads(err)
-            msg = err_obj.get("detail") or err
+            return json.loads(err).get("detail") or err
         except Exception:
-            msg = err
-        await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
-        return
-    vs_part = f" (vs {vs_name}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
-    await interaction.response.send_message(
-        f"✅ Bet placed: **{amount:,}g** on **{side_name}**{vs_part}.",
-        ephemeral=True,
-    )
+            return err
+    return None
+
+
+async def _bet_ack(interaction: discord.Interaction):
+    """Acknowledge within Discord's 3s window so a slow backend cannot turn a
+    COMMITTED wager into "interaction failed" (review find 8). Safe to call
+    twice — a second defer on an already-acknowledged interaction raises and
+    is swallowed."""
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=False)
+    except Exception:
+        pass
+
+
+async def _bet_reply(interaction: discord.Interaction, msg: str):
+    """Ephemeral answer that works whether or not the interaction was
+    deferred."""
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception as e:
+        print(f"[BETS] reply failed: {e}")
+
+
+def _parse_bet_amount(raw: str):
+    """(amount, error_message). 1..2,000g is the ceiling every bet endpoint
+    enforces; rejecting here only saves a round trip — the server is the gate."""
+    # Review find 3: stripping "." turned "10.50" into 1050 — a silent 100x
+    # wager the server then correctly debited. Thousands separators are a
+    # courtesy; a decimal point means the user typed an amount this currency
+    # does not have, so REJECT rather than reinterpret.
+    cleaned = (raw or "").replace(",", "").replace(" ", "").strip()
+    if not cleaned.isdigit():
+        return None, "Enter a whole number of gold, e.g. `1250` (no decimals)."
+    try:
+        amount = int(cleaned)
+    except ValueError:
+        return None, "Enter a whole number of gold, e.g. `1250`."
+    if amount < 1 or amount > 2000:
+        return None, "Bet must be between 1 and 2,000 gold."
+    return amount, None
+
+
+def _pair_label(a: str, b: str, per: int = 12) -> str:
+    """"A+B" for a two-player side. Truncated per NAME rather than on the joined
+    string so the second name can never be annihilated by the cap (#260)."""
+    return f"{(a or '?')[:per]}+{(b or '?')[:per]}"
 
 
 class LiveBetCustomButton(discord.ui.Button):
@@ -7728,14 +7765,12 @@ class LiveBetModal(discord.ui.Modal):
         self.add_item(self.amount_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw = (self.amount_input.value or "").replace(",", "").replace(".", "").strip()
-        try:
-            amount = int(raw)
-        except ValueError:
-            await interaction.response.send_message("❌ Enter a whole number of gold, e.g. `1250`.", ephemeral=True)
-            return
-        if amount < 1 or amount > 2000:
-            await interaction.response.send_message("❌ Bet must be between 1 and 2,000 gold.", ephemeral=True)
+        # r2 find 1: this used to carry its own parser that stripped "." —
+        # "10.50" became a 1,050g wager the server then correctly debited.
+        # ONE parser for every surface (_parse_bet_amount rejects decimals).
+        amount, err = _parse_bet_amount(self.amount_input.value)
+        if err:
+            await _bet_reply(interaction, f"❌ {err}")
             return
         bet_on_steam = self.parent_view.p1_steam if self.on_p1 else self.parent_view.p2_steam
         side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
@@ -7790,11 +7825,120 @@ def _format_live_bet_embed(s: dict) -> discord.Embed:
     em.set_footer(text=f"series {s['series_id'][:8]}")
     return em
 
+class TeamLiveBetView(discord.ui.View):
+    """2v2 twin of LiveBetView — identical row layout (team 1 presets row 0,
+    team 2 presets row 1, both customs row 2).
+
+    PER-SIDE gating for the same reason the 1v1 view has it: the endpoint
+    refuses the chosen side below the 1.10x floor while the global bets_locked
+    only trips when BOTH sides are, so rendering a heavy favorite's buttons is
+    a guaranteed 409 (#159 same-predicate rule). Absent flags default True so
+    an older API response renders exactly as it did before.
+    """
+    def __init__(self, series_id: str, t1_label: str, t2_label: str,
+                 t1_bettable: bool = True, t2_bettable: bool = True):
+        super().__init__(timeout=None)
+        self.series_id = series_id
+        self.t1_label = t1_label
+        self.t2_label = t2_label
+        for amt in LIVE_BET_AMOUNTS:
+            if t1_bettable:
+                self.add_item(TeamLiveBetButton(self, amt, on_t1=True))
+        for amt in LIVE_BET_AMOUNTS:
+            if t2_bettable:
+                self.add_item(TeamLiveBetButton(self, amt, on_t1=False))
+        if t1_bettable:
+            self.add_item(TeamLiveBetCustomButton(self, on_t1=True))
+        if t2_bettable:
+            self.add_item(TeamLiveBetCustomButton(self, on_t1=False))
+
+
+class TeamLiveBetButton(discord.ui.Button):
+    def __init__(self, parent: TeamLiveBetView, amount: int, on_t1: bool):
+        side_label = parent.t1_label if on_t1 else parent.t2_label
+        style = discord.ButtonStyle.primary if on_t1 else discord.ButtonStyle.success
+        super().__init__(label=f"{amount:,}g {side_label}"[:80], style=style,
+                         row=(0 if on_t1 else 1),
+                         custom_id=f"tlivebet:{parent.series_id}:{amount}:{'t1' if on_t1 else 't2'}")
+        self.parent_view = parent
+        self.amount = amount
+        self.on_t1 = on_t1
+
+    async def callback(self, interaction: discord.Interaction):
+        await _place_discord_team_bet(interaction, self.parent_view,
+                                      1 if self.on_t1 else 2, self.amount)
+
+
+class TeamLiveBetCustomButton(discord.ui.Button):
+    def __init__(self, parent: TeamLiveBetView, on_t1: bool):
+        side_label = parent.t1_label if on_t1 else parent.t2_label
+        style = discord.ButtonStyle.primary if on_t1 else discord.ButtonStyle.success
+        super().__init__(label=f"Custom on {side_label}..."[:80], style=style, row=2,
+                         custom_id=f"tlivebetc:{parent.series_id}:{'t1' if on_t1 else 't2'}")
+        self.parent_view = parent
+        self.on_t1 = on_t1
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(TeamLiveBetModal(self.parent_view, self.on_t1))
+
+
+class TeamLiveBetModal(discord.ui.Modal):
+    def __init__(self, parent: TeamLiveBetView, on_t1: bool):
+        side = parent.t1_label if on_t1 else parent.t2_label
+        super().__init__(title=f"Bet on {side[:38]}")
+        self.parent_view = parent
+        self.on_t1 = on_t1
+        self.amount_input = discord.ui.TextInput(
+            label="Gold amount (1 - 2,000)",
+            placeholder="e.g. 1250",
+            min_length=1, max_length=5, required=True,
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        amount, err = _parse_bet_amount(self.amount_input.value)
+        if err:
+            await _bet_reply(interaction, f"❌ {err}")
+            return
+        await _place_discord_team_bet(interaction, self.parent_view,
+                                      1 if self.on_t1 else 2, amount)
+
+
+async def _place_discord_team_bet(interaction: discord.Interaction,
+                                  parent: TeamLiveBetView, bet_on_team: int, amount: int):
+    """Shared 2v2 placement path for preset buttons + the custom modal."""
+    await _bet_ack(interaction)
+    side_name = parent.t1_label if bet_on_team == 1 else parent.t2_label
+    vs_name = parent.t2_label if bet_on_team == 1 else parent.t1_label
+    try:
+        result = await api_post(
+            "/discord-team-bets",
+            params={
+                "discord_user_id": str(interaction.user.id),
+                "team_series_id": parent.series_id,
+                "bet_on_team": bet_on_team,
+                "amount": amount,
+            },
+        )
+    except Exception as e:
+        await _bet_reply(interaction, f"Bet failed: {e}")
+        return
+    err = _discord_bet_error(result)
+    if err:
+        await _bet_reply(interaction, f"❌ {err}")
+        return
+    # Name the MATCHUP, not just the side — the same reason the 1v1 path does
+    # (bug #53): a player can be in more than one live series.
+    await _bet_reply(interaction,
+        f"✅ Bet placed: **{amount:,}g** on **{side_name}** "
+        f"(vs {vs_name}, 2v2 series `{parent.series_id[:8]}`).",)
+
+
 def _format_team_live_bet_embed(s: dict) -> discord.Embed:
-    """2v2 live-series embed for the gambler channel. Read-only (no Discord bet
-    buttons yet — in-game 2v2 betting already works; this just makes 2v2 series
-    VISIBLE in the gambler chat, which they weren't before: poll_live_bets only
-    polled the 1v1 /series/active, so every 2v2 series was silently absent)."""
+    """2v2 live-series embed for the gambler channel, with Discord bet buttons
+    attached by the poller when the series is open (Aug 9 parity pass — the
+    embed was visibility-only before, so 2v2 was bettable in-game and nowhere
+    else)."""
     t1a = s.get("t1a_name", "?"); t1b = s.get("t1b_name", "?")
     t2a = s.get("t2a_name", "?"); t2b = s.get("t2b_name", "?")
     # Per-player 2v2 ratings (not the team average).
@@ -7810,7 +7954,8 @@ def _format_team_live_bet_embed(s: dict) -> discord.Embed:
         f"Team 2: **{t2a}** ({t2ar}) + **{t2b}** ({t2br})",
         f"Series: **{t1w} - {t2w}**",
         f"Odds: **{t1o}x** Team 1 / **{t2o}x** Team 2",
-        "_Bet in-game via the F5 → Leaderboard panel._",
+        ("_Bet in-game via the F5 → Leaderboard panel._" if locked else
+         "_Bet with the buttons below, or in-game via F5 → Leaderboard._"),
     ]
     if locked:
         if reason == "game_in_progress":
@@ -7832,14 +7977,101 @@ team_live_bet_messages = {}
 ffa_live_bet_messages = {}
 
 
-def _format_ffa_live_bet_embed(lobby):
-    """Read-only live-odds embed for one FFA lobby, keyed per GAME.
+class FfaLiveBetView(discord.ui.View):
+    """FFA placement UI. A 10-player field x 3 presets would blow past Discord's
+    25-component cap, so the field is a Select and the amount is a Modal —
+    2 components total regardless of lobby size."""
+    def __init__(self, lobby_id: str, game_number, targets):
+        super().__init__(timeout=None)
+        self.add_item(FfaBetSelect(lobby_id, game_number, targets))
 
-    Deliberately not a bet-placement UI: 10 players x 3 presets would blow past
-    Discord's 25-component cap, so placing an FFA bet from Discord needs a
-    select+modal flow that is its own piece of work. This is the visibility half
-    Sid asked for ("make FFA bets show up in the discord gambler chat").
-    """
+
+class FfaBetSelect(discord.ui.Select):
+    def __init__(self, lobby_id: str, game_number, targets):
+        options = []
+        names = {}
+        for t in targets:
+            sid = str(t.get("steam_id") or "")
+            if not sid or sid in names:
+                continue
+            nm = str(t.get("name") or "?")
+            names[sid] = nm
+            odds = t.get("odds")
+            try:
+                # A missing/zero multiplier must not render as "x0.00 payout" —
+                # that reads as a real price rather than as absent data.
+                odds_part = f"x{float(odds):.2f} payout" if odds else "odds pending"
+            except (TypeError, ValueError):
+                odds_part = "odds pending"
+            rating = t.get("rating")
+            desc = f"{odds_part} - rating {rating}" if rating is not None else odds_part
+            options.append(discord.SelectOption(label=nm[:100], value=sid[:100],
+                                                description=desc[:100]))
+            if len(options) >= 25:
+                break
+        super().__init__(placeholder="Pick a player to bet on...", min_values=1, max_values=1,
+                         options=options,
+                         custom_id=f"ffabet:{lobby_id}:{game_number if game_number else 0}")
+        self.lobby_id = lobby_id
+        self.game_number = game_number
+        self.names = names
+
+    async def callback(self, interaction: discord.Interaction):
+        steam = self.values[0]
+        await interaction.response.send_modal(
+            FfaBetModal(self.lobby_id, self.game_number, steam, self.names.get(steam, "?")))
+
+
+class FfaBetModal(discord.ui.Modal):
+    def __init__(self, lobby_id: str, game_number, bet_on_steam: str, name: str):
+        super().__init__(title=f"Bet on {str(name)[:38]}")
+        self.lobby_id = lobby_id
+        self.game_number = game_number
+        self.bet_on_steam = bet_on_steam
+        self.name = name
+        self.amount_input = discord.ui.TextInput(
+            label="Gold amount (1 - 2,000)",
+            placeholder="e.g. 1250",
+            min_length=1, max_length=5, required=True,
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        amount, err = _parse_bet_amount(self.amount_input.value)
+        if err:
+            await _bet_reply(interaction, f"❌ {err}")
+            return
+        params = {
+            "discord_user_id": str(interaction.user.id),
+            "lobby_id": self.lobby_id,
+            "bet_on_steam_id": self.bet_on_steam,
+            "amount": amount,
+        }
+        # The listing's game_number is what makes the bet land on the game the
+        # embed is showing. If it is absent the server picks the next unreported
+        # game itself — omitting is strictly safer than guessing a number that
+        # would bind the wager to the wrong game.
+        if self.game_number:
+            params["game_number"] = int(self.game_number)
+        await _bet_ack(interaction)
+        try:
+            result = await api_post("/discord-ffa-bets", params=params)
+        except Exception as e:
+            await _bet_reply(interaction, f"Bet failed: {e}")
+            return
+        perr = _discord_bet_error(result)
+        if perr:
+            await _bet_reply(interaction, f"❌ {perr}")
+            return
+        game_part = f" (game {int(self.game_number)})" if self.game_number else ""
+        await _bet_reply(interaction,
+            f"✅ Bet placed: **{amount:,}g** on **{self.name}**{game_part} "
+            f"in FFA lobby `{str(self.lobby_id)[:8]}`.",)
+
+
+def _format_ffa_live_bet_embed(lobby):
+    """Live-odds embed for one FFA lobby, keyed per GAME. The poller attaches
+    FfaLiveBetView while the per-game window is open."""
     n = lobby.get("player_count") or len(lobby.get("players") or [])
     game_no = lobby.get("game_number") or 1
     locked = False
@@ -7857,13 +8089,13 @@ def _format_ffa_live_bet_embed(lobby):
     elif not open_:
         state = "⏳ Betting for this game has closed"
     else:
-        state = "🟢 **Bets open** — in game, F5 → Leaderboard"
+        state = "🟢 **Bets open** — pick a player below, or in-game via F5 → Leaderboard"
     embed = discord.Embed(
         title=f"🎯 FFA Game {game_no} — {n} players",
         description=state + "\n\n" + "\n".join(lines),
         color=0x8E44AD if not locked else 0x555555,
     )
-    embed.set_footer(text="Bet in-game: F5 -> Leaderboard")
+    embed.set_footer(text="Bet here or in-game: F5 -> Leaderboard")
     return embed
 
 
@@ -7875,8 +8107,16 @@ async def poll_ffa_live_bets():
     window genuinely re-opens for every game of a sitting — a new game deserves
     a new post, not an edit of the finished one. Own guarded loop: a tasks.loop
     dies permanently on an unhandled exception (#129), so this must not share
-    one with the 1v1/2v2 pollers.
+    one with the 1v1/2v2 pollers, and the body must not be able to throw past
+    the wrapper (view construction reads payload fields that may be missing).
     """
+    try:
+        await _poll_ffa_live_bets_once()
+    except Exception as e:
+        print(f"[FFA-LIVE-BETS] poll error: {e}")
+
+
+async def _poll_ffa_live_bets_once():
     if not LIVE_BETS_CHANNEL_ID:
         return
     data = await api_get("/ffa/bettable")
@@ -7895,31 +8135,64 @@ async def poll_ffa_live_bets():
         key = (lid, int(l.get("game_number") or 1))
         seen_now.add(key)
         embed = _format_ffa_live_bet_embed(l)
+        view = None
+        # bets_open is the server's own window predicate — the listing and the
+        # POST must agree or the dropdown is a guaranteed 409 (#159). Per-player
+        # `bettable` carries the same information one level down (odds floor),
+        # and defaults True so an older response still renders.
+        if l.get("bets_open"):
+            targets = [
+                {"steam_id": p.get("steam_id"),
+                 "name": p.get("display_name") or "?",
+                 "odds": p.get("odds_multiplier"),
+                 "rating": p.get("rating")}
+                for p in (l.get("players") or [])
+                if p.get("steam_id") and bool(p.get("bettable", True))
+            ]
+            if targets:
+                view = FfaLiveBetView(lid, l.get("game_number"), targets)
         msg_id = ffa_live_bet_messages.get(key)
         try:
             if msg_id is None:
-                msg = await channel.send(embed=embed)
+                msg = await channel.send(embed=embed, view=view)
                 ffa_live_bet_messages[key] = msg.id
             else:
                 msg = await channel.fetch_message(msg_id)
-                await msg.edit(embed=embed)
+                await msg.edit(embed=embed, view=view)
         except discord.NotFound:
             try:
-                msg = await channel.send(embed=embed)
+                msg = await channel.send(embed=embed, view=view)
                 ffa_live_bet_messages[key] = msg.id
             except Exception as e:
                 print(f"[FFA-LIVE-BETS] re-post failed for {lid}: {e}")
         except Exception as e:
             print(f"[FFA-LIVE-BETS] update failed for {lid}: {e}")
+    # Review find 4 (FFA twin): strip the select/controls before forgetting
+    # the message; keep the entry when the edit fails so it retries.
     for key in [k for k in list(ffa_live_bet_messages.keys()) if k not in seen_now]:
-        del ffa_live_bet_messages[key]
+        mid = ffa_live_bet_messages.get(key)
+        try:
+            if mid is not None:
+                msg = await channel.fetch_message(mid)
+                await msg.edit(view=None)
+            ffa_live_bet_messages.pop(key, None)
+        except discord.NotFound:
+            ffa_live_bet_messages.pop(key, None)
+        except Exception as e:
+            print(f"[FFA-LIVE-BETS] retire failed for {key} (will retry): {e}")
 
 
 @tasks.loop(seconds=10)
 async def poll_team_live_bets():
-    """Mirror of poll_live_bets for 2v2. Posts/updates a read-only embed per
-    active team_series so 2v2 games appear in the gambler channel (they were
-    structurally absent before — no loop polled /team/series/active)."""
+    """Mirror of poll_live_bets for 2v2 — embed + bet buttons per active
+    team_series. Fully guarded body (#129)."""
+    try:
+        await _poll_team_live_bets_once()
+    except Exception as e:
+        print(f"[TEAM-LIVE-BETS] poll error: {e}")
+
+
+async def _poll_team_live_bets_once():
     if not LIVE_BETS_CHANNEL_ID:
         return
     data = await api_get("/team/series/active")
@@ -7936,29 +8209,62 @@ async def poll_team_live_bets():
         if not sid: continue
         seen_now.add(sid)
         embed = _format_team_live_bet_embed(s)
+        view = None
+        if not s.get("bets_locked", False):
+            _t1b = bool(s.get("t1_bettable", True))
+            _t2b = bool(s.get("t2_bettable", True))
+            if _t1b or _t2b:
+                view = TeamLiveBetView(
+                    series_id=sid,
+                    t1_label=_pair_label(s.get("t1a_name", "?"), s.get("t1b_name", "?")),
+                    t2_label=_pair_label(s.get("t2a_name", "?"), s.get("t2b_name", "?")),
+                    t1_bettable=_t1b, t2_bettable=_t2b,
+                )
         msg_id = team_live_bet_messages.get(sid)
         try:
             if msg_id is None:
-                msg = await channel.send(embed=embed)
+                msg = await channel.send(embed=embed, view=view)
                 team_live_bet_messages[sid] = msg.id
             else:
                 msg = await channel.fetch_message(msg_id)
-                await msg.edit(embed=embed)
+                await msg.edit(embed=embed, view=view)
         except discord.NotFound:
             try:
-                msg = await channel.send(embed=embed)
+                msg = await channel.send(embed=embed, view=view)
                 team_live_bet_messages[sid] = msg.id
             except Exception as e:
                 print(f"[TEAM-LIVE-BETS] re-post failed for {sid}: {e}")
         except Exception as e:
             print(f"[TEAM-LIVE-BETS] update failed for {sid}: {e}")
-    stale = [sid for sid in list(team_live_bet_messages.keys()) if sid not in seen_now]
-    for sid in stale:
-        del team_live_bet_messages[sid]
+    # Review find 4: strip the controls BEFORE forgetting the message, and
+    # only forget it once the edit landed — dropping tracking first left a
+    # live button set on an unlisted series forever.
+    for sid in [x for x in list(team_live_bet_messages.keys()) if x not in seen_now]:
+        mid = team_live_bet_messages.get(sid)
+        try:
+            if mid is not None:
+                msg = await channel.fetch_message(mid)
+                await msg.edit(view=None)
+            team_live_bet_messages.pop(sid, None)
+        except discord.NotFound:
+            team_live_bet_messages.pop(sid, None)   # message is gone; nothing to retire
+        except Exception as e:
+            # Keep the entry so the next tick retries the retirement.
+            print(f"[TEAM-LIVE-BETS] retire failed for {sid} (will retry): {e}")
 
 
 @tasks.loop(seconds=10)
 async def poll_live_bets():
+    """Guarded wrapper (#129) — the body reads payload fields that a schema
+    change can remove, and one throw would kill this loop for the bot's whole
+    uptime rather than for one tick."""
+    try:
+        await _poll_live_bets_once()
+    except Exception as e:
+        print(f"[LIVE-BETS] poll error: {e}")
+
+
+async def _poll_live_bets_once():
     if not LIVE_BETS_CHANNEL_ID:
         return
     data = await api_get("/series/active")
@@ -8009,9 +8315,351 @@ async def poll_live_bets():
     # but drop our tracking so we don't keep editing it. (A separate cleanup
     # could mark it as "Final: X-Y" but that needs a /series/{id} fetch we
     # don't have yet; cheap enough to leave as-is.)
-    stale = [sid for sid in list(live_bet_messages.keys()) if sid not in seen_now]
-    for sid in stale:
-        del live_bet_messages[sid]
+    # Review find 4 (1v1 twin): retire the controls before forgetting the
+    # message, and keep the entry when the edit fails so it retries.
+    for sid in [x for x in list(live_bet_messages.keys()) if x not in seen_now]:
+        mid = live_bet_messages.get(sid)
+        try:
+            if mid is not None:
+                msg = await channel.fetch_message(mid)
+                await msg.edit(view=None)
+            live_bet_messages.pop(sid, None)
+        except discord.NotFound:
+            live_bet_messages.pop(sid, None)
+        except Exception as e:
+            print(f"[LIVE-BETS] retire failed for {sid} (will retry): {e}")
+
+
+# ── Lobby-phase betting (pre-start hosted lobbies) ───────────────────────
+# A hosted 2v2/FFA lobby is bettable BEFORE it starts: the wager is placed on
+# a target (a 2v2 team pair, or one FFA player) and the odds are priced when
+# the host presses Start. This section posts one embed per bettable open
+# lobby with a target Select + amount Modal.
+lobby_bet_messages = {}   # (mode, lobby_id) -> message_id
+_LOBBY_BET_MODE_LABEL = {"team": "2v2", "ffa": "FFA", "ovt": "1v2"}
+
+
+def _build_lobby_bet_targets(mode: str, members):
+    """Client-side targets when the listing gives members but no bet_targets.
+
+    2v2 has no teams yet in an OPEN lobby, so every possible PAIR is a target.
+    The pair id is the two steam ids sorted by (length, ordinal) and joined
+    with ':' — that is this codebase's cross-language canonical steam ordering
+    (#213), and it must match what the server keys the wager on or the bet
+    lands on a target that never resolves.
+    """
+    people = []
+    for m in members or []:
+        sid = m.get("steam_id") or m.get("steam") or m.get("steam_id_64")
+        if not sid:
+            continue
+        people.append((str(sid), str(m.get("name") or m.get("display_name") or "?")))
+    if len(people) < 2:
+        return []
+    if mode != "team":
+        return [{"value": sid, "label": nm[:100], "description": ""} for sid, nm in people][:25]
+    out = []
+    for i in range(len(people)):
+        for j in range(i + 1, len(people)):
+            pair = sorted((people[i], people[j]), key=lambda p: (len(p[0]), p[0]))
+            out.append({
+                "value": ":".join(p[0] for p in pair),
+                "label": _pair_label(pair[0][1], pair[1][1], 14)[:100],
+                # find 7: the ids disambiguate same-named players.
+                "description": f"#{pair[0][0][-4:]} + #{pair[1][0][-4:]}"[:100],
+            })
+    return out[:25]
+
+
+def _normalize_bettable_lobby(raw, fallback_mode: str):
+    """One listing entry -> the shape the embed/view need, or None to SKIP.
+
+    Skipping is deliberate: a lobby we cannot build a target id for would
+    render a dropdown whose every option is rejected, which is worse than not
+    showing the lobby at all (#159 — the listing must not promise what the
+    POST refuses).
+    """
+    if not isinstance(raw, dict):
+        return None
+    mode = str(raw.get("mode") or fallback_mode or "").lower()
+    lobby_id = raw.get("lobby_id") or raw.get("id")
+    if not lobby_id or mode not in _LOBBY_BET_MODE_LABEL:
+        return None
+    # An explicit false closes betting. ABSENT is treated as open because the
+    # plain browser listings carry no such flag — the POST is the real gate.
+    if raw.get("bets_open") is False or raw.get("bettable") is False:
+        return None
+    members = raw.get("members") or raw.get("players") or []
+    targets = []
+    for t in (raw.get("bet_targets") or []):
+        if not isinstance(t, dict):
+            continue
+        # The server emits {"id": <steam id>, "name": <display name>} (the
+        # shape the in-game client parses too — one contract, three
+        # consumers). The other keys are accepted as a courtesy to any older
+        # payload shape; "id"/"name" is the authoritative pair.
+        val = (t.get("id") or t.get("target_steams")
+               or t.get("value") or t.get("steam_id"))
+        if not val:
+            continue
+        # Review find 7: two players called "Alex" (or sharing a truncated
+        # prefix) must not be indistinguishable in a MONEY choice — tag each
+        # option with the last 4 of its steam id.
+        _nm = str(t.get("name") or t.get("label") or val)
+        targets.append({
+            "value": str(val),
+            "label": f"{_nm[:80]} #{str(val)[-4:]}"[:100],
+            "description": str(t.get("description") or "")[:100],
+        })
+    # INTEGRATION FIX: the server's bet_targets list is the LIVE MEMBER
+    # ROSTER (one entry per player) for both modes — but a 'team' wager must
+    # name exactly TWO steam ids, so offering those entries directly would
+    # send a single id and earn a 400 on every click. An open 2v2 lobby has
+    # no teams yet, so every possible PAIR is a legitimate target: rebuild
+    # them. (The server re-sorts and canonicalizes whatever we send, so our
+    # ordering only has to be stable, not authoritative.)
+    if mode == "team" and targets:
+        targets = _build_lobby_bet_targets(
+            "team",
+            [{"steam_id": t["value"], "name": t["label"]} for t in targets],
+        )
+    if not targets:
+        targets = _build_lobby_bet_targets(mode, members)
+    if not targets:
+        return None
+    names = [str(m.get("name") or m.get("display_name") or "?")
+             for m in members if isinstance(m, dict)]
+    return {
+        "mode": mode,
+        "lobby_id": str(lobby_id),
+        "host_name": str(raw.get("host_name") or "?"),
+        "player_count": raw.get("player_count") or len(names),
+        "max_players": raw.get("max_players") or "?",
+        "has_password": bool(raw.get("has_password")),
+        "names": names,
+        "targets": targets,
+    }
+
+
+# Ticks to wait before re-probing /lobby/bettable after a miss. api_get logs
+# every non-200, so probing 4x/minute against an endpoint that is not deployed
+# yet would bury the bot's log; ~10 minutes still picks it up on its own.
+_lobby_bettable_backoff = 0
+_lobby_bettable_seen_ok = False
+
+
+async def _fetch_bettable_lobbies():
+    """(lobbies, known_modes) — open hosted lobbies that accept a pre-start bet.
+
+    Prefers the dedicated /lobby/bettable listing because it owns the bettable
+    predicate the POST enforces. Falls back to the plain browsers so the
+    section still works before that endpoint exists — the fallback can only
+    produce targets when a listing carries member STEAM IDS, and the browsers
+    currently do not, so in fallback mode every lobby is skipped rather than
+    guessed at.
+
+    known_modes is the set of modes this tick actually LISTED. A failed fetch
+    must never read as "every lobby of that mode ended": the caller retires a
+    post only for a mode it genuinely observed, so an API blip (or a redeploy)
+    leaves live lobby posts alone instead of closing all of them out.
+    """
+    global _lobby_bettable_backoff, _lobby_bettable_seen_ok
+    if _lobby_bettable_backoff > 0:
+        _lobby_bettable_backoff -= 1
+    else:
+        # Review find 11: there is no /lobby/bettable endpoint — probing it
+        # produced a 404 every tick and always fell through here anyway. The
+        # per-mode browsers below ARE the source of truth.
+        pass
+        if _lobby_bettable_seen_ok:
+            # The endpoint exists and is momentarily unreachable. Do NOT drop to
+            # the steam-id-less browser fallback — it lists nothing, which the
+            # caller would read as "every lobby ended".
+            return [], set()
+        _lobby_bettable_backoff = 40
+    out, known = [], set()
+    for mode, path in (("team", "/team/lobbies"), ("ffa", "/ffa/lobbies")):
+        d = await api_get(path)
+        if not isinstance(d, dict):
+            continue
+        known.add(mode)
+        for l in (d.get("lobbies") or []):
+            norm = _normalize_bettable_lobby(l, mode)
+            if norm:
+                out.append(norm)
+    return out, known
+
+
+def _format_lobby_bet_embed(lob) -> discord.Embed:
+    label = _LOBBY_BET_MODE_LABEL.get(lob["mode"], lob["mode"].upper())
+    host = discord.utils.escape_markdown(str(lob["host_name"]))
+    # escape_markdown on every user-authored name — an unescaped name carrying
+    # bold markers and a newline can forge a state line inside the embed.
+    roster = ", ".join(discord.utils.escape_markdown(n) for n in lob["names"]) or "-"
+    lines = [
+        f"Host: **{host}**" + ("  🔒 private" if lob["has_password"] else ""),
+        f"Players ({lob['player_count']}/{lob['max_players']}): {roster}",
+        "",
+        "🟢 **Betting open** — odds are priced when the host starts the lobby.",
+        ("Pick the pair you're backing below, then enter an amount."
+         if lob["mode"] == "team" else
+         "Pick who you're backing below, then enter an amount."),
+    ]
+    em = discord.Embed(title=f"🏟️ {label} lobby — waiting to start",
+                       description="\n".join(lines)[:4000], color=0x27AE60)
+    em.set_footer(text=f"{label} lobby {lob['lobby_id'][:8]}")
+    return em
+
+
+class LobbyBetView(discord.ui.View):
+    def __init__(self, mode: str, lobby_id: str, targets):
+        super().__init__(timeout=None)
+        self.add_item(LobbyBetSelect(mode, lobby_id, targets))
+
+
+class LobbyBetSelect(discord.ui.Select):
+    def __init__(self, mode: str, lobby_id: str, targets):
+        options = []
+        labels = {}
+        for t in targets:
+            val = str(t.get("value") or "")
+            if not val or val in labels:
+                continue
+            lab = (str(t.get("label") or "") or val)[:100]
+            labels[val] = lab
+            desc = (str(t.get("description") or ""))[:100]
+            options.append(discord.SelectOption(label=lab, value=val[:100],
+                                                description=desc or None))
+            if len(options) >= 25:
+                break
+        super().__init__(
+            placeholder=("Pick a team to back..." if mode == "team"
+                         else "Pick a player to back..."),
+            min_values=1, max_values=1, options=options,
+            custom_id=f"lobbybet:{mode}:{lobby_id}",
+        )
+        self.mode = mode
+        self.lobby_id = lobby_id
+        self.labels = labels
+
+    async def callback(self, interaction: discord.Interaction):
+        target = self.values[0]
+        await interaction.response.send_modal(
+            LobbyBetModal(self.mode, self.lobby_id, target,
+                          self.labels.get(target, target)))
+
+
+class LobbyBetModal(discord.ui.Modal):
+    def __init__(self, mode: str, lobby_id: str, target_steams: str, target_label: str):
+        super().__init__(title=f"Bet on {str(target_label)[:38]}")
+        self.mode = mode
+        self.lobby_id = lobby_id
+        self.target_steams = target_steams
+        self.target_label = target_label
+        self.amount_input = discord.ui.TextInput(
+            label="Gold amount (1 - 2,000)",
+            placeholder="e.g. 1250",
+            min_length=1, max_length=5, required=True,
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        amount, err = _parse_bet_amount(self.amount_input.value)
+        if err:
+            await _bet_reply(interaction, f"❌ {err}")
+            return
+        await _bet_ack(interaction)
+        try:
+            result = await api_post(
+                "/discord-lobby-bets",
+                params={
+                    "discord_user_id": str(interaction.user.id),
+                    "mode": self.mode,
+                    "lobby_id": self.lobby_id,
+                    "target_steams": self.target_steams,
+                    "amount": amount,
+                },
+            )
+        except Exception as e:
+            await _bet_reply(interaction, f"Bet failed: {e}")
+            return
+        perr = _discord_bet_error(result)
+        if perr:
+            await _bet_reply(interaction, f"❌ {perr}")
+            return
+        label = _LOBBY_BET_MODE_LABEL.get(self.mode, self.mode.upper())
+        await _bet_reply(interaction,
+            f"✅ Bet placed: **{amount:,}g** on **{self.target_label}** "
+            f"in {label} lobby `{self.lobby_id[:8]}` — odds are set when the host starts.",)
+
+
+@tasks.loop(seconds=15)
+async def poll_lobby_bets():
+    """Own fully-guarded loop (#129) — one bad payload never kills it."""
+    try:
+        await _poll_lobby_bets_once()
+    except Exception as e:
+        print(f"[LOBBY-BETS] poll error: {e}")
+
+
+async def _poll_lobby_bets_once():
+    if not LIVE_BETS_CHANNEL_ID:
+        return
+    lobbies, known_modes = await _fetch_bettable_lobbies()
+    if not lobbies and not known_modes:
+        return   # nothing observed this tick — see _fetch_bettable_lobbies
+    channel = bot.get_channel(LIVE_BETS_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(LIVE_BETS_CHANNEL_ID)
+        except Exception:
+            return
+    seen_now = set()
+    for lob in lobbies:
+        key = (lob["mode"], lob["lobby_id"])
+        seen_now.add(key)
+        embed = _format_lobby_bet_embed(lob)
+        view = LobbyBetView(lob["mode"], lob["lobby_id"], lob["targets"])
+        msg_id = lobby_bet_messages.get(key)
+        try:
+            if msg_id is None:
+                msg = await channel.send(embed=embed, view=view)
+                lobby_bet_messages[key] = msg.id
+            else:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed, view=view)
+        except discord.NotFound:
+            try:
+                msg = await channel.send(embed=embed, view=view)
+                lobby_bet_messages[key] = msg.id
+            except Exception as e:
+                print(f"[LOBBY-BETS] re-post failed for {key}: {e}")
+        except Exception as e:
+            print(f"[LOBBY-BETS] update failed for {key}: {e}")
+    # A lobby that left the listing has STARTED or disbanded. Strip the view so
+    # the post stops offering a dropdown whose every option the POST now
+    # refuses (#159, one message later). Tracking is dropped even if the edit
+    # fails rather than retried forever — the POST is still the real gate, so a
+    # stale dropdown is cosmetic, and the server's own refusal is what the
+    # bettor would see.
+    for key in [k for k in list(lobby_bet_messages.keys())
+                if k not in seen_now and k[0] in known_modes]:
+        msg_id = lobby_bet_messages.get(key)
+        try:
+            msg = await channel.fetch_message(msg_id)
+            closed = discord.Embed(
+                title=f"🏁 {_LOBBY_BET_MODE_LABEL.get(key[0], key[0].upper())} lobby "
+                      f"{key[1][:8]} — betting closed",
+                description="The lobby started or disbanded. Live odds for a running "
+                            "series post separately in this channel.",
+                color=0x666666,
+            )
+            await msg.edit(embed=closed, view=None)
+            lobby_bet_messages.pop(key, None)
+        except discord.NotFound:
+            lobby_bet_messages.pop(key, None)   # gone; nothing to retire
+        except Exception as e:
+            print(f"[LOBBY-BETS] close-out failed for {key}: {e}")
 
 
 # ── Gambler role: ping on open bets + self-serve opt-in/out ──────────────

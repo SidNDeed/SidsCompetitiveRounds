@@ -1735,10 +1735,14 @@ namespace CompetitiveRounds
         private static GameObject ffaBrowserContainer;
         private sealed class FfaBrowserRow
         {
-            public GameObject root, joinBtn;
+            public GameObject root, joinBtn, betBtn;
             public object txtInfo;
             public string lobbyId;
             public bool hasPassword;   // v1.37: routes Join through the password prompt
+            // Aug 9 lobby-phase betting: bound at FILL time and read at CLICK
+            // time (#265) — the pooled row is rebound on every browser refresh.
+            public List<ApiClient.LobbyBetTarget> betTargets;
+            public int betAmount;
         }
         private static readonly List<FfaBrowserRow> ffaBrowserRows = new List<FfaBrowserRow>();
 
@@ -1747,10 +1751,14 @@ namespace CompetitiveRounds
         // client lives in ApiClient (TeamLobby / OvtLobby).
         private sealed class HostLobbyBrowserRow
         {
-            public GameObject root, joinBtn;
+            public GameObject root, joinBtn, betBtn;
             public object txtInfo;
             public string lobbyId;
             public bool hasPassword;
+            // Aug 9 lobby-phase betting (2v2 only). Bound at FILL, read at
+            // CLICK (#265).
+            public List<ApiClient.LobbyBetTarget> betTargets;
+            public int betAmount;
         }
         private static readonly List<HostLobbyBrowserRow> teamLobbyBrowserRows = new List<HostLobbyBrowserRow>();
         private static readonly List<HostLobbyBrowserRow> ovtLobbyBrowserRows = new List<HostLobbyBrowserRow>();
@@ -3359,6 +3367,14 @@ namespace CompetitiveRounds
                 },
                 sizeDelta:new Vector2(88,26));
             SetFfaLayoutWidth(row.joinBtn,88f,0f,88f);
+            row.betBtn=UIFactory.CreateButton("Bet",row.root.transform,"Bet",16f,C_WHITE,
+                new Color(0.35f,0.28f,0.10f,0.95f),
+                // CreateButton already claims the per-control guard — a Claim
+                // in here would be a same-frame no-op (#158).
+                ()=>{ClickLobbyBet("ffa",row.lobbyId,row.betTargets,row.betAmount);dirty=true;},
+                sizeDelta:new Vector2(76,26));
+            SetFfaLayoutWidth(row.betBtn,76f,0f,76f);
+            row.betBtn.SetActive(false);
             row.root.SetActive(false);
             return row;
         }
@@ -3417,7 +3433,8 @@ namespace CompetitiveRounds
                 for(int i=0;i<ffaBrowserRows.Count;i++)
                 {
                     var row=ffaBrowserRows[i];
-                    if(lobbies==null||i>=lobbies.Count){row.root.SetActive(false);continue;}
+                    if(lobbies==null||i>=lobbies.Count)
+                    { row.betTargets=null; row.betAmount=0; row.root.SetActive(false); continue; }
                     var l=lobbies[i];
                     row.lobbyId=l.lobby_id;
                     row.hasPassword=l.has_password;
@@ -3429,15 +3446,40 @@ namespace CompetitiveRounds
                     // Aug 8 (Sid): second line = WHO is inside ("(1v1)" suffix
                     // when the FFA glicko isn't established yet).
                     string memberLine=BuildLobbyMemberLine(l.members,showUnestablished:true);
+                    // Aug 9: lobby-phase bet state. FFA backs ONE player, so a
+                    // single target is enough to offer the button.
+                    bool canBet=LobbyBetAvailable(l.bets_open,l.bet_targets,1);
+                    var belief=LobbyBetBeliefFor("ffa",l.lobby_id);
+                    row.betTargets=l.bet_targets;
+                    row.betAmount=l.my_bet_amount>0?l.my_bet_amount:(belief!=null?belief.amount:0);
+                    string betTag="";
+                    if(row.betAmount>0)
+                    {
+                        string lbl=l.my_bet_amount>0
+                            ?LobbyBetTargetLabel(l.bet_targets,l.my_bet_targets)
+                            :(belief!=null?belief.label:"");
+                        betTag="  "+I18n.TrF("<color=#FFD94D>your bet: {0}g on {1}</color>",row.betAmount,lbl);
+                    }
+                    else if(canBet)betTag="  "+I18n.Tr("<color=#FFD94D>bets open</color>");
                     UIFactory.SetTextRaw(row.txtInfo,
                         privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
                             FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age)
+                        +betTag
                         +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
                     // Re-asserted per fill — pooled rows swap shapes (#63).
                     UIFactory.SetPrefH(row.root,memberLine!=null?54f:31f);
                     bool joinable=l.player_count<l.max_players
                         &&ApiClient.FfaQueueStatus!="leaving";
                     row.joinBtn.SetActive(joinable);
+                    // Review find 2: an OPEN wager stays cancellable even if
+                    // the lobby stops being bettable (dropped below two
+                    // members, flipped casual) — otherwise the stake is
+                    // stranded until the janitor.
+                    bool showBetBtn=canBet||row.betAmount>0;
+                    row.betBtn.SetActive(showBetBtn);
+                    if(showBetBtn)
+                        UIFactory.SetTextRaw(UIFactory.GetButtonText(row.betBtn),
+                            row.betAmount>0?I18n.Tr("Cancel"):I18n.Tr("Bet"));
                     row.root.SetActive(true);
                 }
                 UIFactory.SetText(txtFfaLobbyBody,n==0
@@ -3576,6 +3618,18 @@ namespace CompetitiveRounds
                 ()=>{JoinHostLobbyRow(row,team);dirty=true;},
                 sizeDelta:new Vector2(80,24));
             SetFfaLayoutWidth(row.joinBtn,80f,0f,80f);
+            // 2v2 only: the server never opens lobby bets on 1v2, and the fill
+            // pass gates on `team` as well so a future payload change can't
+            // surface the button there by accident.
+            row.betBtn=UIFactory.CreateButton("Bet",row.root.transform,"Bet",14f,C_WHITE,
+                new Color(0.35f,0.28f,0.10f,0.95f),
+                // `team` is captured, not re-read: this pool is shared with the
+                // 1v2 tab, and a bet request tagged "team" from a 1v2 row would
+                // name a lobby id the team endpoint doesn't own.
+                ()=>{if(team)ClickLobbyBet("team",row.lobbyId,row.betTargets,row.betAmount);dirty=true;},
+                sizeDelta:new Vector2(70,24));
+            SetFfaLayoutWidth(row.betBtn,70f,0f,70f);
+            row.betBtn.SetActive(false);
             row.root.SetActive(false);
             return row;
         }
@@ -3743,7 +3797,8 @@ namespace CompetitiveRounds
                 for(int i=0;i<rows.Count;i++)
                 {
                     var row=rows[i];
-                    if(lobbies==null||i>=lobbies.Count){row.root.SetActive(false);continue;}
+                    if(lobbies==null||i>=lobbies.Count)
+                    { row.betTargets=null; row.betAmount=0; row.root.SetActive(false); continue; }
                     var l=lobbies[i];
                     row.lobbyId=l.lobby_id;
                     row.hasPassword=l.has_password;
@@ -3754,14 +3809,39 @@ namespace CompetitiveRounds
                     // Aug 8 (Sid): second line = WHO is inside (1v2 is unrated,
                     // so no "(1v1)" fallback suffix there).
                     string memberLine=BuildLobbyMemberLine(l.members,showUnestablished:team);
+                    // Aug 9: a 2v2 bet backs a PAIR, so two live members must
+                    // exist before the picker can produce a valid target.
+                    bool canBet=team&&LobbyBetAvailable(l.bets_open,l.bet_targets,2);
+                    var belief=LobbyBetBeliefFor("team",l.lobby_id);
+                    row.betTargets=l.bet_targets;
+                    row.betAmount=l.my_bet_amount>0?l.my_bet_amount:(belief!=null?belief.amount:0);
+                    string betTag="";
+                    if(row.betAmount>0)
+                    {
+                        string lbl=l.my_bet_amount>0
+                            ?LobbyBetTargetLabel(l.bet_targets,l.my_bet_targets)
+                            :(belief!=null?belief.label:"");
+                        betTag="  "+I18n.TrF("<color=#FFD94D>your bet: {0}g on {1}</color>",row.betAmount,lbl);
+                    }
+                    else if(canBet)betTag="  "+I18n.Tr("<color=#FFD94D>bets open</color>");
                     UIFactory.SetTextRaw(row.txtInfo,
                         privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
                             FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age)
+                        +betTag
                         +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
                     // Two-line rows grow; re-asserted every fill because the
                     // pooled row may swap between shapes (#63 prefH rules).
                     UIFactory.SetPrefH(row.root,memberLine!=null?50f:29f);
                     row.joinBtn.SetActive(l.player_count<l.max_players&&!leaving&&!busy);
+                    // Review find 2: an OPEN wager stays cancellable even if
+                    // the lobby stops being bettable (dropped below two
+                    // members, flipped casual) — otherwise the stake is
+                    // stranded until the janitor.
+                    bool showBetBtn=canBet||row.betAmount>0;
+                    row.betBtn.SetActive(showBetBtn);
+                    if(showBetBtn)
+                        UIFactory.SetTextRaw(UIFactory.GetButtonText(row.betBtn),
+                            row.betAmount>0?I18n.Tr("Cancel"):I18n.Tr("Bet"));
                     row.root.SetActive(true);
                 }
                 UIFactory.SetTextRaw(bodyTxt,n==0
@@ -7108,6 +7188,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static string customBetSeriesId, customBetOnSteamId;
         private static int customBetTeam;
         private static bool customBetIsTeam, customBetIsFfa;
+        // Aug 9 (Sid): lobby-phase betting reuses this same modal. Every
+        // Open*Prompt below clears the flags it does NOT set — a stale mode
+        // would post the amount to the wrong endpoint.
+        private static bool customBetIsLobby;
+        private static string customBetLobbyMode, customBetLobbyId, customBetLobbyTargets;
 
         public static void OpenCustomBetPrompt(string seriesId, string betOnSteamId, int team, bool isTeam, string targetLabel)
         {
@@ -7116,6 +7201,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             customBetTeam = team;
             customBetIsTeam = isTeam;
             customBetIsFfa = false;
+            customBetIsLobby = false;
             CustomBetTargetLabel = targetLabel ?? "";
             CustomBetAmountText = "";
             CustomBetPromptOpen = true;
@@ -7129,6 +7215,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             customBetTeam=0;
             customBetIsTeam=false;
             customBetIsFfa=true;
+            customBetIsLobby=false;
             // Signed into the bet request (server review find 2): a retried
             // request can then never silently land on a LATER game.
             customBetFfaGameNumber=gameNumber;
@@ -7151,6 +7238,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             string id = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(id) || id == "unknown") return;
+            if (customBetIsLobby)
+            {
+                // Captured now: the modal's statics are reused by the next
+                // prompt, and this callback outlives the click (#265).
+                string mode = customBetLobbyMode, lobbyId = customBetLobbyId;
+                string targets = customBetLobbyTargets, label = CustomBetTargetLabel;
+                Plugin.Log.LogInfo($"[LOBBY-BET] Placing CUSTOM {amount}g on {targets} ({mode} lobby {lobbyId})");
+                ApiClient.PlaceLobbyBet(id, mode, lobbyId, targets, amount, (ok, resp) =>
+                {
+                    var col = ok ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.5f, 0.5f);
+                    if (ok)
+                    {
+                        RememberLobbyBet(mode, lobbyId, amount, targets, label);
+                        CompetitiveUI.ShowNotification(
+                            I18n.TrF("Bet placed: {0}g on {1}. {2}", amount, label, LobbyBetDisclaimer()), col, 6f);
+                    }
+                    else CompetitiveUI.ShowNotification(I18n.TrF("Bet failed: {0}", resp), col, 3f);
+                    dirty = true;
+                });
+                return;
+            }
             if (customBetIsFfa)
             {
                 Plugin.Log.LogInfo($"[FFA-BET] Placing CUSTOM {amount}g on {customBetOnSteamId} (lobby {customBetSeriesId})");
@@ -7199,6 +7307,197 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () => OpenCustomBetPrompt(seriesId, betOnSteamId, team, isTeam, targetLabel),
                 sizeDelta: new Vector2(30, 22));
             UIFactory.AddLE(btn, prefW: 30, prefH: 22, flexW: 0, flexH: 0);
+        }
+
+        // ── Lobby-phase betting (Aug 9, Sid) ────────────────────────────────
+        /* Bet on a hosted 2v2 / FFA lobby BEFORE it starts, from the browser.
+         * The roster is not final at that point, so no odds can be quoted —
+         * the server prices the bet at lock and refunds it outright when the
+         * exact person (FFA) or pair (2v2) bet on isn't in the game that runs.
+         * That rule is stated in the target picker and repeated in the
+         * placement toast, because the amount modal itself lives in
+         * CompetitiveUI with a fixed layout this file must not change. */
+        private static string LobbyBetDisclaimer() => I18n.Tr(
+            "Odds are set when the lobby starts. Refunded if the exact person/team you bet on is not in the game.");
+
+        /// <summary>Local record of a placed lobby bet, so the row can offer
+        /// Cancel immediately. The server MAY echo the same thing back as
+        /// my_bet_amount/my_bet_targets; when it does, the echo wins (it
+        /// survives a relaunch and this doesn't).</summary>
+        private sealed class LobbyBetBelief { public int amount; public string targets, label; }
+        private static readonly Dictionary<string, LobbyBetBelief> lobbyBetBeliefs =
+            new Dictionary<string, LobbyBetBelief>();
+        private static string LobbyBetKey(string mode, string lobbyId) => (mode ?? "") + "|" + (lobbyId ?? "");
+
+        private static void RememberLobbyBet(string mode, string lobbyId, int amount, string targets, string label)
+        {
+            // A lobby id is never reused, so entries only accumulate; the cap
+            // keeps a marathon session from growing this without bound.
+            if (lobbyBetBeliefs.Count > 64) lobbyBetBeliefs.Clear();
+            lobbyBetBeliefs[LobbyBetKey(mode, lobbyId)] =
+                new LobbyBetBelief { amount = amount, targets = targets ?? "", label = label ?? "" };
+        }
+
+        private static void ForgetLobbyBet(string mode, string lobbyId)
+        {
+            lobbyBetBeliefs.Remove(LobbyBetKey(mode, lobbyId));
+        }
+
+        private static LobbyBetBelief LobbyBetBeliefFor(string mode, string lobbyId)
+        {
+            LobbyBetBelief b;
+            return lobbyBetBeliefs.TryGetValue(LobbyBetKey(mode, lobbyId), out b) ? b : null;
+        }
+
+        /// <summary>Resolve a ':'-joined target id list to display names using
+        /// the browser's own bet_targets. Falls back to the raw ids so a bet on
+        /// someone who has since left the lobby still renders something.</summary>
+        private static string LobbyBetTargetLabel(List<ApiClient.LobbyBetTarget> targets, string ids)
+        {
+            if (string.IsNullOrEmpty(ids)) return "";
+            var sb = new StringBuilder();
+            foreach (string id in ids.Split(':'))
+            {
+                if (string.IsNullOrEmpty(id)) continue;
+                string nm = null;
+                if (targets != null)
+                    foreach (var t in targets)
+                        if (t != null && t.id == id) { nm = t.name; break; }
+                if (sb.Length > 0) sb.Append(" + ");
+                sb.Append(FfaSafeRich(Trunc(string.IsNullOrEmpty(nm) ? id : nm, 16)));
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>One target's RAW display name, for the picker only —
+        /// RebuildPickerList sanitizes the label it is handed, and FfaSafeRich
+        /// is not idempotent ('&amp;' becomes '&amp;amp;amp;' on a second pass), so
+        /// the picker must never be given the pre-escaped form.</summary>
+        private static string LobbyBetRawName(List<ApiClient.LobbyBetTarget> targets, string id)
+        {
+            if (targets != null)
+                foreach (var t in targets)
+                    if (t != null && t.id == id)
+                    {
+                        // Review find 7: two players with the same (or same
+                        // truncated) name must be distinguishable in a money
+                        // choice — tag the last 4 of the steam id.
+                        string tail = id.Length >= 4 ? id.Substring(id.Length - 4) : id;
+                        return string.IsNullOrEmpty(t.name)
+                            ? id : Trunc(t.name, 20) + " #" + tail;
+                    }
+            return id;
+        }
+
+        private static bool LobbyBetTargetsContainLocal(List<ApiClient.LobbyBetTarget> targets)
+        {
+            string me = MatchTracker.LocalSteamId;
+            if (targets == null || string.IsNullOrEmpty(me) || me == "unknown") return false;
+            foreach (var t in targets) if (t != null && t.id == me) return true;
+            return false;
+        }
+
+        /// <summary>True when this browser row should offer a bet at all.
+        /// Defensive on every axis: an old server sends neither field, so both
+        /// stay false/null and no button appears; a lobby the local player is
+        /// somehow inside is never bettable.</summary>
+        private static bool LobbyBetAvailable(bool betsOpen, List<ApiClient.LobbyBetTarget> targets, int minTargets)
+        {
+            return betsOpen && targets != null && targets.Count >= minTargets
+                   && !LobbyBetTargetsContainLocal(targets);
+        }
+
+        private static void OpenLobbyBetPrompt(string mode, string lobbyId, string targets, string label)
+        {
+            customBetIsLobby = true;
+            customBetLobbyMode = mode;
+            customBetLobbyId = lobbyId;
+            customBetLobbyTargets = targets;
+            customBetIsTeam = false;
+            customBetIsFfa = false;
+            customBetSeriesId = null;
+            customBetOnSteamId = null;
+            customBetTeam = 0;
+            CustomBetTargetLabel = label ?? "";
+            CustomBetAmountText = "";
+            CustomBetPromptOpen = true;
+        }
+
+        /// <summary>FFA: pick ONE lobby member to back. Single-select, so the
+        /// picker closes itself and hands straight over to the amount modal.</summary>
+        private static void OpenFfaLobbyBetPicker(string lobbyId, List<ApiClient.LobbyBetTarget> targets)
+        {
+            var snapshot = new List<ApiClient.LobbyBetTarget>(targets);
+            ShowPicker(I18n.Tr("Bet on which player?"),
+                () => { var ids = new List<string>(); foreach (var t in snapshot) if (t != null) ids.Add(t.id); return ids; },
+                id => LobbyBetRawName(snapshot, id),
+                id => C_WHITE,
+                id => false,
+                id => OpenLobbyBetPrompt("ffa", lobbyId, id, LobbyBetTargetLabel(snapshot, id)),
+                multiSelect: false,
+                note: LobbyBetDisclaimer());
+        }
+
+        // 2v2 pairs are only decided when the host starts, so the picker asks
+        // for the two people the bet is on rather than a "team". Multi-select
+        // with an auto-hand-off at two, which reads as "pick 2" without
+        // needing a confirm button the picker primitive doesn't have.
+        private static readonly List<string> lobbyBetPickSel = new List<string>();
+
+        private static void OpenTeamLobbyBetPicker(string lobbyId, List<ApiClient.LobbyBetTarget> targets)
+        {
+            var snapshot = new List<ApiClient.LobbyBetTarget>(targets);
+            lobbyBetPickSel.Clear();
+            ShowPicker(I18n.Tr("Bet on which pair? Pick 2"),
+                () => { var ids = new List<string>(); foreach (var t in snapshot) if (t != null) ids.Add(t.id); return ids; },
+                id => LobbyBetRawName(snapshot, id),
+                id => C_WHITE,
+                id => lobbyBetPickSel.Contains(id),
+                id =>
+                {
+                    if (lobbyBetPickSel.Contains(id)) { lobbyBetPickSel.Remove(id); return; }
+                    lobbyBetPickSel.Add(id);
+                    if (lobbyBetPickSel.Count < 2) return;
+                    // Ordinal sort, matching the server's own sorted() over
+                    // the two id STRINGS — the pair key must be byte-identical
+                    // on both sides or the HMAC canonical won't verify.
+                    lobbyBetPickSel.Sort(StringComparer.Ordinal);
+                    string pair = lobbyBetPickSel[0] + ":" + lobbyBetPickSel[1];
+                    lobbyBetPickSel.Clear();
+                    HidePicker();
+                    OpenLobbyBetPrompt("team", lobbyId, pair, LobbyBetTargetLabel(snapshot, pair));
+                },
+                multiSelect: true,
+                note: LobbyBetDisclaimer());
+        }
+
+        /// <summary>The browser row's Bet/Cancel click. existingAmount &gt; 0
+        /// means a bet is already down on this lobby, in which case the button
+        /// withdraws it instead of opening a second one.</summary>
+        private static void ClickLobbyBet(string mode, string lobbyId,
+            List<ApiClient.LobbyBetTarget> targets, int existingAmount)
+        {
+            if (string.IsNullOrEmpty(lobbyId) || targets == null || targets.Count == 0) return;
+            string id = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(id) || id == "unknown") return;
+            if (existingAmount > 0)
+            {
+                ApiClient.CancelLobbyBet(id, mode, lobbyId, (ok, resp) =>
+                {
+                    // Cleared either way: a refused cancel means the server
+                    // holds no open bet for us, so the belief was the wrong
+                    // one and the row should go back to offering Bet.
+                    ForgetLobbyBet(mode, lobbyId);
+                    CompetitiveUI.ShowNotification(
+                        ok ? I18n.Tr("Bet cancelled - your gold is back.")
+                           : I18n.TrF("Could not cancel: {0}", resp),
+                        ok ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.5f, 0.5f), 3f);
+                    dirty = true;
+                });
+                return;
+            }
+            if (mode == "ffa") OpenFfaLobbyBetPicker(lobbyId, targets);
+            else OpenTeamLobbyBetPicker(lobbyId, targets);
         }
 
         private static void AddTeamBetButton(Transform parent, string seriesId, int team, int amount)
@@ -10812,10 +11111,14 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             catch { return new Rect(0, 0, 0, 0); }
         }
 
+        /// <summary>note (Aug 9): an optional wrapped caption under the title.
+        /// Lobby-phase betting needs its refund rule stated at the moment the
+        /// target is chosen, and the amount modal that follows lives in
+        /// CompetitiveUI with a fixed layout.</summary>
         private static void ShowPicker(string title, Func<List<string>> items,
                                       Func<string, string> label, Func<string, Color> color,
                                       Func<string, bool> isSelected, Action<string> onPick,
-                                      bool multiSelect)
+                                      bool multiSelect, string note = null)
         {
             try
             {
@@ -10884,6 +11187,17 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
                 UIFactory.CreateText("PkTitle", box.transform, pickerTitle, 22f, C_GOLD,
                     UIFactory.AlignMidCenter, sizeDelta: new Vector2(580, 30));
+                if (!string.IsNullOrEmpty(note))
+                {
+                    var noteTxt = UIFactory.CreateText("PkNote", box.transform,
+                        $"<color=#FFD94D>{note}</color>", 14f, C_SUB,
+                        UIFactory.AlignMidLeft, sizeDelta: new Vector2(580, 52));
+                    UIFactory.SetWordWrap(noteTxt, true);
+                    // Overflow, not the global Truncate default: a translated
+                    // note in an OS-fallback script has taller line metrics and
+                    // would lose its last line inside a fixed box (#292/#297).
+                    UIFactory.SetOverflowMode(noteTxt, 0);
+                }
                 UIFactory.CreateText("PkCap", box.transform,
                     "<color=#88AAFF>Type to filter</color>", 14f, C_SUB,
                     UIFactory.AlignMidLeft, sizeDelta: new Vector2(580, 18));
