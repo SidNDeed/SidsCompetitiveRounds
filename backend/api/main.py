@@ -576,6 +576,10 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
         select(RankedSeries)
         .where(
             RankedSeries.status == "active",
+            # Aug 9 bet audit find 1 (r1): an admin reversal leaves the row
+            # status='active' with invalidated_at set — it must not be REUSED
+            # by a fresh preflight (the listing + POST already exclude it).
+            RankedSeries.invalidated_at.is_(None),
             _series_pair_filter(pid_a, pid_b),
             or_(
                 RankedSeries.created_at >= cutoff,
@@ -995,7 +999,18 @@ async def queue_cleanup_loop():
                             -- husk — no fixed age can distinguish a long
                             -- game 1 from abandonment, but the parent's
                             -- status can.
-                            WHERE q.last_polled < NOW() - INTERVAL '60 minutes'
+                            WHERE (q.last_polled < NOW() - INTERVAL '60 minutes'
+                                   -- Aug 9 queue audit: SEARCHING rows die at
+                                   -- the same 75s the poll-driven prune uses
+                                   -- — that prune only runs when ANOTHER 1v2
+                                   -- player polls, so with zero pollers a
+                                   -- quitter's row sat visible-in-DB for up
+                                   -- to an hour. 75s-stale = ~25 missed 3s
+                                   -- polls; a live client that stale is in
+                                   -- the #150 redeploy-recovery case and its
+                                   -- next poll auto-rejoins by design.
+                                   OR (q.status = 'searching'
+                                       AND q.last_polled < NOW() - INTERVAL '75 seconds'))
                               AND NOT (q.status = 'ready_join'
                                        AND s.status = 'active')
                               -- Aug 6 item 9: 'lobby' rows point at
@@ -1262,7 +1277,12 @@ async def queue_cleanup_loop():
                             -- dead lobby eventually leaves 'active' (lease
                             -- expiry, dead-lock/dispersed closes), which
                             -- unlocks these rows for the next tick.
-                            WHERE q.last_polled < NOW() - INTERVAL '60 minutes'
+                            WHERE (q.last_polled < NOW() - INTERVAL '60 minutes'
+                                   -- Aug 9 queue audit: searching rows at 75s
+                                   -- (janitor-driven twin of the poll-driven
+                                   -- prune — see the ovt sweep's note above).
+                                   OR (q.status = 'searching'
+                                       AND q.last_polled < NOW() - INTERVAL '75 seconds'))
                               AND NOT (q.status = 'ready_join'
                                        AND l.status = 'active')
                             FOR UPDATE OF q SKIP LOCKED
@@ -1456,6 +1476,21 @@ async def queue_cleanup_loop():
                      ORDER BY b.player_id::text, b.id
                      LIMIT 20"""))).mappings().all()
                 for b in stranded_1v1:
+                    # Aug 9 bet audit r2 find 2: lock the parent series and
+                    # RE-CHECK it before paying. The candidate list was read
+                    # without a lock, so an admin reversal committing in that
+                    # window would otherwise be undone by this payout — the
+                    # reversal's own clawback already ran and cannot see a
+                    # transaction that starts after it.
+                    still = (await db.execute(text("""
+                        SELECT 1 FROM ranked_series
+                         WHERE id = :sid AND status = 'completed'
+                           AND invalidated_at IS NULL AND winner_id IS NOT NULL
+                         FOR NO KEY UPDATE
+                    """), {"sid": b["series_id"]})).first()
+                    if still is None:
+                        await db.commit()   # release the lock pass, skip this bet
+                        continue
                     won = b["bet_on_player_id"] == b["winner_id"]
                     pay = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
                     claimed = (await db.execute(text(
@@ -2032,7 +2067,13 @@ async def _maybe_grant_level_rewards(db, player, old_xp: int, match_or_series_re
     total_reward = sum(level_reward_for(lvl) for lvl in range(old_level + 1, new_level + 1))
     if total_reward <= 0:
         return 0
-    player.gold_earned = (player.gold_earned or 0) + total_reward
+    # r4 find 1: atomic delta + expire — an absolute ORM write here
+    # flushes a STALE total and erases any credit committed in
+    # between (achievements credit atomically mid-transaction).
+    await db.execute(text(
+        "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+    ), {"amt": total_reward, "pid": player.id})
+    db.expire(player, ["gold_earned"])
     db.add(GoldTransaction(
         player_id=player.id,
         amount=total_reward,
@@ -2230,7 +2271,12 @@ async def _reverse_match_gold_xp(db: AsyncSession, m: Match) -> None:
         ))
         player = (await db.execute(select(Player).where(Player.id == tx.player_id))).scalar_one_or_none()
         if player is not None:
-            player.gold_earned = max(0, (player.gold_earned or 0) - tx.amount)
+            # r4 find 1: atomic delta (see the credit twins).
+            await db.execute(text(
+                "UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - :amt)"
+                " WHERE id = :pid"
+            ), {"amt": tx.amount, "pid": player.id})
+            db.expire(player, ["gold_earned"])
     # Roll back XP. p1_xp_gained / p2_xp_gained were stored at insert time.
     # July 20: also reverse level-ding gold for the boundaries the rollback
     # UN-CROSSES — _maybe_grant_level_rewards has no cross-match idempotency,
@@ -2266,7 +2312,12 @@ async def _reverse_match_gold_xp(db: AsyncSession, m: Match) -> None:
             player_id=player_obj.id, amount=-claw,
             reason="reversal", reference_id=str(m.id),
         ))
-        player_obj.gold_earned = max(0, (player_obj.gold_earned or 0) - claw)
+        # r4 find 1: atomic delta (see the credit twins).
+        await db.execute(text(
+            "UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - :amt)"
+            " WHERE id = :pid"
+        ), {"amt": claw, "pid": player_obj.id})
+        db.expire(player_obj, ["gold_earned"])
 
 
 async def _check_anti_cheat(
@@ -2980,6 +3031,31 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         )
     p1 = await get_or_create_player(db, report.player1.steam_id, report.player1.display_name)
     p2 = await get_or_create_player(db, report.player2.steam_id, report.player2.display_name)
+    # Aug 9 bet audit r2 find 4: take the SERIES lock here — the moment both
+    # players are known — rather than at the identification site far below.
+    # Everything between (match insert, telemetry, xp, gold, achievements) is
+    # real work, and while it ran a concurrent /bets could take the series
+    # lock first, read the persisted pre-report score, and accept a wager on a
+    # game that had already been decided. This is lock-only: the authoritative
+    # load still happens below, and holding the row means it cannot change
+    # underneath that load. Ordering is unchanged (#206: players advisory pass
+    # above -> series -> glicko).
+    # r3 find 2: NOT gated on report.is_ranked — a casual-claimed report can
+    # still be upgraded to ranked further down (recent-series evidence), and
+    # the upgrade path would then run all its work before any lock. Locking an
+    # existing current series for this pair is harmless when the report really
+    # is casual (the row is simply left alone).
+    if True:
+        try:
+            _pre_series = await _find_current_active_series(
+                db, p1.id, p2.id, room_id=report.photon_room_id)
+            if _pre_series is not None:
+                await db.execute(
+                    text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
+                    {"sid": _pre_series.id},
+                )
+        except Exception as _ple:
+            print(f"[SERIES-LOCK] early lock skipped: {_ple}")
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
     # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
     # here means the player deliberately turned ranked off. The old behavior
@@ -3060,7 +3136,11 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             # would re-create bug #78 via the resurrected series.
             _recent_series_evidence = (await db.execute(text(
                 "SELECT rs.id FROM ranked_series rs "
-                "WHERE rs.status = 'active' "
+                # Aug 9 bet audit r2 find 6: a REVERSED series stays
+                # status='active'; it must not be evidence that a casual
+                # rematch is really ranked (it would mint a fresh ranked
+                # series + ranked economy off a voided game).
+                "WHERE rs.status = 'active' AND rs.invalidated_at IS NULL "
                 "  AND ((rs.player1_id = :a AND rs.player2_id = :b) "
                 "    OR (rs.player1_id = :b AND rs.player2_id = :a)) "
                 "  AND (rs.created_at > NOW() - (:w || ' minutes')::interval "
@@ -3452,10 +3532,19 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     gold_p1 = (p1.total_xp // 100) - (old_xp_p1 // 100)
     gold_p2 = (p2.total_xp // 100) - (old_xp_p2 // 100)
     if gold_p1 > 0:
-        p1.gold_earned = (p1.gold_earned or 0) + gold_p1
+        # r4 find 1: atomic delta + expire — an absolute ORM write here
+        # flushes a STALE total and erases any credit committed in
+        # between (achievements credit atomically mid-transaction).
+        await db.execute(text(
+            "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+        ), {"amt": gold_p1, "pid": p1.id})
+        db.expire(p1, ["gold_earned"])
         db.add(GoldTransaction(player_id=p1.id, amount=gold_p1, reason="xp", reference_id=str(match.id)))
     if gold_p2 > 0:
-        p2.gold_earned = (p2.gold_earned or 0) + gold_p2
+        await db.execute(text(
+            "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+        ), {"amt": gold_p2, "pid": p2.id})
+        db.expire(p2, ["gold_earned"])
         db.add(GoldTransaction(player_id=p2.id, amount=gold_p2, reason="xp", reference_id=str(match.id)))
 
     # Level rewards (v1.26.8): 100g per 5 levels through 50, 500g per 5
@@ -3533,6 +3622,28 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # (activity-based recency + tournament-aware — see its docstring;
         # room_id keeps sync tournament series bound to their sct- room).
         series = await _find_current_active_series(db, p1.id, p2.id, room_id=report.photon_room_id)
+        # Aug 9 bet audit r1 find 4: LOCK the series as soon as it is
+        # identified — the report used to hold only the participant rows
+        # while it computed, so a concurrent /bets could take the series lock
+        # first, read a persisted 0-0, and accept an outcome-informed wager
+        # that this very request was about to make 1-0. Ordering matches the
+        # 1v1 protocol (#206: players pass above, then series, then glicko),
+        # and NO KEY UPDATE is the weakest mode that still conflicts with the
+        # bet path's own lock (#202).
+        if series is not None:
+            await db.execute(
+                text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
+                {"sid": series.id},
+            )
+            await db.refresh(series)
+            # r2 find 4: the row can have gone terminal while we waited (a
+            # prune abandoned it, an admin reversed it). Advancing an
+            # invalidated/non-active series would credit a voided result —
+            # drop it and let the code below create a fresh one instead.
+            if series.status != "active" or getattr(series, "invalidated_at", None) is not None:
+                print(f"[SERIES-LOCK] discovered series {series.id} went terminal while locking "
+                      f"(status={series.status}) — starting a fresh series")
+                series = None
 
         series_was_new = False
         if not series:
@@ -3675,13 +3786,22 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             _series_gold_winner = winner_bonus
             _series_gold_loser = loser_bonus
 
-            series_winner.gold_earned = (series_winner.gold_earned or 0) + winner_bonus
+            # r4 find 1: atomic delta + expire — an absolute ORM write here
+            # flushes a STALE total and erases any credit committed in
+            # between (achievements credit atomically mid-transaction).
+            await db.execute(text(
+                "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+            ), {"amt": winner_bonus, "pid": series_winner.id})
+            db.expire(series_winner, ["gold_earned"])
             db.add(GoldTransaction(
                 player_id=series_winner.id, amount=winner_bonus,
                 reason="series_win", reference_id=str(series.id),
             ))
             if loser_bonus > 0:
-                series_loser.gold_earned = (series_loser.gold_earned or 0) + loser_bonus
+                await db.execute(text(
+                    "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+                ), {"amt": loser_bonus, "pid": series_loser.id})
+                db.expire(series_loser, ["gold_earned"])
                 db.add(GoldTransaction(
                     player_id=series_loser.id, amount=loser_bonus,
                     reason="series_loss", reference_id=str(series.id),
@@ -6321,7 +6441,10 @@ async def get_gold_sources(
           LEFT JOIN matches m ON gt.reason = 'xp' AND m.id::text = gt.reference_id
          WHERE gt.player_id = :pid
            AND gt.amount > 0
-           AND gt.reason NOT IN ('refund_abandoned', 'team_bet_refund', 'ffa_bet_refund')
+           -- 'admin_reverse' added Aug 9 (bet audit r1 find 10): the 1v1
+           -- reversal refund returns PRINCIPAL, same as its siblings here.
+           AND gt.reason NOT IN ('refund_abandoned', 'team_bet_refund', 'ffa_bet_refund',
+                                 'admin_reverse')
          GROUP BY 1
          ORDER BY SUM(gt.amount) DESC
     """), {"pid": pid})).mappings().all()
@@ -7427,7 +7550,8 @@ async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids) -> 
 _CROSS_QUEUE_TABLES = ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")
 
 
-async def _evict_other_queue_searching(db: AsyncSession, player_ids, keep_table: str, reason: str) -> None:
+async def _evict_other_queue_searching(db: AsyncSession, player_ids, keep_table: str, reason: str,
+                                      joined_before=None) -> None:
     """A player locked into one mode's match is no longer available to the
     other queues — delete their still-'searching' rows everywhere else.
 
@@ -7462,9 +7586,11 @@ async def _evict_other_queue_searching(db: AsyncSession, player_ids, keep_table:
                     text(f"""DELETE FROM {table} WHERE player_id IN (
                                 SELECT player_id FROM {table}
                                  WHERE player_id = ANY(:pids) AND status = 'searching'
+                                   AND (CAST(:jb AS timestamptz) IS NULL
+                                        OR joined_at <= CAST(:jb AS timestamptz))
                                  FOR UPDATE SKIP LOCKED)
                             RETURNING steam_id"""),
-                    {"pids": pids},
+                    {"pids": pids, "jb": joined_before},
                 )
                 for r in res.fetchall():
                     print(f"[QUEUE-EVICT] {r[0]} removed from {table} (locked into {reason})")
@@ -7480,9 +7606,11 @@ async def _evict_other_queue_searching(db: AsyncSession, player_ids, keep_table:
                 rows_m = (await db.execute(
                     text("""SELECT player_id, matched_with FROM ranked_queue
                              WHERE player_id = ANY(:pids) AND status = 'matched'
+                               AND (CAST(:jb AS timestamptz) IS NULL
+                                    OR joined_at <= CAST(:jb AS timestamptz))
                                AND room_name IS NULL
                              FOR UPDATE SKIP LOCKED"""),
-                    {"pids": pids},
+                    {"pids": pids, "jb": joined_before},
                 )).mappings().all()
                 for rm in rows_m:
                     if rm["matched_with"] is not None:
@@ -8143,8 +8271,12 @@ async def queue_count(steam_id: str | None = Query(None), db: AsyncSession = Dep
     the caller counts toward the online figure (v1.29 clients do; older
     clients omit it and simply aren't counted)."""
     _presence_touch(steam_id)
+    # Aug 9 queue audit: count only FRESH rows (the janitor removes stale ones
+    # within 30-90s, but the count showed the ghost meanwhile — a quitter
+    # inflated "N searching" for up to 90s).
     result = await db.execute(
-        text("SELECT COUNT(*) FROM ranked_queue WHERE status = 'searching'")
+        text("SELECT COUNT(*) FROM ranked_queue WHERE status = 'searching'"
+             " AND last_polled > NOW() - INTERVAL '30 seconds'")
     )
     searching = result.scalar() or 0
     result2 = await db.execute(
@@ -8463,7 +8595,10 @@ async def booster_grant(
         return {"status": "already_granted", "discord_id": discord_id, "month": month}
     db.add(BoosterGrant(discord_id=discord_id, player_id=player.id,
                         month=month, amount=BOOSTER_MONTHLY_GOLD))
-    player.gold_earned = (player.gold_earned or 0) + BOOSTER_MONTHLY_GOLD
+    # r3 find 1: atomic delta (see the settlement/royalty twins).
+    await db.execute(text(
+        "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+    ), {"amt": BOOSTER_MONTHLY_GOLD, "pid": player.id})
     db.add(GoldTransaction(
         player_id=player.id, amount=BOOSTER_MONTHLY_GOLD,
         reason="booster_monthly", reference_id=month,
@@ -13198,7 +13333,12 @@ async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
             # Credit to bettor — payout INCLUDES stake return.
             bettor = (await db.execute(select(Player).where(Player.id == bet.player_id))).scalar_one_or_none()
             if bettor is not None:
-                bettor.gold_earned = (bettor.gold_earned or 0) + payout
+                # r2 find 3: atomic delta — bettor rows sit outside this
+                # transaction's locked set, so an absolute write can
+                # lost-update against a concurrent stake debit or payout.
+                await db.execute(text(
+                    "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+                ), {"amt": payout, "pid": bettor.id})
                 db.add(GoldTransaction(
                     player_id=bettor.id, amount=payout,
                     reason="bet_win", reference_id=str(series.id),
@@ -13464,7 +13604,19 @@ async def purchase_item(
     if balance < item.price:
         raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {item.price}")
 
-    player.gold_spent = (player.gold_spent or 0) + item.price
+    # Aug 9 bet audit r1 find 3: atomic conditional debit. An absolute
+    # assignment here could lost-update against a concurrent bet stake (both
+    # read the same gold_spent, both write their own total) — two 100g
+    # commitments for 100g of spend. The read above stays for the friendly
+    # message; THIS is the guard.
+    _debit = (await db.execute(text("""
+        UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt
+         WHERE id = :pid
+           AND COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0) >= :amt
+        RETURNING id
+    """), {"amt": item.price, "pid": player.id})).first()
+    if _debit is None:
+        raise HTTPException(status_code=402, detail="Insufficient gold")
     db.add(PlayerItem(player_id=player.id, item_id=item.id, purchase_price=item.price))
     db.add(GoldTransaction(
         player_id=player.id, amount=-item.price,
@@ -13482,7 +13634,12 @@ async def purchase_item(
                                      Player.deleted_at.is_(None))
             )).scalar_one_or_none()
             if artist_player is not None:
-                artist_player.gold_earned = (artist_player.gold_earned or 0) + royalty
+                # r2 find 3: atomic delta — two simultaneous sales of the same
+                # artist's items each wrote an absolute total, so one royalty
+                # silently vanished while both ledger rows persisted.
+                await db.execute(text(
+                    "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+                ), {"amt": royalty, "pid": artist_player.id})
                 db.add(GoldTransaction(
                     player_id=artist_player.id, amount=royalty,
                     reason="artist_royalty", reference_id=sku,
@@ -13902,9 +14059,13 @@ async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_aband
         select(Bet).where(Bet.series_id == sid, Bet.settled_at.is_(None))
     )).scalars().all()
     for b in bets:
-        player = (await db.execute(select(Player).where(Player.id == b.player_id))).scalar_one_or_none()
-        if player is not None:
-            player.gold_spent = max(0, (player.gold_spent or 0) - b.amount)
+        # Aug 9 bet audit r1 find 3: atomic delta (an absolute write here
+        # could clobber a concurrent stake debit and hand back gold twice).
+        await db.execute(text("""
+            UPDATE players
+               SET gold_spent = GREATEST(0, COALESCE(gold_spent, 0) - :amt)
+             WHERE id = :pid
+        """), {"amt": b.amount, "pid": b.player_id})
         db.add(GoldTransaction(
             player_id=b.player_id, amount=b.amount,
             reason=reason, reference_id=str(sid),
@@ -13999,8 +14160,12 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             p1.display_name            AS p1_name,
             p2.steam_id                AS p2_steam_id,
             p2.display_name            AS p2_name,
-            ROUND(gr1.rating)::int     AS p1_rating,
-            ROUND(gr2.rating)::int     AS p2_rating,
+            -- r3 find 5: FULL precision — the POST prices from the exact
+            -- doubles, so rounding here made p*_bettable disagree with it
+            -- (1.100233 advertised vs 1.099812 rejected). Display rounds in
+            -- Python instead.
+            gr1.rating                 AS p1_rating,
+            gr2.rating                 AS p2_rating,
             gr1.rating_deviation       AS p1_rd,
             gr2.rating_deviation       AS p2_rd,
             rs.p1_series_wins, rs.p2_series_wins,
@@ -14017,6 +14182,10 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         LEFT JOIN glicko_ratings gr2 ON gr2.player_id = rs.player2_id
         LEFT JOIN tournaments t      ON t.id = rs.tournament_id
         WHERE rs.status = 'active'
+          -- Aug 9 bet audit find 1: an admin reversal leaves a 1v1 series
+          -- 'active' with invalidated_at set — it must vanish from the live
+          -- list (and the POST rejects it too, same-predicate rule #159).
+          AND rs.invalidated_at IS NULL
           -- "Live" = created recently OR being actively played. The second
           -- arm keeps a RESUMED cross-session series (created days ago,
           -- kept active by the resume window) visible while its games are
@@ -14037,8 +14206,11 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
 
     series = []
     for r in rows:
-        p1_rating = r["p1_rating"] or 1500
-        p2_rating = r["p2_rating"] or 1500
+        # r2 find 7: keep FULL precision for the odds/flags — the POST prices
+        # from the raw doubles, so an int-rounded rating here could advertise
+        # a side the endpoint then rejects (1.10023 vs 1.09981).
+        p1_rating = float(r["p1_rating"] or 1500)
+        p2_rating = float(r["p2_rating"] or 1500)
         p1_rd = float(r["p1_rd"] or 350)
         p2_rd = float(r["p2_rd"] or 350)
         live_p1 = r["live_p1_points"] or 0
@@ -14050,7 +14222,12 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         #     RD ≥ 280 → cap clamps low, no point letting players burn gold)
         p1_odds = round(_odds_multiplier(p1_rating, p2_rating, p1_rd, p2_rd), 2)
         p2_odds = round(_odds_multiplier(p2_rating, p1_rating, p2_rd, p1_rd), 2)
-        no_profit = max(p1_odds, p2_odds) < 1.10
+        # Aug 9 bet audit r1 find 8: the per-side flags must come from the
+        # RAW multiplier the POST checks — rounding 1.096 to 1.10 for display
+        # would advertise a side the endpoint rejects.
+        p1_odds_raw = _odds_multiplier(p1_rating, p2_rating, p1_rd, p2_rd)
+        p2_odds_raw = _odds_multiplier(p2_rating, p1_rating, p2_rd, p1_rd)
+        no_profit = max(p1_odds_raw, p2_odds_raw) < 1.10
         is_private = bool(r["is_private"])
         # Private-room series get a 1-point wider betting window. Their ranked_series
         # row is created LATE (client-side preflight gated on Photon prop replication),
@@ -14087,16 +14264,23 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             "series_id": r["series_id"],
             "p1_steam_id": r["p1_steam_id"],
             "p1_name": r["p1_name"],
-            "p1_rating": p1_rating,
+            "p1_rating": int(round(p1_rating)),
             "p1_rd": round(p1_rd, 1),
             "p1_wins": r["p1_series_wins"],
             "p1_odds": p1_odds,
+            # Aug 9 bet audit find 3: the POST rejects the CHOSEN side below
+            # the 1.10 floor while bets_locked only trips when BOTH sides are
+            # below it — per-side flags let the client hide just the dead
+            # button instead of offering a guaranteed 409 (FFA's per-player
+            # pattern).
+            "p1_bettable": p1_odds_raw >= 1.10,
             "p2_steam_id": r["p2_steam_id"],
             "p2_name": r["p2_name"],
-            "p2_rating": p2_rating,
+            "p2_rating": int(round(p2_rating)),
             "p2_rd": round(p2_rd, 1),
             "p2_wins": r["p2_series_wins"],
             "p2_odds": p2_odds,
+            "p2_bettable": p2_odds_raw >= 1.10,
             "live_p1_points": live_p1,
             "live_p2_points": live_p2,
             "bets_locked": bets_locked,
@@ -14108,6 +14292,39 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             "started_at": r["created_at"].isoformat() if r["created_at"] else None,
         })
     return {"series": series}
+
+
+async def _team_odds_inputs(db: AsyncSession, pids):
+    """(rating, rd) per player for 2v2 ODDS — THE single source for both the
+    live listing and the /team-bets POST.
+
+    Aug 9 bet audit r1 find 9: these used to be computed two different ways.
+    The listing averaged with an INNER JOIN on glicko_ratings_2v2, which
+    silently DROPS a player who has no 2v2 row yet; the POST substituted
+    (1500, 350) for that same player. A veteran teamed with a 2v2 newcomer was
+    therefore quoted 1.60x on the panel and rejected at 1.05 by the endpoint.
+    One helper, one answer (#159's same-predicate rule applied to pricing)."""
+    out = {}
+    if not pids:
+        return out
+    rows = (await db.execute(text("""
+        SELECT g2.player_id, g2.rating, g2.rating_deviation, g2.completed_series,
+               g.rating AS rating_1v1
+          FROM glicko_ratings_2v2 g2
+          JOIN glicko_ratings g ON g.player_id = g2.player_id
+         WHERE g2.player_id = ANY(:pids)
+    """), {"pids": list(pids)})).mappings().all()
+    rmap = {r["player_id"]: r for r in rows}
+    for pid in pids:
+        r = rmap.get(pid)
+        if r is None:
+            out[pid] = (1500.0, 350.0)
+            continue
+        cs = int(r["completed_series"] or 0)
+        rd = float(r["rating_deviation"] or 350.0)
+        rating = float(r["rating"] if cs >= TEAM_TRUST_2V2_RATING_AFTER else (r["rating_1v1"] or 1500.0))
+        out[pid] = (rating, rd)
+    return out
 
 
 @app.get("/api/v1/team/series/active", tags=["Team Matches"])
@@ -14122,7 +14339,7 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
             p2a.steam_id  AS t2a_steam, p2a.display_name AS t2a_name,
             p2b.steam_id  AS t2b_steam, p2b.display_name AS t2b_name,
             ts.t1_series_wins, ts.t2_series_wins,
-            ts.created_at, ts.dc_grace_until,
+            ts.created_at, ts.dc_grace_until, ts.status,
             -- Team-aggregated 2v2 ratings (avg of the 2 members), 1v1 fallback for low-confidence.
             -- Used only for ODDS. The panel ALSO shows each player's individual rating below.
             (SELECT AVG(CASE WHEN g2.completed_series >= :trust THEN g2.rating ELSE g1.rating END)
@@ -14181,20 +14398,50 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
     except Exception:
         pass
 
+    _all_pids = []
+    for r in rows:
+        _all_pids += [r["t1a_id"], r["t1b_id"], r["t2a_id"], r["t2b_id"]]
+    _team_odds_map = await _team_odds_inputs(db, _all_pids)
+
     series = []
     for r in rows:
-        t1_r = float(r["t1_avg_rating"] or 1500.0)
-        t2_r = float(r["t2_avg_rating"] or 1500.0)
-        t1_rd = float(r["t1_avg_rd"] or 350.0)
-        t2_rd = float(r["t2_avg_rd"] or 350.0)
+        _oi = _team_odds_map
+        _t1 = [_oi.get(r["t1a_id"], (1500.0, 350.0)), _oi.get(r["t1b_id"], (1500.0, 350.0))]
+        _t2 = [_oi.get(r["t2a_id"], (1500.0, 350.0)), _oi.get(r["t2b_id"], (1500.0, 350.0))]
+        t1_r = sum(x[0] for x in _t1) / 2
+        t2_r = sum(x[0] for x in _t2) / 2
+        t1_rd = sum(x[1] for x in _t1) / 2
+        t2_rd = sum(x[1] for x in _t2) / 2
         t1_odds = round(_odds_multiplier(t1_r, t2_r, t1_rd, t2_rd), 2)
         t2_odds = round(_odds_multiplier(t2_r, t1_r, t2_rd, t1_rd), 2)
-        no_profit = max(t1_odds, t2_odds) < 1.10
+        # find 8 (2v2 twin): raw multipliers drive the flags/lock.
+        t1_odds_raw = _odds_multiplier(t1_r, t2_r, t1_rd, t2_rd)
+        t2_odds_raw = _odds_multiplier(t2_r, t1_r, t2_rd, t1_rd)
+        no_profit = max(t1_odds_raw, t2_odds_raw) < 1.10
         # Lock when series has any games done (t1_series_wins > 0 OR t2 > 0)
         # — the "is the favorite holding up" mystery has been resolved.
         score_locked = (r["t1_series_wins"] or 0) > 0 or (r["t2_series_wins"] or 0) > 0
-        bets_locked = no_profit or score_locked
-        lock_reason = "game_in_progress" if score_locked else ("no_meaningful_odds" if no_profit else None)
+        # Aug 9 bet audit find 2: dc_paused rows are LISTED (so the panel can
+        # show the paused series) but the POST only accepts status='active' —
+        # the listing must report them locked or the client renders buttons
+        # that always 409 (#159 same-predicate rule).
+        status_locked = (r["status"] or "active") != "active"
+        # Aug 9 bet audit find 8: 2v2 had NO mid-game close — game 1 stayed
+        # bettable for its full ~9 min while 1v1 locks at 2 points and FFA at
+        # 90s. Time-box it: closed once the series has been active for
+        # TEAM_BET_OPEN_SECONDS (covers room join + load + the opening
+        # exchanges; the balance knob is Sid's).
+        time_locked = False
+        try:
+            if r["created_at"] is not None:
+                _age = (datetime.now(timezone.utc) - r["created_at"]).total_seconds()
+                time_locked = _age > TEAM_BET_OPEN_SECONDS
+        except Exception:
+            pass
+        bets_locked = no_profit or score_locked or status_locked or time_locked
+        lock_reason = ("game_in_progress" if (score_locked or time_locked)
+                       else ("series_paused" if status_locked
+                             else ("no_meaningful_odds" if no_profit else None)))
         series.append({
             "series_id": r["series_id"],
             "t1a_steam": r["t1a_steam"], "t1a_name": r["t1a_name"],
@@ -14210,6 +14457,9 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
             "t1_wins": r["t1_series_wins"] or 0,
             "t2_wins": r["t2_series_wins"] or 0,
             "t1_odds": t1_odds, "t2_odds": t2_odds,
+            # Aug 9 bet audit find 3 — see the 1v1 listing's per-side note.
+            "t1_bettable": t1_odds_raw >= 1.10,
+            "t2_bettable": t2_odds_raw >= 1.10,
             "bets_locked": bets_locked,
             "lock_reason": lock_reason,
             "started_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -14248,6 +14498,12 @@ async def series_preflight(
     Server returns the series_id which the client then uses for live-points
     reports during game 1."""
     _presence_touch(p1_steam_id)
+    # Aug 9 bet audit r1 find 6: the incarnation fence for the evictions
+    # below. A preflight request delayed in flight must never delete a queue
+    # row the player joined AFTER sending it (they left the room and queued
+    # again) — only rows that already existed when this request arrived are
+    # evicted.
+    _pf_arrived = datetime.now(timezone.utc)
     # Diagnostics for private-room series that fail to register. Grep `PREFLIGHT`
     # in the api log: every successful call logs a 'call' + ('created'|'reuse');
     # a 'call' with no follow-up means a DB error, and a rejection logs why.
@@ -14321,6 +14577,20 @@ async def series_preflight(
         print(f"[PREFLIGHT-DIAG] reuse: existing active series {existing.id} for {p1_steam_id} vs {p2_steam_id} "
               f"(score {existing.p1_series_wins}-{existing.p2_series_wins})")
         await db.commit()
+        # Aug 9 (Sid): a rated ROOMCODE game's only server touchpoints are
+        # this preflight and the match report — neither evicted, so both
+        # players' 'searching' rows in every queue stayed live and matchable
+        # mid-game. Same post-commit own-transaction contract as the lock-path
+        # callers; keep_table="" sweeps all four queues (ranked_queue
+        # included) and the helper's matched-pair dissolution covers the 1v1
+        # ready-up phase. The not_ranked returns above deliberately do NOT
+        # evict — a casual roomcode game must not end a search (bug #112).
+        try:
+            await _evict_other_queue_searching(db, [p1.id, p2.id], keep_table="",
+                                               reason="a room-code ranked game",
+                                               joined_before=_pf_arrived)
+        except Exception as _ee:
+            print(f"[PREFLIGHT-DIAG] eviction failed (non-fatal): {_ee}")
         # Echo the series score + player order so a reconnecting client can
         # adopt the resumed BO3 tally into its HUD instead of starting at 0-0.
         sp1 = p1_steam_id if existing.player1_id == p1.id else p2_steam_id
@@ -14348,6 +14618,13 @@ async def series_preflight(
     db.add(series)
     await db.flush()
     await db.commit()
+    # Aug 9 (Sid): see the eviction note on the reuse branch above.
+    try:
+        await _evict_other_queue_searching(db, [p1.id, p2.id], keep_table="",
+                                           reason="a room-code ranked game",
+                                           joined_before=_pf_arrived)
+    except Exception as _ee:
+        print(f"[PREFLIGHT-DIAG] eviction failed (non-fatal): {_ee}")
     print(f"[SERIES-PREFLIGHT] created series {series.id} for {p1_steam_id} vs {p2_steam_id} "
           f"(room={room_id or '?'} private={is_priv})")
     return {
@@ -14388,6 +14665,14 @@ async def update_live_points(
     if series is None:
         raise HTTPException(status_code=404, detail="Series not found")
 
+    # Aug 9 bet audit r4 find 2: refuse points for a series that is no longer
+    # active. A stale client (delayed preflight, resumed session) could
+    # otherwise keep writing into a COMPLETED series — harmless there, but the
+    # same staleness left the live series' own points unreported, so its bet
+    # cutoff never tripped. Fail loudly instead of silently accepting.
+    if series.status != "active" or getattr(series, "invalidated_at", None) is not None:
+        raise HTTPException(status_code=409, detail="Series is not active")
+
     # Reporter must be a participant — only the two players in the match should report.
     reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
     if reporter is None or reporter.id not in (series.player1_id, series.player2_id):
@@ -14401,14 +14686,36 @@ async def update_live_points(
 
     # Monotonic: only ever increase. Prevents a stale or out-of-order report from
     # un-locking betting after the cutoff has been hit.
-    series.live_p1_points = max(series.live_p1_points or 0, new_p1)
-    series.live_p2_points = max(series.live_p2_points or 0, new_p2)
+    # Aug 9 bet audit r1 find 5: the max() must happen IN THE DATABASE. Two
+    # concurrent reports both read the stored value, and the higher one could
+    # be overwritten by the lower one's absolute write — betting reopened
+    # below the cutoff. GREATEST makes each write monotonic on its own.
+    # r5 find 4: the status check above is advisory (it can go stale between
+    # statements) — the REAL guard is these predicates inside the UPDATE, so a
+    # completion committing mid-request means zero rows and a 409 rather than
+    # a silent write to a terminal series.
+    _pts = (await db.execute(text("""
+        UPDATE ranked_series
+           SET live_p1_points = GREATEST(COALESCE(live_p1_points, 0), :p1),
+               live_p2_points = GREATEST(COALESCE(live_p2_points, 0), :p2)
+         WHERE id = :sid AND status = 'active' AND invalidated_at IS NULL
+        RETURNING live_p1_points, live_p2_points
+    """), {"p1": new_p1, "p2": new_p2, "sid": sid})).first()
+    if _pts is None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Series is not active")
     await db.commit()
+    series.live_p1_points, series.live_p2_points = _pts[0], _pts[1]
+    # Aug 9 bet audit find 7: mirror the POST /bets predicate exactly — the
+    # private-room threshold is 3 and a decided game locks regardless.
+    _lock_pts = 3 if bool(getattr(series, "is_private", False)) else 2
     return {
         "status": "ok",
         "live_p1_points": series.live_p1_points,
         "live_p2_points": series.live_p2_points,
-        "bets_locked": (series.live_p1_points + series.live_p2_points) >= 2,
+        "bets_locked": ((series.live_p1_points + series.live_p2_points) >= _lock_pts
+                        or (series.p1_series_wins or 0) > 0
+                        or (series.p2_series_wins or 0) > 0),
     }
 
 
@@ -14493,11 +14800,32 @@ async def place_bet(
         sid = UUID(series_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid series_id")
-    series = (await db.execute(select(RankedSeries).where(RankedSeries.id == sid))).scalar_one_or_none()
+    # Aug 9 bet audit find 6: lock the series row (NO KEY UPDATE — weakest
+    # mode that conflicts with the report path's locks, #202) so the close
+    # checks below cannot read a pre-completion snapshot while a concurrent
+    # report commits; every predicate after this line sees post-lock truth.
+    series = (await db.execute(
+        select(RankedSeries).where(RankedSeries.id == sid).with_for_update(key_share=True)
+    )).scalar_one_or_none()
     if series is None:
         raise HTTPException(status_code=404, detail="Series not found")
     if series.status != "active":
         raise HTTPException(status_code=409, detail="Series is not active")
+    # Aug 9 bet audit find 1: an admin-reversed series keeps status='active'.
+    if getattr(series, "invalidated_at", None) is not None:
+        raise HTTPException(status_code=409, detail="Series was invalidated")
+    # Aug 9 bet audit find 4: the listing windows liveness at 2h but the POST
+    # accepted any 'active' row forever — mirror the listing's exact predicate
+    # (same-predicate rule #159) so a crafted request can't stake a husk.
+    _live = (await db.execute(text("""
+        SELECT 1 FROM ranked_series rs
+         WHERE rs.id = :sid
+           AND (rs.created_at > NOW() - INTERVAL '2 hours'
+                OR EXISTS (SELECT 1 FROM matches m2 WHERE m2.series_id = rs.id
+                           AND m2.ended_at > NOW() - INTERVAL '2 hours'))
+    """), {"sid": sid})).first()
+    if _live is None:
+        raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
     if series.p1_series_wins >= 2 or series.p2_series_wins >= 2:
         raise HTTPException(status_code=409, detail="Series already effectively concluded")
     # Any decided game locks betting. /series/active has always REPORTED this
@@ -14554,8 +14882,19 @@ async def place_bet(
         raise HTTPException(status_code=409,
             detail="Bets restricted — odds offer no meaningful profit (player rating still uncertain)")
 
-    # Stake: debit now, credit payout at settlement.
-    bettor.gold_spent = (bettor.gold_spent or 0) + amount
+    # Stake: debit now, credit payout at settlement. Aug 9 bet audit find 5:
+    # the debit is the ATOMIC conditional UPDATE (the FFA pattern, #148) —
+    # the read-check above is only the friendly error message; this row-level
+    # guard is what prevents two concurrent bets from double-spending one
+    # balance snapshot.
+    _debit = (await db.execute(text("""
+        UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt
+         WHERE id = :pid
+           AND COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0) >= :amt
+        RETURNING id
+    """), {"amt": amount, "pid": bettor.id})).first()
+    if _debit is None:
+        raise HTTPException(status_code=402, detail="Insufficient gold")
     db.add(GoldTransaction(
         player_id=bettor.id, amount=-amount,
         reason="bet_stake", reference_id=series_id,
@@ -14612,13 +14951,27 @@ async def place_team_bet(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid team_series_id")
     series = (await db.execute(text("""
-        SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id, t1_series_wins, t2_series_wins
-          FROM team_series WHERE id = :sid
+        SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id, t1_series_wins, t2_series_wins,
+               created_at, invalidated_at
+          FROM team_series WHERE id = :sid FOR NO KEY UPDATE
     """), {"sid": sid})).mappings().first()
     if series is None:
         raise HTTPException(status_code=404, detail="Team series not found")
     if series["status"] != "active":
         raise HTTPException(status_code=409, detail=f"Series is {series['status']}")
+    if series["invalidated_at"] is not None:
+        raise HTTPException(status_code=409, detail="Series was invalidated")
+    # Aug 9 bet audit finds 4+8: liveness bound (the listing windows at 2h;
+    # the POST accepted any 'active' husk) and the 2v2 time-box close — see
+    # TEAM_BET_OPEN_SECONDS. FOR NO KEY UPDATE above (find 6, #202) makes
+    # every check here read post-lock truth against a concurrent report's
+    # FOR UPDATE instead of a stale snapshot.
+    if series["created_at"] is not None:
+        _age = (datetime.now(timezone.utc) - series["created_at"]).total_seconds()
+        if _age > 2 * 3600:
+            raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
+        if _age > TEAM_BET_OPEN_SECONDS:
+            raise HTTPException(status_code=409, detail="Betting closed for this series")
     # Close once ANY game is decided — the same rule the live-bets listing has
     # always displayed as locked (score_locked above at 1-0) and the same rule
     # /bets enforces for 1v1 (#107 family). The endpoint previously only
@@ -14649,23 +15002,11 @@ async def place_team_bet(
     # average of its 2 members' 2v2 ratings (RD-weighted falls back to 1v1
     # via _team_balance_rating for low-confidence accounts).
     pair_ids = [series["t1a_id"], series["t1b_id"], series["t2a_id"], series["t2b_id"]]
-    g_rows = (await db.execute(text("""
-        SELECT g2.player_id, g2.rating, g2.rating_deviation, g2.completed_series,
-               g.rating AS rating_1v1
-          FROM glicko_ratings_2v2 g2
-          JOIN glicko_ratings g ON g.player_id = g2.player_id
-         WHERE g2.player_id = ANY(:pids)
-    """), {"pids": pair_ids})).mappings().all()
-    rmap = {r["player_id"]: r for r in g_rows}
-
+    # find 9: same helper the live listing prices with — the two must never
+    # diverge again.
+    _oi = await _team_odds_inputs(db, pair_ids)
     def team_balance(pid):
-        r = rmap.get(pid)
-        if r is None:
-            return 1500.0, 350.0
-        cs = int(r["completed_series"] or 0)
-        rd = float(r["rating_deviation"] or 350.0)
-        rating = float(r["rating"] if cs >= TEAM_TRUST_2V2_RATING_AFTER else (r["rating_1v1"] or 1500.0))
-        return rating, rd
+        return _oi.get(pid, (1500.0, 350.0))
 
     t1_ratings = [team_balance(series["t1a_id"]), team_balance(series["t1b_id"])]
     t2_ratings = [team_balance(series["t2a_id"]), team_balance(series["t2b_id"])]
@@ -14682,7 +15023,16 @@ async def place_team_bet(
         raise HTTPException(status_code=409,
             detail="Bets restricted — odds offer no meaningful profit (low team rating confidence)")
 
-    bettor.gold_spent = (bettor.gold_spent or 0) + amount
+    # Aug 9 bet audit find 5: atomic conditional debit (FFA pattern, #148) —
+    # the earlier balance read is only the friendly message.
+    _debit = (await db.execute(text("""
+        UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt
+         WHERE id = :pid
+           AND COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0) >= :amt
+        RETURNING id
+    """), {"amt": amount, "pid": bettor.id})).first()
+    if _debit is None:
+        raise HTTPException(status_code=402, detail="Insufficient gold")
     db.add(GoldTransaction(
         player_id=bettor.id, amount=-amount,
         reason="team_bet_stake", reference_id=team_series_id,
@@ -17877,7 +18227,11 @@ async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db
     gold_awarded = 0
     if gold_ok:
         gold_awarded = _achievement_gold(req.achievement_key)
-        player.gold_earned = (player.gold_earned or 0) + gold_awarded
+        # r3 find 1: atomic delta (see the settlement/royalty twins) — this
+        # row is not covered by a lock the concurrent writers share.
+        await db.execute(text(
+            "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+        ), {"amt": gold_awarded, "pid": player.id})
         db.add(GoldTransaction(
             player_id=player.id,
             amount=gold_awarded,
@@ -18895,7 +19249,10 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
         return {"status": "already_unlocked"}
     db.add(PlayerAchievement(player_id=target.id, achievement_key=req.achievement_key))
     gold_amt = _achievement_gold(req.achievement_key)
-    target.gold_earned = (target.gold_earned or 0) + gold_amt
+    # r3 find 1: atomic delta (see the settlement/royalty twins).
+    await db.execute(text(
+        "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+    ), {"amt": gold_amt, "pid": target.id})
     db.add(GoldTransaction(
         player_id=target.id, amount=gold_amt,
         reason="achievement", reference_id=req.achievement_key,
@@ -18963,9 +19320,12 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
     # July 20 item 6: also claw back the new loser-side series gold — the 2v2
     # counterpart already reverses win AND loss reasons; without series_loss
     # here a colluding pair keeps the loser payout through every reversal.
+    # Aug 9 bet audit find 1: bet payouts are clawed back too (the 2v2 twin
+    # already reverses team_bet_payout; without bet_win here a reversed series
+    # left winners keeping payouts funded by a voided result).
     txns = (await db.execute(
         select(GoldTransaction).where(
-            GoldTransaction.reason.in_(["series_win", "series_loss"]),
+            GoldTransaction.reason.in_(["series_win", "series_loss", "bet_win"]),
             GoldTransaction.reference_id == str(series.id),
         )
     )).scalars().all()
@@ -18974,9 +19334,13 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
             player_id=tx.player_id, amount=-tx.amount,
             reason="reversal", reference_id=str(series.id),
         ))
-        player = (await db.execute(select(Player).where(Player.id == tx.player_id))).scalar_one_or_none()
-        if player is not None:
-            player.gold_earned = max(0, (player.gold_earned or 0) - tx.amount)
+        # Aug 9 bet audit r1 find 3: atomic delta — an absolute write here can
+        # lost-update against a concurrent credit on the same player row
+        # (bettors sit outside this transaction's locked set by design).
+        await db.execute(text(
+            "UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - :amt)"
+            " WHERE id = :pid"
+        ), {"amt": tx.amount, "pid": tx.player_id})
 
     matches_in_series = (await db.execute(select(Match).where(Match.series_id == series.id))).scalars().all()
     for m in matches_in_series:
@@ -18989,10 +19353,18 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
     series.invalidated_at = datetime.now(timezone.utc)
     series.invalidation_reason = req.reason[:64]
 
+    # Aug 9 bet audit find 1: unsettled bets on the voided result are
+    # refunded (the 2v2 twin has always done this via its reconcile; the 1v1
+    # reversal previously stranded them forever — the janitor settle arm
+    # requires invalidated_at IS NULL and the prune arms never match an
+    # invalidated row).
+    _refunded = await _refund_series_bets(db, series.id, "admin_reverse")
+
     db.add(AdminAction(
         admin_steam_id=req.admin_steam_id, action="reverse_series",
         target_series_id=series.id,
-        details={"reason": req.reason, "matches_reversed": len(matches_in_series)},
+        details={"reason": req.reason, "matches_reversed": len(matches_in_series),
+                 "bets_refunded": _refunded},
     ))
     await db.commit()
     return {"status": "reversed", "series_id": req.series_id, "matches_reversed": len(matches_in_series)}
@@ -23509,6 +23881,14 @@ FFA_BET_LIVE_ASSEMBLY_MINUTES = 15     # ...since lock, for a lobby with 0 games
 # seconds after game N-1 ended (or after the lock, for game 1). Delete this
 # once the live-score lock is live and adoption is confirmed.
 FFA_BET_OPEN_SECONDS = 90
+
+# Aug 9 bet audit find 8: 2v2 was the only mode with NO mid-game close —
+# betting stayed open for all of game 1 (~9 min avg) while 1v1 locks at 2
+# points and FFA at 90s, and the spectator ruling leans on the close windows
+# being the information gate. Same interim shape as FFA's: a fixed window
+# after series activation (queue lock / hosted-lobby Start). Room join + load
+# eats ~30-60s of it. BALANCE KNOB — Sid's number.
+TEAM_BET_OPEN_SECONDS = 120
 # Engine DEFAULTS — MUST match plugin/FfaMode.cs (RoundsToWin/PointsToWinRound).
 # 3 -> 5 after the first playtest (Sid: games ended too fast for the rolling
 # card bar to ever engage).
@@ -28772,6 +29152,20 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                  "t1a": p_t1a.id, "t1b": p_t1b.id,
                  "t2a": p_t2a.id, "t2b": p_t2b.id},
             )
+            # Aug 9 (Codex, lobby-bets design review Q3): this re-stamp SWAPS
+            # which stored slot pair is "team 1". Bets placed BEFORE the first
+            # report stored bet_on_team against the OLD mapping, so without
+            # this flip every pre-game-1 wager settles against the opposite
+            # pair — a silent wrong-winner payout. Unsettled bets only; the
+            # partition itself is guaranteed identical by the guard above.
+            _flipped = (await db.execute(text("""
+                UPDATE team_bets SET bet_on_team = 3 - bet_on_team
+                 WHERE team_series_id = :sid AND settled_at IS NULL
+                RETURNING id
+            """), {"sid": series_uuid})).fetchall()
+            if _flipped:
+                print(f"[TEAM-BET] slot re-stamp swapped sides — flipped {len(_flipped)} "
+                      f"unsettled bet(s) on series {series_uuid}")
             # Re-read for downstream slot lookups.
             s_q2 = await db.execute(
                 text("SELECT * FROM team_series WHERE id = :sid"), {"sid": series_uuid},

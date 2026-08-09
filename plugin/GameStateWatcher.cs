@@ -101,6 +101,7 @@ namespace CompetitiveRounds
         // ranked matches in /series/active immediately rather than after the
         // first match completes.
         private static bool seriesPreflightSent = false;
+
         // (#26) Opponent-never-arrived watchdog state (ranked_* rooms only).
         private static bool rankedRoomStallHandled = false;
         private static bool rankedRoomStallWarned = false;
@@ -2229,20 +2230,23 @@ namespace CompetitiveRounds
                     }
                     // Codex re-review find A: a PRE-ROOM 1v1 match (ready-up
                     // phase) must dissolve too, or the player holds two live
-                    // commitments (1v1 popup + this game). Decline is the
-                    // existing machinery: it resets both sides to searching
-                    // server-side, and once a room was actually issued the
-                    // server refuses it (match_already_formed) - a harmless
-                    // failed call in that already-lost race.
+                    // commitments (1v1 popup + this game).
+                    //
+                    // Aug 9 bet audit r2 find 5: this used DeclineMatch, which
+                    // puts BOTH rows back to 'searching' - so the player in
+                    // this room kept polling and stayed matchable, the exact
+                    // ghost the room-entry teardown exists to remove.
+                    // LeaveQueue deletes OUR row; the server's own eviction
+                    // resets the innocent partner.
                     else if (!PhotonNetwork.OfflineMode
                              && joinedCompetitiveRoom
                              && (ApiClient.CurrentQueueState == ApiClient.QueueState.Matched
                                  || ApiClient.CurrentQueueState == ApiClient.QueueState.ReadySent)
                              && !joinedOwnPendingRoom)
                     {
-                        ApiClient.DeclineMatch(GameStateWatcher.LocalSteamId);
+                        ApiClient.LeaveQueue(GameStateWatcher.LocalSteamId);
                         CompetitiveUI.ShowNotification(
-                            "Declined 1v1 match - you joined a game",
+                            "Left the 1v1 match queue - you joined a game",
                             Color.yellow,
                             5f);
                         Plugin.Log.LogInfo(

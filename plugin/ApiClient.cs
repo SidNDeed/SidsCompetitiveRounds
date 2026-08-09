@@ -1298,6 +1298,11 @@ namespace CompetitiveRounds
             public string p1_steam_id, p1_name;
             public int p1_rating, p1_wins;
             public float p1_odds;
+            // Aug 9 bet audit find 8: AUTHORITATIVE per-side flags (server
+            // computes them from the RAW multiplier its POST checks — never
+            // re-derive from the rounded odds above). Default true so a
+            // pre-1.39 server's response leaves the buttons as they were.
+            public bool p1_bettable = true, p2_bettable = true;
             public string p2_steam_id, p2_name;
             public int p2_rating, p2_wins;
             public float p2_odds;
@@ -1357,6 +1362,8 @@ namespace CompetitiveRounds
                             e.p2_rating    = ExtractJsonInt(chunk, "p2_rating");
                             e.p2_wins      = ExtractJsonInt(chunk, "p2_wins");
                             e.p2_odds      = ExtractJsonFloat(chunk, "p2_odds");
+                            e.p1_bettable  = !(chunk.Contains("\"p1_bettable\":false") || chunk.Contains("\"p1_bettable\": false"));
+                            e.p2_bettable  = !(chunk.Contains("\"p2_bettable\":false") || chunk.Contains("\"p2_bettable\": false"));
                             e.live_p1_points = ExtractJsonInt(chunk, "live_p1_points");
                             e.live_p2_points = ExtractJsonInt(chunk, "live_p2_points");
                             e.bets_locked   = chunk.Contains("\"bets_locked\":true") || chunk.Contains("\"bets_locked\": true");
@@ -1589,6 +1596,37 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[LIVE-POINTS] series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {p1Points}-{p2Points} ok={ok}");
+                // Aug 9 bet audit r8: SELF-HEAL. The server can hand a new
+                // game the PREVIOUS series' id when the deciding report has
+                // not committed yet (the preflight legitimately reuses a
+                // still-active series). Once that report lands, the id we
+                // hold is completed — the server now says so explicitly
+                // ("Series is not active", added in this batch) instead of
+                // silently accepting the write. Drop it: GameStateWatcher
+                // re-arms the preflight whenever the id is empty at game
+                // start, so the next point recreates the right series and the
+                // betting window opens. Ordering-proof by construction — it
+                // reacts to the server's own verdict rather than trying to
+                // predict the race.
+                if (!ok && resp != null && resp.IndexOf("not active", StringComparison.OrdinalIgnoreCase) >= 0
+                    && string.Equals(ActiveRankedSeriesId, seriesId, StringComparison.Ordinal))
+                {
+                    Plugin.Log.LogWarning("[LIVE-POINTS] held series is no longer active — clearing so the "
+                                          + "preflight re-arms for the current game");
+                    ActiveRankedSeriesId = null;
+                    // Deliberately NO eager mid-game re-arm here (r9): the
+                    // recovery poll is not bound to a live game, so between
+                    // games it would create a phantom 0-0 series that is
+                    // bettable even if nobody rematches — and a replacement
+                    // created mid-game would start 0-0 and reopen betting
+                    // after points were already scored. Clearing alone is the
+                    // safe half: it stops live points going to a finished
+                    // series, and the existing game-start re-arm
+                    // (GameStateWatcher, "no live series id") recreates the
+                    // right series at the next boundary. Residual, unchanged
+                    // from before this batch: a game that adopted a retiring
+                    // series id has no betting window until then.
+                }
             }));
         }
 
@@ -1623,6 +1661,8 @@ namespace CompetitiveRounds
             public int t1a_rating, t1b_rating, t2a_rating, t2b_rating;  // per-player 2v2 ratings
             public int t1_wins, t2_wins;
             public float t1_odds, t2_odds;
+            // Aug 9 bet audit find 8 — see the 1v1 twin.
+            public bool t1_bettable = true, t2_bettable = true;
             public bool bets_locked;
             public string lock_reason;
             public string started_at;
@@ -1683,6 +1723,8 @@ namespace CompetitiveRounds
                     t2_wins   = ExtractJsonInt(obj, "t2_wins"),
                     t1_odds   = ExtractJsonFloat(obj, "t1_odds"),
                     t2_odds   = ExtractJsonFloat(obj, "t2_odds"),
+                    t1_bettable = !obj.Contains("\"t1_bettable\":false") && !obj.Contains("\"t1_bettable\": false"),
+                    t2_bettable = !obj.Contains("\"t2_bettable\":false") && !obj.Contains("\"t2_bettable\": false"),
                     bets_locked = ExtractJsonBool(obj, "bets_locked"),
                     lock_reason = ExtractJsonString(obj, "lock_reason"),
                     started_at = ExtractJsonString(obj, "started_at"),
@@ -4551,6 +4593,16 @@ namespace CompetitiveRounds
             string json = sb.ToString();
             string matchType = isRanked ? "RANKED" : "CASUAL";
             Plugin.Log.LogInfo($"Reporting {matchType} match to API...");
+            // r7 find 1: the game ended NOW, so BOTH the retirement and the
+            // series-id clear happen HERE, synchronously — not in the report's
+            // async callback. Applying them late let an old report's response
+            // (up to 3 x 10s of retries) wipe an id the NEXT game had already
+            // installed, and left a pre-boundary preflight response briefly
+            // able to bind. Everything sent up to this instant belongs to the
+            // game that just finished; anything sent after it survives.
+            if (preflightGeneration > preflightRetiredThrough)
+                preflightRetiredThrough = preflightGeneration;
+            ActiveRankedSeriesId = null;
 
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/matches",
@@ -4640,10 +4692,12 @@ namespace CompetitiveRounds
                             string seriesStatus = ExtractJsonString(response, "series_status");
                             string seriesScore = ExtractJsonString(response, "series_score");
 
-                            // After game 1 of a series is over, live-points reporting is irrelevant
-                            // (bets are locked anyway by series_wins > 0). Clear so we don't post
-                            // stale series_id if a new series starts within the same room.
-                            ActiveRankedSeriesId = null;
+                            // (live-points reporting for the finished game is
+                            // irrelevant — bets are locked by series_wins > 0.
+                            // ActiveRankedSeriesId was already cleared at the
+                            // synchronous game boundary above; clearing it
+                            // HERE would wipe an id the next game installed
+                            // while this response was in flight — r7 find 1.)
 
                             if (seriesStatus == "active")
                             {
@@ -6928,6 +6982,13 @@ namespace CompetitiveRounds
             // the wider private window). #36.
             string roomName = "";
             try { roomName = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+            string preflightRoom = roomName;   // find 6: incarnation fence for the callback
+            // r4 find 2: room name alone ALIASES successive series in one
+            // room (a rematch reuses the Photon room), so a delayed response
+            // could reinstall a completed series and send the NEW series'
+            // live points to it. Every send takes a generation; only the
+            // newest may bind.
+            int myGen = ++preflightGeneration;
             string url = $"{baseUrl}/api/v1/series/preflight?p1_steam_id={Escape(mySteamId)}&p2_steam_id={Escape(oppSteamId)}"
                        + $"&p1_name={Escape(myName)}&p2_name={Escape(oppName)}"
                        + $"&room_id={UnityEngine.Networking.UnityWebRequest.EscapeURL(roomName)}&sig={sig}";
@@ -6935,11 +6996,65 @@ namespace CompetitiveRounds
             {
                 if (ok)
                 {
+                    // Aug 9 bet audit r3 find 3: this response describes the
+                    // room the request was SENT from. If we have since left
+                    // or changed rooms it must not bind anything — installing
+                    // its series id here made Room B report its live points
+                    // into Room A's series, and the teardown-only guard below
+                    // was too late to stop that.
+                    string roomNow = "";
+                    try { roomNow = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+                    bool sameRoom = string.Equals(roomNow, preflightRoom, StringComparison.Ordinal);
+                    if (myGen != preflightGeneration || myGen <= preflightRetiredThrough)
+                    {
+                        Plugin.Log.LogInfo($"[PREFLIGHT] response ignored — superseded (gen {myGen}, "
+                                           + $"latest {preflightGeneration}, retired through {preflightRetiredThrough})");
+                        return;
+                    }
+                    if (!sameRoom)
+                    {
+                        Plugin.Log.LogInfo("[PREFLIGHT] response ignored — room changed since the request "
+                                           + $"(sent from '{preflightRoom}', now '{roomNow}')");
+                        return;
+                    }
                     string sid = ExtractJsonString(resp, "series_id");
                     if (!string.IsNullOrEmpty(sid))
                     {
                         ActiveRankedSeriesId = sid;
                         Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} status={ExtractJsonString(resp, "status")}");
+                        // Aug 9 (Sid): a rated ROOMCODE game must end every
+                        // other search — the room-entry teardown deliberately
+                        // ignores non-prefix rooms (bug #112: casual-while-
+                        // searching is supported), so THIS is the first
+                        // client-side moment the game is known rated. The
+                        // server's preflight-time eviction covers old
+                        // clients; this mirror gives the local UI immediate
+                        // truth instead of a poll-time not_in_queue surprise.
+                        try
+                        {
+                            // (the whole callback is already room-fenced above)
+                            //
+                            if (CurrentQueueState == QueueState.Searching)
+                            {
+                                Plugin.Log.LogInfo("[PREFLIGHT] rated room-code game confirmed — leaving the 1v1 search");
+                                LeaveQueue(MatchTracker.LocalSteamId);
+                            }
+                            else if (CurrentQueueState == QueueState.Matched || CurrentQueueState == QueueState.ReadySent)
+                            {
+                                // Aug 9 bet audit r1 find 7: NOT DeclineMatch —
+                                // decline puts both players back to
+                                // 'searching', so the fighter in this rated
+                                // room stays matchable (and a decline after a
+                                // queue room was issued 409s, then the next
+                                // poll's ready_join + LeavingForRanked yanks
+                                // them OUT of the rated game). LeaveQueue
+                                // deletes our row; the server's own eviction
+                                // resets the innocent partner.
+                                Plugin.Log.LogInfo("[PREFLIGHT] rated room-code game confirmed — leaving the pending 1v1 match");
+                                LeaveQueue(MatchTracker.LocalSteamId);
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[PREFLIGHT] queue teardown failed: {ex.Message}"); }
                         // Resumed series (#33): adopt the server-side BO3 tally so
                         // the HUD doesn't restart at 0-0 after a DC + reconnect.
                         try
@@ -7082,6 +7197,21 @@ namespace CompetitiveRounds
         // GameStateWatcher's poll to address the correct series when posting live point counts.
         // Cleared after the series's first match report (no longer needed; bets locked anyway).
         public static string ActiveRankedSeriesId;
+        /// <summary>r4 find 2: monotonic id for preflight requests. Bumped on
+        /// every send; a callback whose captured value is no longer the latest
+        /// describes a superseded request and must bind nothing.</summary>
+        private static int preflightGeneration;
+
+        /// <summary>Responses whose captured generation is at or below this are
+        /// stale: they belong to a request sent BEFORE the game boundary that
+        /// set the watermark (r5 find 1 / r6 find 1).
+        ///
+        /// The watermark is captured SYNCHRONOUSLY when the match report is
+        /// SENT — not in its async callback. A blind bump in the callback
+        /// superseded the NEXT game's preflight whenever the report response
+        /// was slow (up to 3 x 10s of retries), leaving that game with no
+        /// series row and therefore no pre-game betting window.</summary>
+        private static int preflightRetiredThrough;
         public static QueuePollData LastPollData { get; private set; }
         public static bool IsQueuePolling { get; private set; } = false;
         private static float queuePollTimer = 0f;

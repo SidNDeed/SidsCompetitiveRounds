@@ -7584,20 +7584,30 @@ LIVE_BET_AMOUNTS = (100, 500, 2000)
 
 class LiveBetView(discord.ui.View):
     def __init__(self, series_id: str, p1_steam: str, p1_name: str,
-                 p2_steam: str, p2_name: str):
+                 p2_steam: str, p2_name: str,
+                 p1_bettable: bool = True, p2_bettable: bool = True):
         super().__init__(timeout=None)
         self.series_id = series_id
         self.p1_steam = p1_steam
         self.p1_name = p1_name
         self.p2_steam = p2_steam
         self.p2_name = p2_name
-        # 8 buttons: (3 preset amounts + custom) × 2 players, in three rows.
+        # Aug 9 bet audit find 3/8: PER-SIDE gating. The endpoint rejects the
+        # chosen side below the 1.10x floor while the global bets_locked only
+        # trips when BOTH sides are — so a favorite's buttons were a
+        # guaranteed 409 in Discord exactly as they were in-game. The flags
+        # are the server's own (computed from the raw multiplier it prices
+        # with); default True keeps older API responses rendering as before.
         for amt in LIVE_BET_AMOUNTS:
-            self.add_item(LiveBetButton(self, amt, on_p1=True))
+            if p1_bettable:
+                self.add_item(LiveBetButton(self, amt, on_p1=True))
         for amt in LIVE_BET_AMOUNTS:
-            self.add_item(LiveBetButton(self, amt, on_p1=False))
-        self.add_item(LiveBetCustomButton(self, on_p1=True))
-        self.add_item(LiveBetCustomButton(self, on_p1=False))
+            if p2_bettable:
+                self.add_item(LiveBetButton(self, amt, on_p1=False))
+        if p1_bettable:
+            self.add_item(LiveBetCustomButton(self, on_p1=True))
+        if p2_bettable:
+            self.add_item(LiveBetCustomButton(self, on_p1=False))
 
 class LiveBetButton(discord.ui.Button):
     def __init__(self, parent: LiveBetView, amount: int, on_p1: bool):
@@ -7690,7 +7700,8 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
 
 
 class LiveBetCustomButton(discord.ui.Button):
-    """v1.29: opens a modal for an arbitrary bet amount (1 – 100,000g)."""
+    """v1.29: opens a modal for an arbitrary bet amount (1-2,000g,
+    the cap every bet endpoint enforces)."""
     def __init__(self, parent: LiveBetView, on_p1: bool):
         side_label = parent.p1_name if on_p1 else parent.p2_name
         style = discord.ButtonStyle.primary if on_p1 else discord.ButtonStyle.success
@@ -7966,13 +7977,17 @@ async def poll_live_bets():
         embed = _format_live_bet_embed(s)
         view = None
         if not s.get("bets_locked", False):
-            view = LiveBetView(
-                series_id=sid,
-                p1_steam=s.get("p1_steam_id", ""),
-                p1_name=s.get("p1_name", "?"),
-                p2_steam=s.get("p2_steam_id", ""),
-                p2_name=s.get("p2_name", "?"),
-            )
+            _p1b = bool(s.get("p1_bettable", True))
+            _p2b = bool(s.get("p2_bettable", True))
+            if _p1b or _p2b:
+                view = LiveBetView(
+                    series_id=sid,
+                    p1_steam=s.get("p1_steam_id", ""),
+                    p1_name=s.get("p1_name", "?"),
+                    p2_steam=s.get("p2_steam_id", ""),
+                    p2_name=s.get("p2_name", "?"),
+                    p1_bettable=_p1b, p2_bettable=_p2b,
+                )
         msg_id = live_bet_messages.get(sid)
         try:
             if msg_id is None:

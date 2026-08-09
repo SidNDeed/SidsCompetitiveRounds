@@ -7002,6 +7002,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 UIFactory.SetWordWrap(t, false);
                 return;
             }
+            // Aug 9 bet audit find 3/8: the POST rejects the CHOSEN side below
+            // the 1.10x floor while bets_locked only trips when BOTH sides
+            // are — a favorite's buttons were a guaranteed 409. Consume the
+            // server's AUTHORITATIVE flag (computed from the raw multiplier);
+            // never re-derive from the rounded odds shown here.
+            bool sideBettable = (steamId == s.p1_steam_id) ? s.p1_bettable : s.p2_bettable;
+            if (!sideBettable)
+            {
+                var t = UIFactory.CreateText("bl", row.transform,
+                    $"<b>{Trunc(name, 10)}</b> @{odds:F1}x  <color=#A07744><i>{I18n.Tr("no profit at these odds")}</i></color>",
+                    13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                UIFactory.SetWordWrap(t, false);
+                return;
+            }
             var betLabel = UIFactory.CreateText("bl", row.transform,
                 $"Bet on <b>{Trunc(name, 10)}</b> @{odds:F1}x:",
                 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(240, 22));
@@ -7060,6 +7074,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 var lbl = UIFactory.CreateText("tbl", row.transform,
                     $"<b>{teamLabel}</b> @{odds:F1}x  <color=#AA9955><i>your match</i></color>",
+                    13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                UIFactory.SetWordWrap(lbl, false);
+                return;
+            }
+            // Aug 9 bet audit find 3/8 — see the 1v1 twin's per-side note.
+            if (!(team == 1 ? s.t1_bettable : s.t2_bettable))
+            {
+                var lbl = UIFactory.CreateText("tbl", row.transform,
+                    $"<b>{teamLabel}</b> @{odds:F1}x  <color=#A07744><i>{I18n.Tr("no profit at these odds")}</i></color>",
                     13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
                 UIFactory.SetWordWrap(lbl, false);
                 return;
