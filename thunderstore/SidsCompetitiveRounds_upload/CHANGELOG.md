@@ -1,3 +1,138 @@
+## v1.38.1 (2026-08-10)
+
+New community cosmetic: **Twisted Topper** (detail slot) joins the shop
+catalog this release.
+
+### Spectator mode — the desync is fixed (bugs 187/188/190/192/194)
+
+- **The spectator's game clock is fixed.** It was never armed on the spectate
+  join path, and every round-ending kill ratcheted it further down with
+  nothing restoring it — bullets, gun timers, character limb IK, the floating
+  nametag follower and gravity all run on that clock, which is why everything
+  visibly trailed the (real-time) position stream: slow-motion bullets,
+  instant hits, lagging names, floating bodies.
+- **Removed a vanilla trap** where the spectator client silently dropped into
+  TEST-MAP mode on its first map load — which teleport-revived dead fighters
+  at random spawn points on the spectator's screen 2.5 seconds after every
+  death, and contaminated map bookkeeping for the whole session.
+- **Fixed the ghost-object registry.** The join-time cleanup hid the room's
+  inherited object history but left its Photon view registrations alive, so
+  from game 2 of a sitting every new object collided with a ghost view ID and
+  live boxes/bullets stopped updating for spectators (the doubled/desynced
+  string-box reports). Ghosts are now buried AND locally unregistered at
+  source — which also removes the join-time error wall (700+ exceptions in
+  one burst) that correlated with the "lag spike when you joined" reports.
+- **Map loads are serialized on spectators** (vanilla corrupts its own
+  scene-wrapper handoff when two additive loads overlap — routine for a
+  chronically-behind spectator), with boundary reconciles that supersede
+  cleanly instead of stacking, and deck rebuilds that tolerate mid-apply
+  leavers.
+- **Spectating no longer touches fighter gameplay.** A spectator joining or
+  leaving used to arm a 3-second poison "roster quarantine" that disabled
+  block-honoring on live poison streams — spectator churn was changing
+  fighter damage. The poison census now runs on replicated data identically
+  on every seat. Ejecting an unauthorized watcher can also no longer end the
+  fighters' match through the vanilla disconnect cascade.
+- **Kicks are honest now.** Stock Photon ships CloseConnection DISABLED on
+  both ends — every spectator "kick" to date was a silent no-op. Kicks now
+  work cooperatively between mod clients (revoked leases, wrong protocols,
+  unauthorized entrants), fighters remain un-kickable by design, and the
+  server-side lease system stays the real enforcement.
+- **Spectate protocol floor -> 2** (migration 210): old-protocol clients carry
+  the hazards above, so mixed rooms are excluded. Between the backend deploy
+  and the client release, spectate grants are refused on purpose.
+
+### Spectator mode — quality of life (Sid's list + bugs 184/191/193)
+
+- **No more black flashes between points.** The fullscreen "Synchronizing"
+  cover now exists only before the first sync; after that the live arena
+  stays visible, and vanilla's own between-points score sequence (the
+  orange/blue orbs with HALF/ROUND pips) plays for spectators exactly as
+  fighters see it. Round starts are no longer hidden behind a reconcile.
+- **The top bar shows the full picture**: team-colored names with the game
+  score including half points ("Archnith 2.5 - 3 NotNic"), the current
+  series score, and the SESSION series tally between the two fighters (how
+  many series each has won this sitting — carried in the snapshot protocol).
+- **Spectators can see who else is spectating** (the same bottom-right roster
+  fighters already had — it was explicitly gated off for spectators).
+- **Escape is deconflicted** (bug 191): an open chat box or F5 menu consumes
+  Esc first; the leave-spectating dialog only opens from the base state.
+- **The F5 menu no longer force-closes** when a round starts while
+  spectating (bug 193), and the whole log-driven match tracker is quiescent
+  on spectator clients (watched picks can no longer leak into a later
+  fighter session's telemetry).
+- The FFA phantom "card picking ends in Xs" banner fix (bug 184) ships in
+  this release.
+
+### Fighter-side (spectator-adjacent)
+
+- Removed every identified spectator-conditional cost on fighter clients: a
+  master-side bookkeeping loop ran at 100x its intended cadence, spectate
+  attest state leaked across rooms, a master handoff could starve spectator
+  validation for a minute, and misc handlers misread spectator joins as
+  "opponent joined". Fighters' own fps/ping telemetry was flat through the
+  playtest; if lag persists at 1-2 spectators after this batch, the
+  remaining suspect is Photon relay fan-out.
+
+### Changed
+
+- **Spectators can bet.** The old rule blocked anyone holding a spectator
+  seat from placing bets (plus a 5-minute cooldown after leaving). Removed:
+  the bet-close windows are the information gate — bets lock once a game is
+  decided (or the FFA time window closes), so watching live can't out-inform
+  a locked bet. Spectators watch from the beginning of a series until
+  disconnect and bet under the same windows as everyone else.
+
+### Fixed
+
+- **2v2 betting now actually closes at 1-0 on the server.** The live-bets
+  panel has always shown 1-0 series as locked, but the endpoint itself only
+  refused bets at 2 wins — a crafted request could bet on the leader after
+  game 1. The server now enforces the same first-decided-game close as 1v1.
+
+- **GROW's damage no longer depends on frame rate in competitive play.** The
+  card's growth compounded per rendered frame, making its total multiplier
+  exponential in frame TIME: a 60 FPS shooter dealt ~1.4× the Grow damage of a
+  400 FPS shooter before stacking, several times more with stacked copies, and
+  a single 200 ms hitch frame multiplied damage ×2.16 by itself — the "low-FPS
+  Grow nukes" reports. In queue-matched ranked 1v1, 2v2, 1v2, FFA and
+  sync-tournament rooms — and in private/quickplay rooms where BOTH players
+  had Ranked enabled when they connected — growth is now normalized to
+  a fixed 240-FPS-equivalent rate — near-identical growth per unit of distance
+  flown for every player (the small remaining frame-granularity differences
+  always err toward LESS growth, never more). Private/quickplay rooms with a
+  ranked-off player, rooms with an unmodded player, and the sandbox keep
+  vanilla behavior (mode rooms — queue, tournament, hosted lobbies — apply it
+  regardless of the 1v1 Ranked toggle, since entering the mode is the mode's
+  consent); the fix only activates when EVERY player in the room runs a
+  version that has it (mixed rooms stay vanilla on all seats).
+- **Drill bullets fired point-blank into a wall/box no longer vanish for the
+  other players.** A same-frame race on the receiving client could drop the
+  drill effect from the bullet's hit processing, so the remote copy died at
+  the wall while the shooter's bullet drilled through and kept hitting —
+  an invisible bullet. The hit is now deferred one frame and the drill
+  re-registered (bug #186's second half; extends the v1.37 drill-position
+  fix).
+- **FFA: Phoenix no longer respawns players "into thin air"** (bug #185). The
+  vanilla respawn coroutine looks the player up by list POSITION, which broke
+  after any leaver in an FFA lobby — the crash left the player alive-flagged,
+  invisible and unhittable on every client (opponents had to suicide to
+  advance the round). The lookup is now by player ID, and a Phoenix whose
+  charge crosses a round transition defers to the round's own mass revive
+  instead of firing into the next round.
+- **Spectators no longer see phantom "card picking ends in Xs" banners** when
+  nobody is picking (bug #184), and a closed pick window no longer lingers at
+  0s for non-pickers.
+- **The top status strip no longer cuts off** ("2 onli", "(2 in q") — the
+  queue/online text now takes the full remaining row width (bug from the Aug 8
+  screenshots).
+- **Jump/land dust puffs now match an equipped body color** instead of staying
+  vanilla orange/blue, and the **end-of-game VICTORY / REMATCH? text** follows
+  the custom team color too (in FFA it uses the winner's color).
+- **Block stat graph uses one y-axis** (bug #182, Stan): the activated and
+  successful lines share a scale like the shots graph; only legacy
+  damage-vs-blocks rows keep dual axes.
+
 ## v1.38.0 — 2026-08-08 — Hosted lobbies, alerts, chat moderation, animated cosmetics
 
 Schema: migrations **202–206** (202 LFP modes, 203 admin alerts, 204 cosmetic
@@ -1074,66 +1209,6 @@ Settings tab with your log attached — that is what turns these into confirmed 
 - `151_steam_auth_arming.sql` — adds `players.steam_auth_seen_at` (monotonic steam-auth arming) with a backfill from surviving verified sessions. Applied 2026-07-27.
 - `152_ban_session_cleanup.sql` — one-time revocation of sessions held by already-banned accounts. Applied 2026-07-27.
 - `153_release_ballooniphones_soda_helm.sql` — publishes the two community face cosmetics bundled in this release, guarded against a post-bundle placement revision. Applied 2026-07-27.
-
-## v1.34.4 — 2026-07-26 — 1v2 extra-pick crash fix + HTTPS endpoint
-
-### 1v2
-- **Fixed the Solo Extra Pick hang.** With the option on, the solo player picked their first card and the round froze — the solo was then dropped and the other two saw "opponent disconnected". Cause was in the base game: it clears the current picker the instant a card is chosen, and the follow-up deal then looked that picker up with the cleared value and threw. Nothing ever hit it before because the extra pick is the only mode that asks for a second card. Reported by Stan (#86) and NotNic (#85), whose logs together pinned it down.
-- The second card is also now selectable at all — the same cleared value disabled card selection, so even without the crash the extra pick could not have been used.
-
-### Connection
-- **The mod now talks to the server over HTTPS.** Traffic used to be plain HTTP, so anything on the network path (public wifi, a hostile ISP) could read your session, chat, and Steam ID. Existing installs are moved over automatically on first launch; a custom server address is left alone.
-- If the secure endpoint cannot be reached from your network, the mod falls back to the old one for that session and retries the secure one next launch, so nobody gets stranded.
-
-### Cosmetics
-- **Crown and Dark Aura now use their approved placement.** Both had adjustments signed off in the artist review flow that never made it into a build (#84); they now render at the size and position that were approved.
-
-### Server
-- Hardened an unauthenticated stats endpoint that could be used to read the database, and closed two internal endpoints that trusted the caller's network address instead of a key. Both fixed server-side already — no action needed.
-
-## v1.34.3 — 2026-07-24 — First community cosmetic ships + gambler ping fix
-
-### Cosmetics
-- **Spooky Head-Bouncers by Nix is live** — the first community cosmetic to go through the full artist upload -> admin placement review -> release pipeline. It ships at the exact scale and position that were approved in-game.
-- **Releases now always bundle approved cosmetics.** v1.34.2 shipped without this one because the art lives in the database until a release compiles it into the client; the ship process now requires it, with a checksum check on the extracted art and a migration guard that refuses to publish if the approved placement changed after the bundle was cut.
-
-### Discord
-- **The gambler ping no longer repeats for the same series.** Bets lock while a game is being played and re-open between games, and the bot was forgetting a series every time that happened — so the same match got announced again on the next game. It now announces once per series for its whole life.
-
-## v1.34.2 — 2026-07-24 — Cosmetic placement workflow, flagged-match evidence, performance pass
-
-### Cosmetics — artists & admins
-- **Artists set the render scale at upload.** The in-game uploader now opens a size preview: your PNG against an orange player-body circle, with a scale slider (0.50x–2.25x) and presets. A full 512x512 canvas equals the body only at ~1.30x — the preview shows the truth instead of a rule of thumb.
-- **Drag to position.** Both the artist preview and the admin review let you drag the art. Offset is only the *default* start position (players can reposition face items themselves in the character editor), so it no longer clutters the list menus — scale is what decides whether art fits.
-- **Adjust placement on already-shipped cosmetics.** Previously only new submissions could be adjusted; items that shipped before the review workflow existed had no record to edit. They can now be adjusted, and the change goes back through admin review before taking effect.
-- **Placement changes are reviewed, not instant.** Scale/offset are compiled into the client, so an approved change goes live with the next mod update. The live item keeps its current placement until then.
-- **Admin review upgrades:** the four approval guidelines plus a scale-appropriateness rule are shown in the popup, a denial reason is required, and re-placements show the current approved scale beside the proposed one.
-- **Approve/deny now DMs the artist** with the outcome (and the reason on a denial).
-- **A release tracker** lists approved cosmetics awaiting a client update, with the exact scale to bundle.
-- **Unreleased art can no longer appear in the shop or on Home.** Community art stays hidden until its PNG actually ships in a client release, so Newest Cosmetics can't be taken over by an unreleased batch.
-
-### Flagged matches (admin)
-- **Flags now carry real evidence.** Both the in-game Admin panel and #scr-admin show Steam IDs and the suspect, the detector's reasoning, score and point progression, cards picked by each player, combat/input/FPS telemetry, and connection data.
-- **Suspected-macro flags record the exact per-second windows** that broke the threshold, from both players rather than only the match reporter.
-- **Flagged Matches gets more room** in the Admin tab, and clicking Details opens a full evidence view.
-
-### In-match HUD
-- **The Session line is gone.** The series score line now carries your session series record instead: `Series: 1 - 1   (session 2-1)`.
-- **Session series now counts for both players.** It previously only updated on the client that submitted the match report, so one player in every match saw `0-0` all session.
-
-### Performance
-- Overlays now only draw on render frames, slow-changing labels refresh a few times a second instead of every frame, the hold-Tab table snapshots at 8 Hz, and chat reuses its buffers. Combat diagnostics are off unless Block Debug is on.
-- **Animated Cosmetics now also freezes player-effect auras** — they kept emitting after the setting was turned off.
-
-### Discord bot
-- **Elo calculator fixed** — it timed out silently and never replied; it now answers or explains why it can't.
-- **FAQ accuracy pass** across many false positives and missed questions, plus new answers (Grow, room codes, series, DC rules, install safety, questions channel, Steam↔Discord lookup).
-- **Malformed room codes get a heads-up** — a posted code that isn't six capital letters gets a reply explaining the game reads it as offline. Ordinary chat, slang and names are left alone.
-
-### Fixes
-- 2v2 Recent Series no longer jumps the scroll when you click a series, and the `[ID]` copy target is the chip itself instead of the whole row.
-- The game-ID button sits left of the score in both ranked and casual history.
-- Artist rows hidden by scrolling are no longer clickable through the section above them.
 
 ---
 
