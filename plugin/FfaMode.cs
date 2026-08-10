@@ -1119,6 +1119,25 @@ namespace CompetitiveRounds
             {
                 points[winnerTeam] = PointsFor(winnerTeam) + 1;
                 pointsTotal[winnerTeam] = PointsTotalFor(winnerTeam) + 1;
+                // Aug 9 (Sid): FFA betting closes on 2 POINTS SCORED, same as
+                // every other mode — report the highest total anyone holds in
+                // THIS game so the server can enforce it. Master only: one
+                // reporter is enough (the server takes the max anyway) and it
+                // keeps a 10-player lobby from sending ten copies.
+                try
+                {
+                    if (PhotonNetwork.IsMasterClient
+                        && !string.IsNullOrEmpty(ApiClient.ActiveFfaLobbyId)
+                        && !string.IsNullOrEmpty(MatchTracker.LocalSteamId))
+                    {
+                        int top = 0;
+                        foreach (var kv in pointsTotal) if (kv.Value > top) top = kv.Value;
+                        ApiClient.PostFfaLivePoints(ApiClient.ActiveFfaLobbyId,
+                                                    MatchTracker.LocalSteamId,
+                                                    gameNumber, top);
+                    }
+                }
+                catch { }
                 if (points[winnerTeam] >= PointsToWinRound)
                 {
                     rounds[winnerTeam] = RoundsFor(winnerTeam) + 1;

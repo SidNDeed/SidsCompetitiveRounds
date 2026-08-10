@@ -1630,6 +1630,90 @@ namespace CompetitiveRounds
             }));
         }
 
+        // Review HIGH: live-point delivery must survive one failed request —
+        // the cutoff is the whole point of the channel, and FFA has a single
+        // sender. Each key keeps only its LATEST score; a failure re-queues it
+        // (bounded), and a newer score replaces a pending one rather than
+        // queueing behind it. The server's writes are monotonic and
+        // idempotent, so a resend is always safe.
+        private class LivePointRetry { public string url; public int attempts; public string tag; }
+        private static readonly Dictionary<string, LivePointRetry> livePointRetries =
+            new Dictionary<string, LivePointRetry>();
+        private const int LIVE_POINT_MAX_ATTEMPTS = 4;
+
+        private static void SendLivePoints(string key, string url, string tag)
+        {
+            var entry = new LivePointRetry { url = url, attempts = 0, tag = tag };
+            livePointRetries[key] = entry;   // newest score wins outright
+            SendLivePointsOnce(key, entry);
+        }
+
+        private static void SendLivePointsOnce(string key, LivePointRetry entry)
+        {
+            entry.attempts++;
+            Plugin.Instance.StartCoroutine(PostRequest(entry.url, "", (ok, resp) =>
+            {
+                LivePointRetry current;
+                if (!livePointRetries.TryGetValue(key, out current) || current != entry)
+                    return;   // a newer score superseded this one
+                if (ok)
+                {
+                    livePointRetries.Remove(key);
+                    Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} ok");
+                    return;
+                }
+                // A 409 is the server saying the write does not apply (series
+                // over, wrong game) — retrying cannot help.
+                bool permanent = resp != null && resp.IndexOf("HTTP/1.1 409", StringComparison.Ordinal) >= 0;
+                if (permanent || entry.attempts >= LIVE_POINT_MAX_ATTEMPTS)
+                {
+                    livePointRetries.Remove(key);
+                    Plugin.Log.LogWarning($"[LIVE-POINTS] {entry.tag} giving up after {entry.attempts} "
+                                          + $"attempt(s){(permanent ? " (server refused)" : "")}");
+                    return;
+                }
+                Plugin.Instance.StartCoroutine(RetryLivePointsAfter(key, entry, 2f * entry.attempts));
+            }));
+        }
+
+        private static System.Collections.IEnumerator RetryLivePointsAfter(string key, LivePointRetry entry, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            LivePointRetry current;
+            if (livePointRetries.TryGetValue(key, out current) && current == entry)
+                SendLivePointsOnce(key, entry);
+        }
+
+        /// <summary>2v2 game-1 points, so betting locks at 2 the way 1v1 does
+        /// (Sid, Aug 9: the cutoff is 2 points, never a clock). t1/t2 are in
+        /// team_series' own slot order. Fire-and-forget: a lost report costs
+        /// one tick of cutoff precision, never gameplay.</summary>
+        public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points)
+        {
+            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
+            string sig = ComputeHmacHex($"team-live-points:{seriesId}:{reporterSteamId}:{t1Points}:{t2Points}");
+            string url = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
+                         $"?t1_points={t1Points}&t2_points={t2Points}" +
+                         $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
+            SendLivePoints("2v2:" + seriesId, url,
+                $"2v2 series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {t1Points}-{t2Points}");
+        }
+
+        /// <summary>FFA points for the game in progress — the HIGHEST total any
+        /// player holds, since a free-for-all has no two sides to sum. Betting
+        /// locks once somebody has 2. game_number keeps a finished game's score
+        /// from locking the next one's window.</summary>
+        public static void PostFfaLivePoints(string lobbyId, string reporterSteamId, int gameNumber, int topPoints)
+        {
+            if (string.IsNullOrEmpty(lobbyId) || string.IsNullOrEmpty(reporterSteamId) || gameNumber < 1) return;
+            string sig = ComputeHmacHex($"ffa-live-points:{lobbyId}:{reporterSteamId}:{gameNumber}:{topPoints}");
+            string url = $"{baseUrl}/api/v1/ffa/lobbies/{Escape(lobbyId)}/live-points" +
+                         $"?game_number={gameNumber}&top_points={topPoints}" +
+                         $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
+            SendLivePoints("ffa:" + lobbyId, url,
+                $"ffa lobby={lobbyId.Substring(0, Math.Min(8, lobbyId.Length))} g{gameNumber} top={topPoints}");
+        }
+
         /// <summary>Place a bet. HMAC over "bet:{bettor}:{series_id}:{bet_on}:{amount}".</summary>
         public static void PlaceBet(string bettorSteamId, string seriesId, string betOnSteamId, int amount, Action<bool, string> callback)
         {

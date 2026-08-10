@@ -3282,6 +3282,19 @@ namespace CompetitiveRounds
                     {
                         ApiClient.PostLivePoints(ApiClient.ActiveRankedSeriesId, LocalSteamId, curP1Points, curP2Points);
                     }
+                    // Aug 9 (Sid): 2v2 closes on the SAME rule — 2 points in
+                    // game 1 — so it needs the same channel. GM_ArmsRace's
+                    // p1/p2 point fields ARE the two teams in a cr_ff room,
+                    // and team_series' slot order is the same 0/1 the game
+                    // uses, so the values map straight across. Game 1 only
+                    // (rounds still 0-0), same traffic discipline as 1v1.
+                    if (curP1Rounds == 0 && curP2Rounds == 0
+                        && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId)
+                        && !string.IsNullOrEmpty(LocalSteamId))
+                    {
+                        ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId,
+                                                     curP1Points, curP2Points);
+                    }
                 }
 
                 if (curP1Rounds != lastP1Rounds || curP2Rounds != lastP2Rounds)

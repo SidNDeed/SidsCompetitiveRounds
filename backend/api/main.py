@@ -1694,6 +1694,47 @@ _VERSION_GATE_BYPASS = frozenset({
 })
 
 
+# The release that carries the live-point REPORTERS (2v2 + FFA). Betting in
+# those modes is refused for any participant below it: without a reporter the
+# 2-point cutoff can never fire, and betting would silently stay open until
+# the game's result lands — the exact late-bet hole the rule exists to close.
+#
+# SHIP COUPLING (#294): this MUST equal the version that actually ships the
+# reporters. Raising MIN_MOD_VERSION to the same value at release restores
+# betting for everyone; until then old clients simply cannot be bet on.
+LIVE_POINTS_MIN_VERSION = "1.39.0"
+
+
+async def _live_points_capable(db: AsyncSession, player_ids) -> bool:
+    """Can EVERY listed participant report live points?
+
+    False disables betting for that series/lobby (fail closed). An unknown or
+    unparseable version counts as incapable: admitting a participant whose
+    reporting we cannot vouch for is exactly the case that lets a wager land
+    after the cutoff."""
+    ids = [x for x in (player_ids or []) if x is not None]
+    if not ids:
+        return False
+    try:
+        rows = (await db.execute(text(
+            "SELECT mod_version FROM players WHERE id = ANY(:pids)"
+        ), {"pids": ids})).scalars().all()
+    except Exception:
+        return False
+    if len(rows) < len(set(ids)):
+        return False
+    floor = _parse_version(LIVE_POINTS_MIN_VERSION)
+    for v in rows:
+        if not v:
+            return False
+        try:
+            if _parse_version(v) < floor:
+                return False
+        except Exception:
+            return False
+    return True
+
+
 def _parse_version(v: str) -> tuple[int, ...]:
     try:
         return tuple(int(x) for x in v.strip().split("."))
@@ -14430,6 +14471,7 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
             p2b.steam_id  AS t2b_steam, p2b.display_name AS t2b_name,
             ts.t1_series_wins, ts.t2_series_wins,
             ts.created_at, ts.dc_grace_until, ts.status,
+            ts.live_t1_points, ts.live_t2_points,
             -- Team-aggregated 2v2 ratings (avg of the 2 members), 1v1 fallback for low-confidence.
             -- Used only for ODDS. The panel ALSO shows each player's individual rating below.
             (SELECT AVG(CASE WHEN g2.completed_series >= :trust THEN g2.rating ELSE g1.rating END)
@@ -14492,6 +14534,31 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
     for r in rows:
         _all_pids += [r["t1a_id"], r["t1b_id"], r["t2a_id"], r["t2b_id"]]
     _team_odds_map = await _team_odds_inputs(db, _all_pids)
+    # One capability lookup for the page (never per-row).
+    _team_reporter_ok = {}
+    try:
+        _vers = {}
+        if _all_pids:
+            for _pid, _mv in (await db.execute(text(
+                "SELECT id, mod_version FROM players WHERE id = ANY(:pids)"
+            ), {"pids": _all_pids})).all():
+                _vers[_pid] = _mv
+        _floor = _parse_version(LIVE_POINTS_MIN_VERSION)
+
+        def _ok(v):
+            if not v:
+                return False
+            try:
+                return _parse_version(v) >= _floor
+            except Exception:
+                return False
+
+        for r in rows:
+            _team_reporter_ok[r["series_id"]] = all(
+                _ok(_vers.get(x)) for x in
+                (r["t1a_id"], r["t1b_id"], r["t2a_id"], r["t2b_id"]))
+    except Exception:
+        _team_reporter_ok = {}
 
     series = []
     for r in rows:
@@ -14516,20 +14583,18 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
         # the listing must report them locked or the client renders buttons
         # that always 409 (#159 same-predicate rule).
         status_locked = (r["status"] or "active") != "active"
-        # Aug 9 bet audit find 8: 2v2 had NO mid-game close — game 1 stayed
-        # bettable for its full ~9 min while 1v1 locks at 2 points and FFA at
-        # 90s. Time-box it: closed once the series has been active for
-        # TEAM_BET_OPEN_SECONDS (covers room join + load + the opening
-        # exchanges; the balance knob is Sid's).
-        time_locked = False
-        try:
-            if r["created_at"] is not None:
-                _age = (datetime.now(timezone.utc) - r["created_at"]).total_seconds()
-                time_locked = _age > TEAM_BET_OPEN_SECONDS
-        except Exception:
-            pass
-        bets_locked = no_profit or score_locked or status_locked or time_locked
-        lock_reason = ("game_in_progress" if (score_locked or time_locked)
+        # THE cutoff (Sid, Aug 9): 2 POINTS SCORED IN GAME 1 — the identical
+        # rule 1v1 has enforced since v1.22, now that 2v2 reports live points
+        # too (migration 208). A clock was briefly used here because the
+        # channel did not exist; that was the wrong answer to a missing
+        # feature and is gone.
+        points_locked = ((r["live_t1_points"] or 0) + (r["live_t2_points"] or 0)) >= 2
+        # No reporter in the group => the 2-point cutoff can never fire, so
+        # betting is closed rather than open-forever (review CRITICAL).
+        if not _team_reporter_ok.get(r["series_id"], False):
+            points_locked = True
+        bets_locked = no_profit or score_locked or status_locked or points_locked
+        lock_reason = ("game_in_progress" if (score_locked or points_locked)
                        else ("series_paused" if status_locked
                              else ("no_meaningful_odds" if no_profit else None)))
         series.append({
@@ -14809,6 +14874,139 @@ async def update_live_points(
     }
 
 
+@app.post("/api/v1/team/series/{series_id}/live-points", tags=["Betting"])
+async def update_team_live_points(
+    series_id: str,
+    t1_points: int = Query(..., ge=0, le=10),
+    t2_points: int = Query(..., ge=0, le=10),
+    reporter_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """2v2 game-1 points, so betting locks at 2 exactly as 1v1 does.
+
+    HMAC signs 'team-live-points:{series_id}:{reporter_steam_id}:{t1}:{t2}'.
+    Slot order is team_series' own (t1a/t1b vs t2a/t2b) — the reporter maps
+    its in-game side to that order before signing, the same contract the
+    match report already uses.
+    """
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"team-live-points:{series_id}:{reporter_steam_id}:{t1_points}:{t2_points}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    _presence_touch(reporter_steam_id)
+    try:
+        sid = UUID(series_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid series_id")
+
+    reporter = (await db.execute(
+        select(Player).where(Player.steam_id == reporter_steam_id)
+    )).scalar_one_or_none()
+    if reporter is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    # Participants only, and only while the series is genuinely live. Both
+    # predicates ride INSIDE the UPDATE so a completion committing mid-request
+    # cannot be written over (the #159/TOCTOU shape the 1v1 twin also uses).
+    pts = (await db.execute(text("""
+        UPDATE team_series
+           SET live_t1_points = GREATEST(COALESCE(live_t1_points, 0), :t1),
+               live_t2_points = GREATEST(COALESCE(live_t2_points, 0), :t2)
+         WHERE id = :sid AND status = 'active' AND invalidated_at IS NULL
+           AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)
+        RETURNING live_t1_points, live_t2_points
+    """), {"t1": t1_points, "t2": t2_points, "sid": sid, "pid": reporter.id})).first()
+    if pts is None:
+        await db.rollback()
+        raise HTTPException(status_code=409,
+                            detail="Series is not active, or reporter is not in it")
+    await db.commit()
+    return {
+        "status": "ok",
+        "live_t1_points": pts[0],
+        "live_t2_points": pts[1],
+        "bets_locked": (pts[0] + pts[1]) >= 2,
+    }
+
+
+@app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
+async def update_ffa_live_points(
+    lobby_id: str,
+    game_number: int = Query(..., ge=1, le=99),
+    top_points: int = Query(..., ge=0, le=20),
+    reporter_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """FFA points for the game currently being played, so betting locks at 2.
+
+    HMAC signs 'ffa-live-points:{lobby_id}:{reporter_steam_id}:{game_number}:{top_points}'.
+    There are no two sides to sum in a free-for-all, so the reported figure is
+    the HIGHEST point total any player in the game holds — the cutoff is
+    "somebody has 2", which is what "2 points scored" means with N players.
+
+    game_number is signed and stored: a lobby plays many games, and game 2's
+    score must never lock game 3's window.
+    """
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"ffa-live-points:{lobby_id}:{reporter_steam_id}:{game_number}:{top_points}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    _presence_touch(reporter_steam_id)
+    try:
+        lid = UUID(lobby_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid lobby_id")
+
+    reporter = (await db.execute(
+        select(Player).where(Player.steam_id == reporter_steam_id)
+    )).scalar_one_or_none()
+    if reporter is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    # A NEW game resets the figure (its own game_number replaces the stored
+    # one); the SAME game only ever ratchets upward. Both cases are one
+    # statement, so no read-then-write can lose a concurrent report.
+    pts = (await db.execute(text("""
+        UPDATE ffa_lobbies
+           SET live_points_game = :gn,
+               live_top_points = CASE
+                   WHEN COALESCE(live_points_game, 0) = :gn
+                       THEN GREATEST(COALESCE(live_top_points, 0), :tp)
+                   ELSE :tp
+               END
+         WHERE id = :lid AND status = 'active'
+           AND :pid = ANY(member_ids)
+           AND COALESCE(games_played, 0) + 1 = :gn
+        RETURNING live_top_points, live_points_game
+    """), {"gn": game_number, "tp": top_points, "lid": lid, "pid": reporter.id})).first()
+    if pts is None:
+        await db.rollback()
+        raise HTTPException(status_code=409,
+                            detail="Lobby is not live, reporter is not a member, "
+                                   "or that game is not the one in progress")
+    await db.commit()
+    return {
+        "status": "ok",
+        "live_top_points": pts[0],
+        "game_number": pts[1],
+        "bets_locked": pts[0] >= 2,
+    }
+
+
 @app.post("/api/v1/discord-bets", tags=["Betting"])
 async def place_discord_bet(
     discord_user_id: str = Query(..., max_length=32),
@@ -15042,7 +15240,7 @@ async def place_team_bet(
         raise HTTPException(status_code=400, detail="Invalid team_series_id")
     series = (await db.execute(text("""
         SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id, t1_series_wins, t2_series_wins,
-               created_at, invalidated_at
+               created_at, invalidated_at, live_t1_points, live_t2_points
           FROM team_series WHERE id = :sid FOR NO KEY UPDATE
     """), {"sid": sid})).mappings().first()
     if series is None:
@@ -15053,15 +15251,24 @@ async def place_team_bet(
         raise HTTPException(status_code=409, detail="Series was invalidated")
     # Aug 9 bet audit finds 4+8: liveness bound (the listing windows at 2h;
     # the POST accepted any 'active' husk) and the 2v2 time-box close — see
-    # TEAM_BET_OPEN_SECONDS. FOR NO KEY UPDATE above (find 6, #202) makes
+    # FOR NO KEY UPDATE above (find 6, #202) makes
     # every check here read post-lock truth against a concurrent report's
     # FOR UPDATE instead of a stale snapshot.
     if series["created_at"] is not None:
         _age = (datetime.now(timezone.utc) - series["created_at"]).total_seconds()
         if _age > 2 * 3600:
             raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
-        if _age > TEAM_BET_OPEN_SECONDS:
-            raise HTTPException(status_code=409, detail="Betting closed for this series")
+    # THE cutoff (Sid): 2 points scored in game 1. Same predicate the listing
+    # renders, so the two can never disagree (#159).
+    if ((series["live_t1_points"] or 0) + (series["live_t2_points"] or 0)) >= 2:
+        raise HTTPException(status_code=409,
+                            detail="Bets locked - game 1 has progressed too far")
+    # Review CRITICAL: refuse when the group cannot report live points at all
+    # — otherwise the cutoff above never fires and a wager can land after it.
+    if not await _live_points_capable(db, [series["t1a_id"], series["t1b_id"],
+                                           series["t2a_id"], series["t2b_id"]]):
+        raise HTTPException(status_code=409,
+                            detail="Betting needs every player on the latest mod version")
     # Close once ANY game is decided — the same rule the live-bets listing has
     # always displayed as locked (score_locked above at 1-0) and the same rule
     # /bets enforces for 1v1 (#107 family). The endpoint previously only
@@ -23974,22 +24181,15 @@ FFA_ODDS_MIN_SMALL = 1.4    # floor at 3-4 players — 1/3 of a 3-man field is a
 # the last session" report) because the only predicate was status='active'.
 FFA_BET_LIVE_AFTER_GAME_MINUTES = 30   # ...since the last recorded game ended
 FFA_BET_LIVE_ASSEMBLY_MINUTES = 15     # ...since lock, for a lobby with 0 games
-# INTERIM exploit gate (see the docstring on _ffa_bet_window_open). FFA has no
-# live score server-side, so bets currently stay open until the game's REPORT
-# lands — i.e. until the final kill, which is free money for anyone watching.
-# Sid's rule is "bet until someone has 2 points"; that needs a client push and
-# ships with the next build. Until then, betting on game N closes this many
-# seconds after game N-1 ended (or after the lock, for game 1). Delete this
-# once the live-score lock is live and adoption is confirmed.
-FFA_BET_OPEN_SECONDS = 90
+# (FFA_BET_OPEN_SECONDS lived here — a 90s interim window used while the
+# server had no live FFA score. The client reports one now, so the real rule
+# (2 points, Sid) is enforced in _ffa_bet_window_open and the clock is gone.
+# Do not reintroduce a timer as a bet cutoff.)
 
-# Aug 9 bet audit find 8: 2v2 was the only mode with NO mid-game close —
-# betting stayed open for all of game 1 (~9 min avg) while 1v1 locks at 2
-# points and FFA at 90s, and the spectator ruling leans on the close windows
-# being the information gate. Same interim shape as FFA's: a fixed window
-# after series activation (queue lock / hosted-lobby Start). Room join + load
-# eats ~30-60s of it. BALANCE KNOB — Sid's number.
-TEAM_BET_OPEN_SECONDS = 120
+# (TEAM_BET_OPEN_SECONDS lived here — a 120s time-box added Aug 9 because 2v2
+# had no live score to lock on. Sid: the cutoff is 2 POINTS IN GAME 1 for
+# every mode, never a clock. Migration 208 added the missing channel and the
+# constant is gone; do not reintroduce a timer for a bet window.)
 # Engine DEFAULTS — MUST match plugin/FfaMode.cs (RoundsToWin/PointsToWinRound).
 # 3 -> 5 after the first playtest (Sid: games ended too fast for the rolling
 # card bar to ever engage).
@@ -28638,30 +28838,34 @@ def _ffa_lobby_is_live(lobby) -> bool:
 
 
 def _ffa_bet_window_open(lobby) -> bool:
-    """INTERIM exploit gate — see FFA_BET_OPEN_SECONDS.
+    """Is the CURRENT game of this lobby still bettable?
 
-    Sid's rule is "let people bet until someone has 2 points", but the server
-    has no live FFA score: nothing reports progress between the lock and the
-    game's final report, so the only enforceable gate today is elapsed time.
-    Without it, betting stays open until the last kill, and with the odds floor
-    raised to 2.0 (5.0 at ten players) that is a guaranteed multiple on a
-    decided game for anyone spectating.
+    THE cutoff (Sid, Aug 9): 2 POINTS SCORED IN THE CURRENT GAME — the same
+    rule 1v1 and 2v2 use. This replaced a 90-second clock that existed only
+    because the server had no live FFA score; the client now reports one
+    (migration 208), so the real rule is enforceable and the clock is gone.
 
-    So: game 1 is bettable for FFA_BET_OPEN_SECONDS after the lock, game N+1
-    for the same window after game N ended. This is deliberately COARSER than
-    the real rule — it can close while a slow lobby is still picking cards —
-    and it is replaced by the exact 2-point lock as soon as the client can push
-    live scores. Being slightly too strict costs a missed bet; being too loose
-    mints gold.
+    live_points_game pins the score to a GAME NUMBER: a lobby plays many
+    games, and game 2's leftover score must never lock game 3's window. A
+    report for anything other than the game about to be played is ignored
+    here, which means a fresh game opens betting again — correct, and the
+    reason the column exists.
+
+    Structurally-open case worth naming: a lobby whose clients never report
+    (all on a pre-208 build) has no score, so the window stays open until the
+    game's result lands. That is the pre-clock behaviour and it is bounded by
+    _ffa_lobby_is_live; with MIN_MOD_VERSION at 1.38.0 every live client
+    reports.
     """
     try:
-        now = datetime.now(timezone.utc)
-        anchor = lobby["last_game_at"] if int(lobby["games_played"] or 0) > 0 else lobby["created_at"]
-        if anchor is None:
-            return False
-        return (now - anchor).total_seconds() <= FFA_BET_OPEN_SECONDS
+        current_game = int(lobby["games_played"] or 0) + 1
+        if int(lobby["live_points_game"] or 0) != current_game:
+            return True      # no score for THIS game yet
+        return int(lobby["live_top_points"] or 0) < 2
     except Exception:
-        return False
+        # Fail OPEN rather than silently refusing every FFA bet on a schema
+        # hiccup; _ffa_lobby_is_live still bounds the lobby's life.
+        return True
 
 
 async def _ffa_lobby_field(db: AsyncSession, member_ids: list) -> list[dict]:
@@ -28835,7 +29039,7 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
     requester is a member of are flagged (client hides the buttons)."""
     lobbies = (await db.execute(text("""
         SELECT l.id, l.member_ids, l.departed_ids, l.player_count, l.games_played,
-               l.created_at, l.score_target,
+               l.created_at, l.score_target, l.live_top_points, l.live_points_game,
                (SELECT MAX(m.ended_at) FROM ffa_matches m
                  WHERE m.lobby_id = l.id AND m.invalidated_at IS NULL) AS last_game_at
           FROM ffa_lobbies l
@@ -28859,6 +29063,11 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
         # then rejected with a 409. The listing and the enforcement must use the
         # SAME predicate; `bets_open` lets the panel dim rather than lie.
         window_open = _ffa_bet_window_open(l)
+        # Review CRITICAL: a lobby with any member unable to report live
+        # points can never reach the 2-point cutoff, so betting is CLOSED for
+        # it rather than open until the result lands.
+        if window_open and not await _live_points_capable(db, list(l["member_ids"] or [])):
+            window_open = False
         # Departed members are out of the field: no odds, no bet target
         # (round-2 review find 6).
         departed = set(l["departed_ids"] or [])
@@ -28937,7 +29146,7 @@ async def place_ffa_bet(
     # key column.
     lobby = (await db.execute(text(
         "SELECT id, status, member_ids, departed_ids, games_played, created_at,"
-        "       score_target, is_ranked,"
+        "       score_target, is_ranked, live_top_points, live_points_game,"
         "       (SELECT MAX(m.ended_at) FROM ffa_matches m"
         "         WHERE m.lobby_id = ffa_lobbies.id AND m.invalidated_at IS NULL) AS last_game_at"
         "  FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
@@ -28952,6 +29161,9 @@ async def place_ffa_bet(
         raise HTTPException(status_code=409, detail="Casual lobbies are not bettable")
     if not _ffa_lobby_is_live(lobby):
         raise HTTPException(status_code=409, detail="Betting closed - this sitting has ended")
+    if not await _live_points_capable(db, list(lobby["member_ids"] or [])):
+        raise HTTPException(status_code=409,
+                            detail="Betting needs every player on the latest mod version")
     if not _ffa_bet_window_open(lobby):
         raise HTTPException(status_code=409,
                             detail="Betting for this game has closed - wait for the next one")
