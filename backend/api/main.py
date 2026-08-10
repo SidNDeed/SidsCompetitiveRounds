@@ -14940,17 +14940,19 @@ async def update_team_live_points(
 async def update_ffa_live_points(
     lobby_id: str,
     game_number: int = Query(..., ge=1, le=99),
-    top_points: int = Query(..., ge=0, le=20),
+    total_points: int = Query(..., ge=0, le=200),
     reporter_steam_id: str = Query(...),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     """FFA points for the game currently being played, so betting locks at 2.
 
-    HMAC signs 'ffa-live-points:{lobby_id}:{reporter_steam_id}:{game_number}:{top_points}'.
-    There are no two sides to sum in a free-for-all, so the reported figure is
-    the HIGHEST point total any player in the game holds — the cutoff is
-    "somebody has 2", which is what "2 points scored" means with N players.
+    HMAC signs 'ffa-live-points:{lobby_id}:{reporter_steam_id}:{game_number}:{total_points}'.
+    The reported figure is the number of points scored ACROSS THE FIELD in
+    this game (every player's points added up) — "2 points scored", the same
+    reading 1v1 and 2v2 use when they sum their two sides. The threshold
+    itself scales with the lobby's win condition; see
+    _ffa_bet_cutoff_points.
 
     game_number is signed and stored: a lobby plays many games, and game 2's
     score must never lock game 3's window.
@@ -14959,7 +14961,7 @@ async def update_ffa_live_points(
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
         MATCH_HMAC_SECRET.encode(),
-        f"ffa-live-points:{lobby_id}:{reporter_steam_id}:{game_number}:{top_points}".encode(),
+        f"ffa-live-points:{lobby_id}:{reporter_steam_id}:{game_number}:{total_points}".encode(),
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
@@ -14983,16 +14985,16 @@ async def update_ffa_live_points(
     pts = (await db.execute(text("""
         UPDATE ffa_lobbies
            SET live_points_game = :gn,
-               live_top_points = CASE
+               live_total_points = CASE
                    WHEN COALESCE(live_points_game, 0) = :gn
-                       THEN GREATEST(COALESCE(live_top_points, 0), :tp)
+                       THEN GREATEST(COALESCE(live_total_points, 0), :tp)
                    ELSE :tp
                END
          WHERE id = :lid AND status = 'active'
            AND :pid = ANY(member_ids)
            AND COALESCE(games_played, 0) + 1 = :gn
-        RETURNING live_top_points, live_points_game
-    """), {"gn": game_number, "tp": top_points, "lid": lid, "pid": reporter.id})).first()
+        RETURNING live_total_points, live_points_game
+    """), {"gn": game_number, "tp": total_points, "lid": lid, "pid": reporter.id})).first()
     if pts is None:
         await db.rollback()
         raise HTTPException(status_code=409,
@@ -15001,9 +15003,11 @@ async def update_ffa_live_points(
     await db.commit()
     return {
         "status": "ok",
-        "live_top_points": pts[0],
+        "live_total_points": pts[0],
         "game_number": pts[1],
-        "bets_locked": pts[0] >= 2,
+        "bets_locked": pts[0] >= _ffa_bet_cutoff_points(
+            (await db.execute(text("SELECT score_target FROM ffa_lobbies WHERE id = :lid"),
+                              {"lid": lid})).scalar()),
     }
 
 
@@ -28837,34 +28841,48 @@ def _ffa_lobby_is_live(lobby) -> bool:
         return False
 
 
+def _ffa_bet_cutoff_points(score_target) -> int:
+    """How many points must be SCORED IN THE GAME before betting closes.
+
+    Sid, Aug 9: two points for a normal lobby, but "make it 1 point scored
+    total if the win condition is 3 points" — a first-to-3 game is decided so
+    much sooner that waiting for two would hand the bettor a near-certain
+    result. FFA is the only mode whose win condition is configurable
+    (score_target, host-set 3-10); 1v1 and 2v2 have fixed conditions and sit
+    at the flat 2."""
+    try:
+        return 1 if int(score_target or FFA_ROUNDS_TO_WIN) <= 3 else 2
+    except Exception:
+        return 2
+
+
 def _ffa_bet_window_open(lobby) -> bool:
     """Is the CURRENT game of this lobby still bettable?
 
-    THE cutoff (Sid, Aug 9): 2 POINTS SCORED IN THE CURRENT GAME — the same
-    rule 1v1 and 2v2 use. This replaced a 90-second clock that existed only
-    because the server had no live FFA score; the client now reports one
-    (migration 208), so the real rule is enforceable and the clock is gone.
+    THE cutoff (Sid, Aug 9): POINTS SCORED ACROSS THE FIELD in the game being
+    played — 2 normally, 1 when the lobby's win condition is first-to-3. This
+    is the same shape 1v1 and 2v2 use (both sum their two sides); a
+    free-for-all's "field" is simply everyone.
 
-    live_points_game pins the score to a GAME NUMBER: a lobby plays many
+    live_points_game pins the total to a GAME NUMBER: a lobby plays many
     games, and game 2's leftover score must never lock game 3's window. A
-    report for anything other than the game about to be played is ignored
-    here, which means a fresh game opens betting again — correct, and the
-    reason the column exists.
+    total belonging to any other game is ignored here, so a fresh game opens
+    betting again — the reason the column exists.
 
-    Structurally-open case worth naming: a lobby whose clients never report
-    (all on a pre-208 build) has no score, so the window stays open until the
-    game's result lands. That is the pre-clock behaviour and it is bounded by
-    _ffa_lobby_is_live; with MIN_MOD_VERSION at 1.38.0 every live client
-    reports.
+    A lobby whose clients cannot report has no total at all; that case never
+    reaches this function, because betting is refused outright for
+    participants below LIVE_POINTS_MIN_VERSION (fail closed, review CRITICAL).
     """
     try:
         current_game = int(lobby["games_played"] or 0) + 1
         if int(lobby["live_points_game"] or 0) != current_game:
-            return True      # no score for THIS game yet
-        return int(lobby["live_top_points"] or 0) < 2
+            return True      # no total for THIS game yet
+        cutoff = _ffa_bet_cutoff_points(lobby["score_target"])
+        return int(lobby["live_total_points"] or 0) < cutoff
     except Exception:
         # Fail OPEN rather than silently refusing every FFA bet on a schema
-        # hiccup; _ffa_lobby_is_live still bounds the lobby's life.
+        # hiccup; _ffa_lobby_is_live still bounds the lobby's life, and the
+        # reporter gate still bounds who can bet at all.
         return True
 
 
@@ -29039,7 +29057,7 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
     requester is a member of are flagged (client hides the buttons)."""
     lobbies = (await db.execute(text("""
         SELECT l.id, l.member_ids, l.departed_ids, l.player_count, l.games_played,
-               l.created_at, l.score_target, l.live_top_points, l.live_points_game,
+               l.created_at, l.score_target, l.live_total_points, l.live_points_game,
                (SELECT MAX(m.ended_at) FROM ffa_matches m
                  WHERE m.lobby_id = l.id AND m.invalidated_at IS NULL) AS last_game_at
           FROM ffa_lobbies l
@@ -29146,7 +29164,7 @@ async def place_ffa_bet(
     # key column.
     lobby = (await db.execute(text(
         "SELECT id, status, member_ids, departed_ids, games_played, created_at,"
-        "       score_target, is_ranked, live_top_points, live_points_game,"
+        "       score_target, is_ranked, live_total_points, live_points_game,"
         "       (SELECT MAX(m.ended_at) FROM ffa_matches m"
         "         WHERE m.lobby_id = ffa_lobbies.id AND m.invalidated_at IS NULL) AS last_game_at"
         "  FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"

@@ -1130,11 +1130,13 @@ namespace CompetitiveRounds
                         && !string.IsNullOrEmpty(ApiClient.ActiveFfaLobbyId)
                         && !string.IsNullOrEmpty(MatchTracker.LocalSteamId))
                     {
-                        int top = 0;
-                        foreach (var kv in pointsTotal) if (kv.Value > top) top = kv.Value;
+                        // Sid, Aug 9: the metric is points scored ACROSS THE
+                        // FIELD, not the leader's tally — sum everyone.
+                        int scored = 0;
+                        foreach (var kv in pointsTotal) scored += kv.Value;
                         ApiClient.PostFfaLivePoints(ApiClient.ActiveFfaLobbyId,
                                                     MatchTracker.LocalSteamId,
-                                                    gameNumber, top);
+                                                    gameNumber, scored);
                     }
                 }
                 catch { }

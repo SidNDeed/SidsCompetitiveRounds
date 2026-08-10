@@ -1699,19 +1699,20 @@ namespace CompetitiveRounds
                 $"2v2 series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {t1Points}-{t2Points}");
         }
 
-        /// <summary>FFA points for the game in progress — the HIGHEST total any
-        /// player holds, since a free-for-all has no two sides to sum. Betting
-        /// locks once somebody has 2. game_number keeps a finished game's score
-        /// from locking the next one's window.</summary>
-        public static void PostFfaLivePoints(string lobbyId, string reporterSteamId, int gameNumber, int topPoints)
+        /// <summary>Points scored ACROSS THE FIELD in the FFA game in progress
+        /// (everyone's points added up), so betting closes on the same reading
+        /// 1v1 and 2v2 use when they sum their two sides. The threshold is the
+        /// server's (2 normally, 1 for a first-to-3 lobby). game_number keeps a
+        /// finished game's total from locking the next one's window.</summary>
+        public static void PostFfaLivePoints(string lobbyId, string reporterSteamId, int gameNumber, int totalPoints)
         {
             if (string.IsNullOrEmpty(lobbyId) || string.IsNullOrEmpty(reporterSteamId) || gameNumber < 1) return;
-            string sig = ComputeHmacHex($"ffa-live-points:{lobbyId}:{reporterSteamId}:{gameNumber}:{topPoints}");
+            string sig = ComputeHmacHex($"ffa-live-points:{lobbyId}:{reporterSteamId}:{gameNumber}:{totalPoints}");
             string url = $"{baseUrl}/api/v1/ffa/lobbies/{Escape(lobbyId)}/live-points" +
-                         $"?game_number={gameNumber}&top_points={topPoints}" +
+                         $"?game_number={gameNumber}&total_points={totalPoints}" +
                          $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
             SendLivePoints("ffa:" + lobbyId, url,
-                $"ffa lobby={lobbyId.Substring(0, Math.Min(8, lobbyId.Length))} g{gameNumber} top={topPoints}");
+                $"ffa lobby={lobbyId.Substring(0, Math.Min(8, lobbyId.Length))} g{gameNumber} total={totalPoints}");
         }
 
         /// <summary>Place a bet. HMAC over "bet:{bettor}:{series_id}:{bet_on}:{amount}".</summary>
