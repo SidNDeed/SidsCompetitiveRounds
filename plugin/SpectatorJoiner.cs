@@ -179,6 +179,26 @@ namespace CompetitiveRounds
                 }
                 yield return null;
             }
+            // Success re-check BEFORE declaring timeout (Aug 10 r11 find 1:
+            // PUN can dispatch the successful join on the exact frame the
+            // watchdog budget lapses — the loop condition then fails without
+            // running its own success check, and Fail() on a session that
+            // actually JOINED tore down the statics before the room exit was
+            // observed, latching session state into later fighter play).
+            bool joinedAfterAll = false;
+            try
+            {
+                joinedAfterAll = SpectatorSession.IsLocalSpectator
+                                 && PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
+                                 && string.Equals(PhotonNetwork.CurrentRoom?.Name, room, StringComparison.Ordinal);
+            }
+            catch { }
+            if (joinedAfterAll)
+            {
+                _running = false;
+                try { nch.m_ForceRegion = false; } catch { }
+                yield break;
+            }
             Fail("join timed out — the game may have ended");
         }
 

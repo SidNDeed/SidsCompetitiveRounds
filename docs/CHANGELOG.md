@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+### Spectator mode — the desync is fixed (bugs 187/188/190/192/194)
+
+- **The spectator's game clock is fixed.** It was never armed on the spectate
+  join path, and every round-ending kill ratcheted it further down with
+  nothing restoring it — bullets, gun timers, character limb IK, the floating
+  nametag follower and gravity all run on that clock, which is why everything
+  visibly trailed the (real-time) position stream: slow-motion bullets,
+  instant hits, lagging names, floating bodies.
+- **Removed a vanilla trap** where the spectator client silently dropped into
+  TEST-MAP mode on its first map load — which teleport-revived dead fighters
+  at random spawn points on the spectator's screen 2.5 seconds after every
+  death, and contaminated map bookkeeping for the whole session.
+- **Fixed the ghost-object registry.** The join-time cleanup hid the room's
+  inherited object history but left its Photon view registrations alive, so
+  from game 2 of a sitting every new object collided with a ghost view ID and
+  live boxes/bullets stopped updating for spectators (the doubled/desynced
+  string-box reports). Ghosts are now buried AND locally unregistered at
+  source — which also removes the join-time error wall (700+ exceptions in
+  one burst) that correlated with the "lag spike when you joined" reports.
+- **Map loads are serialized on spectators** (vanilla corrupts its own
+  scene-wrapper handoff when two additive loads overlap — routine for a
+  chronically-behind spectator), with boundary reconciles that supersede
+  cleanly instead of stacking, and deck rebuilds that tolerate mid-apply
+  leavers.
+- **Spectating no longer touches fighter gameplay.** A spectator joining or
+  leaving used to arm a 3-second poison "roster quarantine" that disabled
+  block-honoring on live poison streams — spectator churn was changing
+  fighter damage. The poison census now runs on replicated data identically
+  on every seat. Ejecting an unauthorized watcher can also no longer end the
+  fighters' match through the vanilla disconnect cascade.
+- **Kicks are honest now.** Stock Photon ships CloseConnection DISABLED on
+  both ends — every spectator "kick" to date was a silent no-op. Kicks now
+  work cooperatively between mod clients (revoked leases, wrong protocols,
+  unauthorized entrants), fighters remain un-kickable by design, and the
+  server-side lease system stays the real enforcement.
+- **Spectate protocol floor -> 2** (migration 210): old-protocol clients carry
+  the hazards above, so mixed rooms are excluded. Between the backend deploy
+  and the client release, spectate grants are refused on purpose.
+
+### Spectator mode — quality of life (Sid's list + bugs 184/191/193)
+
+- **No more black flashes between points.** The fullscreen "Synchronizing"
+  cover now exists only before the first sync; after that the live arena
+  stays visible, and vanilla's own between-points score sequence (the
+  orange/blue orbs with HALF/ROUND pips) plays for spectators exactly as
+  fighters see it. Round starts are no longer hidden behind a reconcile.
+- **The top bar shows the full picture**: team-colored names with the game
+  score including half points ("Archnith 2.5 - 3 NotNic"), the current
+  series score, and the SESSION series tally between the two fighters (how
+  many series each has won this sitting — carried in the snapshot protocol).
+- **Spectators can see who else is spectating** (the same bottom-right roster
+  fighters already had — it was explicitly gated off for spectators).
+- **Escape is deconflicted** (bug 191): an open chat box or F5 menu consumes
+  Esc first; the leave-spectating dialog only opens from the base state.
+- **The F5 menu no longer force-closes** when a round starts while
+  spectating (bug 193), and the whole log-driven match tracker is quiescent
+  on spectator clients (watched picks can no longer leak into a later
+  fighter session's telemetry).
+- The FFA phantom "card picking ends in Xs" banner fix (bug 184) ships in
+  this release.
+
+### Fighter-side (spectator-adjacent)
+
+- Removed every identified spectator-conditional cost on fighter clients: a
+  master-side bookkeeping loop ran at 100x its intended cadence, spectate
+  attest state leaked across rooms, a master handoff could starve spectator
+  validation for a minute, and misc handlers misread spectator joins as
+  "opponent joined". Fighters' own fps/ping telemetry was flat through the
+  playtest; if lag persists at 1-2 spectators after this batch, the
+  remaining suspect is Photon relay fan-out.
+
 ### Changed
 
 - **Spectators can bet.** The old rule blocked anyone holding a spectator

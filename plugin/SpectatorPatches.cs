@@ -224,20 +224,39 @@ namespace CompetitiveRounds
             catch { }
             try
             {
+                // One observed round per call-in (Aug 10 review find 9):
+                // vanilla dedupes duplicate/bunched round broadcasts with
+                // isTransitioning, which lives in the suppressed machine —
+                // without this mirror a duplicate would double-increment the
+                // score and stack overlapping visual sequences.
+                if (SpectatorSync.RoundObservationLatched) return false;
+                SpectatorSync.LatchRoundObservation();
+
                 // The RPC args are PRE-increment (vanilla RPCA_NextRound
                 // assigns them and THEN increments the winner — Codex r2 find
                 // 16: recording them raw displayed every score one event
                 // stale, including the final one). Mirror vanilla's own
-                // increment: winner points +1; at pointsToWinRound (2 in
-                // every competitive room) the winner converts a round and
-                // both points reset. Boundary snapshots overwrite with the
-                // master's live values, correcting any drift.
+                // increment, using the LIVE thresholds (host-configurable in
+                // private rooms — never hardcode). Boundary snapshots
+                // overwrite with the master's values, correcting any drift.
+                int ptw = __instance.pointsToWinRound; if (ptw <= 0) ptw = 2;
+                int rtw = __instance.roundsToWinGame; if (rtw <= 0) rtw = 5;
+                SpectatorViewState.RecordPointsToWin(ptw);
+
                 int p1p = p1PointsSet, p2p = p2PointsSet;
                 int p1r = p1RoundsSet, p2r = p2RoundsSet;
                 if (winningTeamID == 0) p1p++;
                 else if (winningTeamID == 1) p2p++;
-                if (winningTeamID == 0 && p1p >= 2) { p1r++; p1p = 0; p2p = 0; }
-                else if (winningTeamID == 1 && p2p >= 2) { p2r++; p1p = 0; p2p = 0; }
+                // RAW post-increment points for the visual sequence (find 7:
+                // passing the normalized 0-0 to DoWinSequence rendered empty
+                // HALF pips on every round win).
+                int visP1 = p1p, visP2 = p2p;
+                bool conversion = false;
+                if (winningTeamID == 0 && p1p >= ptw) { conversion = true; p1r++; p1p = 0; p2p = 0; }
+                else if (winningTeamID == 1 && p2p >= ptw) { conversion = true; p2r++; p1p = 0; p2p = 0; }
+                bool gameOver = conversion
+                    && (winningTeamID == 0 ? p1r : p2r) >= rtw;
+
                 SpectatorViewState.RecordScore(winningTeamID, p1p, p2p, p1r, p2r);
                 // Mirror into the GM's own score fields (playtest #2c): the
                 // vanilla CROWN reads gm.p1Rounds/p1Points directly
@@ -256,9 +275,230 @@ namespace CompetitiveRounds
                 // the fields we just mirrored; it handles both the first
                 // PlayIn and later transfers.
                 try { UnityEngine.Object.FindObjectOfType<GameCrownHandler>()?.PointOver(); } catch { }
+
+                // Between-points display (item 2): vanilla's own score-orb
+                // sequence, driven from the observed values. Replaces the
+                // hard black reconcile flash spectators used to get here.
+                SpectatorSync.PlayPointSequence(conversion, gameOver, visP1, visP2, p1r, p2r, winningTeamID);
             }
             catch { }
             return false;
+        }
+    }
+
+    /// <summary>Aug 10 root cause D1: GM_ArmsRace.PlayerDied runs on every
+    /// replicated round-ending kill (its subscription is made in OnEnable,
+    /// and the spectator activates the GM object for its RPC receivers). It
+    /// calls TimeHandler.DoSlowDown() — whose every restore lives in the
+    /// suppressed transitions, so the spectator's clock ratcheted down at the
+    /// first kill and stayed there: slow-motion bullets, frozen IK/wobble
+    /// followers ("nametags lag"), stair-stepping bodies. It also carries an
+    /// IsMasterClient branch that would broadcast a REAL RPCA_NextRound from
+    /// a spectator during a master-handoff window. Suppress the whole method;
+    /// score observation rides the fighters' own RPCA_NextRound instead.
+    /// This is the missing GM-mode sibling of FfaMode's existing spectator
+    /// gate (FfaMode.cs "Codex r2 find 9").</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "PlayerDied")]
+    internal static class Spectator_NoGmPlayerDied_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix()
+        {
+            return !SpectatorPatchSupport.Suppress;
+        }
+    }
+
+    /// <summary>Aug 10 root cause D1b: with GameManager.isPlaying false,
+    /// vanilla Map.Awake activates GM_Test (test-map mode). GM_Test.OnEnable
+    /// subscribes a PlayerDied handler that teleport-revives dead fighter
+    /// replicas at random spawns 2.5s after every death, sets
+    /// isTestingMap = true, and force-starts the clock. The isPlaying pin in
+    /// SpectatorSync prevents the activation; this is the belt for any path
+    /// that still enables it — with OnEnable suppressed, GM_Test's
+    /// subscriptions are never made (its OnDisable Delegate.Remove of a
+    /// never-added handler is a harmless no-op).</summary>
+    [HarmonyPatch(typeof(GM_Test), "OnEnable")]
+    internal static class Spectator_NoGmTest_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix()
+        {
+            if (!SpectatorPatchSupport.Suppress) return true;
+            SpectatorPatchSupport.Log("GM_Test.OnEnable");
+            return false;
+        }
+    }
+
+    /// <summary>Join-replay quarantine, tag half (Aug 10 review find 5): a
+    /// parentless PhotonMapObject clone seen while the window is armed is a
+    /// cache-replayed husk. Tag it at Awake — the TAG (not the armed state at
+    /// Start time) decides suppression, because Awake and a deferred Start
+    /// can straddle a later live map load.</summary>
+    [HarmonyPatch(typeof(PhotonMapObject), "Awake")]
+    internal static class Spectator_ReplayTag_Patch
+    {
+        private static void Postfix(PhotonMapObject __instance)
+        {
+            try
+            {
+                if (!SpectatorPatchSupport.Suppress) return;
+                if (__instance == null || __instance.transform.parent != null) return;
+                if (SpectatorSync.ReplayQuarantineArmed)
+                {
+                    SpectatorSync.TagReplayObject(__instance.GetInstanceID());
+                    return;
+                }
+                // LIVE clone: stamp its map-load generation NOW (r5 find 4 —
+                // sampling at Start is too late; a newer command in the
+                // Awake->Start gap would bind it to the wrong map).
+                SpectatorSync.StampLiveCloneGen(__instance.GetInstanceID());
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>Join-replay quarantine, suppression half (root cause D2): a
+    /// tagged husk's vanilla Start would NRE against the missing map (the
+    /// 323/763-exception join walls in both spectator logs) and leave a
+    /// REGISTERED PhotonView that collides with the rematch's recycled view
+    /// IDs (the proven game-2 desync). Bury + locally unregister at source
+    /// instead; vanilla never runs.</summary>
+    [HarmonyPatch(typeof(PhotonMapObject), "Start")]
+    internal static class Spectator_ReplayQuarantine_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix(PhotonMapObject __instance)
+        {
+            try
+            {
+                if (!SpectatorPatchSupport.Suppress) return true;
+                if (__instance == null) return true;
+                if (SpectatorSync.IsReplayTagged(__instance.GetInstanceID()))
+                {
+                    SpectatorSync.SafeBuryAndClean(__instance.gameObject);
+                    SpectatorSync.CountReplayBuried();
+                    return false;
+                }
+                // LIVE clone with no local map yet (Aug 10 r2 find 3: we
+                // joined after the load RPC and the direct local load is
+                // still in flight): vanilla Start would NRE and leave a
+                // registered orphan view. Defer it until the map exists —
+                // the defer coroutine re-invokes Start, which passes through
+                // here again with a live map and runs vanilla normally.
+                if (__instance.transform.parent == null)
+                {
+                    // SETTLED on the last COMMANDED SCENE (r4 blocker 1): the
+                    // in-flight signal is the RPCA_LoadLevel arg we record —
+                    // Map.levelID is vanilla's readiness token, never scene
+                    // identity, so no field equality can express this. While
+                    // a load is in flight, vanilla Start would parent this
+                    // clone under the OUTGOING map, which dies with its
+                    // unload and corrupts the new map's accounting.
+                    if (!SpectatorSync.MapSettledOnCommanded())
+                    {
+                        SpectatorSync.DeferMapObjectStart(__instance);
+                        return false;
+                    }
+                }
+                return true;
+            }
+            catch { return true; }
+        }
+    }
+
+    /// <summary>Aug 10 r3 find 5: vanilla PhotonMapObject.Update carries the
+    /// LAST master-only sender the spectator's authority suppression missed —
+    /// during a transient spectator-master window, a local PLACEHOLDER's
+    /// Update would PhotonNetwork.Instantiate real networked map pieces at
+    /// every fighter. Replace the body for spectators: identical local
+    /// accounting (counter, waitingToBeRemoved, missingObjects), never the
+    /// instantiate branch. All fields publicized.</summary>
+    [HarmonyPatch(typeof(PhotonMapObject), "Update")]
+    internal static class Spectator_NoMapObjectAuthority_Patch
+    {
+        private static bool Prefix(PhotonMapObject __instance)
+        {
+            if (!SpectatorPatchSupport.Suppress) return true;
+            try
+            {
+                var o = __instance;
+                if (o == null) return false;
+                if (o.waitingToBeRemoved || o.photonSpawned) return false;
+                o.counter += Mathf.Clamp(Time.deltaTime, 0f, 0.1f);
+                var map = o.map;
+                bool gate = false;
+                try
+                {
+                    gate = (PhotonNetwork.OfflineMode && o.counter > 1f && map != null && map.hasEntered)
+                           || (map != null && map.hasEntered && map.LoadedForAll());
+                }
+                catch { }
+                if (gate)
+                {
+                    // Vanilla would PhotonNetwork.Instantiate here when
+                    // master — the one thing a spectator must never do.
+                    map.missingObjects++;
+                    o.waitingToBeRemoved = true;
+                }
+            }
+            catch { }
+            return false;
+        }
+    }
+
+    /// <summary>Map-load serializer gate (r5 blocker 1): vanilla subscribes
+    /// its completion handler PER RPCA_LoadLevel call, so overlapping loads
+    /// double-subscribe and corrupt the wrapper handoff. On a spectator this
+    /// PREFIX permits one active load, queues the latest different target
+    /// (launched from the completion hook below), and drops duplicates. It
+    /// also closes the join-replay window — live map flow has begun — and
+    /// records the commanded scene (the RPC arg is the ONLY observable
+    /// "load in flight toward S" signal).</summary>
+    [HarmonyPatch(typeof(MapManager), "RPCA_LoadLevel")]
+    internal static class Spectator_MapLoadGate_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix(string sceneName)
+        {
+            try
+            {
+                if (!SpectatorPatchSupport.Suppress) return true;
+                SpectatorSync.DisarmReplayQuarantine("map load");
+                return SpectatorSync.GateMapLoad(sceneName);
+            }
+            catch { return true; }
+        }
+    }
+
+    /// <summary>Completion hook for the serializer: pins local readiness to
+    /// the settled map's token and launches any queued load.</summary>
+    [HarmonyPatch(typeof(MapManager), "OnLevelFinishedLoading")]
+    internal static class Spectator_MapLoadCompleted_Patch
+    {
+        private static void Postfix()
+        {
+            try
+            {
+                if (SpectatorPatchSupport.Suppress)
+                    SpectatorSync.OnMapLoadCompleted();
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>r5 find 2: a slow fighter's RPCA_ReportMapLoaded carries the
+    /// readiness token of ITS load lineage. After the spectator direct-loads
+    /// a missed map, its local token can legitimately differ — the report
+    /// would overwrite the pinned scalar, LoadedForAll would stay false and
+    /// every networked clone would stay kinematic. The spectator's readiness
+    /// scalar is fully self-owned (pinned at each load completion); inbound
+    /// reports are dropped. Fighters are untouched.</summary>
+    [HarmonyPatch(typeof(MapManager), "RPCA_ReportMapLoaded")]
+    internal static class Spectator_NoInboundMapReports_Patch
+    {
+        private static bool Prefix()
+        {
+            return !SpectatorPatchSupport.Suppress;
         }
     }
 
@@ -309,8 +549,24 @@ namespace CompetitiveRounds
             try
             {
                 if (otherPlayer == null) return true;
-                if (!RoomActors.IsSpectator(otherPlayer)) return true;   // inert
-                Plugin.Log?.LogInfo($"[SPECTATE] spectator actor {otherPlayer.ActorNumber} left — suppressing vanilla match teardown");
+                // A departure tears the match down ONLY for a genuine
+                // fighter. The load-bearing tests are the PROP-DERIVED pair
+                // (r9): no-u_id and impostor-duplicate are computed
+                // identically on every seat from replicated data, so the
+                // suppression can never split across clients whatever their
+                // local roster-freeze timing (the r8 failure). The local
+                // caches (rejected/unauthorized) only ADD suppression on
+                // seats that know more — a benign asymmetry, because extra
+                // suppression converges to the vanilla outcome when the real
+                // fighters act.
+                bool nonFighter = RoomActors.IsSpectator(otherPlayer)
+                                  || (RoomActors.ReplicatedIdentityGuaranteed()
+                                      && !RoomActors.HasReplicatedFighterIdentity(otherPlayer))
+                                  || RoomActors.IsImpostorReplicated(otherPlayer)
+                                  || RoomActors.IsRejected(otherPlayer)
+                                  || RoomActors.IsUnauthorized(otherPlayer);
+                if (!nonFighter) return true;   // inert
+                Plugin.Log?.LogInfo($"[SPECTATE] non-fighter actor {otherPlayer.ActorNumber} left — suppressing vanilla match teardown");
                 return false;
             }
             catch { return true; }   // never break vanilla's leave path
@@ -330,9 +586,22 @@ namespace CompetitiveRounds
             try
             {
                 if (newPlayer == null) return true;
-                if (!RoomActors.IsSpectator(newPlayer)) return true;   // inert
-                Plugin.Log?.LogInfo($"[SPECTATE] spectator actor {newPlayer.ActorNumber} joined — not a match-found event");
-                return false;
+                if (RoomActors.IsSpectator(newPlayer))
+                {
+                    Plugin.Log?.LogInfo($"[SPECTATE] spectator actor {newPlayer.ActorNumber} joined — not a match-found event");
+                    return false;
+                }
+                // Unauthorized entrant: record the rejection HERE too —
+                // callback dispatch order vs Plugin's IInRoomCallbacks is
+                // undefined, and the cache must exist before the master's
+                // CloseConnection produces the departure (blocker 2).
+                if (RoomActors.IsUnauthorized(newPlayer))
+                {
+                    RoomActors.RecordRejected(newPlayer);
+                    Plugin.Log?.LogInfo($"[SPECTATE] unauthorized actor {newPlayer.ActorNumber} joined — not a match-found event");
+                    return false;
+                }
+                return true;   // inert
             }
             catch { return true; }
         }
@@ -402,12 +671,16 @@ namespace CompetitiveRounds
                 bool unauthorized = !spectatorOwned && RoomActors.IsUnauthorized(owner);
                 if (!spectatorOwned && !unauthorized) return true;   // inert path
 
+                // Cache the rejection locally (additive suppression; the
+                // cross-client leave rule is prop-derived, r9).
+                if (unauthorized) RoomActors.RecordRejected(owner);
+
                 Plugin.Log?.LogWarning($"[SPECTATE] rejecting Player registration from " +
                     $"{(spectatorOwned ? "spectator" : "unauthorized")} actor {owner.ActorNumber}");
                 try { player.gameObject.SetActive(false); } catch { }
                 if (PhotonNetwork.IsMasterClient && unauthorized)
                 {
-                    try { PhotonNetwork.CloseConnection(owner); } catch { }
+                    RoomActors.CooperativeClose(owner);   // best-effort (r9 find 1)
                 }
                 return false;
             }

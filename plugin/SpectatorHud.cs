@@ -47,18 +47,37 @@ namespace CompetitiveRounds
                 EnsureStyles();
                 var e = Event.current;
 
-                // Esc: toggle the leave menu. KeyDown only, consumed so no
-                // other IMGUI consumer sees it.
+                // Esc: toggle the leave menu — but YIELD to higher-priority
+                // consumers (bug 191 + Aug 10 review find 13): an open chat
+                // box closes on Esc later in this same DrawUI pass, and the
+                // F5 menu already consumed this frame's Esc in Update
+                // (NativeUI.IsOpen is false by OnGUI time — the frame stamp
+                // is the only reliable signal).
                 if (e != null && e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape)
                 {
-                    MenuOpen = !MenuOpen;
-                    e.Use();
+                    bool yield = false;
+                    try
+                    {
+                        yield = CompetitiveUI.AnyChatTyping
+                                || NativeUI.IsOpen
+                                || NativeUI.EscConsumedFrame == Time.frameCount;
+                    }
+                    catch { }
+                    if (!yield)
+                    {
+                        MenuOpen = !MenuOpen;
+                        e.Use();
+                    }
                 }
 
                 var stage = SpectatorSync.CurrentStage;
-                bool active = stage == SpectatorSync.Stage.Active;
 
-                if (!active)
+                // Item 2 (seizure-inducing black flashes): the fullscreen
+                // cover exists ONLY before the first activation. Every later
+                // reconcile keeps the live scene visible — vanilla's own
+                // point sequence plays between points, and the top bar grows
+                // a "Syncing" note while a reconcile is in flight.
+                if (!SpectatorSync.HasEverActivated)
                     DrawBlackout(stage);
                 else
                     DrawLiveBar();
@@ -67,6 +86,15 @@ namespace CompetitiveRounds
                     DrawLeaveMenu();
             }
             catch { }
+        }
+
+        /// <summary>Fully de-styled name for plain-text surfaces
+        /// (notifications, the game-over toast).</summary>
+        internal static string PlainName(string styled)
+        {
+            if (string.IsNullOrEmpty(styled)) return "";
+            try { return _allTagStrip.Replace(styled, ""); }
+            catch { return styled; }
         }
 
         private static void DrawBlackout(SpectatorSync.Stage stage)
@@ -103,27 +131,129 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(0, h - 60, w, 24), I18n.Tr("Press Esc to leave"), _sub);
         }
 
+        // ROUNDS team hues for the score line (ASCII hex only, #47).
+        private const string ORANGE_HEX = "#FF8124";
+        private const string BLUE_HEX = "#33B5FF";
+
+        private static string _cachedBarLine = "";
+        private static float _barCachedAt = -999f;
+
         private static void DrawLiveBar()
         {
             int w = Screen.width;
-            // Slim top-center bar: SPECTATING | names | series | game score.
-            // Cached strings only on Repaint-heavy path (#162): names line
-            // refreshes at 2s, series line at 5s.
-            string names = NamesLine();
-            _sb.Length = 0;
-            _sb.Append(I18n.Tr("SPECTATING"));
-            if (names.Length > 0) _sb.Append("  |  ").Append(names);
-            string series = SeriesLine();
-            if (series.Length > 0) _sb.Append("  |  ").Append(series);
-            if (SpectatorViewState.HasScore) _sb.Append("  |  ").Append(SpectatorViewState.ScoreLine());
-            string line = _sb.ToString();
+            // Slim top-center bar (0.5s composite cache, #162):
+            //   SPECTATING | <orange>A</> 2.5 - 3 <blue>B</> | Series 1-0 | Session 2-1 [| Syncing...]
+            // The colored score segment REPLACES the plain names segment when
+            // a score exists (Aug 10 review find 11 — never both).
+            if (Time.unscaledTime - _barCachedAt > 0.5f)
+            {
+                _barCachedAt = Time.unscaledTime;
+                // Segments FIRST — NamesLine() clears the shared _sb builder
+                // internally, so it must never run mid-composition.
+                string score = TeamScoreInline();
+                string names = score.Length > 0 ? "" : NamesLine();
+                string series = SeriesLine();
+                string session = SessionLine();
+                _sb.Length = 0;
+                _sb.Append(I18n.Tr("SPECTATING"));
+                if (score.Length > 0) _sb.Append("  |  ").Append(score);
+                else if (names.Length > 0) _sb.Append("  |  ").Append(names);
+                if (series.Length > 0) _sb.Append("  |  ").Append(series);
+                if (session.Length > 0) _sb.Append("  |  ").Append(session);
+                if (SpectatorSync.CurrentStage != SpectatorSync.Stage.Active)
+                    _sb.Append("  |  ").Append(I18n.Tr("Syncing..."));
+                _cachedBarLine = _sb.ToString();
+            }
 
             var rect = new Rect(0, 6, w, 26);
             GUI.color = new Color(0f, 0f, 0f, 0.55f);
             // Wider backdrop: titles + ratings joined the line (playtest #2b).
             GUI.DrawTexture(new Rect(w * 0.5f - 480, 4, 960, 28), BlackTex());
             GUI.color = Color.white;
-            GUI.Label(rect, line, _sub);
+            GUI.Label(rect, _cachedBarLine, _sub);
+        }
+
+        /// <summary>Item 3: the game score with sides attached and half
+        /// points — "NameA 2.5 - 3 NameB", each side in its ROUNDS team
+        /// color, so who leads is one glance. Empty when no score yet or in
+        /// FFA (which has its own score HUD).</summary>
+        private static string TeamScoreInline()
+        {
+            try
+            {
+                if (!SpectatorViewState.HasScore) return "";
+                if (SpectatorSync.WatchedMode == "ffa") return "";
+                var names = SpectatorSync.FighterNames;
+                var teams = SpectatorSync.FighterTeams;
+                if (names == null || teams == null || names.Length != teams.Length || names.Length == 0)
+                    return "";
+                string t0 = TeamNamesInline(0), t1 = TeamNamesInline(1);
+                if (t0.Length == 0 || t1.Length == 0) return "";
+                _decorSb.Length = 0;
+                _decorSb.Append("<color=").Append(ORANGE_HEX).Append(">").Append(t0).Append("  ")
+                        .Append(SpectatorViewState.TeamScoreText(0)).Append("</color>")
+                        .Append("  -  ")
+                        .Append("<color=").Append(BLUE_HEX).Append(">")
+                        .Append(SpectatorViewState.TeamScoreText(1)).Append("  ").Append(t1).Append("</color>");
+                return _decorSb.ToString();
+            }
+            catch { return ""; }
+        }
+
+        private static string TeamNamesInline(int team)
+        {
+            var names = SpectatorSync.FighterNames;
+            var teams = SpectatorSync.FighterTeams;
+            var sb = new StringBuilder(48);
+            for (int i = 0; i < names.Length; i++)
+            {
+                if (teams[i] != team) continue;
+                if (sb.Length > 0) sb.Append(" + ");
+                // Plain names inside the colored segment: nested nametag
+                // color styling would fight the team color mid-string.
+                sb.Append(PlainName(names[i])).Append(DecorPlain(i));
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Rating-only decor (no color tags) for the team-colored
+        /// score segment.</summary>
+        private static string DecorPlain(int fighterIndex)
+        {
+            try
+            {
+                var sids = SpectatorSync.FighterSteamIds;
+                var roster = SpectatorSession.WatchedRoster;
+                if (sids == null || fighterIndex >= sids.Length || roster == null) return "";
+                int m = -1;
+                for (int r = 0; r < roster.Length; r++)
+                    if (roster[r] == sids[fighterIndex]) { m = r; break; }
+                if (m < 0) return "";
+                var ratings = SpectatorSession.WatchedRatings;
+                string rating = ratings != null && m < ratings.Length ? ratings[m] : "";
+                return string.IsNullOrEmpty(rating) ? "" : " (" + rating + ")";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Item 3: series won per side THIS SITTING (snapshot slots
+        /// 16/17, fighter-array order mapped to team order). Hidden unless a
+        /// well-formed 1v1 tally arrived.</summary>
+        private static string SessionLine()
+        {
+            try
+            {
+                int s0 = SpectatorViewState.SessionSeries0;
+                int s1 = SpectatorViewState.SessionSeries1;
+                if (s0 < 0 || s1 < 0) return "";
+                var teams = SpectatorSync.FighterTeams;
+                if (teams == null || teams.Length != 2) return "";
+                // Fighter-array order -> team order (team 0 renders left).
+                int left = teams[0] == 0 ? s0 : s1;
+                int right = teams[0] == 0 ? s1 : s0;
+                return I18n.TrF("Session {0}-{1}", left, right);
+            }
+            catch { return ""; }
         }
 
         private static void DrawLeaveMenu()

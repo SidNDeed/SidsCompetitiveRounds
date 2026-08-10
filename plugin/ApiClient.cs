@@ -16894,9 +16894,15 @@ namespace CompetitiveRounds
                   .Append($"\"steam_id\":\"{Escape(sid)}\",")
                   .Append($"\"room_name\":\"{Escape(roomAtSend)}\",")
                   .Append("\"spectators\":[");
+                bool first = true;
                 for (int i = 0; i < specs.Length; i++)
                 {
-                    if (i > 0) sb.Append(',');
+                    // Wrong-protocol seats are never validated (Aug 10 r2
+                    // blocker 2): the master closes them (entry hook + sweep);
+                    // validating one would keep its lease bound and alive.
+                    if (RoomActors.SpectatorProtocolOf(specs[i]) != SpectatorSession.PROTOCOL) continue;
+                    if (!first) sb.Append(',');
+                    first = false;
                     sb.Append('{')
                       .Append($"\"actor_number\":{specs[i].ActorNumber},")
                       .Append($"\"steam_id\":\"{Escape(RoomActors.SteamIdOf(specs[i]))}\"")
@@ -16942,8 +16948,8 @@ namespace CompetitiveRounds
                                         var p = room != null ? room.GetPlayer(actor) : null;
                                         if (p != null && RoomActors.IsSpectator(p))
                                         {
-                                            Plugin.Log.LogWarning($"[SPECTATE] kicking invalid spectator actor {actor}");
-                                            Photon.Pun.PhotonNetwork.CloseConnection(p);
+                                            Plugin.Log.LogWarning($"[SPECTATE] close requested for invalid spectator actor {actor} (cooperative)");
+                                            RoomActors.CooperativeClose(p);
                                         }
                                     }
                                     catch { }

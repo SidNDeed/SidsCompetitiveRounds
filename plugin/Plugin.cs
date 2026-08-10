@@ -697,6 +697,18 @@ namespace CompetitiveRounds
             // modDisabled/startup, and a client that advertises authority but never
             // subscribed to the commit path would never apply its OWN damage.
             try { PoisonSync.StageCapability("Awake"); PoisonSync.Hook(); } catch { }
+            // CloseConnection is a COOPERATIVE Photon primitive that stock
+            // PUN ships DISABLED on both ends (Aug 10 r9 find 1: every
+            // spectator-system "kick" to date was a silent no-op). It is
+            // deliberately NOT enabled globally here (r10 find 3: a hostile
+            // CURRENT MASTER could then evict honest FIGHTERS — a new
+            // competitive-integrity primitive). Instead: SPECTATOR sessions
+            // enable the flag for their own lifetime (a spectator is
+            // kickable by design — SpectatorSync owns that), and master-side
+            // send sites raise it TRANSIENTLY around their own CloseConnection
+            // call via RoomActors.CooperativeClose — while WE are master, an
+            // incoming event 203 can only be honored from "the master",
+            // which is us, so the transient window is not exploitable.
             // cr_grow1 deliberately has NO Awake stage call: GrowNormalize
             // refuses to advertise before the compat verdict (Codex find 6),
             // so its staging rides the persistent tick a few seconds later —
@@ -2037,11 +2049,16 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(NetworkConnectionHandler), "OnPlayerEnteredRoom")]
     class QuickplayChurnFreezePatch
     {
-        static void Postfix()
+        static void Postfix(Photon.Realtime.Player newPlayer)
         {
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
+                // A spectator entering is not a match-found signal — the
+                // census below already keeps the freeze correct, but skipping
+                // outright also silences the misleading "opponent joined" log
+                // on every spectator entry (Aug 10 playtest noise).
+                if (RoomActors.IsSpectator(newPlayer)) return;
                 // Census: "match found" means a second FIGHTER — a lone
                 // searcher plus a spectator must not freeze the churn timer
                 // (the client would sit in an empty room believing a match
@@ -2284,18 +2301,42 @@ namespace CompetitiveRounds
             // Roster changed: drop the same-frame fighter cache (r3).
             try { RoomActors.InvalidateFighterCache(); } catch { }
 
-            // Poison protocol: re-evaluate whether every peer speaks it, and arm
-            // the roster quarantine. Ungated — a joiner in ANY room type matters,
-            // and the persistent tick is only a backstop for a missed callback.
-            try { PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
+            // Local classification cache. Best effort and LOCAL by design
+            // (r9 deleted the announced-verdict property): the cross-client
+            // consistent leave rule is prop-derived (no-u_id / impostor),
+            // and this cache only adds suppression on seats that classified.
+            bool entrantIsSpectator = false;
+            try
+            {
+                if (RoomActors.IsSpectator(p)) entrantIsSpectator = true;
+                else if (RoomActors.IsUnauthorized(p)) RoomActors.RecordRejected(p);
+            }
+            catch { }
+
+            // Poison protocol: arm the roster quarantine on a REPLICATED
+            // basis only (r8 find 2): every seat must make the identical
+            // decision from the identical data, and the only replicated
+            // discriminator is the cr_spec role prop. A declared spectator
+            // never changes the fighter census (design-review blocker 1); an
+            // UNMARKED intruder arms the 3s quarantine on EVERY seat
+            // symmetrically — fair and fail-closed — until the master's
+            // close removes it. Never gate this on IsUnauthorized: that
+            // reads the LOCAL frozen roster, which seats legally disagree on.
+            try { if (!entrantIsSpectator) PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
 
             // Spectator entry: the master validates the claimed lease with the
             // server immediately (design §6.6) — invalid actors get kicked,
             // valid names go up as cr_spec_roster for the roster display.
+            // MasterNoteSpectatorEntered seeds the 90s never-validated clock
+            // and closes incompatible-protocol seats on the spot (Aug 10 r2
+            // blocker 2 / find 9).
             try
             {
                 if (RoomActors.IsSpectator(p) && Photon.Pun.PhotonNetwork.IsMasterClient)
+                {
+                    SpectatorSync.MasterNoteSpectatorEntered(p);
                     ApiClient.SpectateValidateActors();
+                }
             }
             catch { }
             // Playtest #169b: vanilla sends faces via an UNBUFFERED RPC at
@@ -2312,13 +2353,22 @@ namespace CompetitiveRounds
             // UNAUTHORIZED entrant (frozen roster, no spectator role, not a
             // fighter we froze): the master closes the connection at the door
             // (Codex r1 find 1 — the reserved seats must admit only granted
-            // spectators). Inert until a roster is frozen.
+            // spectators). Inert until a roster is frozen. The rejection was
+            // already CACHED above on every client, so the closed actor's
+            // departure is suppressed everywhere (design-review blocker 2).
             try
             {
-                if (Photon.Pun.PhotonNetwork.IsMasterClient && RoomActors.IsUnauthorized(p))
+                if (Photon.Pun.PhotonNetwork.IsMasterClient && !entrantIsSpectator && RoomActors.IsRejected(p))
                 {
-                    Plugin.Log.LogWarning($"[SPECTATE] closing unauthorized entrant actor {p?.ActorNumber}");
-                    Photon.Pun.PhotonNetwork.CloseConnection(p);
+                    // BEST-EFFORT ONLY (r9 find 1): cooperative — the target
+                    // complies only if ITS EnableCloseConnection is true (our
+                    // spectator clients set it; hostile/vanilla clients keep
+                    // their socket). Containment for a non-complying actor is
+                    // the registration firewall, the fail-closed quorums and
+                    // the scoped leave rules — not this call. The master
+                    // sweep retries on its cadence (covers handoffs).
+                    Plugin.Log.LogWarning($"[SPECTATE] close requested for unauthorized entrant actor {p?.ActorNumber} (cooperative)");
+                    RoomActors.CooperativeClose(p);
                 }
             }
             catch { }
@@ -2366,19 +2416,45 @@ namespace CompetitiveRounds
             // callback. PoisonSync's roster note still runs below — its scan
             // excludes spectators, and a missed roster-change note is worse
             // than a redundant one.
+            // The no-u_id arm applies ONLY where pre-join staging is
+            // guaranteed (r10 finds 1+2: in ranked 1v1 / casual rooms u_id
+            // arrives post-join or never, so a genuine fighter's or vanilla
+            // peer's departure must run vanilla teardown).
             bool leaverIsSpectator = false;
-            try { leaverIsSpectator = RoomActors.IsSpectator(p) || RoomActors.IsUnauthorized(p); } catch { }
+            try
+            {
+                leaverIsSpectator = RoomActors.IsSpectator(p)
+                    || (RoomActors.ReplicatedIdentityGuaranteed()
+                        && !RoomActors.HasReplicatedFighterIdentity(p))
+                    || RoomActors.IsImpostorReplicated(p)
+                    || RoomActors.IsRejected(p) || RoomActors.IsUnauthorized(p);
+            }
+            catch { }
+            // Poison's leave note uses the REPLICATED subset only (r8 find
+            // 2, r9): cr_spec, the SCOPED u_id-absence rule and the
+            // impostor-duplicate rule are computed from replicated data
+            // identically on every seat; the local caches are not consulted.
+            bool leaverIsSpectatorReplicated = false;
+            try
+            {
+                leaverIsSpectatorReplicated = RoomActors.IsSpectator(p)
+                    || (RoomActors.ReplicatedIdentityGuaranteed()
+                        && !RoomActors.HasReplicatedFighterIdentity(p))
+                    || RoomActors.IsImpostorReplicated(p);
+            }
+            catch { }
 
             // July 22 item 2 (bug #81): universal leaver banner — BEFORE the
             // Diag2v2 gate so casual/ranked 1v1 rooms get it too. Photon fires
             // this on every remaining seat, so the ally AND both opponents all
             // see who left. Display-only; every report path below is untouched.
             try { if (!leaverIsSpectator) GameStateWatcher.NotifyPlayerLeftRoom(p); } catch { }
-            // Poison protocol: arm the roster quarantine. The "we saw an incapable
-            // peer" flag is deliberately STICKY for the room and is NOT cleared
-            // here — a peer that appears briefly and leaves must not re-enable
-            // block honouring underneath a stream it already partially simulated.
-            try { PoisonSync.NoteRosterChange("PlayerLeft"); } catch { }
+            // Poison protocol: arm the roster quarantine — FIGHTER departures
+            // only (design-review blocker 1: a spectator leaving never changes
+            // the fighter census, and the 3s quarantine it armed disabled
+            // block honouring for any poison stream starting inside it). The
+            // sticky incapable flag is untouched either way.
+            try { if (!leaverIsSpectatorReplicated) PoisonSync.NoteRosterChange("PlayerLeft"); } catch { }
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
             catch { }
@@ -2551,6 +2627,9 @@ namespace CompetitiveRounds
             // find 1 family). Runs for every role, before any branch.
             try { RoomActors.OnJoinedNewRoom(); } catch { }
             try { SpectatorSync.MasterResetSpectatorState(); } catch { }
+            // Callback-bound edge reset (Aug 10 r2 find 8) — the poll's
+            // wasInRoom sampling can miss a fast leave+join.
+            try { GameStateWatcher.ResetSpectateAttestEdges(alsoRoomTally: true); } catch { }
 
             // SPECTATOR BRANCH (design §3.3): before ANY fighter work. A
             // spectator client runs none of the fighter setup below — no
@@ -3018,6 +3097,8 @@ namespace CompetitiveRounds
             // Role/roster caches die with the room, on every client.
             try { RoomActors.Reset(); } catch { }
             try { SpectatorSync.MasterResetSpectatorState(); } catch { }
+            // Callback-bound edge reset (Aug 10 r2 find 8).
+            try { GameStateWatcher.ResetSpectateAttestEdges(alsoRoomTally: false); } catch { }
             // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
             // materials die with the room too — Reset() previously had NO
             // caller, so the flush the r4 cap depends on never ran and a
@@ -4461,6 +4542,12 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Spectator: observe-only clients must not feed pick tracking
+                // at all (design-review find 12: buffered "localTeam unknown"
+                // picks from a WATCHED match survive the session and would
+                // flush into the next FIGHTER match's opponent telemetry).
+                if (SpectatorSession.IsLocalSpectator) return;
+
                 // Instinct (bug #60): the scroll tracker alone can miss a pick
                 // (stale CurrentPickerIsLocal, RPC ordering), so also verify the
                 // card actually TAKEN. theInt is the pick-UI slot index, 0 =

@@ -1031,4 +1031,8 @@ class SpectateLease(Base):
     heartbeat_expires_at = Column(DateTime(timezone=True), nullable=False)
     # Photon ActorNumber bound at first master validation (one lease = one actor).
     bound_actor = Column(Integer, nullable=True)
+    # Spectate protocol the lease was minted under (migration 210). The
+    # running API refuses a lease below max(game.protocol_min,
+    # SPECTATE_PROTOCOL) at heartbeat/validate.
+    protocol = Column(Integer, nullable=False, default=1)
     revoked_at = Column(DateTime(timezone=True), nullable=True)

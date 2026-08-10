@@ -37,9 +37,10 @@ namespace CompetitiveRounds
     ///    registration firewall means they can never FIGHT. Accepted.
     /// 2. A modified spectator that /leave-s its lease but keeps its Photon
     ///    seat is snapshot-fed until the master's validation TTL (5 min)
-    ///    kicks it. Betting stays blocked only while the lease is LIVE —
-    ///    leave-then-bet is the ghosting policy question the design assigns
-    ///    to Sid (§8 Q6), not something a seat can prevent. Accepted.
+    ///    closes it (cooperatively — physical eviction is best-effort).
+    ///    Betting policy note (superseded Aug 9): spectators MAY bet by
+    ///    ruling; the score-based close windows are the information gate, so
+    ///    a lingering seat gains nothing a non-spectator lacks. Accepted.
     /// 3. Diagnostic logs outside the spectator files (NetworkRestart diag,
     ///    queue joiner, 2v2 diag) still print room names — a pre-existing
     ///    pattern shared with fighters' own logs and bug bundles. Spectator
@@ -60,8 +61,12 @@ namespace CompetitiveRounds
         /// <summary>Wire protocol version for the spectator role. Bumped when
         /// the snapshot/lease contract changes incompatibly; a fighter room
         /// can then refuse an incompatible spectator instead of admitting one
-        /// that would mis-render or mis-handshake.</summary>
-        internal const int PROTOCOL = 1;
+        /// that would mis-render or mis-handshake.
+        /// 2 (Aug 10): the desync/safety batch — protocol-1 clients carry the
+        /// PlayerDied/master-window RPC hazard, the poison roster-quarantine
+        /// misfire and unregistered husk views, so mixed rooms are excluded
+        /// (design-review blocker 3). The server floor moves in lockstep.</summary>
+        internal const int PROTOCOL = 2;
 
         /// <summary>Sid's decision (Aug 6): 4 spectator seats per game.
         /// Rooms are created with MaxPlayers = fighters + SEAT_CAP.</summary>
@@ -182,6 +187,13 @@ namespace CompetitiveRounds
         {
             if (!IsLocalSpectator && string.IsNullOrEmpty(PendingRoom)) return;
             Plugin.Log?.LogInfo($"[SPECTATE] session end ({reason})");
+            // Flag teardown must be independent of the role flag and of the
+            // room-exit observation (r11 find 1: a Fail() racing a same-frame
+            // successful join cleared the role before the exit was observed,
+            // so OnLeftSpectatorRoom's clear never ran and the cooperative-
+            // close opt-in leaked into later FIGHTER sessions). EndSession
+            // runs in every teardown path; clearing here closes them all.
+            try { Photon.Pun.PhotonNetwork.EnableCloseConnection = false; } catch { }
             IsLocalSpectator = false;
             LeaveRequested = false;
             PendingRoom = "";
@@ -212,8 +224,13 @@ namespace CompetitiveRounds
                 if (IsLocalSpectator && LeaveRequested
                     && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode))
                 {
-                    // The room exit happened but nothing observed it.
+                    // The room exit happened but nothing observed it. Run the
+                    // sync teardown too (Aug 10 r2 hardening): the normal
+                    // OnLeftRoom path pairs these, and the backstop must not
+                    // leave sync statics (quarantine tags, latches, pending
+                    // boundary) behind. Both are idempotent.
                     EndSession("leave completed (tick backstop)");
+                    try { SpectatorSync.OnLeftSpectatorRoom(); } catch { }
                     return;
                 }
                 if (!_pendingPropClear) return;

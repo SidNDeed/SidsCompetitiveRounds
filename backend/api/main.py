@@ -31767,7 +31767,13 @@ _SPECTATE_WATCHABLE_MODES = {"1v1", "2v2", "1v2", "ffa"}
 _SPECTATE_ROOM_PREFIX = {"1v1": "ranked_", "2v2": "team_", "1v2": "ovt_", "ffa": "ffa_"}
 SPECTATE_ATTEST_FRESH_SECONDS = 150      # attest cadence is 60s; 150 covers one miss
 SPECTATE_SEAT_CAP = 4                    # Sid's Aug 6 decision (client SEAT_CAP mirrors)
-SPECTATE_PROTOCOL = 1
+# 2 (Aug 10, design-review blocker 3): the spectator desync/safety batch.
+# Protocol-1 clients carry the PlayerDied/master-window RPC hazard, the
+# poison roster-quarantine misfire and unregistered husk views — mixed rooms
+# are excluded. NOTE the deploy gap is deliberate fail-closed: between this
+# deploy and the client release, grants are refused (client_protocol < 2)
+# and spectating is dark; migration 210 revokes the then-open leases.
+SPECTATE_PROTOCOL = 2
 SPECTATE_JOIN_WINDOW_SECONDS = 60
 SPECTATE_HEARTBEAT_TTL_SECONDS = 60
 
@@ -31807,7 +31813,10 @@ async def _spectate_game_ready(db: AsyncSession, game) -> tuple[bool, str]:
                 or r["region"] != game["room_region"]
                 or r["fighter_target"] != game["fighter_target"]
                 or r["room_capacity"] != game["room_capacity"]
-                or r["protocol"] < game["protocol_min"]):
+                # Floor is max(stored, constant) — the running API is
+                # authoritative even for rows minted by an older API in a
+                # mixed-deploy window (Aug 10 r3 blocker 1).
+                or r["protocol"] < max(game["protocol_min"] or 1, SPECTATE_PROTOCOL)):
             return False, "room_not_ready"
     opt = (await db.execute(text("""
         SELECT COUNT(*) AS n FROM players
@@ -31977,17 +31986,23 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
         # grant time) is what enforces agreement, so a roster change (FFA
         # leaver) converges as the remaining fighters re-attest.
         # source_ref is server-derived, never the caller's (r1 find 4).
+        # protocol_min ADVANCES on refresh (Aug 10 blocker 3: it used to be
+        # frozen at create time, so a live row from before a protocol bump
+        # kept admitting old-protocol pairings forever). GREATEST only — a
+        # rollback deploy must not lower a row's floor under seated leases.
         await db.execute(text("""
             UPDATE spectate_games
                SET roster = :roster, room_region = :region, phase = :phase,
                    fighter_target = :target, room_capacity = :cap,
                    source_ref = :ref,
+                   protocol_min = GREATEST(protocol_min, :proto),
                    last_attest_at = NOW(),
                    last_battle_at = CASE WHEN :battle THEN NOW() ELSE last_battle_at END
              WHERE id = :gid
         """), {"roster": req.roster, "region": req.region, "phase": req.phase[:16],
                "target": req.fighter_target, "cap": req.room_capacity,
                "ref": derived_ref[:64], "battle": is_battle,
+               "proto": SPECTATE_PROTOCOL,
                "gid": str(game["id"])})
 
     await db.execute(text("""
@@ -32082,7 +32097,8 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
             if (a["roster"] != g["roster"] or a["region"] != g["room_region"]
                     or a["fighter_target"] != g["fighter_target"]
                     or a["room_capacity"] != g["room_capacity"]
-                    or a["protocol"] < g["protocol_min"]):
+                    # max(stored, constant) — r3 blocker 1, same as above.
+                    or a["protocol"] < max(g["protocol_min"] or 1, SPECTATE_PROTOCOL)):
                 return False, "room_not_ready"
             m = meta_by_sid.get(s)
             if m is None or not bool(m["allow_spectators"]):
@@ -32205,14 +32221,15 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
     await db.execute(text("""
         INSERT INTO spectate_leases
             (id, token_hash, game_id, spectator_steam_id,
-             join_expires_at, heartbeat_expires_at)
+             join_expires_at, heartbeat_expires_at, protocol)
         VALUES (CAST(:id AS UUID), :th, :gid, :sid,
                 NOW() + make_interval(secs => :joinw),
-                NOW() + make_interval(secs => :hbw))
+                NOW() + make_interval(secs => :hbw), :proto)
     """), {"id": lease_id, "th": hashlib.sha256(token.encode()).hexdigest(),
            "gid": str(game["id"]), "sid": req.steam_id,
            "joinw": SPECTATE_JOIN_WINDOW_SECONDS,
-           "hbw": SPECTATE_JOIN_WINDOW_SECONDS + SPECTATE_HEARTBEAT_TTL_SECONDS})
+           "hbw": SPECTATE_JOIN_WINDOW_SECONDS + SPECTATE_HEARTBEAT_TTL_SECONDS,
+           "proto": SPECTATE_PROTOCOL})
     await db.commit()
     # The ONLY place the room credential leaves the server (§6.2).
     return {
@@ -32231,13 +32248,25 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
                              db: AsyncSession = Depends(get_db)):
     if not await _strict_steam_session_ok(request, req.steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
-    lease = (await db.execute(text("""
-        SELECT l.id, l.game_id, l.revoked_at, l.heartbeat_expires_at,
-               g.ended_at, g.roster, g.last_attest_at, g.last_battle_at, g.mode
-          FROM spectate_leases l
-          JOIN spectate_games g ON g.id = l.game_id
-         WHERE l.id = CAST(:lid AS UUID) AND l.spectator_steam_id = :sid
-    """), {"lid": req.lease_id, "sid": req.steam_id})).mappings().first()
+    # Savepoint (#235 + Aug 10 r3 find 6): this SELECT reads the
+    # migration-210 column. If the API ever runs ahead of the migration the
+    # statement fails — which must be FAIL CLOSED (410, client leaves), not
+    # an ignored 500 that leaves the seat locally admitted.
+    lease = None
+    try:
+        async with db.begin_nested():
+            lease = (await db.execute(text("""
+                SELECT l.id, l.game_id, l.revoked_at, l.heartbeat_expires_at, l.protocol,
+                       g.ended_at, g.roster, g.last_attest_at, g.last_battle_at, g.mode,
+                       g.protocol_min
+                  FROM spectate_leases l
+                  JOIN spectate_games g ON g.id = l.game_id
+                 WHERE l.id = CAST(:lid AS UUID) AND l.spectator_steam_id = :sid
+            """), {"lid": req.lease_id, "sid": req.steam_id})).mappings().first()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=410, detail="lease_ended")
     if lease is None:
         raise HTTPException(status_code=404, detail="lease_unknown")
     now_dead = (lease["revoked_at"] is not None
@@ -32247,6 +32276,11 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
                 # without this a live lease kept renewing through the rollback
                 # for the rest of the game.
                 or lease["mode"] not in _SPECTATE_WATCHABLE_MODES
+                # Aug 10 r2 blocker 1: a lease minted under an older protocol
+                # must die when the game's floor advances past it — without
+                # this, a protocol bump never evicts already-seated viewers
+                # (grants created in a mixed-deploy window kept renewing).
+                or (lease["protocol"] or 1) < max(lease["protocol_min"] or 1, SPECTATE_PROTOCOL)
                 or lease["heartbeat_expires_at"] < datetime.now(timezone.utc)
                 or lease["last_attest_at"] < datetime.now(timezone.utc) - timedelta(seconds=SPECTATE_ATTEST_FRESH_SECONDS * 2)
                 # No live COMBAT recently = the sitting is over (Codex r2
@@ -32300,7 +32334,7 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
     if not await _strict_steam_session_ok(request, req.steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     game = (await db.execute(text("""
-        SELECT id, roster, mode FROM spectate_games
+        SELECT id, roster, mode, protocol_min FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
     """), {"room": req.room_name})).mappings().first()
     if game is None:
@@ -32320,15 +32354,27 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
             # lease to this ActorNumber; any other actor claiming the same
             # identity finds the lease bound elsewhere and fails. One lease =
             # one Photon seat.
-            lease = (await db.execute(text("""
-                UPDATE spectate_leases
-                   SET bound_actor = :actor
-                 WHERE game_id = :gid AND spectator_steam_id = :sid
-                   AND revoked_at IS NULL AND heartbeat_expires_at > NOW()
-                   AND (bound_actor IS NULL OR bound_actor = :actor)
-                RETURNING id
-            """), {"gid": str(game["id"]), "sid": entry.steam_id,
-                   "actor": entry.actor_number})).first()
+            # protocol >= the game's floor (Aug 10 r2 blocker 1): validation
+            # is what keeps a seat open, so a stale-protocol lease must fail
+            # here too, not only at its own heartbeat. Savepoint (#235 + r3
+            # find 6): a missing migration-210 column must yield ok=False for
+            # this actor (fail closed), not poison the whole transaction.
+            lease = None
+            try:
+                async with db.begin_nested():
+                    lease = (await db.execute(text("""
+                        UPDATE spectate_leases
+                           SET bound_actor = :actor
+                         WHERE game_id = :gid AND spectator_steam_id = :sid
+                           AND revoked_at IS NULL AND heartbeat_expires_at > NOW()
+                           AND COALESCE(protocol, 1) >= :pmin
+                           AND (bound_actor IS NULL OR bound_actor = :actor)
+                        RETURNING id
+                    """), {"gid": str(game["id"]), "sid": entry.steam_id,
+                           "actor": entry.actor_number,
+                           "pmin": max(int(game.get("protocol_min") or 1), SPECTATE_PROTOCOL)})).first()
+            except Exception:
+                lease = None
             if lease is not None:
                 ok = True
                 display = (await db.execute(text("""

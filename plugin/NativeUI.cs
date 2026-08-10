@@ -1153,10 +1153,17 @@ namespace CompetitiveRounds
         internal static void RequestCatalogueRebuild() { catalogueRebuildPending = true; }
         private static bool catalogueRebuildPending;
 
+        /// <summary>Frame stamp of the Escape press that closed the F5 menu.
+        /// Tick runs in Update, BEFORE any OnGUI consumer sees the same key
+        /// event — the spectator leave-menu reads this so one Esc press never
+        /// both closes the menu AND opens the leave dialog (Aug 10 review
+        /// find 13; NativeUI.IsOpen is already false by OnGUI time).</summary>
+        public static int EscConsumedFrame { get; private set; } = -1;
+
         public static void Tick()
         {
             if(!isOpen||!pageBuilt)return;if(pageGO==null){isOpen=false;pageBuilt=false;return;}
-            if(Input.GetKeyDown(KeyCode.Escape)){Close();return;}
+            if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;Close();return;}
             if(catalogueRebuildPending)
             {
                 catalogueRebuildPending=false;

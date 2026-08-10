@@ -230,7 +230,10 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (RoomActors.LocalIsSpectator) return;   // spectator has its own HUD
+                // Spectators see it too (item 4, Aug 10): the spectator HUD
+                // never took this over, so spectators had no way to know who
+                // else was watching. Same bottom-right line for every seat,
+                // fed by the master's server-validated cr_spec_roster names.
                 if (Time.unscaledTime - specRosterCachedAt > 3f)
                 {
                     specRosterCachedAt = Time.unscaledTime;

@@ -74,6 +74,14 @@ namespace CompetitiveRounds
         internal enum Stage { None, Synchronizing, Applying, Active }
         internal static Stage CurrentStage { get; private set; } = Stage.None;
 
+        /// <summary>Sticky per-session activation flag (Aug 10 design review
+        /// find 6): once the first boundary apply succeeds, the fullscreen
+        /// blackout and the Synchronizing-stage cache sweeps are RETIRED for
+        /// the session — a later failed reconcile shows the live scene with a
+        /// "Syncing" note instead of flashing black and must never bury live
+        /// objects. Reset only on session join/leave.</summary>
+        internal static bool HasEverActivated { get; private set; }
+
         // ── spectator-side view of the watched match ─────────────────────
         internal static string WatchedMode { get; private set; } = "";
         internal static string WatchedPhase { get; private set; } = "";
@@ -136,7 +144,12 @@ namespace CompetitiveRounds
                     return;
                 }
                 Plugin.Log?.LogInfo($"[SPECTATE] in room as spectator (actors={PhotonNetwork.CurrentRoom?.PlayerCount ?? 0})");
+                // A spectator is kickable BY DESIGN (r10 find 3): honor the
+                // master's cooperative close for this session's lifetime.
+                // Fighters keep the flag false — see Plugin.Awake's note.
+                try { PhotonNetwork.EnableCloseConnection = true; } catch { }
                 CurrentStage = Stage.Synchronizing;
+                HasEverActivated = false;
                 _haveInfo = false;
                 _awaitBoundarySeq = -1;
                 _boundaryResponse = null;
@@ -145,7 +158,47 @@ namespace CompetitiveRounds
                 _boundaryFailStreak = 0;
                 _deckFailStreak = 0;
                 _lastSeenEpoch = int.MinValue;
+                _roundLatched = false;
+                _seqCo = null;
+                _pendingBoundaryMapId = -1;
+                _lastCommandedScene = "";
+                _mapLoadGen = 0;
+                _loadInFlight = false;
+                _activeLoadScene = "";
+                _queuedLoadScene = "";
+                _cloneGenAtAwake.Clear();
+                _lastObservedBoundaryMapId = -1;
                 SpectatorViewState.Reset();
+
+                // ── Clock + lifecycle ownership (Aug 10 root cause D1/D1b) ──
+                // The spectator joins outside every vanilla game-entry path,
+                // so TimeHandler.gameStartTime is 0 (timeScale 0: bullets,
+                // IK, wobble followers and gravity all freeze while streams
+                // arrive at real time), and GameManager.isPlaying is false —
+                // which makes vanilla Map.Awake drop the client into GM_Test
+                // test-map mode on the FIRST map load (isTestingMap
+                // contamination + a handler that teleport-revives dead
+                // fighter replicas at random spawns 2.5s after every death).
+                // Pin all of it here, and re-assert from MaintenanceLoop —
+                // the FFA engine already does the DoSpeedUp half of this for
+                // its own spectators; this is the missing GM-mode sibling.
+                PinSpectatorClockAndLifecycle("join");
+
+                // ── Join-replay quarantine (design-review find 5) ──────────
+                // Photon replays the room cache (the fighters' whole prior
+                // sitting of map objects + cards) right after this callback.
+                // Arm the tag window: PhotonMapObject.Awake tags parentless
+                // clones while armed; their Start is then suppressed + buried
+                // + locally unregistered REGARDLESS of when it runs (Awake
+                // and Start can straddle a later live map load, so a
+                // Start-time currentMap test is not an exact classifier).
+                _replayTagged.Clear();
+                _replayQuarantineArmed = true;
+                _replayBuried = 0;
+
+                // Observe-only client: watched picks must never sit in the
+                // fighter pick buffer (design-review find 12).
+                try { CardChoiceEndPickPatch.ClearPending(); } catch { }
 
                 // The GM object hosts the PunRPC receivers the spectator
                 // observes (RPCA_NextRound and friends). Vanilla only
@@ -188,7 +241,9 @@ namespace CompetitiveRounds
         /// <summary>Called on room exit (OnLeftRoom / session end).</summary>
         internal static void OnLeftSpectatorRoom()
         {
+            try { PhotonNetwork.EnableCloseConnection = false; } catch { }
             CurrentStage = Stage.None;
+            HasEverActivated = false;
             _haveInfo = false;
             _awaitBoundarySeq = -1;
             _boundaryResponse = null;
@@ -197,11 +252,429 @@ namespace CompetitiveRounds
             _boundaryFailStreak = 0;
             _deckFailStreak = 0;
             _lastSeenEpoch = int.MinValue;
+            _roundLatched = false;
+            _seqCo = null;
+            _pendingBoundaryMapId = -1;
+            _lastCommandedScene = "";
+            _mapLoadGen = 0;
+            _loadInFlight = false;
+            _activeLoadScene = "";
+            _queuedLoadScene = "";
+            _cloneGenAtAwake.Clear();
+            _lastObservedBoundaryMapId = -1;
+            _replayQuarantineArmed = false;
+            _replayTagged.Clear();
+            _replayBuried = 0;
             WatchedMode = "";
             WatchedPhase = "";
             FighterNames = new string[0];
             FighterTeams = new int[0];
             SpectatorViewState.Reset();
+            try { CardChoiceEndPickPatch.ClearPending(); } catch { }
+        }
+
+        // ── clock + lifecycle pinning (D1/D1b) ───────────────────────────
+
+        /// <summary>Pin the vanilla state a spectator's suppressed lifecycle
+        /// would otherwise leave broken. Idempotent; called at join and
+        /// re-asserted every maintenance tick (nothing legitimate un-pins any
+        /// of these on a spectator, so a blind re-assert cannot fight another
+        /// writer). Restoration on leave is NOT needed: leaving spectate goes
+        /// through NetworkRestart, which reloads the scene fresh.</summary>
+        private static void PinSpectatorClockAndLifecycle(string why)
+        {
+            try
+            {
+                var th = TimeHandler.instance;
+                if (th != null)
+                {
+                    if (th.gameStartTime < 1f)
+                    {
+                        th.gameStartTime = 1f;
+                        Plugin.Log?.LogInfo($"[SPECTATE] armed gameStartTime ({why})");
+                    }
+                    // No slow-mo is ever mirrored on a spectator (design
+                    // review cut F1.3): with GM PlayerDied suppressed nothing
+                    // should lower this, so any sub-1 value is a missed path —
+                    // snap it back rather than strand the clock (#276).
+                    if (th.gameOverTime < 1f) th.gameOverTime = 1f;
+                }
+            }
+            catch { }
+            try
+            {
+                if (GameManager.instance != null && !GameManager.instance.isPlaying)
+                {
+                    GameManager.instance.isPlaying = true;
+                    Plugin.Log?.LogInfo($"[SPECTATE] forced GameManager.isPlaying ({why}) — Map.Awake GM_Test trap defused");
+                }
+            }
+            catch { }
+            try
+            {
+                if (MapManager.instance != null && MapManager.instance.isTestingMap)
+                {
+                    MapManager.instance.isTestingMap = false;
+                    Plugin.Log?.LogWarning($"[SPECTATE] cleared isTestingMap contamination ({why})");
+                }
+            }
+            catch { }
+            try
+            {
+                // A GM_Test that slipped through (activated before the pin
+                // landed) must be shut down — its PlayerDied handler
+                // teleport-revives dead fighter replicas at random spawns.
+                var gt = GM_Test.instance;
+                if (gt != null && gt.gameObject.activeSelf)
+                {
+                    gt.gameObject.SetActive(false);
+                    Plugin.Log?.LogWarning($"[SPECTATE] deactivated stray GM_Test ({why})");
+                }
+            }
+            catch { }
+        }
+
+        // ── join-replay quarantine (design-review find 5) ─────────────────
+
+        private static bool _replayQuarantineArmed;
+        private static int _replayBuried;
+        private static readonly HashSet<int> _replayTagged = new HashSet<int>();
+
+        internal static bool ReplayQuarantineArmed => _replayQuarantineArmed;
+
+        /// <summary>Tag a parentless PhotonMapObject clone seen during the
+        /// armed window (called from its Awake postfix). The TAG decides its
+        /// Start suppression — not the armed state at Start time.</summary>
+        internal static void TagReplayObject(int instanceId)
+        {
+            if (_replayQuarantineArmed) _replayTagged.Add(instanceId);
+        }
+
+        internal static bool IsReplayTagged(int instanceId)
+            => _replayTagged.Contains(instanceId);
+
+        internal static void CountReplayBuried() { _replayBuried++; }
+
+        /// <summary>Disarm at the first LIVE map flow (RPCA_LoadLevel or a
+        /// call-in): everything cache-replayed has been delivered by then.</summary>
+        internal static void DisarmReplayQuarantine(string why)
+        {
+            if (!_replayQuarantineArmed) return;
+            _replayQuarantineArmed = false;
+            Plugin.Log?.LogInfo($"[SPECTATE] join-replay quarantine disarmed ({why}) — buried {_replayBuried} cached object(s) at source");
+        }
+
+        /// <summary>Aug 10 r2 find 3: a LIVE (untagged) map-object clone can
+        /// arrive while the spectator's local map is still null (we joined
+        /// after the load RPC; the direct local load is in flight). Running
+        /// vanilla Start then would NRE and leave a registered orphan view —
+        /// the exact collision debt this batch closes. Defer: wait for the
+        /// local map, then re-invoke Start (the prefix passes it to vanilla
+        /// once currentMap exists). Timeout = treat as husk (bury + clean),
+        /// which is exactly what the old code did to EVERYTHING.</summary>
+        // ── map-load coordinator (Aug 10 r4 blocker 1) ─────────────────
+        // VERIFIED VANILLA MODEL (MapManager.cs:139-191): RPCA_LoadLevel only
+        // STARTS the additive scene load; currentLevelID and currentMap both
+        // advance ATOMICALLY in OnLevelFinishedLoading — so
+        // `currentLevelID == mapId` IS the settling test. Map.levelID is NOT
+        // scene identity: OnLevelFinishedLoading assigns it from the OLD
+        // currentLevelID before advancing, making it a shared READINESS
+        // TOKEN (LoadedForAll compares fighters' reports against it). The
+        // only observable "a load is in flight toward scene S" signal is the
+        // RPCA_LoadLevel ARG — recorded here by the load postfix.
+        private static string _lastCommandedScene = "";
+        private static int _mapLoadGen;
+
+        private static void NoteMapLoadCommanded(string sceneName)
+        {
+            if (string.IsNullOrEmpty(sceneName)) return;
+            if (string.Equals(sceneName, _lastCommandedScene, StringComparison.Ordinal)) return;
+            _lastCommandedScene = sceneName;
+            _mapLoadGen++;
+        }
+
+        internal static string LastCommandedScene => _lastCommandedScene;
+
+        // ── load serializer (Aug 10 r5 blocker 1) ────────────────────
+        // Vanilla RPCA_LoadLevel subscribes OnLevelFinishedLoading PER CALL;
+        // two loads in flight double-subscribe the handler, which can wrap
+        // one scene twice, schedule a bogus unload and leave the second load
+        // with no handler at all (independently demonstrated in a 2v2 log's
+        // duplicate-completion failure). On a spectator — chronically behind
+        // the fighters — overlap is routine, so loads are SERIALIZED: one
+        // active load; the latest DIFFERENT target queues and launches from
+        // the completion hook; same-target duplicates drop while active.
+        private static bool _loadInFlight;
+        private static string _activeLoadScene = "";
+        private static string _queuedLoadScene = "";
+
+        // NO TTL, deliberately (Aug 10 r7: the 20s TTL + expiry watchdog
+        // produced two consecutive rounds of HIGH findings — expiry could
+        // strand the queue, and TTL re-admission raced the stale-handler
+        // cleanup. The model it guarded against — a valid additive
+        // LoadScene that never completes — is one VANILLA itself does not
+        // handle either (no fighter recovery exists). Deleted per the
+        // #310 rule: liveness recovery now lives at the RECONCILE level
+        // (TickReconcileLiveness), which owns decidable state.)
+        internal static bool MapLoadInFlight => _loadInFlight;
+
+        /// <summary>RPCA_LoadLevel PREFIX gate (spectator only). True = let
+        /// vanilla start the load; false = suppressed (queued or duplicate).</summary>
+        internal static bool GateMapLoad(string sceneName)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(sceneName)) return false;
+                if (!MapLoadInFlight)
+                {
+                    _loadInFlight = true;
+                    _activeLoadScene = sceneName;
+                    _queuedLoadScene = "";
+                    NoteMapLoadCommanded(sceneName);
+                    return true;
+                }
+                if (string.Equals(sceneName, _activeLoadScene, StringComparison.Ordinal))
+                {
+                    // Re-command of the ACTIVE scene: the newest target IS
+                    // the active load, so anything queued is now stale (r6
+                    // find 2: Y active, Z queued, Y re-commanded — launching
+                    // stale Z at Y's completion stranded the spectator on the
+                    // wrong map). Clearing a queued Z must ALSO advance the
+                    // clone generation (r7 find 3): Z's already-arrived
+                    // clones were stamped with Y's generation and would
+                    // otherwise start under Y, corrupting its accounting.
+                    // The bump buries them — and may bury some of Y's own
+                    // deferred clones too, which is the SAFE direction
+                    // (missing pieces beat misparented ones).
+                    if (!string.IsNullOrEmpty(_queuedLoadScene))
+                    {
+                        _queuedLoadScene = "";
+                        _mapLoadGen++;
+                    }
+                    return false;
+                }
+                _queuedLoadScene = sceneName;   // latest different target wins
+                Plugin.Log?.LogInfo($"[SPECTATE] queued map load behind the active one");
+                return false;
+            }
+            catch { return true; }
+        }
+
+        /// <summary>OnLevelFinishedLoading POSTFIX (spectator only): the
+        /// active load settled — pin local readiness to the settled map's
+        /// own token (r5 find 2: with inbound fighter reports suppressed,
+        /// this scalar is fully spectator-owned) and launch any queued load
+        /// through the gate.</summary>
+        internal static void OnMapLoadCompleted()
+        {
+            try
+            {
+                _loadInFlight = false;
+                _activeLoadScene = "";
+                PinLocalMapReadiness("load completed");
+                LaunchQueuedLoad();
+            }
+            catch { }
+        }
+
+        private static void LaunchQueuedLoad()
+        {
+            if (string.IsNullOrEmpty(_queuedLoadScene)) return;
+            string next = _queuedLoadScene;
+            _queuedLoadScene = "";
+            Plugin.Log?.LogInfo($"[SPECTATE] launching queued map load");
+            try { MapManager.instance?.RPCA_LoadLevel(next); } catch { }
+        }
+
+        /// <summary>Reconcile-liveness tick (r7 restructure): if an observed
+        /// boundary's attempt died (16s map wait expired while its load was
+        /// still queued/slow) the spectator would otherwise stay dark until
+        /// the NEXT natural boundary — forever, pre-activation, if the game
+        /// ends first. When the settled map IS the last observed boundary's
+        /// map and no attempt is running, re-schedule the reconcile. The
+        /// attempt then passes its map wait instantly and proceeds to the
+        /// snapshot. Post-activation the next boundary self-heals, so this
+        /// only fires pre-activation.</summary>
+        internal static void TickReconcileLiveness()
+        {
+            try
+            {
+                if (HasEverActivated) return;
+                if (CurrentStage != Stage.Synchronizing) return;   // an attempt holds Applying
+                if (_lastObservedBoundaryMapId < 0) return;
+                if (SpectatorSession.LeaveRequested) return;
+                var mm = MapManager.instance;
+                if (mm == null || mm.currentLevelID != _lastObservedBoundaryMapId) return;
+                if (!MapSettledOnCommanded()) return;
+                Plugin.Log?.LogInfo($"[SPECTATE] reconcile liveness: re-scheduling boundary {_lastObservedBoundaryMapId}");
+                ScheduleBoundary(_lastObservedBoundaryMapId);
+            }
+            catch { }
+        }
+
+        private static int _lastObservedBoundaryMapId = -1;
+
+        /// <summary>Local readiness scalar := the settled map's OWN levelID
+        /// (vanilla's readiness token). Inbound RPCA_ReportMapLoaded is
+        /// suppressed on spectators (r5 find 2: a slow fighter's report
+        /// carries the token of ITS load lineage, which after our direct
+        /// load can differ from ours — an overwrite left LoadedForAll false
+        /// forever and every clone kinematic).</summary>
+        internal static void PinLocalMapReadiness(string why)
+        {
+            try
+            {
+                var mm = MapManager.instance;
+                var cm = mm != null ? mm.currentMap : null;
+                if (mm == null || cm == null || cm.Map == null) return;
+                if (mm.otherPlayersMostRecentlyLoadedLevel != cm.Map.levelID)
+                {
+                    mm.otherPlayersMostRecentlyLoadedLevel = cm.Map.levelID;
+                    Plugin.Log?.LogInfo($"[SPECTATE] readiness pinned to token {cm.Map.levelID} ({why})");
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>True when the current map wrapper's SCENE is the last
+        /// commanded one (no load in flight). With no command ever observed,
+        /// any settled map counts — the steady state for a spectator that
+        /// joined long after the last transition.</summary>
+        internal static bool MapSettledOnCommanded()
+        {
+            try
+            {
+                var mm = MapManager.instance;
+                var cm = mm != null ? mm.currentMap : null;
+                if (cm == null || cm.Map == null) return false;
+                if (string.IsNullOrEmpty(_lastCommandedScene)) return true;
+                return string.Equals(cm.Scene.name, _lastCommandedScene, StringComparison.Ordinal);
+            }
+            catch { return false; }
+        }
+
+        // Live-clone identity is stamped at AWAKE (r5 find 4: sampling the
+        // generation at Start is too late — a newer command arriving in the
+        // Awake->Start gap would bind the clone to the WRONG map).
+        private static readonly Dictionary<int, int> _cloneGenAtAwake = new Dictionary<int, int>();
+
+        internal static void StampLiveCloneGen(int instanceId)
+        {
+            try
+            {
+                // ACCEPTED RESIDUAL (r6 find 3, bound corrected per r7 find
+                // 4): the no-command-known branch binds blindly to the NEXT
+                // command. If the spectator missed this clone's own load RPC
+                // AND the next observed command is already a LATER map
+                // (backlogged double transition), EVERY such clone — there
+                // can be several — starts under that later map, decrementing
+                // its missingObjects early and standing as an extra/kinematic
+                // piece until that map unloads. Spectator-local, one map's
+                // lifetime, self-healing at its unload — which is the
+                // pre-batch baseline behavior for ALL clones, all the time.
+                _cloneGenAtAwake[instanceId] =
+                    string.IsNullOrEmpty(_lastCommandedScene) ? _mapLoadGen + 1 : _mapLoadGen;
+            }
+            catch { }
+        }
+
+        internal static void DeferMapObjectStart(PhotonMapObject o)
+        {
+            try
+            {
+                if (Plugin.Instance == null || o == null)
+                {
+                    if (o != null) SafeBuryAndClean(o.gameObject);
+                    return;
+                }
+                // BIND the clone to the load generation it can legitimately
+                // settle under (r4 blocker 1): the one stamped at ITS OWN
+                // Awake (r5 find 4), falling back to now — the CURRENT gen
+                // when a load is in flight, or the NEXT one when nothing was
+                // commanded yet (mid-transition join: the boundary's direct
+                // load names this clone's map). A command beyond that means
+                // this clone's map is gone — bury, never parent it later.
+                int allowedGen;
+                if (_cloneGenAtAwake.TryGetValue(o.GetInstanceID(), out allowedGen))
+                    _cloneGenAtAwake.Remove(o.GetInstanceID());
+                else
+                    allowedGen = string.IsNullOrEmpty(_lastCommandedScene) ? _mapLoadGen + 1 : _mapLoadGen;
+                Plugin.Instance.StartCoroutine(DeferredMapObjectStart(o, _boundaryGeneration, allowedGen));
+            }
+            catch { }
+        }
+
+        private static IEnumerator DeferredMapObjectStart(PhotonMapObject o, int gen, int allowedGen)
+        {
+            float t0 = Time.unscaledTime;
+            while (Time.unscaledTime - t0 < 15f)
+            {
+                if (gen != _boundaryGeneration) yield break;   // session over — OnLeft cleans up
+                if (o == null || o.gameObject == null) yield break;
+                if (_mapLoadGen > allowedGen) break;           // superseded — bury below
+                if (MapSettledOnCommanded())
+                {
+                    // Re-invoke vanilla Start (publicized): the prefix sees a
+                    // settled map now and lets it through — correct
+                    // parenting, correct missingObjects accounting.
+                    try { o.Start(); } catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] deferred map-object start: {ex.Message}"); }
+                    yield break;
+                }
+                yield return null;
+            }
+            if (o != null && o.gameObject != null)
+            {
+                Plugin.Log?.LogWarning("[SPECTATE] deferred map object superseded/timed out — burying as husk");
+                SafeBuryAndClean(o.gameObject);
+            }
+        }
+
+        /// <summary>Bury + locally unregister, in the ONLY safe order (Aug 10
+        /// r2 find 6): the view array must be captured while the object is
+        /// still ACTIVE — SetActive(false) runs OnDisable callbacks that can
+        /// detach or destroy child views, and a post-disable traversal would
+        /// miss them, leaving registry debt.</summary>
+        internal static void SafeBuryAndClean(GameObject go)
+        {
+            try
+            {
+                PhotonView[] views = null;
+                try { views = go.GetComponentsInChildren<PhotonView>(true); } catch { }
+                go.SetActive(false);
+                if (views != null) SafeLocalCleanViews(views);
+            }
+            catch { }
+        }
+
+        // ── local view hygiene (design-review find 4) ─────────────────────
+
+        /// <summary>Locally unregister every PhotonView on a buried husk so a
+        /// rematch's recycled view IDs cannot collide with it (the proven
+        /// game-2 desync: 348-432 "PhotonView ID duplicate" errors). IDENTITY
+        /// SAFE: PUN's LocalCleanPhotonView removes by ID without checking
+        /// which instance the registry holds — if the registry already maps
+        /// this ID to a DIFFERENT (live) view, removing would unregister the
+        /// live one. In that case only mark the husk removed so its own
+        /// destruction can never evict the live entry either. No Object.
+        /// Destroy anywhere (#94), no network op.</summary>
+        private static void SafeLocalCleanViews(PhotonView[] views)
+        {
+            for (int i = 0; i < views.Length; i++)
+            {
+                var v = views[i];
+                if (v == null) continue;
+                try
+                {
+                    var cur = PhotonNetwork.GetPhotonView(v.ViewID);
+                    if (cur != null && !ReferenceEquals(cur, v))
+                    {
+                        v.removedFromLocalViewList = true;   // publicized
+                        continue;
+                    }
+                    PhotonNetwork.LocalCleanPhotonView(v);
+                }
+                catch { }
+            }
         }
 
         /// <summary>User-initiated or server-forced leave. ORDER IS THE FIX
@@ -279,11 +752,22 @@ namespace CompetitiveRounds
             float lastCosmetics = -999f, lastSeries = -999f;
             while (gen == _boundaryGeneration && SpectatorSession.IsLocalSpectator && PhotonNetwork.InRoom)
             {
+                // Re-assert the clock/lifecycle pins every tick (D1/D1b) —
+                // cheap, idempotent, and the only defense against a path we
+                // missed lowering the clock or re-arming GM_Test.
+                try { PinSpectatorClockAndLifecycle("tick"); } catch { }
+                // Reconcile liveness (r7 restructure — replaces the load
+                // TTL watchdog; see TickReconcileLiveness).
+                try { TickReconcileLiveness(); } catch { }
+
                 // Cache-replay hygiene ONLY while dark (Codex r5): cards and
                 // map pieces present during Synchronizing are stale replays;
                 // anything spawning during Applying (the incoming map) or
-                // Active (live picks) is real and must stay visible.
-                if (CurrentStage == Stage.Synchronizing)
+                // Active (live picks) is real and must stay visible. AND only
+                // before the first activation (Aug 10 find 6): a later failed
+                // reconcile re-enters Synchronizing, where these sweeps would
+                // bury LIVE objects.
+                if (CurrentStage == Stage.Synchronizing && !HasEverActivated)
                 {
                     try { SweepPreActivationCards(); } catch { }
                     SweepStaleMapObjects();
@@ -333,7 +817,12 @@ namespace CompetitiveRounds
                 if (ci == null || ci.gameObject == null) continue;
                 if (!ci.gameObject.activeInHierarchy) continue;
                 if (ci.GetComponent<PhotonView>() == null) continue;
-                ci.gameObject.SetActive(false);
+                // Bury + local unregister (Aug 10 find 4/D2): buried card
+                // husks' views collide with the rematch's recycled IDs
+                // exactly like map objects do (View 1002 Bullet_Base vs
+                // ghost Quick Shot in both spectator logs). Capture-then-
+                // deactivate order lives inside the helper (r2 find 6).
+                SafeBuryAndClean(ci.gameObject);
                 hidden++;
             }
             if (hidden > 0)
@@ -355,6 +844,33 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Aug 10 rework (design-review D2 + doubles race): the old
+                // indiscriminate burial (a) could bury an INCOMING live map's
+                // copy before its Start ran — missingObjects never decrements,
+                // Map.StartMatch never fires, placeholders go immortal and the
+                // rope joints the dead one ("double boxes on strings") — and
+                // (b) left every buried husk's PhotonView registered, which is
+                // the proven game-2 view-ID collision storm. New rules:
+                //   * placeholders (authored children, photonSpawned false
+                //     with a parent) are NEVER touched — vanilla's accounting
+                //     needs them;
+                //   * pre-Start clones (no parent, photonSpawned false) are
+                //     skipped this tick — the next 1s tick classifies them
+                //     (their Start either parents them under the live map or
+                //     the replay quarantine already buried them at source);
+                //   * networked copies parented under the CURRENT map are
+                //     LIVE — skip;
+                //   * everything else (orphans whose Start threw during the
+                //     cache replay, copies of older maps) is buried AND
+                //     locally unregistered.
+                Transform liveMapRoot = null;
+                try
+                {
+                    var cm = MapManager.instance != null ? MapManager.instance.currentMap : null;
+                    if (cm != null && cm.Map != null) liveMapRoot = cm.Map.transform;
+                }
+                catch { }
+
                 var objs = UnityEngine.Object.FindObjectsOfType<PhotonMapObject>();
                 int hidden = 0;
                 for (int i = 0; i < objs.Length; i++)
@@ -362,7 +878,11 @@ namespace CompetitiveRounds
                     var o = objs[i];
                     if (o == null || o.gameObject == null) continue;
                     if (!o.gameObject.activeInHierarchy) continue;
-                    o.gameObject.SetActive(false);
+                    bool isCopy = false;
+                    try { isCopy = o.photonSpawned; } catch { }   // publicized
+                    if (!isCopy) continue;   // placeholder or pre-Start clone
+                    if (liveMapRoot != null && o.transform.IsChildOf(liveMapRoot)) continue;   // live
+                    SafeBuryAndClean(o.gameObject);
                     hidden++;
                 }
                 if (hidden > 0)
@@ -428,9 +948,141 @@ namespace CompetitiveRounds
         internal static void OnCallInObserved(int mapId)
         {
             if (!SpectatorSession.IsLocalSpectator) return;
-            if (CurrentStage == Stage.None || CurrentStage == Stage.Applying) return;
+            // Boundaries are rejected outright once a leave is requested (r3
+            // find 8): the generation fence only covers coroutines that
+            // already started, not a call-in queued during the exit window.
+            if (SpectatorSession.LeaveRequested) return;
+            // A call-in ends the observed round-transition: re-open the
+            // round-observation latch (find 9's dedupe window) and, if the
+            // join-replay window was somehow still armed, close it — live map
+            // flow has provably begun. These side effects live ONLY here —
+            // the deferred re-issue path calls ScheduleBoundary directly (r3
+            // find 7: re-entering this method cleared a NEWER round latch).
+            _roundLatched = false;
+            DisarmReplayQuarantine("call-in");
+            _lastObservedBoundaryMapId = mapId;
+            ScheduleBoundary(mapId);
+        }
+
+        /// <summary>Side-effect-free reconcile scheduler (r3 find 7). Every
+        /// real call-in supersedes the in-flight attempt via the attempt
+        /// generation (r3 find 4) — a stale attempt must never local-load an
+        /// OLD map over the newer one or apply a stale snapshot.</summary>
+        private static void ScheduleBoundary(int mapId)
+        {
+            if (!SpectatorSession.IsLocalSpectator || SpectatorSession.LeaveRequested) return;
+            if (CurrentStage == Stage.None) return;
+            _boundaryAttemptGen++;
+            if (CurrentStage == Stage.Applying)
+            {
+                // NEVER discard a newer boundary (r2 find 4): latest-wins;
+                // the superseded attempt notices the generation bump at its
+                // next resume and its finally re-issues this one.
+                _pendingBoundaryMapId = mapId;
+                return;
+            }
             if (Plugin.Instance == null) return;
-            Plugin.Instance.StartCoroutine(BoundaryAttempt(mapId, _boundaryGeneration));
+            Plugin.Instance.StartCoroutine(BoundaryAttempt(mapId, _boundaryGeneration, _boundaryAttemptGen));
+        }
+
+        // Latest call-in observed while an attempt was mid-flight (r2 find 4).
+        private static int _pendingBoundaryMapId = -1;
+        // Bumped by every scheduled boundary: an attempt whose gen is stale
+        // has been superseded and must exit without counting a failure.
+        private static int _boundaryAttemptGen;
+
+        // ── round observation latch + between-points display ─────────────
+
+        // Vanilla dedupes duplicate RPCA_NextRound broadcasts with
+        // isTransitioning, which lives in the machine the spectator
+        // suppresses (find 9). One observed round per call-in, with a TTL so
+        // a missed call-in cannot eat the next game's first round.
+        private static bool _roundLatched;
+        private static float _roundLatchedAt;
+
+        internal static bool RoundObservationLatched
+            => _roundLatched && Time.unscaledTime - _roundLatchedAt < 20f;
+
+        internal static void LatchRoundObservation()
+        {
+            _roundLatched = true;
+            _roundLatchedAt = Time.unscaledTime;
+        }
+
+        // One replaceable sequence handle (find 9): never StopAllCoroutines
+        // on the shared PointVisualizer — stop exactly our previous sequence
+        // and normalize its overlay before starting the next.
+        private static Coroutine _seqCo;
+
+        /// <summary>Drive vanilla's own between-points display from the
+        /// observed score (item 2: spectators used to get a hard black flash
+        /// here and never saw the score orbs fighters see). Display-only.
+        /// DoWinSequence is 1v1-shaped (its tail shows the loser's pick
+        /// visualizer via a team-id-as-player-index call) — team modes and
+        /// game-ending rounds get the plain point sequence / a notification
+        /// instead (find 8).</summary>
+        internal static void PlayPointSequence(bool conversion, bool gameOver,
+                                               int visP1, int visP2, int p1r, int p2r,
+                                               int winningTeamID)
+        {
+            try
+            {
+                var pv = PointVisualizer.instance;
+                if (gameOver)
+                {
+                    // Retire any running sequence FIRST (r2 find 7): a fast
+                    // decisive kill mid-sequence would otherwise leave the
+                    // orb overlay animating over the victory notification.
+                    if (_seqCo != null && pv != null)
+                    {
+                        try { pv.StopCoroutine(_seqCo); } catch { }
+                        try { pv.Close(); } catch { }
+                        _seqCo = null;
+                    }
+                    string who = FighterNamesForTeam(winningTeamID);
+                    if (who.Length > 0)
+                        CompetitiveUI.ShowNotification(I18n.TrF("Game over - {0} wins", who), Color.green, 6f);
+                    return;
+                }
+                // Vanilla's pip logic hardcodes the 2-point round shape (r2
+                // find 5: values > 1 render "ROUND", so a 3-point room's
+                // second point mis-renders). Custom thresholds skip the
+                // sequence — the HUD score line is threshold-aware.
+                if (SpectatorViewState.PointsToWinRound != 2) return;
+                if (pv == null || !pv.gameObject.activeInHierarchy) return;
+                if (_seqCo != null)
+                {
+                    try { pv.StopCoroutine(_seqCo); } catch { }
+                    _seqCo = null;
+                    try { pv.Close(); } catch { }   // publicized — vanilla's own overlay reset
+                }
+                bool orangeWinner = winningTeamID == 0;
+                bool oneVone = WatchedMode == "1v1"
+                               && FighterTeams != null && FighterTeams.Length == 2;
+                if (conversion && oneVone)
+                    _seqCo = pv.StartCoroutine(pv.DoWinSequence(visP1, visP2, p1r, p2r, orangeWinner));
+                else
+                    _seqCo = pv.StartCoroutine(pv.DoSequence(visP1, visP2, orangeWinner));
+            }
+            catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] point sequence: {ex.Message}"); }
+        }
+
+        private static string FighterNamesForTeam(int teamId)
+        {
+            try
+            {
+                var names = FighterNames; var teams = FighterTeams;
+                if (names == null || teams == null || names.Length != teams.Length) return "";
+                var sb = new System.Text.StringBuilder(32);
+                for (int i = 0; i < names.Length; i++)
+                {
+                    if (teams[i] != teamId) continue;
+                    if (sb.Length > 0) sb.Append(" + ");
+                    sb.Append(SpectatorHud.PlainName(names[i]));
+                }
+                return sb.ToString();
+            }
+            catch { return ""; }
         }
 
         // Consecutive failed DECK reconstructions specifically (Codex r2
@@ -446,12 +1098,16 @@ namespace CompetitiveRounds
         // game-1 runtime state).
         private static int _lastSeenEpoch = int.MinValue;
 
-        private static IEnumerator BoundaryAttempt(int mapId, int gen)
+        private static IEnumerator BoundaryAttempt(int mapId, int gen, int attemptGen)
         {
             var prior = CurrentStage;
             CurrentStage = Stage.Applying;
             bool ok = false;
             bool applied = false;
+            // Superseded = a NEWER boundary was scheduled (r3 find 4). The
+            // attempt must exit before any further local load/snapshot/deck
+            // work, and its finally must not count it as a failure.
+            bool superseded = false;
             try
             {
                 // 1. Wait for the named map to be the loaded one locally. The
@@ -464,10 +1120,29 @@ namespace CompetitiveRounds
                 while (Time.unscaledTime - t0 < 16f)
                 {
                     if (gen != _boundaryGeneration) yield break;
+                    if (attemptGen != _boundaryAttemptGen) { superseded = true; break; }
                     bool loaded = false;
-                    try { loaded = MapManager.instance != null && MapManager.instance.currentLevelID == mapId; } catch { }
+                    try
+                    {
+                        // `currentLevelID == mapId` IS the settling test —
+                        // currentLevelID and currentMap advance atomically in
+                        // OnLevelFinishedLoading (r4 blocker 1 corrected r3's
+                        // model: Map.levelID is a readiness token, NOT scene
+                        // identity, and never equals the new map's id).
+                        var mmr = MapManager.instance;
+                        var cmr = mmr != null ? mmr.currentMap : null;
+                        loaded = mmr != null && mmr.currentLevelID == mapId
+                                 && cmr != null && cmr.Map != null;
+                    }
+                    catch { }
                     if (loaded) { ok = true; break; }
-                    if (!triedLocalLoad && Time.unscaledTime - t0 > 8f)
+                    // 0.75s grace, not 8 (Aug 10 r2 find 3): the missed-load
+                    // window is when the master's live instantiates arrive
+                    // against a null local map — every second here is a
+                    // second of deferred PhotonMapObject starts. The grace
+                    // only exists so an in-flight vanilla load RPC (queued in
+                    // the same dispatch as the call-in) can land first.
+                    if (!triedLocalLoad && Time.unscaledTime - t0 > 0.75f)
                     {
                         triedLocalLoad = true;
                         try
@@ -475,19 +1150,49 @@ namespace CompetitiveRounds
                             var mm = MapManager.instance;
                             if (mm != null && mm.levels != null && mapId >= 0 && mapId < mm.levels.Length)
                             {
-                                Plugin.Log?.LogInfo($"[SPECTATE] map {mapId} missing locally — direct local load");
-                                mm.RPCA_LoadLevel(mm.levels[mapId]);
+                                // NEVER fallback-load while ANY load is in
+                                // flight (r5 blocker 1: a stale boundary's
+                                // fallback would queue its OLD map behind the
+                                // newer command). The serializer gate makes a
+                                // duplicate same-scene call harmless, but a
+                                // stale different-scene call must not even
+                                // reach the queue.
+                                if (MapLoadInFlight
+                                    || string.Equals(LastCommandedScene, mm.levels[mapId], StringComparison.Ordinal))
+                                {
+                                    Plugin.Log?.LogInfo($"[SPECTATE] map {mapId} — a load is in flight, waiting");
+                                }
+                                else
+                                {
+                                    Plugin.Log?.LogInfo($"[SPECTATE] map {mapId} missing locally — direct local load");
+                                    mm.RPCA_LoadLevel(mm.levels[mapId]);
+                                }
                             }
                         }
                         catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] local map load: {ex.Message}"); }
                     }
                     yield return null;
                 }
+                if (superseded) yield break;
                 if (!ok)
                 {
                     Plugin.Log?.LogWarning($"[SPECTATE] boundary map {mapId} never loaded locally");
                     yield break;
                 }
+
+                // Local vanilla readiness (r3 find 3): LoadedForAll() reads a
+                // scalar fed by the FIGHTERS' load reports. If we joined
+                // after those unbuffered RPCs (or direct-loaded), the scalar
+                // is stale, Map.StartMatch never runs, placeholders are never
+                // swapped and live clones stay kinematic. Mirror the value
+                // LOCALLY — no network op (our own report stays suppressed);
+                // later fighter reports overwrite it consistently.
+                // Readiness is pinned to the settled map's own token (the
+                // shared helper — r5 find 2 moved ownership of the scalar
+                // fully to the spectator: inbound fighter reports are now
+                // suppressed, so nothing can overwrite this with a token
+                // from a different load lineage).
+                PinLocalMapReadiness($"boundary {mapId}");
 
                 // 2. Fresh snapshot for THIS boundary (retry once).
                 ok = false;
@@ -501,10 +1206,13 @@ namespace CompetitiveRounds
                     while (Time.unscaledTime - t1 < 8f)
                     {
                         if (gen != _boundaryGeneration) yield break;
+                        if (attemptGen != _boundaryAttemptGen) { superseded = true; break; }
                         if (_boundaryResponse != null) { ok = true; break; }
                         yield return null;
                     }
+                    if (superseded) break;
                 }
+                if (superseded) yield break;
                 if (!ok)
                 {
                     Plugin.Log?.LogWarning("[SPECTATE] no boundary snapshot — staying dark until next boundary");
@@ -533,10 +1241,12 @@ namespace CompetitiveRounds
                 while (Time.unscaledTime - t2 < 8f)
                 {
                     if (gen != _boundaryGeneration) yield break;
+                    if (attemptGen != _boundaryAttemptGen) { superseded = true; break; }
                     bodies = AllBodiesPresent(actors);
                     if (bodies) break;
                     yield return null;
                 }
+                if (superseded) yield break;
                 if (!bodies)
                 {
                     Plugin.Log?.LogWarning("[SPECTATE] fighter bodies missing at boundary — staying dark");
@@ -560,8 +1270,9 @@ namespace CompetitiveRounds
                 // 7. Apply decks, ALL-OR-NOTHING with post-verification.
                 applied = true;
                 _lastApplyOk = false;
-                yield return ApplyDecks(snap, gen, forceReset);
+                yield return ApplyDecks(snap, gen, attemptGen, forceReset);
                 if (gen != _boundaryGeneration) yield break;
+                if (attemptGen != _boundaryAttemptGen) { superseded = true; yield break; }
                 if (!_lastApplyOk)
                 {
                     Plugin.Log?.LogWarning("[SPECTATE] deck reconstruction failed — staying dark");
@@ -573,6 +1284,7 @@ namespace CompetitiveRounds
                 {
                     bool firstActivation = prior != Stage.Active;
                     CurrentStage = Stage.Active;
+                    HasEverActivated = true;
                     _boundaryFailStreak = 0;
                     _deckFailStreak = 0;
 
@@ -623,21 +1335,45 @@ namespace CompetitiveRounds
             {
                 if (gen == _boundaryGeneration && CurrentStage == Stage.Applying)
                 {
-                    // FAILED attempt: NEVER restore Active (Codex r2 find 8 —
-                    // a failed rematch reconstruction was re-exposing mixed
-                    // old/new decks). Back to the blackout; the next boundary
-                    // (or the leave below) resolves it.
-                    CurrentStage = Stage.Synchronizing;
-                    _boundaryFailStreak++;
-                    if (applied && !_lastApplyOk) _deckFailStreak++;
-                    if (_deckFailStreak >= 3)
+                    if (superseded)
                     {
-                        // Repeated DECK failures = build mismatch (unknown
-                        // cards, mod skew) — unrecoverable; map/snapshot
-                        // timeouts keep retrying instead.
-                        Plugin.Log?.LogWarning("[SPECTATE] three failed deck reconstructions — leaving");
-                        LeaveToMenu("deck reconstruction failed");
+                        // Superseded is NOT failed (r3 find 4): a newer
+                        // boundary owns the reconcile now — restore the prior
+                        // stage so its attempt can start, and count nothing
+                        // (three fast points during deck applies must never
+                        // read as a build mismatch).
+                        CurrentStage = prior;
                     }
+                    else
+                    {
+                        // FAILED attempt: NEVER restore Active (Codex r2 find
+                        // 8 — a failed rematch reconstruction was re-exposing
+                        // mixed old/new decks). Back to the blackout; the
+                        // next boundary (or the leave below) resolves it.
+                        CurrentStage = Stage.Synchronizing;
+                        _boundaryFailStreak++;
+                        if (applied && !_lastApplyOk) _deckFailStreak++;
+                        if (_deckFailStreak >= 3)
+                        {
+                            // Repeated DECK failures = build mismatch
+                            // (unknown cards, mod skew) — unrecoverable;
+                            // map/snapshot timeouts keep retrying instead.
+                            Plugin.Log?.LogWarning("[SPECTATE] three failed deck reconstructions — leaving");
+                            LeaveToMenu("deck reconstruction failed");
+                        }
+                    }
+                }
+                // A boundary observed while THIS attempt was applying is
+                // re-issued now (r2 find 4) through the SIDE-EFFECT-FREE
+                // scheduler (r3 find 7: re-entering OnCallInObserved cleared
+                // a newer round latch and re-disarmed the quarantine).
+                if (gen == _boundaryGeneration && _pendingBoundaryMapId >= 0
+                    && SpectatorSession.IsLocalSpectator)
+                {
+                    int next = _pendingBoundaryMapId;
+                    _pendingBoundaryMapId = -1;
+                    Plugin.Log?.LogInfo($"[SPECTATE] re-issuing boundary {next} deferred during apply");
+                    ScheduleBoundary(next);
                 }
             }
         }
@@ -650,6 +1386,16 @@ namespace CompetitiveRounds
                 for (int i = 0; i < actors.Length; i++)
                     if (FindBodyByActor(actors[i]) == null) return false;
                 return true;
+            }
+            catch { return false; }
+        }
+
+        private static bool ActorDeparted(int actorNumber)
+        {
+            try
+            {
+                var room = PhotonNetwork.CurrentRoom;
+                return room == null || room.GetPlayer(actorNumber) == null;
             }
             catch { return false; }
         }
@@ -699,7 +1445,7 @@ namespace CompetitiveRounds
             return names;
         }
 
-        private static IEnumerator ApplyDecks(object[] snap, int gen, bool forceReset)
+        private static IEnumerator ApplyDecks(object[] snap, int gen, int attemptGen, bool forceReset)
         {
             _lastApplyOk = false;
             int[] actors; string[] decksFlat; int[] offsets;
@@ -764,6 +1510,13 @@ namespace CompetitiveRounds
                     }
                 }
             }
+            // COMMIT POINT (r4 find 2 + r5 find 6): supersession is honored
+            // up to here and NOT past it — the bar clear below is the FIRST
+            // visible mutation, so the check must precede it (a stale
+            // attempt that cleared bars and then bailed left them empty if
+            // the successor boundary failed).
+            if (attemptGen != _boundaryAttemptGen) yield break;
+
             if (globalReset)
             {
                 try
@@ -783,8 +1536,23 @@ namespace CompetitiveRounds
                 var body = FindBodyByActor(actor);
                 if (body == null)
                 {
-                    // Bodies were verified present before this ran; one going
-                    // null mid-apply (leave during transition) fails the pass.
+                    // Bodies were verified present before this ran. If the
+                    // ACTOR left the room mid-manifest (r5 find 5: routine in
+                    // FFA), skip them and keep applying the survivors —
+                    // aborting left every later actor on a stale deck. A
+                    // still-connected actor with no body remains a hard fail.
+                    bool actorPresent = false;
+                    try
+                    {
+                        var room = PhotonNetwork.CurrentRoom;
+                        actorPresent = room != null && room.GetPlayer(actor) != null;
+                    }
+                    catch { }
+                    if (!actorPresent)
+                    {
+                        Plugin.Log?.LogInfo($"[SPECTATE] actor {actor} left mid-apply — skipping their deck");
+                        continue;
+                    }
                     Plugin.Log?.LogWarning($"[SPECTATE] body for actor {actor} vanished mid-apply");
                     yield break;
                 }
@@ -802,12 +1570,13 @@ namespace CompetitiveRounds
                         if (!string.Equals(have[k], target[k], StringComparison.Ordinal)) { isExtension = false; break; }
                 }
 
+                bool applyFailed = false;
                 if (isExtension)
                 {
                     for (int k = have.Count; k < target.Count; k++)
                     {
                         if (gen != _boundaryGeneration) yield break;
-                        if (!ApplyOne(body, actor, target[k])) yield break;
+                        if (!ApplyOne(body, actor, target[k])) { applyFailed = true; break; }
                         // #225: NEVER two applies in one frame — 16 vanilla
                         // cards self-destruct when two copies apply same-frame.
                         yield return null;
@@ -821,6 +1590,21 @@ namespace CompetitiveRounds
                     if (gen != _boundaryGeneration) yield break;
                 }
 
+                // An actor who LEFT the room during their own multi-frame
+                // apply must not abort the manifest for everyone after them
+                // (r6 find 4 — the pre-turn skip only covered departures
+                // BEFORE the iteration). Departed = skip; still-connected
+                // failures stay hard.
+                if (applyFailed)
+                {
+                    if (ActorDeparted(actor))
+                    {
+                        Plugin.Log?.LogInfo($"[SPECTATE] actor {actor} left during their deck apply — skipping");
+                        continue;
+                    }
+                    yield break;
+                }
+
                 // VERIFY (r1 find 9): the body's rendered deck must now equal
                 // the snapshot exactly, in order.
                 var now = CurrentDeckNames(body);
@@ -830,6 +1614,11 @@ namespace CompetitiveRounds
                         if (!string.Equals(now[k], target[k], StringComparison.Ordinal)) { match = false; break; }
                 if (!match)
                 {
+                    if (ActorDeparted(actor))
+                    {
+                        Plugin.Log?.LogInfo($"[SPECTATE] actor {actor} left before deck verify — skipping");
+                        continue;
+                    }
                     Plugin.Log?.LogWarning($"[SPECTATE] deck verify failed for actor {actor} " +
                                            $"(have {now.Count}, want {target.Count})");
                     yield break;
@@ -998,6 +1787,33 @@ namespace CompetitiveRounds
                    && Time.unscaledTime - at < VALIDATION_TTL_SECONDS;
         }
 
+        /// <summary>Master notes a spectator actor the moment it ENTERS (Aug
+        /// 10 r2 find 9: seeding first-seen only from the sweep stretched the
+        /// never-validated eviction to 120-180s; seeded at entry, the 90s
+        /// deadline is real again). Also the entry-time protocol gate (r2
+        /// blocker 2): an actor whose cr_spec VALUE is not the supported
+        /// protocol is closed immediately — presence-based classification
+        /// keeps it a spectator (suppressed everywhere) until the close
+        /// lands.</summary>
+        internal static void MasterNoteSpectatorEntered(Photon.Realtime.Player sp)
+        {
+            try
+            {
+                if (sp == null || !PhotonNetwork.IsMasterClient) return;
+                if (SpectatorSession.IsLocalSpectator) return;
+                int a = sp.ActorNumber;
+                if (!_spectatorFirstSeen.ContainsKey(a))
+                    _spectatorFirstSeen[a] = Time.unscaledTime;
+                int proto = RoomActors.SpectatorProtocolOf(sp);
+                if (proto != SpectatorSession.PROTOCOL)
+                {
+                    Plugin.Log?.LogWarning($"[SPECTATE] close requested for spectator actor {a} — incompatible protocol {proto} (need {SpectatorSession.PROTOCOL}; cooperative)");
+                    RoomActors.CooperativeClose(sp);
+                }
+            }
+            catch { }
+        }
+
         /// <summary>Kick spectator actors that never validated, or whose
         /// validation went stale (fail CLOSED — a seat the server no longer
         /// confirms is not a seat). Called from the fighter-side ticker.</summary>
@@ -1007,9 +1823,44 @@ namespace CompetitiveRounds
             {
                 if (!PhotonNetwork.InRoom || !PhotonNetwork.IsMasterClient) return;
                 if (SpectatorSession.IsLocalSpectator) return;
+                // Unauthorized non-spectator actors are re-closed on this
+                // cadence too (r9 find 4: a close issued during a master
+                // handoff window is rejected by the target as coming from a
+                // non-master — the sweep is the retry, and a NEW master runs
+                // it within one cadence).
+                try
+                {
+                    var all = PhotonNetwork.PlayerList;
+                    if (all != null && RoomActors.RosterFrozen)
+                    {
+                        for (int i = 0; i < all.Length; i++)
+                        {
+                            var a0 = all[i];
+                            if (a0 == null || a0.IsLocal) continue;
+                            if (RoomActors.IsSpectator(a0)) continue;
+                            if (!RoomActors.IsUnauthorized(a0)) continue;
+                            RoomActors.RecordRejected(a0);
+                            Plugin.Log?.LogWarning($"[SPECTATE] close requested for unauthorized actor {a0.ActorNumber} (sweep, cooperative)");
+                            RoomActors.CooperativeClose(a0);
+                        }
+                    }
+                }
+                catch { }
                 foreach (var sp in RoomActors.Spectators())
                 {
                     int a = sp.ActorNumber;
+                    // Wrong-protocol seats close regardless of validation
+                    // state (r2 blocker 2 backstop — the entry hook covers
+                    // the normal path; this catches a master handoff where
+                    // the new master never saw the entry).
+                    if (RoomActors.SpectatorProtocolOf(sp) != SpectatorSession.PROTOCOL)
+                    {
+                        Plugin.Log?.LogWarning($"[SPECTATE] close requested for incompatible-protocol spectator actor {a} (cooperative)");
+                        RoomActors.CooperativeClose(sp);
+                        _spectatorFirstSeen.Remove(a);
+                        _validatedAt.Remove(a);
+                        continue;
+                    }
                     if (IsValidatedFresh(a)) continue;
                     bool wasValidated = _validatedAt.ContainsKey(a);
                     float first;
@@ -1022,8 +1873,8 @@ namespace CompetitiveRounds
                         || Time.unscaledTime - _spectatorFirstSeen[a] > 90f;
                     if (overdue)
                     {
-                        Plugin.Log?.LogWarning($"[SPECTATE] kicking {(wasValidated ? "stale-validated" : "never-validated")} spectator actor {a}");
-                        try { PhotonNetwork.CloseConnection(sp); } catch { }
+                        Plugin.Log?.LogWarning($"[SPECTATE] close requested for {(wasValidated ? "stale-validated" : "never-validated")} spectator actor {a} (cooperative)");
+                        RoomActors.CooperativeClose(sp);
                         _spectatorFirstSeen.Remove(a);
                         _validatedAt.Remove(a);
                     }
@@ -1157,6 +2008,32 @@ namespace CompetitiveRounds
                     catch { }
                 }
 
+                // Session series tally, fighter-array order (item 3 / Aug 10
+                // find 11): STRICT 1v1 with exactly two identified fighters
+                // only — every other shape sends -1 sentinels the client
+                // treats as "hide the line". Values come from the master's
+                // room-scoped counters (fed only by local game-over outcomes,
+                // reset only on room join — never from report callbacks).
+                int sw0 = -1, sw1 = -1;
+                try
+                {
+                    if (mode == "1v1" && n == 2)
+                    {
+                        string mySid = "";
+                        try { mySid = MatchTracker.LocalSteamId ?? ""; } catch { }
+                        int myIdx = !string.IsNullOrEmpty(mySid) && steamIds[0] == mySid ? 0
+                                  : !string.IsNullOrEmpty(mySid) && steamIds[1] == mySid ? 1 : -1;
+                        if (myIdx >= 0)
+                        {
+                            int w = GameStateWatcher.RoomSeriesWinsLocal;
+                            int l = GameStateWatcher.RoomSeriesLossesLocal;
+                            sw0 = myIdx == 0 ? w : l;
+                            sw1 = myIdx == 0 ? l : w;
+                        }
+                    }
+                }
+                catch { }
+
                 return new object[]
                 {
                     (byte)SpectatorSession.PROTOCOL, seq, mode, phase, scene, levelId,
@@ -1168,7 +2045,8 @@ namespace CompetitiveRounds
                     // change (Codex r1 find 11). Only CHANGE matters — a
                     // master handoff shifting the absolute value just costs
                     // one redundant reset+replay.
-                    GameStateWatcher.SessionMatchCountValue
+                    GameStateWatcher.SessionMatchCountValue,
+                    sw0, sw1
                 };
             }
             catch (Exception ex)
@@ -1256,6 +2134,24 @@ namespace CompetitiveRounds
                         rounds.Length > 0 ? rounds[0] : 0,
                         rounds.Length > 1 ? rounds[1] : 0);
                 }
+
+                // Session series tally (item 3): CLEAR before parse (find 11 —
+                // a newer master's values must not survive a later, shorter
+                // snapshot from an older master), then accept only a strict
+                // well-formed 1v1 payload.
+                SpectatorViewState.RecordSessionSeries(-1, -1);
+                try
+                {
+                    if (a.Length >= 18 && WatchedMode == "1v1")
+                    {
+                        int s0 = Convert.ToInt32(a[16]);
+                        int s1 = Convert.ToInt32(a[17]);
+                        var act = a[6] as int[];
+                        if (s0 >= 0 && s1 >= 0 && act != null && act.Length == 2)
+                            SpectatorViewState.RecordSessionSeries(s0, s1);
+                    }
+                }
+                catch { }
                 _haveInfo = true;
 
                 if (seq == _awaitBoundarySeq)

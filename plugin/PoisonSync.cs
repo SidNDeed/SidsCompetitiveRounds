@@ -391,7 +391,7 @@ namespace CompetitiveRounds
                     // rejoin can look like this) — same reset, same reason.
                     if (_tickRoom != "") ResetForRoomExit();
                     _tickRoom = room;
-                    _lastRosterCount = RoomActors.ActiveFighterCount();   // census: fighters, in lockstep with ScanRoster
+                    _lastRosterCount = RawNonSpectatorCount();   // census basis: see ScanRoster (r8 find 2)
                     NoteRosterChange("room-change");
                     return;
                 }
@@ -399,7 +399,7 @@ namespace CompetitiveRounds
                 if (Time.unscaledTime - _lastScan < 1f) return;
                 _lastScan = Time.unscaledTime;
 
-                int n = RoomActors.ActiveFighterCount();   // census: fighters, in lockstep with ScanRoster
+                int n = RawNonSpectatorCount();   // census basis: see ScanRoster (r8 find 2)
                 if (n != _lastRosterCount)
                 {
                     // Belt and braces: we also hook the room callbacks, but a
@@ -438,17 +438,56 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        private static int RawNonSpectatorCount()
+        {
+            try
+            {
+                var list = PhotonNetwork.PlayerList;
+                if (list == null) return 0;
+                int n = 0;
+                for (int i = 0; i < list.Length; i++)
+                    if (list[i] != null && !RoomActors.IsSpectator(list[i])) n++;
+                return n;
+            }
+            catch { return 0; }
+        }
+
+        private static List<Photon.Realtime.Player> RawNonSpectators()
+        {
+            var keep = new List<Photon.Realtime.Player>(4);
+            try
+            {
+                var list = PhotonNetwork.PlayerList;
+                if (list == null) return keep;
+                for (int i = 0; i < list.Length; i++)
+                    if (list[i] != null && !RoomActors.IsSpectator(list[i])) keep.Add(list[i]);
+            }
+            catch { }
+            return keep;
+        }
+
         private static void ScanRoster(string why)
         {
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
-                // FIGHTERS only (census): a spectator never stages the poison
-                // capability, and _sawIncapablePeer is deliberately STICKY for
-                // the room — one spectator would otherwise permanently disable
-                // block-honouring for every fighter (the recon's worst find).
-                var list = RoomActors.ActiveFighters();
-                if (list == null || list.Length == 0) return;
+                // Census basis (Aug 10 r8 find 2, the GrowSync Quorum rule):
+                // raw PhotonNetwork.PlayerList filtered ONLY by the
+                // replicated cr_spec role prop. RoomActors.ActiveFighters was
+                // used here and REJECTED — its frozen-roster filter is LOCAL
+                // state, and roster freezing is legally divergent between
+                // seats, so an unmarked intruder was excluded on one seat and
+                // included on the other: the sticky incapable flag (and with
+                // it victim-side block honouring) then split across clients,
+                // directly changing fighter damage. With the raw list every
+                // seat counts the same actors from the same replicated data;
+                // an unmarked intruder reads INCAPABLE on every seat
+                // symmetrically — fail-closed, rule-symmetric — until the
+                // master's close removes it. Declared spectators (cr_spec,
+                // replicated) are excluded identically everywhere; the sticky
+                // flag stays deliberately sticky.
+                var list = RawNonSpectators();
+                if (list == null || list.Count == 0) return;
 
                 bool anyIncapable = false;
                 var detail = new List<string>();

@@ -66,6 +66,29 @@ namespace CompetitiveRounds
         // Room the cache belongs to; a room change wipes it.
         private static string _cacheRoom = "";
 
+        // Actors this room REJECTED locally (unauthorized entrants, impostor
+        // duplicates). LOCAL knowledge only — seats with a frozen roster
+        // know more than seats without one, and that is fine because this
+        // cache only ever ADDS suppression. The cross-client-CONSISTENT
+        // question ("is this departing actor a fighter whose leave should
+        // tear the match down?") is answered by the PROP-DERIVED rules below
+        // (HasReplicatedFighterIdentity / IsImpostorReplicated), which every
+        // seat computes identically from replicated data with no
+        // announcements. (An announced-verdict room property was tried in
+        // an earlier round and DELETED: client-writable room state is an
+        // attack surface — a hostile actor could suppress a real fighter's
+        // DC teardown by pre-writing their ActorNumber — and its delivery
+        // could never be made monotonic against Photon's property cache.)
+        private static readonly HashSet<int> _rejectedActors = new HashSet<int>();
+
+        // ActorNumber -> "has been seen carrying a u_id". Seeded at first
+        // classification and PROMOTABLE (r10 find 1): a false entry re-reads
+        // live props on each query and can only move to true — so a fighter
+        // whose u_id arrived post-join is never mistaken for a non-fighter
+        // at departure. PUN retains the leaving actor's props through the
+        // leave callback, so the live re-read works there too.
+        private static readonly Dictionary<int, bool> _hasUidByActor = new Dictionary<int, bool>();
+
         /// <summary>Frozen fighter roster (steam ids), set at match assembly.
         /// Empty = not yet frozen, in which case "expected fighter" degrades
         /// to "not a spectator", which is the pre-spectator behaviour.</summary>
@@ -84,6 +107,8 @@ namespace CompetitiveRounds
             if (room != _cacheRoom)
             {
                 _roleByActor.Clear();
+                _rejectedActors.Clear();
+                _hasUidByActor.Clear();
                 _cacheRoom = room;
                 // Deliberately NOT clearing _fighterSteamIds here: the roster
                 // is frozen by the match-assembly path, which owns its own
@@ -96,10 +121,117 @@ namespace CompetitiveRounds
         internal static void Reset()
         {
             _roleByActor.Clear();
+            _rejectedActors.Clear();
+            _hasUidByActor.Clear();
             _cacheRoom = "";
             _fighterSteamIds.Clear();
             _fighterCacheFrame = -1;
             _fighterCache = null;
+        }
+
+        /// <summary>Record an actor this room has rejected (unauthorized
+        /// entrant / impostor). Called on EVERY client the moment the actor
+        /// is classified unauthorized — before the master's CloseConnection
+        /// lands — so its later departure is provably not a fighter leaving.</summary>
+        internal static void RecordRejected(PhotonPlayer actor)
+        {
+            if (actor == null) return;
+            try
+            {
+                EnsureCacheRoom();
+                _rejectedActors.Add(actor.ActorNumber);
+            }
+            catch { }
+        }
+
+        /// <summary>True if this actor was recorded as rejected in this room
+        /// (LOCAL knowledge — additive suppression only; the cross-client
+        /// rule is the prop-derived pair below). Survives the actor's
+        /// property teardown at departure.</summary>
+        internal static bool IsRejected(PhotonPlayer actor)
+        {
+            if (actor == null) return false;
+            try
+            {
+                EnsureCacheRoom();
+                return _rejectedActors.Contains(actor.ActorNumber);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>True in rooms where PRE-JOIN u_id staging is GUARANTEED
+        /// for every fighter (Aug 10 r10 finds 1+2 scoped the no-u_id rule
+        /// here): the team_/ovt_/ffa_ lobby paths stage u_id before joining
+        /// — verified at their three prejoin sites — and those rooms are
+        /// mod-issued, so no vanilla actor can legitimately lack it. Ranked
+        /// 1v1 / code / casual rooms get u_id POST-join from vanilla's own
+        /// publish (or never, for unmodded quickplay peers), so the rule
+        /// must stay inactive there — a genuine fighter's or vanilla peer's
+        /// departure must run vanilla teardown. Room NAME is replicated:
+        /// every seat evaluates this identically.</summary>
+        internal static bool ReplicatedIdentityGuaranteed()
+        {
+            try
+            {
+                var room = PhotonNetwork.CurrentRoom;
+                string n = room != null ? (room.Name ?? "") : "";
+                return n.StartsWith("team_", StringComparison.Ordinal)
+                    || n.StartsWith("ovt_", StringComparison.Ordinal)
+                    || n.StartsWith("ffa_", StringComparison.Ordinal);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>REPLICATED-CONSISTENT fighter-identity test. ONLY
+        /// meaningful where ReplicatedIdentityGuaranteed() — callers gate on
+        /// it (r10 find 2). The cache is PROMOTABLE (r10 find 1): a false
+        /// latched before a later u_id publish re-checks live props and
+        /// promotes, never demotes — so the answer can only move toward
+        /// "fighter", the vanilla-teardown direction.</summary>
+        internal static bool HasReplicatedFighterIdentity(PhotonPlayer actor)
+        {
+            if (actor == null) return false;
+            try
+            {
+                EnsureCacheRoom();
+                bool cached;
+                if (_hasUidByActor.TryGetValue(actor.ActorNumber, out cached) && cached) return true;
+                bool has = !string.IsNullOrEmpty(SteamIdOf(actor));
+                _hasUidByActor[actor.ActorNumber] = has;
+                return has;
+            }
+            catch { return true; }   // unknown -> treat as fighter (vanilla behavior)
+        }
+
+        /// <summary>REPLICATED-CONSISTENT impostor test (r9): an actor whose
+        /// u_id duplicates an EARLIER, still-present actor's u_id is a copy,
+        /// not a fighter — computable identically on every seat from
+        /// replicated props + ActorNumber ordering, with NO roster
+        /// dependence (the roster-gated duplicate rule in IsUnauthorized
+        /// remains for seats that know more). A genuine reconnect is
+        /// unaffected: the old actor has already left, so no duplicate
+        /// exists.</summary>
+        internal static bool IsImpostorReplicated(PhotonPlayer actor)
+        {
+            if (actor == null) return false;
+            try
+            {
+                string sid = SteamIdOf(actor);
+                if (string.IsNullOrEmpty(sid)) return false;
+                var room = PhotonNetwork.CurrentRoom;
+                if (room == null || room.Players == null) return false;
+                foreach (var kv in room.Players)
+                {
+                    var other = kv.Value;
+                    if (other == null || other.ActorNumber == actor.ActorNumber) continue;
+                    if (other.ActorNumber < actor.ActorNumber
+                        && !IsSpectator(other)
+                        && string.Equals(SteamIdOf(other), sid, StringComparison.Ordinal))
+                        return true;
+                }
+                return false;
+            }
+            catch { return false; }
         }
 
         /// <summary>Called from OnJoinedRoom on EVERY client: a new room means
@@ -147,6 +279,11 @@ namespace CompetitiveRounds
                     isSpec = true;
                 }
                 _roleByActor[actor.ActorNumber] = isSpec;
+                // Piggyback the u_id-presence cache (r9): classification is
+                // the one point every entry path passes through while the
+                // actor's props are certainly readable.
+                if (!_hasUidByActor.ContainsKey(actor.ActorNumber))
+                    _hasUidByActor[actor.ActorNumber] = !string.IsNullOrEmpty(SteamIdOf(actor));
                 return isSpec;
             }
             catch { return false; }
@@ -169,6 +306,9 @@ namespace CompetitiveRounds
         internal static bool IsUnauthorized(PhotonPlayer actor)
         {
             if (actor == null) return false;
+            // Once rejected, always rejected — the cache outlives the actor's
+            // properties (design-review blocker 2).
+            if (IsRejected(actor)) return true;
             if (!RosterFrozen) return false;
             if (IsSpectator(actor)) return false;
             try
@@ -205,6 +345,24 @@ namespace CompetitiveRounds
                 return false;
             }
             catch { return false; }
+        }
+
+        /// <summary>The protocol version an actor's cr_spec property
+        /// advertises, or -1 when absent/unreadable. Classification stays
+        /// presence-based (IsSpectator) — an INCOMPATIBLE spectator must
+        /// remain a spectator (never fall through as a fighter) right up
+        /// until the master closes it (Aug 10 r2 blocker 2).</summary>
+        internal static int SpectatorProtocolOf(PhotonPlayer actor)
+        {
+            try
+            {
+                var props = actor != null ? actor.CustomProperties : null;
+                object v;
+                if (props != null && props.TryGetValue(SPEC_PROP, out v) && v is int)
+                    return (int)v;
+            }
+            catch { }
+            return -1;
         }
 
         /// <summary>Steam id an actor advertises via the shared u_id property
@@ -389,6 +547,31 @@ namespace CompetitiveRounds
         {
             try { return Spectators().Length; }
             catch { return 0; }
+        }
+
+        /// <summary>Master-side cooperative close (r10 find 3): raises the
+        /// sender-side EnableCloseConnection flag TRANSIENTLY around the one
+        /// call, then restores it. While WE are master, an incoming event
+        /// 203 is only honored from "the master" — us — so the window is
+        /// not exploitable; and a fighter's steady-state flag stays FALSE,
+        /// so a hostile master can never evict an honest fighter (the
+        /// vanilla baseline). Spectator clients keep the flag true for
+        /// their whole session instead — they are kickable by design.</summary>
+        internal static void CooperativeClose(PhotonPlayer actor)
+        {
+            if (actor == null) return;
+            bool prev = false;
+            try
+            {
+                prev = PhotonNetwork.EnableCloseConnection;
+                PhotonNetwork.EnableCloseConnection = true;
+                PhotonNetwork.CloseConnection(actor);
+            }
+            catch { }
+            finally
+            {
+                try { PhotonNetwork.EnableCloseConnection = prev; } catch { }
+            }
         }
 
         /// <summary>The MasterClient must always be a fighter — authority on

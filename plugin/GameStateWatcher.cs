@@ -1057,6 +1057,41 @@ namespace CompetitiveRounds
         private static float lastSpectateAttestAt = -999f;
         private static float lastSpectateValidateAt = -999f;
         private static bool lastSpectateBattleState = false;
+        // Master-seat edge for the validate cadence (design-review find 15: a
+        // non-master's stamped timer starved a fresh master of validations
+        // for up to 60s after a handoff).
+        private static bool lastSpectateWasMaster = false;
+
+        // Room-scoped 1v1 tally for the spectator snapshot (design-review
+        // find 10). Reset ONLY on actual room join; fed ONLY by the local
+        // game-over outcome path.
+        private static int roomSeriesWinsLocal = 0;
+        private static int roomSeriesLossesLocal = 0;
+        private static int roomGamesWonLocal = 0;
+        private static int roomGamesLostLocal = 0;
+        public static int RoomSeriesWinsLocal => roomSeriesWinsLocal;
+        public static int RoomSeriesLossesLocal => roomSeriesLossesLocal;
+
+        /// <summary>Room-scoped spectate/attest edge state reset — called
+        /// from the ACTUAL Photon room callbacks (Aug 10 r2 find 8: the 10 Hz
+        /// poll's wasInRoom sampling can miss a leave+join inside one tick,
+        /// letting room B inherit room A's battle edge and attest timer). The
+        /// poll-side resets remain as backup.</summary>
+        public static void ResetSpectateAttestEdges(bool alsoRoomTally)
+        {
+            lastSpectateAttestAt = -999f;
+            lastSpectateValidateAt = -999f;
+            lastSpectateBattleState = false;
+            spectateAttestEdgePending = false;
+            lastSpectateWasMaster = false;
+            if (alsoRoomTally)
+            {
+                roomSeriesWinsLocal = 0;
+                roomSeriesLossesLocal = 0;
+                roomGamesWonLocal = 0;
+                roomGamesLostLocal = 0;
+            }
+        }
         // Armed on a battle rising edge; cleared only when an attest SENDS.
         private static bool spectateAttestEdgePending = false;
 
@@ -1135,12 +1170,29 @@ namespace CompetitiveRounds
                 // Master: revalidate claimed spectators (entry validation runs
                 // from the enter callback; this closes mid-match revocation)
                 // and kick any that never validated (fail closed, r1 find 3).
-                if (Time.unscaledTime - lastSpectateValidateAt > 60f)
+                // MASTER-ONLY cadence (Aug 10 design review finds 15 + fighter
+                // lag): a non-master must not stamp the timer (a fresh master
+                // would inherit it and withhold validations for up to 60s),
+                // and the unvalidated-kick sweep belongs on the same 60s
+                // cadence — it was accidentally running at the full 10 Hz
+                // poll rate, allocating actor arrays on the master every tick.
+                bool specMaster = PhotonNetwork.IsMasterClient;
+                if (specMaster && !lastSpectateWasMaster)
+                {
+                    // Became master mid-room: the validation map is
+                    // master-local state the old master took with it — reset
+                    // and validate immediately so spectator snapshot requests
+                    // are not rejected for the rest of the cadence window.
+                    try { SpectatorSync.MasterResetSpectatorState(); } catch { }
+                    lastSpectateValidateAt = -999f;
+                }
+                lastSpectateWasMaster = specMaster;
+                if (specMaster && Time.unscaledTime - lastSpectateValidateAt > 60f)
                 {
                     lastSpectateValidateAt = Time.unscaledTime;
                     try { ApiClient.SpectateValidateActors(); } catch { }
+                    try { SpectatorSync.MasterSweepUnvalidated(); } catch { }
                 }
-                try { SpectatorSync.MasterSweepUnvalidated(); } catch { }
 
                 // Battle-phase EDGE detection runs BEFORE the throttle (Codex
                 // r3: placed after it, the edge was unreachable during the
@@ -2198,6 +2250,20 @@ namespace CompetitiveRounds
                 photonRoomId = PhotonNetwork.CurrentRoom?.Name ?? "";
                 photonRegion = PhotonNetwork.CloudRegion ?? "";
                 roomJoinTime = DateTime.UtcNow;
+                // Spectate attest edge state is ROOM-scoped (design-review
+                // find 14: joining room B <60s after leaving room A while
+                // both battles were live produced no false->true edge, so B's
+                // whole short first battle was never attested). Same for the
+                // master-seat edge and the snapshot tally counters.
+                lastSpectateAttestAt = -999f;
+                lastSpectateValidateAt = -999f;
+                lastSpectateBattleState = false;
+                spectateAttestEdgePending = false;
+                lastSpectateWasMaster = false;
+                roomSeriesWinsLocal = 0;
+                roomSeriesLossesLocal = 0;
+                roomGamesWonLocal = 0;
+                roomGamesLostLocal = 0;
                 try
                 {
                     string pendingRoom = Plugin.PendingRankedRoom ?? "";
@@ -2494,6 +2560,14 @@ namespace CompetitiveRounds
                 // it silently suppressed the NEXT genuine DC score and the
                 // roomless-recovery watchdog. Single-shot by construction now.
                 LeavingForRanked = false;
+                // Spectate attest edge state dies with the room (find 14's
+                // other half — a stale true battle state from THIS room must
+                // not suppress the next room's first edge).
+                lastSpectateAttestAt = -999f;
+                lastSpectateValidateAt = -999f;
+                lastSpectateBattleState = false;
+                spectateAttestEdgePending = false;
+                lastSpectateWasMaster = false;
                 // Dump per-match perf-patch hit counts so we can verify in the log
                 // which ported patches actually fired this match (and how often).
                 PerfGate.DumpAndReset();
@@ -4009,6 +4083,27 @@ namespace CompetitiveRounds
             else if (matchIsRanked)
             {
                 if (localWon) sessionRankedWins++; else sessionRankedLosses++;
+                // Room-scoped tally for the SPECTATOR snapshot (Aug 10 design
+                // review find 10): a self-contained BO3 count on local
+                // outcomes only. currentSeriesGames* below is entangled with
+                // the async report callback's resets and must not be reused;
+                // these four counters are fed ONLY here (both fighters run
+                // this path) and reset ONLY on actual room join. Display-only:
+                // never reported, never signed, never near ratings or gold.
+                // STRICT 1v1 writers only (r2 find 10: matchIsRanked is also
+                // true for 2v2 cr_ff games flowing through this path — the
+                // snapshot sender would hide them behind its own 1v1 gate,
+                // but the counters themselves must not mutate either).
+                if (!Diag2v2.IsActive())
+                {
+                    if (localWon) roomGamesWonLocal++; else roomGamesLostLocal++;
+                    if (roomGamesWonLocal >= 2 || roomGamesLostLocal >= 2)
+                    {
+                        if (roomGamesWonLocal >= 2) roomSeriesWinsLocal++; else roomSeriesLossesLocal++;
+                        roomGamesWonLocal = 0;
+                        roomGamesLostLocal = 0;
+                    }
+                }
                 // BO3 in-progress: bump the per-series game counter so the HUD
                 // can show "Series: 1-0" the moment game 1 ends, without
                 // waiting for the next /series/active fetch.
@@ -5740,6 +5835,14 @@ namespace CompetitiveRounds
         private static void OnUnityLog(string message, string stackTrace, LogType type)
         {
             if (type != LogType.Log) return;
+
+            // Spectator: the whole log-driven tracker is quiescent (Aug 10
+            // design review find 12 — this listener is registered
+            // unconditionally, so the Poll() quiesce never covered it). Also
+            // bug 193: the MOVE PLAYERS END branch below force-closes the F5
+            // menu at every combat start, which a spectator browsing the menu
+            // has no reason to suffer.
+            try { if (SpectatorSession.IsLocalSpectator) return; } catch { }
 
             // Pick-phase tracking for input-gating (Pacifist / Immovable Object).
             // ROUNDS log sequence each round:
