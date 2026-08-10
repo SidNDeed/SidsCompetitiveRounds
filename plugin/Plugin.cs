@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.0";   // Aug 8: hosted lobbies (2v2/1v2) with kick + member lists, standing admin alerts, chat slur filter, animated cosmetic uploads, body-colour team identity, deep idle, uncut formatted release notes, stats help page, graph redesign + whole-game timelines
+        public const string ModVersion = "1.38.1";   // Aug 10: spectator overhaul (clock/ghost-view/GM_Test desync fixes, fighter-safety, protocol 2, HUD scores + roster), Grow FPS normalization (ranked + consenting private rooms), betting overhaul (lobby-phase bets, 2-point closes everywhere, money-integrity audit), Aug 9 bug batch
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string

@@ -1,6 +1,9 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.38.1 (2026-08-10)
+
+New community cosmetic: **Twisted Topper** (detail slot) joins the shop
+catalog this release.
 
 ### Spectator mode — the desync is fixed (bugs 187/188/190/192/194)
 

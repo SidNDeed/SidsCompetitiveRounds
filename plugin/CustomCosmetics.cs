@@ -209,6 +209,8 @@ namespace CompetitiveRounds
             // extraction: every frame's alpha bbox equals its source frame's and
             // the alpha mismatch is 0 px on all ten.
             new CosmeticDef { Sku = "face_detail_magical_hat",      DisplayName = "Magical Hat",      Slot = CharacterItemType.Detail, PngFile = "detail_magical_hat.png",      Scale = 1.3f, Offset = Vector2.zero, Fps = 2.5f },
+            // v1.38.1: approved placement rev 1 (scale/offset from approved_* columns verbatim).
+            new CosmeticDef { Sku = "face_detail_twisted_topper",   DisplayName = "Twisted Topper",   Slot = CharacterItemType.Detail, PngFile = "detail_twisted_topper.png",   Scale = 1.3f, Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

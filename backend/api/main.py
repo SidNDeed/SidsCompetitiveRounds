@@ -1702,7 +1702,9 @@ _VERSION_GATE_BYPASS = frozenset({
 # SHIP COUPLING (#294): this MUST equal the version that actually ships the
 # reporters. Raising MIN_MOD_VERSION to the same value at release restores
 # betting for everyone; until then old clients simply cannot be bet on.
-LIVE_POINTS_MIN_VERSION = "1.39.0"
+# (Was staged as "1.39.0" before the release was NAMED — Sid named it
+# 1.38.1, so the constant follows the name, exactly the trap #294 predicts.)
+LIVE_POINTS_MIN_VERSION = "1.38.1"
 
 
 async def _live_points_capable(db: AsyncSession, player_ids) -> bool:
@@ -2276,7 +2278,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.0"
+LATEST_MOD_VERSION = "1.38.1"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
