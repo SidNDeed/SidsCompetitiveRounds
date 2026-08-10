@@ -125,3 +125,24 @@ Menu overlay canvas, match found panel split, 3-column leaderboard, Recent Ranke
 
 ### v1.18.4 → v1.18.5
 (see git log for the granular summary — baseline of the ranked queue, Glicko-2, matchmaking, leaderboard tabs)
+
+---
+
+### Archived 2026-08-10 (from TODO.md)
+
+## ✅ v1.38.0 — SHIPPED 2026-08-08
+
+GitHub release live (DLL + cosmetics.zip), backend deployed, migrations
+202-206 applied, release notes posted in en/es/ru for BOTH v1.37.0 and
+v1.38.0, i18n at 0 missing in es/ru. 8 Codex Ultra rounds converged
+16 → 12 → 12 → 7 → 5 → 3 → 1 → 1 (GO-WITH-FIXES, last LOW fixed).
+
+**Delivered:** hosted 2v2/1v2 lobbies (create/browse/join/kick/member lists,
+host-owned settings) replacing the old manual + consent queues · standing
+admin alerts · chat slur filter with escalating auto-mute · animated cosmetic
+uploads (multi-PNG + GIF) · body-colour team identity (server-decided coin
+flip, room-prop distributed) · FFA max card draw · watch buttons on every
+mode tab · LFP mode multi-select + Discord emoji · deep idle · shop New chip
++ on-body preview · admin tab restructure + ban-velocity gate · uncut
+formatted release notes · Stan #178-181 (FFA before/after ratings, /game
+codes, stats help page, graph redesign + whole-game timelines).
