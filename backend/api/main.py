@@ -89,6 +89,7 @@ from schemas import (
     BuildTypeResponse,
     SimilarPlayersResponse,
     SpectateAttestBody,
+    SpectateCloseBody,
     SpectateGrantBody,
     SpectateLeaseBody,
     SpectateValidateBody,
@@ -1479,6 +1480,42 @@ async def queue_cleanup_loop():
                     print(f"[LEASE-CLEANUP] released {n} finished/expired lease(s)")
         except Exception as e:
             print(f"[QUEUE-CLEANUP] lease sweep error: {e}")
+        # ── Spectate game closure (bug 199 adjacent finding) ────────────
+        # Own try/except, same reason as the lease sweep above (#228).
+        #
+        # spectate_games.ended_at was written by NOTHING: 0 of 34 rows carried
+        # it, 33 of them stale. Rows only ever aged out of the list's
+        # last_attest_at freshness filter, which meant (a) the partial unique
+        # index on room_name WHERE ended_at IS NULL was accumulating dead rows
+        # forever, and (b) ended_at could not be trusted as a liveness marker
+        # anywhere else.
+        #
+        # This is the SLOW backstop only. The fast path is the fighters'
+        # explicit /spectate/close on room leave, which is what actually
+        # collapses the "dead room still advertised" window that produced
+        # Sid's two 'Game does not exist' rejoin failures on Aug 11. Deliberate
+        # 10-minute margin against SPECTATE_ATTEST_FRESH_SECONDS (150s): the
+        # list and grant already refuse anything past freshness, so this sweep
+        # changes nothing a player can see and must never race a live room.
+        try:
+            async with async_session() as db:
+                closed = await db.execute(text("""
+                    UPDATE spectate_games
+                       SET ended_at = NOW()
+                     WHERE id IN (
+                        SELECT id FROM spectate_games
+                         WHERE ended_at IS NULL
+                           AND last_attest_at < NOW() - INTERVAL '10 minutes'
+                         FOR UPDATE SKIP LOCKED
+                     )
+                    RETURNING room_name
+                """))
+                _n = len(closed.fetchall())
+                await db.commit()
+                if _n:
+                    print(f"[SPECTATE-CLEANUP] closed {_n} stale game row(s)")
+        except Exception as e:
+            print(f"[SPECTATE-CLEANUP] sweep error: {e}")
         # ── Stranded-bet reconciliation (bet-lifecycle backstop) ────────
         # Wagers can outlive their lobby/series: a closure path without bet
         # handling (the NotNic 500g class), a settle savepoint rollback on a
@@ -9037,6 +9074,17 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 )
                 db.add(series)
                 await db.flush()
+            # Bug 199: same stamp as /queue/ready's both_ready branch — a
+            # resumed series is otherwise invisible on the live surfaces from
+            # room-issue until its first scored point.
+            # RAW UPDATE, not `series.last_activity_at = ...`: the column is
+            # deliberately NOT declared on the RankedSeries model (see the note
+            # there), so an ORM assignment would land in __dict__, emit no SQL,
+            # and raise nothing — a silent no-op. Review round 1 caught exactly
+            # that here.
+            await db.execute(text(
+                "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
+                {"sid": series.id})
             await db.commit()
             # Room JUST issued (gated — this both-ready branch replays every
             # poll until the clients join, Codex find 6) — both players are
@@ -9045,6 +9093,10 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             if room_just_generated:
                 await _evict_other_queue_searching(
                     db, [my_pid, opp["player_id"]], "ranked_queue", "a 1v1 match")
+            # Bug 200: carry the resumed BO3 tally, same shape as the
+            # /queue/ready both_ready branch and the preflight "exists"
+            # response — this poll path hands over a series id just like they
+            # do, and therefore closes the same preflight gate.
             return QueuePollResponse(
                 status="ready_join",
                 wait_time=wait_seconds,
@@ -9055,6 +9107,10 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 room_name=room_name,
                 photon_region=entry["room_region"] or entry["region"] or "us",
                 series_id=str(series.id),
+                p1_steam_id=(steam_id if series.player1_id == my_pid else opp["steam_id"]),
+                p2_steam_id=(opp["steam_id"] if series.player1_id == my_pid else steam_id),
+                p1_wins=series.p1_series_wins,
+                p2_wins=series.p2_series_wins,
             )
 
         # Room already set (by /ready endpoint) but we see it on poll
@@ -9062,6 +9118,13 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
             sid_str = str(series.id) if series is not None else None
             await db.commit()
+            # Bug 200: this branch hands over a series_id too, so it must carry
+            # the resumed tally for the same reason the branch above does.
+            # Round-2 review proved it currently UNREACHABLE (room_name is
+            # nulled by every `ready = false` write, so "room set but not both
+            # ready" cannot arise) — carried anyway so the fields can never go
+            # stale against a future change that makes it reachable. `series`
+            # is nullable here, unlike above, hence the guards.
             return QueuePollResponse(
                 status="ready_join",
                 wait_time=wait_seconds,
@@ -9072,6 +9135,12 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 room_name=room_name,
                 photon_region=entry["room_region"] or entry["region"] or "us",
                 series_id=sid_str,
+                p1_steam_id=(None if series is None else
+                             (steam_id if series.player1_id == my_pid else opp["steam_id"])),
+                p2_steam_id=(None if series is None else
+                             (opp["steam_id"] if series.player1_id == my_pid else steam_id)),
+                p1_wins=(0 if series is None else series.p1_series_wins),
+                p2_wins=(0 if series is None else series.p2_series_wins),
             )
 
         # Waiting for ready-up
@@ -9336,6 +9405,18 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
             db.add(existing_series)
             await db.flush()  # get the new series_id
 
+        # Bug 199: a RESUMED series carries a stale created_at and a stale
+        # newest matches.ended_at, so without this stamp it stays invisible on
+        # the live panel and in the Discord live-bets channel from room-issue
+        # until the first point of the game is scored. Stamped on the
+        # create path too — harmless (the row is new) and it keeps the column
+        # meaningful for every series regardless of how it was born.
+        # RAW UPDATE — see the note on the RankedSeries model: the column is
+        # intentionally unmapped, so an ORM assignment here would be silent.
+        await db.execute(text(
+            "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
+            {"sid": existing_series.id})
+
         await db.commit()
         # Room just issued — the pair is committed to a 1v1 game; drop their
         # searching rows in the other queues. Post-commit, own transaction;
@@ -9343,11 +9424,27 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         if room_generated:
             await _evict_other_queue_searching(
                 db, [player.id, opp["player_id"]], "ranked_queue", "a 1v1 match")
+        # Bug 200: the score MUST ride this payload. The client sets
+        # ActiveRankedSeriesId from series_id, and that assignment closes the
+        # `IsNullOrEmpty(ActiveRankedSeriesId)` gate on both /series/preflight
+        # arming sites — so for game 1 of every queue-issued series the
+        # preflight is structurally unreachable, and its "exists" branch is
+        # the ONLY place the client can learn a resumed BO3 tally. Without
+        # these fields a resumed series renders 0-0 on the HUD.
+        # SHAPE IS DELIBERATELY IDENTICAL to the preflight "exists" response
+        # (p1_steam_id/p2_steam_id/p1_wins/p2_wins) so the client resolves
+        # perspective with ONE shared helper rather than a second copy (#330).
+        _s_p1 = steam_id if existing_series.player1_id == player.id else opp["steam_id"]
+        _s_p2 = opp["steam_id"] if existing_series.player1_id == player.id else steam_id
         return {
             "status": "both_ready",
             "room_name": room_name,
             "photon_region": chosen_region,
             "series_id": str(existing_series.id),
+            "p1_steam_id": _s_p1,
+            "p2_steam_id": _s_p2,
+            "p1_wins": existing_series.p1_series_wins,
+            "p2_wins": existing_series.p2_series_wins,
         }
 
     await db.commit()
@@ -14854,21 +14951,86 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
           -- 'active' with invalidated_at set — it must vanish from the live
           -- list (and the POST rejects it too, same-predicate rule #159).
           AND rs.invalidated_at IS NULL
-          -- "Live" = created recently OR being actively played. The second
-          -- arm keeps a RESUMED cross-session series (created days ago,
-          -- kept active by the resume window) visible while its games are
-          -- actually happening, without surfacing every dormant resumable
-          -- series in the live list for days.
+          -- "Live" = created recently OR played recently OR being played
+          -- RIGHT NOW.
+          --
+          -- Bug 199 (Aug 11): the first two arms alone cannot see a resumed
+          -- cross-session series. An earlier version of this comment claimed
+          -- the ended_at arm "keeps a RESUMED series visible while its games
+          -- are actually happening" — it cannot, and never could: ended_at
+          -- only exists for a COMPLETED game, so that arm covers the two
+          -- hours AFTER a game and never the first resumed one. Spirit vs
+          -- NotNic resumed a 5-day-old BO3 and was invisible on the live
+          -- panel and in the Discord live-bets channel for the entire match,
+          -- both arms being 116h stale (58x the window).
+          --
+          -- The third arm is the fix: last_activity_at is stamped by every
+          -- resume site and by the live-points POST, so "is someone playing
+          -- this right now" is answered by a signal that exists DURING the
+          -- game rather than only before and after it.
+          --
+          -- SIZING THIS WINDOW — read before changing it. The live-points POST
+          -- is NOT sent every point: GameStateWatcher gates it on
+          -- curP1Rounds == 0 && curP2Rounds == 0, which are rounds won in the
+          -- CURRENT game, so it fires only during each game's ROUND 1 and then
+          -- stops for rounds 2-5. The budget this window must cover is
+          -- therefore a whole game minus its first round, plus the inter-game
+          -- gap, before the matches.ended_at arm takes over at game end.
+          -- Longest 1v1 game observed in production is 1085s (~18 min) against
+          -- this 30-minute window. Do NOT tighten it on the assumption that
+          -- points stream continuously — that reintroduces bug 199 mid-game.
+          --
+          -- MIRRORED IN POST /bets — same-predicate rule (#159/#328). If you
+          -- change these arms, change that copy in the SAME commit or the
+          -- panel will advertise a series the endpoint 409s.
           AND (rs.created_at > NOW() - INTERVAL '2 hours'
+               OR rs.last_activity_at > NOW() - INTERVAL '30 minutes'
                OR EXISTS (SELECT 1 FROM matches m2 WHERE m2.series_id = rs.id
-                          AND m2.ended_at > NOW() - INTERVAL '2 hours'))
+                          AND m2.ended_at > NOW() - INTERVAL '2 hours')
+               -- FOURTH ARM — async tournaments (Sid, Aug 11). A bracket match
+               -- is created when the bracket activates and then WAITS for the
+               -- pair to sit down: measured over every tournament series on
+               -- record, the gap from activation to first game was 131h, 163h
+               -- and 1139h. So the 2-hour arm has NEVER once covered real
+               -- tournament play, and betting closed on a 0-0 match nobody had
+               -- touched yet. Sid's rule: a tournament match stays bettable the
+               -- whole time, and closes only through the NORMAL condition (a
+               -- decided game / 2 points scored), which the guards below own.
+               -- BOUNDED BY THE MATCH, NOT JUST THE TOURNAMENT. The first cut
+               -- gated only on the parent tournament's status, and review
+               -- caught that as a money bug: a no-show writes ONLY
+               -- tournament_matches.status ('forfeit' / 'double_forfeit') and
+               -- never touches ranked_series, while _prune_stale_series
+               -- excludes tournaments in both modes — so the series sat
+               -- 'active' at 0-0 with a live parent for the REST of the
+               -- tournament (async deadlines are 7 days PER ROUND), staying
+               -- bettable on a match whose winner had already been announced,
+               -- with no settle path and no refund path. Production already
+               -- holds a double_forfeit row carrying a series_id, so this is
+               -- observed, not theoretical.
+               -- Fail-closed twice over: tournament_id is ON DELETE SET NULL,
+               -- so an orphaned series has a NULL t.status and falls back to
+               -- the three recency arms above.
+               OR (rs.is_tournament = TRUE
+                   AND t.status IS NOT NULL
+                   AND t.status NOT IN ('completed', 'cancelled')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tournament_matches tm
+                        WHERE tm.series_id = rs.id
+                          AND tm.status IN ('completed', 'forfeit',
+                                            'double_forfeit', 'bye_auto'))))
           -- Reject phantom 1v1 series whose only matches were 2v2 misroutes.
           AND NOT EXISTS (
               SELECT 1 FROM matches m
               WHERE m.series_id = rs.id
                 AND LEFT(m.photon_room_id, 5) = 'team_'
           )
-        ORDER BY rs.created_at DESC
+        -- Bug 199: sorting on created_at alone buried a RESUMED series at the
+        -- bottom (its creation date can be days old) and made it the first
+        -- thing truncated once 20 series are live — i.e. it could still have
+        -- been invisible after the liveness fix. Order by most-recent
+        -- activity so an in-progress match always outranks a dormant one.
+        ORDER BY GREATEST(rs.created_at, COALESCE(rs.last_activity_at, rs.created_at)) DESC
         LIMIT 20
     """))).mappings().all()
 
@@ -15268,6 +15430,15 @@ async def series_preflight(
     if existing is not None:
         print(f"[PREFLIGHT-DIAG] reuse: existing active series {existing.id} for {p1_steam_id} vs {p2_steam_id} "
               f"(score {existing.p1_series_wins}-{existing.p2_series_wins})")
+        # Bug 199: stamp the resume. This is the ROOM-CODE resume path, and
+        # room-code games are the majority of ranked 1v1 play (#286) — a
+        # queue-lock-only stamp would have left most resumed series just as
+        # invisible as before.
+        # RAW UPDATE — see the note on the RankedSeries model: the column is
+        # intentionally unmapped, so an ORM assignment here would be silent.
+        await db.execute(text(
+            "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
+            {"sid": existing.id})
         await db.commit()
         # Aug 9 (Sid): a rated ROOMCODE game's only server touchpoints are
         # this preflight and the match report — neither evicted, so both
@@ -15389,7 +15560,19 @@ async def update_live_points(
     _pts = (await db.execute(text("""
         UPDATE ranked_series
            SET live_p1_points = GREATEST(COALESCE(live_p1_points, 0), :p1),
-               live_p2_points = GREATEST(COALESCE(live_p2_points, 0), :p2)
+               live_p2_points = GREATEST(COALESCE(live_p2_points, 0), :p2),
+               -- Bug 199 (migration 215): this POST used to stamp nothing. It
+               -- helps keep a RESUMED cross-session series visible while it is
+               -- being played — created_at and matches.ended_at are both stale
+               -- by construction there.
+               -- It is NOT sent every point: the client gates it on the current
+               -- game being 0-0 in ROUNDS, so it arrives as a burst during each
+               -- game's round 1 and then stops until the next game. The resume
+               -- sites do the rest of the stamping. NOT monotonic-guarded like
+               -- the point columns above: this is wall-clock "something
+               -- happened just now", so a plain NOW() is correct and a late
+               -- duplicate report re-stamping it is harmless.
+               last_activity_at = NOW()
          WHERE id = :sid AND status = 'active' AND invalidated_at IS NULL
         RETURNING live_p1_points, live_p2_points
     """), {"p1": new_p1, "p2": new_p2, "sid": sid})).first()
@@ -15646,12 +15829,47 @@ async def place_bet(
     # Aug 9 bet audit find 4: the listing windows liveness at 2h but the POST
     # accepted any 'active' row forever — mirror the listing's exact predicate
     # (same-predicate rule #159) so a crafted request can't stake a husk.
+    # Bug 199: the last_activity_at arm is mirrored from the listing above
+    # (migration 215). The two predicates must stay byte-identical in shape so
+    # the panel never shows a row this endpoint would 409.
+    #
+    # BETTING SURFACE, stated exactly:
+    #  * RESUMED 1v1 series — no new surface. A resumed BO3 is 1-0/0-1 by
+    #    definition and the decided-game rejection below blocks every one.
+    #  * TOURNAMENT series — deliberately WIDENED (Sid, Aug 11). An async
+    #    bracket match sits at 0-0 for days between activation and the pair
+    #    actually playing (measured: 131h / 163h / 1139h), so the old 2-hour
+    #    arm closed betting on a match nobody had touched and never reopened
+    #    it. Now it stays bettable for that whole wait.
+    #    CLOSES ON EITHER of two things — and it must be both, because the
+    #    guards below can only ever fire for a match that is actually PLAYED:
+    #      (a) the normal condition — a decided game / 2 points scored — owned
+    #          by the guards immediately below; or
+    #      (b) the bracket match reaching a terminal state without being
+    #          played (forfeit / double_forfeit / bye_auto / completed), which
+    #          the NOT EXISTS in the liveness arm owns. An earlier version had
+    #          only (a) and left a forfeited match bettable for the rest of the
+    #          tournament with no settle and no refund path.
+    # The LEFT JOIN exists solely to carry the tournament arm — it must match
+    # the listing's join exactly (same-predicate rule). LEFT, not INNER: a
+    # non-tournament series has a NULL tournament_id and must still be matched
+    # by the three recency arms.
     _live = (await db.execute(text("""
         SELECT 1 FROM ranked_series rs
+          LEFT JOIN tournaments t ON t.id = rs.tournament_id
          WHERE rs.id = :sid
            AND (rs.created_at > NOW() - INTERVAL '2 hours'
+                OR rs.last_activity_at > NOW() - INTERVAL '30 minutes'
                 OR EXISTS (SELECT 1 FROM matches m2 WHERE m2.series_id = rs.id
-                           AND m2.ended_at > NOW() - INTERVAL '2 hours'))
+                           AND m2.ended_at > NOW() - INTERVAL '2 hours')
+                OR (rs.is_tournament = TRUE
+                    AND t.status IS NOT NULL
+                    AND t.status NOT IN ('completed', 'cancelled')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM tournament_matches tm
+                         WHERE tm.series_id = rs.id
+                           AND tm.status IN ('completed', 'forfeit',
+                                             'double_forfeit', 'bye_auto'))))
     """), {"sid": sid})).first()
     if _live is None:
         raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
@@ -32666,6 +32884,71 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
            "roster": req.roster, "phase": req.phase[:16]})
     await db.commit()
     return {"status": "ok"}
+
+
+@app.post("/api/v1/spectate/close", tags=["Spectate"])
+async def spectate_close(req: SpectateCloseBody, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    """A fighter has left the room — retract their attestation, and end the
+    game row once nobody is still attesting.
+
+    WHY (bug 199 adjacent finding, Aug 11): nothing ever wrote
+    spectate_games.ended_at, so a finished match stayed "live" until its
+    last_attest_at aged past SPECTATE_ATTEST_FRESH_SECONDS. Fighters simply
+    stop attesting when they leave, so for up to 150 seconds the games list
+    kept advertising a room Photon had already destroyed — Sid clicked one
+    twice on Aug 11 and got 'Photon join refused (32758): Game does not exist'
+    both times. This collapses that window to the length of one HTTP call.
+
+    SAFE BY CONSTRUCTION: the caller may only retract its OWN attestation, and
+    the row is ended only when no other fighter is still fresh. A modified
+    client therefore cannot close a match it is not in (403), nor one whose
+    other fighters are still playing — an FFA leaver does not end the game for
+    the survivors (#222). Idempotent: closing an already-closed room is 200.
+    """
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    # Same advisory lock key the attest path uses, so a close racing a
+    # concurrent attest from another fighter serializes instead of
+    # interleaving the retract with someone else's refresh.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                     {"k": f"spectate:{req.room_name}"})
+    game = (await db.execute(text("""
+        SELECT id, roster FROM spectate_games
+         WHERE room_name = :room AND ended_at IS NULL
+    """), {"room": req.room_name})).mappings().first()
+    if game is None:
+        # Already closed, or never attested. Nothing to do — and deliberately
+        # NOT a 404: the client fires this on every room leave, including
+        # rooms that never became spectatable at all.
+        return {"status": "ok", "closed": False}
+    if req.steam_id not in _spectate_roster_list(game["roster"]):
+        raise HTTPException(status_code=403, detail="not_a_participant")
+    await db.execute(text("""
+        DELETE FROM spectate_attestations
+         WHERE game_id = :gid AND steam_id = :sid
+    """), {"gid": str(game["id"]), "sid": req.steam_id})
+    _remaining = (await db.execute(text("""
+        SELECT COUNT(*) FROM spectate_attestations
+         WHERE game_id = :gid
+           AND attested_at > NOW() - make_interval(secs => :fresh)
+    """), {"gid": str(game["id"]),
+           "fresh": SPECTATE_ATTEST_FRESH_SECONDS})).scalar() or 0
+    _closed = False
+    if _remaining == 0:
+        await db.execute(text("""
+            UPDATE spectate_games SET ended_at = NOW()
+             WHERE id = :gid AND ended_at IS NULL
+        """), {"gid": str(game["id"])})
+        _closed = True
+    await db.commit()
+    if _closed:
+        # Log the game id, NEVER the room name — the room name IS the join
+        # credential and this module's header states unqualified that it never
+        # reaches a log (design §6.4). This was the only site in main.py that
+        # would have broken that invariant.
+        print(f"[SPECTATE] game {game['id']} closed on last fighter leave")
+    return {"status": "ok", "closed": _closed}
 
 
 @app.get("/api/v1/spectate/games", tags=["Spectate"])

@@ -531,6 +531,20 @@ class QueuePollResponse(BaseModel):
     # set ActiveRankedSeriesId just like the /queue/ready both_ready path, so
     # live-points reporting + bet locking work for poll-discovered matches too.
     series_id: str | None = None
+    # Bug 200 (Aug 11): the resumed BO3 tally, carried alongside series_id.
+    # Setting ActiveRankedSeriesId from series_id closes the
+    # IsNullOrEmpty(ActiveRankedSeriesId) gate on both /series/preflight
+    # arming sites, and the preflight "exists" branch is the only other place
+    # the client can learn a resumed score — so a series resumed through the
+    # queue rendered 0-0 on the in-match HUD. Field names and perspective
+    # semantics MIRROR that preflight response exactly, so the client adopts
+    # with one shared helper instead of a divergent second copy (#330).
+    # Old clients ignore these; a new client against an old server sees None
+    # and behaves exactly as before. Safe in both skew directions.
+    p1_steam_id: str | None = None
+    p2_steam_id: str | None = None
+    p1_wins: int = 0
+    p2_wins: int = 0
 
 
 class QueueDeclineRequest(BaseModel):
@@ -1330,6 +1344,19 @@ class SpectateAttestBody(BaseModel):
     # Sorted comma-joined fighter steam ids — must be byte-identical across
     # all attesters (design §6.3).
     roster: str = Field(default="", max_length=400)
+
+
+class SpectateCloseBody(BaseModel):
+    """Fighter-side 'I have left this room'. Strict-session, and the caller
+    must be in the room's roster — a stranger cannot close someone's game.
+
+    Retracting your OWN attestation is always truthful, so this can only ever
+    remove the caller from the live set; the row itself is ended only once no
+    OTHER fighter is still attesting. That keeps an FFA leaver (whose exit does
+    not end the game, #222) from closing a match the survivors are still
+    playing, while a 1v1 pair walking away ends theirs immediately."""
+    steam_id: str = Field(min_length=1, max_length=32)
+    room_name: str = Field(min_length=1, max_length=64)
 
 
 class SpectateGrantBody(BaseModel):

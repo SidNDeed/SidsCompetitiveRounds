@@ -7051,6 +7051,57 @@ namespace CompetitiveRounds
             ));
         }
 
+        /// <summary>Read a resumed BO3 tally out of any server response carrying
+        /// the {p1_steam_id, p1_wins, p2_wins} shape, resolved to MY perspective.
+        ///
+        /// Three responses emit that shape deliberately identically: the
+        /// /series/preflight "exists" branch, /queue/ready's both_ready, and the
+        /// queue poll's ready_join. Bug 200 was caused by only the FIRST of them
+        /// carrying it — and the queue lock, by assigning ActiveRankedSeriesId,
+        /// closes the IsNullOrEmpty gate that arms the preflight, so for game 1
+        /// of every queue-issued series the preflight is unreachable and a
+        /// resumed series rendered 0-0.
+        ///
+        /// Returns false for a fresh 0-0 series (nothing to adopt) and for an
+        /// old server that omits the fields — an absent p1_steam_id must never
+        /// be treated as "I am not p1", which would invert the score.</summary>
+        public static bool TryResolveResumedScore(string resp, string mySteamId,
+                                                  out int myWins, out int oppWins)
+        {
+            myWins = 0; oppWins = 0;
+            try
+            {
+                int p1w = (int)ExtractJsonFloat(resp, "p1_wins");
+                int p2w = (int)ExtractJsonFloat(resp, "p2_wins");
+                if (p1w <= 0 && p2w <= 0) return false;   // fresh series
+                string sp1 = ExtractJsonString(resp, "p1_steam_id");
+                // Perspective is UNRESOLVABLE without both ids — bail rather
+                // than guess (an old server sends neither).
+                if (string.IsNullOrEmpty(sp1) || string.IsNullOrEmpty(mySteamId)) return false;
+                bool meIsP1 = sp1 == mySteamId;
+                myWins = meIsP1 ? p1w : p2w;
+                oppWins = meIsP1 ? p2w : p1w;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>THE single place a resumed score reaches the HUD and the
+        /// player. Both the preflight path (already in the room) and the
+        /// queue-lock path (via GameStateWatcher's stash, applied on room join)
+        /// funnel through here so the toast can never drift between them.</summary>
+        public static void ApplyResumedSeriesScore(int myWins, int oppWins)
+        {
+            try
+            {
+                GameStateWatcher.AdoptSeriesScore(myWins, oppWins);
+                CompetitiveUI.QueueNotification(
+                    I18n.TrF("Resuming series at {0}-{1}", myWins, oppWins),
+                    new Color(1f, 0.85f, 0.3f), 4f);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SERIES] resumed-score apply failed: {ex.Message}"); }
+        }
+
         /// <summary>Pre-create a ranked_series row on the server for a private-room
         /// match between two ranked-enabled mod users. Idempotent — server reuses
         /// any existing active series for the pair. Without this, private-room
@@ -7152,21 +7203,14 @@ namespace CompetitiveRounds
                         try
                         {
                             string status = ExtractJsonString(resp, "status");
-                            if (status == "exists")
+                            if (status == "exists"
+                                && TryResolveResumedScore(resp, mySteamId, out int myWins, out int oppWins))
                             {
-                                int p1w = (int)ExtractJsonFloat(resp, "p1_wins");
-                                int p2w = (int)ExtractJsonFloat(resp, "p2_wins");
-                                if (p1w > 0 || p2w > 0)
-                                {
-                                    string sp1 = ExtractJsonString(resp, "p1_steam_id");
-                                    bool meIsP1 = sp1 == mySteamId;
-                                    int myWins = meIsP1 ? p1w : p2w;
-                                    int oppWins = meIsP1 ? p2w : p1w;
-                                    GameStateWatcher.AdoptSeriesScore(myWins, oppWins);
-                                    CompetitiveUI.QueueNotification(
-                                        I18n.TrF("Resuming series at {0}-{1}", myWins, oppWins),
-                                        new Color(1f, 0.85f, 0.3f), 4f);
-                                }
+                                // This path is already IN the room, so adopting
+                                // immediately is safe — nothing resets the tally
+                                // afterwards. The queue-lock path is not, and
+                                // stashes instead (see StashResumedSeriesScore).
+                                ApplyResumedSeriesScore(myWins, oppWins);
                             }
                         }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[PREFLIGHT] score adopt failed: {ex.Message}"); }
@@ -7789,6 +7833,13 @@ namespace CompetitiveRounds
                             // v1.22 — server now pre-creates the ranked_series and returns its id.
                             // Stash it so live-points reports during game 1 can address the right series.
                             ActiveRankedSeriesId = ExtractJsonString(response, "series_id");
+                            // Bug 200: the server may have RESUMED an undecided BO3
+                            // rather than creating a fresh one. Staging the tally
+                            // here (not adopting) is required — the room-join reset
+                            // runs after this and would zero it.
+                            if (TryResolveResumedScore(response, MatchTracker.LocalSteamId,
+                                                       out int _rmw, out int _row))
+                                GameStateWatcher.StashResumedSeriesScore(room, _rmw, _row);
                             if (!string.IsNullOrEmpty(room))
                             {
                                 IsQueuePolling = false;
@@ -7865,6 +7916,12 @@ namespace CompetitiveRounds
                             // and the betting lock logic ran blind (#36).
                             string sid = ExtractJsonString(response, "series_id");
                             if (!string.IsNullOrEmpty(sid)) ActiveRankedSeriesId = sid;
+                            // Bug 200: parity with the /queue/ready both_ready
+                            // path — this poll branch hands over a series id the
+                            // same way, so it must carry a resumed tally too.
+                            if (TryResolveResumedScore(response, MatchTracker.LocalSteamId,
+                                                       out int _pmw, out int _pow))
+                                GameStateWatcher.StashResumedSeriesScore(room, _pmw, _pow);
                             IsQueuePolling = false;
                             CurrentQueueState = QueueState.Idle;
                             LastPollData = null;
@@ -16645,6 +16702,40 @@ namespace CompetitiveRounds
                 {
                     if (!ok && !resp.Contains("HTTP 4"))
                         Plugin.Log.LogInfo($"[SPECTATE] attest failed (transport): {resp}");
+                }));
+        }
+
+        /// <summary>Tell the server this fighter has left the room, so the
+        /// spectate row can be closed instead of aging out.
+        ///
+        /// WHY (bug 199 adjacent finding): nothing ever wrote
+        /// spectate_games.ended_at — fighters just stopped attesting, and the
+        /// row stayed listed until last_attest_at aged past the 150s freshness
+        /// window. For up to two and a half minutes the games list advertised a
+        /// room Photon had already destroyed, which is what produced the
+        /// "Photon join refused (32758): Game does not exist" rejoin failures.
+        ///
+        /// Fire-and-forget and deliberately unconditional on room type: the
+        /// server 200s with closed:false for a room that was never spectatable,
+        /// so the client needs no knowledge of whether this room had a row.
+        /// The server only ever retracts THIS caller's attestation, and closes
+        /// the row solely when no other fighter is still fresh.</summary>
+        public static void SpectateClose(string roomName)
+        {
+            if (string.IsNullOrEmpty(roomName) || Plugin.Instance == null) return;
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken)) return;   // strict-session endpoint
+            string json = "{"
+                + $"\"steam_id\":\"{Escape(sid)}\","
+                + $"\"room_name\":\"{Escape(roomName)}\""
+                + "}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/spectate/close", json,
+                (ok, resp) =>
+                {
+                    if (!ok && !resp.Contains("HTTP 4"))
+                        Plugin.Log.LogInfo($"[SPECTATE] close failed (transport): {resp}");
                 }));
         }
 

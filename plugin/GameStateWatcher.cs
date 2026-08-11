@@ -710,7 +710,50 @@ namespace CompetitiveRounds
         {
             currentSeriesGamesWon = Mathf.Max(0, myWins);
             currentSeriesGamesLost = Mathf.Max(0, oppWins);
-            Plugin.Log.LogInfo($"[SESSION] Adopted resumed series score {currentSeriesGamesWon}-{currentSeriesGamesLost} from preflight");
+            Plugin.Log.LogInfo($"[SESSION] Adopted resumed series score {currentSeriesGamesWon}-{currentSeriesGamesLost}");
+        }
+
+        // ── Resumed-series handoff from the QUEUE LOCK (bug 200) ────────────
+        // The queue lock learns the resumed BO3 tally BEFORE the room is
+        // joined, and the room-join branch below unconditionally zeroes the
+        // tally ("Fresh room = new series") — so calling AdoptSeriesScore at
+        // lock time would be wiped a moment later. Stash it here and consume it
+        // inside that reset, which is the only ordering that survives.
+        //
+        // Keyed on the ROOM NAME the lock told us to join, NOT on the series id
+        // alone: ActiveRankedSeriesId survives a failed join (it is cleared on
+        // room LEAVE), so a series-id-only guard could paint a stale "1-0" onto
+        // an unrelated room the player joined next — including a casual one.
+        private static string pendingResumedRoom = "";
+        private static int pendingResumedMyWins = 0;
+        private static int pendingResumedOppWins = 0;
+
+        /// <summary>Stage a resumed BO3 tally learned at queue-lock time, to be
+        /// applied when (and only when) we actually join that room.</summary>
+        public static void StashResumedSeriesScore(string roomName, int myWins, int oppWins)
+        {
+            if (string.IsNullOrEmpty(roomName)) return;
+            pendingResumedRoom = roomName;
+            pendingResumedMyWins = Mathf.Max(0, myWins);
+            pendingResumedOppWins = Mathf.Max(0, oppWins);
+            Plugin.Log.LogInfo($"[SESSION] Resumed series {pendingResumedMyWins}-{pendingResumedOppWins} staged for room {roomName}");
+        }
+
+        /// <summary>Consume the queue-lock stash, one-shot, and only for the
+        /// exact room it was staged for.</summary>
+        private static void TryConsumePendingResumedScore(string joinedRoom)
+        {
+            if (string.IsNullOrEmpty(pendingResumedRoom)) return;
+            if (string.IsNullOrEmpty(joinedRoom) || joinedRoom != pendingResumedRoom)
+            {
+                // Joined a different room than the one this was staged for —
+                // it can never apply. Drop it so it cannot leak into a later room.
+                pendingResumedRoom = "";
+                return;
+            }
+            int my = pendingResumedMyWins, opp = pendingResumedOppWins;
+            pendingResumedRoom = "";   // one-shot, before the apply
+            if (my > 0 || opp > 0) ApiClient.ApplyResumedSeriesScore(my, opp);
         }
         /// <summary>v1.29 (#42): the server refused a ranked series for this
         /// pairing (one side has ranked explicitly disabled). Flip the match
@@ -2424,6 +2467,11 @@ namespace CompetitiveRounds
                 // session game / series tallies stay (they're cumulative).
                 currentSeriesGamesWon = 0;
                 currentSeriesGamesLost = 0;
+                // Bug 200: ...unless the queue lock staged a RESUMED series'
+                // tally for THIS room. Must run after the zeroing above, never
+                // before — that ordering is the whole reason the score is
+                // stashed rather than adopted at lock time.
+                TryConsumePendingResumedScore(photonRoomId);
                 ovtSoloWins = 0; ovtDuoWins = 0;   // review [4]: 1v2 banner tally
                 Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
                 // Republish all local cosmetic props on every room join. Photon
@@ -2523,6 +2571,16 @@ namespace CompetitiveRounds
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
+                // Bug 199 adjacent: retract this fighter's spectate attestation
+                // so the room stops being advertised the moment it dies, rather
+                // than lingering for the 150s attest-freshness window and
+                // handing clickers a "Game does not exist" join failure.
+                // Spectators are excluded — they were never in the roster, so
+                // the endpoint would just 403 them.
+                if (!RoomActors.LocalIsSpectator)
+                {
+                    try { ApiClient.SpectateClose(photonRoomId); } catch { }
+                }
                 // A series id is only meaningful for the pairing it was preflighted
                 // for. Carrying it across rooms would let the ranked-override at
                 // report time force-rank a later casual game vs an unrelated
@@ -3348,8 +3406,15 @@ namespace CompetitiveRounds
                     if (TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points))
                         StampPointTime();
                     // v1.22 — report live points to the server during ranked games so betting
-                    // locks once 2 points are scored in game 1. Only fires while we're in the
-                    // first match of a series (p1Rounds + p2Rounds == 0) to keep traffic low.
+                    // locks once 2 points are scored in game 1.
+                    // CADENCE, precisely (the old comment here said "only while we're in the
+                    // first match of a series", which is wrong): curP1Rounds/curP2Rounds are
+                    // rounds won in the CURRENT game, and GM_ArmsRace.ResetMatch zeroes them on
+                    // every rematch — so this re-arms at the start of EVERY game and fires only
+                    // during that game's ROUND 1, then stops for rounds 2-5. That is what caps
+                    // the stored point sum at 2 (1-1) and makes the bet lock work.
+                    // Bug 199 depends on this too: it is also the last last_activity_at stamp a
+                    // game produces, so the liveness window must cover a whole game, not a round.
                     if (matchIsRanked && curP1Rounds == 0 && curP2Rounds == 0
                         && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
                         && !string.IsNullOrEmpty(LocalSteamId))

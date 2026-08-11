@@ -326,6 +326,31 @@ class RankedSeries(Base):
     # Private rooms (set by /series/preflight when room name doesn't start
     # with "ranked_") — bets are locked, not surfaced on Live Ranked Games.
     is_private = Column(Boolean, nullable=False, default=False)
+    # NOT DECLARED HERE ON PURPOSE: ranked_series.last_activity_at (migration
+    # 215, bug 199). It exists in the DB and is read by the liveness predicates
+    # in GET /series/active and POST /bets, but it is written ONLY through raw
+    # `UPDATE ranked_series SET last_activity_at = NOW()` statements.
+    #
+    # Two reasons. (1) Declaring it would add the column to every
+    # `select(RankedSeries)` column list, so an API deployed ahead of migration
+    # 215 would ALSO 500 on match report, report-dc and admin reversal. Note
+    # what this does NOT buy: the column is already read AND written in raw SQL
+    # at six sites, so a pre-migration API 500s on /series/active, /bets,
+    # live-points, /series/preflight (resume branch) and BOTH queue both_ready
+    # branches regardless — and because the queue stamps sit before their
+    # commits, room issuance rolls back with them, i.e. no ranked match can be
+    # formed at all. Leaving it unmapped narrows the blast radius; it does not
+    # make the deploy order optional. See the DEPLOY ORDER note in
+    # backend/sql/215_series_last_activity.sql. (2) Nothing else needs it in
+    # Python.
+    #
+    # THE TRAP THIS NOTE EXISTS TO CLOSE: because Base is a plain
+    # DeclarativeBase with no __slots__, `series.last_activity_at = x` on an
+    # instance is NOT an error — it lands in __dict__, emits no UPDATE, and
+    # raises nothing. The first version of the bug-199 fix did exactly that at
+    # three sites and was silently inert; only cold review caught it. If you
+    # need to stamp it, use raw SQL. (Compare the tournament_id note above:
+    # that one at least failed loudly, as a constructor kwarg.)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
