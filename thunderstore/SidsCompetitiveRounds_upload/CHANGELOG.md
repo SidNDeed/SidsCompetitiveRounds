@@ -1,3 +1,39 @@
+## v1.38.3 (2026-08-11) — Ukrainian + Swedish
+
+Two new full mod languages, plus first-of-its-kind base-game localization.
+
+- **Ukrainian (Українська) and Swedish (Svenska)** join English, Spanish and
+  Russian as complete mod languages: every UI string (1,708 keys per
+  language), machine-drafted, independently reviewed, seeded into the
+  translation portal for community moderation, and selectable from the
+  first-launch prompt or Settings.
+- **The base game itself speaks Ukrainian and Swedish now.** ROUNDS ships 9
+  official languages — Ukrainian and Swedish are not among them (the vanilla
+  files even contain an unused "Svenska" label, so this one is overdue). With
+  the mod language set to uk/sv, all 242 vanilla strings — menus, prompts,
+  card names and descriptions — render translated via a runtime-injected
+  locale. Fully reversible, zero effect on any other language setting, and
+  card text in the mod's own panels follows automatically.
+- **Release notes in four languages**: every release's notes are now
+  published in es/ru/uk/sv (machine-translated, labeled as such), and the
+  current three releases were back-filled.
+- Translation portal upgrades that came out of the review rounds: base-game
+  strings are moderatable with their table/entry context shown (including
+  Landfall's own translator notes), stale proposals against reworded English
+  are refused at approval, and the shop-string snapshot now has a proper
+  refresh tool.
+- **Ukrainian and Swedish chat channels** join the in-game chat split: pick
+  them in the chat view/typing pickers, and messages bridge to the matching
+  Discord rooms (English/Spanish/Russian unchanged).
+- Spanish/Russian catch-up: 13 recently-added strings (lobby betting, new
+  shop cosmetics) translated, plus consistency fixes from the review pass.
+
+Known limits, accepted for this release: a language chat channel that has
+been quiet for a while can look empty when you switch to it (the in-game log
+keeps one shared 60-message buffer; the server still has the history), and
+changing ROUNDS' own language from the vanilla Options screen during the
+few seconds the mod is setting up uk/sv will not stick.
+
 ## v1.38.2 (2026-08-11)
 
 Mini-release: the Aug 11 playtest minor-bug batch (spectator polish + portal
@@ -997,252 +1033,6 @@ Schema changes: migration **166** (`ffa_lobbies.host_player_id` + open-lobby ind
   title from the `/faq` list used to fail for every topic because the matcher
   only understood natural questions.
 
-## v1.35.0 — 2026-07-28 — NEW MODE: Free-For-All, rank ladder reorganization, 1v2 overhaul
-
-### Rank reorganization (July 28, round 3)
-- **New rank ladder** (community proposal): tier-group floors move to
-  Intermediate **1500**, Advanced **1675**, Master **1980** — Grand Master stays
-  **2330** — and the sub-tiers widen toward the bottom so early ranks are
-  meaningful climbs (Beginner I is now 0-1139 instead of a 16-point sliver).
-  Every tier spells out its numeral: Beginner I-V, Intermediate I-V, Advanced
-  I-V, Master I-V, Grand Master I-V.
-- **Discord roles follow automatically** once the new `/setup-rank-roles`
-  command has been run (renames the existing 25 roles in place — colors,
-  position and members are preserved — then the regular role sync re-sorts
-  everyone onto their new rung within ~30 minutes).
-- **Rating-history graph** (Leaderboard tab, player detail): the reference
-  lines now sit on the tier boundaries — 1139 (top of Beginner I), then the
-  1500 / 1675 / 1980 / 2330 tier floors — colored to match the Discord rank
-  families.
-- **Master achievement** now unlocks at **1980** (the new Master I floor), and
-  everyone whose peak 1v1/2v2 rating already clears it gets it backfilled with
-  its full 500g reward.
-- **Opponent-tier reward multipliers** track the new floors (a 1990-rated
-  opponent now pays Master-tier gold/XP, matching their displayed rank).
-
-### FFA — bigger maps for bigger lobbies (July 28, round 3)
-- **Maps now scale up 3% per player above 4** (a 10-player lobby plays on a
-  ~18% larger arena). The whole world scales together — platforms spread out
-  and grow, the camera zooms to match, and the kill boundary moves out
-  proportionally — so the game feels identical, just roomier. The factor is
-  published by the lobby master each round, so every client plays the exact
-  same map. 4 or fewer players = exactly vanilla.
-
-### Queues — 30-minute cap + ghost cleanup (July 28, round 3)
-- **Queue searches now cap at 30 minutes** in every mode (1v1, 2v2, 1v2, FFA).
-  If you hit the cap you get a clear in-game notice — rejoin if you're still
-  around. No more all-afternoon phantom queue entries.
-- **Fixed the 2v2 queue cleanup crash**: the background sweeper had been dying
-  every tick since July 27 on a Postgres locking error, so crashed clients'
-  queue rows were never removed — that's how one player showed "285 minutes in
-  queue" on the 2v2 tab, and how stale rows made custom lobbies look fuller
-  than they were. The sweeper is fixed AND each cleanup now runs isolated so
-  one failure can never kill the others again.
-- **The 2v2 tab only lists players whose game is actually polling** — ghost
-  rows can no longer appear as live queuers (this is what made "4 people in a
-  custom lobby" not match: some of the four were ghosts).
-
-### NEW MODE: Free-For-All (3-10 players) — RANKED
-The FFA tab (under Multiplayer) is live, hardened across two July 28 playtest
-rounds (fix batches below). Big-lobby edge cases will still surface — please
-keep filing bug reports with logs attached.
-- **Queue:** joining is consent — no rating band, no ready-up. Once 3 people are
-  searching a 25-second gather window opens so more can pile in, up to 10; a full
-  lobby starts immediately.
-- **The game:** everyone is their own team. Last player standing takes a half
-  point, 2 half points make a point, first to 5 points wins. A player leaving
-  does not end the match — the survivors play on, and the leaver keeps their
-  tallies for placement.
-- **Live standings:** a vanilla-style top-left scoreboard — one row per player
-  in their colour, a full dot per point and a half dot for a held half point.
-  The outright leader wears the crown; tied leaders do not.
-- **Simultaneous card picks:** everyone picks at the same time during the opening
-  draw, and after each point everyone who did not take it picks together
-  again — no more sitting through a 10-player pick queue. Picks are synchronised
-  so every client applies the same cards. Nothing is ever picked FOR you: the
-  window stays open at least 45 seconds, extends while picks come in (90s cap),
-  shows a live countdown, and missing it just means no card that cycle.
-- **Placement tie-breaks:** points, then all half points earned across the game
-  (spent ones included), then total kills.
-- **Rolling 5-card cap:** your 6th pick pushes out your oldest card, Rolling Card
-  Bar style. Your own card bar shows your live deck; hold Tab for everyone's.
-- **Ranked from day one:** every match moves a real FFA rating, bounded so a
-  10-player game cannot swing your rating several times harder than a 3-player one.
-  Placement earns XP and gold — more players beaten, more XP, plus a winner bonus.
-- **FFA leaderboard** (sortable by rating, games, wins, top-3s, average placement,
-  win rate) and a **Recent Ranked FFAs** panel showing every player's placement,
-  rounds, points and rating change, plus cards for the top three finishers.
-
-### 1v2
-- **Separate Solo and Duo leaderboards.** 20 solo wins and 20 duo wins are not the
-  same achievement, so they no longer share a board — and you only appear on a
-  board for a role you have actually played. Each board's W-L counts only that
-  role's games, sorted by wins, then win rate, then games played.
-- **New "Recent 1v2 Games" panel:** recent series with per-game scores, per-player
-  cards, and the gold/XP each player earned.
-- **The duo now spawns together.** One duo member was spawning next to the solo —
-  in the spot a 2v2 teammate takes — while their partner stood alone across the
-  map. The solo now gets one side to themselves and the duo share the other.
-- **The second duo player gets their character back at the card-pick screen.** The
-  base game only ever shows one character per round pick, which is fine for 1v1;
-  with two losers, the second person picked in front of an empty stage. Everyone
-  picking now gets their own body, face and colour. *(This also fixes 2v2, where
-  the first picker was being shown the wrong player's character entirely.)*
-- **My Stats lists your 1v2 opponents** instead of a bare "Casual 2W-0L". 1v2 games
-  were being counted as casual with no opponent rows at all; they now have their
-  own 1v2 line in Session Info and list everyone you played, with your duo partner
-  shown as "w/ Name" the way 2v2 does.
-- **The in-game top line no longer claims a 1v2 is RANKED** and no longer names just
-  one opponent. It reads "1v2 BETA - Unranked" with the real 1v2 series score and
-  every player in the room.
-- Equipped title colours now tint player names on the 1v2 boards.
-
-### Menus
-- **Mouse-wheel scrolling is 3x faster everywhere.** It was slow enough that people
-  were click-dragging every list instead.
-- **Leaderboard click-drag scrolling should be smoother.** The scroll views were
-  using a stencil mask, which forces an extra render pass and breaks batching
-  across ~100 leaderboard rows; they now use rect clipping.
-- **Non-Latin name support has been rebuilt, but the new path has not been tested
-  in-game yet.** The old one could never have worked on this version of the game.
-  The replacement loads fonts directly from your system: Latin-extended, Greek and
-  Cyrillic are prepared up front, Chinese, Japanese and Korean are added when those
-  fonts are installed, and anything else is filled in as it appears. Please report
-  any names still showing as empty boxes.
-- **New Info buttons on the 2v2, 1v2 and FFA tabs** explaining how each mode works
-  and what every leaderboard column means — including FFA's AvgPl and 2v2's Gold,
-  XP and Avg Mate Elo. The info popup, Tournaments included, is bigger with
-  bigger text.
-- **1v2 and FFA tab text enlarged** to match the rest of the menus, with rows,
-  buttons and columns resized to suit.
-
-### Base-game bug fixes
-- **Post-death knockback and damage-over-time no longer spam console errors.** The
-  base game fires those at players it has already deactivated; harmless, but it
-  buried real errors in every log.
-- **Cosmetic auras and colour tints no longer silently skip a round** when their
-  refresh landed while you were still dead between rounds.
-- **Card-effect cleanup between games now runs a second, correctly-timed pass.**
-  The old sweep ran before the game tore down the previous game's card objects, so
-  a broken card effect (the Shield Charge class of bug) could stay broken for a
-  full game after a rematch.
-
-### Server
-- The server now records FFA queues and lobbies, match results, each player's stats
-  and cards, FFA ratings, and FFA-specific Gold/XP totals.
-- It now powers FFA matchmaking, result reporting, leaderboards and recent games,
-  plus 1v2's recent-games panel and the separate Solo/Duo boards.
-- FFA reports must match the active lobby's locked players, player count and slots.
-  The server also requires one unique winner at exactly 5 points and rejects
-  totals above the mode's ceilings, so a result cannot silently drop the players
-  who beat you. Kill counts are stored per player and break placement ties.
-- Schema: migration 160 backfills the Master achievement (+500g) for peak
-  ratings already at or above the new 1980 floor.
-
-### FFA — second-playtest round (July 28, round 2)
-- **Recent Ranked FFAs got the full treatment:** per-player rows with score
-  dots (points as full dots, leftover half points as half dots with a count),
-  kills, gold/XP earned, equipped titles, each player's cards on their own
-  line with rolled-off cards in red, a game-ID copy button, and a
-  score-progression graph on hover (new games record a half-point timeline).
-- **Winner rewards scale with lobby size:** the winner's XP/gold multiplier
-  is x1.5 in a 3-player game growing to x5 in a full 10-player lobby.
-- **FFA betting:** spectators can bet gold on any active FFA lobby from the
-  FFA tab. Field odds come from FFA Glicko ratings (RD-aware); payouts scale
-  with lobby size up to x5; uncertain ratings restrict betting, stakes are
-  refunded if a lobby dies before the game reports.
-- **Discord bot finally knows FFA exists:** queue beacon pings, a result
-  embed per ranked FFA (placements, points, kills, rating moves), and the
-  FAQ no longer claims FFA is "in design".
-- **Player profiles show every mode:** clicking a leaderboard player now has
-  1v2, 2v2 and FFA history sections alongside the 1v1 one (FFA rows carry
-  player count, placement, rating move, date and the field).
-- **Session Info records FFAs** (bug #106) — games, placements and
-  per-opponent tallies.
-- **Cross-machine cosmetics fix** (bug #102): the base game sends faces via
-  an unbuffered network event at spawn time, so clients still loading missed
-  early spawners' faces/cosmetics forever. Everyone re-sends theirs once the
-  FFA game starts.
-- **No more 2-player "FFAs"** (bug #104): leavers dropping the room below 3
-  end the sitting after the current game.
-- **Achievements only evaluate in competitive rooms** (bug #101): public
-  quickplay could award input-tracked achievements (Instinct and friends)
-  because the violation detectors never ran there. The one confirmed-false
-  unlock was revoked.
-- **Hold-Tab board no longer clips wrapped card lists** (bug #107), and the
-  FFA leaderboard highlights the active sort column (the sorts themselves
-  were working — with three players the order just rarely changes).
-- Names using math-symbol Unicode (the boxes on leaderboard #47) render now:
-  the font fallback chain gained Segoe UI Symbol / Cambria Math.
-
-### FFA — first-playtest fixes (July 28)
-- **Nobody's card is ever force-picked again.** The first build auto-picked your
-  highlighted (first) card after 25 seconds, which looked exactly like "someone
-  spamming space picks everyone's first card" (reports 92-98). Auto-pick is gone;
-  see the pick-window rules above.
-- **A leaver no longer strands the survivors in slow motion** (reports 99/100).
-  The base game keeps the departed player's destroyed object in its player list
-  and the next transition crashed on it before restoring game speed or reviving
-  anyone. Departed players are now cleanly removed on every client, the
-  transition survives errors, and the sync-up wait can no longer hang forever.
-- **Hold-Tab board:** card names render in consistent CAPS, and hovering a card
-  name shows its card art.
-- The mode info popups no longer describe reporter internals, and the in-game
-  language is half points / points everywhere.
-- **Cross-review hardening** (adversarial review of the fix batch): the server
-  no longer rejects honest long games (the half-point ceiling ignored that
-  everyone's banked half is wiped when any player converts a point); a member
-  quitting mid-sitting no longer closes the lobby out from under the
-  survivors' reports; rematch reports after a hard disconnect still cover the
-  frozen roster, with the departed member held as a zero-tally "ghost" who is
-  neither rated nor rewarded for games they never played; a winner who closes
-  the game instantly after clinching still gets the match reported; and the
-  end-of-game placement toast now counts leavers you didn't beat.
-
-## v1.34.5 — 2026-07-27 — attempted base-game bug fixes, menu overhaul, security batch
-
-### Base-game bugs — ATTEMPTED FIXES, PLEASE REPORT BACK
-These target bugs in ROUNDS itself, found by reading the game's own code. They are
-**not confirmed fixed in live play yet** — they have had almost no play-testing, so
-treat every one as "should be better, tell us if it isn't". They only apply in
-competitive rooms and sandbox, never in public quickplay. If you still hit any of
-these (or see something NEW go wrong around them), please file a bug report from the
-Settings tab with your log attached — that is what turns these into confirmed fixes.
-- **Demonic Pact should stop breaking Spray in later games.** The game copies Demonic Pact's "no holding the trigger" flag onto your gun and never clears it between games in the same room — so picking Spray in any later game fired one shot per click instead of spraying. The flag is now reset between games. *(Cause confirmed in the game's files; the fix itself still needs play-testing.)*
-- **Poison "ghost damage" attempt.** Occasionally a poisoned player's own health bar stopped tracking ticks that everyone else saw land (you could still hear them). Best theory: each player's copy of the game decides separately whether a tick lands during a block window, and the copies can disagree. Ticks should now land consistently on every screen. Players holding Decay are deliberately exempt so blocking mid-spread still works exactly like the base game.
-- **Drill bullets fired against a wall should no longer be invisible to other players.** The game moves the wrong object when a drilled bullet comes out the far side; the mod now moves the actual bullet on everyone else's screen. *(Lowest confidence of the five — please report whether it still happens.)*
-- **Killing your opponent during the end screen should no longer corrupt the next game** (the missing map / undespawned body / death-to-nothing sequence). Kills and damage-over-time ticks that arrive after the game has already ended are now ignored.
-- **Chase's card text no longer advertises "+30% Health".** The bonus is dead data inside the game files — it was never actually applied to anyone. The card's real effect (a speed boost while heading at a visible opponent) is unchanged; only the phantom line is removed. *(This one is a display-only change and is safe.)*
-
-### Cosmetics — new community art
-- **Ballooniphones** and **Soda Helm**, both by their artist through the full upload → placement review → release pipeline. They ship at the exact scale and position that were approved in-game. The artist opens sales from the Artist tab when ready.
-
-### Menus
-- **Tournaments tab no longer paints text over itself on smaller/wider windows.** The long "How It Works" and prize blocks moved behind two buttons that open a scrollable popup, and the whole left column scrolls now.
-- **Settings tab reorganized** into Data & Privacy / Interface / Visuals & Effects, and every description now sits directly UNDER the setting it describes (bug #87 — they used to hug the button above them).
-- **The in-match ranked line now reads "Series Score: X - X (Total Series X - X)"** where Total Series is your lifetime series record against the CURRENT opponent — replacing the confusing rolling "session" tally.
-
-### Cosmetics — artist workflow
-- **The placement drag in the artist/admin preview is now a visual aid only — it is never saved.** New cosmetics spawn centered and players position them in the character editor; already-shipped items keep their approved placements.
-
-### Chat
-- If secure chat can't connect on your network, chat falls back for that session instead of silently eating your messages (the rest of the mod already did this).
-
-### Server & security
-- Fixed a matchmaking deadlock where two players polling at the same instant could briefly wedge the 1v1 queue, plus a batch of queue-lock hardening across 1v1/2v2/1v2.
-- **Leaving a queue now waits for the server to confirm.** If the leave request failed (bad connection, a busy moment), the mod used to show you as out while your slot stayed live server-side — which could lock other players into a lobby with a ghost. All three queues (1v1, 2v2, 1v2) now show "Leaving queue...", retry the request, and only then finish; joining again is held off for the moment it takes the leave to resolve.
-- **A match result is no longer wedged by a disconnect forfeit or an admin correction arriving at the same moment.** If the last game of a series was reported at the same instant something else finished that same series, the two could block each other and one would lose — and when that was the match report, a real game silently didn't count. The result-writing paths (match reports, forfeits, admin resolve/reverse, the ratings rebuild) now claim their records in one consistent order in both 1v1 and 2v2, so they wait their turn instead of colliding.
-- **An admin correction can no longer be half-undone by a match report landing at the same time.** Reversing a series while its final game was still being processed could leave the rating change applied anyway, and could hand out a title for a win that had just been taken back. The rating step now re-checks that the series still stands before it applies anything.
-- **A problem paying out bets can no longer take the match result down with it.** Bet settlement is now isolated in 1v1 the way it already was in 2v2: if it fails, the game still counts and the ratings still apply.
-- Admin actions now use a separate secret that does not ship inside the mod — previously anyone who unpacked the DLL could forge admin requests.
-- Session checks extended across cosmetic equips, privacy toggles, blocks, and queue actions; bans now also revoke live sessions and stop new ones from being minted.
-- Deleting your data now also clears 2v2/1v2 queue entries and login sessions, and declining a match is validated against who you're actually matched with.
-- The API's public documentation pages were turned off and the minimum supported mod version was raised to 1.33.0 (older clients get the update prompt).
-
-### Schema changes
-- `151_steam_auth_arming.sql` — adds `players.steam_auth_seen_at` (monotonic steam-auth arming) with a backfill from surviving verified sessions. Applied 2026-07-27.
-- `152_ban_session_cleanup.sql` — one-time revocation of sessions held by already-banned accounts. Applied 2026-07-27.
-- `153_release_ballooniphones_soda_helm.sql` — publishes the two community face cosmetics bundled in this release, guarded against a post-bundle placement revision. Applied 2026-07-27.
 
 ---
 
