@@ -308,6 +308,28 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Aug 11 r3 HIGH — an OBSERVER seat must be structurally unable
+    /// to originate a death. Vanilla DoDamage broadcasts RPCA_Die(All) /
+    /// RPCA_Die_Phoenix from ANY replica whose local health crosses zero
+    /// (HealthHandler.cs:286-294, no ownership check), and a spectator's
+    /// replica health can diverge from the fighters' (degraded local bullet
+    /// sim against buried objects; the poison display path's bounded stale
+    /// residual) — so a legitimate later hit could cross zero HERE while the
+    /// real fighter survives, killing them for everyone. Forcing lethal=false
+    /// makes vanilla's own clamp (health >= 1) run first and the death branch
+    /// unreachable, for EVERY damage path on this seat. Real deaths still
+    /// render: fighters' seats broadcast the die RPCs, which call the death
+    /// path directly, never through DoDamage. Fighter seats untouched.</summary>
+    [HarmonyPatch(typeof(HealthHandler), "DoDamage")]
+    internal static class Spectator_NonLethalDamage_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static void Prefix(ref bool lethal)
+        {
+            try { if (RoomActors.LocalIsSpectator) lethal = false; } catch { }
+        }
+    }
+
     /// <summary>Aug 10 root cause D1b: with GameManager.isPlaying false,
     /// vanilla Map.Awake activates GM_Test (test-map mode). GM_Test.OnEnable
     /// subscribes a PlayerDied handler that teleport-revives dead fighter

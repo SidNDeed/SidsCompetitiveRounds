@@ -2630,6 +2630,10 @@ namespace CompetitiveRounds
                 string stampHex=SafeHexColor(player.color_hex);
                 Color dotColor=FfaPlayerColor(player.slot);
                 if(stampHex!=null&&ColorUtility.TryParseHtmlString(stampHex,out Color stamped))dotColor=stamped;
+                // Aug 11 review find: dots keep the RAW stamp (graph/dot
+                // identity match), but TEXT gets the lightness floor —
+                // Charcoal/Obsidian stamps were near-invisible as text.
+                string stampTextHex=stampHex!=null?ReadableNameColor(stampHex):null;
                 UIFactory.SetText(ui.txtPlacement,placement>0?$"#{placement}":"#?");
                 // Name first, THEN the title — every other surface renders
                 // "name [title]" (leaderboards, chat); this row was the one
@@ -2650,11 +2654,11 @@ namespace CompetitiveRounds
                 FillFfaDotPool(ui.halfDots,ui.halfDotsGO,shownHalves,ffaHalfDotSprite,dotColor,"H");
                 // Aug 8 (Sid): the stamp also tints the points/score readout
                 // (stampHex computed above, beside the dot colour).
-                UIFactory.SetText(ui.txtPoints,stampHex!=null?$"<color={stampHex}>{points}(P)</color>":$"{points}(P)");
+                UIFactory.SetText(ui.txtPoints,stampTextHex!=null?$"<color={stampTextHex}>{points}(P)</color>":$"{points}(P)");
                 int hiddenHalves=leftover-shownHalves;
                 if(ui.halfOverflowGO!=null)ui.halfOverflowGO.SetActive(hiddenHalves>0);
-                if(hiddenHalves>0)UIFactory.SetText(ui.txtHalfOverflow,stampHex!=null?$"<color={stampHex}>+{hiddenHalves}</color>":$"+{hiddenHalves}");
-                UIFactory.SetText(ui.txtHalves,stampHex!=null?$"<color={stampHex}>{leftover}(H)</color>":$"{leftover}(H)");
+                if(hiddenHalves>0)UIFactory.SetText(ui.txtHalfOverflow,stampTextHex!=null?$"<color={stampTextHex}>+{hiddenHalves}</color>":$"+{hiddenHalves}");
+                UIFactory.SetText(ui.txtHalves,stampTextHex!=null?$"<color={stampTextHex}>{leftover}(H)</color>":$"{leftover}(H)");
                 UIFactory.SetText(ui.txtKills,$"{Math.Max(0,player.kills)}k");
                 UIFactory.SetText(ui.txtRewards,player.xp_gained==0&&player.gold_gained==0?""
                     :$"+{player.xp_gained}xp <color=#FFD94D>+{player.gold_gained}g</color>");
@@ -7119,10 +7123,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         {
             // Show each player's ACTUAL 2v2 rating (was the team average for both,
             // which read as "1500 for all 4"). Format: "Name(elo)+Name(elo)".
+            // Aug 11 playtest item 3: a stamped series tints its sides with the
+            // frozen body-colour identity; unstamped rows keep the classic hues.
+            string h1 = SafeStampTextHex(s.t1_color_hex) ?? "#AAF";
+            string h2 = SafeStampTextHex(s.t2_color_hex) ?? "#FAA";
             string line = $"<color=#FFB347>2v2</color>  " +
-                          $"<color=#AAF>{Trunc(s.t1a_name, 7)}({s.t1a_rating})+{Trunc(s.t1b_name, 7)}({s.t1b_rating})</color>  " +
+                          $"<color={h1}>{Trunc(s.t1a_name, 7)}({s.t1a_rating})+{Trunc(s.t1b_name, 7)}({s.t1b_rating})</color>  " +
                           $"<b>{s.t1_wins}-{s.t2_wins}</b>  " +
-                          $"<color=#FAA>{Trunc(s.t2a_name, 7)}({s.t2a_rating})+{Trunc(s.t2b_name, 7)}({s.t2b_rating})</color>";
+                          $"<color={h2}>{Trunc(s.t2a_name, 7)}({s.t2a_rating})+{Trunc(s.t2b_name, 7)}({s.t2b_rating})</color>";
             var t = UIFactory.CreateText("hdr", row.transform, line,
                 14f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 24));
             UIFactory.SetWordWrap(t, false);
@@ -7133,9 +7141,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static void ApplyTeamBetRow(GameObject row, ApiClient.ActiveTeamSeriesEntry s, int team)
         {
             float odds = team == 1 ? s.t1_odds : s.t2_odds;
+            // Aug 11 playtest item 3: a stamped series names its side by the
+            // frozen body-colour identity ("Team Midnight", tinted); unstamped
+            // rows keep the numeric labels exactly.
+            string cn = team == 1 ? s.t1_color_name : s.t2_color_name;
+            string ch = SafeStampTextHex(team == 1 ? s.t1_color_hex : s.t2_color_hex);
+            string sideName = !string.IsNullOrEmpty(cn)
+                ? I18n.TrF("Team {0}", FfaSafeRich(cn))
+                : (team == 1 ? "Team 1" : "Team 2");
+            if (ch != null && !string.IsNullOrEmpty(cn))
+                sideName = $"<color={ch}>{sideName}</color>";
             string teamLabel = team == 1
-                ? $"Team 1 ({Trunc(s.t1a_name, 6)}+{Trunc(s.t1b_name, 6)})"
-                : $"Team 2 ({Trunc(s.t2a_name, 6)}+{Trunc(s.t2b_name, 6)})";
+                ? $"{sideName} ({Trunc(s.t1a_name, 6)}+{Trunc(s.t1b_name, 6)})"
+                : $"{sideName} ({Trunc(s.t2a_name, 6)}+{Trunc(s.t2b_name, 6)})";
 
             string myId = MatchTracker.LocalSteamId;
             bool localIsParticipant = !string.IsNullOrEmpty(myId)
@@ -8456,6 +8474,17 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 UIFactory.SetImageColor(shopArtistBtns[i], active ? C_TABACT : C_BTN);
                 UIFactory.SetColor(shopArtistBtnTexts[i], active ? C_WHITE : C_LABEL);
             }
+        }
+
+        // Aug 11 review find 3: stamped body-colour hexes can be near-black
+        // (Obsidian, Charcoal) — run them through the same lightness floor as
+        // shop names before they paint TEXT on the dark panel. Null
+        // (unstamped/invalid) stays null so callers keep their classic
+        // fallback via ??.
+        private static string SafeStampTextHex(string c)
+        {
+            string s = SafeHexColor(c);
+            return s == null ? null : ReadableNameColor(s);
         }
 
         // Bug #63: shop-item NAME colors get a lightness floor so dark preview
@@ -19618,10 +19647,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     var ts = liveTeam[i];
                     // Names are user-authored — FfaSafeRich before they touch
                     // TMP rich text (the old one-body strip interpolated raw).
+                    // Aug 11 playtest item 3: stamped identity hues, classic
+                    // fallback (mirrors ApplyTeamHeaderRow).
+                    string lh1 = SafeStampTextHex(ts.t1_color_hex) ?? "#AAF";
+                    string lh2 = SafeStampTextHex(ts.t2_color_hex) ?? "#FAA";
                     UIFactory.SetTextRaw(row.txt,
-                        $"<color=#AAF>{FfaSafeRich(Trunc(ts.t1a_name, 7))}({ts.t1a_rating})+{FfaSafeRich(Trunc(ts.t1b_name, 7))}({ts.t1b_rating})</color>"
+                        $"<color={lh1}>{FfaSafeRich(Trunc(ts.t1a_name, 7))}({ts.t1a_rating})+{FfaSafeRich(Trunc(ts.t1b_name, 7))}({ts.t1b_rating})</color>"
                         + $"  <b>{ts.t1_wins}-{ts.t2_wins}</b>  "
-                        + $"<color=#FAA>{FfaSafeRich(Trunc(ts.t2a_name, 7))}({ts.t2a_rating})+{FfaSafeRich(Trunc(ts.t2b_name, 7))}({ts.t2b_rating})</color>");
+                        + $"<color={lh2}>{FfaSafeRich(Trunc(ts.t2a_name, 7))}({ts.t2a_rating})+{FfaSafeRich(Trunc(ts.t2b_name, 7))}({ts.t2b_rating})</color>");
                     var g = FindSpectateGame("2v2", ts.series_id);
                     bool canWatch = g != null && !LocalInSpectateRoster(g);
                     row.gameId = canWatch ? g.game_id : null;
@@ -19802,7 +19835,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 // only — Sid's scope ruling; equipped nametag cosmetics would
                 // win, but this panel renders plain names). Unstamped series
                 // (pre-migration) keep today's side colors exactly.
-                string t1Hex = SafeHexColor(s.t1_color_hex), t2Hex = SafeHexColor(s.t2_color_hex);
+                // Aug 11 review find: TEXT hexes take the lightness floor —
+                // Charcoal/Obsidian stamps were near-invisible as names.
+                string t1Hex = SafeStampTextHex(s.t1_color_hex), t2Hex = SafeStampTextHex(s.t2_color_hex);
                 string leftHex = leftIsT1 ? t1Hex : t2Hex;
                 string rightHex = leftIsT1 ? t2Hex : t1Hex;
                 string leftColorName = leftIsT1 ? s.t1_color_name : s.t2_color_name;

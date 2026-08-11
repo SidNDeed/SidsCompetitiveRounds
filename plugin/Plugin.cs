@@ -1307,6 +1307,16 @@ namespace CompetitiveRounds
             if (Plugin.DeepIdleUnfocused == null || !Plugin.DeepIdleUnfocused.Value) return false;
             if (unfocusedSinceRt < 0f) return false;
             if (Time.realtimeSinceStartup - unfocusedSinceRt < 60f) return false;
+            // Aug 11 playtest item 5: a spectator seat is blind to BOTH room
+            // gates below — the session quiesces GameStateWatcher before
+            // PollRoomState ever writes wasInRoom, and battleOngoing is only
+            // set by the suppressed participant lifecycle — so deep idle
+            // engaged mid-spectate (proven twice in the Aug 10 log). The
+            // IsLocalSpectator gate also covers the joiner window; the direct
+            // InRoom check fixes the CLASS for any future watcher-sleeping
+            // seat (#122 semantics without depending on wasInRoom).
+            try { if (SpectatorSession.IsLocalSpectator) return false; } catch { }
+            try { if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode) return false; } catch { }
             if (GameStateWatcher.IsInOnlineRoom) return false;          // never in online play (#122-safe accessor)
             try { if (GameManager.instance != null && GameManager.instance.battleOngoing) return false; } catch { }
             if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom)) return false;

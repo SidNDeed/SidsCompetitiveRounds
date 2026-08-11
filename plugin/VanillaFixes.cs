@@ -1163,6 +1163,50 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Aug 11 (bug-198 log): 555 NREs in one spectator session from
+    /// Sonigon.Internal.Voice.SetVolumeRatioUpdate — a voice holding a
+    /// destroyed AudioSource (PUN's duplicate-ID RemoveInstantiatedGO killed
+    /// its host mid-life). The throw propagates to SoundManager.Update and
+    /// aborts the WHOLE manager loop every frame, starving every healthy
+    /// voice's update too. InstanceSoundEvent.ManagedUpdate is the per-
+    /// instance containment boundary: swallowing there skips only the broken
+    /// instance's frame and is robust to WHICH internal leaf throws. Pure
+    /// audio state — no gameplay can abort here. Play/Stop calls are the
+    /// sibling patch above (#322).</summary>
+    [HarmonyPatch]
+    internal static class SonigonVoiceUpdateGuardPatch
+    {
+        private static MethodBase TargetMethod()
+        {
+            var t = AccessTools.TypeByName("Sonigon.Internal.InstanceSoundEvent");
+            if (t == null)
+                throw new InvalidOperationException("SonigonVoiceUpdateGuard: Sonigon.Internal.InstanceSoundEvent not found");
+            var m = AccessTools.Method(t, "ManagedUpdate");
+            if (m == null)
+                throw new InvalidOperationException("SonigonVoiceUpdateGuard: ManagedUpdate not found");
+            return m;
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+                VanillaFixSupport.DiagLimited(
+                    "SonigonVoiceUpdateGuard-swallowed",
+                    "InstanceSoundEvent.ManagedUpdate threw " + __exception.GetType().Name +
+                    " — swallowed so the sound manager's other voices keep updating",
+                    20);
+            return null;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("SonigonVoiceUpdateGuard", exception);
+        }
+    }
+
     // DeadPlayerDotPatch used to live here — a second Harmony Prefix on
     // DamageOverTime.TakeDamageOverTime whose only job was to skip the call while the
     // host GameObject was inactive. It has been FOLDED into

@@ -1,5 +1,38 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+Aug 11 playtest minor-bug batch (spectator polish + portal fix), staged for
+the next release:
+
+- **Stuck pick cards are gone for spectators** (bug 197). A fast join could
+  collapse the cleanup window to zero, leaving the room's cache-replayed card
+  table standing for the whole sitting — the burial now runs synchronously
+  the moment the join replay provably ends. Live leftovers (cards whose local
+  destruction never got scheduled) are swept a few seconds after each round
+  boundary, and the card-picker avatar is hidden at the boundary instead of
+  lingering over the next battle.
+- **Poison and Decay now move health bars on spectator seats.** The
+  spectator's round lifecycle runs slightly behind the fighters', and the
+  damage engine silently ate every DOT verdict that arrived in that gap —
+  then the late revive erased the rest of the stream. Spectator seats now
+  render DOT verdicts directly (display only, clamped above zero — a
+  spectator can never broadcast a death; kills only show via the fighters'
+  own death event), and live streams survive the spectator's late revive.
+- Dark team-color stamps (Charcoal, Obsidian, Midnight) get a readability
+  lift wherever they paint **text** — 2v2 recent-series names, FFA history
+  score counters — while dots and graphs keep the true color.
+- **Team-identity colors reach the last hardcoded surfaces**: the spectator
+  score bar, the hold-Tab match-stats header (fighters had this bug too — a
+  Midnight team read as "blue"), and the 2v2 live-bets rows in the F5 menu
+  (which now also name a stamped side "Team Midnight" instead of "Team 1").
+- **The 15-FPS deep idle no longer engages mid-spectate** — the spectator
+  seat was invisible to both of its "never during online play" gates.
+- **A sound-engine guard** stops one broken voice from aborting every other
+  sound's update each frame (555 errors in one spectator session's log).
+- **Translation portal**: the review queue now shows proposer display names
+  instead of raw Steam IDs (machine drafts still read "by claude-mt").
+
 ## v1.38.1 (2026-08-10)
 
 New community cosmetic: **Twisted Topper** (detail slot) joins the shop

@@ -189,11 +189,19 @@ namespace CompetitiveRounds
                     return "";
                 string t0 = TeamNamesInline(0), t1 = TeamNamesInline(1);
                 if (t0.Length == 0 || t1.Length == 0) return "";
+                // Aug 11 playtest item 3: follow the equipped team-colour
+                // identity (Midnight team must not read as "blue") — the
+                // resolver works on a spectator seat because it consumes the
+                // replicated cr_tcol room prop / player props; classic
+                // orange/blue is the unresolved fallback. The bar's 0.5s
+                // composite cache is fine — the resolver has its own TTL.
+                string hex0 = TeamColorIdentity.DisplayHexForTeam(0, ORANGE_HEX);
+                string hex1 = TeamColorIdentity.DisplayHexForTeam(1, BLUE_HEX);
                 _decorSb.Length = 0;
-                _decorSb.Append("<color=").Append(ORANGE_HEX).Append(">").Append(t0).Append("  ")
+                _decorSb.Append("<color=").Append(hex0).Append(">").Append(t0).Append("  ")
                         .Append(SpectatorViewState.TeamScoreText(0)).Append("</color>")
                         .Append("  -  ")
-                        .Append("<color=").Append(BLUE_HEX).Append(">")
+                        .Append("<color=").Append(hex1).Append(">")
                         .Append(SpectatorViewState.TeamScoreText(1)).Append("  ").Append(t1).Append("</color>");
                 return _decorSb.ToString();
             }

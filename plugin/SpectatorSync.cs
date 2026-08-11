@@ -362,6 +362,20 @@ namespace CompetitiveRounds
             if (!_replayQuarantineArmed) return;
             _replayQuarantineArmed = false;
             Plugin.Log?.LogInfo($"[SPECTATE] join-replay quarantine disarmed ({why}) — buried {_replayBuried} cached object(s) at source");
+            // Aug 11 (bug 197): the 1s maintenance sweep needs a tick INSIDE
+            // the Synchronizing window to bury cache-replayed CARD husks
+            // (cards are structurally outside the PhotonMapObject at-source
+            // quarantine), and a fast join can collapse that window to zero —
+            // NotNic: join → replay burst → call-in → ACTIVE with no tick
+            // between, so his card table survived unburied for the whole
+            // sitting. The disarm is the one point that provably runs AFTER
+            // the entire cache replay has been delivered and BEFORE first
+            // activation — sweep synchronously here, window size be damned.
+            if (!HasEverActivated)
+            {
+                try { SweepCardObjects("cached"); } catch { }
+                try { SweepStaleMapObjects(); } catch { }
+            }
         }
 
         /// <summary>Aug 10 r2 find 3: a LIVE (untagged) map-object clone can
@@ -769,7 +783,7 @@ namespace CompetitiveRounds
                 // bury LIVE objects.
                 if (CurrentStage == Stage.Synchronizing && !HasEverActivated)
                 {
-                    try { SweepPreActivationCards(); } catch { }
+                    try { SweepCardObjects("cached"); } catch { }
                     SweepStaleMapObjects();
                 }
                 if (Time.unscaledTime - lastCosmetics > 6f)
@@ -799,15 +813,16 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Bury every Photon card object in the scene. Called ONLY
-        /// while Stage == Synchronizing (Codex r5 rework): the cached replay
-        /// of past pick phases lands seconds after join — squarely inside
-        /// Synchronizing — and gets buried by the loop's next tick; a LIVE
-        /// pick phase only ever happens while Active, where this never runs,
+        /// <summary>Bury every Photon card object in the scene. Callers pick
+        /// the moment: the 1s maintenance tick + the quarantine disarm run it
+        /// pre-activation ("cached" — the replayed pick tables of the room's
+        /// past), and the +3s post-call-in fence runs it live ("leftover" —
+        /// cards whose local destruction never got scheduled, bug 197). A
+        /// LIVE pick phase is never on screen at either moment: activation
+        /// happens at a call-in and every pick window precedes its call-in,
         /// so spectators still watch real picks (playtest #2d). No id
-        /// bookkeeping at all — ViewIDs recycle (r5 find 8), and "visible
-        /// while Active, buried while dark" needs none.</summary>
-        private static void SweepPreActivationCards()
+        /// bookkeeping at all — ViewIDs recycle (r5 find 8).</summary>
+        private static void SweepCardObjects(string label)
         {
             var infos = UnityEngine.Object.FindObjectsOfType<CardInfo>();
             int hidden = 0;
@@ -816,7 +831,12 @@ namespace CompetitiveRounds
                 var ci = infos[i];
                 if (ci == null || ci.gameObject == null) continue;
                 if (!ci.gameObject.activeInHierarchy) continue;
-                if (ci.GetComponent<PhotonView>() == null) continue;
+                // ViewID > 0 excludes CardSnapshot's local render clones (r1
+                // find 4: their PhotonView is ViewID-0 and pending same-frame
+                // destroy — burying one forces the native-card capture to
+                // retry). Networked pick cards always carry a real id.
+                var pv = ci.GetComponent<PhotonView>();
+                if (pv == null || pv.ViewID <= 0) continue;
                 // Bury + local unregister (Aug 10 find 4/D2): buried card
                 // husks' views collide with the rematch's recycled IDs
                 // exactly like map objects do (View 1002 Bullet_Base vs
@@ -826,7 +846,7 @@ namespace CompetitiveRounds
                 hidden++;
             }
             if (hidden > 0)
-                Plugin.Log?.LogInfo($"[SPECTATE] hid {hidden} cached card object(s)");
+                Plugin.Log?.LogInfo($"[SPECTATE] hid {hidden} {label} card object(s)");
         }
 
         /// <summary>Playtest #2f: the room cache also replays every networked
@@ -960,8 +980,62 @@ namespace CompetitiveRounds
             // find 7: re-entering this method cleared a NEWER round latch).
             _roundLatched = false;
             DisarmReplayQuarantine("call-in");
+            // Aug 11 playtest item 1: a call-in means the pick phase is OVER,
+            // but on a spectator the only vanilla CardChoiceVisuals.Hide
+            // rides PlayerManager.Move's tail — downstream of the map-settle
+            // spin — and the point sequence's own Show (DoWinSequence's tail)
+            // can land AFTER it under dispatch backlog. Retire both at RPC
+            // receipt so the picker avatar can never float over the next
+            // battle, and fence a leftover-card sweep for cards whose local
+            // destruction never got scheduled (bug 197's permanence class).
+            RetireBoundaryPickDisplay();
+            if (Plugin.Instance != null)
+                Plugin.Instance.StartCoroutine(LeftoverCardSweep(_boundaryGeneration));
             _lastObservedBoundaryMapId = mapId;
             ScheduleBoundary(mapId);
+        }
+
+        /// <summary>Stop the running point sequence (it is the only
+        /// spectator-side Show source) and hide the pick-phase avatar. Both
+        /// idempotent; a later legitimate Show cancels the pending DelayHide
+        /// via vanilla's own StopAllCoroutines.</summary>
+        private static void RetireBoundaryPickDisplay()
+        {
+            try
+            {
+                var pv = PointVisualizer.instance;
+                if (_seqCo != null && pv != null)
+                {
+                    try { pv.StopCoroutine(_seqCo); } catch { }
+                    try { pv.Close(); } catch { }
+                }
+                _seqCo = null;
+            }
+            catch { }
+            try
+            {
+                var vis = CardChoiceVisuals.instance;
+                if (vis != null && vis.isShowinig) vis.Hide();
+            }
+            catch { }
+        }
+
+        /// <summary>Bug 197 backstop: a card whose IDoEndPick never scheduled
+        /// its RemoveAfterSeconds is invisible to vanilla's ClearObjects
+        /// forever (it only destroys ACTIVE RemoveAfterSeconds carriers).
+        /// Healthy cards self-destroy by pick-end +~1.7s and every pick
+        /// window precedes its call-in, so anything still active at call-in
+        /// +3s with no NEWER round observed is a leftover by construction.
+        /// The round-latch fence covers the fast-round case where the next
+        /// pick phase could already be on screen at +3s — that boundary's
+        /// own sweep picks up the slack.</summary>
+        private static IEnumerator LeftoverCardSweep(int gen)
+        {
+            yield return new WaitForSecondsRealtime(3f);
+            if (gen != _boundaryGeneration) yield break;
+            if (!SpectatorSession.IsLocalSpectator) yield break;
+            if (RoundObservationLatched) yield break;
+            try { SweepCardObjects("leftover"); } catch { }
         }
 
         /// <summary>Side-effect-free reconcile scheduler (r3 find 7). Every

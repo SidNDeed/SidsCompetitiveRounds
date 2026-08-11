@@ -572,8 +572,33 @@ namespace CompetitiveRounds
             public int Accepted;
             public int Blocked;
             public int Applied;
+            // Creation order, for the spectator-seat eviction below.
+            public int Seq;
         }
         private static readonly Dictionary<long, StreamRec> _streams = new Dictionary<long, StreamRec>();
+
+        // Spectator seats never prune records at Revive (the fence is deleted
+        // — see ResetForView), so the table has room lifetime there. Bound it
+        // (r2 find 4): past the cap, evict the OLDEST streams. A live stream
+        // is never near the oldest at this size — poison/Decay streams run
+        // seconds, the cap holds hundreds — so eviction only ever drops
+        // long-completed records. Fighter seats prune at Revive and stay far
+        // below the cap; the eviction simply never fires for them.
+        private const int STREAM_RECORD_CAP = 512;
+        private static int _recSeq;
+
+        private static void EvictOldestStreams()
+        {
+            // Spectator seats ONLY (r3 find 2): a fighter seat evicting a
+            // live stream would drop real damage ticks — and fighters prune
+            // at Revive anyway, so the cap has no job there.
+            if (!RoomActors.LocalIsSpectator) return;
+            if (_streams.Count <= STREAM_RECORD_CAP) return;
+            var keys = new List<long>(_streams.Keys);
+            keys.Sort((a, b) => _streams[a].Seq.CompareTo(_streams[b].Seq));
+            int drop = _streams.Count - (STREAM_RECORD_CAP * 3 / 4);
+            for (int i = 0; i < drop && i < keys.Count; i++) _streams.Remove(keys[i]);
+        }
 
         // Last time (server clock) we heard ANY verdict from this actor.
         private static readonly Dictionary<int, int> _lastHeardServerTs = new Dictionary<int, int>();
@@ -613,6 +638,42 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Aug 11 spectator fix (playtest item 2): a spectator's Revive
+                // timeline is DECOUPLED from the victim's — our Move-tail
+                // Revive runs LATE (downstream of the map-settle spin), while
+                // the victim is still publishing the round's live stream.
+                // Stamping "now" and deleting every record here silently
+                // dropped that stream's whole tail (and the Revive itself had
+                // just reset health to max), which is why poison/Decay never
+                // moved health bars for spectators. On a spectator seat the
+                // revive fence is DELETED outright — no stamp, no removal
+                // (records clear on room exit). Codex r1 killed the tempting
+                // middle grounds: fencing on OUR call-in receipt time races
+                // streams a fighter starts inside our dispatch lag (their
+                // start ts predates our receipt ts), and treating any local
+                // Revive as the boundary preserves/deletes wrongly for
+                // Phoenix (Revive(false)) and card-apply revives. With no
+                // fence the worst case is bounded and tiny: a victim's
+                // authority coroutine dies at its own death/revive, so the
+                // only stale arrivals are ticks already in flight (~1-2
+                // slices within one RTT) — a couple of HP briefly shaved off
+                // a just-healed bar, versus whole live streams wrongly
+                // killed. Display seat, display-sized error.
+                if (RoomActors.LocalIsSpectator)
+                {
+                    // Eaten-verdict evidence (recon gap): accepted ticks that
+                    // never moved HP were swallowed by DoDamage's silent
+                    // gates on this seat only. Cap keeps repeats cheap.
+                    foreach (var kv in _streams)
+                    {
+                        if ((int)(kv.Key >> 32) != viewId) continue;
+                        if (kv.Value.Accepted > kv.Value.Applied)
+                            VanillaFixSupport.DiagLimited("spect-eaten",
+                                "[POISON-SYNC] SPECT-EATEN v" + viewId + " accepted="
+                                + kv.Value.Accepted + " applied=" + kv.Value.Applied, 20);
+                    }
+                    return;
+                }
                 _reviveServerTs[viewId] = PhotonNetwork.ServerTimestamp;
                 var dead = new List<long>();
                 foreach (var kv in _streams)
@@ -641,6 +702,7 @@ namespace CompetitiveRounds
                 _sawIncapablePeer = false;
                 _rosterRoom = "";
                 _lastRosterChange = -999f;
+                _recSeq = 0;
             }
             catch { }
         }
@@ -833,8 +895,10 @@ namespace CompetitiveRounds
                         AttackerId = (int)a[10],
                         Lethal = (bool)a[11],
                         DamageSource = (byte)a[12],
+                        Seq = ++_recSeq,
                     };
                     _streams[key] = rec;
+                    EvictOldestStreams();
                     Apply(view, rec, (bool)a[13], viewId, streamId, 0);
                     return;
                 }
@@ -866,6 +930,36 @@ namespace CompetitiveRounds
                 // swallow this quietly.
                 Plugin.Log.LogError("[POISON-SYNC] DROPPED tick v" + viewId + "/s" + streamId
                     + "/t" + tick + ": no HealthHandler — this client will read low on damage");
+                return;
+            }
+
+            // Aug 11 spectator fix (playtest item 2, r2 HIGH): a spectator
+            // seat NEVER calls DoDamage — always the direct display subtract.
+            // DoDamage broadcasts the ownerless RPCA_Die(All) from ANY replica
+            // whose local health crosses zero (the file-header hazard), and
+            // with the revive fence deleted, stale in-flight ticks landing
+            // after our belated Revive could accumulate a real fighter's
+            // death FROM THE OBSERVER SEAT. Bypassing DoDamage entirely makes
+            // that structurally impossible: health is clamped at 1 hp, so a
+            // kill is only ever rendered by the fighters' own death RPC. It
+            // also fixes the reported symptom — DoDamage's silent gates
+            // (!isPlaying during our lagging transitions) ate every verdict
+            // and the bar never moved. Costs on this seat only: no damage
+            // flash and no attacker-lifesteal rendering from DOT ticks —
+            // bars still track, safety beats flash.
+            if (RoomActors.LocalIsSpectator)
+            {
+                try
+                {
+                    var cds = view.GetComponent<CharacterData>();
+                    if (cds != null && !cds.dead && !hh.isRespawning)
+                    {
+                        float nh = cds.health - rec.Slice.magnitude;
+                        cds.health = nh < 1f ? 1f : nh;
+                        rec.Applied++;
+                    }
+                }
+                catch { }
                 return;
             }
 

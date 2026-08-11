@@ -334,6 +334,18 @@ namespace CompetitiveRounds
 
         private static Color TeamColor(Player p)
         {
+            // Aug 11 playtest item 3 ("also a thing for non-spectators"): the
+            // equipped team-colour identity wins — the skin bank only knows
+            // vanilla orange/blue, so a Midnight team read as "blue" here.
+            // Tint surface: honours the Show Player Colors toggle (with tints
+            // off the bodies ARE vanilla, so vanilla paint matches).
+            try
+            {
+                TeamColorIdentity.TeamIdentity id;
+                if (TeamColorIdentity.TintsEnabled && TeamColorIdentity.TryGet(p.TeamID, out id))
+                    return id.TextColor;
+            }
+            catch { }
             try
             {
                 var skin = PlayerSkinBank.GetPlayerSkinColors(p.PlayerID);

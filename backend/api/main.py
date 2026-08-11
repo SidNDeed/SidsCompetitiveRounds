@@ -12252,11 +12252,19 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
     # Counting over the JOINed set also makes the total agree with the page by
     # construction; the old standalone count read i18n_proposals alone and
     # would have over-counted a proposal whose key row was gone.
+    # proposer_name: LEFT JOIN on unique players.steam_id cannot multiply rows
+    # (same argument as /i18n/approved). 'claude-mt' matches no players row ->
+    # empty name -> the SPA falls back to the raw label, preserving the
+    # "by claude-mt" rendering for free. Account deletion rewrites BOTH join
+    # keys to the same tombstone, so deleted proposers join the anonymized
+    # row and render "[Deleted User]" — the intended outcome.
     rows = (await db.execute(text(
         "SELECT p.id, p.key_id, p.proposed_target, p.proposer_steam_id, p.created_at,"
         "       p.source_hash, k.msgctxt, k.source_hash AS current_hash, k.sensitive,"
+        "       COALESCE(pn.display_name,'') AS proposer_name,"
         "       COUNT(*) OVER () AS total_rows"
         "  FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
+        "  LEFT JOIN players pn ON pn.steam_id = p.proposer_steam_id"
         " WHERE p.language_code = :lang AND p.status = :st"
         " ORDER BY p.created_at, p.id LIMIT :lim OFFSET :off"
     ), {"lang": lang, "st": status, "lim": limit, "off": offset})).mappings().all()
@@ -12278,6 +12286,7 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
             "offset": offset, "limit": limit, "proposals": [{
         "id": r["id"], "key_id": r["key_id"], "source": r["msgctxt"],
         "target": r["proposed_target"], "proposer": r["proposer_steam_id"],
+        "proposer_name": r["proposer_name"],
         "created_at": r["created_at"].isoformat(), "sensitive": r["sensitive"],
         "source_changed_since": r["source_hash"] != r["current_hash"],
     } for r in rows]}
@@ -13144,7 +13153,7 @@ function renderQueue(d){
   qd.appendChild(pager(d.offset,d.limit,total,go));
   d.proposals.forEach(p=>{
     const box=el("div","key");
-    const head=el("div","muted","["+d.language.toUpperCase()+"] #"+p.id+" by "+p.proposer+(p.sensitive?" ":""));
+    const head=el("div","muted","["+d.language.toUpperCase()+"] #"+p.id+" by "+(p.proposer_name||p.proposer)+(p.sensitive?" ":""));
     if(p.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
     if(p.source_changed_since)head.appendChild(el("span","badge b-stale","source changed since"));
     box.appendChild(head);

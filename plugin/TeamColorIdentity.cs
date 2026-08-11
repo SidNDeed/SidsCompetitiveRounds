@@ -122,6 +122,32 @@ namespace CompetitiveRounds
             return false;
         }
 
+        /// <summary>UI display colour for a team: the identity's readable text
+        /// colour when the system is active (TintsEnabled + resolved), else the
+        /// classic colour the caller passes (orange/blue). Tint-surface
+        /// semantics — honours the Show Player Colors toggle (Aug 8 split):
+        /// with tints off, the bodies on screen are vanilla, so UI paint must
+        /// match them.</summary>
+        public static Color DisplayColorForTeam(int teamId, Color classic)
+        {
+            TeamIdentity id;
+            return (TintsEnabled && TryGet(teamId, out id)) ? id.TextColor : classic;
+        }
+
+        /// <summary>Rich-text hex form of DisplayColorForTeam, for
+        /// string-composed surfaces. Returns "#RRGGBB".</summary>
+        public static string DisplayHexForTeam(int teamId, string classicHex)
+        {
+            try
+            {
+                TeamIdentity id;
+                if (TintsEnabled && TryGet(teamId, out id))
+                    return "#" + ColorUtility.ToHtmlStringRGB(id.TextColor);
+            }
+            catch { }
+            return classicHex;
+        }
+
         /// <summary>Lift a colour so it stays readable as text or a small dot against
         /// ROUNDS' dark scene. Charcoal/Obsidian bodies are near-black; drawn raw they
         /// would be an invisible point announcement.</summary>
