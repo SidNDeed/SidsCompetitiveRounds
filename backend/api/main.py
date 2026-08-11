@@ -1640,7 +1640,11 @@ app.include_router(tournaments_router)
 # compatibility carve-out around steam-session enforcement, so the floor climbs
 # until the carve-out is gone. 1.33.0 is stage one; raise to 1.34.0 once
 # players.mod_version shows adoption. Old clients get 426 → auto-update.
-MIN_MOD_VERSION = "1.38.0"
+# Aug 11 (Sid's go, with the v1.38.2 ship): floor at 1.38.1 — adoption was
+# 17x 1.38.1 vs 2x 1.38.0 among 24h actives. This also restores 2v2/FFA
+# bettability (LIVE_POINTS_MIN_VERSION is 1.38.1). NOT raised to 1.38.2:
+# 1.38.1 clients stay fully compatible with this release's server.
+MIN_MOD_VERSION = "1.38.1"
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # First client build with the fixed hit/block counting semantics (July 21:
@@ -2278,7 +2282,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.1"
+LATEST_MOD_VERSION = "1.38.2"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():

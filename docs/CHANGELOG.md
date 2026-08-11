@@ -1,9 +1,10 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.38.2 (2026-08-11)
 
-Aug 11 playtest minor-bug batch (spectator polish + portal fix), staged for
-the next release:
+Mini-release: the Aug 11 playtest minor-bug batch (spectator polish + portal
+fix). Also raises the server's minimum mod version to 1.38.1, which restores
+2v2/FFA bettability for everyone.
 
 - **Stuck pick cards are gone for spectators** (bug 197). A fast join could
   collapse the cleanup window to zero, leaving the room's cache-replayed card
