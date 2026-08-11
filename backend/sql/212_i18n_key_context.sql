@@ -1,0 +1,14 @@
+-- 212: moderation context for i18n keys (Aug 11, uk/sv + base-game batch;
+-- design round-1 find 12).
+--
+-- The 'game' namespace (base-game string tables) introduces keys whose bare
+-- English is ambiguous in the review queue: the mod's "Refresh" vs the card
+-- table's "Refresh", and four PS/Xbox platform pairs whose English coincides
+-- but whose terminology must not. `context` carries "TableName/ENTRY_KEY"
+-- plus Landfall's own translator comment for game keys (NULL for client
+-- keys); the queue endpoint, key lists, and the portal SPA surface it.
+--
+-- Written by /admin/i18n/sync-keys (tools/i18n_sync_keys.py sends it).
+-- Apply BEFORE deploying the API build that writes the column (#235's
+-- ordering rule: columns first, then code).
+ALTER TABLE i18n_keys ADD COLUMN IF NOT EXISTS context VARCHAR(160);

@@ -5564,9 +5564,9 @@ namespace CompetitiveRounds
         private static string chatInputText = "";
         private static GUIStyle chatStyle;
 
-        // §2.6: display label for a send channel's WIRE value ("global"/"es"/
-        // "ru" — the wire strings stay English everywhere; this maps them for
-        // the chat header's {0} hole only).
+        // §2.6: display label for a send channel's WIRE value ("global" plus
+        // one per language channel — the wire strings stay English everywhere;
+        // this maps them for the chat header's {0} hole only).
         //
         // Item 13: this used to render "Global/ES/RU" while
         // NativeUI.ChatChannelDisplayName rendered "Global/Español/Русский" for
@@ -5584,6 +5584,8 @@ namespace CompetitiveRounds
                 case "global": return I18n.Tr("English");
                 case "es":     return "Español";
                 case "ru":     return "Русский";
+                case "uk":     return "Українська";
+                case "sv":     return "Svenska";
                 default:       return (channel ?? "").ToUpperInvariant();
             }
         }
@@ -5592,7 +5594,11 @@ namespace CompetitiveRounds
         // (ChatClient.IsAllowedChannel), not just this locale's channel — an
         // English client can type into es/ru too, which is the whole point of
         // the change. Hoisted so the rotation allocates nothing per keystroke.
-        private static readonly string[] ChatSendCycle = { "global", "es", "ru" };
+        // Must stay in sync with ChatClient.IsAllowedChannel: a channel the
+        // client accepts but that is missing here is unreachable by the Alt
+        // tap, and a persisted pick sitting outside this array makes the first
+        // tap jump to "global" rather than to the next channel.
+        private static readonly string[] ChatSendCycle = { "global", "es", "ru", "uk", "sv" };
         private static void CycleChatSendChannel()
         {
             string cur = ChatClient.SendChannel;

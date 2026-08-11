@@ -101,7 +101,7 @@ namespace CompetitiveRounds
             get
             {
                 string loc = I18n.Locale;
-                return (loc == "ru" || loc == "es") ? loc : null;
+                return (loc == "ru" || loc == "es" || loc == "uk" || loc == "sv") ? loc : null;
             }
         }
 
@@ -109,14 +109,19 @@ namespace CompetitiveRounds
         /// (CHAT_CHANNELS_ALLOWED). The server relays a send to any of these
         /// regardless of the sender's locale.</summary>
         private static bool IsAllowedChannel(string c)
-            => c == "global" || c == "es" || c == "ru";
+            => c == "global" || c == "es" || c == "ru" || c == "uk" || c == "sv";
 
         /// <summary>Every channel this client subscribes to — a CONSTANT, and
         /// the whole server-allowed set (CHAT_CHANNELS_ALLOWED). Comma-joined
         /// because both consumers (the subscribe frame and the scrollback
         /// query string) want that form. Closed-set values, so it is safe
-        /// verbatim in JSON and in a URL.</summary>
-        private const string AllChannels = "global,es,ru";
+        /// verbatim in JSON and in a URL.
+        /// A client AHEAD of the server degrades instead of breaking: both the
+        /// subscribe handler and the scrollback query intersect this list with
+        /// CHAT_CHANNELS_ALLOWED and drop the unknown names rather than
+        /// rejecting the request, so a new channel simply carries nothing until
+        /// the API ships it. Server-first deploy is still preferred.</summary>
+        private const string AllChannels = "global,es,ru,uk,sv";
 
         /// <summary>The TYPING target's default: an explicit persisted pick
         /// wins (Plugin.ChatSendChannel), else the mod language's channel,
@@ -128,16 +133,19 @@ namespace CompetitiveRounds
 
         /// <summary>The explicit persisted typing-channel override, or null
         /// when the player never picked one (default "" = follow the mod
-        /// language). Honors "global" as a real pick, so an es/ru player who
-        /// deliberately types in Global keeps doing so across restarts and
-        /// across language changes. Null-guarded: the config may not be bound
+        /// language). Honors "global" as a real pick, so a player on any
+        /// language channel who deliberately types in Global keeps doing so
+        /// across restarts and across language changes. Must list every
+        /// IsAllowedChannel value: a channel missing here is silently demoted
+        /// to "follow the mod language" on the next launch, discarding the
+        /// player's pick. Null-guarded: the config may not be bound
         /// yet in some init orders.</summary>
         private static string PersistedSendDefault()
         {
             try
             {
                 string v = Plugin.ChatSendChannel != null ? Plugin.ChatSendChannel.Value : null;
-                return (v == "es" || v == "ru" || v == "global") ? v : null;
+                return (v == "es" || v == "ru" || v == "uk" || v == "sv" || v == "global") ? v : null;
             }
             catch { return null; }
         }

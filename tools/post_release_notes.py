@@ -8,17 +8,21 @@ English.
 
 Usage (Sid's PC, needs the admin secret in the environment):
     set ADMIN_HMAC_SECRET=...          (never in the repo / never in argv)
+    set SCR_API_BASE=...               (API base URL; environment-specific,
+                                        so there is no default — pass --base
+                                        instead if you prefer)
     python tools/post_release_notes.py --admin <steam64> --tag v1.37.0 \\
         --notes-dir dist/release-notes-v1.37.0
 
-The notes dir holds one file per language, named <lang>.md (en.md, es.md, ru.md).
+The notes dir holds one file per language, named <lang>.md (en.md, es.md,
+ru.md, uk.md, sv.md).
 Aug 7 item 6: ENGLISH IS POSTED TOO — the Home tab's primary source is now the
 server's own uncut store (/api/v1/release-notes/full/{locale}); the Discord
 mirror only ever carried what one 2000-char message could, and GitHub is the
 last-resort fallback. English rows are marked source=human.
 
-For es/ru, `source` is left at the server default `machine`, which makes the
-client append a "machine translation" note. That is deliberate: Sid cannot
+For es/ru/uk/sv, `source` is left at the server default `machine`, which makes
+the client append a "machine translation" note. That is deliberate: Sid cannot
 read these, so players must know a human did not write them.
 
 The HMAC canonical mirrors the server's _admin_canonical exactly:
@@ -34,8 +38,7 @@ import sys
 import urllib.error
 import urllib.request
 
-BASE = os.environ.get("SCR_API_BASE", "http://192.168.72.90:8443")
-LANGS = ("en", "es", "ru")
+LANGS = ("en", "es", "ru", "uk", "sv")
 
 
 def main() -> int:
@@ -44,11 +47,20 @@ def main() -> int:
     ap.add_argument("--tag", required=True, help="release tag, e.g. v1.37.0")
     ap.add_argument("--notes-dir", required=True)
     ap.add_argument("--langs", default=",".join(LANGS))
+    # No default: the API base is environment-specific and is supplied by the
+    # operator (code review find 16).
+    ap.add_argument("--base", default=os.environ.get("SCR_API_BASE", ""),
+                    help="API base URL (env SCR_API_BASE)")
     args = ap.parse_args()
 
     secret = os.environ.get("ADMIN_HMAC_SECRET", "")
     if not secret:
         print("ADMIN_HMAC_SECRET not set", file=sys.stderr)
+        return 2
+    if not args.base:
+        print("set SCR_API_BASE (or pass --base): the API base URL is "
+              "environment-specific and is not carried in this file",
+              file=sys.stderr)
         return 2
 
     rc = 0
@@ -84,7 +96,7 @@ def main() -> int:
         }).encode("utf-8")
 
         req = urllib.request.Request(
-            f"{BASE}/api/v1/admin/release-notes",
+            f"{args.base}/api/v1/admin/release-notes",
             data=payload,
             headers={"Content-Type": "application/json", "X-Mod-Version": "99.0.0"},
             method="POST")
@@ -103,7 +115,8 @@ def main() -> int:
 
     print()
     print("Verify:  curl -sS -H \"X-Mod-Version: 1.37.0\" "
-          f"{BASE}/api/v1/release-notes/ru   (expect the new tag)")
+          f"{args.base}/api/v1/release-notes/ru   (expect the new tag; "
+          "repeat for /uk and /sv)")
     return rc
 
 

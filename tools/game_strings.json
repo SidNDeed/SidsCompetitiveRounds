@@ -1,0 +1,1020 @@
+{
+ "format": 1,
+ "tables": {
+  "StringTableCards": {
+   "AMOUNT_AHUGEAMOUNTOF": {
+    "en": "A huge amount of",
+    "smart": false
+   },
+   "AMOUNT_ALITTLEBITOF": {
+    "en": "Slightly more",
+    "smart": false
+   },
+   "AMOUNT_ALOTLOWER": {
+    "en": "A lot lower",
+    "smart": false
+   },
+   "AMOUNT_ALOTOF": {
+    "en": "A bunch more",
+    "smart": false
+   },
+   "AMOUNT_LOWER": {
+    "en": "Lower",
+    "smart": false
+   },
+   "AMOUNT_SLIGHTLYLOWER": {
+    "en": "Slightly lower",
+    "smart": false
+   },
+   "AMOUNT_SLIGHTLYSMALLER": {
+    "en": "Slightly smaller",
+    "smart": false
+   },
+   "AMOUNT_SMALLER": {
+    "en": "Smaller",
+    "smart": false
+   },
+   "AMOUNT_SOME": {
+    "en": "More",
+    "smart": false
+   },
+   "CARD_ABYSSAL_COUNTDOWN": {
+    "en": "ABYSSAL COUNTDOWN",
+    "smart": false
+   },
+   "CARD_ABYSSAL_COUNTDOWN_DESC": {
+    "en": "Stand still to summon dark powers",
+    "smart": false
+   },
+   "CARD_BARRAGE": {
+    "en": "BARRAGE",
+    "smart": false
+   },
+   "CARD_BARRAGE_DESC": {
+    "en": "Fire many bullets at the same time",
+    "smart": false
+   },
+   "CARD_BIG_BULLET": {
+    "en": "BIG BULLET",
+    "smart": false
+   },
+   "CARD_BIG_BULLET_DESC": {
+    "en": "Bigger bullets",
+    "smart": false
+   },
+   "CARD_BOMBS_AWAY": {
+    "en": "BOMBS AWAY",
+    "smart": false
+   },
+   "CARD_BOMBS_AWAY_DESC": {
+    "en": "Spawn a bunch of small bombs around you when you block",
+    "smart": false
+   },
+   "CARD_BOUNCY": {
+    "en": "BOUNCY",
+    "smart": false
+   },
+   "CARD_BRAWLER": {
+    "en": "BRAWLER",
+    "smart": false
+   },
+   "CARD_BRAWLER_DESC": {
+    "en": "+200% HP 3s after dealing DMG",
+    "smart": false,
+    "comment": "Health Points, Damage"
+   },
+   "CARD_BUCKSHOT": {
+    "en": "BUCKSHOT",
+    "smart": false
+   },
+   "CARD_BUCKSHOT_DESC": {
+    "en": "Adds a shotgun vibe to your attack",
+    "smart": false
+   },
+   "CARD_BURST": {
+    "en": "BURST",
+    "smart": false
+   },
+   "CARD_BURST_DESC": {
+    "en": "Multiple bullets are fired in a sequence",
+    "smart": false
+   },
+   "CARD_CAREFUL_PLANNING": {
+    "en": "CAREFUL PLANNING",
+    "smart": false
+   },
+   "CARD_CHASE": {
+    "en": "CHASE",
+    "smart": false
+   },
+   "CARD_CHASE_DESC": {
+    "en": "+60% movement when moving towards the opponent",
+    "smart": false
+   },
+   "CARD_CHILLING_PRESENCE": {
+    "en": "CHILLING PRESENCE",
+    "smart": false
+   },
+   "CARD_CHILLING_PRESENCE_DESC": {
+    "en": "Slightly slow nearby enemies",
+    "smart": false
+   },
+   "CARD_COLD_BULLETS": {
+    "en": "COLD BULLETS",
+    "smart": false
+   },
+   "CARD_COMBINE": {
+    "en": "COMBINE",
+    "smart": false
+   },
+   "CARD_DAZZLE": {
+    "en": "DAZZLE",
+    "smart": false
+   },
+   "CARD_DAZZLE_DESC": {
+    "en": "Bullets stun the oponent multiple times",
+    "smart": false
+   },
+   "CARD_DECAY": {
+    "en": "DECAY",
+    "smart": false
+   },
+   "CARD_DECAY_DESC": {
+    "en": "Damage done to you is dealt over 4 seconds",
+    "smart": false
+   },
+   "CARD_DEFENDER": {
+    "en": "DEFENDER",
+    "smart": false
+   },
+   "CARD_DEMONIC_PACT": {
+    "en": "Demonic pact",
+    "smart": false
+   },
+   "CARD_DEMONIC_PACT_DESC": {
+    "en": "Shooting costs 10HP\nRemoves shooting cooldown",
+    "smart": false,
+    "comment": "Health Points"
+   },
+   "CARD_DRILL_AMMO": {
+    "en": "DRILL AMMO",
+    "smart": false
+   },
+   "CARD_ECHO": {
+    "en": "ECHO",
+    "smart": false
+   },
+   "CARD_ECHO_DESC": {
+    "en": "Blocking triggers another, delayed block",
+    "smart": false
+   },
+   "CARD_EMP": {
+    "en": "EMP",
+    "smart": false,
+    "comment": "Electromagnetic pulse"
+   },
+   "CARD_EMPOWER": {
+    "en": "EMPOWER",
+    "smart": false
+   },
+   "CARD_EMPOWER_DESC": {
+    "en": "Blocking increases the damage and speed of your next shot.\nThe shot also triggers any on block abilities where it lands.",
+    "smart": false
+   },
+   "CARD_EMP_DESC": {
+    "en": "Blocking spawns a ring of slowing projectiles",
+    "smart": false
+   },
+   "CARD_EXPLOSIVE_BULLET": {
+    "en": "EXPLOSIVE BULLET",
+    "smart": false
+   },
+   "CARD_EXPLOSIVE_BULLET_DESC": {
+    "en": "Bullet explodes on impact",
+    "smart": false
+   },
+   "CARD_FASTBALL": {
+    "en": "FASTBALL",
+    "smart": false
+   },
+   "CARD_FAST_FORWARD": {
+    "en": "Fast forward",
+    "smart": false
+   },
+   "CARD_FAST_FORWARD_DESC": {
+    "en": "Bullets keep the default trajectory",
+    "smart": false
+   },
+   "CARD_FROST_SLAM": {
+    "en": "FROST SLAM",
+    "smart": false
+   },
+   "CARD_FROST_SLAM_DESC": {
+    "en": "Slows enemies around you when you block",
+    "smart": false
+   },
+   "CARD_GLASS_CANNON": {
+    "en": "GLASS CANNON",
+    "smart": false
+   },
+   "CARD_GROW": {
+    "en": "GROW",
+    "smart": false
+   },
+   "CARD_GROW_DESC": {
+    "en": "Bullets gets more damage over time when travelling",
+    "smart": false
+   },
+   "CARD_HEALING_FIELD": {
+    "en": "Healing field",
+    "smart": false
+   },
+   "CARD_HEALING_FIELD_DESC": {
+    "en": "Blocking creates a healing field",
+    "smart": false
+   },
+   "CARD_HOMING": {
+    "en": "HOMING",
+    "smart": false
+   },
+   "CARD_HOMING_DESC": {
+    "en": "Bullets home towards visible targets",
+    "smart": false
+   },
+   "CARD_HUGE": {
+    "en": "HUGE",
+    "smart": false
+   },
+   "CARD_IMPLODE": {
+    "en": "Implode",
+    "smart": false
+   },
+   "CARD_IMPLODE_DESC": {
+    "en": "Blocking pulls enemies towards you",
+    "smart": false
+   },
+   "CARD_LEECH": {
+    "en": "LEECH",
+    "smart": false
+   },
+   "CARD_LIFESTEALER": {
+    "en": "LIFESTEALER",
+    "smart": false
+   },
+   "CARD_LIFESTEALER_DESC": {
+    "en": "Steal HP from your opponent when near",
+    "smart": false,
+    "comment": "Health Points\n2023-10-17: Added missing capitalization of \"HP\" to keep consistency"
+   },
+   "CARD_MAYHEM": {
+    "en": "MAYHEM",
+    "smart": false
+   },
+   "CARD_OVERPOWER": {
+    "en": "OVERPOWER",
+    "smart": false
+   },
+   "CARD_OVERPOWER_DESC": {
+    "en": "Deal 15% of your max HP to enemies around you when you block",
+    "smart": false,
+    "comment": "Health Points"
+   },
+   "CARD_PARASITE": {
+    "en": "PARASITE",
+    "smart": false
+   },
+   "CARD_PARASITE_DESC": {
+    "en": "Bullets deal damage over 5 seconds",
+    "smart": false
+   },
+   "CARD_PHOENIX": {
+    "en": "PHOENIX",
+    "smart": false
+   },
+   "CARD_PHOENIX_DESC": {
+    "en": "Respawn once on death",
+    "smart": false
+   },
+   "CARD_POISON": {
+    "en": "POISON",
+    "smart": false
+   },
+   "CARD_POISON_DESC": {
+    "en": "Bullets deal damage over 3 seconds",
+    "smart": false
+   },
+   "CARD_PRISITNE_PERSEVERENCE": {
+    "en": "PRISTINE PERSEVERENCE",
+    "smart": false,
+    "comment": "2023-10-20: ENG: Fixed a typo in \"PRISTINE\" (\"PRISITNE\")"
+   },
+   "CARD_PRISITNE_PERSEVERENCE_DESC": {
+    "en": "+400% HP when above 90% HP",
+    "smart": false,
+    "comment": "Health Points"
+   },
+   "CARD_QUICK_RELOAD": {
+    "en": "QUICK RELOAD",
+    "smart": false
+   },
+   "CARD_QUICK_SHOT": {
+    "en": "QUICK SHOT",
+    "smart": false
+   },
+   "CARD_RADAR_SHOT": {
+    "en": "RADAR SHOT",
+    "smart": false
+   },
+   "CARD_RADAR_SHOT_DESC": {
+    "en": "Blocking scans the area for enemies. You automatically shoot any enemy found.",
+    "smart": false
+   },
+   "CARD_RADIANCE": {
+    "en": "RADIANCE",
+    "smart": false
+   },
+   "CARD_RADIANCE_DESC": {
+    "en": "Spawn damaging sun waves when reloading.\nThe rate increases during the reload sequence.",
+    "smart": false
+   },
+   "CARD_REFRESH": {
+    "en": "Refresh",
+    "smart": false
+   },
+   "CARD_REFRESH_DESC": {
+    "en": "You get block back when deal damage",
+    "smart": false
+   },
+   "CARD_REMOTE": {
+    "en": "REMOTE",
+    "smart": false
+   },
+   "CARD_REMOTE_DESC": {
+    "en": "Steer bullet with right stick / mouse",
+    "smart": false,
+    "comment": "Xbox Terminology: right stick"
+   },
+   "CARD_REMOTE_DESC_PS": {
+    "en": "Steer bullet with right stick",
+    "smart": false,
+    "comment": "PS Terminology: right stick"
+   },
+   "CARD_REMOTE_DESC_XBOX": {
+    "en": "Steer bullet with right stick",
+    "smart": false,
+    "comment": "Xbox Terminology: right stick"
+   },
+   "CARD_RICCOCHET": {
+    "en": "RICCOCHET",
+    "smart": false
+   },
+   "CARD_RICCOCHET_DESC": {
+    "en": "Bullets lose half of their speed when they bounce",
+    "smart": false
+   },
+   "CARD_SAW": {
+    "en": "SAW",
+    "smart": false
+   },
+   "CARD_SAW_DESC": {
+    "en": "Blocking spawns a saw around you for a short while",
+    "smart": false
+   },
+   "CARD_SCAVENGER": {
+    "en": "SCAVENGER",
+    "smart": false
+   },
+   "CARD_SCAVENGER_DESC": {
+    "en": "Dealing damage reloads your weapon",
+    "smart": false
+   },
+   "CARD_SHIELDS_UP": {
+    "en": "SHIELDS UP",
+    "smart": false
+   },
+   "CARD_SHIELDS_UP_DESC": {
+    "en": "Firing your last bullet triggers a block.\nDisabled continuous reloading.",
+    "smart": false
+   },
+   "CARD_SHIELD_CHARGE": {
+    "en": "SHIELD CHARGE",
+    "smart": false
+   },
+   "CARD_SHIELD_CHARGE_DESC": {
+    "en": "Blocking launches you forward and gives you a second automatic block upon ending the charge",
+    "smart": false
+   },
+   "CARD_SHOCKWAVE": {
+    "en": "Shockwave",
+    "smart": false
+   },
+   "CARD_SHOCKWAVE_DESC": {
+    "en": "Blocking pushes enemies away",
+    "smart": false
+   },
+   "CARD_SILENCE": {
+    "en": "SILENCE",
+    "smart": false
+   },
+   "CARD_SILENCE_DESC": {
+    "en": "Blocking silences enemies nearby",
+    "smart": false
+   },
+   "CARD_SNEAKY": {
+    "en": "SNEAKY",
+    "smart": false
+   },
+   "CARD_SNEAKY_DESC": {
+    "en": "Bullets avoid the ground",
+    "smart": false
+   },
+   "CARD_SPRAY": {
+    "en": "SPRAY",
+    "smart": false
+   },
+   "CARD_STATIC_FIELD": {
+    "en": "STATIC FIELD",
+    "smart": false
+   },
+   "CARD_STATIC_FIELD_DESC": {
+    "en": "Blocking creates a field that slows and deals damage",
+    "smart": false
+   },
+   "CARD_STEADY_SHOT": {
+    "en": "STEADY SHOT",
+    "smart": false
+   },
+   "CARD_SUPERNOVA": {
+    "en": "SUPERNOVA",
+    "smart": false
+   },
+   "CARD_SUPERNOVA_DESC": {
+    "en": "Spawns a field that pulls enemies in and stuns after a while",
+    "smart": false
+   },
+   "CARD_TACTICAL_RELOAD": {
+    "en": "TACTICAL RELOAD",
+    "smart": false
+   },
+   "CARD_TACTICAL_RELOAD_DESC": {
+    "en": "Blocking reloads your weapon\n",
+    "smart": false
+   },
+   "CARD_TANK": {
+    "en": "TANK",
+    "smart": false
+   },
+   "CARD_TARGET_BOUNCE": {
+    "en": "Target BOUNCE",
+    "smart": false
+   },
+   "CARD_TARGET_BOUNCE_DESC": {
+    "en": "Bullets aim for visible targets when bouncing",
+    "smart": false
+   },
+   "CARD_TASTE_OF_BLOOD": {
+    "en": "TASTE OF BLOOD",
+    "smart": false
+   },
+   "CARD_TASTE_OF_BLOOD_DESC": {
+    "en": "+50% movement speed 3s after dealing DMG",
+    "smart": false,
+    "comment": "Damage"
+   },
+   "CARD_TELEPORT": {
+    "en": "TELEPORT",
+    "smart": false
+   },
+   "CARD_TELEPORT_DESC": {
+    "en": "Blocking teleports you forward",
+    "smart": false
+   },
+   "CARD_THRUSTER": {
+    "en": "THRUSTER",
+    "smart": false
+   },
+   "CARD_THRUSTER_DESC": {
+    "en": "Bullets have thrusters that push targets",
+    "smart": false
+   },
+   "CARD_TIMED_DETONATION": {
+    "en": "TIMED DETONATION",
+    "smart": false
+   },
+   "CARD_TIMED_DETONATION_DESC": {
+    "en": "Bullets spawn bombs that explode after half a second",
+    "smart": false
+   },
+   "CARD_TOXIC_CLOUD": {
+    "en": "TOXIC CLOUD",
+    "smart": false
+   },
+   "CARD_TOXIC_CLOUD_DESC": {
+    "en": "Bullets spawn a poison cloud on impact. \nClouds deal damage and slow.",
+    "smart": false
+   },
+   "CARD_TRICKSTER": {
+    "en": "TRICKSTER",
+    "smart": false
+   },
+   "CARD_TRICKSTER_DESC": {
+    "en": "Bullets deal 80% more DMG per bounce",
+    "smart": false,
+    "comment": "Damage"
+   },
+   "CARD_WIND_UP": {
+    "en": "WIND UP",
+    "smart": false
+   },
+   "STAT_AMMO": {
+    "en": "Ammo",
+    "smart": false
+   },
+   "STAT_ATKSPD": {
+    "en": "ATKSPD",
+    "smart": false,
+    "comment": "Attack Speed"
+   },
+   "STAT_ATTACK_SPEED": {
+    "en": "Attack Speed",
+    "smart": false
+   },
+   "STAT_BLOCK_COOLDOWN": {
+    "en": "Block cooldown",
+    "smart": false
+   },
+   "STAT_BULLET": {
+    "en": "Bullet",
+    "smart": false
+   },
+   "STAT_BULLETS": {
+    "en": "Bullets",
+    "smart": false
+   },
+   "STAT_BULLETS_DRILL_THROUGH_WALLS": {
+    "en": "Bullets drill through walls",
+    "smart": false
+   },
+   "STAT_BULLET_BOUNCE": {
+    "en": "Bullet bounce",
+    "smart": false
+   },
+   "STAT_BULLET_BOUNCES": {
+    "en": "Bullet bounces",
+    "smart": false
+   },
+   "STAT_BULLET_SLOW": {
+    "en": "Bullet slow",
+    "smart": false
+   },
+   "STAT_BULLET_SPEED": {
+    "en": "Bullet speed",
+    "smart": false
+   },
+   "STAT_DMG": {
+    "en": "DMG",
+    "smart": false,
+    "comment": "Damage"
+   },
+   "STAT_HEALTH": {
+    "en": "Health",
+    "smart": false
+   },
+   "STAT_HP": {
+    "en": "HP",
+    "smart": false,
+    "comment": "Health Points"
+   },
+   "STAT_LIFE_STEAL": {
+    "en": "Life steal",
+    "smart": false
+   },
+   "STAT_PROJECTILE_SPEED": {
+    "en": "Projectile speed",
+    "smart": false
+   },
+   "STAT_RELOAD_SPEED": {
+    "en": "Reload speed",
+    "smart": false
+   },
+   "STAT_RELOAD_TIME": {
+    "en": "Reload time",
+    "smart": false
+   },
+   "STAT_SPLASH_DMG": {
+    "en": "Splash DMG",
+    "smart": false,
+    "comment": "Damage"
+   }
+  },
+  "StringTableDefault": {
+   "BUTTON_BACK": {
+    "en": "Back",
+    "smart": false,
+    "comment": "Action to go back to previous menu"
+   },
+   "BUTTON_BLOCK": {
+    "en": "Block and mute opponent",
+    "smart": false,
+    "comment": "Block as in blacklisting the player"
+   },
+   "BUTTON_BLOCKLIST": {
+    "en": "Manage blocklist",
+    "smart": false
+   },
+   "BUTTON_CONTINUE": {
+    "en": "Continue",
+    "smart": false
+   },
+   "BUTTON_GETOAUTH": {
+    "en": "Get OAUTH",
+    "smart": false
+   },
+   "BUTTON_HOST": {
+    "en": "Host",
+    "smart": false,
+    "comment": "Verb"
+   },
+   "BUTTON_HOSTROOM": {
+    "en": "Host room",
+    "smart": false
+   },
+   "BUTTON_INVITEFRIEND": {
+    "en": "Invite friend",
+    "smart": false
+   },
+   "BUTTON_LOCAL": {
+    "en": "Local",
+    "smart": false
+   },
+   "BUTTON_MAINMENU": {
+    "en": "Main menu",
+    "smart": false
+   },
+   "BUTTON_ONLINE": {
+    "en": "Online",
+    "smart": false
+   },
+   "BUTTON_OPTIONS": {
+    "en": "Options",
+    "smart": false
+   },
+   "BUTTON_QUICKMATCH": {
+    "en": "Quick match",
+    "smart": false
+   },
+   "BUTTON_QUIT": {
+    "en": "Quit",
+    "smart": false,
+    "comment": "Close the game"
+   },
+   "BUTTON_REPORT": {
+    "en": "Report opponent",
+    "smart": false
+   },
+   "BUTTON_RESUME": {
+    "en": "Resume",
+    "smart": false
+   },
+   "BUTTON_SANDBOX": {
+    "en": "Sandbox",
+    "smart": false
+   },
+   "BUTTON_SAVE": {
+    "en": "Save",
+    "smart": false
+   },
+   "BUTTON_TWITCH": {
+    "en": "Twitch matchmaking",
+    "smart": false,
+    "comment": "Do no translate \"Twitch\""
+   },
+   "BUTTON_UNBLOCK": {
+    "en": "Unblock opponent",
+    "smart": false,
+    "comment": "Opposite action from above"
+   },
+   "BUTTON_VERSUS": {
+    "en": "Versus",
+    "smart": false
+   },
+   "CATEGORY_DETAIL1": {
+    "en": "Detail 1",
+    "smart": false
+   },
+   "CATEGORY_DETAIL2": {
+    "en": "Detail 2",
+    "smart": false
+   },
+   "CATEGORY_EYES": {
+    "en": "Eyes",
+    "smart": false
+   },
+   "CATEGORY_MOUTHS": {
+    "en": "Mouths",
+    "smart": false,
+    "comment": "Plural"
+   },
+   "ERROR_PLAYER_LEFT": {
+    "en": "Other player left",
+    "smart": false
+   },
+   "LANG_CHINESE": {
+    "en": "简体中文",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "LANG_ENGLISH": {
+    "en": "English",
+    "smart": false
+   },
+   "LANG_FRENCH": {
+    "en": "Français",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "LANG_GERMAN": {
+    "en": "Deutsch",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "LANG_ITALIAN": {
+    "en": "Italiano",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "LANG_JAPANESE": {
+    "en": "日本語",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "LANG_PORTUGUESE_BR": {
+    "en": "Português (Brasil)",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version\n2023-10-17: Added missing \"t\" in \"Portuguese\""
+   },
+   "LANG_RUSSIAN": {
+    "en": "Русский",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "LANG_SPANISH": {
+    "en": "Español",
+    "smart": false,
+    "comment": "2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "LANG_SWEDISH": {
+    "en": "Svenska",
+    "smart": false,
+    "comment": "Not used, for testing purposes\n2023-10-23: Replaced the unlocalized name with its translated version"
+   },
+   "OPTION_CONTROLLER_AIM8DIR": {
+    "en": "Lock aiming to 8 directions (Controller)",
+    "smart": false,
+    "comment": "Xbox Terminology: Controller (to take from \"Xbox Wireless Controller\")"
+   },
+   "OPTION_CONTROLLER_AIM8DIR_PS": {
+    "en": "Lock aiming to 8 directions (Controller)",
+    "smart": false,
+    "comment": "PS Terminology: Controller (to take from \"wireless controller\")"
+   },
+   "OPTION_CROSSPLAY": {
+    "en": "Allow cross platform multiplayer",
+    "smart": false
+   },
+   "OPTION_EXCLUSIVEFULLSCREEN": {
+    "en": "Exclusive Fullscreen",
+    "smart": false
+   },
+   "OPTION_FULLSCREEN": {
+    "en": "Fullscreen Mode",
+    "smart": false
+   },
+   "OPTION_FULLSCREENWINDOW": {
+    "en": "Fullscreen Window",
+    "smart": false
+   },
+   "OPTION_LANGUAGE": {
+    "en": "Language",
+    "smart": false
+   },
+   "OPTION_LEFTSTICKAIMING": {
+    "en": "Left stick aiming",
+    "smart": false,
+    "comment": "Xbox Terminology: Left Stick"
+   },
+   "OPTION_LEFTSTICKAIMING_PS": {
+    "en": "Left stick aiming",
+    "smart": false,
+    "comment": "PS Terminology: Left Stick"
+   },
+   "OPTION_MAXIMIZEWINDOW": {
+    "en": "Maximize Window",
+    "smart": false
+   },
+   "OPTION_MOUSE_AIM8DIR": {
+    "en": "Lock aiming to 8 directions (Mouse)",
+    "smart": false
+   },
+   "OPTION_MUTE": {
+    "en": "Mute Chat",
+    "smart": false
+   },
+   "OPTION_NO": {
+    "en": "No",
+    "smart": false
+   },
+   "OPTION_RESOLUTION": {
+    "en": "Resolution",
+    "smart": false
+   },
+   "OPTION_SHOWSTATNUMBERS": {
+    "en": "Show card stat numbers",
+    "smart": false
+   },
+   "OPTION_VOLUME_MASTER": {
+    "en": "Master volume",
+    "smart": false,
+    "comment": "Main audio volume"
+   },
+   "OPTION_VOLUME_MUSIC": {
+    "en": "Music volume",
+    "smart": false,
+    "comment": "2023-10-17: Fixed a typo in \"Music\" (\"Mucis\")"
+   },
+   "OPTION_VOLUME_SFX": {
+    "en": "SFX volume",
+    "smart": false,
+    "comment": "Sound effects volume"
+   },
+   "OPTION_VSYNC": {
+    "en": "V-SYNC",
+    "smart": false
+   },
+   "OPTION_WINDOWED": {
+    "en": "Windowed",
+    "smart": false
+   },
+   "OPTION_YES": {
+    "en": "Yes",
+    "smart": false
+   },
+   "PROMPT_BEINGEDITED": {
+    "en": "Being \nEdited",
+    "smart": false
+   },
+   "PROMPT_BLOCKLIST_EMPTY": {
+    "en": "You have not blocked any users from other platforms",
+    "smart": false,
+    "comment": "Shown when managing blocklist but the list is empty"
+   },
+   "PROMPT_CANCEL_CONTROLLER": {
+    "en": "<sprite name=BUTTON_EAST> Cancel",
+    "smart": false
+   },
+   "PROMPT_CANCEL_MOUSE": {
+    "en": "[ESC] Cancel",
+    "smart": false
+   },
+   "PROMPT_CONTINUE": {
+    "en": "Continue?",
+    "smart": false
+   },
+   "PROMPT_DISCONNECT": {
+    "en": "Disconnected",
+    "smart": false
+   },
+   "PROMPT_ENTER_CARD_NAME": {
+    "en": "Enter card name",
+    "smart": false
+   },
+   "PROMPT_ENTER_CHAT_MESSAGE": {
+    "en": "Enter chat message",
+    "smart": false
+   },
+   "PROMPT_HALF_BLUE": {
+    "en": "Half Blue",
+    "smart": false
+   },
+   "PROMPT_HALF_ORANGE": {
+    "en": "Half Orange",
+    "smart": false
+   },
+   "PROMPT_HOSTING": {
+    "en": "Waiting for",
+    "smart": false
+   },
+   "PROMPT_JOINROOM": {
+    "en": "<sprite name=BUTTON_WEST> To join room",
+    "smart": false
+   },
+   "PROMPT_JOINROOM_ENTER": {
+    "en": "Press enter key to join with roomcode",
+    "smart": false
+   },
+   "PROMPT_JUMP_TO_JOIN": {
+    "en": "Press jump\nto join",
+    "smart": false
+   },
+   "PROMPT_LETSGO": {
+    "en": "LET'S GOO!",
+    "smart": false,
+    "comment": "2023-10-17: Added missing apostrophe in \"LET'S\"."
+   },
+   "PROMPT_MATCHFOUND": {
+    "en": "Match found",
+    "smart": false
+   },
+   "PROMPT_MOVE_ITEMS": {
+    "en": "To move items",
+    "smart": false
+   },
+   "PROMPT_MOVE_ITEMS_CONTROLLER": {
+    "en": "[RIGHT STICK]\nTo move items",
+    "smart": false
+   },
+   "PROMPT_MOVE_ITEMS_CONTROLLER_PS": {
+    "en": "[RIGHT STICK]\nTo move items",
+    "smart": false,
+    "comment": "PS Terminology"
+   },
+   "PROMPT_PICKONE": {
+    "en": "Pick one",
+    "smart": false
+   },
+   "PROMPT_READY": {
+    "en": "Ready",
+    "smart": false
+   },
+   "PROMPT_REMATCH": {
+    "en": "Rematch?",
+    "smart": false
+   },
+   "PROMPT_ROOMCODE": {
+    "en": "Roomcode: {ROOMCODE}",
+    "smart": true
+   },
+   "PROMPT_ROUND_BLUE": {
+    "en": "Round Blue",
+    "smart": false
+   },
+   "PROMPT_ROUND_ORANGE": {
+    "en": "Round Orange",
+    "smart": false
+   },
+   "PROMPT_SANDBOX_CONTROLLER": {
+    "en": "Press <sprite name=BUTTON_NORTH> to open text input\nType names of the cards to spawn them\nShoot the cards to pick them",
+    "smart": false
+   },
+   "PROMPT_SANDBOX_MOUSE": {
+    "en": "Press enter to chat\nType names of the cards to spawn them\nShoot the cards to pick them",
+    "smart": false
+   },
+   "PROMPT_SEARCHING": {
+    "en": "Searching",
+    "smart": false
+   },
+   "PROMPT_SOUTH_TO_JOIN": {
+    "en": "Press\n[<sprite name=BUTTON_SOUTH>]\nto join",
+    "smart": false
+   },
+   "PROMPT_SPACE_TO_JOIN": {
+    "en": "Press\n[SPACE]\nto join",
+    "smart": false
+   },
+   "PROMPT_START_TO_SAVE": {
+    "en": "Press\n[<sprite name=BUTTON_START>]\nto save",
+    "smart": false
+   },
+   "PROMPT_START_WHEN_READY": {
+    "en": "Press [<sprite name=BUTTON_START>] when ready",
+    "smart": false
+   },
+   "PROMPT_TOEDIT": {
+    "en": "To edit",
+    "smart": false
+   },
+   "PROMPT_VICTORY": {
+    "en": "Victory!",
+    "smart": false
+   },
+   "PROMPT_VS": {
+    "en": "VS",
+    "smart": false,
+    "comment": "Versus"
+   },
+   "PROMPT_WAITING": {
+    "en": "Waiting",
+    "smart": false
+   },
+   "PROMPT_WAITING_FOR_FRIEND": {
+    "en": "Waiting for friend",
+    "smart": false
+   },
+   "PROMT_SPACE_WHEN_READY": {
+    "en": "Press [SPACE] when ready",
+    "smart": false
+   }
+  }
+ }
+}

@@ -1,0 +1,1216 @@
+{
+ "format": 1,
+ "comment": "Reviewed machine-draft base-game translations, keyed Table/ENTRY_KEY with the expected English at draft time. Regenerate GameLocaleCatalogues.cs via tools/gen_game_catalogues.py; at ship time overlay approved portal entries with --approved-dump.",
+ "entries": {
+  "StringTableCards/AMOUNT_AHUGEAMOUNTOF": {
+   "en": "A huge amount of",
+   "uk": "Дуже багато",
+   "sv": "Enormt mycket mer"
+  },
+  "StringTableCards/AMOUNT_ALITTLEBITOF": {
+   "en": "Slightly more",
+   "uk": "Трохи більше",
+   "sv": "Något mer"
+  },
+  "StringTableCards/AMOUNT_ALOTLOWER": {
+   "en": "A lot lower",
+   "uk": "Набагато менше",
+   "sv": "Mycket lägre"
+  },
+  "StringTableCards/AMOUNT_ALOTOF": {
+   "en": "A bunch more",
+   "uk": "Набагато більше",
+   "sv": "Mycket mer"
+  },
+  "StringTableCards/AMOUNT_LOWER": {
+   "en": "Lower",
+   "uk": "Менше",
+   "sv": "Lägre"
+  },
+  "StringTableCards/AMOUNT_SLIGHTLYLOWER": {
+   "en": "Slightly lower",
+   "uk": "Трохи менше",
+   "sv": "Något lägre"
+  },
+  "StringTableCards/AMOUNT_SLIGHTLYSMALLER": {
+   "en": "Slightly smaller",
+   "uk": "Трохи менша",
+   "sv": "Något mindre"
+  },
+  "StringTableCards/AMOUNT_SMALLER": {
+   "en": "Smaller",
+   "uk": "Менша",
+   "sv": "Mindre"
+  },
+  "StringTableCards/AMOUNT_SOME": {
+   "en": "More",
+   "uk": "Більше",
+   "sv": "Mer"
+  },
+  "StringTableCards/CARD_ABYSSAL_COUNTDOWN": {
+   "en": "ABYSSAL COUNTDOWN",
+   "uk": "ВІДЛІК БЕЗОДНІ",
+   "sv": "AVGRUNDENS NEDRÄKNING"
+  },
+  "StringTableCards/CARD_ABYSSAL_COUNTDOWN_DESC": {
+   "en": "Stand still to summon dark powers",
+   "uk": "Стійте нерухомо, щоб прикликати темні сили",
+   "sv": "Stå stilla för att åkalla mörka krafter"
+  },
+  "StringTableCards/CARD_BARRAGE": {
+   "en": "BARRAGE",
+   "uk": "ШКВАЛ ВОГНЮ",
+   "sv": "SPÄRRELD"
+  },
+  "StringTableCards/CARD_BARRAGE_DESC": {
+   "en": "Fire many bullets at the same time",
+   "uk": "Стріляйте багатьма кулями одночасно",
+   "sv": "Du avfyrar många kulor samtidigt"
+  },
+  "StringTableCards/CARD_BIG_BULLET": {
+   "en": "BIG BULLET",
+   "uk": "ВЕЛИКА КУЛЯ",
+   "sv": "STOR KULA"
+  },
+  "StringTableCards/CARD_BIG_BULLET_DESC": {
+   "en": "Bigger bullets",
+   "uk": "Більші кулі",
+   "sv": "Större kulor"
+  },
+  "StringTableCards/CARD_BOMBS_AWAY": {
+   "en": "BOMBS AWAY",
+   "uk": "БОМБАРДУВАННЯ",
+   "sv": "BOMBARDEMANG"
+  },
+  "StringTableCards/CARD_BOMBS_AWAY_DESC": {
+   "en": "Spawn a bunch of small bombs around you when you block",
+   "uk": "Блок створює купу маленьких бомб навколо вас",
+   "sv": "När du blockerar skapas en drös småbomber runt dig"
+  },
+  "StringTableCards/CARD_BOUNCY": {
+   "en": "BOUNCY",
+   "uk": "СТРИБУНЕЦЬ",
+   "sv": "STUDSIG"
+  },
+  "StringTableCards/CARD_BRAWLER": {
+   "en": "BRAWLER",
+   "uk": "ЗАБІЯКА",
+   "sv": "SLAGSKÄMPE"
+  },
+  "StringTableCards/CARD_BRAWLER_DESC": {
+   "en": "+200% HP 3s after dealing DMG",
+   "uk": "+200% здоров’я на 3 секунди після завдання шкоди",
+   "sv": "+200 % HP i 3 s efter att du gjort skada"
+  },
+  "StringTableCards/CARD_BUCKSHOT": {
+   "en": "BUCKSHOT",
+   "uk": "КАРТЕЧ",
+   "sv": "HAGELSKOTT"
+  },
+  "StringTableCards/CARD_BUCKSHOT_DESC": {
+   "en": "Adds a shotgun vibe to your attack",
+   "uk": "Ваша атака нагадує постріл із дробовика",
+   "sv": "Får din attack att kännas som ett hagelgevär"
+  },
+  "StringTableCards/CARD_BURST": {
+   "en": "BURST",
+   "uk": "ЧЕРГА",
+   "sv": "SALVA"
+  },
+  "StringTableCards/CARD_BURST_DESC": {
+   "en": "Multiple bullets are fired in a sequence",
+   "uk": "Кілька куль вилітають одна за одною",
+   "sv": "Flera kulor avfyras i följd"
+  },
+  "StringTableCards/CARD_CAREFUL_PLANNING": {
+   "en": "CAREFUL PLANNING",
+   "uk": "РЕТЕЛЬНИЙ ПЛАН",
+   "sv": "NOGGRANN PLANERING"
+  },
+  "StringTableCards/CARD_CHASE": {
+   "en": "CHASE",
+   "uk": "ГОНИТВА",
+   "sv": "JAKT"
+  },
+  "StringTableCards/CARD_CHASE_DESC": {
+   "en": "+60% movement when moving towards the opponent",
+   "uk": "+60% до швидкості руху, коли ви рухаєтеся до суперника",
+   "sv": "+60 % rörelsehastighet när du rör dig mot motståndaren"
+  },
+  "StringTableCards/CARD_CHILLING_PRESENCE": {
+   "en": "CHILLING PRESENCE",
+   "uk": "МОРОЗНА АУРА",
+   "sv": "ISANDE NÄRVARO"
+  },
+  "StringTableCards/CARD_CHILLING_PRESENCE_DESC": {
+   "en": "Slightly slow nearby enemies",
+   "uk": "Трохи сповільнює ворогів поблизу",
+   "sv": "Saktar ner fiender i närheten något"
+  },
+  "StringTableCards/CARD_COLD_BULLETS": {
+   "en": "COLD BULLETS",
+   "uk": "ХОЛОДНІ КУЛІ",
+   "sv": "KALLA KULOR"
+  },
+  "StringTableCards/CARD_COMBINE": {
+   "en": "COMBINE",
+   "uk": "КОМБІНАЦІЯ",
+   "sv": "KOMBINATION"
+  },
+  "StringTableCards/CARD_DAZZLE": {
+   "en": "DAZZLE",
+   "uk": "СПАЛАХ",
+   "sv": "BLÄNDNING"
+  },
+  "StringTableCards/CARD_DAZZLE_DESC": {
+   "en": "Bullets stun the oponent multiple times",
+   "uk": "Кулі кілька разів поспіль оглушують суперника",
+   "sv": "Kulor bedövar motståndaren flera gånger"
+  },
+  "StringTableCards/CARD_DECAY": {
+   "en": "DECAY",
+   "uk": "ЗГАСАННЯ",
+   "sv": "FÖRFALL"
+  },
+  "StringTableCards/CARD_DECAY_DESC": {
+   "en": "Damage done to you is dealt over 4 seconds",
+   "uk": "Завдана вам шкода розтягується на 4 секунди",
+   "sv": "Skadan du tar fördelas över 4 sekunder"
+  },
+  "StringTableCards/CARD_DEFENDER": {
+   "en": "DEFENDER",
+   "uk": "ЗАХИСНИК",
+   "sv": "FÖRSVARARE"
+  },
+  "StringTableCards/CARD_DEMONIC_PACT": {
+   "en": "Demonic pact",
+   "uk": "ДЕМОНІЧНИЙ ПАКТ",
+   "sv": "DJÄVULSPAKT"
+  },
+  "StringTableCards/CARD_DEMONIC_PACT_DESC": {
+   "en": "Shooting costs 10HP\nRemoves shooting cooldown",
+   "uk": "Кожен постріл забирає 10 очок здоров’я\nУсуває затримку між пострілами",
+   "sv": "Att skjuta kostar 10 HP\nTar bort väntetiden mellan skott"
+  },
+  "StringTableCards/CARD_DRILL_AMMO": {
+   "en": "DRILL AMMO",
+   "uk": "БУРОВІ НАБОЇ",
+   "sv": "BORRAMMUNITION"
+  },
+  "StringTableCards/CARD_ECHO": {
+   "en": "ECHO",
+   "uk": "ЛУНА",
+   "sv": "EKO"
+  },
+  "StringTableCards/CARD_ECHO_DESC": {
+   "en": "Blocking triggers another, delayed block",
+   "uk": "Блок активує ще один блок із затримкою",
+   "sv": "När du blockerar utlöses ytterligare ett block med fördröjning"
+  },
+  "StringTableCards/CARD_EMP": {
+   "en": "EMP",
+   "uk": "ЕМІ",
+   "sv": "EMP"
+  },
+  "StringTableCards/CARD_EMPOWER": {
+   "en": "EMPOWER",
+   "uk": "МІЦЬ",
+   "sv": "FÖRSTÄRKNING"
+  },
+  "StringTableCards/CARD_EMPOWER_DESC": {
+   "en": "Blocking increases the damage and speed of your next shot.\nThe shot also triggers any on block abilities where it lands.",
+   "uk": "Блок збільшує шкоду та швидкість наступного пострілу.\nПостріл також активує здібності блоку в місці влучання.",
+   "sv": "När du blockerar ökar skadan och hastigheten på ditt nästa skott.\nSkottet utlöser även alla blockförmågor där det träffar."
+  },
+  "StringTableCards/CARD_EMP_DESC": {
+   "en": "Blocking spawns a ring of slowing projectiles",
+   "uk": "Блок створює кільце снарядів, що сповільнюють",
+   "sv": "När du blockerar skapas en ring av projektiler som saktar ner fiender"
+  },
+  "StringTableCards/CARD_EXPLOSIVE_BULLET": {
+   "en": "EXPLOSIVE BULLET",
+   "uk": "РОЗРИВНА КУЛЯ",
+   "sv": "EXPLOSIV KULA"
+  },
+  "StringTableCards/CARD_EXPLOSIVE_BULLET_DESC": {
+   "en": "Bullet explodes on impact",
+   "uk": "Куля вибухає при влучанні",
+   "sv": "Kulan exploderar vid träff"
+  },
+  "StringTableCards/CARD_FASTBALL": {
+   "en": "FASTBALL",
+   "uk": "ШВИДКА КУЛЯ",
+   "sv": "SNABBOLL"
+  },
+  "StringTableCards/CARD_FAST_FORWARD": {
+   "en": "Fast forward",
+   "uk": "ТІЛЬКИ ВПЕРЕД",
+   "sv": "SNABBSPOLNING"
+  },
+  "StringTableCards/CARD_FAST_FORWARD_DESC": {
+   "en": "Bullets keep the default trajectory",
+   "uk": "Кулі зберігають звичайну траєкторію",
+   "sv": "Kulor behåller sin vanliga bana"
+  },
+  "StringTableCards/CARD_FROST_SLAM": {
+   "en": "FROST SLAM",
+   "uk": "КРИЖАНИЙ УДАР",
+   "sv": "FROSTSMÄLL"
+  },
+  "StringTableCards/CARD_FROST_SLAM_DESC": {
+   "en": "Slows enemies around you when you block",
+   "uk": "Блок сповільнює ворогів навколо вас",
+   "sv": "Saktar ner fiender runt dig när du blockerar"
+  },
+  "StringTableCards/CARD_GLASS_CANNON": {
+   "en": "GLASS CANNON",
+   "uk": "СКЛЯНА ГАРМАТА",
+   "sv": "GLASKANON"
+  },
+  "StringTableCards/CARD_GROW": {
+   "en": "GROW",
+   "uk": "РІСТ",
+   "sv": "TILLVÄXT"
+  },
+  "StringTableCards/CARD_GROW_DESC": {
+   "en": "Bullets gets more damage over time when travelling",
+   "uk": "Що далі летить куля, то більшої шкоди вона завдає",
+   "sv": "Kulor gör mer skada ju längre de färdas"
+  },
+  "StringTableCards/CARD_HEALING_FIELD": {
+   "en": "Healing field",
+   "uk": "ЦІЛЮЩЕ ПОЛЕ",
+   "sv": "HELANDE FÄLT"
+  },
+  "StringTableCards/CARD_HEALING_FIELD_DESC": {
+   "en": "Blocking creates a healing field",
+   "uk": "Блок створює цілюще поле",
+   "sv": "När du blockerar skapas ett helande fält"
+  },
+  "StringTableCards/CARD_HOMING": {
+   "en": "HOMING",
+   "uk": "САМОНАВЕДЕННЯ",
+   "sv": "MÅLSÖKANDE"
+  },
+  "StringTableCards/CARD_HOMING_DESC": {
+   "en": "Bullets home towards visible targets",
+   "uk": "Кулі самі наводяться на видимі цілі",
+   "sv": "Kulor söker sig mot synliga mål"
+  },
+  "StringTableCards/CARD_HUGE": {
+   "en": "HUGE",
+   "uk": "ВЕЛЕТЕНЬ",
+   "sv": "ENORM"
+  },
+  "StringTableCards/CARD_IMPLODE": {
+   "en": "Implode",
+   "uk": "КОЛАПС",
+   "sv": "IMPLOSION"
+  },
+  "StringTableCards/CARD_IMPLODE_DESC": {
+   "en": "Blocking pulls enemies towards you",
+   "uk": "Блок притягує ворогів до вас",
+   "sv": "När du blockerar dras fiender mot dig"
+  },
+  "StringTableCards/CARD_LEECH": {
+   "en": "LEECH",
+   "uk": "П’ЯВКА",
+   "sv": "BLODIGEL"
+  },
+  "StringTableCards/CARD_LIFESTEALER": {
+   "en": "LIFESTEALER",
+   "uk": "КРОВОПИВЦЯ",
+   "sv": "LIVSTJUV"
+  },
+  "StringTableCards/CARD_LIFESTEALER_DESC": {
+   "en": "Steal HP from your opponent when near",
+   "uk": "Крадете здоров’я в суперника, коли він поруч",
+   "sv": "Du stjäl HP från motståndaren på nära håll"
+  },
+  "StringTableCards/CARD_MAYHEM": {
+   "en": "MAYHEM",
+   "uk": "ГАРМИДЕР",
+   "sv": "KAOS"
+  },
+  "StringTableCards/CARD_OVERPOWER": {
+   "en": "OVERPOWER",
+   "uk": "НАДСИЛА",
+   "sv": "ÖVERMAKT"
+  },
+  "StringTableCards/CARD_OVERPOWER_DESC": {
+   "en": "Deal 15% of your max HP to enemies around you when you block",
+   "uk": "Блок завдає ворогам поблизу шкоди — 15% вашого макс. здоров’я",
+   "sv": "När du blockerar tar fiender runt dig skada motsvarande 15 % av din maximala HP"
+  },
+  "StringTableCards/CARD_PARASITE": {
+   "en": "PARASITE",
+   "uk": "ПАРАЗИТ",
+   "sv": "PARASIT"
+  },
+  "StringTableCards/CARD_PARASITE_DESC": {
+   "en": "Bullets deal damage over 5 seconds",
+   "uk": "Кулі завдають шкоди протягом 5 секунд",
+   "sv": "Kulor gör skada under 5 sekunder"
+  },
+  "StringTableCards/CARD_PHOENIX": {
+   "en": "PHOENIX",
+   "uk": "ФЕНІКС",
+   "sv": "FENIX"
+  },
+  "StringTableCards/CARD_PHOENIX_DESC": {
+   "en": "Respawn once on death",
+   "uk": "Одне відродження після смерті",
+   "sv": "Du återuppstår en gång när du dör"
+  },
+  "StringTableCards/CARD_POISON": {
+   "en": "POISON",
+   "uk": "ОТРУТА",
+   "sv": "GIFT"
+  },
+  "StringTableCards/CARD_POISON_DESC": {
+   "en": "Bullets deal damage over 3 seconds",
+   "uk": "Кулі завдають шкоди протягом 3 секунд",
+   "sv": "Kulor gör skada under 3 sekunder"
+  },
+  "StringTableCards/CARD_PRISITNE_PERSEVERENCE": {
+   "en": "PRISTINE PERSEVERENCE",
+   "uk": "НЕПОХИТНІСТЬ",
+   "sv": "ORUBBLIGHET"
+  },
+  "StringTableCards/CARD_PRISITNE_PERSEVERENCE_DESC": {
+   "en": "+400% HP when above 90% HP",
+   "uk": "+400% здоров’я, коли у вас понад 90% здоров’я",
+   "sv": "+400 % HP när du har över 90 % HP"
+  },
+  "StringTableCards/CARD_QUICK_RELOAD": {
+   "en": "QUICK RELOAD",
+   "uk": "ШВИДКА ПЕРЕЗАРЯДКА",
+   "sv": "SNABBOMLADDNING"
+  },
+  "StringTableCards/CARD_QUICK_SHOT": {
+   "en": "QUICK SHOT",
+   "uk": "ШВИДКИЙ ПОСТРІЛ",
+   "sv": "SNABBSKOTT"
+  },
+  "StringTableCards/CARD_RADAR_SHOT": {
+   "en": "RADAR SHOT",
+   "uk": "РАДАР",
+   "sv": "RADARSKOTT"
+  },
+  "StringTableCards/CARD_RADAR_SHOT_DESC": {
+   "en": "Blocking scans the area for enemies. You automatically shoot any enemy found.",
+   "uk": "Блок сканує місцевість у пошуках ворогів. Ви автоматично стріляєте в кожного знайденого ворога.",
+   "sv": "När du blockerar skannas området av efter fiender. Du skjuter automatiskt på varje fiende som hittas."
+  },
+  "StringTableCards/CARD_RADIANCE": {
+   "en": "RADIANCE",
+   "uk": "СЯЙВО",
+   "sv": "STRÅLGLANS"
+  },
+  "StringTableCards/CARD_RADIANCE_DESC": {
+   "en": "Spawn damaging sun waves when reloading.\nThe rate increases during the reload sequence.",
+   "uk": "Під час перезарядки з’являються нищівні сонячні хвилі.\nЇхня частота зростає протягом перезарядки.",
+   "sv": "När du laddar om skapas solvågor som gör skada.\nFrekvensen ökar under omladdningen."
+  },
+  "StringTableCards/CARD_REFRESH": {
+   "en": "Refresh",
+   "uk": "ВІДНОВЛЕННЯ",
+   "sv": "ÅTERHÄMTNING"
+  },
+  "StringTableCards/CARD_REFRESH_DESC": {
+   "en": "You get block back when deal damage",
+   "uk": "Блок відновлюється, коли ви завдаєте шкоди",
+   "sv": "Du får tillbaka ditt block när du gör skada"
+  },
+  "StringTableCards/CARD_REMOTE": {
+   "en": "REMOTE",
+   "uk": "ДИСТАНЦІЙНЕ КЕРУВАННЯ",
+   "sv": "FJÄRRSTYRNING"
+  },
+  "StringTableCards/CARD_REMOTE_DESC": {
+   "en": "Steer bullet with right stick / mouse",
+   "uk": "Керуйте кулею правим стіком або мишею",
+   "sv": "Styr kulan med höger styrspak / mus"
+  },
+  "StringTableCards/CARD_REMOTE_DESC_PS": {
+   "en": "Steer bullet with right stick",
+   "uk": "Керуйте кулею правим стіком",
+   "sv": "Styr kulan med höger styrspak"
+  },
+  "StringTableCards/CARD_REMOTE_DESC_XBOX": {
+   "en": "Steer bullet with right stick",
+   "uk": "Керуйте кулею правим стіком",
+   "sv": "Styr kulan med höger styrspak"
+  },
+  "StringTableCards/CARD_RICCOCHET": {
+   "en": "RICCOCHET",
+   "uk": "РИКОШЕТ",
+   "sv": "RIKOSCHETT"
+  },
+  "StringTableCards/CARD_RICCOCHET_DESC": {
+   "en": "Bullets lose half of their speed when they bounce",
+   "uk": "Кулі втрачають половину швидкості при відскоку",
+   "sv": "Kulor förlorar halva sin hastighet när de studsar"
+  },
+  "StringTableCards/CARD_SAW": {
+   "en": "SAW",
+   "uk": "ПИЛКА",
+   "sv": "SÅG"
+  },
+  "StringTableCards/CARD_SAW_DESC": {
+   "en": "Blocking spawns a saw around you for a short while",
+   "uk": "Блок ненадовго створює пилку, що літає навколо вас",
+   "sv": "När du blockerar snurrar en såg runt dig en kort stund"
+  },
+  "StringTableCards/CARD_SCAVENGER": {
+   "en": "SCAVENGER",
+   "uk": "ПАДАЛЬНИК",
+   "sv": "ASÄTARE"
+  },
+  "StringTableCards/CARD_SCAVENGER_DESC": {
+   "en": "Dealing damage reloads your weapon",
+   "uk": "Завдання шкоди перезаряджає вашу зброю",
+   "sv": "När du gör skada laddas ditt vapen om"
+  },
+  "StringTableCards/CARD_SHIELDS_UP": {
+   "en": "SHIELDS UP",
+   "uk": "ПІДНЯТИ ЩИТИ",
+   "sv": "HÖJ SKÖLDARNA"
+  },
+  "StringTableCards/CARD_SHIELDS_UP_DESC": {
+   "en": "Firing your last bullet triggers a block.\nDisabled continuous reloading.",
+   "uk": "Постріл останньою кулею активує блок.\nВимикає постійну перезарядку.",
+   "sv": "När du avfyrar din sista kula utlöses ett block.\nKontinuerlig omladdning inaktiveras."
+  },
+  "StringTableCards/CARD_SHIELD_CHARGE": {
+   "en": "SHIELD CHARGE",
+   "uk": "РИВОК ІЗ ЩИТОМ",
+   "sv": "SKÖLDRUSNING"
+  },
+  "StringTableCards/CARD_SHIELD_CHARGE_DESC": {
+   "en": "Blocking launches you forward and gives you a second automatic block upon ending the charge",
+   "uk": "Блок кидає вас уперед і дає другий автоматичний блок після завершення ривка",
+   "sv": "När du blockerar kastas du framåt och får ett andra automatiskt block när rusningen tar slut"
+  },
+  "StringTableCards/CARD_SHOCKWAVE": {
+   "en": "Shockwave",
+   "uk": "УДАРНА ХВИЛЯ",
+   "sv": "TRYCKVÅG"
+  },
+  "StringTableCards/CARD_SHOCKWAVE_DESC": {
+   "en": "Blocking pushes enemies away",
+   "uk": "Блок відштовхує ворогів",
+   "sv": "När du blockerar knuffas fiender bort"
+  },
+  "StringTableCards/CARD_SILENCE": {
+   "en": "SILENCE",
+   "uk": "ТИША",
+   "sv": "TYSTNAD"
+  },
+  "StringTableCards/CARD_SILENCE_DESC": {
+   "en": "Blocking silences enemies nearby",
+   "uk": "Блок не дає ворогам поблизу атакувати та використовувати здібності",
+   "sv": "När du blockerar tystas fiender i närheten"
+  },
+  "StringTableCards/CARD_SNEAKY": {
+   "en": "SNEAKY",
+   "uk": "ПРОНОЗА",
+   "sv": "LISTIG"
+  },
+  "StringTableCards/CARD_SNEAKY_DESC": {
+   "en": "Bullets avoid the ground",
+   "uk": "Кулі оминають землю",
+   "sv": "Kulor undviker marken"
+  },
+  "StringTableCards/CARD_SPRAY": {
+   "en": "SPRAY",
+   "uk": "РОЗПИЛЮВАЧ",
+   "sv": "KULSPRUTA"
+  },
+  "StringTableCards/CARD_STATIC_FIELD": {
+   "en": "STATIC FIELD",
+   "uk": "СТАТИЧНЕ ПОЛЕ",
+   "sv": "STATISKT FÄLT"
+  },
+  "StringTableCards/CARD_STATIC_FIELD_DESC": {
+   "en": "Blocking creates a field that slows and deals damage",
+   "uk": "Блок створює поле, що сповільнює й завдає шкоди",
+   "sv": "När du blockerar skapas ett fält som saktar ner fiender och gör skada"
+  },
+  "StringTableCards/CARD_STEADY_SHOT": {
+   "en": "STEADY SHOT",
+   "uk": "ТВЕРДА РУКА",
+   "sv": "STADIGT SKOTT"
+  },
+  "StringTableCards/CARD_SUPERNOVA": {
+   "en": "SUPERNOVA",
+   "uk": "НАДНОВА",
+   "sv": "SUPERNOVA"
+  },
+  "StringTableCards/CARD_SUPERNOVA_DESC": {
+   "en": "Spawns a field that pulls enemies in and stuns after a while",
+   "uk": "Створює поле, що втягує ворогів і згодом оглушує їх",
+   "sv": "Skapar ett fält som drar in fiender och bedövar dem efter ett tag"
+  },
+  "StringTableCards/CARD_TACTICAL_RELOAD": {
+   "en": "TACTICAL RELOAD",
+   "uk": "ТАКТИЧНА ПЕРЕЗАРЯДКА",
+   "sv": "TAKTISK OMLADDNING"
+  },
+  "StringTableCards/CARD_TACTICAL_RELOAD_DESC": {
+   "en": "Blocking reloads your weapon\n",
+   "uk": "Блок перезаряджає вашу зброю\n",
+   "sv": "När du blockerar laddas ditt vapen om\n"
+  },
+  "StringTableCards/CARD_TANK": {
+   "en": "TANK",
+   "uk": "ТАНК",
+   "sv": "TANK"
+  },
+  "StringTableCards/CARD_TARGET_BOUNCE": {
+   "en": "Target BOUNCE",
+   "uk": "ВЛУЧНИЙ ВІДСКІК",
+   "sv": "MÅLSTUDS"
+  },
+  "StringTableCards/CARD_TARGET_BOUNCE_DESC": {
+   "en": "Bullets aim for visible targets when bouncing",
+   "uk": "При відскоку кулі летять до видимих цілей",
+   "sv": "Kulor siktar mot synliga mål när de studsar"
+  },
+  "StringTableCards/CARD_TASTE_OF_BLOOD": {
+   "en": "TASTE OF BLOOD",
+   "uk": "СМАК КРОВІ",
+   "sv": "BLODSMAK"
+  },
+  "StringTableCards/CARD_TASTE_OF_BLOOD_DESC": {
+   "en": "+50% movement speed 3s after dealing DMG",
+   "uk": "+50% до швидкості руху на 3 секунди після завдання шкоди",
+   "sv": "+50 % rörelsehastighet i 3 s efter att du gjort skada"
+  },
+  "StringTableCards/CARD_TELEPORT": {
+   "en": "TELEPORT",
+   "uk": "ТЕЛЕПОРТ",
+   "sv": "TELEPORT"
+  },
+  "StringTableCards/CARD_TELEPORT_DESC": {
+   "en": "Blocking teleports you forward",
+   "uk": "Блок телепортує вас уперед",
+   "sv": "När du blockerar teleporteras du framåt"
+  },
+  "StringTableCards/CARD_THRUSTER": {
+   "en": "THRUSTER",
+   "uk": "ПРИСКОРЮВАЧ",
+   "sv": "DRIVRAKET"
+  },
+  "StringTableCards/CARD_THRUSTER_DESC": {
+   "en": "Bullets have thrusters that push targets",
+   "uk": "Кулі мають прискорювачі, що штовхають цілі",
+   "sv": "Kulor har drivraketer som knuffar målen"
+  },
+  "StringTableCards/CARD_TIMED_DETONATION": {
+   "en": "TIMED DETONATION",
+   "uk": "ВІДКЛАДЕНА ДЕТОНАЦІЯ",
+   "sv": "TIDSDETONATION"
+  },
+  "StringTableCards/CARD_TIMED_DETONATION_DESC": {
+   "en": "Bullets spawn bombs that explode after half a second",
+   "uk": "Кулі створюють бомби, що вибухають за пів секунди",
+   "sv": "Kulor skapar bomber som exploderar efter en halv sekund"
+  },
+  "StringTableCards/CARD_TOXIC_CLOUD": {
+   "en": "TOXIC CLOUD",
+   "uk": "ТОКСИЧНА ХМАРА",
+   "sv": "GIFTMOLN"
+  },
+  "StringTableCards/CARD_TOXIC_CLOUD_DESC": {
+   "en": "Bullets spawn a poison cloud on impact. \nClouds deal damage and slow.",
+   "uk": "При влучанні кулі створюють отруйну хмару.\nХмари завдають шкоди та сповільнюють.",
+   "sv": "Kulor skapar ett giftmoln vid träff.\nMolnen gör skada och saktar ner fiender."
+  },
+  "StringTableCards/CARD_TRICKSTER": {
+   "en": "TRICKSTER",
+   "uk": "КРУТІЙ",
+   "sv": "FILUR"
+  },
+  "StringTableCards/CARD_TRICKSTER_DESC": {
+   "en": "Bullets deal 80% more DMG per bounce",
+   "uk": "Кулі завдають на 80% більше шкоди за кожен відскік",
+   "sv": "Kulor gör 80 % mer skada per studs"
+  },
+  "StringTableCards/CARD_WIND_UP": {
+   "en": "WIND UP",
+   "uk": "ЗАМАХ",
+   "sv": "UPPVARVNING"
+  },
+  "StringTableCards/STAT_AMMO": {
+   "en": "Ammo",
+   "uk": "Набої",
+   "sv": "Ammunition"
+  },
+  "StringTableCards/STAT_ATKSPD": {
+   "en": "ATKSPD",
+   "uk": "Швидкості атаки",
+   "sv": "Attackhastighet"
+  },
+  "StringTableCards/STAT_ATTACK_SPEED": {
+   "en": "Attack Speed",
+   "uk": "Швидкості атаки",
+   "sv": "Attackhastighet"
+  },
+  "StringTableCards/STAT_BLOCK_COOLDOWN": {
+   "en": "Block cooldown",
+   "uk": "Часу відновлення блоку",
+   "sv": "Blocknedkylning"
+  },
+  "StringTableCards/STAT_BULLET": {
+   "en": "Bullet",
+   "uk": "Куля",
+   "sv": "Kula"
+  },
+  "StringTableCards/STAT_BULLETS": {
+   "en": "Bullets",
+   "uk": "Кулі",
+   "sv": "Kulor"
+  },
+  "StringTableCards/STAT_BULLETS_DRILL_THROUGH_WALLS": {
+   "en": "Bullets drill through walls",
+   "uk": "Кулі проходять крізь стіни",
+   "sv": "Kulor borrar sig genom väggar"
+  },
+  "StringTableCards/STAT_BULLET_BOUNCE": {
+   "en": "Bullet bounce",
+   "uk": "Відскік кулі",
+   "sv": "Kulstuds"
+  },
+  "StringTableCards/STAT_BULLET_BOUNCES": {
+   "en": "Bullet bounces",
+   "uk": "Відскоки куль",
+   "sv": "Kulstudsar"
+  },
+  "StringTableCards/STAT_BULLET_SLOW": {
+   "en": "Bullet slow",
+   "uk": "Сповільнення від кулі",
+   "sv": "Bromseffekt från kulor"
+  },
+  "StringTableCards/STAT_BULLET_SPEED": {
+   "en": "Bullet speed",
+   "uk": "Швидкості кулі",
+   "sv": "Kulhastighet"
+  },
+  "StringTableCards/STAT_DMG": {
+   "en": "DMG",
+   "uk": "Шкоди",
+   "sv": "Skada"
+  },
+  "StringTableCards/STAT_HEALTH": {
+   "en": "Health",
+   "uk": "Здоров’я",
+   "sv": "Hälsa"
+  },
+  "StringTableCards/STAT_HP": {
+   "en": "HP",
+   "uk": "Очок здоров’я",
+   "sv": "HP"
+  },
+  "StringTableCards/STAT_LIFE_STEAL": {
+   "en": "Life steal",
+   "uk": "Викрадення здоров’я",
+   "sv": "Livsstöld"
+  },
+  "StringTableCards/STAT_PROJECTILE_SPEED": {
+   "en": "Projectile speed",
+   "uk": "Швидкості снаряда",
+   "sv": "Projektilhastighet"
+  },
+  "StringTableCards/STAT_RELOAD_SPEED": {
+   "en": "Reload speed",
+   "uk": "Швидкості перезарядки",
+   "sv": "Omladdningshastighet"
+  },
+  "StringTableCards/STAT_RELOAD_TIME": {
+   "en": "Reload time",
+   "uk": "Час перезарядки",
+   "sv": "Omladdningstid"
+  },
+  "StringTableCards/STAT_SPLASH_DMG": {
+   "en": "Splash DMG",
+   "uk": "Шкоди по площі",
+   "sv": "Områdesskada"
+  },
+  "StringTableDefault/BUTTON_BACK": {
+   "en": "Back",
+   "uk": "Назад",
+   "sv": "Tillbaka"
+  },
+  "StringTableDefault/BUTTON_BLOCK": {
+   "en": "Block and mute opponent",
+   "uk": "Заблокувати й вимкнути звук суперника",
+   "sv": "Blockera och tysta motståndare"
+  },
+  "StringTableDefault/BUTTON_BLOCKLIST": {
+   "en": "Manage blocklist",
+   "uk": "Керувати списком заблокованих",
+   "sv": "Hantera blockeringslista"
+  },
+  "StringTableDefault/BUTTON_CONTINUE": {
+   "en": "Continue",
+   "uk": "Продовжити",
+   "sv": "Fortsätt"
+  },
+  "StringTableDefault/BUTTON_GETOAUTH": {
+   "en": "Get OAUTH",
+   "uk": "Отримати OAUTH",
+   "sv": "Hämta OAUTH"
+  },
+  "StringTableDefault/BUTTON_HOST": {
+   "en": "Host",
+   "uk": "Створити матч",
+   "sv": "Skapa match"
+  },
+  "StringTableDefault/BUTTON_HOSTROOM": {
+   "en": "Host room",
+   "uk": "Створити кімнату",
+   "sv": "Skapa rum"
+  },
+  "StringTableDefault/BUTTON_INVITEFRIEND": {
+   "en": "Invite friend",
+   "uk": "Запросити друга",
+   "sv": "Bjud in vän"
+  },
+  "StringTableDefault/BUTTON_LOCAL": {
+   "en": "Local",
+   "uk": "Локально",
+   "sv": "Lokalt"
+  },
+  "StringTableDefault/BUTTON_MAINMENU": {
+   "en": "Main menu",
+   "uk": "Головне меню",
+   "sv": "Huvudmeny"
+  },
+  "StringTableDefault/BUTTON_ONLINE": {
+   "en": "Online",
+   "uk": "Онлайн",
+   "sv": "Online"
+  },
+  "StringTableDefault/BUTTON_OPTIONS": {
+   "en": "Options",
+   "uk": "Налаштування",
+   "sv": "Alternativ"
+  },
+  "StringTableDefault/BUTTON_QUICKMATCH": {
+   "en": "Quick match",
+   "uk": "Швидкий матч",
+   "sv": "Snabbmatch"
+  },
+  "StringTableDefault/BUTTON_QUIT": {
+   "en": "Quit",
+   "uk": "Вийти",
+   "sv": "Avsluta"
+  },
+  "StringTableDefault/BUTTON_REPORT": {
+   "en": "Report opponent",
+   "uk": "Поскаржитися на суперника",
+   "sv": "Anmäl motståndare"
+  },
+  "StringTableDefault/BUTTON_RESUME": {
+   "en": "Resume",
+   "uk": "Продовжити гру",
+   "sv": "Återuppta"
+  },
+  "StringTableDefault/BUTTON_SANDBOX": {
+   "en": "Sandbox",
+   "uk": "Пісочниця",
+   "sv": "Sandlåda"
+  },
+  "StringTableDefault/BUTTON_SAVE": {
+   "en": "Save",
+   "uk": "Зберегти",
+   "sv": "Spara"
+  },
+  "StringTableDefault/BUTTON_TWITCH": {
+   "en": "Twitch matchmaking",
+   "uk": "Підбір гравців через Twitch",
+   "sv": "Twitch-matchmaking"
+  },
+  "StringTableDefault/BUTTON_UNBLOCK": {
+   "en": "Unblock opponent",
+   "uk": "Розблокувати суперника",
+   "sv": "Avblockera motståndare"
+  },
+  "StringTableDefault/BUTTON_VERSUS": {
+   "en": "Versus",
+   "uk": "Двобій",
+   "sv": "Duell"
+  },
+  "StringTableDefault/CATEGORY_DETAIL1": {
+   "en": "Detail 1",
+   "uk": "Деталь 1",
+   "sv": "Detalj 1"
+  },
+  "StringTableDefault/CATEGORY_DETAIL2": {
+   "en": "Detail 2",
+   "uk": "Деталь 2",
+   "sv": "Detalj 2"
+  },
+  "StringTableDefault/CATEGORY_EYES": {
+   "en": "Eyes",
+   "uk": "Очі",
+   "sv": "Ögon"
+  },
+  "StringTableDefault/CATEGORY_MOUTHS": {
+   "en": "Mouths",
+   "uk": "Роти",
+   "sv": "Munnar"
+  },
+  "StringTableDefault/ERROR_PLAYER_LEFT": {
+   "en": "Other player left",
+   "uk": "Інший гравець вийшов",
+   "sv": "Den andra spelaren har lämnat"
+  },
+  "StringTableDefault/LANG_CHINESE": {
+   "en": "简体中文",
+   "uk": "简体中文",
+   "sv": "简体中文"
+  },
+  "StringTableDefault/LANG_ENGLISH": {
+   "en": "English",
+   "uk": "English",
+   "sv": "English"
+  },
+  "StringTableDefault/LANG_FRENCH": {
+   "en": "Français",
+   "uk": "Français",
+   "sv": "Français"
+  },
+  "StringTableDefault/LANG_GERMAN": {
+   "en": "Deutsch",
+   "uk": "Deutsch",
+   "sv": "Deutsch"
+  },
+  "StringTableDefault/LANG_ITALIAN": {
+   "en": "Italiano",
+   "uk": "Italiano",
+   "sv": "Italiano"
+  },
+  "StringTableDefault/LANG_JAPANESE": {
+   "en": "日本語",
+   "uk": "日本語",
+   "sv": "日本語"
+  },
+  "StringTableDefault/LANG_PORTUGUESE_BR": {
+   "en": "Português (Brasil)",
+   "uk": "Português (Brasil)",
+   "sv": "Português (Brasil)"
+  },
+  "StringTableDefault/LANG_RUSSIAN": {
+   "en": "Русский",
+   "uk": "Русский",
+   "sv": "Русский"
+  },
+  "StringTableDefault/LANG_SPANISH": {
+   "en": "Español",
+   "uk": "Español",
+   "sv": "Español"
+  },
+  "StringTableDefault/LANG_SWEDISH": {
+   "en": "Svenska",
+   "uk": "Svenska",
+   "sv": "Svenska"
+  },
+  "StringTableDefault/OPTION_CONTROLLER_AIM8DIR": {
+   "en": "Lock aiming to 8 directions (Controller)",
+   "uk": "Фіксація прицілу у 8 напрямках (контролер)",
+   "sv": "Lås siktet till 8 riktningar (handkontroll)"
+  },
+  "StringTableDefault/OPTION_CONTROLLER_AIM8DIR_PS": {
+   "en": "Lock aiming to 8 directions (Controller)",
+   "uk": "Фіксація прицілу у 8 напрямках (контролер)",
+   "sv": "Lås siktet till 8 riktningar (handkontroll)"
+  },
+  "StringTableDefault/OPTION_CROSSPLAY": {
+   "en": "Allow cross platform multiplayer",
+   "uk": "Дозволити кросплатформний мультиплеєр",
+   "sv": "Tillåt flerspelarläge mellan plattformar"
+  },
+  "StringTableDefault/OPTION_EXCLUSIVEFULLSCREEN": {
+   "en": "Exclusive Fullscreen",
+   "uk": "Ексклюзивний повноекранний режим",
+   "sv": "Exklusiv helskärm"
+  },
+  "StringTableDefault/OPTION_FULLSCREEN": {
+   "en": "Fullscreen Mode",
+   "uk": "Повноекранний режим",
+   "sv": "Helskärmsläge"
+  },
+  "StringTableDefault/OPTION_FULLSCREENWINDOW": {
+   "en": "Fullscreen Window",
+   "uk": "Вікно на весь екран",
+   "sv": "Helskärmsfönster"
+  },
+  "StringTableDefault/OPTION_LANGUAGE": {
+   "en": "Language",
+   "uk": "Мова",
+   "sv": "Språk"
+  },
+  "StringTableDefault/OPTION_LEFTSTICKAIMING": {
+   "en": "Left stick aiming",
+   "uk": "Прицілювання лівим стіком",
+   "sv": "Sikta med vänster styrspak"
+  },
+  "StringTableDefault/OPTION_LEFTSTICKAIMING_PS": {
+   "en": "Left stick aiming",
+   "uk": "Прицілювання лівим стіком",
+   "sv": "Sikta med vänster styrspak"
+  },
+  "StringTableDefault/OPTION_MAXIMIZEWINDOW": {
+   "en": "Maximize Window",
+   "uk": "Розгорнуте вікно",
+   "sv": "Maximerat fönster"
+  },
+  "StringTableDefault/OPTION_MOUSE_AIM8DIR": {
+   "en": "Lock aiming to 8 directions (Mouse)",
+   "uk": "Фіксація прицілу у 8 напрямках (миша)",
+   "sv": "Lås siktet till 8 riktningar (mus)"
+  },
+  "StringTableDefault/OPTION_MUTE": {
+   "en": "Mute Chat",
+   "uk": "Вимкнути чат",
+   "sv": "Tysta chatten"
+  },
+  "StringTableDefault/OPTION_NO": {
+   "en": "No",
+   "uk": "Ні",
+   "sv": "Nej"
+  },
+  "StringTableDefault/OPTION_RESOLUTION": {
+   "en": "Resolution",
+   "uk": "Роздільна здатність",
+   "sv": "Upplösning"
+  },
+  "StringTableDefault/OPTION_SHOWSTATNUMBERS": {
+   "en": "Show card stat numbers",
+   "uk": "Показувати числові характеристики карт",
+   "sv": "Visa siffervärden på korten"
+  },
+  "StringTableDefault/OPTION_VOLUME_MASTER": {
+   "en": "Master volume",
+   "uk": "Загальна гучність",
+   "sv": "Huvudvolym"
+  },
+  "StringTableDefault/OPTION_VOLUME_MUSIC": {
+   "en": "Music volume",
+   "uk": "Гучність музики",
+   "sv": "Musikvolym"
+  },
+  "StringTableDefault/OPTION_VOLUME_SFX": {
+   "en": "SFX volume",
+   "uk": "Гучність ефектів",
+   "sv": "Effektvolym"
+  },
+  "StringTableDefault/OPTION_VSYNC": {
+   "en": "V-SYNC",
+   "uk": "Вертикальна синхронізація",
+   "sv": "Vertikal synkronisering"
+  },
+  "StringTableDefault/OPTION_WINDOWED": {
+   "en": "Windowed",
+   "uk": "У вікні",
+   "sv": "Fönsterläge"
+  },
+  "StringTableDefault/OPTION_YES": {
+   "en": "Yes",
+   "uk": "Так",
+   "sv": "Ja"
+  },
+  "StringTableDefault/PROMPT_BEINGEDITED": {
+   "en": "Being \nEdited",
+   "uk": "Триває \nредагування",
+   "sv": "Redigeras\njust nu"
+  },
+  "StringTableDefault/PROMPT_BLOCKLIST_EMPTY": {
+   "en": "You have not blocked any users from other platforms",
+   "uk": "Ви не заблокували жодного користувача з інших платформ",
+   "sv": "Du har inte blockerat några användare från andra plattformar"
+  },
+  "StringTableDefault/PROMPT_CANCEL_CONTROLLER": {
+   "en": "<sprite name=BUTTON_EAST> Cancel",
+   "uk": "<sprite name=BUTTON_EAST> Скасувати",
+   "sv": "<sprite name=BUTTON_EAST> Avbryt"
+  },
+  "StringTableDefault/PROMPT_CANCEL_MOUSE": {
+   "en": "[ESC] Cancel",
+   "uk": "[ESC] Скасувати",
+   "sv": "[ESC] Avbryt"
+  },
+  "StringTableDefault/PROMPT_CONTINUE": {
+   "en": "Continue?",
+   "uk": "Продовжити?",
+   "sv": "Fortsätta?"
+  },
+  "StringTableDefault/PROMPT_DISCONNECT": {
+   "en": "Disconnected",
+   "uk": "З’єднання розірвано",
+   "sv": "Frånkopplad"
+  },
+  "StringTableDefault/PROMPT_ENTER_CARD_NAME": {
+   "en": "Enter card name",
+   "uk": "Введіть назву карти",
+   "sv": "Ange kortnamn"
+  },
+  "StringTableDefault/PROMPT_ENTER_CHAT_MESSAGE": {
+   "en": "Enter chat message",
+   "uk": "Введіть повідомлення в чат",
+   "sv": "Skriv chattmeddelande"
+  },
+  "StringTableDefault/PROMPT_HALF_BLUE": {
+   "en": "Half Blue",
+   "uk": "Пів раунду за синім",
+   "sv": "Halv runda till blå"
+  },
+  "StringTableDefault/PROMPT_HALF_ORANGE": {
+   "en": "Half Orange",
+   "uk": "Пів раунду за помаранчевим",
+   "sv": "Halv runda till orange"
+  },
+  "StringTableDefault/PROMPT_HOSTING": {
+   "en": "Waiting for",
+   "uk": "Чекаємо на",
+   "sv": "Väntar på"
+  },
+  "StringTableDefault/PROMPT_JOINROOM": {
+   "en": "<sprite name=BUTTON_WEST> To join room",
+   "uk": "<sprite name=BUTTON_WEST> Увійти до кімнати",
+   "sv": "<sprite name=BUTTON_WEST> Gå med i rum"
+  },
+  "StringTableDefault/PROMPT_JOINROOM_ENTER": {
+   "en": "Press enter key to join with roomcode",
+   "uk": "Натисніть Enter, щоб увійти до кімнати за кодом",
+   "sv": "Tryck på Enter för att gå med via rumskod"
+  },
+  "StringTableDefault/PROMPT_JUMP_TO_JOIN": {
+   "en": "Press jump\nto join",
+   "uk": "Натисніть кнопку стрибка,\nщоб приєднатися",
+   "sv": "Tryck på hoppknappen\nför att gå med"
+  },
+  "StringTableDefault/PROMPT_LETSGO": {
+   "en": "LET'S GOO!",
+   "uk": "ГАЙДА!",
+   "sv": "NU KÖR VI!"
+  },
+  "StringTableDefault/PROMPT_MATCHFOUND": {
+   "en": "Match found",
+   "uk": "Суперника знайдено",
+   "sv": "Match hittad"
+  },
+  "StringTableDefault/PROMPT_MOVE_ITEMS": {
+   "en": "To move items",
+   "uk": "Переміщення предметів",
+   "sv": "Flytta föremål"
+  },
+  "StringTableDefault/PROMPT_MOVE_ITEMS_CONTROLLER": {
+   "en": "[RIGHT STICK]\nTo move items",
+   "uk": "[ПРАВИЙ СТІК]\nПереміщення предметів",
+   "sv": "[HÖGER STYRSPAK]\nFlytta föremål"
+  },
+  "StringTableDefault/PROMPT_MOVE_ITEMS_CONTROLLER_PS": {
+   "en": "[RIGHT STICK]\nTo move items",
+   "uk": "[ПРАВИЙ СТІК]\nПереміщення предметів",
+   "sv": "[HÖGER STYRSPAK]\nFlytta föremål"
+  },
+  "StringTableDefault/PROMPT_PICKONE": {
+   "en": "Pick one",
+   "uk": "Оберіть одну",
+   "sv": "Välj ett"
+  },
+  "StringTableDefault/PROMPT_READY": {
+   "en": "Ready",
+   "uk": "Готово",
+   "sv": "Redo"
+  },
+  "StringTableDefault/PROMPT_REMATCH": {
+   "en": "Rematch?",
+   "uk": "Реванш?",
+   "sv": "Revansch?"
+  },
+  "StringTableDefault/PROMPT_ROOMCODE": {
+   "en": "Roomcode: {ROOMCODE}",
+   "uk": "Код кімнати: {ROOMCODE}",
+   "sv": "Rumskod: {ROOMCODE}"
+  },
+  "StringTableDefault/PROMPT_ROUND_BLUE": {
+   "en": "Round Blue",
+   "uk": "Раунд за синім",
+   "sv": "Runda till blå"
+  },
+  "StringTableDefault/PROMPT_ROUND_ORANGE": {
+   "en": "Round Orange",
+   "uk": "Раунд за помаранчевим",
+   "sv": "Runda till orange"
+  },
+  "StringTableDefault/PROMPT_SANDBOX_CONTROLLER": {
+   "en": "Press <sprite name=BUTTON_NORTH> to open text input\nType names of the cards to spawn them\nShoot the cards to pick them",
+   "uk": "Натисніть <sprite name=BUTTON_NORTH>, щоб відкрити текстове поле\nВводьте назви карт, щоб створити їх\nСтріляйте в карти, щоб узяти їх",
+   "sv": "Tryck på <sprite name=BUTTON_NORTH> för att öppna textinmatningen\nSkriv kortens namn för att skapa dem\nSkjut på korten för att välja dem"
+  },
+  "StringTableDefault/PROMPT_SANDBOX_MOUSE": {
+   "en": "Press enter to chat\nType names of the cards to spawn them\nShoot the cards to pick them",
+   "uk": "Натисніть Enter, щоб написати в чат\nВводьте назви карт, щоб створити їх\nСтріляйте в карти, щоб узяти їх",
+   "sv": "Tryck på Enter för att chatta\nSkriv kortens namn för att skapa dem\nSkjut på korten för att välja dem"
+  },
+  "StringTableDefault/PROMPT_SEARCHING": {
+   "en": "Searching",
+   "uk": "Пошук",
+   "sv": "Söker"
+  },
+  "StringTableDefault/PROMPT_SOUTH_TO_JOIN": {
+   "en": "Press\n[<sprite name=BUTTON_SOUTH>]\nto join",
+   "uk": "Натисніть\n[<sprite name=BUTTON_SOUTH>]\nщоб приєднатися",
+   "sv": "Tryck på\n[<sprite name=BUTTON_SOUTH>]\nför att gå med"
+  },
+  "StringTableDefault/PROMPT_SPACE_TO_JOIN": {
+   "en": "Press\n[SPACE]\nto join",
+   "uk": "Натисніть\n[SPACE]\nщоб приєднатися",
+   "sv": "Tryck på\n[SPACE]\nför att gå med"
+  },
+  "StringTableDefault/PROMPT_START_TO_SAVE": {
+   "en": "Press\n[<sprite name=BUTTON_START>]\nto save",
+   "uk": "Натисніть\n[<sprite name=BUTTON_START>]\nщоб зберегти",
+   "sv": "Tryck på\n[<sprite name=BUTTON_START>]\nför att spara"
+  },
+  "StringTableDefault/PROMPT_START_WHEN_READY": {
+   "en": "Press [<sprite name=BUTTON_START>] when ready",
+   "uk": "Натисніть [<sprite name=BUTTON_START>], коли будете готові",
+   "sv": "Tryck på [<sprite name=BUTTON_START>] när du är redo"
+  },
+  "StringTableDefault/PROMPT_TOEDIT": {
+   "en": "To edit",
+   "uk": "Редагувати",
+   "sv": "Redigera"
+  },
+  "StringTableDefault/PROMPT_VICTORY": {
+   "en": "Victory!",
+   "uk": "Перемога!",
+   "sv": "Seger!"
+  },
+  "StringTableDefault/PROMPT_VS": {
+   "en": "VS",
+   "uk": "ПРОТИ",
+   "sv": "VS"
+  },
+  "StringTableDefault/PROMPT_WAITING": {
+   "en": "Waiting",
+   "uk": "Очікування",
+   "sv": "Väntar"
+  },
+  "StringTableDefault/PROMPT_WAITING_FOR_FRIEND": {
+   "en": "Waiting for friend",
+   "uk": "Чекаємо на друга",
+   "sv": "Väntar på vän"
+  },
+  "StringTableDefault/PROMT_SPACE_WHEN_READY": {
+   "en": "Press [SPACE] when ready",
+   "uk": "Натисніть [SPACE], коли будете готові",
+   "sv": "Tryck på [SPACE] när du är redo"
+  }
+ }
+}

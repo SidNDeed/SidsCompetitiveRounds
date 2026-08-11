@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.2";   // Aug 11: playtest minor batch — spectator stuck-cards/avatar cleanup, DOT display sync + observer non-lethal rule, team-identity colors on the last hardcoded surfaces, deep-idle spectator exemption, sound-engine voice guard, portal proposer names
+        public const string ModVersion = "1.38.3";   // Aug 11: Ukrainian + Swedish — full mod catalogues (1,708 keys each), base-game locale injection (ROUNDS' own 242 strings), uk/sv chat channels, 5-language release notes
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -102,8 +102,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> UiDateFormat;       // MDY | DMY | YMD (Sid Aug-3 item 9)
         internal static ConfigEntry<bool> UiHeavyFont;          // bug #159: thicker SCR menu text
         internal static ConfigEntry<float> UiFontWeight;        // how much thicker (SDF weight delta)
-        internal static ConfigEntry<string> ChatDisplayChannel; // all | global | es | ru (item 5)
-        internal static ConfigEntry<string> ChatSendChannel;    // "" = follow language (item 13)
+        internal static ConfigEntry<string> ChatDisplayChannel; // all | global | es | ru | uk | sv (item 5)
+        internal static ConfigEntry<string> ChatSendChannel;    // "" = follow language | global | es | ru | uk | sv (item 13)
         // Pipe-delimited list of muted display names — local mute, doesn't leave the client.
         // Mutated via /mute and /unmute commands typed in the F5 chat input.
         internal static ConfigEntry<string> MutedChatNames;
@@ -331,12 +331,12 @@ namespace CompetitiveRounds
             // Localization v1 (D2: asked once, changeable in Settings). The
             // "unset" sentinel drives the one-time first-launch prompt with
             // the OS-culture suggestion pre-selected; the prompt writes the
-            // choice here and it is never asked again. Values: en, es, ru
-            // (qps = pseudo-locale, dev-only via PseudoLocale below).
+            // choice here and it is never asked again. Values: en, es, ru,
+            // uk, sv (qps = pseudo-locale, dev-only via PseudoLocale below).
             ModLanguage = Config.Bind(
                 "UI", "Language",
                 I18n.LOCALE_UNSET,
-                "Mod display language: en, es, ru (unset = ask on next launch)"
+                "Mod display language: en, es, ru, uk, sv (unset = ask on next launch)"
             );
             PseudoLocaleEnabled = Config.Bind(
                 "UI", "PseudoLocale",
@@ -602,20 +602,24 @@ namespace CompetitiveRounds
 
             // Sid Aug-3 item 5: which chat channel the Home tab shows.
             // "all" = merged view of every subscribed channel (the historical
-            // behavior); "global"/"es"/"ru" show only that channel. The SEND
-            // channel defaults to the mod language's channel and is changed
-            // from the same Home dropdown or with Tab while typing.
+            // behavior); "global"/"es"/"ru"/"uk"/"sv" show only that channel.
+            // The SEND channel defaults to the mod language's channel and is
+            // changed from the same Home dropdown or with Tab while typing.
+            // The description text below is cosmetic for existing installs
+            // (#190: Config.Bind writes the default once and never revisits a
+            // written entry) — the uk/sv values are legal regardless.
             ChatDisplayChannel = Config.Bind(
                 "UI", "ChatDisplayChannel",
                 "all",
-                "Home-tab chat filter: all (merged), global, es, or ru."
+                "Home-tab chat filter: all (merged), global, es, ru, uk, or sv."
             );
 
             // Sid Aug-3 item 13: the TYPING target is now its OWN setting,
             // separate from the display filter above. Empty = follow the mod
-            // language (Spanish -> es, Russian -> ru, everything else ->
-            // global/English). A concrete value here is an explicit player
-            // pick made from the Home tab or by pressing Shift while typing.
+            // language (Spanish -> es, Russian -> ru, Ukrainian -> uk,
+            // Swedish -> sv, everything else -> global/English). A concrete
+            // value here is an explicit player pick made from the Home tab or
+            // by pressing Shift while typing.
             // "all" is deliberately not a legal value — you cannot type into
             // the merged view. NEW key (#190: changing ChatDisplayChannel's
             // meaning would have migrated nobody, since its value is already
@@ -623,7 +627,7 @@ namespace CompetitiveRounds
             ChatSendChannel = Config.Bind(
                 "UI", "ChatSendChannel",
                 "",
-                "Chat channel you type into: empty (follow the mod language), global, es, or ru."
+                "Chat channel you type into: empty (follow the mod language), global, es, ru, uk, or sv."
             );
 
             MutedChatNames = Config.Bind(
@@ -1412,6 +1416,22 @@ namespace CompetitiveRounds
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
 
+            // Base-game locale injector (uk/sv) state machine. Static and
+            // lifecycle-durable (localization-design §6.3, r2 find 8):
+            // stepping from THIS persistent tick — not a coroutine on a
+            // destroyable host — means a scene-transition respawn resumes
+            // activation wherever it was. One enum compare when no activation
+            // is in flight (en/es/ru sessions).
+            //
+            // r3 find 4: Awake requests activation, but the injector stays
+            // INERT until DoInitialize clears the other-mod compat check ~3s
+            // in — because modDisabled returns above this line, a Step() that
+            // had already acquired handles or committed a provider could never
+            // be stepped again, and its options-init postfix would keep
+            // re-asserting a locale for a mod that reports itself disabled.
+            // The compat-fail branch in DoInitialize calls Shutdown() instead.
+            try { GameLocaleInjector.Step(); } catch { }
+
             // Delayed initialization (wait for game to be fully loaded)
             if (!startupComplete)
             {
@@ -1555,6 +1575,13 @@ namespace CompetitiveRounds
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
+                        // r3 find 4: same shape for the base-game locale
+                        // injector. It has been inert (activation is gated on
+                        // the compat clear below), but Shutdown is idempotent
+                        // and is the only thing that can restore a vanilla
+                        // locale + drop the provider/subscriber/handles if a
+                        // future ordering change ever lets it commit first.
+                        try { GameLocaleInjector.Shutdown("other mods detected"); } catch { }
                         return;
                     }
                 }
@@ -1565,6 +1592,13 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
             }
             Plugin.compatCheckComplete = true;
+            // r3 find 4: releases the injector's activation gate. Everything
+            // it does before this is a no-op, so a uk/sv session that is
+            // about to be disabled never acquires a handle or installs
+            // anything. Reached on the check's exception path too — a compat
+            // check we could not run is treated as passing, exactly like
+            // every other feature below.
+            try { GameLocaleInjector.OnCompatCleared(); } catch { }
 
             ApiClient.Initialize(Plugin.ApiBaseUrl.Value);
             GameStateWatcher.Initialize();

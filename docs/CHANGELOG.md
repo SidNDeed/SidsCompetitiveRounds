@@ -1,5 +1,41 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.38.3 (2026-08-11) — Ukrainian + Swedish
+
+Two new full mod languages, plus first-of-its-kind base-game localization.
+
+- **Ukrainian (Українська) and Swedish (Svenska)** join English, Spanish and
+  Russian as complete mod languages: every UI string (1,708 keys per
+  language), machine-drafted, independently reviewed, seeded into the
+  translation portal for community moderation, and selectable from the
+  first-launch prompt or Settings.
+- **The base game itself speaks Ukrainian and Swedish now.** ROUNDS ships 9
+  official languages — Ukrainian and Swedish are not among them (the vanilla
+  files even contain an unused "Svenska" label, so this one is overdue). With
+  the mod language set to uk/sv, all 242 vanilla strings — menus, prompts,
+  card names and descriptions — render translated via a runtime-injected
+  locale. Fully reversible, zero effect on any other language setting, and
+  card text in the mod's own panels follows automatically.
+- **Release notes in four languages**: every release's notes are now
+  published in es/ru/uk/sv (machine-translated, labeled as such), and the
+  current three releases were back-filled.
+- Translation portal upgrades that came out of the review rounds: base-game
+  strings are moderatable with their table/entry context shown (including
+  Landfall's own translator notes), stale proposals against reworded English
+  are refused at approval, and the shop-string snapshot now has a proper
+  refresh tool.
+- **Ukrainian and Swedish chat channels** join the in-game chat split: pick
+  them in the chat view/typing pickers, and messages bridge to the matching
+  Discord rooms (English/Spanish/Russian unchanged).
+- Spanish/Russian catch-up: 13 recently-added strings (lobby betting, new
+  shop cosmetics) translated, plus consistency fixes from the review pass.
+
+Known limits, accepted for this release: a language chat channel that has
+been quiet for a while can look empty when you switch to it (the in-game log
+keeps one shared 60-message buffer; the server still has the history), and
+changing ROUNDS' own language from the vanilla Options screen during the
+few seconds the mod is setting up uk/sv will not stick.
+
 ## v1.38.2 (2026-08-11)
 
 Mini-release: the Aug 11 playtest minor-bug batch (spectator polish + portal

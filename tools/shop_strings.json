@@ -1,6 +1,6 @@
 {
  "format": 1,
- "comment": "Live shop catalog display strings (names + descriptions) - regenerate from prod shop_items when items ship. Consumed by tools/i18n_extract.py.",
+ "comment": "Live shop catalog display strings (names + descriptions) - regenerate from prod shop_items when items ship (tools/refresh_shop_strings.py). Consumed by tools/i18n_extract.py.",
  "strings": [
   "A bold red mouse cursor.",
   "A braided crown of twisted thorns, blood-tipped.",
@@ -225,6 +225,7 @@
   "Lowercase letters render as smaller capitals.",
   "Lucky Clover",
   "Lucky green clovers tumble around you.",
+  "Magical Hat",
   "Magma",
   "Maroon",
   "Mint",
@@ -336,6 +337,7 @@
   "Soviet",
   "Sparks",
   "Specter",
+  "Spilled Icecream",
   "Spooky Head-Bouncers",
   "Stan Slayer",
   "Star Earmuffs",
@@ -369,6 +371,7 @@
   "Tryhard",
   "Trying, hard.",
   "Twilight",
+  "Twisted Topper",
   "Two crossed battle standards. For the cause!",
   "Two glowing green feelers. Take me to your leader.",
   "Umber",

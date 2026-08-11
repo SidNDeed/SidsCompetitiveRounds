@@ -34,12 +34,20 @@ CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
 # CHAT_CHANNELS maps chat-channel language codes to Discord channel ids:
 #   "global:<id>,ru:<id>,es:<id>"
 # Defaults: the existing bridge channel stays `global`; ru/es are the two
-# channels created for D5. Unmapped languages or unresolvable channels relay
-# into GLOBAL with a "[RU]" prefix and log once — never drop.
+# channels created for D5, uk/sv the two added with those locales. Unmapped
+# languages or unresolvable channels relay into GLOBAL with a "[RU]" prefix
+# and log once — never drop.
+# The env var MERGES over these defaults per-language (the loop below only
+# writes the languages a token names), so a new language needs a default here
+# and NO .env edit; env stays the per-deployment override for the ids that
+# actually differ. Must track the server's CHAT_CHANNELS_ALLOWED: a language
+# the API accepts but that is missing here relays into global with a prefix.
 def _parse_chat_channels(raw: str) -> dict:
     out = {"global": CHAT_CHANNEL_ID,
            "ru": 1533218251205775360,
-           "es": 1533218515019108353}
+           "es": 1533218515019108353,
+           "uk": 1536669058794266694,
+           "sv": 1536669138502819890}
     for tok in (raw or "").split(","):
         tok = tok.strip()
         if not tok or ":" not in tok:
@@ -2733,12 +2741,17 @@ async def _forward_ingame_to_discord(data: dict) -> bool:
             if lang not in _chat_route_warned:
                 _chat_route_warned.add(lang)
                 print(f"[CHAT] channel for '{lang}' unmapped/unresolvable — relaying into global with a prefix")
+        # Fall back to the MERGED global mapping, not the legacy env var: a
+        # deployment that overrides global through CHAT_CHANNELS while leaving
+        # CHAT_CHANNEL unset/stale would otherwise relay into the wrong (or an
+        # unresolvable) channel and drop the message.
+        fallback_id = CHAT_CHAN_BY_LANG.get("global", CHAT_CHANNEL_ID)
         try:
-            channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+            channel = bot.get_channel(fallback_id) or await bot.fetch_channel(fallback_id)
         except Exception:
             channel = None
     if channel is None:
-        print(f"[CHAT] Channel {CHAT_CHANNEL_ID} not resolvable")
+        print(f"[CHAT] Channel {CHAT_CHAN_BY_LANG.get('global', CHAT_CHANNEL_ID)} not resolvable")
         return False
     try:
         await channel.send(

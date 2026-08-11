@@ -121,6 +121,23 @@
       <HintPath>$(ManagedDir)\Unity.Postprocessing.Runtime.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Unity.Localization (+ Addressables/ResourceManager for its handle
+         types) — the base-game locale injector (GameLocaleInjector.cs,
+         localization-design §6.3 v2): ITableProvider's generic method cannot
+         be implemented via reflection, so these are plain typed references.
+         Game-owned assemblies, public APIs only — NOT publicized. -->
+    <Reference Include="Unity.Localization">
+      <HintPath>$(ManagedDir)\Unity.Localization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.Addressables">
+      <HintPath>$(ManagedDir)\Unity.Addressables.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.ResourceManager">
+      <HintPath>$(ManagedDir)\Unity.ResourceManager.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- Game (publicized for direct access to private members) -->

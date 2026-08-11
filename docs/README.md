@@ -19,6 +19,19 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 - **Tournaments** — weekly same-time brackets with auto-connected matches, plus long-running async tournaments, run through Discord
 - **Tier List Maker** — assign every card an S/A/B/C/D/E/F tier with click-to-cycle, three independent lists (Casual / Ranked / All) persisted server-side. Click any card to pop a full-color art preview. Export the whole tier list as a near-square PNG: the real ROUNDS card art for every card + your live `## played` / `##% won` underneath, color-coded by win band (≥55% green / ≤45% red). Output lands in `<ROUNDS>/CompetitiveRoundsTierLists/tierlist-<filter>-<timestamp>.png`.
 
+### Spectator mode
+- **Watch a live ranked match** — **WATCH** buttons appear on Live Ranked Games in the Leaderboard tab and on the 2v2, 1v2, and FFA live panels. You join with no character, no team, and no effect on the people playing
+- **Four spectator seats per game**; you can't watch a match you're in, and players can turn spectating off for their own games
+- **Joins at a clean boundary** — you land on a "Synchronizing" screen and start watching at the next battle (at most one point away), with both players' decks and health rebuilt exactly, rather than dropping into a half-played round showing the wrong state
+- **Full match view** — the arena, both bodies with their faces/colors/trails/effects, the crown, live card picks, plus a top bar with names, titles, ratings, series score and game score. Hold **Tab** for the scoreboard
+- **Players see who's watching** — a *Spectators (N)* line, so nobody is observed silently
+
+### Languages
+- **Five languages: English, Spanish, Russian, Ukrainian, Swedish** — the entire mod UI (1,700+ strings), chosen on first launch or from Settings
+- **Ukrainian and Swedish also translate the BASE GAME** — ROUNDS ships neither language, so the mod supplies its own: vanilla menus, prompts, and all card names and descriptions render translated alongside the mod's own UI
+- **Community-moderated** — appointed translators propose and review corrections through a web portal, and approved fixes reach players without waiting for a mod update
+- **Per-language chat channels** bridged to matching Discord rooms, plus release notes published in every language
+
 ### Economy & cosmetics
 - **Gold currency** — earn from matches, series wins, sweeps, and achievements; ranked rewards scale with your opponent's rank tier
 - **Shop** with titles, cosmetic trails, map color skins (premium animated ones included), body colors, cursor colors, player aura effects, and name styling
@@ -47,7 +60,7 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 - **HMAC-signed** match reports and admin endpoints prevent spoofing
 
 ### Quality of life
-- **41 achievements** (100-1000g by difficulty, several unlock exclusive titles) — card-build challenges, marathon streaks, rating milestones — with retroactive grants from your existing match history
+- **47 achievements** (100-1000g by difficulty, several unlock exclusive titles) — card-build challenges, marathon streaks, rating milestones, and FFA feats — with retroactive grants from your existing match history
 - **XP & leveling** with bonus XP for wins, sweeps, and ranked play, scaled by your opponent's rank tier
 - **Hold Tab: live match scoreboard** — every player's current build, stats, and card list at a glance mid-game
 - **Auto-update** — newer mod versions are downloaded and applied automatically on next launch (Thunderstore builds defer to the mod manager)

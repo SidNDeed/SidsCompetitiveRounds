@@ -5411,12 +5411,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 var boxRT = box.GetComponent<RectTransform>();
                 boxRT.anchorMin = new Vector2(0.5f, 0.5f); boxRT.anchorMax = new Vector2(0.5f, 0.5f);
                 boxRT.pivot = new Vector2(0.5f, 0.5f);
-                boxRT.sizeDelta = new Vector2(560, 250);
+                boxRT.sizeDelta = new Vector2(560, 360);
                 UIFactory.AddVLG(box, spacing: 12, padL: 26, padR: 26, padT: 20, padB: 20);
-                // Trilingual title — a player who can't read English must
+                // Multilingual title — a player who can't read English must
                 // still recognise theirs. Bypasses the catalogue by design.
+                // 22f, single-space separators: five names at 26f overflowed
+                // the 500-wide box (#292's truncate class — measure, not hope).
                 UIFactory.CreateText("LPTitle", box.transform,
-                    "Language  /  Idioma  /  Язык", 26f, C_GOLD, UIFactory.AlignMidCenter,
+                    "Language / Idioma / Язык / Мова / Språk", 22f, C_GOLD, UIFactory.AlignMidCenter,
                     sizeDelta: new Vector2(500, 36));
                 Action<string, string> mk = (code, label) =>
                 {
@@ -5442,6 +5444,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 mk("en", "English");
                 mk("es", "Español");
                 mk("ru", "Русский");
+                mk("uk", "Українська");
+                mk("sv", "Svenska");
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[I18N] lang prompt: " + ex.Message); }
         }
@@ -9082,7 +9086,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // Deliberately trilingual and NOT translated: this is the
                 // label a lost player scans for, so it must be readable in
                 // every locale we ship.
-                "Language  /  Idioma  /  Язык", 17f, new Color(0.7f, 0.85f, 1f),
+                "Language / Idioma / Язык / Мова / Språk", 17f, new Color(0.7f, 0.85f, 1f),
                 sizeDelta: new Vector2(700, 24));
 
             // -- Stats (bug 180, Stan) --
@@ -9265,8 +9269,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     // obvious way back. Now: choose explicitly, and land back
                     // on this Settings tab.
                     CompetitiveUI.OpenArtistPicker("Mod language",
-                        new string[] { "English", "Español (Spanish)", "Русский (Russian)" },
-                        new string[] { "en", "es", "ru" },
+                        new string[] { "English", "Español (Spanish)", "Русский (Russian)", "Українська (Ukrainian)", "Svenska (Swedish)" },
+                        new string[] { "en", "es", "ru", "uk", "sv" },
                         picked =>
                         {
                             if (string.IsNullOrEmpty(picked)) return;
@@ -9728,7 +9732,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // away — a player stuck in the wrong locale must still find
                 // theirs). The label itself bypasses the catalogue.
                 string lv = Plugin.ModLanguage.Value;
-                string lname = lv == "es" ? "Español" : lv == "ru" ? "Русский" : "English";
+                string lname = lv == "es" ? "Español" : lv == "ru" ? "Русский"
+                    : lv == "uk" ? "Українська" : lv == "sv" ? "Svenska" : "English";
                 UIFactory.SetTextRaw(langToggleTxt, I18n.TrF("Language: <color=#88CCFF>{0}</color>", lname));
             }
             // Item 9: date-format picker label.
@@ -15013,6 +15018,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             {
                 case "es": return "Español";
                 case "ru": return "Русский";
+                case "uk": return "Українська";
+                case "sv": return "Svenska";
                 case "global": return I18n.Tr("English");
                 default: return I18n.Tr("All (merged)");
             }
@@ -15033,8 +15040,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             string cur = "all";
             try { cur = Plugin.ChatDisplayChannel?.Value ?? "all"; } catch { }
             CompetitiveUI.OpenArtistPicker(I18n.Tr("View channel"),
-                new string[] { I18n.Tr("All (merged)"), I18n.Tr("English"), "Español", "Русский" },
-                new string[] { "all", "global", "es", "ru" },
+                new string[] { I18n.Tr("All (merged)"), I18n.Tr("English"), "Español", "Русский", "Українська", "Svenska" },
+                new string[] { "all", "global", "es", "ru", "uk", "sv" },
                 picked =>
                 {
                     if (string.IsNullOrEmpty(picked)) return;
@@ -15055,8 +15062,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             string cur = "global";
             try { cur = ChatClient.SendChannel ?? "global"; } catch { }
             CompetitiveUI.OpenArtistPicker(I18n.Tr("Typing channel"),
-                new string[] { I18n.Tr("English"), "Español", "Русский" },
-                new string[] { "global", "es", "ru" },
+                new string[] { I18n.Tr("English"), "Español", "Русский", "Українська", "Svenska" },
+                new string[] { "global", "es", "ru", "uk", "sv" },
                 picked =>
                 {
                     if (string.IsNullOrEmpty(picked)) return;
@@ -15087,7 +15094,11 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (txtChatLog == null) return;
             // "all" (and the "auto" default) keeps the merged view; only an explicit
             // concrete channel filters. System lines (null channel) always show.
-            bool concrete = filter == "global" || filter == "es" || filter == "ru";
+            // Must list every concrete channel the view picker can write: a
+            // channel missing here falls through to the merged view, so the
+            // header would name one channel while the pane shows all of them.
+            bool concrete = filter == "global" || filter == "es" || filter == "ru"
+                || filter == "uk" || filter == "sv";
             /* item 4: capture the scroll state BEFORE the text changes — "was the
              * player already at the bottom" is a question about the view they were
              * looking at. `wasOverflowing` is the second half: when the content did
@@ -15566,8 +15577,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
          * grant no pack can ever serve). Labels stay in their own language, as
          * they do in the Settings picker; codes are the wire values and must
          * never be translated. */
-        private static readonly string[] I18N_GRANT_LANG_LABELS = { "Espanol (es)", "Russkiy (ru)" };
-        private static readonly string[] I18N_GRANT_LANG_CODES = { "es", "ru" };
+        private static readonly string[] I18N_GRANT_LANG_LABELS = { "Espanol (es)", "Russkiy (ru)", "Ukrainska (uk)", "Svenska (sv)" };
+        private static readonly string[] I18N_GRANT_LANG_CODES = { "es", "ru", "uk", "sv" };
 
         /// <summary>Removes an author's hard line breaks so the renderer can do
         /// the wrapping (bug #160). A single newline inside a paragraph becomes
@@ -16844,8 +16855,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
          * Codes are wire values and are never translated, exactly as the
          * translator-grant picker above leaves its language codes alone. */
         private static readonly string[] CHAT_MUTE_CHANNEL_LABELS =
-            { "All channels", "Global", "Russkiy (ru)", "Espanol (es)" };
-        private static readonly string[] CHAT_MUTE_CHANNEL_IDS = { "*", "global", "ru", "es" };
+            { "All channels", "Global", "Russkiy (ru)", "Espanol (es)",
+              "Ukrainska (uk)", "Svenska (sv)" };
+        private static readonly string[] CHAT_MUTE_CHANNEL_IDS =
+            { "*", "global", "ru", "es", "uk", "sv" };
         private static readonly string[] CHAT_MUTE_DURATION_LABELS =
             { "10 minutes", "1 hour", "6 hours", "1 day", "7 days", "30 days", "Permanent" };
         // Minutes as the server reads them; 0 is permanent.

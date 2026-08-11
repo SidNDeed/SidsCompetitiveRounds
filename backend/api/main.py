@@ -2282,7 +2282,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.2"
+LATEST_MOD_VERSION = "1.38.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -10013,7 +10013,24 @@ async def get_recent_series(
 # MANDATORY: at 10-60 DAU a hard partition would leave every language room
 # empty and kill chat rather than improve it — clients may HIDE global
 # locally but every socket stays subscribed to it server-side.
-CHAT_CHANNELS_ALLOWED = ("global", "ru", "es")
+#
+# A language belongs here only once its Discord channel EXISTS — the bridge
+# relays each channel both ways, so a code listed here with no channel behind
+# it is a room whose messages go nowhere. uk/sv joined on Aug 11, when the two
+# channels were created; adding a language to I18N_LANGS does NOT add it here
+# (and must not: translation and chat are separate capabilities).
+CHAT_CHANNELS_ALLOWED = ("global", "ru", "es", "uk", "sv")
+
+# The channels a `chat_moderate` grant may name — DERIVED from the line above
+# so the grant allowlist and the enforcement filter are the same set by
+# construction (r3 find 9, learning #285: two gates sharing one hand-written
+# list drift the moment either side is widened, and here the drift was silent
+# — the grant endpoint validated against I18N_LANGS, so uk/sv grants persisted
+# and returned success while _chat_moderator_scope discarded them and every
+# moderation call 403'd). `global` is excluded: a grant's language_code IS its
+# channel name, 'global' is not a language, and a grant must never confer
+# authority over the all-languages room.
+_CHAT_MODERATE_LANGS = tuple(c for c in CHAT_CHANNELS_ALLOWED if c != "global")
 
 # ── Aug 7 item 9: automatic slur censor ─────────────────────────────────────
 # DELIBERATELY NARROW: hard slurs only. Every term must be reviewed for
@@ -10939,10 +10956,11 @@ async def _chat_moderator_scope(db: AsyncSession, steam_id: str):
     # A grant's language_code IS its channel name. Filter to channels the
     # server actually serves so a grant for a retired language cannot widen
     # into something unexpected, and 'global' can never appear (it is not a
-    # language code, so it is not producible here — but the intersection with
-    # CHAT_CHANNELS_ALLOWED makes that structural rather than incidental).
-    chans = {str(l).lower() for l in langs
-             if str(l).lower() in CHAT_CHANNELS_ALLOWED and str(l).lower() != "global"}
+    # language code, so it is not producible here — but the intersection makes
+    # that structural rather than incidental). _CHAT_MODERATE_LANGS is the
+    # SAME set the grant endpoint validates against, so a grant that was
+    # accepted can never be discarded here (r3 find 9).
+    chans = {str(l).lower() for l in langs if str(l).lower() in _CHAT_MODERATE_LANGS}
     if chans:
         return ("moderator", chans)
     return (None, None)
@@ -11411,7 +11429,7 @@ async def admin_list_actions(
 # is grant-checked server-side (that is what makes "moderators see only their
 # languages" real rather than cosmetic).
 
-I18N_LANGS = ("es", "ru")
+I18N_LANGS = ("es", "ru", "uk", "sv")
 I18N_PACK_FORMAT = 1
 # Terms locked by the glossary check: if the SOURCE contains one, the target
 # must carry it verbatim (they are proper nouns/metric names on every board).
@@ -11444,6 +11462,14 @@ I18N_GLOSSARY_ALIASES = {
         # rating write-ups keep "RD". Left verbatim-only on purpose rather than
         # inventing an abbreviation nobody uses.
     },
+    # Ukrainian follows the ru precedent: Cyrillic renderings are sanctioned,
+    # the Latin forms stay legal everywhere (the machine drafts keep Latin).
+    # RD verbatim-only for the same reason as ru. Swedish needs no entries
+    # (Latin script writes Elo/Glicko/RD as-is — the es precedent).
+    "uk": {
+        "Elo": ("Ело",),
+        "Glicko": ("Гліко",),
+    },
 }
 I18N_PORTAL_TTL_MIN = 45
 # ABSOLUTE life of a portal session, anchored on created_at (Aug-3). The TTL
@@ -11463,6 +11489,13 @@ _I18N_BASE_OK = lambda o: (0x20 <= o <= 0x7E) or o == 0x0A or (0xA0 <= o <= 0x17
 _I18N_LANG_OK = {
     "es": lambda o: _I18N_BASE_OK(o),
     "ru": lambda o: _I18N_BASE_OK(o) or (0x0400 <= o <= 0x04FF),
+    # The Cyrillic block covers every Ukrainian-specific letter (Ґґ U+0490/91,
+    # Єє U+0404/54, Іі U+0406/56, Її U+0407/57); the apostrophe Ukrainian
+    # orthography needs (м’яч) is U+2019, already in the base set.
+    "uk": lambda o: _I18N_BASE_OK(o) or (0x0400 <= o <= 0x04FF),
+    # Swedish å ä ö are inside the base 0xA0-0x17F range — entry is explicit
+    # rather than relying on the .get() fallback, matching the es pattern.
+    "sv": lambda o: _I18N_BASE_OK(o),
 }
 # Rejected outright in any language: zero-width, bidi overrides, isolates,
 # and the normally-invisible soft hyphen (wave-2 find 16 — it defeats the
@@ -11511,6 +11544,19 @@ def _i18n_markup_residue(s: str) -> str:
     return "".join(out)
 
 
+# Named smart-format holes ({ROOMCODE}) — the base-game 'game' namespace's
+# one smart entry carries one. Combined brace grammar (Aug 11, design round-1
+# confirmed): when the SOURCE carries named tokens, the target must carry the
+# exact same multiset, and the verified tokens are stripped from BOTH sides
+# before the numeric {N} validation below runs on the remainder — so
+# "{{ROOMCODE}}" leaves stray braces (rejected), an extra named token is a
+# multiset mismatch (rejected), and a named token in a target whose source
+# has none falls through to the numeric grammar (rejected as malformed).
+# ZERO client-namespace sources match this regex (verified against all 1,708),
+# so .NET string.Format consumers are provably unaffected.
+_I18N_NAMED_HOLE = _re.compile(r"\{[A-Z][A-Z_]*\}")
+
+
 def _i18n_hole_tokens(s: str) -> tuple[list, bool]:
     """(exact hole tokens like "{0}" / "{1:F0}", well_formed). MUST mirror the
     client's I18n.ExtractHoleTokens exactly (Codex Aug-3 find 8's rule): if
@@ -11553,8 +11599,17 @@ def _i18n_validate(source: str, target: str, language: str) -> list:
     #    spec against the real argument throws at format time, so TrF shows
     #    raw English with visible holes. Zero existing entries alter a token,
     #    so exact equality costs nothing and closes the whole class.
-    _src_toks, _ = _i18n_hole_tokens(source)
-    _tgt_toks, _tgt_ok = _i18n_hole_tokens(target)
+    _hole_src, _hole_tgt = source, target
+    _src_named = sorted(_I18N_NAMED_HOLE.findall(source))
+    if _src_named:
+        _tgt_named = sorted(_I18N_NAMED_HOLE.findall(target))
+        if _tgt_named != _src_named:
+            errors.append("named holes must be carried over EXACTLY as the source "
+                          f"writes them (source has {sorted(set(_src_named))})")
+        _hole_src = _I18N_NAMED_HOLE.sub("", source)
+        _hole_tgt = _I18N_NAMED_HOLE.sub("", target)
+    _src_toks, _ = _i18n_hole_tokens(_hole_src)
+    _tgt_toks, _tgt_ok = _i18n_hole_tokens(_hole_tgt)
     if not _tgt_ok:
         errors.append("stray or malformed brace — braces may only form {N} / {N:spec} holes")
     elif sorted(_src_toks) != sorted(_tgt_toks):
@@ -11845,7 +11900,7 @@ async def release_notes_full(locale: str, db: AsyncSession = Depends(get_db)):
     English fallback — replacing the Discord-mirror path whose bodies arrived
     pre-truncated to what a 2000-char Discord message could carry (v1.37.0
     lost 63% of its notes that way). English rows are POSTed at ship time
-    (ship.md step 8b). Empty when no en rows exist yet — the client falls back
+    (ship.md step 11). Empty when no en rows exist yet — the client falls back
     to the mirror/GitHub path unchanged."""
     locale = (locale or "en").lower()[:8]
     if locale not in _RELEASE_NOTE_LANGS:
@@ -11923,6 +11978,15 @@ async def i18n_pack(locale: str, db: AsyncSession = Depends(get_db)):
         "SELECT k.msgctxt, e.target, e.state FROM i18n_entries e"
         " JOIN i18n_keys k ON k.key_id = e.key_id"
         " WHERE e.language_code = :lang AND k.retired_at IS NULL"
+        # CLIENT NAMESPACE ONLY — load-bearing from the deploy that first
+        # syncs 'game' keys (Aug 11): fifteen English sources exist in BOTH
+        # namespaces (Ammo, Bullet slow, Bullets, English, Life steal,
+        # Refresh, Rematch?), and every shipped pack-capable client applies
+        # entries by bare source string — an approved GAME entry served here
+        # would overwrite the MOD translation on all of them. Game-namespace
+        # corrections ship inside releases (GameLocaleCatalogues), never
+        # through this pack.
+        "   AND k.namespace = 'client'"
         "   AND (k.sensitive IS FALSE OR e.state = 'approved')"
         " ORDER BY k.key_id"
     ), {"lang": locale})).mappings().all()
@@ -11950,24 +12014,40 @@ async def i18n_my_grants(request: Request, db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/v1/i18n/keys", tags=["I18n"])
 async def i18n_keys(request: Request, lang: str = Query(...),
+                    namespace: str = Query(None),
                     db: AsyncSession = Depends(get_db)):
     """Portal key list for one language. Staleness is DERIVED here (#205):
-    approved_source_hash != the key's CURRENT source_hash."""
+    approved_source_hash != the key's CURRENT source_hash. `namespace`
+    optionally filters to one namespace (r2 find 12: the game corpus exceeds
+    the SPA's render cap, so a translator needs a way to scope the list).
+    NOT interpolated — bound parameter with an allowlist (#188's rule)."""
+    # CAST(:ns AS text), never `:ns::text` (r3 find 5). asyncpg's parameter
+    # parser cannot tell PG's `::` cast operator from a bind-parameter prefix
+    # when the two are adjacent, so the adjacent form is a PostgresSyntaxError
+    # — here it would have 500'd EVERY authorized key-list request, i.e. the
+    # whole portal. Already learned once on the 4-player lock (see the
+    # matching comment at the team-queue block delete).
     steam_id = await _portal_auth(request, db)
     lang = lang.lower()[:8]
     if await _i18n_role(db, steam_id, lang, "translate") is None:
         raise HTTPException(403, "no translate grant for this language")
+    if namespace is not None and namespace not in ("client", "game"):
+        raise HTTPException(400, "namespace must be client|game")
     rows = (await db.execute(text(
-        "SELECT k.key_id, k.namespace, k.msgctxt, k.source_hash, k.sensitive, k.max_px,"
+        "SELECT k.key_id, k.namespace, k.context, k.msgctxt, k.source_hash,"
+        "       k.sensitive, k.max_px,"
         "       e.target, e.state, e.approved_source_hash,"
         "       (SELECT COUNT(*) FROM i18n_proposals p WHERE p.key_id = k.key_id"
         "          AND p.language_code = :lang AND p.status = 'pending') AS pending"
         "  FROM i18n_keys k"
         "  LEFT JOIN i18n_entries e ON e.key_id = k.key_id AND e.language_code = :lang"
-        " WHERE k.retired_at IS NULL ORDER BY k.namespace, k.key_id"
-    ), {"lang": lang})).mappings().all()
+        " WHERE k.retired_at IS NULL"
+        "   AND (CAST(:ns AS text) IS NULL OR k.namespace = :ns)"
+        " ORDER BY k.namespace, k.key_id"
+    ), {"lang": lang, "ns": namespace})).mappings().all()
     return {"language": lang, "keys": [{
-        "key_id": r["key_id"], "namespace": r["namespace"], "source": r["msgctxt"],
+        "key_id": r["key_id"], "namespace": r["namespace"],
+        "context": r["context"], "source": r["msgctxt"],
         "sensitive": r["sensitive"], "max_px": r["max_px"],
         "target": r["target"], "state": r["state"], "pending": r["pending"],
         "stale": bool(r["target"] and r["state"] == "approved"
@@ -12006,8 +12086,8 @@ async def i18n_key_history(request: Request, key_id: str = Query(...),
     # set the isolation level before any auth query runs — neither is worth it
     # for a momentary display inconsistency.
     k = (await db.execute(text(
-        "SELECT key_id, msgctxt, source_hash, sensitive FROM i18n_keys"
-        " WHERE key_id = :k"), {"k": key_id})).mappings().first()
+        "SELECT key_id, msgctxt, source_hash, sensitive, namespace, context"
+        " FROM i18n_keys WHERE key_id = :k"), {"k": key_id})).mappings().first()
     if k is None:
         raise HTTPException(404, "unknown key")
     ent = (await db.execute(text(
@@ -12034,6 +12114,7 @@ async def i18n_key_history(request: Request, key_id: str = Query(...),
         "key_id": k["key_id"],
         "source": k["msgctxt"],
         "sensitive": k["sensitive"],
+        "namespace": k["namespace"], "context": k["context"],
         "current": None if ent is None else {
             "target": ent["target"], "state": ent["state"],
             "self_approved": ent["self_approved"],
@@ -12118,7 +12199,7 @@ async def i18n_approved_list(request: Request, lang: str = Query(...),
         "    FROM i18n_proposals pr"
         "   WHERE pr.language_code = :lang AND pr.status = 'approved'"
         ") "
-        "SELECT e.key_id, k.namespace, k.msgctxt, k.source_hash, k.sensitive,"
+        "SELECT e.key_id, k.namespace, k.context, k.msgctxt, k.source_hash, k.sensitive,"
         "       e.target, e.state, e.approved_source_hash, e.self_approved,"
         "       e.updated_at, e.approved_by_steam_id,"
         "       COALESCE(av.display_name,'') AS approver_name,"
@@ -12165,6 +12246,7 @@ async def i18n_approved_list(request: Request, lang: str = Query(...),
     return {"language": lang, "total": int(total), "offset": offset,
             "limit": limit, "entries": [{
         "key_id": r["key_id"], "namespace": r["namespace"],
+        "context": r["context"],
         "source": r["msgctxt"], "sensitive": r["sensitive"],
         "target": r["target"], "state": r["state"],
         "approved_by": r["approved_by_steam_id"],
@@ -12199,8 +12281,19 @@ async def i18n_propose(payload: dict, request: Request,
     role = await _i18n_role(db, steam_id, lang, "translate")
     if role is None:
         raise HTTPException(403, "no translate grant for this language")
+    # Same key-before-proposal lock order as review and sync (r3 find 6). Here
+    # it also decides WHICH English this proposal is recorded against: without
+    # it, a sync committing between this read and the INSERT below stamps the
+    # proposal with a hash the sync has already replaced — and sync's
+    # stale-proposal supersede has already run, so the row would sit pending
+    # forever (approve 409s on the stale source, nothing ever supersedes it).
+    # FOR NO KEY UPDATE, not FOR UPDATE: this transaction's own INSERT below
+    # takes FOR KEY SHARE on this same row for its foreign key, and FOR UPDATE
+    # is the one mode that conflicts with it — taking it here would make every
+    # concurrent proposal on this key queue behind us for nothing (#202).
     key = (await db.execute(text(
-        "SELECT msgctxt, source_hash FROM i18n_keys WHERE key_id = :k AND retired_at IS NULL"
+        "SELECT msgctxt, source_hash FROM i18n_keys WHERE key_id = :k"
+        "   AND retired_at IS NULL FOR NO KEY UPDATE"
     ), {"k": key_id})).mappings().first()
     if key is None:
         raise HTTPException(404, "unknown key")
@@ -12247,6 +12340,18 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
     if await _i18n_role(db, steam_id, lang, "translate") is None:
         raise HTTPException(403, "no translate grant for this language")
     status = status if status in ("pending", "approved", "rejected", "superseded") else "pending"
+    # RETIRED KEYS ARE NOT ACTIONABLE (r3 find 8, defence in depth). Sync now
+    # supersedes pending proposals on the keys it retires, so this should never
+    # match anything — but a proposal on a retired key cannot be approved OR
+    # rejected (both paths load the key and 409), so listing one is offering a
+    # reviewer a row they cannot decide. Only the PENDING view is filtered: the
+    # decided views are history, and history of a since-retired string is
+    # exactly what an audit needs to see.
+    # Fragment, not a bound value — a constant chosen by a closed branch on a
+    # server-side comparison, never request text (#188's rule is about
+    # interpolating INPUT). Both the page and its COUNT(*) OVER () use this
+    # same string, so the total cannot disagree with the rows.
+    live_key_only = " AND k.retired_at IS NULL" if status == "pending" else ""
     # COUNT(*) OVER () on the ROW statement, never a separate COUNT query
     # (Aug-3 review F11). Two statements are two READ COMMITTED snapshots: the
     # count could observe zero, a proposal commit, and the page query observe
@@ -12265,11 +12370,12 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
     rows = (await db.execute(text(
         "SELECT p.id, p.key_id, p.proposed_target, p.proposer_steam_id, p.created_at,"
         "       p.source_hash, k.msgctxt, k.source_hash AS current_hash, k.sensitive,"
+        "       k.namespace, k.context,"
         "       COALESCE(pn.display_name,'') AS proposer_name,"
         "       COUNT(*) OVER () AS total_rows"
         "  FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
         "  LEFT JOIN players pn ON pn.steam_id = p.proposer_steam_id"
-        " WHERE p.language_code = :lang AND p.status = :st"
+        " WHERE p.language_code = :lang AND p.status = :st" + live_key_only +
         " ORDER BY p.created_at, p.id LIMIT :lim OFFSET :off"
     ), {"lang": lang, "st": status, "lim": limit, "off": offset})).mappings().all()
     total = int(rows[0]["total_rows"]) if rows else 0
@@ -12280,7 +12386,7 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
         # The extra snapshot is harmless: the page is empty either way.
         total = (await db.execute(text(
             "SELECT COUNT(*) FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
-            " WHERE p.language_code = :lang AND p.status = :st"
+            " WHERE p.language_code = :lang AND p.status = :st" + live_key_only
         ), {"lang": lang, "st": status})).scalar() or 0
         # r3 find 12: clamp like the approved list, so the client's walk-back is
         # STRICTLY smaller than its current offset and cannot stall on a page an
@@ -12293,16 +12399,23 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
         "proposer_name": r["proposer_name"],
         "created_at": r["created_at"].isoformat(), "sensitive": r["sensitive"],
         "source_changed_since": r["source_hash"] != r["current_hash"],
+        # Round-1 find 12 (Aug 11): a moderator must be able to tell the
+        # mod's "Refresh" from the base-game card's "Refresh", and the PS
+        # from the Xbox platform variant — namespace + context carry that.
+        "namespace": r["namespace"], "context": r["context"],
     } for r in rows]}
 
 
 @app.post("/api/v1/i18n/review", tags=["I18n"])
 async def i18n_review(payload: dict, request: Request,
                       db: AsyncSession = Depends(get_db)):
-    """Approve → live immediately (§2.5). The validator re-runs against the
-    CURRENT source at approve time — never trust the submit verdict; the
-    source may have changed since. Sensitive keys are approvable by
-    moderators too since Aug 6 (item 14).
+    """Approve → live immediately for CLIENT-namespace keys (§2.5); GAME-
+    namespace approvals ship at the next release instead (the pack is
+    client-namespace-only — §6.3, r2 find 14 — and the base-game catalogue is
+    exported from approved entries at ship time). The validator re-runs
+    against the CURRENT source at approve time — never trust the submit
+    verdict; the source may have changed since. Sensitive keys are approvable
+    by moderators too since Aug 6 (item 14).
 
     Containment, stated accurately (Codex round 1): a MODERATOR cannot
     approve their own proposal — that refusal is what makes moderator
@@ -12317,19 +12430,56 @@ async def i18n_review(payload: dict, request: Request,
     note = str(payload.get("note", ""))[:500]
     if action not in ("approve", "reject"):
         raise HTTPException(400, "action must be approve|reject")
+    # ── LOCK ORDER: i18n_keys BEFORE i18n_proposals, in EVERY writer ────────
+    # (r3 find 6.) This endpoint used to lock the proposal and then read the
+    # key UNLOCKED, while sync-keys writes the key first and only then blocks
+    # on the proposal — opposite orders, so the two interleaved: sync moved a
+    # stable game key to new English, review kept reading the pre-sync snapshot
+    # (READ COMMITTED), passed the stale-source refusal below on a hash that was
+    # already history, and committed an "approved" translation of text nobody
+    # ships. Locking the key first makes that interleaving impossible AND makes
+    # the key row we read below the authoritative post-sync one.
+    #
+    # The proposal id is all the request carries, so the key_id has to be
+    # discovered before it can be locked (learning #197's discover-then-lock:
+    # legal only because every decision below re-reads under the locks, and
+    # the discovered membership is re-checked once both are held).
+    disc = (await db.execute(text(
+        "SELECT key_id FROM i18n_proposals WHERE id = :pid"
+    ), {"pid": pid})).mappings().first()
+    if disc is None:
+        raise HTTPException(404, "unknown proposal")
+    # FOR NO KEY UPDATE is the weakest mode that still conflicts with what
+    # sync-keys does to this row — its upsert and its retirement sweep both
+    # leave key_id alone, so both take exactly this mode, and it self-conflicts,
+    # so the two serialize (#202). FOR UPDATE would be the wrong reach: it is
+    # the only mode that conflicts with FOR KEY SHARE, which is what EVERY
+    # OTHER transaction's insert into i18n_entries / i18n_proposals takes on
+    # this key row for its foreign key — so it would enrol unrelated RI checks
+    # in our wait graph for a key column nothing here modifies.
+    await db.execute(text(
+        "SELECT 1 FROM i18n_keys WHERE key_id = :k FOR NO KEY UPDATE"
+    ), {"k": disc["key_id"]})
     # Row-lock the proposal so two reviewers can't both decide it.
     prop = (await db.execute(text(
         "SELECT p.id, p.key_id, p.language_code, p.proposed_target, p.proposer_steam_id,"
-        "       p.status FROM i18n_proposals p WHERE p.id = :pid FOR UPDATE"
+        "       p.status, p.source_hash FROM i18n_proposals p WHERE p.id = :pid FOR UPDATE"
     ), {"pid": pid})).mappings().first()
     if prop is None:
         raise HTTPException(404, "unknown proposal")
+    if prop["key_id"] != disc["key_id"]:
+        # No writer moves a proposal between keys today, so this is unreachable
+        # — but if one ever does, the row we locked is the wrong key and the
+        # ordering guarantee above is void. Refuse rather than decide blind.
+        raise HTTPException(409, "proposal changed key while locking - retry")
     if prop["status"] != "pending":
         raise HTTPException(409, f"already {prop['status']}")
     lang = prop["language_code"]
     role = await _i18n_role(db, steam_id, lang, "translate")
     if role is None:
         raise HTTPException(403, "no translate grant for this language")
+    # Authoritative re-read of the key UNDER the lock (#208): whatever sync
+    # committed is visible here, and nothing can move it until we commit.
     key = (await db.execute(text(
         "SELECT msgctxt, source_hash, sensitive FROM i18n_keys"
         " WHERE key_id = :k AND retired_at IS NULL"
@@ -12337,6 +12487,25 @@ async def i18n_review(payload: dict, request: Request,
     if key is None:
         raise HTTPException(409, "key retired since proposal")
     if action == "approve":
+        # STALE-SOURCE REFUSAL (Aug 11, design r2 find 1). Game-namespace
+        # key_ids are STABLE across English edits (identity = table entry,
+        # not text), so a proposal written against old English can sit in the
+        # queue after the source moves — approving it would launder "20%"
+        # wording as a fresh translation of "10%". The queue shows the
+        # source_changed_since badge; the server must refuse outright rather
+        # than trust the badge was seen. Client-namespace keys cannot hit
+        # this (their key_id IS the source hash), so nothing shipped changes.
+        #
+        # Both sides of this comparison now come from rows we hold locks on —
+        # the proposal's hash off the FOR UPDATE read, the key's off the
+        # re-read under FOR NO KEY UPDATE. The old separate
+        # `SELECT source_hash FROM i18n_proposals` was a third READ COMMITTED
+        # snapshot for a value the locked row already carried.
+        prop_hash = prop["source_hash"]
+        if prop_hash and prop_hash != key["source_hash"]:
+            raise HTTPException(409, "the English source changed after this "
+                                     "proposal was written - it needs a fresh "
+                                     "proposal against the current text")
         # Aug 6 item 14 (Sid): translation moderators may now approve
         # sensitive keys too — he can't review translations himself anyway,
         # so the admin-only gate just bottlenecked on him. The self-approval
@@ -12757,7 +12926,7 @@ function bindRun(node,warnEl){
   node.addEventListener("drop",function(){setTimeout(scrub,0);});
 }
 
-let LANG=null,VIEW="all",IS_ADMIN=false,SECTION="keys";
+let LANG=null,VIEW="all",IS_ADMIN=false,SECTION="keys",NS="all";
 // Section switcher. The key list, the review queue and the approved list used
 // to render stacked, so the queue sat under up to 200 editor boxes and the
 // approved list would have been invisible below both.
@@ -12795,7 +12964,7 @@ function clearLangViews(){
   // holding a reference to an old row (or any later change that leaves rows
   // painted while the new language loads) finds it inert rather than armed.
   SUBMIT_GATES.forEach(function(g){g.btn.disabled=true;});
-  KEYS=[];KEYS_LANG=null;SUBMIT_GATES.length=0;
+  KEYS=[];KEYS_LANG=null;SUBMIT_GATES.length=0;RENDER_LIMIT=RENDER_CAP;
   ["list","queue","approved"].forEach(function(id){
     const e=document.getElementById(id);if(e)e.textContent="";});
   delete VIEW_COUNTS.queue;delete VIEW_COUNTS.approved;
@@ -12899,7 +13068,18 @@ async function boot(){
   }
 }
 const FILTERS=[["all","All"],["missing","Untranslated"],["stale","Stale"],["pending","Has pending"]];
+// Namespace scope. SERVER-side (the /keys endpoint's `namespace=`), unlike the
+// four view filters above which re-render the already-loaded set: the two
+// namespaces are two different corpora and a translator working the base-game
+// tables should not have to carry 1,708 mod keys to reach them (r3 find 10).
+const NAMESPACES=[["all","All"],["client","Mod"],["game","Base game"]];
+// Page size, not a hard ceiling (r3 find 10). 200 tag-locked editors is about
+// as much DOM as one render should build, but the base-game corpus is 242 keys
+// — a fixed cap made 42 of them unreachable no matter what was typed in the
+// search box. RENDER_LIMIT grows by one page per "Show more" click and resets
+// to one page whenever the matched set changes underneath it.
 const RENDER_CAP=200;
+let RENDER_LIMIT=RENDER_CAP;
 let filterBuilt=false,searchTimer=null;
 function matchesView(k,v){
   if(v==="missing")return !k.target;
@@ -12912,10 +13092,13 @@ function matchesView(k,v){
 // Russian words they had just written got zero results.
 function matchesQuery(k,q){
   if(!q)return true;
+  // context carries "TableName/ENTRY_KEY — comment" for game keys (r2 find
+  // 12): searching CARD_LEECH or StringTableDefault must reach the row.
   return (k.source||"").toLowerCase().indexOf(q)>=0
       ||(k.target||"").toLowerCase().indexOf(q)>=0
       ||(k.key_id||"").toLowerCase().indexOf(q)>=0
-      ||(k.namespace||"").toLowerCase().indexOf(q)>=0;
+      ||(k.namespace||"").toLowerCase().indexOf(q)>=0
+      ||(k.context||"").toLowerCase().indexOf(q)>=0;
 }
 function currentQuery(){const s=document.getElementById("q");
   return s?s.value.trim().toLowerCase():"";}
@@ -12930,7 +13113,18 @@ function filterBar(){
     const b=el("button",null,fv[1]);b.setAttribute("data-view",fv[0]);
     // Client-side: a view change is a re-render over the ALREADY-LOADED set,
     // never a refetch of all 1,384 keys.
-    b.onclick=function(){VIEW=fv[0];renderKeys();updateFilterCounts();};
+    b.onclick=function(){VIEW=fv[0];RENDER_LIMIT=RENDER_CAP;
+      renderKeys();updateFilterCounts();};
+    f.appendChild(b);
+  });
+  // Namespace scope — a REFETCH, because the filter lives on the server.
+  // Painted separately from the view buttons so the two rows of chips stay
+  // visually distinguishable as "what is loaded" vs "what is shown".
+  f.appendChild(el("span","muted"," namespace: "));
+  NAMESPACES.forEach(function(nv){
+    const b=el("button",null,nv[1]);b.setAttribute("data-ns",nv[0]);
+    b.onclick=function(){if(NS===nv[0])return;NS=nv[0];RENDER_LIMIT=RENDER_CAP;
+      paintNsButtons();loadKeys();};
     f.appendChild(b);
   });
   const s=el("input");s.type="text";s.id="q";
@@ -12938,9 +13132,18 @@ function filterBar(){
   // Debounced: renderKeys() rebuilds up to 200 tag-locked editors, far too
   // much work to redo on every keystroke (the input felt frozen).
   s.oninput=function(){if(searchTimer)clearTimeout(searchTimer);
-    searchTimer=setTimeout(function(){searchTimer=null;renderKeys();updateFilterCounts();},150);};
+    searchTimer=setTimeout(function(){searchTimer=null;RENDER_LIMIT=RENDER_CAP;
+      renderKeys();updateFilterCounts();},150);};
   f.appendChild(s);
   filterBuilt=true;
+  paintNsButtons();
+}
+function paintNsButtons(){
+  const f=document.getElementById("filter");if(!f)return;
+  Array.prototype.forEach.call(f.querySelectorAll("button"),function(b){
+    const v=b.getAttribute("data-ns");if(!v)return;
+    b.style.background=(v===NS)?"#4a5a7a":"";
+  });
 }
 // The counts are what make the four buttons distinguishable. With the render
 // cap at 200, All / Untranslated / Has-pending showed the same first 200 rows
@@ -12974,11 +13177,15 @@ async function loadKeys(){
   const gen=++LOAD_GEN,lang=LANG,lgen=LANG_GEN;
   setStatus("Loading keys…",false);
   try{
-    const d=await api("/keys?lang="+encodeURIComponent(lang));
+    // `namespace` is omitted for "all" — the endpoint's allowlist is
+    // client|game, and absence (SQL NULL) is what means unscoped there.
+    const d=await api("/keys?lang="+encodeURIComponent(lang)+
+      (NS==="all"?"":"&namespace="+encodeURIComponent(NS)));
     // Drop on EITHER staleness: a newer load of this same language (LOAD_GEN)
     // or a newer language selection entirely (LANG_GEN, F1).
     if(gen!==LOAD_GEN||lgen!==LANG_GEN)return;
     KEYS=d.keys;KEYS_LANG=d.language;setStatus("",false);
+    RENDER_LIMIT=RENDER_CAP;   // new corpus, first page again
     renderKeys();updateFilterCounts();
   }catch(e){
     if(gen!==LOAD_GEN||lgen!==LANG_GEN)return;
@@ -13001,10 +13208,10 @@ function renderKeys(){
     if(!matchesView(k,VIEW))return;
     if(!matchesQuery(k,q))return;
     matched++;
-    if(shown>=RENDER_CAP)return;
+    if(shown>=RENDER_LIMIT)return;
     shown++;
     const box=el("div","key");
-    const head=el("div",null,k.namespace+" · "+k.key_id);head.className="muted";
+    const head=el("div",null,k.namespace+" · "+k.key_id+(k.context?" · "+k.context:""));head.className="muted";
     if(k.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
     if(k.state)head.appendChild(el("span","badge b-"+k.state,k.state));
     if(k.stale)head.appendChild(el("span","badge b-stale","stale"));
@@ -13073,6 +13280,9 @@ function renderKeys(){
         const h=await api("/history?key_id="+encodeURIComponent(k.key_id)+"&lang="+encodeURIComponent(rowLang));
         hbox.textContent="";
         const head=el("h4",null,"English source");hbox.appendChild(head);
+        // r2 find 12: the header names the namespace + game-table context so
+        // the PS/Xbox twins and cross-namespace homonyms stay tellable apart.
+        hbox.appendChild(el("div","muted",(h.namespace||"client")+(h.context?" · "+h.context:"")));
         hbox.appendChild(el("div","h-src",h.source));
         if(h.current){
           const c=el("div","hrow h-approved");
@@ -13112,9 +13322,20 @@ function renderKeys(){
   if(!matched){list.appendChild(el("div","muted","Nothing matches this filter."));return;}
   // SAY when the list is truncated. The silent 200-row cap is why three of the
   // four filters looked identical: they all rendered the same first 200 rows.
-  if(matched>shown)list.insertBefore(el("div","muted",
-    "Showing the first "+shown+" of "+matched+" matches — narrow the search to see the rest."),
-    list.firstChild);
+  if(matched>shown){
+    list.insertBefore(el("div","muted",
+      "Showing the first "+shown+" of "+matched+" matches — narrow the search, "+
+      "pick a namespace, or show more below."),
+      list.firstChild);
+    // The escape hatch the cap needed (r3 find 10): 242 base-game keys against
+    // a 200-row cap left 42 unreachable, and no search term can reach a row
+    // whose whole point is that you do not know it is there. Growing the limit
+    // re-renders from KEYS — no refetch, and open editors on rows already
+    // shown are rebuilt from the same objects.
+    const more=el("button",null,"Show "+Math.min(RENDER_CAP,matched-shown)+" more");
+    more.onclick=function(){RENDER_LIMIT+=RENDER_CAP;renderKeys();};
+    list.appendChild(more);
+  }
 }
 let QUEUE_GEN=0,QUEUE_OFFSET=0;
 const QUEUE_PAGE=25;
@@ -13160,7 +13381,13 @@ function renderQueue(d){
     const head=el("div","muted","["+d.language.toUpperCase()+"] #"+p.id+" by "+(p.proposer_name||p.proposer)+(p.sensitive?" ":""));
     if(p.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
     if(p.source_changed_since)head.appendChild(el("span","badge b-stale","source changed since"));
+    // Namespace + context (Aug 11): the base-game namespace has keys whose
+    // bare English is ambiguous (mod "Refresh" vs card-table "Refresh"; the
+    // PS/Xbox platform pairs). textContent-only rendering — context comes
+    // from the key sync, but stays hostile-input-discipline like everything.
+    if(p.namespace&&p.namespace!=="client")head.appendChild(el("span","badge b-stale",p.namespace));
     box.appendChild(head);
+    if(p.context)box.appendChild(el("div","muted",p.context));
     box.appendChild(el("div","src",p.source));
     box.appendChild(el("div","tgt",p.target));
     const msg=el("div","err","");
@@ -13206,7 +13433,8 @@ function renderApproved(d){
   ad.appendChild(el("h1",null,"Approved translations — "+d.language.toUpperCase()+" ("+total+")"));
   if(!total){ad.appendChild(el("div","muted",
     "Nothing approved in this language yet. Approving a proposal in the review "+
-    "queue puts it here, live for every player of that language."));return;}
+    "queue puts it here - live for every player of that language (base-game "+
+    "entries ship with the next mod release instead)."));return;}
   if(!d.entries.length&&d.offset>0){
     const back=Math.max(0,(Math.ceil(total/d.limit)-1)*d.limit);
     if(back!==d.offset){APPROVED_OFFSET=back;loadApproved();return;}
@@ -13217,9 +13445,10 @@ function renderApproved(d){
   ad.appendChild(pager(d.offset,d.limit,total,go));
   d.entries.forEach(function(e){
     const box=el("div","key");
-    const head=el("div","muted",e.namespace+" - "+e.key_id);
+    const head=el("div","muted",e.namespace+" - "+e.key_id+(e.context?" - "+e.context:""));
     if(e.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
     if(e.stale)head.appendChild(el("span","badge b-stale","stale"));
+    if(e.namespace==="game")head.appendChild(el("span","badge b-pending","ships next release"));
     if(e.self_approved)head.appendChild(el("span","badge b-machine","self-approved"));
     box.appendChild(head);
     box.appendChild(el("div","h-src",e.source));
@@ -13308,11 +13537,29 @@ async def admin_i18n_grant(payload: dict, db: AsyncSession = Depends(get_db)):
                          payload.get("signature"))
     if scope not in ("translate", "chat_moderate") or action not in ("grant", "revoke"):
         raise HTTPException(400, "bad scope/action")
+    # TWO SCOPES, TWO ALLOWLISTS (r3 find 9 — the #285 shared-list trap).
     # Wave-2 find 25: a transposed language code would mint a grant for a
     # language no pack can ever serve — the translator's work would be
-    # permanently unreachable.
-    if lang not in I18N_LANGS:
-        raise HTTPException(400, f"unsupported language (allowed: {', '.join(I18N_LANGS)})")
+    # permanently unreachable. That check was written when the two sets
+    # happened to coincide, so it validated BOTH scopes against I18N_LANGS;
+    # widening I18N_LANGS for uk/sv then made uk/sv chat_moderate grants
+    # mintable, and they are inert — _chat_moderator_scope only honours
+    # channels the chat bridge actually serves, so the endpoint reported
+    # success while every moderation call kept returning 403. A grant that
+    # cannot be exercised must be refused at the point it is asked for, with
+    # the reason, rather than persisted as a promise nothing keeps.
+    #
+    # GRANT ONLY. Revoking is never gated on an allowlist: the day a language
+    # is REMOVED from either list, its outstanding grants are exactly the ones
+    # that must come off, and a gate here would make them unrevokable through
+    # the API. The gate buys nothing on that path anyway — a revoke naming a
+    # language nobody holds already matches no row and returns ok, with or
+    # without it.
+    if action == "grant":
+        allowed = I18N_LANGS if scope == "translate" else _CHAT_MODERATE_LANGS
+        if lang not in allowed:
+            raise HTTPException(400, f"unsupported language for scope '{scope}' "
+                                     f"(allowed: {', '.join(allowed)})")
     # Rounds 12+13 find 1: this transaction writes TWO raw identities (the
     # target on the grant row, the ADMIN on granted_by + the audit actor) and
     # the i18n tables have no player FK — so BOTH must be locked, in
@@ -13372,36 +13619,153 @@ async def admin_i18n_sync_keys(payload: dict, db: AsyncSession = Depends(get_db)
     ), {"sid": admin_id})).scalar()
     if not _a_live or not await _is_admin(db, admin_id):
         raise HTTPException(403, "admin identity not live")
+    # NAMESPACE-SCOPED RETIREMENT (Aug 11, design round-1 find 11). The sweep
+    # below retires every live key absent from this manifest — with a second
+    # namespace ('game') that is only safe if the sweep is scoped to the
+    # namespaces this manifest actually COVERS. A payload without the field
+    # (the pre-Aug-11 tool, or any stale copy of it) defaults to ['client'],
+    # so a client-only manifest can never erase the game keys and vice versa.
+    if "namespaces" in payload:
+        namespaces = payload.get("namespaces")
+        # Explicit null/empty is a malformed manifest, never a default
+        # (design r2 find 10) — only ABSENCE means the legacy client-only
+        # tool, and the allowlist is closed.
+        if (not isinstance(namespaces, list) or not namespaces
+                or not all(n in ("client", "game") for n in namespaces)):
+            raise HTTPException(400, "namespaces must be a non-empty subset of client|game")
+    else:
+        namespaces = ["client"]
+    namespaces = sorted(set(namespaces))
+    # Truncation guards (r2 find 10): the tool declares how many keys per
+    # namespace this manifest SHOULD carry; a damaged manifest that still
+    # parses then fails the equality instead of retiring the difference.
+    expected_counts = payload.get("expected_counts") or {}
+    if not isinstance(expected_counts, dict):
+        raise HTTPException(400, "expected_counts must be an object")
+    allow_shrink = bool(payload.get("allow_shrink", False))
+    # SHRINK BASELINE, SNAPSHOTTED BEFORE ANY WRITE (r3 find 7). The guard
+    # below used to COUNT live keys AFTER the upsert loop had already inserted
+    # this manifest's ids — so a re-key wave (edit 342 English sources; a
+    # client key_id IS derived from its source, so 342 NEW ids appear for the
+    # same 1,708 strings) measured a 1,708-key manifest against ~2,050 live
+    # rows and refused a perfectly good sync as a 17% shrink. The question this
+    # guard exists to ask is "is this manifest TRUNCATED", so its baseline has
+    # to be the corpus as it stood before this request touched anything. A
+    # same-size re-key passes by design: it retires 342 old ids, which is what
+    # a re-key IS.
+    live_before = {}
+    for _ns in namespaces:
+        live_before[_ns] = (await db.execute(text(
+            "SELECT COUNT(*) FROM i18n_keys WHERE namespace = :ns AND retired_at IS NULL"
+        ), {"ns": _ns})).scalar() or 0
     seen = []
+    seen_set = set()
+    ns_counts = {n: 0 for n in namespaces}
     for k in keys:
         kid = str(k.get("key_id", ""))[:16]
         ctx = str(k.get("msgctxt", ""))
         if not kid or not ctx:
             continue
+        ns = str(k.get("namespace", "client"))[:32]
+        if ns not in ns_counts:
+            # A key outside the declared scope would be upserted but never
+            # covered by the retirement sweep — a manifest inconsistency,
+            # not a soft skip.
+            raise HTTPException(400, f"key namespace '{ns}' not in declared namespaces")
+        if kid in seen_set:
+            raise HTTPException(400, f"duplicate key_id in manifest: {kid}")
+        if ns == "game" and not (k.get("context") or "").strip():
+            # Game keys are meaningless in the queue without their
+            # TableName/ENTRY_KEY context (r2 find 10).
+            raise HTTPException(400, f"game key {kid} missing context")
+        seen_set.add(kid)
+        ns_counts[ns] += 1
         seen.append(kid)
         await db.execute(text(
-            "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, updated_at)"
-            " VALUES (:k, :ns, :ctx, :sh, :sens, :px, NOW())"
+            "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, context, updated_at)"
+            " VALUES (:k, :ns, :ctx, :sh, :sens, :px, :kctx, NOW())"
             " ON CONFLICT (key_id) DO UPDATE SET namespace = EXCLUDED.namespace,"
             "   msgctxt = EXCLUDED.msgctxt, source_hash = EXCLUDED.source_hash,"
             "   sensitive = EXCLUDED.sensitive, max_px = EXCLUDED.max_px,"
+            "   context = EXCLUDED.context,"
             "   retired_at = NULL, updated_at = NOW()"
-        ), {"k": kid, "ns": str(k.get("namespace", "client"))[:32], "ctx": ctx,
+        ), {"k": kid, "ns": ns, "ctx": ctx,
             "sh": str(k.get("source_hash", ""))[:40],
             "sens": bool(k.get("sensitive", False)),
-            "px": k.get("max_px")})
-    retired = 0
+            "px": k.get("max_px"),
+            "kctx": (str(k.get("context"))[:160] if k.get("context") else None)})
+    # A declared namespace that contributed ZERO keys is a truncated or
+    # mis-built manifest; proceeding would retire that entire namespace.
+    empty_ns = [n for n, c in ns_counts.items() if c == 0]
+    if empty_ns:
+        raise HTTPException(400, f"declared namespace(s) with no keys: {', '.join(empty_ns)}")
+    for ns in namespaces:
+        if ns in expected_counts and ns_counts[ns] != int(expected_counts[ns]):
+            raise HTTPException(400, f"namespace '{ns}': manifest carries {ns_counts[ns]} "
+                                     f"keys but declares {expected_counts[ns]}")
+        # LARGE-SHRINK authorization (r2 find 10): ordinary extractor churn
+        # retires a few keys per release and passes freely; a manifest carrying
+        # >10% FEWER keys than the namespace held before this request is
+        # presumed truncated unless the caller explicitly says allow_shrink.
+        # The baseline is the pre-write snapshot, never a live count (find 7).
+        live = live_before.get(ns, 0)
+        if live > 0 and ns_counts[ns] < live * 0.9 and not allow_shrink:
+            raise HTTPException(400, f"namespace '{ns}': manifest ({ns_counts[ns]}) would "
+                                     f"retire more than 10% of {live} live keys - pass "
+                                     "allow_shrink=true if this is deliberate")
+    # ── EVERY KEY WRITE IS ABOVE THIS LINE; EVERY PROPOSAL WRITE IS BELOW ───
+    # Load-bearing ordering, not tidiness (r3 find 6). The upserts above and
+    # the retirement sweep here hold a row lock on every key this request
+    # touches, and the supersedes after them are the first statements in this
+    # endpoint to touch i18n_proposals — the same key-before-proposal order the
+    # review endpoint takes. With the two orders reversed they interleave, and
+    # an approval commits a translation of English this sync already replaced.
+    # Keep the retirement above the supersedes when editing: moving a key write
+    # below a proposal write re-opens exactly that race.
+    retired_ids = []
     if seen:
-        retired = len((await db.execute(text(
+        retired_ids = (await db.execute(text(
             "UPDATE i18n_keys SET retired_at = NOW()"
-            " WHERE retired_at IS NULL AND NOT (key_id = ANY(:seen)) RETURNING key_id"
-        ), {"seen": seen})).scalars().all())
+            " WHERE retired_at IS NULL AND namespace = ANY(:ns)"
+            "   AND NOT (key_id = ANY(:seen)) RETURNING key_id"
+        ), {"ns": namespaces, "seen": seen})).scalars().all()
+    retired = len(retired_ids)
+    # Stale-proposal supersede (design r2 find 1, second half): when a key's
+    # English moved in this sync (stable game key_id, new source_hash), every
+    # pending proposal written against the OLD text is decided as superseded
+    # — history survives, the queue stops offering unapprovable rows, and the
+    # next seed wave can propose against the current text. Client-namespace
+    # rows never match (key_id derives from the source, so hash mismatch is
+    # impossible on a live key).
+    superseded = len((await db.execute(text(
+        "UPDATE i18n_proposals p SET status = 'superseded',"
+        " review_note = 'source changed at key sync', reviewed_at = NOW()"
+        " FROM i18n_keys k WHERE p.key_id = k.key_id AND p.status = 'pending'"
+        "   AND k.key_id = ANY(:seen) AND p.source_hash <> k.source_hash"
+        " RETURNING p.id"
+    ), {"seen": seen})).scalars().all()) if seen else 0
+    # RETIRED-KEY supersede (r3 find 8). The supersede above only reaches keys
+    # present in THIS manifest, so a pending proposal on a key the same sync
+    # RETIRES was left 'pending' with nothing able to decide it ever again:
+    # the review queue still listed it, approve returned 409 "key retired since
+    # proposal", and reject — which also loads the key — returned the same 409.
+    # A permanently undecidable row in a queue whose whole purpose is to be
+    # emptied. Re-keying is the common case (the language header's client key
+    # changes id whenever its English is edited), so this is routine, not
+    # exotic. History survives; only the status moves.
+    superseded_retired = len((await db.execute(text(
+        "UPDATE i18n_proposals SET status = 'superseded',"
+        " review_note = 'key retired at key sync', reviewed_at = NOW()"
+        " WHERE status = 'pending' AND key_id = ANY(:ids) RETURNING id"
+    ), {"ids": list(retired_ids)})).scalars().all()) if retired_ids else 0
     await db.execute(text(
         "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
         " key_id, action, detail) VALUES (:sid, 'admin', 'all', NULL, 'sync_keys', :d)"
-    ), {"sid": admin_id, "d": f"{len(seen)} keys, {retired} retired"})
+    ), {"sid": admin_id, "d": f"{len(seen)} keys, {retired} retired, "
+                              f"{superseded} superseded, {superseded_retired} superseded (retired)"})
     await db.commit()
-    return {"synced": len(seen), "retired": retired}
+    return {"synced": len(seen), "retired": retired, "superseded": superseded,
+            "superseded_retired": superseded_retired}
 
 
 # ── Betting helpers ──────────────────────────────────────────

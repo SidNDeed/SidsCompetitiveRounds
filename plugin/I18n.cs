@@ -173,10 +173,13 @@ namespace CompetitiveRounds
                                + (gameLocaleChanged ? " (game locale followed)" : ""));
         }
 
-        // Everything below is reflection-only: the csproj deliberately does
-        // not reference Unity.Localization (learning #15's sibling rule for
-        // game assemblies). Every lookup is null-guarded and logged; any
-        // failure leaves ROUNDS' locale alone and the mod UI still switches.
+        // Everything below is reflection-only. The csproj DOES reference
+        // Unity.Localization now (GameLocaleInjector needs typed access —
+        // ITableProvider's generic method cannot be implemented via
+        // reflection), but these pre-existing reflection paths deliberately
+        // stay as they are (§6.3 build-config note: touching them is out of
+        // scope). Every lookup is null-guarded and logged; any failure
+        // leaves ROUNDS' locale alone and the mod UI still switches.
         private const System.Reflection.BindingFlags PubStatic =
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static;
 
@@ -219,8 +222,8 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
-        // Log-once-per-locale so a game that simply doesn't ship es/ru can't
-        // spam the log on every switch.
+        // Log-once-per-locale so a game that doesn't ship the language (uk/sv
+        // have no vanilla locale at all) can't spam the log on every switch.
         private static readonly HashSet<string> _gameLocaleMissLogged =
             new HashSet<string>(StringComparer.Ordinal);
 
@@ -247,6 +250,26 @@ namespace CompetitiveRounds
         /// whether the card-text caches are stale.</summary>
         private static bool TryApplyRoundsLocale(string twoLetter)
         {
+            // INJECTED BASE-GAME LOCALES (uk/sv — localization-design §6.3
+            // v2): the game ships no such Locale, and one must NEVER be
+            // resolved from (or added to) AvailableLocales — vanilla persists
+            // OPTION_LANGUAGE as an INDEX into that list and indexes it
+            // unguarded at options init, so an out-of-range persisted index
+            // throws every launch on an uninstalled mod (round-1 blocker 1).
+            // Delegate to the injector: it selects its PRIVATE locale object
+            // by reference once activation commits (miss-style log until
+            // then). OPTION_LANGUAGE is never written and the vanilla options
+            // row is never synced for these codes — the mod's own ModLanguage
+            // config is the persistence, re-asserted each launch.
+            if (GameLocaleInjector.IsInjectedCode(twoLetter))
+                return GameLocaleInjector.ApplyInjected(twoLetter);
+
+            // A vanilla-locale request means the player is switching AWAY
+            // from an injected locale (or never used one): clear the
+            // injector's session override latch (r2 find 7) so a later
+            // switch back to uk/sv re-asserts. No-op when never active.
+            GameLocaleInjector.OnVanillaLocaleRequested();
+
             Type ls = FindLocalizationSettingsType();
             if (ls == null)
             {
@@ -823,7 +846,7 @@ namespace CompetitiveRounds
             try
             {
                 string two = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName?.ToLowerInvariant();
-                if (two == "es" || two == "ru") return two;
+                if (two == "es" || two == "ru" || two == "uk" || two == "sv") return two;
             }
             catch { }
             return LOCALE_EN;
@@ -944,6 +967,27 @@ namespace CompetitiveRounds
             if (a.Count != b.Count) return false;
             for (int i = 0; i < a.Count; i++)
                 if (!string.Equals(a[i], b[i], StringComparison.Ordinal)) return false;
+            // NAMED smart-format holes ({ROOMCODE}) — combined brace grammar
+            // mirroring the server's _i18n_validate (Aug 11, localization-
+            // design §6.3): when the SOURCE carries named tokens the target
+            // must carry the identical multiset, and the verified tokens are
+            // stripped from BOTH sides before the numeric {N} validation runs
+            // on the remainder. No client-namespace source carries one, so
+            // mod-catalogue behavior is unchanged; the rule exists for the
+            // base-game 'game' namespace (PROMPT_ROOMCODE).
+            string holeSrc = source, holeTgt = target;
+            var sNamed = ExtractNamedHoles(source);
+            if (sNamed.Count > 0)
+            {
+                var tNamed = ExtractNamedHoles(target);
+                if (sNamed.Count != tNamed.Count) return false;
+                sNamed.Sort(StringComparer.Ordinal);
+                tNamed.Sort(StringComparer.Ordinal);
+                for (int i = 0; i < sNamed.Count; i++)
+                    if (!string.Equals(sNamed[i], tNamed[i], StringComparison.Ordinal)) return false;
+                holeSrc = StripNamedHoles(source);
+                holeTgt = StripNamedHoles(target);
+            }
             // Placeholder IDENTITY (Codex Aug-3 r2 find 4 + r3 find 2,
             // mirrors the server's _i18n_validate rule exactly): the target's
             // hole TOKENS must equal the source's as a multiset. This rejects
@@ -953,14 +997,49 @@ namespace CompetitiveRounds
             // typed spec against the real argument throws, so TrF would show
             // raw English with visible holes.
             bool tgtOk;
-            var sh = ExtractHoleTokens(source, out _);
-            var th = ExtractHoleTokens(target, out tgtOk);
+            var sh = ExtractHoleTokens(holeSrc, out _);
+            var th = ExtractHoleTokens(holeTgt, out tgtOk);
             if (!tgtOk || sh.Count != th.Count) return false;
             sh.Sort(StringComparer.Ordinal);
             th.Sort(StringComparer.Ordinal);
             for (int i = 0; i < sh.Count; i++)
                 if (!string.Equals(sh[i], th[i], StringComparison.Ordinal)) return false;
             return true;
+        }
+
+        /// <summary>Named-hole tokens: "{" + [A-Z] + [A-Z_]* + "}", exactly
+        /// the server's _I18N_NAMED_HOLE regex, hand-scanned (this file uses
+        /// no Regex). Returns them in order of appearance.</summary>
+        private static List<string> ExtractNamedHoles(string s)
+        {
+            var toks = new List<string>();
+            for (int i = 0; i < s.Length; i++)
+            {
+                if (s[i] != '{') continue;
+                int j = i + 1;
+                if (j >= s.Length || s[j] < 'A' || s[j] > 'Z') continue;
+                j++;
+                while (j < s.Length && ((s[j] >= 'A' && s[j] <= 'Z') || s[j] == '_')) j++;
+                if (j < s.Length && s[j] == '}')
+                {
+                    toks.Add(s.Substring(i, j - i + 1));
+                    i = j;
+                }
+            }
+            return toks;
+        }
+
+        private static string StripNamedHoles(string s)
+        {
+            var toks = ExtractNamedHoles(s);
+            if (toks.Count == 0) return s;
+            string outp = s;
+            foreach (var t in toks)
+            {
+                int at = outp.IndexOf(t, StringComparison.Ordinal);
+                if (at >= 0) outp = outp.Remove(at, t.Length);
+            }
+            return outp;
         }
 
         /// <summary>Exact hole tokens ("{0}", "{1:F0}") in order; wellFormed
