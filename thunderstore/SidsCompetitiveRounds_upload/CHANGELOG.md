@@ -1,3 +1,27 @@
+## v1.38.4 (2026-08-11) — Translator titles and portal progress
+
+Schema: migration **214**.
+
+- **Three new achievement titles for translators** — **Rosetta** (10 strings),
+  **Dragoman** (100) and **Babel** (1000), paying 100g / 300g / 1000g. A
+  string counts once it is APPROVED, and both people behind it earn it: the
+  translator who proposed it and the moderator who reviewed it. Doing both
+  yourself on the same string still counts once, and moderators still cannot
+  approve their own work. Existing contributors were back-granted.
+- **Progress bars in the translation portal**, one per language. The green
+  fill is approved and live; the lighter bar behind it is everything with a
+  draft awaiting review; the dark remainder is what has no usable
+  translation at all — so rejecting a bad machine draft correctly pushes the
+  bar back and shows the work that is genuinely left. Ukrainian and Swedish
+  count the base-game strings too, since the game does not ship those
+  languages; Spanish and Russian do not, because it does.
+- The Compare tab's achievement grid now sizes its columns to the space
+  available — at 50 achievements the old fixed two columns ran off the
+  bottom of the panel on common resolutions.
+- Granting an achievement from the admin panel now also grants its title.
+  This was missed for Sid Slayer and Stan Slayer too, and re-granting repairs
+  an old one.
+
 ## v1.38.3 (2026-08-11) — Ukrainian + Swedish
 
 Two new full mod languages, plus first-of-its-kind base-game localization.
