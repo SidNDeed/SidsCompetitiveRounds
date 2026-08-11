@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.3";   // Aug 11: Ukrainian + Swedish — full mod catalogues (1,708 keys each), base-game locale injection (ROUNDS' own 242 strings), uk/sv chat channels, 5-language release notes
+        public const string ModVersion = "1.38.4";   // Aug 11: translator titles (Rosetta/Dragoman/Babel) + portal progress bars; Compare grid now sizes its columns to fit 50 achievements
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string

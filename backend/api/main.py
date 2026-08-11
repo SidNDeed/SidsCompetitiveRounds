@@ -1680,6 +1680,7 @@ _VERSION_GATE_BYPASS = frozenset({
     "/api/v1/i18n/keys",
     "/api/v1/i18n/history",
     "/api/v1/i18n/approved",            # Aug-3: live-translation list for the portal
+    "/api/v1/i18n/progress",            # Aug-11: per-language progress bars
     # Aug-3: the SPA's keep-alive. It MUST be listed or the browser is 426'd
     # before _portal_auth runs — and a session that cannot be extended is the
     # bug this route exists to fix. (The MINT, /i18n/portal-session, is called
@@ -2282,7 +2283,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.3"
+LATEST_MOD_VERSION = "1.38.4"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -12012,6 +12013,61 @@ async def i18n_my_grants(request: Request, db: AsyncSession = Depends(get_db)):
             "languages": [dict(r) for r in rows]}
 
 
+@app.get("/api/v1/i18n/progress", tags=["I18n"])
+async def i18n_progress(request: Request, db: AsyncSession = Depends(get_db)):
+    """Per-language completion for the portal's progress bars.
+
+    Returns, for every shipped language: `total` live keys IN SCOPE,
+    `approved` (a live approved entry) and `pending` (ANY proposal awaiting
+    review on a key not already approved). The bar draws `approved` solid
+    with `approved + pending` as the lighter buffer behind it.
+
+    SCOPE differs per language (I18N_GAME_LANGS): uk/sv own the base-game
+    'game' keys too, es/ru do not — counting 242 keys a Spanish translator can
+    never action would park their bar 12% short of full forever.
+
+    PENDING DELIBERATELY INCLUDES THE MACHINE DRAFTS (Sid, Aug 11). Every key
+    ships with a claude-mt draft, so the buffer starts full — and that is the
+    point: the buffer RETREATS as translators REJECT bad drafts, and the gap
+    it leaves behind is the only surface anywhere that says "these strings
+    have no usable translation at all and need one written from scratch".
+    Filtering the sentinel out would have made the buffer mean "queued for
+    review" and thrown that signal away. So the three bands read:
+        solid            -> approved and live
+        buffer above it  -> has SOME draft awaiting review (machine or human)
+        empty above that -> rejected or never drafted: real work remaining
+
+    Read-only and portal-authenticated: it names no strings, only counts, but
+    it is translator-facing UI and rides the same session as everything else.
+    """
+    await _portal_auth(request, db)
+    rows = (await db.execute(text(
+        "WITH live AS ("
+        "  SELECT key_id, namespace FROM i18n_keys WHERE retired_at IS NULL"
+        "), scope AS ("
+        "  SELECT l.lang, k.key_id FROM unnest(CAST(:langs AS text[])) AS l(lang)"
+        "  JOIN live k ON k.namespace = 'client'"
+        "              OR (k.namespace = 'game' AND l.lang = ANY(CAST(:game AS text[])))"
+        "), appr AS ("
+        "  SELECT key_id, language_code FROM i18n_entries WHERE state = 'approved'"
+        "), pend AS ("
+        "  SELECT DISTINCT key_id, language_code FROM i18n_proposals"
+        "   WHERE status = 'pending'"
+        ") "
+        "SELECT s.lang, COUNT(*) AS total, COUNT(a.key_id) AS approved,"
+        "       COUNT(*) FILTER (WHERE a.key_id IS NULL AND p.key_id IS NOT NULL) AS pending"
+        "  FROM scope s"
+        "  LEFT JOIN appr a ON a.key_id = s.key_id AND a.language_code = s.lang"
+        "  LEFT JOIN pend p ON p.key_id = s.key_id AND p.language_code = s.lang"
+        " GROUP BY s.lang ORDER BY s.lang"
+    ), {"langs": list(I18N_LANGS), "game": list(I18N_GAME_LANGS)})).mappings().all()
+    return {"languages": [{
+        "language_code": r["lang"], "total": int(r["total"]),
+        "approved": int(r["approved"]), "pending": int(r["pending"]),
+        "includes_base_game": r["lang"] in I18N_GAME_LANGS,
+    } for r in rows]}
+
+
 @app.get("/api/v1/i18n/keys", tags=["I18n"])
 async def i18n_keys(request: Request, lang: str = Query(...),
                     namespace: str = Query(None),
@@ -12267,6 +12323,14 @@ async def i18n_propose(payload: dict, request: Request,
     steam_id = await _portal_auth(request, db)
     key_id = str(payload.get("key_id", ""))[:16]
     lang = str(payload.get("language_code", "")).lower()[:8]
+    # SHIPPED LANGUAGES ONLY (Aug-11 find 7). _i18n_role grants admins every
+    # language implicitly, so without this an admin could propose+self-approve
+    # a key under invented codes — each (key, language) is a distinct unit of
+    # translator credit, and /pack/{locale} would never serve any of it. The
+    # grant endpoint already refuses unknown codes; this closes the same hole
+    # on the path admins can reach without a grant.
+    if lang not in I18N_LANGS:
+        raise HTTPException(400, f"unsupported language (allowed: {', '.join(I18N_LANGS)})")
     # 8000 matches the client's PackMaxStringLen — the FFA How-It-Works doc
     # (~4.3k source, longer translated) must survive the proposal path intact
     # or moderators silently submit truncated rewrites (Codex Aug-3 find 6).
@@ -12554,6 +12618,30 @@ async def i18n_review(payload: dict, request: Request,
         " key_id, action, detail) VALUES (:sid, :role, :lang, :k, :act, :d)"
     ), {"sid": steam_id, "role": role, "lang": lang, "k": prop["key_id"],
         "act": action, "d": f"proposal {pid}" + (" (self-approved)" if action == "approve" and prop["proposer_steam_id"] == steam_id else "")})
+    if action == "approve":
+        # Translator titles for BOTH people behind the now-live string, in a
+        # SAVEPOINT each (learning #187): the review is the durable work and
+        # must commit even if a title grant hits a schema/data problem.
+        #
+        # CANONICAL ORDER, not proposer-first (find 2): each grant takes the
+        # contributor's advisory identity lock, so two approvals whose
+        # (proposer, reviewer) pairs are mirror images — A proposes/B reviews
+        # and B proposes/A reviews, committing concurrently — would take the
+        # two locks in opposite orders and ABBA-deadlock. Sorting the distinct
+        # contributors makes every caller take them in the same order.
+        #
+        # HONEST FAILURE MODE (find 3): a failed grant is re-evaluated only if
+        # that person contributes again. It does NOT self-heal on its own — an
+        # earlier comment here claimed it did, which was wrong. The backstop is
+        # re-running the back-grant half of migration 214, which is idempotent
+        # and grants exactly the tiers a contributor has earned.
+        for _who in sorted({w for w in (prop["proposer_steam_id"], steam_id) if w}):
+            try:
+                async with db.begin_nested():
+                    await _grant_translator_achievements(db, _who)
+            except Exception as _tex:  # noqa: BLE001
+                print(f"[I18N] translator title grant failed for {_who}: {_tex}"
+                      f" — re-run migration 214's back-grant to repair")
     await db.commit()
     return {"proposal_id": pid, "status": "approved" if action == "approve" else "rejected"}
 
@@ -12635,10 +12723,29 @@ user-select:none;cursor:not-allowed}
 .b-sensitive{background:#4a1e3a}.b-pending{background:#1e3a5a}
 .err{color:#ff8888;white-space:pre-wrap}.muted{color:#889}#filter{margin:8px 0}
 input[type=text]{background:#1c2029;color:#dde;border:1px solid #445;padding:5px}
+/* Per-language progress. Three bands, back to front: the track is work with
+   no usable draft at all, the buffer is anything awaiting review, the fill is
+   approved and live. The buffer starts full (every key ships a machine draft)
+   and RETREATS as bad drafts are rejected — that receding edge is the
+   "needs writing from scratch" signal, so it must stay visually distinct
+   from the track rather than blending into it. */
+.prog{margin:6px 0 10px 0;max-width:560px}
+.prog-row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.prog-lang{width:34px;font-weight:bold;font-size:12px;color:#cdd}
+.prog-track{position:relative;flex:1;height:14px;background:#23283a;
+  border:1px solid #39405a;border-radius:7px;overflow:hidden}
+.prog-buf{position:absolute;left:0;top:0;bottom:0;background:#39527a}
+.prog-fill{position:absolute;left:0;top:0;bottom:0;background:#3f9a52}
+.prog-num{width:150px;text-align:right;font-size:11px;color:#99a;
+  font-variant-numeric:tabular-nums}
+.prog-legend{font-size:11px;color:#778;margin-top:2px}
+.prog-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin:0 4px 0 10px;vertical-align:middle}
 </style></head><body>
 <h1>Sid's Competitive ROUNDS — Translation Portal</h1>
 <div id="auth" class="muted">Checking session…</div>
 <div id="langs"></div>
+<div id="progress" class="prog"></div>
 <div id="status" class="muted"></div>
 <div id="assentRow" style="display:none;margin:8px 0"><label>
 <input type="checkbox" id="assent"> I license my submitted translations to the
@@ -13054,6 +13161,7 @@ async function boot(){
       const b=el("button",null,l.language_code.toUpperCase());
       b.setAttribute("data-lang",l.language_code);
       b.onclick=()=>{selectLang(l.language_code)};langs.appendChild(b)});
+    loadProgress();
     if(seen.size)document.getElementById("assentRow").style.display="";
     if(!seen.size)a.textContent+=" — no translate grants. Ask an admin for one.";
     // The keep-alive is already armed by the pre-fetch refresh above and
@@ -13356,6 +13464,56 @@ async function loadQueue(){
     qd.appendChild(el("div","err","Could not load the review queue. "+errText(e)));
   }
 }
+// ── Per-language progress bars ───────────────────────────────────────────
+// Shows every SHIPPED language, not just the viewer's granted ones: a
+// translator seeing the other languages' bars is the point ("there is an
+// end, and here is where everyone is"). Counts only — no strings — so this
+// leaks nothing a grant would otherwise gate.
+async function loadProgress(){
+  const box=document.getElementById("progress");
+  try{
+    const d=await api("/progress");
+    box.textContent="";
+    (d.languages||[]).forEach(function(L){
+      const total=L.total||0;
+      // approved is a SUBSET of the buffer: draw the buffer at approved+pending
+      // so the fill sits inside it rather than adding to it.
+      const done=Math.min(L.approved||0,total);
+      const buf=Math.min(done+(L.pending||0),total);
+      const pd=total?(done*100/total):0, pb=total?(buf*100/total):0;
+      const row=el("div","prog-row");
+      row.appendChild(el("div","prog-lang",L.language_code.toUpperCase()));
+      const track=el("div","prog-track");
+      const b=el("div","prog-buf");b.style.width=pb.toFixed(1)+"%";
+      const f=el("div","prog-fill");f.style.width=pd.toFixed(1)+"%";
+      track.appendChild(b);track.appendChild(f);
+      // title is set via property, never innerHTML — same hostile-input
+      // discipline as every other render here.
+      track.title=L.language_code.toUpperCase()+": "+done+" approved, "
+        +(L.pending||0)+" awaiting review, "+Math.max(0,total-buf)
+        +" with no draft"+(L.includes_base_game?" (includes base-game strings)":"");
+      row.appendChild(track);
+      row.appendChild(el("div","prog-num",
+        done+" / "+total+"  ("+pd.toFixed(0)+"%)"));
+      box.appendChild(row);
+    });
+    if(box.children.length){
+      const lg=el("div","prog-legend");
+      const s1=el("i");s1.style.background="#3f9a52";
+      const s2=el("i");s2.style.background="#39527a";
+      const s3=el("i");s3.style.background="#23283a";
+      lg.appendChild(s1);lg.appendChild(document.createTextNode("approved"));
+      lg.appendChild(s2);lg.appendChild(document.createTextNode("awaiting review"));
+      lg.appendChild(s3);lg.appendChild(document.createTextNode("needs a translation"));
+      box.appendChild(lg);
+    }
+  }catch(e){
+    // Never let a progress hiccup break the portal — the bars are
+    // information, the queue is the job.
+    box.textContent="";
+  }
+}
+
 function renderQueue(d){
   const qd=document.getElementById("queue");qd.textContent="";
   const total=d.total||0;
@@ -13397,7 +13555,7 @@ function renderQueue(d){
         // Refresh the Approved list too: an approval leaving the queue with
         // nothing visibly replacing it is exactly the "it disappeared without
         // a trace" report.
-        await loadQueue();await loadApproved();await loadKeys();}
+        await loadQueue();await loadApproved();await loadKeys();await loadProgress();}
       catch(e){msg.textContent=errText(e)}};
     const ap=el("button",null,"Approve");ap.onclick=act("approve");
     const rj=el("button",null,"Reject");rj.onclick=act("reject");
@@ -13481,7 +13639,7 @@ function renderApproved(d){
         try{await api("/revert",{method:"POST",body:JSON.stringify(
           {key_id:e.key_id,language_code:d.language})});
           msg.className="muted";msg.textContent="Reset — reloading.";
-          await loadApproved();await loadKeys();}
+          await loadApproved();await loadKeys();await loadProgress();}
         catch(err){msg.className="err";msg.textContent=errText(err);}
       };
       box.appendChild(rs);box.appendChild(msg);
@@ -18363,6 +18521,9 @@ ACHIEVEMENT_GOLD_OVERRIDES = {
     "ffa_kills_50": 100,           # Rampage          — >50 kills in one game
     "ffa_kills_100": 500,          # Bodycount        — >100 kills in one game
     "ffa_half_point_heartbreak": 300,   # Heartbreak  — lose holding 10+ halves
+    # Translator titles — priced on the same effort ladder as everything else:
+    # 10 strings is an afternoon, 1000 is the whole catalogue twice over.
+    "rosetta": 100, "dragoman": 300, "babel": 1000,
     #
     # ── KNOWN TRADE-OFF, accepted deliberately ─────────────────────────────
     # These six originally shipped at 0g BECAUSE every value they read is
@@ -18491,6 +18652,14 @@ ACHIEVEMENT_DEFS = {
     "ffa_kills_50":         {"name": "Rampage",            "desc": "Get over 50 kills in a single ranked FFA"},
     "ffa_kills_100":        {"name": "Bodycount",          "desc": "Get over 100 kills in a single ranked FFA"},
     "ffa_half_point_heartbreak": {"name": "Heartbreak",    "desc": "Lose a ranked FFA holding 10 or more half points that never became a point"},
+    # Translator titles (Sid, Aug 11). Credit is per STRING and counts both
+    # sides of the review — proposing a translation that gets approved, and
+    # approving someone else's — so the pair of people behind one live string
+    # each earn a point. See _translator_credit for why one person doing both
+    # still only earns one.
+    "rosetta":              {"name": "Rosetta",            "desc": "Get 10 translations approved (yours, or ones you reviewed)"},
+    "dragoman":             {"name": "Dragoman",           "desc": "Get 100 translations approved (yours, or ones you reviewed)"},
+    "babel":                {"name": "Babel",              "desc": "Get 1000 translations approved (yours, or ones you reviewed)"},
     # Payout: 100 / 300 / 500 / 100 / 500 / 300, in the order listed above
     # (Sid priced them 2026-08-07; they shipped at 0g for one day). The table in
     # ACHIEVEMENT_GOLD_OVERRIDES is the contract — read it, not this comment —
@@ -18529,7 +18698,84 @@ SLAYER_TARGETS = {
 ACHIEVEMENT_TITLE_SKUS = {
     "regicide":    "title_sid_slayer",
     "stan_slayer": "title_stan_slayer",
+    "rosetta":     "title_rosetta",
+    "dragoman":    "title_dragoman",
+    "babel":       "title_babel",
 }
+
+# Translator credit thresholds, ascending. Evaluated whenever a proposal is
+# approved (both people involved) and back-granted by migration 214.
+TRANSLATOR_TIERS = ((10, "rosetta"), (100, "dragoman"), (1000, "babel"))
+
+# Languages whose translators are ALSO responsible for the base game's own
+# strings ('game' namespace). ROUNDS ships es/ru itself, so those 242 keys are
+# not work for a Spanish or Russian translator and must not weigh down their
+# progress bar; it ships neither uk nor sv, so for those two the mod supplies
+# the whole base-game table and the keys genuinely are part of the job.
+I18N_GAME_LANGS = ("uk", "sv")
+
+
+async def _translator_credit(db: AsyncSession, steam_id: str) -> int:
+    """How many live STRINGS this person is responsible for.
+
+    Counts DISTINCT (key_id, language_code) over APPROVED proposals where they
+    were EITHER the proposer OR the reviewer. Three rules fall out of that one
+    expression, and all three are deliberate:
+
+      * approved only — a pending or rejected proposal is worth nothing, so
+        the title cannot be farmed by submitting a thousand junk proposals;
+      * both roles earn — the translator and the reviewer behind one live
+        string each get a point, because reviewing IS the scarce work here;
+      * DISTINCT dedupes a person who filled both roles on the same string
+        (admins may self-approve — see i18n_review) to ONE point, and equally
+        dedupes a string that was re-translated several times.
+
+    The 'claude-mt' machine-draft sentinel is not a player, so its proposals
+    credit nobody; the human who APPROVES one is credited, which is exactly
+    the work worth rewarding."""
+    return int((await db.execute(text(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT DISTINCT p.key_id, p.language_code FROM i18n_proposals p"
+        "   WHERE p.status = 'approved'"
+        "     AND p.language_code = ANY(:langs)"
+        "     AND (p.proposer_steam_id = :sid OR p.reviewed_by_steam_id = :sid)"
+        ") s"
+    ), {"sid": steam_id, "langs": list(I18N_LANGS)})).scalar() or 0)
+
+
+async def _grant_translator_achievements(db: AsyncSession, steam_id: str) -> None:
+    """Evaluate the translator tiers for one contributor. Best-effort by
+    design (learning #187): a title grant must never be able to fail the
+    moderation action that triggered it, so the caller wraps this in a
+    savepoint and swallows — an ungranted title is fixed by the next approval
+    or a back-grant, a rolled-back approval is lost work."""
+    if not steam_id or steam_id == "claude-mt":
+        return
+    # IDENTITY LOCK before reading liveness (find 1, learning #282's protocol).
+    # Account deletion purges achievements under this same advisory lock and
+    # THEN anonymizes; without taking it we can read a player as live from an
+    # uncommitted deletion's snapshot and re-insert a row the deletion just
+    # swept, leaving data it explicitly intended to purge. Advisory locks key
+    # on a VALUE, so this works whether or not the row still exists (#207).
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                     {"sid": steam_id})
+    pid = (await db.execute(text(
+        "SELECT id FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+    ), {"sid": steam_id})).scalar()
+    if pid is None:
+        return
+    # Cheapest-first: the count is one indexed aggregate, but skip it entirely
+    # when every tier is already unlocked.
+    have = set((await db.execute(text(
+        "SELECT achievement_key FROM player_achievements WHERE player_id = :p"
+        "   AND achievement_key = ANY(:keys)"
+    ), {"p": pid, "keys": [k for _, k in TRANSLATOR_TIERS]})).scalars().all())
+    if len(have) == len(TRANSLATOR_TIERS):
+        return
+    credit = await _translator_credit(db, steam_id)
+    for need, key in TRANSLATOR_TIERS:
+        if credit >= need and key not in have:
+            await _grant_achievement_inline(db, pid, key)
 
 
 async def _grant_rating_achievements(db: AsyncSession, player_id, new_rating: float) -> None:
@@ -19937,6 +20183,16 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
         )
     )).scalar_one_or_none()
     if existing is not None:
+        # SELF-REPAIR (Aug-11 find 4): this route never granted the matching
+        # TITLE item, so an achievement admin-granted before now unlocked the
+        # badge and the gold but left the title unequippable forever — the
+        # holder is already in `have`, so no later evaluation revisits it.
+        # Re-granting is the natural retry, so make it repair the gap instead
+        # of reporting "already_unlocked" and changing nothing. Idempotent.
+        _repair_sku = ACHIEVEMENT_TITLE_SKUS.get(req.achievement_key)
+        if _repair_sku:
+            await _grant_title_item(db, target.id, _repair_sku)
+            await db.commit()
         return {"status": "already_unlocked"}
     db.add(PlayerAchievement(player_id=target.id, achievement_key=req.achievement_key))
     gold_amt = _achievement_gold(req.achievement_key)
@@ -19948,6 +20204,12 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
         player_id=target.id, amount=gold_amt,
         reason="achievement", reference_id=req.achievement_key,
     ))
+    # Achievement-gated titles must follow EVERY grant path (find 4). Five
+    # keys map to a title today (the two slayers + the three translator
+    # tiers); before this, only the inline path granted the item.
+    _title_sku = ACHIEVEMENT_TITLE_SKUS.get(req.achievement_key)
+    if _title_sku:
+        await _grant_title_item(db, target.id, _title_sku)
     db.add(AdminAction(
         admin_steam_id=req.admin_steam_id, action="grant_achievement",
         target_steam_id=req.target_steam_id,

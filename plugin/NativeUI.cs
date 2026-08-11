@@ -5680,6 +5680,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     case "ffa_shutout_4": case "ffa_half_point_heartbreak": return 300;
                     case "ffa_shutout_5": case "ffa_kills_100":           return 500;
                     case "regicide": case "stan_slayer":                  return 1000;
+                    // Translator tiers (Aug-11 find 8): without these the
+                    // 100 default under-advertised Dragoman by 200g and
+                    // Babel by 900g whenever the achievements fetch failed.
+                    case "dragoman":                                      return 300;
+                    case "babel":                                         return 1000;
                 }
                 return 100;
             };
@@ -12640,16 +12645,31 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
                 // Bug batch item 12: with ~40 achievements a single column forced
                 // 15px rows and 11f text — unreadable, and below ~12pt the SDF
-                // font drops thin glyphs entirely. Split the grid into two
-                // side-by-side halves so rows stay >=20px at a fixed 13f bold.
-                int half = (keys.Count + 1) / 2;
-                float blockW = (W - 36f) / 2f;
+                // font drops thin glyphs entirely. Split the grid into
+                // side-by-side blocks so rows stay >=20px at a fixed 13f bold.
+                //
+                // COLUMN COUNT IS DERIVED, not fixed at 2 (Aug-11 find 6). This
+                // grid is masked and does NOT scroll, so a hardcoded 2 columns
+                // silently CLIPS its bottom rows the moment the catalogue
+                // outgrows the panel: at 50 achievements that is 25 rows, and
+                // 25 * the 20px floor exceeds the height a width-matched canvas
+                // leaves here (#199's class — the arithmetic is invisible in
+                // code review, so do it rather than assume). Work out how many
+                // rows actually fit at the readable floor, then use as many
+                // blocks as that requires; 2 stays the minimum so nothing
+                // narrower than today appears at small counts, and 4 is the cap
+                // because past that the per-player YES/- columns get too thin.
+                const float rowFloor = 20f, headerBlock = 66f;
+                int rowsThatFit = Mathf.Max(1, Mathf.FloorToInt((H - headerBlock) / rowFloor));
+                int blocks = Mathf.Clamp(Mathf.CeilToInt(keys.Count / (float)rowsThatFit), 2, 4);
+                int half = Mathf.CeilToInt(keys.Count / (float)blocks);
+                float blockW = (W - 12f * (blocks + 1)) / blocks;
                 float nameW = Mathf.Min(200f, blockW * 0.46f);
                 float colW = (blockW - nameW - 8f) / Mathf.Max(1, idxs.Count);
                 float headerY = -26f;
-                float rowH = Mathf.Clamp((H - 66f) / Mathf.Max(1, half), 20f, 28f);
+                float rowH = Mathf.Clamp((H - headerBlock) / Mathf.Max(1, half), rowFloor, 28f);
                 const float fontSz = 13f;
-                for (int blk = 0; blk < 2; blk++)
+                for (int blk = 0; blk < blocks; blk++)
                 {
                     float bx = 12f + blk * (blockW + 12f);
                     int from = blk * half, to = Mathf.Min(keys.Count, (blk + 1) * half);

@@ -451,6 +451,13 @@ namespace CompetitiveRounds
             {"ffa_kills_50",             new[]{"Rampage",              "Get over 50 kills in a single ranked FFA"}},
             {"ffa_kills_100",            new[]{"Bodycount",            "Get over 100 kills in a single ranked FFA"}},
             {"ffa_half_point_heartbreak",  new[]{"Heartbreak",           "Lose a ranked FFA holding 10 or more half points that never became a point"}},
+            // Translator titles (Aug 11). Earned off the translation portal
+            // rather than a match, so nothing client-side evaluates them —
+            // the server grants on approval and these rows only supply the
+            // display name + description for the achievements grid.
+            {"rosetta",                    new[]{"Rosetta",              "Get 10 translations approved (yours, or ones you reviewed)"}},
+            {"dragoman",                   new[]{"Dragoman",             "Get 100 translations approved (yours, or ones you reviewed)"}},
+            {"babel",                      new[]{"Babel",                "Get 1000 translations approved (yours, or ones you reviewed)"}},
         };
 
         // Cached data

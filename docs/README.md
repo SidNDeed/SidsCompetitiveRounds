@@ -60,7 +60,7 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 - **HMAC-signed** match reports and admin endpoints prevent spoofing
 
 ### Quality of life
-- **47 achievements** (100-1000g by difficulty, several unlock exclusive titles) — card-build challenges, marathon streaks, rating milestones, and FFA feats — with retroactive grants from your existing match history
+- **50 achievements** (100-1000g by difficulty, several unlock exclusive titles) — card-build challenges, marathon streaks, rating milestones, and FFA feats — with retroactive grants from your existing match history
 - **XP & leveling** with bonus XP for wins, sweeps, and ranked play, scaled by your opponent's rank tier
 - **Hold Tab: live match scoreboard** — every player's current build, stats, and card list at a glance mid-game
 - **Auto-update** — newer mod versions are downloaded and applied automatically on next launch (Thunderstore builds defer to the mod manager)
