@@ -894,18 +894,18 @@ namespace CompetitiveRounds
                 if (wasOvt)
                 {
                     try { ApiClient.OvtLeaveQueue(); } catch { }
-                    CompetitiveUI.ShowNotification("Couldn't join the 1v2 match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
+                    CompetitiveUI.ShowNotificationCritical("Couldn't join the 1v2 match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 else if (wasFfa)
                 {
                     // Same #150 lifecycle as 1v2: a failed join must dissolve the
                     // FFA lobby server-side or the husk re-feeds this dead room.
                     try { ApiClient.FfaLeaveQueue(); } catch { }
-                    CompetitiveUI.ShowNotification("Couldn't join the FFA match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
+                    CompetitiveUI.ShowNotificationCritical("Couldn't join the FFA match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 else
                 {
-                    CompetitiveUI.ShowNotification("Couldn't join the ranked match — please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
+                    CompetitiveUI.ShowNotificationCritical("Couldn't join the ranked match — please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 return;
             }
@@ -1705,22 +1705,28 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[QUEUE] Loaded scene: {scene.name} (index {scene.buildIndex})");
                 }
 
-                // Disable MainMenuHandler
+                // Hide the main menu the way VANILLA hides it on its own room
+                // joins (NCH.cs:140/415/465): Close() deactivates only the
+                // visual child. The old SetActive(false) on the HANDLER's
+                // GameObject also killed ListMenu — they share the
+                // 'UI_MainMenu' host — so every esc-menu open in a queue room
+                // failed its SelectButton coroutines ("Coroutine couldn't be
+                // started because 'UI_MainMenu' is inactive") and the menu
+                // rendered with NO selection bar or bolding (the Button's own
+                // ColorTint hover feedback still worked — so the dead focus
+                // machinery is a PLAUSIBLE contributor to the Aug 12 stray
+                // click on the disconnect-wired MAIN MENU button, not a
+                // proven cause; EscMenuLeaveGuard is the actual protection).
+                // The follow-up "disable all ListMenu objects" loop below it
+                // was dead code from day one: FindObjectsOfType cannot see
+                // the already-inactive host (its log line never printed once
+                // in any session log).
                 var mainMenuHandler = UnityEngine.Object.FindObjectOfType<MainMenuHandler>();
                 if (mainMenuHandler != null)
                 {
-                    mainMenuHandler.gameObject.SetActive(false);
-                    Plugin.Log.LogInfo("[QUEUE] Disabled MainMenuHandler");
+                    mainMenuHandler.Close();
+                    Plugin.Log.LogInfo("[QUEUE] Main menu hidden (vanilla Close)");
                 }
-
-                // Disable all ListMenu objects (menu buttons)
-                var listMenus = UnityEngine.Object.FindObjectsOfType<ListMenu>();
-                foreach (var menu in listMenus)
-                {
-                    menu.gameObject.SetActive(false);
-                }
-                if (listMenus.Length > 0)
-                    Plugin.Log.LogInfo($"[QUEUE] Disabled {listMenus.Length} ListMenu objects");
 
                 // Disable CharacterSelectionInstance if present
                 var charSelect = UnityEngine.Object.FindObjectOfType<CharacterSelectionInstance>();
@@ -2674,6 +2680,21 @@ namespace CompetitiveRounds
             // Callback-bound edge reset (Aug 10 r2 find 8) — the poll's
             // wasInRoom sampling can miss a fast leave+join.
             try { GameStateWatcher.ResetSpectateAttestEdges(alsoRoomTally: true); } catch { }
+            // Esc-menu leave confirm. Disarm FIRST, unconditionally (r4 find
+            // 2): if both room-exit observers missed a fast transition and
+            // the same scene button survived, an armed guard would otherwise
+            // carry into a CASUAL or spectated room and make its MAIN MENU
+            // button ask for two clicks where one is correct. Disarm is a
+            // no-op when not armed. Then arm if this room qualifies — the
+            // callback ATTEMPTS it on the join frame (discovery or reflection
+            // can abort); the recurring poll tick retries and re-arms.
+            try { EscMenuLeaveGuard.Disarm(); } catch { }
+            try
+            {
+                if (!SpectatorSession.IsLocalSpectator && CompetitiveRoomDetect.IsCompetitiveRoom())
+                    EscMenuLeaveGuard.Arm();
+            }
+            catch { }
 
             // SPECTATOR BRANCH (design §3.3): before ANY fighter work. A
             // spectator client runs none of the fighter setup below — no
@@ -3109,7 +3130,11 @@ namespace CompetitiveRounds
             Plugin.Log.LogWarning($"[2v2] Force-StartGame timed out — never reached {wanted} spawned players (present={present})");
             try
             {
-                CompetitiveUI.ShowNotification(
+                // Critical: terminal one-shot instruction — this coroutine
+                // ends here with no retry and no automatic exit, so a dropped
+                // cue leaves the player stalled in the room with no recovery
+                // advice (Aug 12 review r4 find 1).
+                CompetitiveUI.ShowNotificationCritical(
                     I18n.TrF("Match could not start — only {0} of {1} players connected. Leave to the menu to requeue.", present, wanted),
                     new Color(1f, 0.5f, 0.3f), 12f);
             }
@@ -3126,6 +3151,11 @@ namespace CompetitiveRounds
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+            // Esc-menu leave confirm: callback-bound disarm ATTEMPTS to
+            // restore the vanilla wiring on the ACTUAL room exit (it catches
+            // restore failure; the next successful Arm repairs that button).
+            // The poll's Left-room branch is the lossy backup.
+            try { EscMenuLeaveGuard.Disarm(); } catch { }
             // Spectator room exit observed — the point where the session's
             // statics are actually dropped (#249: clear local state in the
             // response/observation handler, never optimistically before).

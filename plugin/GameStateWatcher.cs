@@ -1500,7 +1500,7 @@ namespace CompetitiveRounds
                         else
                         {
                             Plugin.Log.LogWarning("[QUICKPLAY-GUARD] recovery failed — giving up");
-                            try { CompetitiveUI.ShowNotification("Couldn't recover automatically - please restart matchmaking from the menu.", new Color(1f, 0.5f, 0.4f), 8f); } catch { }
+                            try { CompetitiveUI.ShowNotificationCritical("Couldn't recover automatically - please restart matchmaking from the menu.", new Color(1f, 0.5f, 0.4f), 8f); } catch { }
                             rqPhase = RqPhase.Idle;
                         }
                     }
@@ -1525,7 +1525,7 @@ namespace CompetitiveRounds
                     catch (Exception ex)
                     {
                         Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] requeue failed: {ex.Message}");
-                        try { CompetitiveUI.ShowNotification("Couldn't recover automatically - please restart matchmaking from the menu.", new Color(1f, 0.5f, 0.4f), 8f); } catch { }
+                        try { CompetitiveUI.ShowNotificationCritical("Couldn't recover automatically - please restart matchmaking from the menu.", new Color(1f, 0.5f, 0.4f), 8f); } catch { }
                     }
                     break;
             }
@@ -2486,10 +2486,29 @@ namespace CompetitiveRounds
                 try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
                 try { TrailCosmetic.PublishLocalProps(); } catch { }
                 try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
+                // (The esc-menu leave guard arms from the Photon OnJoinedRoom
+                // callback and the recurring tick below — no join-edge call
+                // is needed here.)
             }
 
             if (inRoom && isTracking && oneVOneMatchAtStart)
                 TryRefreshSharedGameToken();
+
+            // Esc-menu leave confirm: the RECURRING keep-armed tick (Aug 12
+            // review r2 find 3 — the join-edge callers alone cannot retry a
+            // scan that failed, nor re-arm after the esc menu is rebuilt
+            // mid-room). Cheap: armed-with-a-live-button returns immediately,
+            // and a real rescan is throttled inside Arm(). Spectator seats
+            // never reach here (Poll quiesces first).
+            if (inRoom)
+            {
+                try
+                {
+                    if (CompetitiveRoomDetect.IsCompetitiveRoom())
+                        EscMenuLeaveGuard.Arm();
+                }
+                catch { }
+            }
 
             if (!inRoom && wasInRoom)
             {
@@ -2610,6 +2629,10 @@ namespace CompetitiveRounds
                     try { Plugin.ClearPendingFfaSlot(); } catch { }
                     try { FfaMode.OnRoomLeft(); } catch { }
                 }
+                // Backup teardown for the esc-menu guard (the Photon
+                // OnLeftRoom callback is primary). Attempts the restore —
+                // Disarm catches its own failure; no-op when never armed.
+                try { EscMenuLeaveGuard.Disarm(); } catch { }
                 // Consume LeavingForRanked on EVERY observed room exit (lobby
                 // impl round 6): the flag's meaning is "the NEXT room exit is
                 // our deliberate leave-for-ranked". The tracking-gated scoring
@@ -2926,7 +2949,12 @@ namespace CompetitiveRounds
                             string _dcMsg = localR >= 4
                                 ? $"{_dcName} disconnected at {localR}-{oppR} — leave to the menu, you get the win"
                                 : $"{_dcName} disconnected at {localR}-{oppR} — leave to the menu, game won't be counted";
-                            CompetitiveUI.ShowNotification(_dcMsg, new Color(1f, 0.65f, 0.2f), 10f);
+                            // Critical: this is a one-shot ACTIONABLE cue with
+                            // no retry (opponentDCReported latches), so it must
+                            // not be dropped by a live critical window (Aug 12
+                            // review r3) — the player would sit in a hung
+                            // sitting with no instruction.
+                            CompetitiveUI.ShowNotificationCritical(_dcMsg, new Color(1f, 0.65f, 0.2f), 10f);
                         }
                         catch { }
 

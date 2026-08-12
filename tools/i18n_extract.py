@@ -16,7 +16,7 @@ these positions):
   - UIFactory.CreateText(name, parent, TEXT, ...)
   - UIFactory.SetText(target, TEXT)
   - UIFactory.CreateButton(name, parent, LABEL, ...)
-  - CompetitiveUI.ShowNotification(TEXT, ...)
+  - CompetitiveUI.ShowNotification(TEXT, ...) and ShowNotificationCritical
   - ShowInfoPopup(TITLE, BODY) title literals
 Skips: empty strings, pure-markup/format scraps (< 2 letters), strings that
 are obviously identity-ish (no spaces AND no letters beyond [A-Za-z0-9_]) —
@@ -59,6 +59,8 @@ FILES = [
     "MatchTracker.cs", "VanillaFixes.cs", "QuickChat.cs",
     # Spectator mode (Aug 6 item 13) — new files with user-visible Tr() text.
     "SpectatorHud.cs", "SpectatorJoiner.cs", "SpectatorSync.cs",
+    # Esc-menu leave confirm (Aug 12, DC #1).
+    "EscMenuLeaveGuard.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
@@ -69,8 +71,11 @@ SITES = [
     (re.compile(r'UIFactory\.CreateText\s*\('), (2,)),
     (re.compile(r'UIFactory\.SetText\s*\('), (1,)),
     (re.compile(r'UIFactory\.CreateButton\s*\('), (2,)),
-    (re.compile(r'CompetitiveUI\.ShowNotification\s*\('), (0,)),
-    (re.compile(r'(?<![.\w])ShowNotification\s*\('), (0,)),
+    # NOTE: the (?:Critical)? alternative is load-bearing — converting a
+    # call site to ShowNotificationCritical must NOT retire its translation
+    # key (Aug 12: four shipped keys were silently dropped that way, #289).
+    (re.compile(r'CompetitiveUI\.ShowNotification(?:Critical)?\s*\('), (0,)),
+    (re.compile(r'(?<![.\w])ShowNotification(?:Critical)?\s*\('), (0,)),
     (re.compile(r'(?<![.\w])QueueNotification\s*\('), (0,)),
     (re.compile(r'ShowInfoPopup\s*\('), (0, 1)),
     (re.compile(r'(?<![.\w])SettingsToggle\s*\('), (4,)),

@@ -25,6 +25,10 @@ namespace CompetitiveRounds
         private static Color notifColor = Color.white;
         private static float notifTimer = 0f;
         private static List<QueuedNotif> notifQueue = new List<QueuedNotif>();
+        /// <summary>While unscaled time is below this, the notification slot
+        /// belongs to a match-critical cue: ordinary toasts are DROPPED for
+        /// the duration rather than replacing it (Aug 12 review r2/r3).</summary>
+        private static float notifCriticalUntil = 0f;
         private struct QueuedNotif { public string text; public Color color; public float dur; }
         private static GUIStyle notifStyle;
 
@@ -36,6 +40,15 @@ namespace CompetitiveRounds
         public static void ShowNotification(string text, Color color, float duration = 5f)
         {
             if (!Plugin.ShowNotifications.Value) return;
+            // A critical cue owns the slot for its whole duration (Aug 12
+            // review r2): ordinary toasts write the same three fields, so an
+            // FFA pick toast landing a second after the leave-confirm cue
+            // erased it while the 4s gate stayed armed — the player sees
+            // "nothing happened". Ordinary toasts are DROPPED for that window,
+            // not queued: this surface is latest-wins by design, and queueing
+            // them (self-audit) let a busy FFA stack minutes of stale toasts
+            // that then replayed out of context.
+            if (Time.unscaledTime < notifCriticalUntil) return;
             // L10n chokepoint for the IMGUI toast surface (Codex client
             // review find 7): these render via GUI.Label, never through
             // UIFactory, so without this the exact catalogue entries for
@@ -52,6 +65,22 @@ namespace CompetitiveRounds
             if (!Plugin.ShowNotifications.Value) return;
             try { text = I18n.Tr(text); } catch { }
             notifQueue.Add(new QueuedNotif { text = text, color = color, dur = duration });
+        }
+
+        /// <summary>Match-critical toast: bypasses the optional
+        /// ShowNotifications preference AND owns the slot for its duration.
+        /// Reserved for TERMINAL, ACTIONABLE cues — ones instructing a manual
+        /// action that nothing will retry (leave-to-menu after an opponent
+        /// DC, requeue after a failed join, the 2v2 start timeout). Every
+        /// such cue added here also narrows what ordinary toasts can show,
+        /// so do not reach for it for anything a player can miss safely.</summary>
+        public static void ShowNotificationCritical(string text, Color color, float duration = 5f)
+        {
+            try { text = I18n.Tr(text); } catch { }
+            notifText = text;
+            notifColor = color;
+            notifTimer = duration;
+            notifCriticalUntil = Time.unscaledTime + duration;
         }
 
         // Match-found notification sound

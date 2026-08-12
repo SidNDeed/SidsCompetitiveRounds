@@ -2237,4 +2237,37 @@ namespace CompetitiveRounds
             return VanillaFixSupport.Cleanup("HostRoomCodeClipboard", exception);
         }
     }
+
+    /// <summary>Forensics for the DC #1 class (Aug 12, bug 208 session): the
+    /// log could prove the esc menu was OPEN during a pick phase (its button
+    /// hover coroutines failed on the then-dead ListMenu host) but not WHEN
+    /// it opened. Logs each ToggleEsc INVOCATION and the resulting state,
+    /// online rooms only. Honest limits (review r1): a submenu-close call
+    /// returns without toggling (so consecutive OPEN lines are possible),
+    /// Esc key vs controller Command remain indistinguishable, and a throw
+    /// inside the original skips this Postfix. It narrows the timeline; it
+    /// does not identify the input source. Display/diag only.</summary>
+    [HarmonyPatch(typeof(EscapeMenuHandler), "ToggleEsc")]
+    internal static class EscToggleDiagPatch
+    {
+        private static void Postfix()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
+                bool battle = false;
+                try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+                Plugin.Log.LogInfo($"[ESC-DIAG] esc menu -> {(EscapeMenuHandler.isEscMenu ? "OPEN" : "closed")} " +
+                                   $"(room={PhotonNetwork.CurrentRoom?.Name}, battle={battle})");
+            }
+            catch { }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("EscToggleDiag", exception);
+        }
+    }
 }
