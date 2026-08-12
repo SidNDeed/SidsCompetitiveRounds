@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The esc menu works properly in queue rooms again, and MAIN MENU asks
+  before it drops you out of a live match.** Since queues shipped, the mod
+  hid the main menu in a way that also killed the menu's selection system —
+  so opening the esc menu mid-match gave you no highlight bar and no hover
+  feedback at all. On top of that, MAIN MENU is the one button in the game
+  wired straight to "disconnect now", so a stray click during a match ended
+  it instantly. The menu now behaves normally, and in ranked/2v2/1v2/FFA
+  rooms MAIN MENU asks for a second click before leaving. Click it twice if
+  you mean it — and if anything ever goes wrong with the confirm, a second
+  click still leaves, so the button can never get stuck.
+- Instructions you have to act on — an opponent disconnecting, a failed
+  join, a match that could not start — can no longer be wiped off screen by
+  an ordinary notification landing a second later.
+
 First FFA-with-spectator playtest fixes (bug reports 202-207, all root-caused
 from both seats' logs):
 
