@@ -3313,10 +3313,64 @@ namespace CompetitiveRounds
     /// hit travels the normal damage RPC, so no shared simulation is touched
     /// and no capability gate is needed (#269 does not apply). On exception
     /// return FALSE (skip this frame's targeting — under-application, #288);
-    /// returning true would re-enter vanilla + the shared patch, i.e. the bug.</summary>
+    /// returning true would re-enter vanilla + the shared patch, i.e. the bug.
+    ///
+    /// AUG 12 BALANCE CHANGE (Sid, after consulting players): in FFA the wave
+    /// hits every opponent the expanding ring sweeps over, each at most once
+    /// — not just the nearest. Vanilla evaluates only the single closest
+    /// visible enemy and latches `done` after one hit, which is invisible in
+    /// 1v1 and merely quiet in 2v2, but in a 5-10 player FFA the ring sweeps
+    /// visibly through up to nine players it structurally cannot damage.
+    /// That mismatch between what the effect SHOWS and what it DOES is what
+    /// bug 208 reported as "Radiance isn't healing me from Parasite": the
+    /// heal chain was intact, the hits simply never happened.
+    ///
+    /// Two properties that widening quietly depends on, both added because
+    /// review found them missing: the scan must stop when the RING is over
+    /// (its radius stops advancing afterwards, so a finished wave would
+    /// otherwise stand as an invisible tripwire), and the per-frame test must
+    /// be SWEPT rather than sampled (the ring outruns its own 4-unit band at
+    /// low frame rates with Radiance stacked). The swept test catches every
+    /// monotone crossing at any frame rate; an interior cross-and-return
+    /// inside a single frame is an accepted residual documented at the test.
+    ///
+    /// Deliberately UNCHANGED: the vision requirement (walls block the wave
+    /// per target — and the check fails CLOSED), the band width, the
+    /// per-target damage/knockback formulas, owner authority, and every other
+    /// mode — this patch is FFA-gated, so 1v1/2v2/1v2 keep vanilla
+    /// behaviour. A hit that a block or sudden-death suppression swallows
+    /// still consumes that player's crossing, by design.</summary>
     [HarmonyPatch(typeof(LineRangeEffect), "Update")]
     class LineRangeEffect_FfaOwnerExclusion_Patch
     {
+        /// <summary>Per-wave bookkeeping. <c>Consumed</c> holds the PlayerIDs
+        /// whose crossing this wave has already spent. The id goes in when the
+        /// hit is DISPATCHED, not when damage lands — so a contact that a
+        /// block, sudden-death suppression, zero damage or a post-dispatch
+        /// throw swallows still counts as consumed. That is deliberate:
+        /// retrying would spam RPCs and could wound retroactively once
+        /// suppression ends.
+        /// <c>LastSep</c> is each player's previous signed separation from the
+        /// ring, <c>distance - radius</c>: negative inside, positive outside.
+        /// It is what makes the sweep frame-rate independent (see the crossing
+        /// test below).</summary>
+        private class WaveHits
+        {
+            public readonly HashSet<int> Consumed = new HashSet<int>();
+            public readonly Dictionary<int, float> LastSep = new Dictionary<int, float>();
+        }
+
+        /// <summary>Weak-keyed by the wave component, so an entry becomes
+        /// collectible once its managed wrapper is unreachable (not
+        /// synchronously at Unity destruction, but the table never roots it —
+        /// nothing to clean up, nothing to leak). CLR reference identity means
+        /// a destroyed wave can never alias a later one.</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<LineRangeEffect, WaveHits>
+            hitsByWave = new System.Runtime.CompilerServices.ConditionalWeakTable<LineRangeEffect, WaveHits>();
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<LineRangeEffect, WaveHits>.CreateValueCallback
+            MakeWaveHits = _ => new WaveHits();
+
         static bool Prefix(LineRangeEffect __instance)
         {
             if (!FfaMode.EngineActive()) return true;
@@ -3325,24 +3379,143 @@ namespace CompetitiveRounds
                 if (__instance.done || __instance.spawned == null || !__instance.spawned.IsMine())
                     return false;
                 var owner = __instance.owner;
-                var target = FfaTargeting.NearestOpponent(PlayerManager.instance,
-                    __instance.transform.position, -1, needVision: true, excludePlayer: owner);
-                if (target != null)
+                if (owner == null) return false;
+                var pm = PlayerManager.instance;
+                if (pm?.players == null) return false;
+
+                // THE SWEEP MUST BE LIVE. LineEffect.DrawLine deactivates
+                // itself once counter > 1, which STOPS the counter advancing
+                // — so GetRadius() keeps returning that last radius for as
+                // long as the parent object lives. Vanilla is bounded by its
+                // one-hit `done` latch; hitting every opponent removed that
+                // bound, which turned a finished wave into an INVISIBLE
+                // standing tripwire: the ring is gone from the screen and a
+                // player who walks through where it ended still takes full
+                // damage. Caught by the audit, not by me. Latch on the ring
+                // being over — a terminal condition independent of who
+                // happened to be reachable, so it also bounds the scan when
+                // someone is permanently behind a wall. (Normal timing
+                // destroys the parent first, so this branch is the belt to
+                // RemoveAfterSeconds' braces; under point slow-motion the
+                // parent outlives the ring and this is what stops the scan.)
+                var ring = __instance.lineEffect;
+                if (ring == null || !ring.gameObject.activeInHierarchy || ring.counter > 1f)
                 {
-                    const float slack = 2f;
-                    float radius = __instance.lineEffect != null ? __instance.lineEffect.GetRadius() : 0f;
-                    float d = Vector2.Distance(__instance.transform.position, target.transform.position);
-                    if (d < radius + slack && d > radius - slack)
-                    {
-                        __instance.done = true;
-                        Vector3 dir = (target.transform.position - __instance.transform.position).normalized;
-                        target.data.healthHandler.CallTakeDamage(
-                            __instance.dmg * __instance.transform.localScale.x * dir,
-                            target.transform.position, null, owner);
-                        target.data.healthHandler.CallTakeForce(
-                            __instance.knockback * __instance.transform.localScale.x * dir);
-                    }
+                    __instance.done = true;   // no ring => never a radius-0 point-blank AoE
+                    return false;
                 }
+
+                const float slack = 2f;
+                float radius = ring.GetRadius();
+                Vector3 center = __instance.transform.position;
+                var hits = hitsByWave.GetValue(__instance, MakeWaveHits);
+
+                // One pass over the field: dispatch to everyone the ring
+                // crossed SINCE THE LAST FRAME, and count whose crossing is
+                // still unconsumed.
+                int unconsumed = 0;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.gameObject == null || p.data == null) continue;
+                    // Excludes the owner by construction (FFA gives every
+                    // player their own team) AND any future teammate — the
+                    // identity exclusion bug #165 wanted, one layer up.
+                    if (p.TeamID == owner.TeamID) continue;
+
+                    int pid = p.PlayerID;
+                    // Signed separation: negative inside the ring, positive
+                    // outside. Tracked for DEAD players too, so a passage
+                    // sampled entirely while they were dead is recorded and a
+                    // later revive is not retro-struck by a crossing it never
+                    // saw. (A player sampled dead while the ring is still
+                    // APPROACHING, then revived in place, is hit normally —
+                    // which is what we want.)
+                    float sep = Vector2.Distance(center, p.transform.position) - radius;
+                    bool haveLast = hits.LastSep.TryGetValue(pid, out float lastSep);
+                    hits.LastSep[pid] = sep;
+
+                    if (!p.data.dead && !hits.Consumed.Contains(pid))
+                    {
+                        // SWEPT test, not a point sample. The ring is fast:
+                        // radius = 25 * stackScale * curve(t), whose steepest
+                        // section moves ~36.8 * stackScale units/sec against a
+                        // 4-unit band — so with Radiance stacked 5 deep the
+                        // radius advances ~4.7 units in a 30 FPS frame and a
+                        // point test steps clean OVER a player standing in the
+                        // gap. Vanilla has the identical hole; it only ever
+                        // hit one target, so nobody could see it.
+                        //
+                        // GUARANTEE, stated precisely (r2): any MONOTONE change
+                        // in separation that spans the band is caught, at any
+                        // frame rate and any speed. What two scalar samples
+                        // cannot reconstruct is an interior excursion — a
+                        // player who crosses the band and returns outside it
+                        // between two frames reads as never having moved.
+                        // Accepted residual: that needs the player's actual
+                        // trajectory, and the movement it requires is not
+                        // reachable in normal play.
+                        // Strict on BOTH paths: with history the band was
+                        // closed and on first sight open, so a +3 -> +2 pair
+                        // counted as contact while a first sample at exactly
+                        // +2 did not. Vanilla's band is open; keep it.
+                        bool crossing = haveLast
+                            ? (Mathf.Min(lastSep, sep) < slack && Mathf.Max(lastSep, sep) > -slack)
+                            : (sep < slack && sep > -slack);
+                        // Distance first, vision second: the raycast runs only
+                        // for someone the ring actually reached, so a frame in
+                        // which it crosses nobody costs zero raycasts.
+                        if (crossing)
+                        {
+                            // Fail CLOSED (#288): CanSeePlayer dereferences
+                            // data.playerVel behind only a null-player guard,
+                            // so a partially-initialised target could throw —
+                            // and defaulting to visible would strike through a
+                            // wall, now for up to nine targets at once. Note
+                            // this LOSES the crossing rather than deferring it:
+                            // LastSep has already advanced, so there is no
+                            // next-frame retry. Under-application is the
+                            // correct direction, and no stock path reaches it.
+                            bool visible = false;
+                            try { visible = pm.CanSeePlayer(center, p).canSee; } catch { }
+                            if (visible)
+                            {
+                                // Consume BEFORE dispatch and never roll back:
+                                // PUN raises the network event before running
+                                // the RPC locally, so a post-dispatch throw has
+                                // already hit everyone else — re-sending would
+                                // double-apply remotely. Contain the throw per
+                                // TARGET though (r2 find 2): the method-wide
+                                // catch used to abandon the rest of the field,
+                                // and with the ring one frame from over those
+                                // players were missed for good.
+                                hits.Consumed.Add(pid);
+                                try
+                                {
+                                    Vector3 dir = (p.transform.position - center).normalized;
+                                    p.data.healthHandler.CallTakeDamage(
+                                        __instance.dmg * __instance.transform.localScale.x * dir,
+                                        p.transform.position, null, owner);
+                                    p.data.healthHandler.CallTakeForce(
+                                        __instance.knockback * __instance.transform.localScale.x * dir);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Plugin.Log.LogWarning($"[FFA] radiance hit on pid {pid}: {ex.Message}");
+                                }
+                            }
+                        }
+                    }
+                    if (!hits.Consumed.Contains(pid)) unconsumed++;
+                }
+
+                // Early out when no unconsumed opponent remains. An
+                // optimisation ONLY — unreachable whenever anyone is behind a
+                // wall or beyond the ring's reach, which is the norm on a real
+                // map. Dead players stay counted as unconsumed so the scan
+                // keeps running for a revive the ring has not yet reached.
+                // Termination comes from the ring-over check above, or from
+                // the parent being destroyed first (the usual case).
+                if (unconsumed == 0) __instance.done = true;
                 return false;
             }
             catch { return false; }
