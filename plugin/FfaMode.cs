@@ -97,7 +97,12 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        private static void LatchConfigFromRoom()
+        /// <summary>Returns true only when a well-formed room config was
+        /// parsed AND committed (r3 find 3 — the spectator one-shot latch
+        /// must arm on SUCCESS, never on mere property presence). Fighter
+        /// callers ignore the return; their per-OnGameStart re-read is
+        /// unchanged.</summary>
+        private static bool LatchConfigFromRoom()
         {
             // Latched once per game entry, idempotent (config is frozen per
             // lobby). Prefer the room prop when present; the pending statics
@@ -108,9 +113,9 @@ namespace CompetitiveRounds
                 var room = PhotonNetwork.CurrentRoom;
                 var raw = room?.CustomProperties != null && room.CustomProperties.ContainsKey(PropConfig)
                     ? room.CustomProperties[PropConfig] as string : null;
-                if (string.IsNullOrEmpty(raw)) return;
+                if (string.IsNullOrEmpty(raw)) return false;
                 var p = raw.Split(':');
-                if (p.Length < 6) return;
+                if (p.Length < 6) return false;
                 int st, cc, ip, cap, sc, rk;
                 // Aug 6 item 10: the sudden-death segment is OPTIONAL and defaults
                 // to FALSE when absent. That is load-bearing, not tidiness — a
@@ -123,11 +128,42 @@ namespace CompetitiveRounds
                 if (p.Length >= 7)
                 {
                     int sdv;
-                    if (int.TryParse(p[6], out sdv)) sd = sdv != 0;
+                    // r3 find 3: a PRESENT-but-unparsable seventh field is a
+                    // malformed value, not a legacy one — reject the whole
+                    // latch rather than commit six fields with sudden-death
+                    // silently off (the 6-segment legacy path above stays
+                    // valid, that is a different, deliberate semantic).
+                    if (!int.TryParse(p[6], out sdv)) return false;
+                    sd = sdv != 0;
                 }
                 if (int.TryParse(p[0], out st) && int.TryParse(p[1], out cc) && int.TryParse(p[2], out ip)
                     && int.TryParse(p[3], out cap) && int.TryParse(p[4], out sc) && int.TryParse(p[5], out rk))
+                {
                     SetPendingConfig(st, cc, ip, cap, sc != 0, rk != 0, sd);
+                    return true;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>One-shot spectator config latch (r2 find 3 / r3 finds
+        /// 3+4): arms only when a well-formed room config actually committed,
+        /// retries every call until then, and never re-latches for the same
+        /// room (a corrupted later prop cannot flip target/sudden-death
+        /// mid-game on this seat). Called from BOTH observer entry points —
+        /// score seeding and round observation — so activation cannot precede
+        /// the latch when the prop is already cached. Cleared in OnRoomLeft.
+        /// Accepted residual (r3 find 5, PLAUSIBLE only): a spectator-as-
+        /// master handoff race where no participant emits the call-in can
+        /// leave the round latch armed for up to its 20s TTL.</summary>
+        private static void SpectatorLatchConfigOnce()
+        {
+            try
+            {
+                string rn = PhotonNetwork.CurrentRoom?.Name ?? "";
+                if (string.IsNullOrEmpty(rn) || rn == spectatorCfgRoom) return;
+                if (LatchConfigFromRoom()) spectatorCfgRoom = rn;
             }
             catch { }
         }
@@ -315,6 +351,11 @@ namespace CompetitiveRounds
             try
             {
                 if (!RoomActors.LocalIsSpectator) return;
+                // r3 find 4: activation must not precede the config latch —
+                // when the prop is already cached (it rides the join response,
+                // #287), this latches BEFORE the seeded scores can be judged
+                // against a default target below.
+                SpectatorLatchConfigOnce();
                 rounds.Clear();
                 points.Clear();
                 if (roundsByTeam != null)
@@ -328,6 +369,68 @@ namespace CompetitiveRounds
                 // duration/report consumers of this value are all
                 // spectator-guarded.
                 if (matchStartRealtime <= 0f) matchStartRealtime = Time.realtimeSinceStartup;
+                // r3 find 1: terminal lifecycle must run no matter which path
+                // learns the terminal score first (a decisive RPC against an
+                // unseeded table misses it; the late snapshot then carried
+                // the truth but nothing acted on it). One-shot, shared with
+                // the delta path; a NON-terminal seed re-arms it — that is
+                // the observer's "new game started" signal.
+                SpectatorCheckGameOver();
+            }
+            catch { }
+        }
+
+        /// <summary>One-shot per game: whichever observer path (round delta
+        /// or snapshot seed) first sees a team at/above the latched target
+        /// announces the winner and resets the accumulators the snapshots do
+        /// NOT seed (kills, pointsTotal). A non-terminal score re-arms —
+        /// the next game's 0-0 seed is the only reliable rematch signal this
+        /// seat gets (its game-start lifecycle is suppressed).</summary>
+        private static bool spectatorGameOverAnnounced;
+        private static void SpectatorCheckGameOver()
+        {
+            try
+            {
+                if (!RoomActors.LocalIsSpectator) return;
+                int leadTeam = -1, leadRounds = -1;
+                foreach (var kv in rounds)
+                    if (kv.Value > leadRounds) { leadRounds = kv.Value; leadTeam = kv.Key; }
+                bool terminal = leadTeam >= 0 && leadRounds >= RoundsToWin;
+                if (!terminal)
+                {
+                    // r4 find 1: clear the accumulators AGAIN on the
+                    // true→false re-arm — a delayed end-screen death lands
+                    // AFTER the terminal clear (observers never set
+                    // gameOverFired, so RecordKillFor's fighter guard does
+                    // not cover them) and would otherwise carry one stale
+                    // kill into the next game's tally.
+                    if (spectatorGameOverAnnounced)
+                    {
+                        kills.Clear();
+                        pointsTotal.Clear();
+                    }
+                    spectatorGameOverAnnounced = false;
+                    return;
+                }
+                if (spectatorGameOverAnnounced) return;
+                spectatorGameOverAnnounced = true;
+                try
+                {
+                    string who = "Team " + leadTeam;
+                    foreach (var pl in PlayerManager.instance.players)
+                    {
+                        if (pl == null || pl.gameObject == null || pl.data == null) continue;
+                        if (pl.TeamID != leadTeam) continue;
+                        who = GameStateWatcher.StripRichText(pl.data.view?.Owner?.NickName ?? who);
+                        break;
+                    }
+                    if (who.Length > 16) who = who.Substring(0, 16);
+                    CompetitiveUI.ShowNotification(I18n.TrF("{0} wins the game!", who),
+                        new Color(1f, 0.85f, 0.4f), 6f);
+                }
+                catch { }
+                kills.Clear();
+                pointsTotal.Clear();
             }
             catch { }
         }
@@ -554,8 +657,12 @@ namespace CompetitiveRounds
             try
             {
                 // End-screen kills don't count (the report snapshot was
-                // already taken at game over).
+                // already taken at game over). Observers never set
+                // gameOverFired — their terminal marker is the announce flag
+                // (r4 find 1 defense-in-depth; the re-arm clear is the
+                // primary closure).
                 if (gameOverFired) return;
+                if (RoomActors.LocalIsSpectator && spectatorGameOverAnnounced) return;
                 if (killed == null || killed.data == null) return;
                 var src = killed.data.lastSourceOfDamage;
                 if (src == null || src.gameObject == null || src.data == null) return;
@@ -733,10 +840,48 @@ namespace CompetitiveRounds
 
         // ── Lifecycle ──
 
+        /// <summary>Room the last OnGameStart ran in. Same-room rematches keep
+        /// the name, so the cross-room guard below never fires for them.</summary>
+        private static string lastGameRoomName = "";
+
+        /// <summary>Room whose config the SPECTATOR path has latched (r2 find
+        /// 3 — the observer latch is one-shot per room; cleared in
+        /// OnRoomLeft).</summary>
+        private static string spectatorCfgRoom = "";
+
         /// <summary>New game in the room (game 1 AND rematches — invoked from
         /// the DoStartGame replacement, which vanilla runs on both paths).</summary>
         public static void OnGameStart()
         {
+            // Bug 204 self-heal (Codex fix-shape, cross-review converged): if
+            // this game starts in a DIFFERENT room than the last one, any
+            // surviving counters are leakage from a teardown path that missed
+            // OnRoomLeft (the spectator quiesce was one; assume others exist).
+            // Reset BEFORE incrementing so a missed reset degrades to "clean
+            // game 1" instead of "one seat a game ahead, invisible to the
+            // pick manifest forever" — the #276 fail-safe direction.
+            // Deliberately NOT reset here: the config statics. The ready-join
+            // flow stages the NEW room's config into them BEFORE this runs,
+            // and MasterPublishConfig below is cr_ffa_cfg's FIRST writer — a
+            // defaults-reset here would make a leaked-counter master publish
+            // target-5 defaults over a target-7 lobby, split the rules, and
+            // get the report quarantined as score_shape_mismatch (review r1
+            // find 1, HIGH). Counters and Leavers only.
+            try
+            {
+                string roomNow = PhotonNetwork.CurrentRoom?.Name ?? "";
+                if (roomNow != lastGameRoomName)
+                {
+                    if (gameNumber != 0)
+                    {
+                        Plugin.Log.LogWarning($"[FFA] stale game counter ({gameNumber}) from a previous room — reset (missed OnRoomLeft?)");
+                        gameNumber = 0;
+                        Leavers.Clear();
+                    }
+                    lastGameRoomName = roomNow;
+                }
+            }
+            catch { }
             gameNumber++;
             cycleNumber = 0;
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
@@ -835,6 +980,8 @@ namespace CompetitiveRounds
             ClearSpawnGrace();
             try { FfaCardSequence.OnRoomLeft(); } catch { }
             ResetConfigToDefaults();
+            spectatorCfgRoom = "";   // re-spectating the same room must re-latch
+            spectatorGameOverAnnounced = false;
             LocalOffers.Clear();
             GameStartedInRoom = false;
         }
@@ -1076,6 +1223,23 @@ namespace CompetitiveRounds
                 // fires a stale Revive+DoBlock into the spectator's next
                 // round and corrupts its replica state.
                 TransitionGeneration++;
+                // Aug 11 review r1 find 2 (final shape after r3): with the
+                // participant lifecycle fully gated off this seat, the
+                // observer carries the pieces the spectator display genuinely
+                // needs. (a) The one-shot room-config latch — RoundsToWin
+                // drives the HUD dots and the terminal detection, SuddenDeath
+                // the suppressed-hit display rule (see the helper's doc for
+                // the r2f3/r3f3+4 history). (b) The per-round
+                // lastSourceOfDamage clear — spectator PoisonSync subtracts
+                // health directly and never updates lastSourceOfDamage
+                // (vanilla stamps it in DoDamage), so a poison death on this
+                // seat would credit the last BULLET attacker, from
+                // arbitrarily long ago; the participant path bounds the same
+                // field per round at battle start. (c) The shared one-shot
+                // terminal check — announce + accumulator reset, whichever
+                // path sees the terminal score first (r3 find 1).
+                SpectatorLatchConfigOnce();
+                try { ClearLastDamageSources(); } catch { }
                 if (winnerTeam >= 0)
                 {
                     points[winnerTeam] = PointsFor(winnerTeam) + 1;
@@ -1084,6 +1248,7 @@ namespace CompetitiveRounds
                     {
                         rounds[winnerTeam] = RoundsFor(winnerTeam) + 1;
                         points.Clear();
+                        SpectatorCheckGameOver();
                     }
                 }
                 else if (winnerTeam == WINNER_DOUBLE_KO)
@@ -1104,6 +1269,14 @@ namespace CompetitiveRounds
         /// every client from the winner id alone.</summary>
         public static void HandleNextRound(GM_ArmsRace gm, int winnerTeam)
         {
+            // Bug 203 funnel guard (#338): an OBSERVER seat must never run the
+            // participant transition engine, whatever path called in — the
+            // gameOver branch below starts vanilla GameOverTransition (the
+            // "REMATCH?" loop text, which a spectator can never dismiss), and
+            // the score writes double-count against SpectatorObserveRound's.
+            // The caller-side gate lives in GMArmsRace_NextRound_Ffa_Patch;
+            // this is the single-funnel backstop.
+            if (RoomActors.LocalIsSpectator) return;
             if (isTransitioning || gameOverFired) return;
             isTransitioning = true;
             pointLatched = false;
@@ -1461,6 +1634,11 @@ namespace CompetitiveRounds
 
         public static IEnumerator FfaDoStartGame(GM_ArmsRace gm)
         {
+            // #338 funnel backstop (see HandleNextRound): the participant
+            // start flow must never run on an observer seat. OnGameStart()
+            // below increments gameNumber — on a spectator that counter later
+            // leaks into their next FIGHTER room (bug 204's first domino).
+            if (RoomActors.LocalIsSpectator) yield break;
             GameStartedInRoom = true;
             OnGameStart();
             PurgeDepartedPlayers("game start");
@@ -2293,7 +2471,14 @@ namespace CompetitiveRounds
                 }
                 catch { }
             }
-            try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }
+            // Own-pick bookkeeping moved to ApplyManifestPick (accepted-result
+            // time). Recording it HERE — at confirm time, before the master's
+            // result manifest — published cr_cards for picks the reducer then
+            // REJECTED: in bug 204's aborted room, "Broadcast cards: Defender"
+            // convinced everyone Spirit held a card that never applied on any
+            // seat (Codex fix-shape, cross-review converged: publish own-pick
+            // telemetry only after the local player appears in an accepted
+            // result).
             // §10 offer baseline: log what THIS client was offered this draw
             // (own offers only — the report attaches them for the local entry;
             // candidate counts were previously invisible to the server).
@@ -2471,6 +2656,36 @@ namespace CompetitiveRounds
 
             ApplyCardTo(player, prefab);
             deck.Add(prefab);
+
+            // Bug 206 (#250 legibility): manifest applies for OTHER players are
+            // silent by design (OFFLINE_Pick skips the "Picking Card:" log), so
+            // opponents' picks were invisible — Spirit watched Stan produce
+            // supernovas with no record of him ever picking the card and
+            // concluded it was a residual. Announce every non-local apply the
+            // same way 1v1 announces opponent picks. The local player already
+            // SEES their own pick (the card animation, plus the timed-out
+            // auto-pick toast), so no toast here for the local seat — its
+            // bookkeeping (localCards + cr_cards broadcast) happens HERE, at
+            // accepted-result time, so the broadcast can never advertise a
+            // pick the reducer rejected (bug 204's false "he has Defender").
+            try
+            {
+                if (player.data.view == null || !player.data.view.IsMine)
+                {
+                    string who = "P" + pid;
+                    try { who = GameStateWatcher.StripRichText(player.data.view?.Owner?.NickName ?? who); } catch { }
+                    if (who.Length > 14) who = who.Substring(0, 14);
+                    string canon = CardRarityLookup.GetCanonicalName(cardName) ?? cardName;
+                    string shown = CardTextLocalizer.PrettyNameIfCached(canon, cardName);
+                    CompetitiveUI.ShowNotification(I18n.TrF("{0} picked {1}", who, shown),
+                        new Color(0.75f, 0.85f, 1f), 3.5f);
+                }
+                else
+                {
+                    try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }
+                }
+            }
+            catch { }
 
             if (rebuiltDeck)
             {
@@ -2804,6 +3019,12 @@ namespace CompetitiveRounds
             if (!FfaMode.EngineActive()) return true;
             // Every death funnels through here (vanilla invokes PlayerDied
             // per victim), so this is the kill-credit tally point.
+            // SPECTATOR NOTE (bug 203 sibling audit): RecordKillFor stays
+            // active on observer seats DELIBERATELY — boundary snapshots seed
+            // only rounds/points (SpectatorSeedScores), so this tally is the
+            // spectator HUD's only kill source, and it is display-only there
+            // (reports are quiesced). HandlePlayerDied self-gates on
+            // LocalIsSpectator before any state mutation (Codex r2 find 9).
             FfaMode.RecordKillFor(killedPlayer);
             FfaMode.HandlePlayerDied(__instance);
             return false;
@@ -2845,6 +3066,21 @@ namespace CompetitiveRounds
                            int p1PointsSet, int p2PointsSet, int p1RoundsSet, int p2RoundsSet)
         {
             if (!FfaMode.EngineActive()) return true;
+            // Bug 203: HarmonyX runs EVERY prefix even after a higher-priority
+            // one returns false (proven live — the spectator seat logged
+            // "[FFA] point over" all game despite Spectator_ObserveNextRound
+            // returning false first; a bool prefix's result only ANDs into
+            // __runOriginal). So the Priority.First spectator observer does
+            // NOT stop this prefix, and without this gate the participant
+            // engine ran on the observer seat: double score accounting, a
+            // false local game-over at a drifted 5R ("Rematch?" stuck on
+            // screen), and FfaPickPhase writing game/cycle counters that then
+            // leaked into the next room (bug 204). Everything this seat needs
+            // per round — score accounting, config latch, damage-attribution
+            // clear, game-over announcement — lives in SpectatorObserveRound,
+            // invoked by the observer prefix. Return false to keep vanilla
+            // suppressed regardless of prefix ordering.
+            if (RoomActors.LocalIsSpectator) return false;
             FfaMode.HandleNextRound(__instance, winningTeamID);
             return false;
         }
@@ -2859,6 +3095,14 @@ namespace CompetitiveRounds
         static bool Prefix(GM_ArmsRace __instance, ref IEnumerator __result)
         {
             if (!FfaMode.EngineActive()) return true;
+            // Bug 203/204: sibling prefixes all run (HarmonyX semantics — see
+            // GMArmsRace_NextRound_Ffa_Patch). Spectator_NoDoStartGame set
+            // __result to Empty() and returned false; overwriting it here
+            // would run the whole participant start flow (pick engine,
+            // OnGameStart counter increments) on an observer seat — which is
+            // exactly what the Aug 11 playtest logs show happened. Leave
+            // __result untouched on a spectator.
+            if (RoomActors.LocalIsSpectator) return false;
             __result = FfaMode.FfaDoStartGame(__instance);
             return false;
         }
@@ -2943,6 +3187,13 @@ namespace CompetitiveRounds
         static bool Prefix(Photon.Realtime.Player otherPlayer)
         {
             if (!FfaMode.EngineActive()) return true;
+            // Sibling-prefix rule (bug 203 family): the spectator's own leave
+            // handling (Spectator_LeaveIsInvisible) owns room-exit semantics
+            // on an observer seat — the fighter-side round resolution below
+            // (CheckRoundAfterLeave awards points) must not also run there.
+            // Still return false: a fighter's departure must never hand the
+            // observer seat to vanilla's match-ending teardown either.
+            if (RoomActors.LocalIsSpectator) return false;
             try
             {
                 // Log-only, but fighter count — an actor count here over-reports

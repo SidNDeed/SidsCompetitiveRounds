@@ -186,6 +186,7 @@ namespace CompetitiveRounds
         internal static void EndSession(string reason)
         {
             if (!IsLocalSpectator && string.IsNullOrEmpty(PendingRoom)) return;
+            bool wasSpectating = IsLocalSpectator;
             Plugin.Log?.LogInfo($"[SPECTATE] session end ({reason})");
             // Flag teardown must be independent of the role flag and of the
             // room-exit observation (r11 find 1: a Fail() racing a same-frame
@@ -209,6 +210,23 @@ namespace CompetitiveRounds
             _pendingPropClear = true;
             TickPendingClear();
             try { RoomActors.Reset(); } catch { }
+            // Bug 204: the spectator quiesce skips GameStateWatcher's
+            // Left-room branch — the ONLY other caller of FfaMode.OnRoomLeft()
+            // — so FFA counters written during a spectate (game/cycle from the
+            // formerly-ungated pick loop, score tables from the observer path)
+            // survived into the next room this client joined AS A FIGHTER.
+            // Spirit spectated game A, joined the next room one game AHEAD,
+            // and the ahead-only drift adoption made him permanently invisible
+            // to the pick manifest ("no cards" for a player holding Defender).
+            // The prefix gates remove the counter WRITER; this removes the
+            // leak path itself, whichever teardown route ends the session.
+            // Mostly local statics, plus one Photon call: OnRoomLeft clears
+            // the cr_ffa_pk player prop via SetCustomProperties — in-room
+            // that is a legitimate clear, out-of-room a local merge (#287).
+            // A fighter session can never reach here: wasSpectating requires
+            // IsLocalSpectator.
+            if (wasSpectating)
+                try { FfaMode.OnRoomLeft(); } catch { }
         }
 
         /// <summary>Retry the staged-role clear until the client is out of the

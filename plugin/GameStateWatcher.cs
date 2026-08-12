@@ -5051,9 +5051,13 @@ namespace CompetitiveRounds
 
         /// <summary>Own-pick bookkeeping for the FFA pick phase. The silent
         /// apply path deliberately bypasses vanilla's "Picking Card:" log, so
-        /// the standard intercept never fires — FfaMode calls this at confirm
-        /// time to keep localCards + the cr_cards broadcast (append-only pick
-        /// history) in sync for the report path.</summary>
+        /// the standard intercept never fires — FfaMode calls this at
+        /// ACCEPTED-RESULT time (ApplyManifestPick, Aug 11: recording at
+        /// confirm time broadcast picks the reducer then rejected — bug 204's
+        /// false "he has Defender"). Feeds localCards + the cr_cards
+        /// broadcast; note the FFA REPORT does not read either (it uses
+        /// FfaMode.PickHistoryFor) — these serve the non-FFA report shapes,
+        /// achievements, and the cross-mode pick-history channel.</summary>
         public static void RecordFfaLocalPick(string cardName, int roundNumber)
         {
             try
@@ -6090,6 +6094,18 @@ namespace CompetitiveRounds
             try
             {
                 if (!PhotonNetwork.InRoom) return;
+                // Bug 206 (Aug 11 FFA playtest): this poller is 1v1-shaped —
+                // it latches the FIRST non-local fighter and diffs everyone
+                // against ONE shared broadcast counter, so in an FFA room it
+                // recorded only that one player's picks and, when they left,
+                // diffed the NEXT fighter's list against the departed one's
+                // counter (misattributed picks with wrong order). Nothing FFA
+                // consumes opponentCards (FFA reports read
+                // FfaMode.PickHistoryFor; the hold-Tab board reads
+                // currentCards), and pick visibility in
+                // FFA is now the manifest-apply toast in ApplyManifestPick —
+                // so this channel is pure misinformation there. Gate it off.
+                if (FfaMode.EngineActive()) return;
                 if (opponentCardsViaHarmony) return; // Harmony provides cards, skip Photon polling
 
                 Photon.Realtime.Player[] players = RoomActors.ActiveFighters();   // census: opponents are fighters

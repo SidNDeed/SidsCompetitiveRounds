@@ -944,9 +944,19 @@ namespace CompetitiveRounds
             // kill is only ever rendered by the fighters' own death RPC. It
             // also fixes the reported symptom — DoDamage's silent gates
             // (!isPlaying during our lagging transitions) ate every verdict
-            // and the bar never moved. Costs on this seat only: no damage
-            // flash and no attacker-lifesteal rendering from DOT ticks —
-            // bars still track, safety beats flash.
+            // and the bar never moved. Cost on this seat only: no damage
+            // flash. Attacker LIFESTEAL is rendered explicitly below (bug
+            // 202 — the original "no attacker-lifesteal" cost proved
+            // unacceptable: a Leech/Parasite build read as pinned at 1 HP).
+            Player attacker = null;
+            try
+            {
+                if (rec.AttackerId >= 0 && PlayerManager.instance != null)
+                    foreach (var p in PlayerManager.instance.players)
+                        if (p != null && p.PlayerID == rec.AttackerId) { attacker = p; break; }
+            }
+            catch { }
+
             if (RoomActors.LocalIsSpectator)
             {
                 try
@@ -957,20 +967,53 @@ namespace CompetitiveRounds
                         float nh = cds.health - rec.Slice.magnitude;
                         cds.health = nh < 1f ? 1f : nh;
                         rec.Applied++;
+                        // Bug 202: render the ATTACKER's LIFESTEAL for this
+                        // tick — and ONLY lifesteal. Fighter seats get the
+                        // full DealtDamage chain via DoDamage, so a
+                        // Leech/Parasite build healed on every fighter's
+                        // screen while this seat (which deliberately bypasses
+                        // DoDamage — see the header hazard) rendered only the
+                        // down-ticks: the holder read as pinned at 1 HP all
+                        // game. Invoking the FULL DealtDamage chain here was
+                        // REJECTED in cross-review (Codex, Aug 11): it also
+                        // walks arbitrary DealtDamageEffects, and
+                        // SpawnObjectOnDealDamage keeps per-seat THRESHOLD
+                        // state before spawning objects and dealing more
+                        // damage — a mid-game-join observer's accumulator is
+                        // never in sync, so its spawns would diverge, the
+                        // exact class this protocol exists to remove. The two
+                        // vanilla heal mechanisms are the stats.lifeSteal
+                        // float and the LifeSteal DealtDamageEffect
+                        // (CharacterStatModifiers.cs:129-131, LifeSteal.cs)
+                        // — render both, heal-only. Heal only ADDS health
+                        // (#338 untouched) and vanilla gates lifesteal on
+                        // !selfDamage, mirrored here.
+                        try
+                        {
+                            var victim = cds.player;
+                            if (attacker != null && victim != null
+                                && !ReferenceEquals(attacker, victim)
+                                && attacker.data != null && attacker.data.stats != null)
+                            {
+                                float healMag = rec.Slice.magnitude
+                                    * attacker.data.stats.lifeSteal;
+                                try
+                                {
+                                    foreach (var lsc in attacker.GetComponentsInChildren<LifeSteal>())
+                                        if (lsc != null)
+                                            healMag += rec.Slice.magnitude * lsc.multiplier;
+                                }
+                                catch { }
+                                if (healMag > 0f && attacker.data.healthHandler != null)
+                                    attacker.data.healthHandler.Heal(healMag);
+                            }
+                        }
+                        catch { }
                     }
                 }
                 catch { }
                 return;
             }
-
-            Player attacker = null;
-            try
-            {
-                if (rec.AttackerId >= 0 && PlayerManager.instance != null)
-                    foreach (var p in PlayerManager.instance.players)
-                        if (p != null && p.PlayerID == rec.AttackerId) { attacker = p; break; }
-            }
-            catch { }
 
             float hpBefore = 0f;
             try { var cd = view.GetComponent<CharacterData>(); if (cd != null) hpBefore = cd.health; } catch { }

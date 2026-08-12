@@ -192,6 +192,32 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Defense-in-depth for bug 203: GameOverTransition is the ONLY
+    /// caller of GameOverRematch, whose "REMATCH?" DisplayScreenTextLoop has
+    /// no reachable clearer on an observer seat (the only StopScreenTextLoop
+    /// callers in game+mod are IDoRematch and the offline-only DoContinue,
+    /// both reachable solely through GetRematchYesNo — and the spectator's
+    /// PopUpHandler gate, itself correct, never invokes that callback; note
+    /// DoRestart does NOT clear the text either, it NetworkRestarts). Its
+    /// only two callers are participant paths (vanilla GM_ArmsRace.GameOver
+    /// and FfaMode.HandleNextRound), both already gated on observer seats —
+    /// suppressing the funnel too closes the stuck-popup class for every
+    /// path, found or not (#338). Winner feedback on an FFA observer comes
+    /// from SpectatorObserveRound's decisive-conversion announcement; in GM
+    /// modes from the observer prefix's PlayPointSequence.</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "GameOverTransition")]
+    internal static class Spectator_NoGameOverTransition_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix(ref IEnumerator __result)
+        {
+            if (!SpectatorPatchSupport.Suppress) return true;
+            SpectatorPatchSupport.Log("GM_ArmsRace.GameOverTransition");
+            __result = SpectatorPatchSupport.Empty();
+            return false;
+        }
+    }
+
     /// <summary>Round/point accounting: record the score for the spectator's
     /// own HUD, but do NOT run vanilla's state machine (which overwrites
     /// scores, increments a winner, fires GameManager.GameOver and starts
@@ -215,6 +241,22 @@ namespace CompetitiveRounds
             // call-in and body moves arrive via the master's own RPCs.
             try
             {
+                // One observed round per call-in (Aug 10 review find 9, moved
+                // ABOVE the FFA branch by Aug 11 review r2 find 2): vanilla
+                // dedupes duplicate/bunched round broadcasts with
+                // isTransitioning, which lives in the suppressed machine, and
+                // the FFA observer previously returned before this latch —
+                // a duplicate broadcast double-incremented the FFA observer
+                // score and could falsely announce a win. The latch clears at
+                // every observed call-in (both modes ride the master's map
+                // RPCs) with a 20s TTL backstop, so consecutive legitimate
+                // rounds are never eaten.
+                if (SpectatorSync.RoundObservationLatched) return false;
+                SpectatorSync.LatchRoundObservation();
+            }
+            catch { }
+            try
+            {
                 if (FfaMode.EngineActive())
                 {
                     FfaMode.SpectatorObserveRound(winningTeamID);
@@ -224,14 +266,6 @@ namespace CompetitiveRounds
             catch { }
             try
             {
-                // One observed round per call-in (Aug 10 review find 9):
-                // vanilla dedupes duplicate/bunched round broadcasts with
-                // isTransitioning, which lives in the suppressed machine —
-                // without this mirror a duplicate would double-increment the
-                // score and stack overlapping visual sequences.
-                if (SpectatorSync.RoundObservationLatched) return false;
-                SpectatorSync.LatchRoundObservation();
-
                 // The RPC args are PRE-increment (vanilla RPCA_NextRound
                 // assigns them and THEN increments the winner — Codex r2 find
                 // 16: recording them raw displayed every score one event

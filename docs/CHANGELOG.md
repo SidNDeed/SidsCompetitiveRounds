@@ -1,5 +1,31 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+First FFA-with-spectator playtest fixes (bug reports 202-207, all root-caused
+from both seats' logs):
+
+- **Spectating an FFA no longer corrupts the watcher's view or the next
+  lobby.** The FFA participant engine (round accounting, game-start flow,
+  pick machinery, leave handling) was running on spectator seats alongside
+  the spectator's own observer — double-counting the score until a false
+  game-over fired a "Rematch?" popup that could never be dismissed (bug 203),
+  and writing pick-protocol counters that survived the spectate and made the
+  player invisible to the pick system in their NEXT lobby — cards picked but
+  never applied, "no cards" on the Tab board (bug 204). Both paths are now
+  spectator-gated, the game-over UI is unreachable on observer seats, and
+  spectator teardown resets FFA room state.
+- **Spectators now see lifesteal heals.** Poison/DOT damage rendered on the
+  spectator's health bars but the attacker's heals (Leech, Parasite) never
+  did, so a lifesteal build read as pinned at 1 HP all game (bug 202). The
+  spectator seat now renders the same lifesteal heals fighter seats see
+  (heal-only by design — an observer must never originate anything else).
+- **Opponent picks in FFA are announced.** Card applies for other players
+  were silent, so a freshly-picked card could read as a "residual" from a
+  previous game (bug 206 — the card was legitimately held). Every non-local
+  pick now shows a toast, and the 1v1-shaped opponent-pick poller (which
+  misattributed picks in FFA) is disabled there.
+
 ## v1.38.4 (2026-08-11) — Translator titles and portal progress
 
 Schema: migration **214**.

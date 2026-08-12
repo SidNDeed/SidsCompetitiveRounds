@@ -1327,14 +1327,12 @@ namespace CompetitiveRounds
                     yield break;
                 }
 
-                // 5. FFA: seed FfaMode's incremental score tables from the
-                // snapshot — a late joiner otherwise counts from zero forever.
-                try
-                {
-                    if ((snap[2] as string) == "ffa")
-                        FfaMode.SpectatorSeedScores(snap[11] as int[], snap[12] as int[]);
-                }
-                catch { }
+                // 5. FFA score seed: REMOVED (Aug 11 review r3 find 2). Every
+                // accepted snapshot — including this boundary response — is
+                // seeded at receipt in the response parser; re-applying THIS
+                // (by now up to 8s old, having waited for bodies) snapshot
+                // here could overwrite a newer round delta wholesale, and a
+                // terminal round has no later boundary to heal that.
 
                 // 6. Rematch epoch: a changed epoch forces full reset+replay.
                 int epoch = 0;
@@ -2208,6 +2206,21 @@ namespace CompetitiveRounds
                         rounds.Length > 0 ? rounds[0] : 0,
                         rounds.Length > 1 ? rounds[1] : 0);
                 }
+                // Aug 11 review r2 find 1: seed FFA's incremental score
+                // tables from EVERY accepted snapshot, not only the boundary
+                // apply — a spectator joining during a game's FINAL battle
+                // gets this immediate snapshot but no boundary before game
+                // over, so SpectatorObserveRound's decisive-round detection
+                // incremented from zero, missed the winner announcement and
+                // left kills/pointsTotal unreset for the rematch. Same seed
+                // as the boundary site; SpectatorSeedScores self-gates on
+                // the spectator role and overwrites wholesale (idempotent).
+                try
+                {
+                    if (WatchedMode == "ffa")
+                        FfaMode.SpectatorSeedScores(rounds, points);
+                }
+                catch { }
 
                 // Session series tally (item 3): CLEAR before parse (find 11 —
                 // a newer master's values must not survive a later, shorter
