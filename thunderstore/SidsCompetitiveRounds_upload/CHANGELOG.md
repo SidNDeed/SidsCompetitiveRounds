@@ -1,3 +1,73 @@
+## v1.38.5 — 2026-08-13
+
+**New**
+
+- **Your end-of-game build is now recorded and shown in match history.** Hover a
+  game's card names and you get the full card list *and* the build those cards
+  produced — damage, attack speed, reload, ammo, blocks, move speed, HP and the
+  rest. Works in 1v1, 2v2, 1v2 and FFA. Older games have no build recorded and
+  simply show their cards as before.
+- **The rating box now covers every mode.** My Stats and the leaderboard detail
+  show your 2v2 and FFA rating, RD, peak and board position alongside 1v1, with
+  your rank role shown next to your 1v1 peak in its own colour. 1v2 has no elo,
+  so it shows its win/loss record with the other records instead of pretending.
+- **2v2 and FFA podium titles.** Top three on either board get a placement title
+  of their own, and both boards now paint the top three gold/silver/bronze the
+  way the 1v1 board always has.
+- **Chat controls.** Press **M** in game to cycle chat between normal, pinned
+  (stays on screen) and muted — and when you mute, other players can see that in
+  the chat panel, so nobody wastes a message on you. Settings gains a "chat fade
+  after" knob from 0 (never show chat during play) up to 90 seconds.
+- **FFA card toasts show the whole round.** Every player's pick, and every card
+  that rolled off the 5-card cap, laid out in a single strip across the bottom
+  instead of one name at a time over the play area.
+- **Animated cosmetics can be uploaded as GIFs.** Artists can submit a GIF
+  directly (2-16 frames, 0.5-15 fps) instead of exporting numbered PNGs.
+
+**Fixed**
+
+- **FFA opening cards going missing (bug 214).** In a 6-player game four players
+  lost their first card. A spectator seat had been leaking a counter into the
+  pick protocol; the room then split into two numbering schemes and every pick
+  made under the "wrong" one was silently discarded. Both the cause and the
+  amplifier are fixed, and a drift now names exactly who lost a card in the log.
+- **Betting staying open long after a match was decided (bug 212).** The lock for
+  private-room series was set to a threshold the metric could never reach, so it
+  had never once fired since it shipped. Bets now close at 2 points as intended,
+  and the same rule is enforced in game and in Discord.
+- **God Build (and every other achievement) in room-code and quickplay games
+  (bug 209).** Achievements were only evaluated in rooms the mod itself created,
+  which is a minority of real play — a genuinely earned achievement in a private
+  or public lobby simply never fired.
+- **Server-side achievements now tell you when you earn them (bug 201).** Silent
+  Drill, Clutch, Lumberjack, the sweeps, the slayers and the rank thresholds are
+  granted by the server, and the client had no path to announce any of them.
+- **Muffled audio while spectating (bug 210).** A failed sound event was never
+  retired, so its voices leaked until the pool ran dry and started stealing
+  voices from healthy sounds — quiet layers first, which is what made it sound
+  muffled rather than silent.
+- **Discord FFA results show half points (bug 215)**, matching the in-game score.
+- **Rage Quit %** now measures what it was always meant to: how often your
+  quickplay opponents quit on *you*, not how often you quit.
+- **Spectating**: the connect screen explains itself instead of looking like a
+  blank cover, cards are cleared between games so nobody appears to start with
+  extra ones, and titles render bracketed in their real colours.
+- **Async tournaments work the way they were designed.** No room code, no region,
+  no ready-up — you and your opponent play a private lobby whenever suits you
+  before the deadline and it counts automatically. The lock DM no longer tells
+  async players to be online at a start time. Sync tournaments are unchanged and
+  now pick a Photon region per match that suits both players, instead of one
+  region for the whole bracket.
+- **Layout**: the FFA start-button countdown no longer clips (in any language),
+  the 1v2/2v2/FFA tabs share one scale, the chat input no longer covers the
+  messages above it, and tournament bets live behind a button instead of filling
+  the tab.
+
+**Security**
+
+- Uploaded cosmetic images are now fully validated and re-encoded server-side, so
+  nothing can ride along inside an image file.
+
 ## v1.38.4 (2026-08-11) — Translator titles and portal progress
 
 Schema: migration **214**.
