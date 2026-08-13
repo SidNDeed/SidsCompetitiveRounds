@@ -7,9 +7,7 @@
   free-for-all the ring visibly swept through up to nine people it could not
   touch. It now strikes every opponent it crosses, once each — which also
   means lifesteal builds heal per hit instead of once per wave. Walls still
-  block it. Other modes are unchanged. Note this makes a double knockout
-  from a single wave possible, so the "nobody scored this round" message can
-  now follow a Radiance.
+  block it. Other modes are unchanged.
 
 - **The esc menu works properly in queue rooms again, and MAIN MENU asks
   before it drops you out of a live match.** Since queues shipped, the mod
