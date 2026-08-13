@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.4";   // Aug 11: translator titles (Rosetta/Dragoman/Babel) + portal progress bars; Compare grid now sizes its columns to fit 50 achievements
+        public const string ModVersion = "1.38.5";   // Aug 13: build stats in match history, multi-mode elo + 2v2/FFA podium titles, chat mute/pin/TTL, FFA card toasts, async tournament simplification, and the Aug 12-13 bug batch
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -55,6 +55,19 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> DeepIdleUnfocused;
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
+        // Bug 211/213 (Sid's chosen design): M cycles the in-game chat overlay
+        // through Normal -> Pinned -> Muted. The on/off half of that state IS
+        // ShowIngameChat (so the Settings toggle and the hotkey can never
+        // disagree); this is only the "pinned" half. Normal = (show, !pinned),
+        // Pinned = (show, pinned), Muted = (!show, !pinned).
+        internal static ConfigEntry<bool> ChatOverlayPinned;
+        // Item 4: how long a chat line stays fully opaque in the overlay before
+        // the (still hardcoded) 10s fade begins. Float so the value can be
+        // hand-edited in the cfg to anything; the in-game control cycles a
+        // fixed set (CHAT_TTL_CYCLE) because this codebase has no slider.
+        // 0 (and any value <= 0) is a MODE, not a duration — see
+        // ChatOverlayHiddenDuringPlay.
+        internal static ConfigEntry<float> ChatOverlaySeconds;
         internal static ConfigEntry<bool> ShowTrails;
         internal static ConfigEntry<bool> ShowBlockDebug;
         internal static ConfigEntry<bool> ShowPlayerColors;
@@ -113,6 +126,93 @@ namespace CompetitiveRounds
 
         public static bool DataConsentGranted => DataConsent != null && DataConsent.Value == "granted";
         public static bool DataConsentAsked   => DataConsent != null && !string.IsNullOrEmpty(DataConsent.Value);
+
+        // ── Item 4: chat-overlay message TTL ─────────────────────────────
+        // There is no slider infrastructure anywhere in this codebase, so the
+        // established pattern for a numeric setting is a CYCLING button
+        // (cursorShapeBtn / dateFmtBtn). Both the Settings tab and the M
+        // hotkey read the same ConfigEntry, so they cannot disagree.
+        //
+        // The cycle is deliberately bounded, but NOT for the reason a reader
+        // might assume: the overlay renders at most the last 8 entries
+        // (CopyChatTail(_, 8)) out of a ring capped at CHAT_LOG_MAX = 60, so
+        // panel height is bounded by those 8 lines no matter how long the TTL
+        // is — a longer TTL cannot walk the panel into the HUD (#199/#245),
+        // and it cannot resurrect a line the ring already evicted. 90s is the
+        // ceiling simply because past that "recent messages" stops meaning
+        // anything; "never fades" is the PINNED state, not a TTL value.
+        //
+        // ZERO IS A REAL SETTING, NOT A DEGENERATE ONE (Sid, Aug 13): 0 means
+        // the overlay never shows during play at all. It is deliberately NOT
+        // the same thing as the M key's Muted state — Muted also publishes a
+        // marker telling the room this seat cannot read chat (bug 213), and a
+        // player who simply wants a clean screen should not be advertising
+        // that. So 0 hides the overlay locally and says nothing to anyone.
+        //
+        // The floor value must therefore be read as a MODE by the draw path,
+        // never clamped up into the fade arithmetic — see
+        // ChatOverlayHiddenDuringPlay, which is the single place that
+        // decision lives.
+        internal static readonly float[] CHAT_TTL_CYCLE = { 0f, 5f, 10f, 25f, 45f, 90f };
+
+        /// <summary>Advance the chat-overlay TTL to the next value in
+        /// CHAT_TTL_CYCLE. A stored value outside the cycle (hand-edited cfg)
+        /// lands on the first entry.</summary>
+        public static void CycleChatOverlaySeconds()
+        {
+            if (ChatOverlaySeconds == null) return;
+            int idx = -1;
+            for (int i = 0; i < CHAT_TTL_CYCLE.Length; i++)
+                if (Mathf.Approximately(CHAT_TTL_CYCLE[i], ChatOverlaySeconds.Value)) { idx = i; break; }
+            ChatOverlaySeconds.Value = CHAT_TTL_CYCLE[(idx + 1) % CHAT_TTL_CYCLE.Length];
+            Log.LogInfo($"[SETTINGS] Chat overlay TTL -> {ChatOverlaySeconds.Value}s");
+        }
+
+        /// <summary>True when the player has set the TTL to 0, i.e. the in-game
+        /// chat overlay must not be drawn during play at all.
+        ///
+        /// This is the ONE definition of what 0 means; every consumer asks here
+        /// rather than testing the float, so nobody can re-derive it as
+        /// "clamp to 1 second" and quietly resurrect a 10-second fade the
+        /// player asked not to see. `&lt;= 0` rather than `== 0` because the
+        /// value is a float in a hand-editable cfg — a negative would otherwise
+        /// reach the fade arithmetic, where it renders every line as already
+        /// fading and would eventually produce a negative alpha.
+        ///
+        /// Null entry (pre-Awake init order) is FALSE, matching the shipped
+        /// default of 25s — never hide chat because config binding has not run
+        /// yet.
+        ///
+        /// ORDER AGAINST PINNED, flagged rather than decided quietly: the draw
+        /// path should test this BEFORE the Pinned branch, which is Sid's rule
+        /// read literally ("0 = never shows during play"). The cost is that
+        /// pressing M to Pin then announces "messages stay on screen" and
+        /// nothing appears. The alternative — Pinned wins, on the grounds that
+        /// it is a deliberate announced action and the TTL is a background
+        /// preference — is a product call, not a code one. Only reachable when
+        /// a player has set both, and whichever way it goes the toast wording
+        /// should match.</summary>
+        public static bool ChatOverlayHiddenDuringPlay =>
+            ChatOverlaySeconds != null && ChatOverlaySeconds.Value <= 0f;
+
+        /// <summary>Display token for the current TTL, e.g. "25s", and "0s" at
+        /// the floor. Deliberately NOT translated and deliberately not a word:
+        /// a digit+unit token is under the extractor's 3-letter floor (#295c)
+        /// and reads the same in every locale, so the caller wraps it in its
+        /// own translated template rather than composing translated fragments.
+        ///
+        /// "0s" is left as a number on purpose. The Settings row reads
+        /// "Chat fade after: 0s", which is literally true of the setting and
+        /// needs no new translated word; substituting "Off" here would put an
+        /// untranslated English word inside a translated line for every locale
+        /// (and the on/off vocabulary already belongs to the row above, which
+        /// is the actual overlay ON / PINNED / OFF control).</summary>
+        public static string ChatOverlaySecondsLabel()
+        {
+            float v = ChatOverlaySeconds != null ? ChatOverlaySeconds.Value : 25f;
+            if (v <= 0f) return "0s";
+            return Mathf.RoundToInt(v).ToString(System.Globalization.CultureInfo.InvariantCulture) + "s";
+        }
 
         private static bool spawned = false;
         internal static bool modDisabled = false;
@@ -386,6 +486,21 @@ namespace CompetitiveRounds
                 "UI", "ShowIngameChat",
                 true,
                 "Show the in-game chat overlay while outside the F5 menu"
+            );
+
+            // NEW keys, never a repurposed one: Config.Bind writes a default
+            // exactly once and never revisits it (#190), so changing an
+            // existing key's meaning migrates nobody.
+            ChatOverlayPinned = Config.Bind(
+                "UI", "ChatOverlayPinned",
+                false,
+                "Pin the in-game chat overlay so messages never fade out. Cycled in-game with M (Normal -> Pinned -> Muted); Muted is stored as ShowIngameChat=false."
+            );
+
+            ChatOverlaySeconds = Config.Bind(
+                "UI", "ChatOverlaySeconds",
+                25f,
+                "How many seconds an in-game chat line stays fully visible before it starts fading (the fade itself takes a further 10 seconds). 0 hides the overlay during play entirely. Ignored while the overlay is pinned."
             );
 
             ShowTrails = Config.Bind(
@@ -785,6 +900,29 @@ namespace CompetitiveRounds
         // clean state recovers it without the player touching anything.
         private int joinAttempts = 0;
 
+        // ── Tournament (sct-) region gate ────────────────────────────────
+        // Server-issued tournament rooms are the one case where "no region"
+        // must NOT mean "use whatever the player last picked" — see
+        // GateTournamentRegion. Window: hold for GRACE seconds accepting only
+        // the per-match region, then also accept the tournament-wide one, then
+        // give up. Both bounds are generous against the 20s heartbeat poll, so
+        // a single dropped response cannot burn the match.
+        private const float SCT_REGION_GRACE_SECONDS = 45f;
+        private const float SCT_REGION_GIVEUP_SECONDS = 60f;
+        private const float SCT_REGION_REPOLL_SECONDS = 10f;
+        private string sctRegionWaitRoom = null;
+        private float sctRegionWaitStart = -1f;
+        private float sctRegionRepollAt = 0f;
+        // Rooms the player has already been told about. Keyed on the room name
+        // (stable for the whole match) rather than reset with the window, so
+        // the tournament heartbeat re-arming this dispatch every 60s cannot
+        // turn either message into a notification storm. Two separate memos
+        // because they are two different messages: one memo would let the
+        // give-up toast suppress the wait toast on the next cycle, or vice
+        // versa, depending on which fired first.
+        private string sctRegionWaitNotifiedRoom = null;
+        private string sctRegionGaveUpNotifiedRoom = null;
+
         private void Awake()
         {
             Plugin.Log.LogInfo("[QUEUE-JOINER] Awake, DontDestroyOnLoad set");
@@ -910,6 +1048,14 @@ namespace CompetitiveRounds
                 return;
             }
 
+            // Tournament rooms only: refuse to START a run without a
+            // server-supplied region. Deliberately gated on Idle + not yet
+            // initiated so it can never interfere with a join already in
+            // flight, and placed here rather than inside StartNCHConnect so
+            // the hold has its own bounded window instead of silently parking
+            // the state machine at Idle forever (#98/#272).
+            if (state == JoinState.Idle && !joinInitiated && !GateTournamentRegion(pendingRoom)) return;
+
             switch (state)
             {
                 case JoinState.Idle:
@@ -998,6 +1144,146 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Gate on the ONE room type where an empty region is a bug
+        /// rather than a default. Returns true to let the join proceed, false
+        /// to hold this frame.
+        ///
+        /// WHY THIS EXISTS. StartNCHConnect sets RegionSelector.region only
+        /// when the region string is non-empty, and then sets m_ForceRegion
+        /// UNCONDITIONALLY — and NCH.WaitForConnect does
+        /// `if (hasRegionSelect || m_ForceRegion) ConnectToRegion(RegionSelector.region)`.
+        /// So an empty region has never meant "let Photon choose": it means
+        /// each client force-connects to whatever its own region dropdown last
+        /// held (RegionSelector.region, a static loaded from PlayerPrefs
+        /// "Region" when the menu builds). Two tournament opponents with
+        /// different dropdowns then create two different rooms with the same
+        /// name in two different regions, each sits alone, and both take a
+        /// no-show forfeit. That is learning #49 verbatim.
+        ///
+        /// Do NOT try to fix that by clearing m_ForceRegion: RegionSelector's
+        /// own Start sets NCH.hasRegionSelect = true, and the condition is an
+        /// OR — so once the main menu has been shown, ROUNDS force-connects to
+        /// the dropdown either way. Supplying the region is the only lever.
+        ///
+        /// The ladder here is the client half of the region design, and every
+        /// rung is a value the SERVER sent:
+        ///   1. the region the dispatcher passed (per-match, or the
+        ///      tournament-wide value from the Tournaments tab);
+        ///   2. the per-match region on the active-match row, which the 20s
+        ///      heartbeat may have filled in since the dispatch;
+        ///   3. after GRACE, the tournament-wide region for that same
+        ///      tournament;
+        ///   4. give up.
+        ///
+        /// There is deliberately NO rung that picks a region locally. Not the
+        /// dropdown (that is the bug), and not a hardcoded "us" either: the
+        /// server's own fallback ladder ends at "us", so a client that also
+        /// ends at "us" would agree today and silently disagree the moment the
+        /// server's last rung changes — and a disagreement here costs both
+        /// players their run. Giving up is the honest outcome, and it is not
+        /// permanent: clearing the pending room lets the tournament heartbeat's
+        /// 60s re-arm dispatch again, so a region that arrives late still
+        /// connects the match.
+        ///
+        /// Non-tournament rooms are untouched, and that is not an oversight:
+        /// every queue-lock path server-side coerces the room's region with
+        /// `or "us"`, so a ranked/2v2/1v2/FFA room is never issued without one
+        /// and this branch would be dead weight there. The tournament lock
+        /// instead takes the MODE of what the signups reported, which is the
+        /// hole. Their failure modes differ too — requeue vs forfeit the
+        /// bracket.
+        ///
+        /// KIND: gated on the ROOM PREFIX, so it covers async sct- dispatches
+        /// as well. That is deliberate and fails closed: if any async path
+        /// still dispatches a room, it holds instead of splitting. Now that
+        /// async coordinates its own lobby, the honest outcome for it is "no
+        /// auto-connect", which is what this produces — hence the give-up
+        /// message says nothing sync-specific.</summary>
+        private bool GateTournamentRegion(string pendingRoom)
+        {
+            if (string.IsNullOrEmpty(pendingRoom)
+                || !pendingRoom.StartsWith("sct-", StringComparison.Ordinal))
+            {
+                sctRegionWaitRoom = null;
+                sctRegionWaitStart = -1f;
+                return true;
+            }
+
+            // Restart the window for a different room (a new bracket round
+            // dispatches a new sct- room and must not inherit the old wait).
+            if (!string.Equals(sctRegionWaitRoom, pendingRoom, StringComparison.Ordinal))
+            {
+                sctRegionWaitRoom = pendingRoom;
+                sctRegionWaitStart = -1f;
+                sctRegionRepollAt = 0f;
+            }
+
+            float waited = sctRegionWaitStart >= 0f
+                ? Time.unscaledTime - sctRegionWaitStart
+                : 0f;
+
+            string region = (Plugin.PendingRankedRegion ?? "").Trim();
+            if (region.Length == 0)
+            {
+                // Rung 2, and rung 3 once the grace window has elapsed.
+                bool allowTournamentLevel =
+                    sctRegionWaitStart >= 0f && waited >= SCT_REGION_GRACE_SECONDS;
+                try
+                {
+                    region = (ApiClient.TournamentRegionForRoom(pendingRoom, allowTournamentLevel) ?? "").Trim();
+                }
+                catch { region = ""; }
+                if (region.Length > 0)
+                {
+                    // Record it on the pending room so the state machine below
+                    // (and anything else reading PendingRankedRegion) sees the
+                    // resolved value. Same room name, so the replacement fence
+                    // in Update cannot trip on it.
+                    Plugin.SetPendingRoom(pendingRoom, region);
+                    Plugin.Log.LogInfo($"[TOURNAMENT-REGION] resolved '{region}' for {pendingRoom} after {waited:F0}s (tournament-level rung allowed: {allowTournamentLevel})");
+                }
+            }
+
+            if (region.Length > 0)
+            {
+                sctRegionWaitStart = -1f;
+                return true;
+            }
+
+            if (sctRegionWaitStart < 0f)
+            {
+                sctRegionWaitStart = Time.unscaledTime;
+                sctRegionRepollAt = 0f;
+                Plugin.Log.LogWarning($"[TOURNAMENT-REGION] missing for {pendingRoom} — holding the join and re-polling. NOT falling back to the local region dropdown (#49).");
+                if (!string.Equals(sctRegionWaitNotifiedRoom, pendingRoom, StringComparison.Ordinal))
+                {
+                    sctRegionWaitNotifiedRoom = pendingRoom;
+                    CompetitiveUI.ShowNotification("Tournament match found - waiting for the server to pick a region...", new Color(1f, 0.85f, 0.4f), 6f);
+                }
+                return false;
+            }
+
+            if (Time.unscaledTime >= sctRegionRepollAt)
+            {
+                sctRegionRepollAt = Time.unscaledTime + SCT_REGION_REPOLL_SECONDS;
+                try { ApiClient.RepollTournamentRegion(); } catch { }
+            }
+
+            if (waited >= SCT_REGION_GIVEUP_SECONDS)
+            {
+                Plugin.Log.LogError($"[TOURNAMENT-REGION] no server-supplied region for {pendingRoom} after {waited:F0}s — refusing to auto-connect (the heartbeat re-arms this dispatch, so a late region still works)");
+                if (!string.Equals(sctRegionGaveUpNotifiedRoom, pendingRoom, StringComparison.Ordinal))
+                {
+                    sctRegionGaveUpNotifiedRoom = pendingRoom;
+                    CompetitiveUI.ShowNotificationCritical("Tournament match can't auto-connect: the server has not set a region. Open the Tournaments tab.", new Color(1f, 0.4f, 0.4f), 12f);
+                }
+                Plugin.ClearPendingRoom();
+                sctRegionWaitRoom = null;
+                sctRegionWaitStart = -1f;
+            }
+            return false;
+        }
+
         private void StartNCHConnect()
         {
             joinInitiated = true;
@@ -1022,11 +1308,29 @@ namespace CompetitiveRounds
                 try { CharacterCreatorHandler.instance?.CloseMenus(); } catch { }
                 try { MainMenuHandler.instance?.Close(); } catch { }
 
-                // Set target region
+                // Set target region.
+                //
+                // READ THIS BEFORE CHANGING THE SHAPE: because m_ForceRegion is
+                // set unconditionally two lines below, an empty region here does
+                // NOT mean "let Photon pick" — it leaves RegionSelector.region
+                // at whatever the player's own dropdown last held, and NCH then
+                // force-connects there. For a queue-issued room that is a
+                // requeue at worst; for a tournament room it is two players in
+                // two same-named rooms in two regions and a double forfeit
+                // (#49). GateTournamentRegion holds sct- runs at Idle until the
+                // server names a region, so this branch should be unreachable
+                // for them — and if it is ever reached anyway, abort instead of
+                // guessing.
                 if (!string.IsNullOrEmpty(targetRegion))
                 {
                     RegionSelector.region = targetRegion;
                     Plugin.Log.LogInfo($"[QUEUE-JOINER] Set RegionSelector.region = {targetRegion}");
+                }
+                else if ((targetRoom ?? "").StartsWith("sct-", StringComparison.Ordinal))
+                {
+                    Plugin.Log.LogError($"[TOURNAMENT-REGION] StartNCHConnect reached with no region for {targetRoom} — aborting rather than force-connecting to the local dropdown");
+                    joinInitiated = false;   // let the gate own the retry
+                    return;
                 }
 
                 // Force region (via Publicizer)
@@ -2677,6 +2981,14 @@ namespace CompetitiveRounds
             // find 1 family). Runs for every role, before any branch.
             try { RoomActors.OnJoinedNewRoom(); } catch { }
             try { SpectatorSync.MasterResetSpectatorState(); } catch { }
+            // Bug 213: republish this seat's chat-mute marker for the new room.
+            // Photon player properties PERSIST across rooms (#182), so a value
+            // written in a previous room would otherwise be carried in
+            // unrefreshed — and the state can legitimately have changed (via M
+            // or the Settings toggle) while we were at the menu. Runs for every
+            // role, before the spectator branch returns: a spectator can mute
+            // chat too, and the fighters should see that.
+            try { CompetitiveUI.PublishChatMuteState(); } catch { }
             // Callback-bound edge reset (Aug 10 r2 find 8) — the poll's
             // wasInRoom sampling can miss a fast leave+join.
             try { GameStateWatcher.ResetSpectateAttestEdges(alsoRoomTally: true); } catch { }

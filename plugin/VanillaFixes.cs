@@ -1187,16 +1187,127 @@ namespace CompetitiveRounds
             return m;
         }
 
+        /// <summary>Bug 210: swallowing was necessary but NOT sufficient — it
+        /// contained the exception and leaked the instance.
+        ///
+        /// InstanceSoundEvent.ManagedUpdate ends with the instance's ONLY
+        /// self-retirement path (`waitingForPooling = true; PoolAllVoices(...)`),
+        /// and SoundManagerData.ManagedUpdate reads that flag immediately after
+        /// the call returns to remove the instance, pool its voices and
+        /// deactivate it. So a throw BEFORE that tail — which this finalizer
+        /// then turns into a clean return — means the instance is never
+        /// retired, its AudioSources are never pooled, and it stays in the
+        /// managed-update list throwing again every frame. A monotonic leak.
+        ///
+        /// Once SoundManagerVoicePool saturates (every voice isAssigned, and a
+        /// leaked voice is assigned forever) every new Play enters the
+        /// voice-STEALING branch and rips the voice with the lowest
+        /// volume*priority away from a healthy sound. ROUNDS' events are
+        /// layered SoundContainers, so the quiet layers are stolen first —
+        /// which is exactly "intermittently muffled or suppressed", getting
+        /// worse across a session and never recovering before relaunch.
+        /// A spectator seat is the highest-rate producer of destroyed sound
+        /// hosts (join-time burial + PUN destroys), which is why it surfaced
+        /// there first.
+        ///
+        /// Retire the instance ourselves, VOICE BY VOICE. Flag FIRST: even if
+        /// the pooling throws, ManagedUpdate returns at its first statement on
+        /// every later frame, so the per-frame storm stops either way.
+        ///
+        /// Per-voice matters (Codex cold review, finding 3): retiring through
+        /// the single PoolAllVoices call left the leak reachable one layer
+        /// down. That call is one nested loop over every voice, so a throw
+        /// while pooling voice (i,j) — and the broken voice is precisely the
+        /// one that just threw out of ManagedUpdate — abandons every voice
+        /// AFTER it. SoundManagerData then removes and deactivates the
+        /// instance on the waitingForPooling flag regardless, so those later,
+        /// HEALTHY voices stay isAssigned forever. Same saturation, same
+        /// muffling, just slower. PoolSingleVoice is public and drives one
+        /// voice at a time, so each gets its own catch.</summary>
         [HarmonyFinalizer]
-        private static Exception Finalizer(Exception __exception)
+        private static Exception Finalizer(object __instance, Exception __exception)
         {
-            if (__exception != null)
-                VanillaFixSupport.DiagLimited(
-                    "SonigonVoiceUpdateGuard-swallowed",
-                    "InstanceSoundEvent.ManagedUpdate threw " + __exception.GetType().Name +
-                    " — swallowed so the sound manager's other voices keep updating",
-                    20);
+            if (__exception == null) return null;
+            VanillaFixSupport.DiagLimited(
+                "SonigonVoiceUpdateGuard-swallowed",
+                "InstanceSoundEvent.ManagedUpdate threw " + __exception.GetType().Name +
+                " — swallowed and the instance retired so its voices return to the pool",
+                20);
+            // __instance is typed object deliberately: the Sonigon assembly is
+            // resolved by name (AccessTools.TypeByName) and is not referenced by
+            // the csproj, so we cannot name the type in a signature.
+            try
+            {
+                if (__instance != null)
+                {
+                    var t = __instance.GetType();
+                    AccessTools.Field(t, "waitingForPooling")?.SetValue(__instance, true);
+                    if (!PoolVoicesIndividually(__instance, t))
+                    {
+                        // Structure not walkable — the instance still has to be
+                        // retired, so fall back to vanilla's own tail call:
+                        // PoolAllVoices(allowFadeOut: false,
+                        //               isCalledByStopFunction: false).
+                        // Logged rather than silent: a reflected name that no
+                        // longer exists must never become a forever no-op (#91).
+                        VanillaFixSupport.DiagLimited(
+                            "SonigonVoiceUpdateGuard-poolwalk",
+                            "InstanceSoundEvent voice structure not walkable — falling back to whole-instance PoolAllVoices",
+                            5);
+                        try
+                        {
+                            AccessTools.Method(t, "PoolAllVoices")?
+                                .Invoke(__instance, new object[] { false, false, false });
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
             return null;
+        }
+
+        /// <summary>Return every voice of one InstanceSoundEvent to the pool,
+        /// one voice at a time, each in its own catch.
+        ///
+        /// Behaviourally identical to vanilla's
+        /// PoolAllVoices(allowFadeOut: false, isCalledByStopFunction: false):
+        /// that method's whole body (decompile —
+        /// logs-snapshot/decompiled/sonigon/InstanceSoundEvent.cs:470) is this
+        /// nested loop plus two blocks that are BOTH gated on
+        /// isCalledByStopFunction / triggerOnStopEnable and so are dead for
+        /// those arguments. The argument triple below is vanilla's own:
+        /// shouldRestartIfLoop false, allowFadeOut false, isCalledByOnDestroy
+        /// false.
+        ///
+        /// Returns false when the structure could not be walked AT ALL, so the
+        /// caller falls back to the single call instead of quietly pooling
+        /// nothing.</summary>
+        private static bool PoolVoicesIndividually(object inst, Type t)
+        {
+            var holders = AccessTools.Field(t, "instanceSoundContainerHolder")?.GetValue(inst) as Array;
+            var poolOne = AccessTools.Method(t, "PoolSingleVoice");
+            if (holders == null || poolOne == null) return false;
+            bool walked = false;
+            for (int i = 0; i < holders.Length; i++)
+            {
+                object holder = null;
+                try { holder = holders.GetValue(i); } catch { }
+                if (holder == null) continue;
+                Array voices = null;
+                try { voices = AccessTools.Field(holder.GetType(), "voiceHolder")?.GetValue(holder) as Array; }
+                catch { }
+                if (voices == null) continue;
+                for (int j = 0; j < voices.Length; j++)
+                {
+                    walked = true;
+                    // One dead voice must not strand its siblings — that is the
+                    // entire difference from the whole-instance call.
+                    try { poolOne.Invoke(inst, new object[] { i, j, false, false, false }); }
+                    catch { }
+                }
+            }
+            return walked;
         }
 
         [HarmonyCleanup]

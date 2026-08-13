@@ -1077,6 +1077,11 @@ namespace CompetitiveRounds
                     try { ResetMatchState(); } catch { }
                     Plugin.Log.LogInfo("[SPECTATE] GameStateWatcher quiesced");
                 }
+                // The ONE thing a quiesced spectator still needs: without this
+                // the runInBackground override never runs on an observer seat,
+                // so alt-tabbing freezes the very seat the patch exists to keep
+                // alive on any client whose Unity default is false.
+                try { TickRunInBackground(); } catch { }
                 return;
             }
             spectatorQuiesced = false;
@@ -2112,7 +2117,9 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Latest harvested telemetry for a peer by actor number, or null.
-        /// Consumed by TryReportTeamMatch when assembling per-slot telemetry.</summary>
+        /// Consumed by BuildTeamReportPayload when assembling per-slot telemetry
+        /// — and note that peerTele is cleared per match, which is why that read
+        /// happens at match end and never from the deferred submit.</summary>
         internal static bool TryGetPeerTelemetry(int actorNumber,
             out string fpsTl, out string pingTl, out string hitTl, out string blockTl,
             out string damageTl, out int[] counters)
@@ -2144,6 +2151,194 @@ namespace CompetitiveRounds
                 return true;
             }
             catch { return false; }
+        }
+
+        // ── End-of-game BUILD stats (the hold-Tab overlay's 21 values) ─────
+        //
+        // TabStatsOverlay.CaptureBuildStats reads the LIVE Unity objects (Gun,
+        // GunAmmo, CharacterStatModifiers, Block, HealthHandler), so the
+        // snapshot has to be taken in the game-over frame itself: Player
+        // .FullReset (the rematch path) and ResetMatchState wipe every one of
+        // those, and the 2v2 report can run much later from the continuation
+        // callback. Per #171 we never delay finalisation for telemetry and
+        // never read state a reset may already have cleared — so: capture
+        // once, synchronously, at game over; stash it; every report path
+        // (including the deferred 2v2 one) reads the stash.
+        //
+        // Keyed by STEAM ID because that is the key all four report paths
+        // already resolve (ResolvePhotonSteamId). A PlayerID-keyed stash would
+        // need a second resolver, which is exactly how two keys drift apart.
+        //
+        // Lifetime: cleared at every match start (ResetPerMatchCombatCounters,
+        // which BOTH OnMatchStarted and OnFfaMatchStarted call) and written
+        // only while in the room during the live game — so it can never hand a
+        // report a build from a previous game.
+        //
+        // The value is OPAQUE here. Only TabStatsOverlay builds or decodes it.
+        private static readonly Dictionary<string, string> endStatsBySteam =
+            new Dictionary<string, string>(6);
+        private static string endStatsLocal;
+
+        // The two Photon props a Steam ID can arrive under; see StashEndStats.
+        private static readonly string[] END_STATS_ID_KEYS = { "u_id", "unity_id" };
+
+        /// <summary>The end-of-game build stats captured for one player, or
+        /// NULL when nothing was captured for them — an FFA leaver, a seat
+        /// whose Steam ID never resolved, or a report finalised after the room
+        /// was already gone.
+        ///
+        /// Callers must OMIT the field when this returns null rather than send
+        /// "" or a row of dashes: the server stores NULL as "not recorded",
+        /// which is not the same claim as a build of zeroes (#257).</summary>
+        public static string EndStatsFor(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId)) return null;
+            string wire;
+            return endStatsBySteam.TryGetValue(steamId, out wire) ? wire : null;
+        }
+
+        /// <summary>The local seat's captured build. Same contract as
+        /// EndStatsFor, and also reachable as EndStatsFor(localSteamId).</summary>
+        public static string LocalEndStats { get { return endStatsLocal; } }
+
+        /// <summary>One 2v2 game's report, fully resolved and frozen.
+        ///
+        /// The continuation-deferred 2v2 report (bug #70 self-heal) submits from
+        /// an async callback that can land after game 2 has already started, and
+        /// by then EVERY live input the report reads has moved on:
+        ///
+        ///   * matchIsRanked  — the teardown at the bottom of the block that
+        ///     scheduled the deferral sets it false synchronously and
+        ///     unconditionally, so a live read is deterministically wrong.
+        ///   * the build stash, localCards, localFps3sTimeline / pingSamples /
+        ///     localHitTimeline / localBlockTimeline / localDamage3sTimeline,
+        ///     the Local*ThisMatch counters and peerTele — all cleared in place
+        ///     by the next game's ResetPerMatchCombatCounters.
+        ///   * the peers' cr_cards / cr_fps Photon props — game 2 overwrites
+        ///     them with game 2's picks and frame rate.
+        ///   * p1Rounds/p2Rounds/p1Points/p2Points and matchStartTime — game 2's
+        ///     scores and start instant.
+        ///   * RoomActors.ActiveFighters() and PlayerManager.players — a player
+        ///     who leaves in between drops the census below four, which aborts
+        ///     the report outright and loses that game's rating and gold.
+        ///
+        /// So the deferred path does not defer the REPORT; it defers only the
+        /// SUBMIT. BuildTeamReportPayload resolves all of the above at match end
+        /// while it is still true, and the callback supplies the one value it
+        /// was waiting for and posts.
+        ///
+        /// EVERY field the wire call needs is owned here. The series id is
+        /// deliberately NOT one of them: it is read live at submit time because
+        /// obtaining it is the entire reason that path defers. Nothing else is.
+        /// (Codex cold review finding 2; round 2 confirmed the first pass froze
+        /// only rank/score/start/builds and left cards, telemetry and the roster
+        /// live — and that its comment claimed otherwise.)</summary>
+        private sealed class TeamReportPayload
+        {
+            public string RoomId;
+            public string Region;
+            public int DurationSeconds;
+            public DateTime StartedAt;
+            public bool IsRanked;
+            public int T1Rounds, T2Rounds, T1Points, T2Points, WinnerTeam;
+            public string ReporterSteam;
+            /// <summary>False when the election picked someone else — the game
+            /// is routed correctly, we are simply not the one posting it.</summary>
+            public bool LocalIsReporter;
+            // Slot order throughout: t1a, t1b, t2a, t2b.
+            public string[] Steam = new string[4];
+            public string[] Name = new string[4];
+            public List<MatchTracker.CardPickData>[] Cards = new List<MatchTracker.CardPickData>[4];
+            public int[] Fps = new int[4];
+            public ApiClient.TeamTelemetry[] Tele = new ApiClient.TeamTelemetry[4];
+            public string[] EndStats = new string[4];
+        }
+
+        /// <summary>Index one captured build under every spelling of its
+        /// owner's id. ResolvePhotonSteamId validates numerically and falls
+        /// back to "photon_N"; TryResolveOpponent stores the RAW u_id string
+        /// with no validation at all. For a non-numeric platform id those two
+        /// disagree, and the 1v1 lookup (which goes through opponentSteamId)
+        /// would silently miss — so index both spellings.</summary>
+        private static void StashEndStats(Dictionary<string, string> map,
+                                          Photon.Realtime.Player owner, string wire)
+        {
+            string sid = ResolvePhotonSteamId(owner);
+            if (!string.IsNullOrEmpty(sid)) map[sid] = wire;
+            try
+            {
+                var props = owner.CustomProperties;
+                if (props == null) return;
+                foreach (var key in END_STATS_ID_KEYS)
+                {
+                    if (!props.ContainsKey(key)) continue;
+                    string raw = props[key]?.ToString();
+                    if (!string.IsNullOrEmpty(raw) && raw != sid) map[raw] = wire;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Snapshot every spawned player's build into the stash.
+        /// Synchronous and allocation-light by design (one short string per
+        /// player) so it can run in the game-over frame without delaying the
+        /// report. Never throws out of a report path.</summary>
+        private static void CaptureEndStats(string where)
+        {
+            try
+            {
+                // Out of the room there is nothing live to read: the 1v1
+                // DC-win branch calls OnGameOver from the room-LEAVE handler,
+                // so that is the normal case here. Deliberately does NOT clear
+                // the stash — the snapshot taken at DC DETECTION, while the
+                // room was still live, is that game's real build and has to
+                // survive to the report.
+                if (!PhotonNetwork.InRoom) return;
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+
+                var fresh = new Dictionary<string, string>(6);
+                string mine = null;
+                int captured = 0;
+                foreach (var po in pm.players)
+                {
+                    // #222: departed players linger in PlayerManager.players in
+                    // FFA and fake-null out — they have no build left to record.
+                    if (po == null || po.data == null) continue;
+                    string wire = TabStatsOverlay.CaptureBuildStats(po);
+                    if (string.IsNullOrEmpty(wire)) continue;
+                    var pv = po.GetComponent<PhotonView>();
+                    // No owner = offline/sandbox, which is never reported. Note
+                    // IsMine is true for EVERY view in offline mode, so the
+                    // local seat is identified by Owner.IsLocal instead.
+                    if (pv == null || pv.Owner == null) continue;
+                    if (pv.Owner.IsLocal) mine = wire;
+                    StashEndStats(fresh, pv.Owner, wire);
+                    captured++;
+                }
+
+                // Nothing usable this time: keep whatever an earlier capture in
+                // THIS game stashed rather than replacing real data with none.
+                if (captured == 0) return;
+
+                endStatsBySteam.Clear();
+                foreach (var kv in fresh) endStatsBySteam[kv.Key] = kv.Value;
+                endStatsLocal = mine;
+                // The local seat's id comes from Steamworks, peers' from the
+                // u_id prop. Index the local build under localSteamId as well,
+                // so the 1v1 report — which looks its own side up by
+                // localSteamId — cannot miss it if the two ever differ.
+                if (!string.IsNullOrEmpty(mine) && !string.IsNullOrEmpty(localSteamId)
+                    && localSteamId != "unknown")
+                    endStatsBySteam[localSteamId] = mine;
+
+                Plugin.Log.LogInfo($"[END-STATS] {where}: captured {captured} build snapshot(s)");
+            }
+            catch (Exception ex)
+            {
+                // Telemetry must never take a report path down.
+                Plugin.Log.LogWarning($"[END-STATS] capture failed ({where}): {ex.Message}");
+            }
         }
 
         // Item 4: per-game scoring timeline for the history hover graph. Each
@@ -2208,17 +2403,18 @@ namespace CompetitiveRounds
             ShouldShowMatchFoundStuckOverlay = false;
         }
 
-        private static void PollRoomState()
+        /// <summary>The runInBackground override, split out of PollRoomState so
+        /// the SPECTATOR branch can call it too. Poll() early-returns for
+        /// spectators well before PollRoomState — which is this override's only
+        /// writer — so a spectator seat never got it. That defeats the whole
+        /// point of the patch on any client whose Unity default is false: a
+        /// spectator alt-tabbing gets exactly the frozen seat this fix exists to
+        /// prevent. (Found while diagnosing bug 210; NOT that bug's cause — the
+        /// reporter's own default was already true — but a real latent gap.)
+        /// Idempotent and cheap: both arms are one-shot on a flag.</summary>
+        private static void TickRunInBackground()
         {
             bool inRoom = PhotonNetwork.InRoom;
-
-            // Focus-loss safety: keep Unity processing events while we're in
-            // any room, even if the window is in the background. Vanilla
-            // ROUNDS may default to runInBackground=false which makes the
-            // ready-up keybind handler silently drop space presses when the
-            // player tabs away — that's the root-cause hypothesis for the
-            // stuck-on-match-found bug. We restore the original value on
-            // room exit so vanilla menu/screensaver behavior stays normal.
             if (inRoom && !_runInBackgroundOverridden)
             {
                 try
@@ -2240,6 +2436,22 @@ namespace CompetitiveRounds
                 }
                 catch { }
             }
+        }
+
+        private static void PollRoomState()
+        {
+            bool inRoom = PhotonNetwork.InRoom;
+
+            // Focus-loss safety: keep Unity processing events while we're in
+            // any room, even if the window is in the background. Vanilla
+            // ROUNDS may default to runInBackground=false which makes the
+            // ready-up keybind handler silently drop space presses when the
+            // player tabs away — that's the root-cause hypothesis for the
+            // stuck-on-match-found bug. We restore the original value on
+            // room exit so vanilla menu/screensaver behavior stays normal.
+            // Body lives in TickRunInBackground so the spectator branch of
+            // Poll() — which returns long before this method — gets it too.
+            TickRunInBackground();
 
             // Watchdog: detect "stuck on the ready-up screen specifically".
             // Tight gates: suppress in mod-issued rooms (we manage those),
@@ -2933,6 +3145,13 @@ namespace CompetitiveRounds
                     if (opponentWasPresent && playerCount <= 1 && !opponentDCReported)
                     {
                         opponentDCReported = true;
+                        // The 1v1 DC-win report is finalised from the
+                        // room-LEAVE handler below, where the players are
+                        // already gone — this is the last frame that still
+                        // holds the live build. Snapshot it now; OnGameOver's
+                        // own capture no-ops out of the room and leaves this
+                        // one standing.
+                        CaptureEndStats("1v1 opponent DC");
                         int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
                         int oppR = localTeamId == 0 ? p2Rounds : p1Rounds;
                         int totalPts = p1Points + p2Points;
@@ -2981,8 +3200,52 @@ namespace CompetitiveRounds
                             // explicit rule) — no meaningful-play or
                             // match-point gate like the ranked branch.
                             string _dcRoom = PhotonNetwork.CurrentRoom?.Name ?? "";
-                            Plugin.Log.LogInfo($"[DC] Casual midgame leave by {opponentDisplayName} at {localR}-{oppR} — reporting rage-quit");
-                            ApiClient.ReportCasualDc(localSteamId, opponentSteamId, _dcRoom);
+                            // Item 12: name the leaver. A vanilla quickplay
+                            // opponent whose FIRST contact with any mod user is
+                            // a rage-quit has no players row yet, so the server
+                            // creates one from this report — with no name it is
+                            // stored under the raw account id forever.
+                            //
+                            // opponentDisplayName is the name TryResolveOpponent
+                            // already resolved and rich-text stripped at its one
+                            // assignment site — no second resolution path here.
+                            // Two guards on it: the schema caps display_name at
+                            // 64, and "Opponent" is that resolver's own
+                            // placeholder for a null NickName — shipping it would
+                            // file every unnamed leaver under one fake shared
+                            // name, which reads worse on a leaderboard than the
+                            // honest raw account id.
+                            string _dcLeaverName = (opponentDisplayName ?? "").Trim();
+                            if (_dcLeaverName == "Opponent") _dcLeaverName = "";
+                            if (_dcLeaverName.Length > 60) _dcLeaverName = _dcLeaverName.Substring(0, 60);
+                            // Aug 13: name the GAME, not just the room. One
+                            // Photon room hosts a whole sitting (production has
+                            // rooms with 7 recorded matches), so "a match exists
+                            // in this room" cannot answer "was the game they
+                            // abandoned recorded?" — which is why the metric
+                            // over-counts a between-games leave as a rage quit.
+                            // This is the exact prefix the match report for THIS
+                            // game will carry, from the same builder, so the
+                            // survivor's two submissions agree by construction
+                            // (both are ours, and the fallback branch keys on
+                            // matchStartTime, which is stable mid-game — a
+                            // vanilla opponent never negotiates a token, and a
+                            // vanilla opponent is the entire population this
+                            // stat measures).
+                            //
+                            // Omitted when the room name is unknown rather than
+                            // sent half-formed: a prefix missing its room half
+                            // matches no match row at all, and the server reads
+                            // "no match" as "abandoned" — the very inflation
+                            // this closes. No value at all falls back to the
+                            // server's own ordering heuristic instead, which is
+                            // imprecise rather than wrong in one direction.
+                            string _dcGameId = string.IsNullOrEmpty(photonRoomId)
+                                ? null : BuildGameReportIdPrefix();
+                            Plugin.Log.LogInfo($"[DC] Casual midgame leave by {opponentDisplayName} at {localR}-{oppR} — reporting rage-quit (game={_dcGameId ?? "unknown"})");
+                            ApiClient.ReportCasualDc(localSteamId, opponentSteamId, _dcRoom,
+                                                     string.IsNullOrEmpty(_dcLeaverName) ? null : _dcLeaverName,
+                                                     _dcGameId);
                         }
                         else
                         {
@@ -3165,6 +3428,11 @@ namespace CompetitiveRounds
                 {
                     if (player == null || player.IsLocal) continue;
 
+                    // NOTE: "Opponent" here is a PLACEHOLDER, not a name. The
+                    // casual-DC reporter (item 12) filters that exact literal
+                    // out before sending leaver_display_name, so it never
+                    // becomes a real players row name — change the two
+                    // together or that filter goes silently dead.
                     opponentDisplayName = StripRichText(player.NickName ?? "Opponent");
 
                     var props = player.CustomProperties;
@@ -3651,8 +3919,20 @@ namespace CompetitiveRounds
             TryPublishSharedGameToken();
         }
 
-        private static string BuildReportRoomId(
-            int reportP1Rounds = -1, int reportP2Rounds = -1)
+        /// <summary>The STABLE half of this game's report id: "{room}_{token}",
+        /// i.e. BuildReportRoomId with its "_r{score}" suffix removed.
+        ///
+        /// It exists because the score suffix is NOT stable within one game: a
+        /// leave at 4-0 advances the awarded side to the terminal score before
+        /// the report is filed (#179), so a value captured at leave time and the
+        /// value the match row ends up carrying differ by a round. Anything that
+        /// needs to say "this same game" across those two moments must compare
+        /// on this prefix — see the casual-DC report, whose whole purpose is
+        /// exactly that comparison.
+        ///
+        /// Extracted rather than duplicated: BuildReportRoomId now composes from
+        /// it, so the two strings cannot drift apart in a later edit.</summary>
+        private static string BuildGameReportIdPrefix()
         {
             TryRefreshSharedGameToken();
             string token = !string.IsNullOrEmpty(sharedGameToken)
@@ -3660,11 +3940,17 @@ namespace CompetitiveRounds
                 : matchStartTime.ToString(
                     "HHmmss",
                     System.Globalization.CultureInfo.InvariantCulture);
+            return $"{photonRoomId}_{token}";
+        }
+
+        private static string BuildReportRoomId(
+            int reportP1Rounds = -1, int reportP2Rounds = -1)
+        {
             int reportRoundTotal =
                 reportP1Rounds >= 0 && reportP2Rounds >= 0
                     ? reportP1Rounds + reportP2Rounds
                     : p1Rounds + p2Rounds;
-            return $"{photonRoomId}_{token}_r{reportRoundTotal}";
+            return $"{BuildGameReportIdPrefix()}_r{reportRoundTotal}";
         }
 
         // Anti-cheat telemetry must NEVER be able to abort a match report. All
@@ -4047,6 +4333,16 @@ namespace CompetitiveRounds
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
             sessionMatchCount++;
+
+            // FIRST statement after the one-shot latch: snapshot every seat's
+            // BUILD while the live objects still hold it (#171 — finalise from
+            // the current frame, never wait on telemetry). Cheap and
+            // synchronous; nothing below waits on it. Taking it here rather
+            // than inside the report paths is load-bearing: every one of them
+            // runs after this point in OnGameOver, and the 2v2 routing in
+            // particular can be reached once the rematch teardown has already
+            // run Player.FullReset.
+            CaptureEndStats("1v1/2v2/1v2 game over");
 
             // Best-effort peer handoff before reporter election. Exact local
             // suspect evidence also follows its own signed API path below, so
@@ -4467,23 +4763,43 @@ namespace CompetitiveRounds
                     // the game-start continuation request failed (server error / network
                     // blip), which used to drop the game entirely. Re-request the
                     // continuation NOW and submit this game once the series id lands.
-                    // Room + duration are captured; Photon state is still alive during
-                    // the between-games window, so the deferred TryReportTeamMatch can
-                    // resolve all four players. Non-reporters early-return inside
-                    // TryRequestContinuationSeries as usual.
+                    // An earlier revision of this comment claimed the deferred report
+                    // could still "resolve all four players" because Photon state stays
+                    // alive through the between-games window. It cannot: the response may
+                    // land after game 2 has begun, and a player who left in between drops
+                    // the census below four and kills the report. Nothing is resolved
+                    // late any more — see TeamReportPayload. Non-reporters early-return
+                    // inside TryRequestContinuationSeries as usual.
                     if (shouldReport && roomIsCrFf && !hasSeries && playerListLen == 4)
                     {
                         Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] no team series at match end — requesting continuation and deferring report");
-                        string deferredRoom = reportRoomId;
-                        int deferredDuration = duration;
+                        // Resolve the ENTIRE report HERE and defer only the
+                        // submit. Everything it reads — the four-fighter census,
+                        // the roster, both teams' cards, all four telemetry
+                        // blobs, the builds, the scores and the ranked flag —
+                        // is either cleared by the next game's
+                        // ResetPerMatchCombatCounters, overwritten by game 2's
+                        // Photon props, or (matchIsRanked) zeroed by the
+                        // teardown at the bottom of this very block before the
+                        // callback can possibly run. TeamReportPayload lists
+                        // them; nothing but the series id is read late.
+                        var deferredPayload = BuildTeamReportPayload(reportRoomId, duration);
+                        if (deferredPayload == null)
+                            Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] could not resolve this game at match end — still requesting the continuation (later games need it), but this game cannot be submitted");
                         TryRequestContinuationSeries(ok =>
                         {
-                            if (ok && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId))
+                            if (!ok || string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId))
                             {
-                                bool sent = TryReportTeamMatch(deferredRoom, deferredDuration);
-                                Plugin.Log.LogInfo($"[2v2-REPORT-ROUTE] deferred report after continuation: sent={sent}");
+                                Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] continuation retry failed — game not recorded");
+                                return;
                             }
-                            else Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] continuation retry failed — game not recorded");
+                            // Only the elected reporter reaches this callback at
+                            // all (TryRequestContinuationSeries returns before
+                            // firing it otherwise), but the payload carries the
+                            // election result so the two can never disagree.
+                            if (deferredPayload == null || !deferredPayload.LocalIsReporter) return;
+                            SubmitTeamReport(deferredPayload);
+                            Plugin.Log.LogInfo("[2v2-REPORT-ROUTE] deferred report submitted after continuation");
                         });
                     }
                     else
@@ -4530,6 +4846,12 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[REPORT-ROUTE] 1v1 path: room={rn} isRanked={matchIsRanked} tournament={isTour} ranked_queue={isRk} reporter={localSteamId} opponent={opponentSteamId}");
                 }
                 catch { }
+                // Build stats for this report's two seats:
+                //   EndStatsFor(p1SteamId) -> player1.end_stats
+                //   EndStatsFor(p2SteamId) -> player2.end_stats
+                // Both may be null ("not recorded"); omit the JSON field then,
+                // never send "" or dashes (#257). ADVISORY — the 7-field HMAC
+                // canonical does not change.
                 ApiClient.ReportMatch(
                     p1SteamId: p1SteamId,
                     p1Name: p1Name,
@@ -4638,7 +4960,11 @@ namespace CompetitiveRounds
                     localDeathsOwnBullet: LocalDeathsOwnBullet,
                     oppDeaths: OppDeathsObserved,
                     oppDeathsBoundary: OppDeathsBoundaryObserved,
-                    oppDeathsOwnBullet: OppDeathsOwnBulletObserved
+                    oppDeathsOwnBullet: OppDeathsOwnBulletObserved,
+                    // Positional by SLOT, not viewer-relative. Either may be
+                    // null ("not recorded"), which ApiClient omits entirely.
+                    p1EndStats: EndStatsFor(p1SteamId),
+                    p2EndStats: EndStatsFor(p2SteamId)
                 );
             }
 
@@ -4829,6 +5155,12 @@ namespace CompetitiveRounds
             int soloPoints = soloTeam == 0 ? p1Points : p2Points;
             int duoPoints  = soloTeam == 0 ? p2Points : p1Points;
 
+            // Build stats for the three seats:
+            //   EndStatsFor(soloSid) -> solo.end_stats
+            //   EndStatsFor(duoASid) -> duo_a.end_stats
+            //   EndStatsFor(duoBSid) -> duo_b.end_stats
+            // Any may be null ("not recorded") — omit the field then (#257).
+            // ADVISORY — the 10-field 1v2 HMAC canonical does not change.
             ApiClient.ReportOvtMatch(
                 ApiClient.ActiveOvt1v2SeriesId, reportRoomId, photonRegion, duration,
                 soloSid, info[soloSid].name, info[soloSid].cards,
@@ -4836,7 +5168,10 @@ namespace CompetitiveRounds
                 duoBSid, info[duoBSid].name, info[duoBSid].cards,
                 soloRounds, duoRounds, soloPoints, duoPoints,
                 localSteamId, info[soloSid].fps, info[duoASid].fps, info[duoBSid].fps,
-                info[soloSid].dmgTl, info[duoASid].dmgTl, info[duoBSid].dmgTl);
+                info[soloSid].dmgTl, info[duoASid].dmgTl, info[duoBSid].dmgTl,
+                soloEndStats: EndStatsFor(soloSid),
+                duoAEndStats: EndStatsFor(duoASid),
+                duoBEndStats: EndStatsFor(duoBSid));
             Plugin.Log.LogInfo($"[1v2-REPORT] submitted solo={soloSid} duo={duoASid},{duoBSid} {soloRounds}-{duoRounds}");
             return true;
         }
@@ -4908,6 +5243,19 @@ namespace CompetitiveRounds
             localDamageTimeline.Clear(); oppDamageTimeline.Clear();
             OppDamageDealt = 0f; OppMaxSingleHit = 0f; OppMaxHealthSeen = 0f; OppBestBounceKill = 0;
             OppExpandedTelemetrySeen = false;
+            // The end-of-game build stash belongs to exactly ONE game. This is
+            // its only clear site, and BOTH game-start hooks (OnMatchStarted
+            // and OnFfaMatchStarted) call this method — so a report can never
+            // be handed a build from the previous game.
+            //
+            // It does NOT follow that a deferred report finds its own (an
+            // earlier revision of this comment claimed it did): the
+            // continuation-deferred 2v2 report fires from an async callback
+            // that can land after game 2 has started, and it would then read
+            // this cleared-and-refilled dictionary. That path resolves its
+            // whole report before deferring instead — see TeamReportPayload.
+            endStatsBySteam.Clear();
+            endStatsLocal = null;
             CombatTelemetry.ClearMatchState();
         }
 
@@ -5115,6 +5463,12 @@ namespace CompetitiveRounds
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
             sessionMatchCount++;
 
+            // Same rule as OnGameOver: build snapshot first, in this frame.
+            // FfaMode calls this synchronously from its point resolution, so
+            // the players are still spawned and un-reset here; the next FFA
+            // game's start hook clears the stash (#171).
+            CaptureEndStats("FFA game over");
+
             BroadcastGstatsImmediate();
             try { PhotonNetwork.SendAllOutgoingCommands(); } catch { }
 
@@ -5274,6 +5628,8 @@ namespace CompetitiveRounds
                         keysPressed = pCounters[4], activeSeconds = pCounters[5],
                     };
                 }
+                // Build stats: EndStatsFor(sid) -> this entry's end_stats.
+                // ADVISORY — outside the "ffa:"-tagged HMAC canonical.
                 entries.Add(new ApiClient.FfaReportPlayer
                 {
                     steamId = sid, displayName = name, slot = teamId,
@@ -5288,12 +5644,18 @@ namespace CompetitiveRounds
                     damageDealt = FfaMode.DamageDealtFor(teamId),
                     killTimeline = FfaMode.KillTimelineFor(teamId),
                     damageTimeline = FfaMode.DamageTimelineFor(teamId),
+                    endStats = EndStatsFor(sid),
                 });
                 presentSteams.Add(sid);
                 if (teamId == winnerTeam) winnerSteam = sid;
             }
 
             // Leavers: recorded at leave time with their tallies (left_early).
+            // EndStatsFor(kv.Key) is normally null for these — both their
+            // Player object and their Photon owner are gone before the
+            // game-over capture runs, so end_stats is honestly "not recorded".
+            // A leave landing late enough that both survive the capture yields
+            // their build at that moment, which is equally honest.
             foreach (var kv in FfaMode.Leavers)
             {
                 if (presentSteams.Contains(kv.Key)) continue;
@@ -5357,7 +5719,15 @@ namespace CompetitiveRounds
             return true;
         }
 
-        private static bool TryReportTeamMatch(string reportRoomId, int duration)
+        /// <summary>Resolve one 2v2 game into a frozen payload: census, roster,
+        /// teams, cards, fps, telemetry, builds, scores, ranked flag and the
+        /// reporter election. Every mutable per-match global the report needs is
+        /// read exactly once, HERE, so the result may be held across an async
+        /// gap — see TeamReportPayload.
+        ///
+        /// Null means the game is not reportable. The caller must NOT substitute
+        /// a 1v1 fallback (#65/#106).</summary>
+        private static TeamReportPayload BuildTeamReportPayload(string reportRoomId, int duration)
         {
             // Census: gate + roster from ONE fighter view (converted with the
             // photonPlayers assignment below — recon structural hazard).
@@ -5365,14 +5735,14 @@ namespace CompetitiveRounds
             if (reportFighters.Length != 4)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] aborting: fighters={reportFighters.Length} (expected 4)");
-                return false;
+                return null;
             }
 
             var pm = PlayerManager.instance;
             if (pm == null || pm.players == null)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] aborting: PlayerManager.instance={(pm == null ? "null" : "set")} pm.players={(pm?.players == null ? "null" : "set")}");
-                return false;
+                return null;
             }
 
             // Map each Photon player → in-game Player → TeamID. The teamID
@@ -5398,7 +5768,7 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_"))
                 {
                     Plugin.Log.LogWarning($"[2v2-REPORT] couldn't resolve Steam ID for actor {pp.ActorNumber}");
-                    return false;
+                    return null;
                 }
                 // Strip rich-text from NickName before sending to server. The schema
                 // limits display_name to 64 chars; styled nicknames (e.g. neon-pink
@@ -5511,7 +5881,7 @@ namespace CompetitiveRounds
             if (bySteam.Count != 4)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] resolved {bySteam.Count}/4 players, aborting");
-                return false;
+                return null;
             }
 
             // Reporter election: lowest Steam ID across all 4. (Same rule as 1v1.)
@@ -5524,8 +5894,10 @@ namespace CompetitiveRounds
             if (lowestSid == null) lowestSid = localSteamId;
             if (lowestSid != localSteamId)
             {
-                Plugin.Log.LogInfo($"[2v2-REPORT] reporter is {lowestSid}, not me ({localSteamId}) — skipping");
-                return true; // routed correctly; just not by us
+                // Routed correctly, just not by us. A payload rather than null:
+                // "someone else is posting this" is a SUCCESS for the caller,
+                // and null is reserved for "not reportable at all".
+                return new TeamReportPayload { ReporterSteam = lowestSid, LocalIsReporter = false };
             }
 
             // Group by in-game team_id. ROUNDS uses 0/1 for the 2 teams.
@@ -5539,7 +5911,7 @@ namespace CompetitiveRounds
             if (team0Sids.Count != 2 || team1Sids.Count != 2)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] team split is {team0Sids.Count}/{team1Sids.Count}, aborting");
-                return false;
+                return null;
             }
             // Convention: team1_in_db corresponds to in-game team_id=0 by default. We don't actually
             // know which DB team is which — but the server stores by player_id and the client computes
@@ -5549,31 +5921,81 @@ namespace CompetitiveRounds
             team0Sids.Sort(StringComparer.Ordinal);
             team1Sids.Sort(StringComparer.Ordinal);
 
-            int t1Rounds = p1Rounds, t2Rounds = p2Rounds;
-            int t1Points = p1Points, t2Points = p2Points;
-            int winnerTeam = (t1Rounds > t2Rounds) ? 1 : 2;
+            var slots = new string[] { team0Sids[0], team0Sids[1], team1Sids[0], team1Sids[1] };
 
-            string t1aSid = team0Sids[0], t1bSid = team0Sids[1];
-            string t2aSid = team1Sids[0], t2bSid = team1Sids[1];
+            var payload = new TeamReportPayload
+            {
+                RoomId = reportRoomId,
+                // Room-scoped, but frozen with the rest so that a reader of this
+                // type never has to ask which fields are live and which are not.
+                Region = photonRegion,
+                DurationSeconds = duration,
+                StartedAt = matchStartTime,
+                IsRanked = matchIsRanked,
+                T1Rounds = p1Rounds, T2Rounds = p2Rounds,
+                T1Points = p1Points, T2Points = p2Points,
+                WinnerTeam = (p1Rounds > p2Rounds) ? 1 : 2,
+                ReporterSteam = localSteamId,
+                LocalIsReporter = true,
+            };
+            for (int i = 0; i < 4; i++)
+            {
+                string sid = slots[i];
+                payload.Steam[i] = sid;
+                payload.Name[i] = bySteam[sid].name;
+                payload.Cards[i] = bySteam[sid].cards;
+                payload.Fps[i] = bySteam[sid].fps;
+                payload.Tele[i] = teleBySid.TryGetValue(sid, out var tl) ? tl : null;
+                // Builds come from the stash CaptureEndStats filled in the
+                // game-over frame, never re-read from the live objects: by the
+                // time even the synchronous path runs, a rematch teardown may
+                // already have wiped them (#171).
+                payload.EndStats[i] = EndStatsFor(sid);
+            }
+            return payload;
+        }
 
+        /// <summary>Post a resolved 2v2 game.
+        ///
+        /// The series id is the ONE value read live here, and deliberately so:
+        /// the deferred path exists precisely because it did not have one yet.
+        /// Everything else comes off the payload — see TeamReportPayload.
+        ///
+        /// ADVISORY — the 11-field 2v2 HMAC canonical does not change.</summary>
+        private static void SubmitTeamReport(TeamReportPayload p)
+        {
             ApiClient.ReportTeamMatch(
                 seriesId: ApiClient.ActiveTeamSeriesId,
-                t1aSteam: t1aSid, t1aName: bySteam[t1aSid].name, t1aCards: bySteam[t1aSid].cards,
-                t1bSteam: t1bSid, t1bName: bySteam[t1bSid].name, t1bCards: bySteam[t1bSid].cards,
-                t2aSteam: t2aSid, t2aName: bySteam[t2aSid].name, t2aCards: bySteam[t2aSid].cards,
-                t2bSteam: t2bSid, t2bName: bySteam[t2bSid].name, t2bCards: bySteam[t2bSid].cards,
-                t1Rounds: t1Rounds, t2Rounds: t2Rounds, t1Points: t1Points, t2Points: t2Points,
-                photonRoomId: reportRoomId, region: photonRegion,
-                durationSeconds: duration, startedAt: matchStartTime,
-                reporterSteamId: localSteamId, isRanked: matchIsRanked, winnerTeam: winnerTeam,
-                t1aFps: bySteam[t1aSid].fps, t1bFps: bySteam[t1bSid].fps,
-                t2aFps: bySteam[t2aSid].fps, t2bFps: bySteam[t2bSid].fps,
-                t1aTele: teleBySid.TryGetValue(t1aSid, out var _ta) ? _ta : null,
-                t1bTele: teleBySid.TryGetValue(t1bSid, out var _tb) ? _tb : null,
-                t2aTele: teleBySid.TryGetValue(t2aSid, out var _tc) ? _tc : null,
-                t2bTele: teleBySid.TryGetValue(t2bSid, out var _td) ? _td : null
+                t1aSteam: p.Steam[0], t1aName: p.Name[0], t1aCards: p.Cards[0],
+                t1bSteam: p.Steam[1], t1bName: p.Name[1], t1bCards: p.Cards[1],
+                t2aSteam: p.Steam[2], t2aName: p.Name[2], t2aCards: p.Cards[2],
+                t2bSteam: p.Steam[3], t2bName: p.Name[3], t2bCards: p.Cards[3],
+                t1Rounds: p.T1Rounds, t2Rounds: p.T2Rounds,
+                t1Points: p.T1Points, t2Points: p.T2Points,
+                photonRoomId: p.RoomId, region: p.Region,
+                durationSeconds: p.DurationSeconds, startedAt: p.StartedAt,
+                reporterSteamId: p.ReporterSteam, isRanked: p.IsRanked, winnerTeam: p.WinnerTeam,
+                t1aFps: p.Fps[0], t1bFps: p.Fps[1], t2aFps: p.Fps[2], t2bFps: p.Fps[3],
+                t1aTele: p.Tele[0], t1bTele: p.Tele[1], t2aTele: p.Tele[2], t2bTele: p.Tele[3],
+                t1aEndStats: p.EndStats[0], t1bEndStats: p.EndStats[1],
+                t2aEndStats: p.EndStats[2], t2bEndStats: p.EndStats[3]
             );
-            Plugin.Log.LogInfo($"[2v2-REPORT] submitted: t1={t1aSid},{t1bSid} t2={t2aSid},{t2bSid} winner=T{winnerTeam}");
+            Plugin.Log.LogInfo($"[2v2-REPORT] submitted: t1={p.Steam[0]},{p.Steam[1]} t2={p.Steam[2]},{p.Steam[3]} winner=T{p.WinnerTeam}");
+        }
+
+        /// <summary>Synchronous 2v2 report: resolve and post in one go. False =
+        /// not reportable (the caller must not fall back to 1v1); true = routed,
+        /// whether by us or by the elected reporter.</summary>
+        private static bool TryReportTeamMatch(string reportRoomId, int duration)
+        {
+            var payload = BuildTeamReportPayload(reportRoomId, duration);
+            if (payload == null) return false;
+            if (!payload.LocalIsReporter)
+            {
+                Plugin.Log.LogInfo($"[2v2-REPORT] reporter is {payload.ReporterSteam}, not me ({localSteamId}) — skipping");
+                return true;
+            }
+            SubmitTeamReport(payload);
             return true;
         }
 
@@ -5712,17 +6134,35 @@ namespace CompetitiveRounds
         {
             try
             {
-                // Bug #101: a first-time user earned Instinct from PUBLIC
-                // QUICKPLAY despite scrolling — both violation detectors
-                // (Plugin's RPCA_SetCurrentSelected + pick postfixes) are
-                // gated on IsCompetitiveRoom, so outside competitive rooms
-                // the "untouched" flags can only ever look clean. The same
-                // asymmetry applies to every input-tracked achievement
-                // (Pacifist/Immovable/Grounded). Achievements are SCR feats:
-                // evaluate them only where the tracking actually runs.
-                if (!CompetitiveRoomDetect.IsCompetitiveRoom())
+                // Bug #101 was real but its remedy was far too broad, and the
+                // comment that justified the width was FALSE (#351). The
+                // accurate asymmetry: only INSTINCT's violation detectors are
+                // gated on IsCompetitiveRoom (Plugin.cs's
+                // CardChoiceVisuals_SetSelected patch + the
+                // RPCA_SetCurrentSelected postfix), so only Instinct's
+                // "untouched" flag can look falsely clean outside a
+                // mod-issued room. Every OTHER tracker — achTookDamage,
+                // achDied, achFiredShot, achMoved, achJumped, achWasDown04,
+                // abyssalRoundsActivated, the card capture, and the live gun
+                // read — is ungated and correct in every room. The old blanket
+                // gate therefore threw away 86% of all 1v1 games and 48% of
+                // RATED ones (30-day production figures), because
+                // IsCompetitiveRoom only accepts the mod's own room-name
+                // prefixes and the majority of play happens in 6-character
+                // room codes and public quickplay (#286).
+                //
+                // Bug 209 is the proof: Stan won 5-4 in public quickplay with
+                // Shields Up + Combine + Quick Reload — 1 max ammo, ~0.6s
+                // reload, a genuine God Build — and his log shows
+                // "[ACH] Skipping" seven times that evening while the
+                // qualifier's own diagnostic line never printed once.
+                //
+                // What this gate actually needs to exclude is sandbox/offline,
+                // not "rooms we did not name". OfflineMode must be explicit:
+                // it leaves InRoom true at the menu (#122).
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode || RoomActors.LocalIsSpectator)
                 {
-                    Plugin.Log.LogInfo("[ACH] Skipping — not a competitive room (public/sandbox games award nothing)");
+                    Plugin.Log.LogInfo("[ACH] Skipping — not a live online game (offline/sandbox/spectator award nothing)");
                     return;
                 }
                 int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
@@ -5835,10 +6275,21 @@ namespace CompetitiveRounds
                 // every pick without ever scrolling the selection. Violation flag
                 // is set by the RPCA_SetCurrentSelected postfix; require at least
                 // 3 picks so a 1-pick stomp doesn't hand it out.
+                // THE one achievement that genuinely needs the competitive-room
+                // gate (bug #101): its violation detectors are themselves
+                // gated, so outside a mod-issued room achLeftmostViolated can
+                // only ever look clean and Instinct would be handed out for
+                // free. Keeping the narrow check HERE is what let the blanket
+                // gate above be removed without reopening #101.
                 if (localWon && !achLeftmostViolated && pickCountThisMatch >= 3)
                 {
-                    Plugin.Log.LogInfo($"[ACH] Evaluating: Instinct — PASSED ({pickCountThisMatch} untouched picks)");
-                    ApiClient.UnlockAchievement(steamId, "instinct");
+                    if (!CompetitiveRoomDetect.IsCompetitiveRoom())
+                        Plugin.Log.LogInfo("[ACH] Instinct skipped — scroll detection only runs in mod-issued rooms");
+                    else
+                    {
+                        Plugin.Log.LogInfo($"[ACH] Evaluating: Instinct — PASSED ({pickCountThisMatch} untouched picks)");
+                        ApiClient.UnlockAchievement(steamId, "instinct");
+                    }
                 }
                 // July 21 (Instinct verify): re-arm for the NEXT game of the sitting.
                 // ResetMatchState only runs on room-leave, so a game-1 scroll used to

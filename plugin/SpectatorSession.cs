@@ -98,7 +98,22 @@ namespace CompetitiveRounds
         internal static string[] WatchedTitles { get; private set; } = new string[0];
         internal static string[] WatchedRatings { get; private set; } = new string[0];
 
-        internal static void SetWatchedMeta(string rosterCsv, string namesCsv, string titlesPsv, string ratingsCsv)
+        /// <summary>Per-title colours, roster-aligned, pipe-joined exactly like
+        /// WatchedTitles. Aug 12 item 9b: the HUD rendered every title in one
+        /// hardcoded ochre because the games-list entry carried the title TEXT
+        /// and not its colour — every other title surface in the mod renders
+        /// `[Title]` in the title's own colour. Optional on the wire: unless the
+        /// array arrives roster-aligned it is dropped entirely (see
+        /// SetWatchedMeta), so a client running ahead of the server field
+        /// renders exactly as before instead of breaking.</summary>
+        internal static string[] WatchedTitleColors { get; private set; } = new string[0];
+
+        /// <summary>NO DEFAULT on titleColorsPsv, deliberately: it shipped as an
+        /// optional parameter, the one caller kept passing four arguments, and
+        /// the whole colour feature was a silent no-op that still compiled.
+        /// Required, so omitting it is a build error instead.</summary>
+        internal static void SetWatchedMeta(string rosterCsv, string namesCsv, string titlesPsv,
+                                            string ratingsCsv, string titleColorsPsv)
         {
             try
             {
@@ -106,6 +121,15 @@ namespace CompetitiveRounds
                 WatchedNames = (namesCsv ?? "").Split(new[] { ", " }, StringSplitOptions.None);
                 WatchedTitles = (titlesPsv ?? "").Split('|');
                 WatchedRatings = (ratingsCsv ?? "").Split(',');
+                // Colours are positional, so a length that does not match the
+                // roster is not a partial array to index into — it is an array
+                // whose positions mean something else. Dropping it lands every
+                // title on the grey fallback (what a server without the field
+                // already gives); keeping it would paint one fighter's title
+                // in another fighter's colour. Covers both the older-server
+                // case (field absent) and a stray '|' inside a colour.
+                var tc = (titleColorsPsv ?? "").Split('|');
+                WatchedTitleColors = tc.Length == WatchedRoster.Length ? tc : new string[0];
             }
             catch { }
         }
@@ -207,6 +231,7 @@ namespace CompetitiveRounds
             WatchedNames = new string[0];
             WatchedTitles = new string[0];
             WatchedRatings = new string[0];
+            WatchedTitleColors = new string[0];
             _pendingPropClear = true;
             TickPendingClear();
             try { RoomActors.Reset(); } catch { }

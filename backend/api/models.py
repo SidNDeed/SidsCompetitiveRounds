@@ -280,6 +280,18 @@ class Match(Base):
     p2_deaths_boundary = Column(SmallInteger, nullable=True)
     p1_deaths_own_bullet = Column(SmallInteger, nullable=True)
     p2_deaths_own_bullet = Column(SmallInteger, nullable=True)
+    # Aug 12 item 1 (migration 216) — each side's END-OF-GAME BUILD: the 21
+    # hold-Tab stats as one validated numeric string (format documented at
+    # schemas.PlayerMatchData.end_stats). NULL = not recorded, never a build of
+    # zeroes (#257). Same p1/p2 orientation as every column above.
+    #
+    # DEPLOY ORDER: declaring these here puts them in SQLAlchemy's INSERT for
+    # every 1v1 match, so migration 216 MUST be applied before this code is
+    # live or every match report fails. Declaring them is nonetheless the
+    # correct call — an ORM assignment to an UNDECLARED column is a silent
+    # no-op that emits no SQL and raises nothing (#346).
+    p1_end_stats = Column(Text, nullable=True)
+    p2_end_stats = Column(Text, nullable=True)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -752,6 +764,24 @@ class TournamentMatch(Base):
     # migration may have NULL (server falls back to deriving from id
     # at activation time for those, kept for compat).
     photon_room_name = Column(String(64), nullable=True)
+    # Aug 13 (migration 219) — PER-MATCH Photon region for SYNC tournaments.
+    # A bracket re-pairs every round, so one tournament-wide region provably
+    # cannot serve every pair (a EU/EU final under a us-locked tournament is a
+    # permanent ~110ms tax). Resolved once, at activation, in the same
+    # statement block that assigns photon_room_name, and IMMUTABLE from then
+    # on: a recompute after one client has already dispatched puts the two
+    # clients in different rooms, which is a DOUBLE no-show forfeit.
+    # NULL means "no per-match answer" and readers fall back to
+    # tournaments.photon_region — which is also exactly what async writes,
+    # because async no longer pins a region at all (it binds by player pair
+    # from any room, main.py:744).
+    #
+    # DEPLOY ORDER: declaring this here puts it in SQLAlchemy's INSERT for
+    # every bracket row, so migration 219 MUST be applied before this code is
+    # live or bracket construction fails. Declaring it is nonetheless the
+    # correct call — an ORM assignment to an UNDECLARED column is a silent
+    # no-op that emits no SQL and raises nothing (#346).
+    photon_region = Column(String(16), nullable=True)
 
     __table_args__ = (UniqueConstraint("tournament_id", "round", "bracket_side", "slot_idx"),)
 
@@ -881,6 +911,14 @@ class TeamMatch(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
     invalidation_reason = Column(String(64), nullable=True)
+    # Aug 12 item 1 (migration 216) — per-slot END-OF-GAME BUILD, format
+    # documented at schemas.PlayerMatchData.end_stats. NULL = not recorded
+    # (#257). Same deploy-order constraint as Match.p*_end_stats: migration
+    # before deploy, or every 2v2 report fails on the missing columns.
+    t1a_end_stats = Column(Text, nullable=True)
+    t1b_end_stats = Column(Text, nullable=True)
+    t2a_end_stats = Column(Text, nullable=True)
+    t2b_end_stats = Column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("photon_room_id", "t1a_id", "t1b_id", "t2a_id", "t2b_id", name="uq_team_match"),

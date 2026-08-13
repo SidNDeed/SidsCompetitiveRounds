@@ -29,12 +29,35 @@ class CardOfferEntry(BaseModel):
     was_picked: bool = False
 
 
+# End-of-game BUILD STATS wire format (migration 216). One fixed-shape string
+# per player, numbers only — the client renders the labels from its own
+# localised catalogue, so nothing user-authored ever crosses this field:
+#
+#   1|hp|maxhp|dmg|aspd|reload|ammo|bullets|bursts|bounces|bspd|slow|knock|
+#    spread|lifesteal|blockcd|blocks|regen|movespd|jump|jumps|size
+#
+# 22 pipe-separated fields; field 0 is the literal format version "1"; fields
+# 1..21 are each a decimal (optionally negative, <= 3 decimal places) or "-"
+# for unavailable. Structural max is 274 chars — the bound below is slack, and
+# the ANCHORED regex in main.py (_clean_end_stats / _END_STATS_RE) is the real
+# authority: anything that does not match is stored as NULL rather than
+# failing the report. ADVISORY — outside every frozen HMAC canonical
+# (1v1 7-field, 1v2 10-field, 2v2 11-field, FFA "ffa:"-tagged); none of those
+# strings change for this field (hard rule #5).
+END_STATS_MAX_LEN = 300
+
+
 class PlayerMatchData(BaseModel):
     """Data about one player in a match report."""
     steam_id: str = Field(..., max_length=20, examples=["76561198012345678"])
     display_name: str = Field(..., max_length=64, examples=["PlayerOne"])
     cards: list[CardPick] = Field(default_factory=list)
     card_offers: list[CardOfferEntry] = Field(default_factory=list)
+    # Optional: absent from every client that predates the feature, and those
+    # reports must still record normally. NULL is "not recorded", never a build
+    # of zeroes (#257). Shared by 1v1, 2v2 and 1v2 — the slot this object sits
+    # in already carries the seat, so no viewer-orientation mapping is needed.
+    end_stats: str | None = Field(None, max_length=END_STATS_MAX_LEN)
 
 
 class MatchReport(BaseModel):
@@ -341,12 +364,41 @@ class PlayerStatsResponse(BaseModel):
     # changes (learnings #25 / #73). Defaults are the zero-data shape — a fresh
     # account (or the deploy-order window before migration 191) renders these
     # as "no data", never 500s.
-    # Casual rage-quit. Denominator is the UNION of casual games the player
-    # took part in: recorded casual matches PLUS disconnect events whose room
-    # produced no match row. (It is deliberately NOT matches + dc_count —
-    # a leave at 4-0 is BOTH, and counting it twice halved the rate.)
+    # ── "Rage Quit %" — RE-ORIENTED Aug 12 (item 12) ──────────────────────
+    # It now measures HOW OFTEN THIS PLAYER'S QUICKPLAY OPPONENTS QUIT ON
+    # THEM, which is what it was always meant to be. It used to measure how
+    # often the player abandoned their OWN casual games — a shame stat about
+    # the leaver, which is not what the name promises and not what anyone
+    # wanted to read on their own profile. The NAME is unchanged (owner
+    # decision); the number and every description are not.
+    #
+    #   numerator   = casual_dc_events where THIS player is the REPORTER
+    #                 (i.e. they were the one left behind)
+    #   denominator = their recorded casual 1v1 matches
+    #                 + their reporter-side DC events whose own game produced
+    #                   no match row
+    #
+    # The denominator is a UNION, not a sum: a leave at 4-0 is BOTH a recorded
+    # casual match AND a DC event, and counting it twice halves the rate.
+    # The two tables identify a room DIFFERENTLY (raw Photon name vs the
+    # suffixed report id), so the union is computed by prefix + report ordering
+    # in get_player_stats — that note is the authority, not this summary.
+    #
+    # This works against completely unmodded opponents — the casual DC branch
+    # has no has-mod gate and resolves the leaver from ROUNDS' own vanilla
+    # `u_id` player property, so a vanilla quickplay peer is fully attributable.
     casual_rage_quit_pct: float = 0.0
+    # The percentage's OWN numerator: opponents who quit on this player.
+    # Paired with casual_rage_quit_pct on every surface, so it must move with
+    # it — a client rendering "3% (n/N)" needs n to be this number.
     casual_dc_count: int = 0
+    # Same value under an unambiguous name. New clients should bind here;
+    # casual_dc_count is kept in step for clients that predate the re-orientation.
+    casual_opponent_dc_count: int = 0
+    # The OLD number, preserved and renamed: casual games THIS player
+    # abandoned (players.casual_dc_count). Neither the column nor its data was
+    # touched — only what the headline percentage is computed from.
+    casual_own_dc_count: int = 0
     casual_matches: int = 0
     # Damage-per-second over matches that CARRY damage telemetry (#257 —
     # pre-telemetry rows are excluded from both numerator and denominator).
@@ -367,6 +419,42 @@ class PlayerStatsResponse(BaseModel):
     ranked_unique_opponents: int = 0
     ranked_total_series: int = 0
     ranked_uniqueness_pct: float = 0.0
+    # ── Aug 12 item 2 — multi-mode ratings + numeric standings ────────────
+    # All FLAT scalars, so the mod's JsonUtility parse picks them up with zero
+    # parser changes (#25 / #73).
+    #
+    # Every standing is COMPETITION-STYLE (1 + how many eligible players are
+    # strictly ahead) computed with the SAME eligibility filter and ordering
+    # its board actually uses AS CALLED (#153) — not the endpoint's parameter
+    # defaults — so the number agrees with the row the player sees. Two players
+    # on identical values share a standing; the board's own ROW_NUMBER breaks
+    # such a tie arbitrarily, so the shared number is the honest one.
+    #
+    # standing = 0 means NOT ON THAT BOARD (no games, below the entry floor, or
+    # a deleted row) — it is never a real position. *_standing_population is
+    # that board's total eligible population, i.e. the "of N" half of "#7 of N".
+    standing: int = 0
+    standing_population: int = 0
+    # 2v2. team_rating / team_completed_series already existed above.
+    team_rating_deviation: float = 0.0
+    team_peak_rating: float = 0.0
+    team_standing: int = 0
+    team_standing_population: int = 0
+    # FFA. peak_rating IS maintained server-side (GREATEST on every rated
+    # game) but was returned by no endpoint until now.
+    ffa_rating: float = 0.0
+    ffa_rating_deviation: float = 0.0
+    ffa_peak_rating: float = 0.0
+    ffa_standing: int = 0
+    ffa_standing_population: int = 0
+    # 1v2 has NO RATING — glicko_ratings_1v2's rating columns are never
+    # written by anything, so there is no rating, RD or peak to return and one
+    # must not be invented. The 1v2 record is W/L only (ovt_solo_wins /
+    # ovt_solo_losses / ovt_duo_wins / ovt_duo_losses above); the standing
+    # below is that board's own ordering — games played, then win rate — over
+    # the COMBINED role, which is the role the board opens on.
+    ovt_standing: int = 0
+    ovt_standing_population: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -494,6 +582,13 @@ class MatchHistoryEntry(BaseModel):
     opp_deaths: int | None = None
     opp_deaths_boundary: int | None = None
     opp_deaths_own_bullet: int | None = None
+    # Migration 216 — each side's END-OF-GAME BUILD (the 21 hold-Tab stats),
+    # viewer-relative like the columns above. Format documented at
+    # PlayerMatchData.end_stats. None on every pre-216 row and on any row whose
+    # reporter predates the field: the client must render "no data", never a
+    # build of zeroes (#257).
+    player_end_stats: str | None = None
+    opp_end_stats: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -957,6 +1052,9 @@ class Team2v2LeaderboardEntry(BaseModel):
     display_name: str
     rating: int
     rd: int
+    # Aug 12 item 2: peak was only reachable through /team/team-stats.
+    # Falls back to the current rating when the stored peak is NULL.
+    peak_rating: int = 0
     completed_series: int
     series_wins: int
     series_losses: int
@@ -1151,6 +1249,10 @@ class FfaPlayerEntry(BaseModel):
     # best-effort and bounded.
     card_offers: list[CardOfferEntry] = Field(default_factory=list, max_length=1024)
     telemetry: TeamPlayerTelemetry | None = None
+    # End-of-game build stats (migration 216) — see PlayerMatchData.end_stats
+    # for the format. FFA does not use PlayerMatchData, so the field is
+    # declared here too. Outside the frozen "ffa:"-tagged HMAC canonical.
+    end_stats: str | None = Field(None, max_length=END_STATS_MAX_LEN)
 
 
 class FfaMatchReport(BaseModel):
@@ -1199,6 +1301,11 @@ class FfaLeaderboardEntry(BaseModel):
     display_name: str
     rating: int
     rd: int
+    # Aug 12 item 2: glicko_ratings_ffa.peak_rating has been maintained on
+    # every rated game since FFA shipped but was returned by no endpoint.
+    # Defaults to the entry's current rating server-side when the stored peak
+    # is NULL, so it is never lower than what the row already shows.
+    peak_rating: int = 0
     games_played: int
     wins: int                   # 1st places
     top3: int

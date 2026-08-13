@@ -113,6 +113,14 @@ TROPHY_ROLE_PART = os.getenv("TROPHY_ROLE_PARTICIPANT", "SCR Tournament Particip
 TROPHY_ROLE_PART2 = os.getenv("TROPHY_ROLE_PARTICIPANT2", "SCR Tournament Participant 2")
 TROPHY_X2_SUFFIX = " (x2)"
 
+# Per-match deadline for ASYNC tournaments, in days. Must stay in lockstep
+# with tournaments.py's ASYNC_MATCH_DEADLINE_DAYS — the server owns the real
+# value; this is only for prose written before any match row exists (the lock
+# DM fires on the voting->locked transition, and round-1 matches don't get
+# their deadline_at until the tick activates them on a later pass). Anywhere a
+# concrete match IS in hand, render m["deadline_at"] instead of this number.
+ASYNC_DEADLINE_DAYS = 7
+
 # July 28 rank reorganization (Stan's proposal): base-tier floors move to
 # Intermediate 1500 / Advanced 1675 / Master 1980 (GM stays 2330), sub-tiers
 # widen toward the bottom, and tier I is spelled out on every rank. Must stay
@@ -1133,8 +1141,10 @@ FAQ_ENTRIES = [
                    "start time you can make; it locks once **8+ players agree on one time** and at that time you "
                    "just **have ROUNDS open** — the mod auto-connects every bracket match, with a short "
                    "skippable breather between your matches.\n"
-                   "• **Async** (~every 6 weeks): one week per round with a 7-day deadline per match — you schedule "
-                   "each match with your opponent on Discord whenever suits you both.\n"
+                   "• **Async** (~every 6 weeks): one round per week, 7-day deadline per match — nothing to be "
+                   "online for. You agree a time with your opponent on Discord (`/dm-opponent`), then play a "
+                   "normal private lobby together and it records automatically; no room code from the bracket, "
+                   "no Ready Up.\n"
                    "**Prizes scale with signups**: at 8 players 1st gets 1000g/5000xp, growing to double at 16. "
                    "The final sync time locks in **2 days before the default start** (so you always get 24h+ "
                    "notice), and you'll get an availability-check DM 1-4 days before that lock (link your "
@@ -1412,6 +1422,16 @@ FAQ_ENTRIES = [
                    "keeps its score.\n"
                    "• The series isn't lost: **rematch the same player and it resumes** where it left off, no "
                    "matter how much later — unfinished series never expire.\n"
+                   # Item 12: the leaderboard's Leave % (the bullet above) and the Compare tab's
+                   # Rage Quit % are two different numbers pointed in OPPOSITE directions, and
+                   # this entry — the one the bare `rage ?quit` pattern lands on — described only
+                   # the first. Rage Quit % counts the games your OPPONENT walked out of; the
+                   # denominator wording stays deliberately loose ("your casual games") because
+                   # the exact set is the server's to define, and only the orientation is the
+                   # thing players get wrong.
+                   "• **Rage Quit %** (F5 → Compare tab) is a different, casual-only number: it tracks how "
+                   "often your **casual/quickplay opponents quit on you**, not how often you leave. The "
+                   "leaderboard's **Leave %** is the ranked one above — your own ranked-series DCs.\n"
                    "• In 2v2, leaving can immediately forfeit the series when the other team was already up a "
                    "game and the abandoned game had meaningful play. Other 2v2 DCs are marked incomplete for "
                    "an admin to award or void; they do not silently become a loss.\n"
@@ -3913,6 +3933,48 @@ def _pair_is_v2(s):
     return (s or "").startswith("v2|")
 
 
+# Half points per full point. FfaMode.PointsToWinRound (plugin/FfaMode.cs) is
+# `public const int PointsToWinRound = 2;` carrying an explicit "not
+# configurable" note beside the host knobs — RoundsToWin/CardCap/etc. are
+# per-lobby, this one is not — so mirroring it as a literal here cannot drift
+# with a lobby's settings.
+_FFA_HALVES_PER_POINT = 2
+
+
+def _ffa_score_parts(p):
+    """(points, unconverted_half_points, kills) for one FFA player row — the
+    same decomposition the in-game history renders (plugin/NativeUI.cs:2650):
+    `points = max(0, rounds_won)` then `leftover = max(0, points_total -
+    points * 2)`. Both clamps are mirrored below, in that order.
+
+    Bug 215: the series-log post showed `rounds_won` and kills only, so the
+    half points were invisible in Discord while the game showed them.
+    `points_total` is not itself that term — it is the CUMULATIVE count of
+    every half point the player ever won in the game, including the ones
+    already spent converting into the full points printed beside it, so
+    printing it raw double-counts (5 points is already 10 spent halves).
+
+    What the remainder actually means is worth stating exactly, because it is
+    NOT "the half point they were holding at game over" and is routinely far
+    larger than 1 (production max 9, verified over all 536 recorded rows).
+    FfaMode awards a half to the last player alive and, on the SECOND half,
+    converts it to a point and calls `points.Clear()` — which clears the whole
+    dictionary, wiping every OTHER player's live half too. `pointsTotal` never
+    resets. So the remainder is every half a player won that never became a
+    point, most of them burned by somebody else converting first. That is
+    precisely the number the game's `(H)` cell shows (its
+    8-dot cap only limits the DOTS; the numeric cell prints the full value),
+    so mirroring the formula keeps the two surfaces identical.
+
+    Clamped at 0 like the client so a partial/legacy row degrades to 0 rather
+    than a negative. Both feeds carry the fields: /ffa/recent and
+    /matches/by-code each select fmp.rounds_won, fmp.points_total, fmp.kills.
+    """
+    points = max(0, int(p.get("rounds_won") or 0))
+    halves = max(0, int(p.get("points_total") or 0) - points * _FFA_HALVES_PER_POINT)
+    return points, halves, max(0, int(p.get("kills") or 0))
+
+
 def _ffa_point_series(timeline, players):
     """Port of ParseFfaTimeline (plugin/NativeUI.cs) for the /game PNG.
 
@@ -4385,10 +4447,16 @@ async def cmd_game(ctx, code: str):
             head += f"  ({p.get('side')})"
         lines = []
         if mode == "ffa":
+            # Bug 215: this said `{points_total} half-pts`, the cumulative
+            # count INCLUDING the halves already spent on the points printed
+            # right beside it — "5 pts · 11 half-pts" for a player with one
+            # stray half. _ffa_score_parts gives the unconverted remainder,
+            # matching the in-game row and the series-log post.
+            _pts, _halves, _kills = _ffa_score_parts(p)
             result_bits = [
-                f"{p.get('rounds_won', 0)} pts",
-                f"{p.get('points_total', 0)} half-pts",
-                f"{p.get('kills', 0)} kills",
+                f"{_pts} pts",
+                f"{_halves} half-pt" + ("" if _halves == 1 else "s"),
+                f"{_kills} kills",
             ]
             if p.get("damage_dealt") is not None:
                 result_bits.append(f"{p.get('damage_dealt')} damage dealt")
@@ -4861,8 +4929,15 @@ async def log_ffa_match_result(guild, m):
         left = " *(left)*" if p.get("left_early") else ""
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(p.get("placement", 0), f"#{p.get('placement', '?')}")
         nm = discord.utils.escape_markdown(str(p.get("display_name") or p.get("steam_id")))
-        lines.append(f"{medal} **{nm}** — {p.get('rounds_won', 0)}pt "
-                     f"{p.get('kills', 0)}k{ba_s}{rc_s}{left}")
+        # Bug 215 (Sid): points AND unconverted half points, in the game's own
+        # "N(P) N(H)" tokens, so this post and the F5 history row read
+        # identically. Rendered even at 0 because the in-game (H) cell always
+        # is — suppressing it here would reintroduce the mismatch this fixes,
+        # and 0 is a real score (the columns are NOT NULL DEFAULT 0, so there
+        # is no "unrecorded" case to distinguish it from).
+        _pts, _halves, _kills = _ffa_score_parts(p)
+        lines.append(f"{medal} **{nm}** — {_pts}(P) {_halves}(H) "
+                     f"{_kills}k{ba_s}{rc_s}{left}")
     embed = discord.Embed(title=f"🎯 Ranked FFA Complete — {n} players",
                           color=discord.Color.purple())
     embed.description = "\n".join(lines[:12]) or "(no players?)"
@@ -6425,6 +6500,26 @@ def _fmt_pt(iso_str):
         return iso_str
 
 
+def _fmt_pt_rel(iso_str):
+    """Absolute timestamp plus Discord's RELATIVE form: '<t:U:F> (<t:U:R>)'.
+
+    Use this wherever the surrounding prose would otherwise commit to a tense.
+    A DM is composed once and read whenever the player opens Discord, so a
+    sentence like "it starts <absolute>" is a claim about the future that the
+    message itself cannot keep — an admin force-lock schedules the start ~10
+    minutes out, and the poll that sends the DM runs on a 30s tick. The :R
+    form is rendered client-side at read time ("in 2 days" / "5 minutes ago"),
+    so it is correct however late the message is read; pair it with a tenseless
+    label ("Start time:") rather than a verb."""
+    if not iso_str:
+        return "(TBD)"
+    try:
+        u = int(datetime.fromisoformat(iso_str.replace("Z", "+00:00")).timestamp())
+        return f"<t:{u}:F> (<t:{u}:R>)"
+    except Exception:
+        return iso_str
+
+
 async def _promote_role(member, base_name, x2_name):
     """Grant base_name on first placement; on repeat placements, swap base -> x2.
     Idempotent: if member already has x2_name, nothing changes."""
@@ -6517,7 +6612,7 @@ async def poll_tournaments():
         if prev is None and status == "voting":
             if kind == "async":
                 await _announce_in_channel(
-                    f"**Async tournament signups open.** Double-elim BO3, 7-day match deadlines, self-paced. "
+                    f"**Async tournament signups open.** Double-elim BO3, {ASYNC_DEADLINE_DAYS}-day match deadlines, self-paced. "
                     f"Signups close {_fmt_pt(t['lock_at'])}. Sign up in-game via the Tournaments → ASYNC tab."
                 )
             else:
@@ -6526,40 +6621,93 @@ async def poll_tournaments():
                     f"Vote on alternate times or sign up in-game via the Tournaments tab. "
                     f"Signups close {_fmt_pt(t['lock_at'])}."
                 )
-        # voting -> locked -> DM every signup their seed + scheduled start
+        # voting -> locked -> DM every signup what actually happens next.
+        #
+        # This MUST branch on kind. Until Aug 2026 it did not, and every async
+        # signup was sent the sync body ("have ROUNDS open at that time", "the
+        # mod connects you automatically each round", "a couple of hours",
+        # "10 min grace") with a contradicting async line stapled underneath.
+        # Async has no start instant, no auto-connect, no grace window: the
+        # server creates the ranked_series row at bracket activation and binds
+        # the result by PLAYER PAIR, accepting the match from ANY room
+        # (main.py:744 skips the sct- prefix requirement for kind != 'sync').
+        # So the true async instruction is "agree a time between yourselves and
+        # play a private lobby" — nothing else.
         if prev == "voting" and status == "locked":
-            scheduled = _fmt_pt(t.get("scheduled_start_ts"))
+            confirmed = [s for s in t["signups"] if not s["is_speculative"]]
             latest_ver = payload.get("latest_mod_version")
-            await _announce_in_channel(
-                f"**Tournament locked.** {len([s for s in t['signups'] if not s['is_speculative']])} players confirmed. "
-                f"Starts {scheduled}. Bracket visible in-game."
-            )
+            if kind == "async":
+                await _announce_in_channel(
+                    f"**Async tournament locked.** {len(confirmed)} players confirmed. "
+                    f"Bracket is live in-game — each match has a "
+                    f"{ASYNC_DEADLINE_DAYS}-day deadline, play it whenever both players can."
+                )
+            else:
+                await _announce_in_channel(
+                    f"**Tournament locked.** {len(confirmed)} players confirmed. "
+                    f"Start time: {_fmt_pt_rel(t.get('scheduled_start_ts'))}. Bracket visible in-game."
+                )
             # Individual DMs. Wording matters (item 3): since v1.24 the mod
             # heartbeats automatically while ROUNDS is running — players do NOT
             # need to sit in the Tournaments tab. What actually matters is
-            # having the game open at start time. Outdated clients get an
-            # explicit extra warning: an old mod is version-gated by the API,
-            # can't heartbeat, and would silently no-show-forfeit.
+            # having the game open at start time (SYNC only).
+            #
+            # Outdated clients get an extra warning on both kinds, and it stays
+            # HEDGED on purpose. The trigger below is `sv != latest_ver`, but
+            # the thing that actually breaks a player is being below
+            # MIN_MOD_VERSION — every /api/v1 call is version-gated to 426
+            # (main.py), which stops a sync heartbeat and an async match report
+            # alike. One patch behind latest is usually still above the floor
+            # and works fine, and /internal/watch only ships latest_mod_version,
+            # so this loop cannot tell the two apart: say "if it's below the
+            # minimum", never "the server rejects you".
             for s in t.get("signups", []):
                 if s.get("is_speculative"):
                     continue
-                body = (f"Tournament locked — you're in! It starts **{scheduled}**.\n"
-                        f"**All you need to do: have ROUNDS open (main menu) at that time.** "
-                        f"The mod connects you to your opponent automatically each round, with a "
-                        f"short breather between your matches (skippable when both players press "
-                        f"Play Now). Plan to be around for **a couple of hours** — double-elim "
-                        f"BO3s take a while. If ROUNDS isn't running when a match of yours starts "
-                        f"(10 min grace), you forfeit that match.")
+                if kind == "async":
+                    body = (f"Async tournament locked — you're in! **There is no start time to "
+                            f"be present for.**\n"
+                            f"Each match gets its own deadline (**{ASYNC_DEADLINE_DAYS} days** per "
+                            f"round) and you play it whenever both of you can:\n"
+                            f"1. You'll get a DM with your opponent and the exact deadline as "
+                            f"soon as each of your matches is paired (a first-round bye just "
+                            f"means you wait for round 2).\n"
+                            f"2. Agree a time with them — `/dm-opponent <message>` here, or just "
+                            f"message them on Discord.\n"
+                            f"3. At that time, **play a normal private lobby together** (main menu "
+                            f"→ Online → Host Room, send the 6-character code to your opponent). "
+                            f"The result counts automatically — no room code from the bracket, no "
+                            f"Ready Up, nothing to press in the Tournaments tab.\n"
+                            f"Both of you need SCR running with **Ranked enabled** for the match to "
+                            f"record. Miss the deadline and you forfeit that match.")
+                else:
+                    body = (f"Tournament locked — you're in! **Start time: "
+                            f"{_fmt_pt_rel(t.get('scheduled_start_ts'))}.**\n"
+                            f"**All you need to do: have ROUNDS open (main menu) at that time.** "
+                            f"The mod connects you to your opponent automatically each round, with a "
+                            f"short breather between your matches (skippable when both players press "
+                            f"Play Now). Plan to be around for **a couple of hours** — double-elim "
+                            f"BO3s take a while. If ROUNDS isn't running when a match of yours starts "
+                            f"(10 min grace), you forfeit that match.")
                 sv = s.get("mod_version")
                 if latest_ver and sv and sv != latest_ver:
+                    tail = ("your match results wouldn't record." if kind == "async"
+                            else "the mod can't connect you and you'd no-show-forfeit.")
                     body += (f"\n⚠️ **Your mod is v{sv}, latest is v{latest_ver}.** "
-                             f"Update before the tournament (launch ROUNDS, quit, launch again) — "
-                             f"an outdated mod may not be able to connect.")
+                             f"Update before you play (launch ROUNDS, quit, launch again) — "
+                             f"if your version is below the server's minimum, {tail}")
                 await _dm_user(s.get("discord_id"), body)
                 await asyncio.sleep(0.1)
         # locked: pre-start reminder DM ~15 min out (item 3 — "players not
-        # knowing they have a tournament"). Once per tournament.
-        if status == "locked" and tid not in _notified_prestart and t.get("scheduled_start_ts"):
+        # knowing they have a tournament"). Once per tournament. SYNC ONLY:
+        # every line here ("get ROUNDS open to the main menu") assumes a start
+        # instant, and async has none — lock_tournament sets an async
+        # scheduled_start_ts to `now` purely so the tick's locked->running
+        # transition fires immediately (tournaments.py:940). Today that value
+        # is already in the past by the time this 30s poll sees it, so the
+        # `0 < mins_out` test happens to exclude async; the explicit kind gate
+        # is what keeps it excluded if that timing ever changes.
+        if kind != "async" and status == "locked" and tid not in _notified_prestart and t.get("scheduled_start_ts"):
             try:
                 from datetime import datetime as _dt
                 st = _dt.fromisoformat(t["scheduled_start_ts"].replace("Z", "+00:00"))
@@ -6576,9 +6724,18 @@ async def poll_tournaments():
                         await asyncio.sleep(0.1)
             except Exception as e:
                 print(f"[TOURNAMENT-POLL] prestart parse: {e}")
-        # locked -> running -> channel announce
+        # locked -> running -> channel announce. "Round 1 is live" reads as
+        # "being played right now" for sync; for async it only means the round-1
+        # pairings exist and their deadlines have started counting.
         if prev == "locked" and status == "running":
-            await _announce_in_channel("**Tournament started.** Round 1 is live.")
+            if kind == "async":
+                await _announce_in_channel(
+                    f"**Async tournament started.** Round 1 pairings are up — each match has "
+                    f"{ASYNC_DEADLINE_DAYS} days. Players: check your DMs for your opponent, "
+                    f"agree a time, and play a private lobby together."
+                )
+            else:
+                await _announce_in_channel("**Tournament started.** Round 1 is live.")
         # Any state: DM players whose match just became scheduled/ready
         if status == "running":
             for m in t.get("matches", []):
@@ -6614,11 +6771,25 @@ async def poll_tournaments():
                 if mid not in _notified_match_ready:
                     _notified_match_ready.add(mid)
                     if kind == "async":
-                        dl_str = _fmt_pt(m.get("deadline_at"))
-                        await _dm_user(p1d, f"Your async tournament match vs **{p2n}** is live. Deadline to play: {dl_str}. "
-                                             f"Coordinate via `/dm-opponent` or Discord. Use the Tournaments → ASYNC tab in-game to see the bracket + room code.")
-                        await _dm_user(p2d, f"Your async tournament match vs **{p1n}** is live. Deadline to play: {dl_str}. "
-                                             f"Coordinate via `/dm-opponent` or Discord. Use the Tournaments → ASYNC tab in-game to see the bracket + room code.")
+                        # No room code and no Ready Up here: the async match
+                        # binds by player pair from ANY room (main.py:744), so
+                        # a private lobby the two of them make themselves is
+                        # what counts. The bracket panel is a bracket, not a
+                        # thing to press.
+                        dl_str = _fmt_pt_rel(m.get("deadline_at"))
+
+                        def _async_ready_body(opp):
+                            return (f"Your async tournament match vs **{opp}** is live. "
+                                    f"Deadline: {dl_str}.\n"
+                                    f"Agree a time with them (`/dm-opponent <message>` or just DM "
+                                    f"them), then **play a private lobby together** — main menu → "
+                                    f"Online → Host Room, one of you sends the other the "
+                                    f"6-character code. The result records automatically as long "
+                                    f"as you both have SCR running with Ranked enabled. "
+                                    f"Bracket: F5 → Tournaments → ASYNC.")
+
+                        await _dm_user(p1d, _async_ready_body(p2n))
+                        await _dm_user(p2d, _async_ready_body(p1n))
                     else:
                         await _dm_user(p1d, f"🎮 Your tournament match vs **{p2n}** is ready — **get in ROUNDS now**. The mod auto-connects you from the main menu. No-show forfeits in a few minutes.")
                         await _dm_user(p2d, f"🎮 Your tournament match vs **{p1n}** is ready — **get in ROUNDS now**. The mod auto-connects you from the main menu. No-show forfeits in a few minutes.")
@@ -6810,11 +6981,13 @@ async def nag_pending_async_matches():
             p1d, p2d = m.get("p1_discord_id"), m.get("p2_discord_id")
             p1n = m.get("p1_name") or "opponent"
             p2n = m.get("p2_name") or "opponent"
-            dl_str = _fmt_pt(m.get("deadline_at"))
+            dl_str = _fmt_pt_rel(m.get("deadline_at"))
             await _dm_user(p1d, f"**Async match still pending**: vs **{p2n}**. Deadline: {dl_str}. "
-                                 f"Use `/dm-opponent` to coordinate a time.")
+                                 f"Use `/dm-opponent` to agree a time, then just play a private "
+                                 f"lobby together — it records automatically.")
             await _dm_user(p2d, f"**Async match still pending**: vs **{p1n}**. Deadline: {dl_str}. "
-                                 f"Use `/dm-opponent` to coordinate a time.")
+                                 f"Use `/dm-opponent` to agree a time, then just play a private "
+                                 f"lobby together — it records automatically.")
             nagged += 1
             await asyncio.sleep(0.2)
     if nagged:
@@ -6868,10 +7041,11 @@ def _tavail_embed(kind, start_unix, lock_unix):
     if kind == "async":
         lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
         desc = (f"Signups close {lock_str}.\n\n"
-                "Async matches are NOT played at a fixed time — each match has a "
-                "7-day deadline and you schedule each game with your opponent "
-                "whenever suits you both (use `/dm-opponent` to coordinate). "
-                "No specific availability is required.")
+                f"Async matches are NOT played at a fixed time — each match has a "
+                f"{ASYNC_DEADLINE_DAYS}-day deadline and you agree a time with your "
+                f"opponent yourselves (`/dm-opponent` to coordinate), then play a "
+                f"private lobby together and it records automatically. "
+                f"No specific availability is required.")
         return discord.Embed(title="🌀 Async tournament — availability check", description=desc, color=0x5865F2)
     start_str = f"<t:{start_unix}:F>" if start_unix else "(time TBD)"
     lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
@@ -7313,6 +7487,11 @@ def _bracket_progress_lines(t, max_lines=28):
     (defensive .get), else fall back to 'Alice def. Bob' / 'Alice vs Bob'."""
     out = []
     matches = t.get("matches") or []
+    # A 'ready' match means opposite things per kind: sync = the mod is trying
+    # to connect both players RIGHT NOW (minutes), async = the pair have days
+    # to arrange it themselves. Show async its deadline instead of implying an
+    # imminent start.
+    is_async = (t.get("kind") or "sync") == "async"
 
     def keyf(m):
         return (_BRACKET_SIDE_ORDER.get(m.get("bracket_side"), 9),
@@ -7347,7 +7526,12 @@ def _bracket_progress_lines(t, max_lines=28):
         elif st == "active":
             body = f"{p1} vs {p2} — 🎮 in progress"
         elif st == "ready":
-            body = f"{p1} vs {p2} — ⏳ waiting to start"
+            if is_async:
+                _dlu = _unix_ts(m.get("deadline_at"))
+                body = (f"{p1} vs {p2} — ⏳ to be played, due <t:{_dlu}:R>" if _dlu
+                        else f"{p1} vs {p2} — ⏳ to be played")
+            else:
+                body = f"{p1} vs {p2} — ⏳ waiting to start"
         else:
             if p1 == "TBD" and p2 == "TBD":
                 continue  # fully-unresolved future match — noise
@@ -7373,9 +7557,10 @@ _TOURNEY_HOW_IT_WORKS = {
     ),
     "async": (
         "No fixed play time. Sign up in-game (F5 → Tournaments); when signups "
-        "close the bracket starts and each match gets a 7-DAY deadline — you "
-        "schedule each game with your opponent whenever suits you both "
-        "(use `/dm-opponent`). No specific availability needed."
+        f"close the bracket starts and each match gets a {ASYNC_DEADLINE_DAYS}-DAY "
+        "deadline. Agree a time with your opponent (`/dm-opponent` or Discord), "
+        "then play a normal private lobby together — the result records "
+        "automatically. Nothing to be online for, nothing to press."
     ),
 }
 
@@ -7411,9 +7596,16 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
             lines.append("_Start-time voting is open in-game (F5 → Tournaments)._")
         else:
             lines.append(f"Signups close: {_fmt_pt(t.get('lock_at'))} — the bracket starts then; "
-                         f"each match has a 7-day deadline.")
+                         f"each match has a {ASYNC_DEADLINE_DAYS}-day deadline.")
     elif status == "locked":
-        lines.append(f"**Status: Locked** — starts {_fmt_pt(t.get('scheduled_start_ts'))}")
+        # An async lock has no start instant to show: lock_tournament sets
+        # scheduled_start_ts = now purely to make the next tick flip
+        # locked->running (tournaments.py:940), so rendering it as "starts X"
+        # tells players to be somewhere at a time that has already passed.
+        if kind == "sync":
+            lines.append(f"**Status: Locked** — starts {_fmt_pt(t.get('scheduled_start_ts'))}")
+        else:
+            lines.append("**Status: Locked** — bracket generating, round 1 pairings imminent")
         lines.append(f"Players: **{len(signups)}**")
     elif status == "running":
         lines.append("**Status: Running**")
@@ -7465,10 +7657,14 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
     desc = updated + "\n".join(lines)
     # Two embeds share ONE message's 6000-char total budget (Discord counts
     # across all embeds, fields included), so each description gets 2600 —
-    # not the 4096 single-embed cap. 2×2600 desc + 2×(~290-char "How it
-    # works" field + name) + titles ≈ 5.8k, safely under 6000; at 2900 the
-    # fields would have pushed a worst-case edit over the cap and the board
-    # would silently freeze on a 400.
+    # not the 4096 single-embed cap. Worst case, measured rather than
+    # estimated: 2 × 2582 truncated descriptions (2580 + the "\n…" appended
+    # below) + the two "How it works" values (sync 250, async 314) + their
+    # 15-char names + the two titles ≈ 5795, leaving ~200 spare. That margin
+    # is REAL — the async blurb grew by 54 chars in Aug 2026 and ate a fifth
+    # of it. Re-measure before growing either blurb much further, or drop the
+    # description cap in the same edit; overshooting 6000 makes Discord reject
+    # the edit with a 400 and the board silently freezes.
     if len(desc) > 2600:
         desc = desc[:2580] + "\n…"
     color = {"voting": 0x3BA55D, "locked": 0xFAA61A,

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -74,42 +76,82 @@ namespace CompetitiveRounds
             }
         }
 
-        // Stat row description: label + per-player value resolver.
+        // Stat row description: label + the raw numeric read(s) + how the
+        // overlay cell renders them.
+        //
+        // The NUMBERS are the single source of truth: the board renders them
+        // through DisplayCell(), and the match-history capture (CaptureBuildStats
+        // below) serializes the very same expressions. Before the capture
+        // existed each row carried a pre-formatted string, so anything that
+        // wanted the raw value had to re-derive it — which is exactly how the
+        // two drift apart.
+        //
+        //   fmt/suffix reproduce the old inline interpolations byte-for-byte:
+        //     "F0" + ""    -> "12"        (was $"{x:F0}")
+        //     "F2" + "s"   -> "0.75s"     (was $"{x:F2}s")
+        //     "F1" + "/s"  -> "1.5/s"     (was $"{x:F1}/s")
+        //     number2 set  -> "45/100"    (was $"{a:F0}/{b:F0}")
+        //   float.ToString(fmt) resolves the same CurrentCulture the old
+        //   interpolated strings did, so the board's on-screen text is
+        //   unchanged. The WIRE side formats invariantly instead (#47).
         private struct StatRow
         {
             public string label;
-            public Func<Player, string> value;
-            public StatRow(string l, Func<Player, string> v) { label = l; value = v; }
+            public string fmt;                     // display numeric format
+            public string suffix;                  // display-only unit — never on the wire
+            public Func<Player, float> number;     // primary numeric read
+            public Func<Player, float> number2;    // secondary read (HP row only), else null
+            public StatRow(string l, string f, string sfx,
+                           Func<Player, float> n, Func<Player, float> n2 = null)
+            { label = l; fmt = f; suffix = sfx; number = n; number2 = n2; }
         }
 
+        // ── WIRE FORMAT LOCK ────────────────────────────────────────────────
+        // The order of this table IS the stored match-history build string (see
+        // WIRE_V1 below). Inserting, removing or reordering an entry changes the
+        // meaning of every build already persisted on the server, so any such
+        // edit MUST bump BUILD_STATS_WIRE_VERSION and add a new WIRE_Vn table in
+        // the same change — never mutate WIRE_V1, stored rows still decode from
+        // it. WireTableValid() fails closed if the two stop lining up.
         private static readonly StatRow[] ROWS = new[]
         {
             // Clamp at 0 — a dead player's health goes negative internally
             // and "-39/100" on the board reads as a bug (July 28 screenshot).
-            new StatRow("HP",          p => $"{Mathf.Max(0f, p.data.health):F0}/{p.data.MaxHealth:F0}"),
-            new StatRow("Lives",       p => $"{p.data.stats.remainingRespawns + 1:F0}"),
+            new StatRow("HP",          "F0", "",   p => Mathf.Max(0f, p.data.health), p => p.data.MaxHealth),
+            new StatRow("Lives",       "F0", "",   p => p.data.stats.remainingRespawns + 1),
             // Infoholic's damage formula: gun.damage x bulletDamageMultiplier x 55
             // (55 = vanilla base bullet damage).
-            new StatRow("Damage",      p => $"{Gun(p).damage * Gun(p).bulletDamageMultiplier * 55f:F0}"),
-            new StatRow("Attack spd",  p => $"{Gun(p).attackSpeed * Gun(p).attackSpeedMultiplier:F2}s"),
-            new StatRow("Reload",      p => { var ga = Ammo(p); return $"{(ga.reloadTime + ga.reloadTimeAdd) * ga.reloadTimeMultiplier:F2}s"; }),
-            new StatRow("Ammo",        p => $"{Ammo(p).maxAmmo:F0}"),
-            new StatRow("Bullets",     p => $"{Gun(p).numberOfProjectiles:F0}"),
-            new StatRow("Bursts",      p => $"{Gun(p).bursts:F0}"),
-            new StatRow("Bounces",     p => $"{Gun(p).reflects:F0}"),
-            new StatRow("Bullet spd",  p => $"{Gun(p).projectileSpeed:F2}"),
-            new StatRow("Bullet slow", p => $"{Gun(p).slow:F2}"),
-            new StatRow("Knockback",   p => $"{Gun(p).knockback:F2}"),
-            new StatRow("Spread",      p => $"{Gun(p).spread:F2}"),
-            new StatRow("Life steal",  p => $"{p.data.stats.lifeSteal:F2}"),
-            new StatRow("Block CD",    p => $"{p.data.block.Cooldown():F2}s"),
-            new StatRow("Blocks",      p => $"{p.data.block.additionalBlocks + 1:F0}"),
-            new StatRow("Regen",       p => $"{p.data.healthHandler.regeneration:F1}/s"),
-            new StatRow("Move spd",    p => $"{p.data.stats.movementSpeed:F2}"),
-            new StatRow("Jump",        p => $"{p.data.stats.jump:F2}"),
-            new StatRow("Jumps",       p => $"{p.data.stats.numberOfJumps:F0}"),
-            new StatRow("Size",        p => $"{p.data.stats.sizeMultiplier:F2}"),
+            new StatRow("Damage",      "F0", "",   p => Gun(p).damage * Gun(p).bulletDamageMultiplier * 55f),
+            new StatRow("Attack spd",  "F2", "s",  p => Gun(p).attackSpeed * Gun(p).attackSpeedMultiplier),
+            new StatRow("Reload",      "F2", "s",  p => { var ga = Ammo(p); return (ga.reloadTime + ga.reloadTimeAdd) * ga.reloadTimeMultiplier; }),
+            new StatRow("Ammo",        "F0", "",   p => Ammo(p).maxAmmo),
+            new StatRow("Bullets",     "F0", "",   p => Gun(p).numberOfProjectiles),
+            new StatRow("Bursts",      "F0", "",   p => Gun(p).bursts),
+            new StatRow("Bounces",     "F0", "",   p => Gun(p).reflects),
+            new StatRow("Bullet spd",  "F2", "",   p => Gun(p).projectileSpeed),
+            new StatRow("Bullet slow", "F2", "",   p => Gun(p).slow),
+            new StatRow("Knockback",   "F2", "",   p => Gun(p).knockback),
+            new StatRow("Spread",      "F2", "",   p => Gun(p).spread),
+            new StatRow("Life steal",  "F2", "",   p => p.data.stats.lifeSteal),
+            new StatRow("Block CD",    "F2", "s",  p => p.data.block.Cooldown()),
+            new StatRow("Blocks",      "F0", "",   p => p.data.block.additionalBlocks + 1),
+            new StatRow("Regen",       "F1", "/s", p => p.data.healthHandler.regeneration),
+            new StatRow("Move spd",    "F2", "",   p => p.data.stats.movementSpeed),
+            new StatRow("Jump",        "F2", "",   p => p.data.stats.jump),
+            new StatRow("Jumps",       "F0", "",   p => p.data.stats.numberOfJumps),
+            new StatRow("Size",        "F2", "",   p => p.data.stats.sizeMultiplier),
         };
+
+        /// <summary>Renders one board cell from the row's numeric reader(s).
+        /// Throws exactly where the old inline lambdas threw (a null gun, a
+        /// missing GunAmmo) so RefreshSnapshot's per-row catch still yields
+        /// "-" for that cell alone.</summary>
+        private static string DisplayCell(StatRow row, Player p)
+        {
+            float a = row.number(p);
+            if (row.number2 == null) return a.ToString(row.fmt) + row.suffix;
+            return a.ToString(row.fmt) + "/" + row.number2(p).ToString(row.fmt) + row.suffix;
+        }
 
         private static Gun Gun(Player p) => p.data.weaponHandler.gun;
         private static GunAmmo Ammo(Player p) => p.data.weaponHandler.gun.GetComponentInChildren<GunAmmo>(true);
@@ -168,6 +210,366 @@ namespace CompetitiveRounds
             trLabels = labels;
         }
 
+        private static void EnsureLocaleStringsSafe()
+        {
+            // Decode runs off the match-history render path, outside Draw's
+            // blanket catch — a locale/catalogue hiccup must degrade to the
+            // English ROWS labels (LabelFor), never throw at the caller.
+            try { EnsureLocaleStrings(); } catch { }
+        }
+
+        // ══ Build-stat capture (match-history "final build") ═════════════════
+        //
+        // WIRE FORMAT v1 — exactly 22 pipe-separated fields, positional:
+        //   "1|hp|maxhp|dmg|aspd|reload|ammo|bullets|bursts|bounces|bspd|slow|
+        //    knock|spread|lifesteal|blockcd|blocks|regen|movespd|jump|jumps|size"
+        //
+        //  - Leading "1" is the format version.
+        //  - Every value is a plain decimal, InvariantCulture, <=7 integer
+        //    digits and <=3 decimals, trailing zeros trimmed (#47 — a
+        //    Russian/German client must not emit "1,25" into a field the server
+        //    and every other client parse as a number). A value that could not
+        //    be read, or that will not fit that shape, is the literal "-".
+        //  - NO labels and NO localised text cross the wire. Rendering labels
+        //    from the receiver's own catalogue keeps the payload injection-proof
+        //    (nothing player- or locale-authored is stored) and lets an already
+        //    stored build re-render in whatever language the viewer picks.
+        //
+        // WIRE_V1[] is the ONLY thing that maps a field position to a stat: each
+        // entry names the ROWS[] index it reads and which half of that row
+        // (second = the HP row's max). ROWS order therefore IS wire order, and
+        // reordering ROWS without bumping the version silently relabels every
+        // build already stored — hence WireTableValid()'s fail-closed check and
+        // the WIRE FORMAT LOCK banner above ROWS.
+        //
+        // NOTE — the "Lives" row (ROWS[1]) is deliberately absent from v1: the
+        // format was specified as 22 fields without it. To add it later:
+        //   1. add a WIRE_V2 table = WIRE_V1 plus `new WireField(1, false, "lives")`,
+        //   2. add WIRE_V2_TOKEN "2" and point BUILD_STATS_WIRE_VERSION at it,
+        //   3. KEEP WIRE_V1 + its token in WireTableFor and give v2 its own
+        //      row->field maps — every build already stored is a v1 row and has
+        //      to keep rendering.
+        private const string WIRE_V1_TOKEN = "1";
+        /// <summary>Version token this build writes. One token per shipped
+        /// format; capture and WireTableFor both read it, so they can never
+        /// disagree about which table produced a string.</summary>
+        public const string BUILD_STATS_WIRE_VERSION = WIRE_V1_TOKEN;
+        private const string WIRE_MISSING = "-";
+        // Hard per-field length bound, DERIVED FROM THE SERVER'S GRAMMAR —
+        // do not widen one without the other (Codex cold review, finding 5).
+        //
+        // The server validates with an ANCHORED regex
+        // (main.py _END_STATS_RE):  ^1(?:\|(?:-|-?\d{1,7}(?:\.\d{1,3})?)){21}$
+        // so the widest legal numeric field is
+        //     1 sign + 7 integer digits + 1 point + 3 decimals = 12 chars,
+        // and the whole record is bounded at
+        //     1 + 21 * (1 + WIRE_FIELD_MAX) = 274 chars,
+        // comfortably under the server's 300-char column bound
+        // (schemas.END_STATS_MAX_LEN). The two ends now agree by construction
+        // rather than by coincidence.
+        //
+        // Both bounds fail CLOSED and fail SILENTLY on the far side, which is
+        // why the client has to emit exactly the server's shape:
+        //   * a record over 300 chars is dropped whole by ApiClient
+        //     .AppendEndStats (the format is positional, so truncating would
+        //     produce confidently mislabelled history);
+        //   * a record with ONE over-wide field — 8 integer digits, say — does
+        //     not fail that length check at all; the anchored regex simply
+        //     refuses the whole string and the server stores NULL.
+        // Either way the player gets no build recorded and nothing says why.
+        // Clamping here costs one absurd stat one field ("-", which the
+        // grammar already accepts) instead of costing the entire build.
+        private const int WIRE_FIELD_MAX = 12;
+
+        private struct WireField
+        {
+            public readonly int row;      // index into ROWS
+            public readonly bool second;  // read StatRow.number2 instead of number
+            public readonly string name;  // spec name — documentation only, never sent
+            public WireField(int r, bool s, string n) { row = r; second = s; name = n; }
+        }
+
+        private static readonly WireField[] WIRE_V1 =
+        {
+            new WireField(0,  false, "hp"),        new WireField(0,  true,  "maxhp"),
+            new WireField(2,  false, "dmg"),       new WireField(3,  false, "aspd"),
+            new WireField(4,  false, "reload"),    new WireField(5,  false, "ammo"),
+            new WireField(6,  false, "bullets"),   new WireField(7,  false, "bursts"),
+            new WireField(8,  false, "bounces"),   new WireField(9,  false, "bspd"),
+            new WireField(10, false, "slow"),      new WireField(11, false, "knock"),
+            new WireField(12, false, "spread"),    new WireField(13, false, "lifesteal"),
+            new WireField(14, false, "blockcd"),   new WireField(15, false, "blocks"),
+            new WireField(16, false, "regen"),     new WireField(17, false, "movespd"),
+            new WireField(18, false, "jump"),      new WireField(19, false, "jumps"),
+            new WireField(20, false, "size"),
+        };
+
+        private static bool wireInit, wireValid;
+        // ROWS index -> position in the split payload (0 is the version token),
+        // -1 when this version does not carry that row. Built once from WIRE_V1
+        // so decode never rescans the table per row.
+        private static int[] wireFirstAt, wireSecondAt;
+
+        /// <summary>Table self-check. A mismatch between WIRE and ROWS can only
+        /// come from an edit that moved a row without bumping the version, and
+        /// the wrong answer there is a mislabelled build in someone's history —
+        /// so both capture and decode fail closed (no string / no rows).</summary>
+        private static bool WireTableValid()
+        {
+            if (wireInit) return wireValid;
+            wireInit = true;
+            wireValid = false;
+            try
+            {
+                var first = new int[ROWS.Length];
+                var second = new int[ROWS.Length];
+                for (int i = 0; i < ROWS.Length; i++) { first[i] = -1; second[i] = -1; }
+
+                for (int i = 0; i < WIRE_V1.Length; i++)
+                {
+                    var f = WIRE_V1[i];
+                    if (f.row < 0 || f.row >= ROWS.Length) { WireBreak("row index out of range at field " + i); return false; }
+                    var reader = f.second ? ROWS[f.row].number2 : ROWS[f.row].number;
+                    if (reader == null) { WireBreak("no reader for field " + i + " (" + f.name + ")"); return false; }
+                    int at = i + 1;                       // +1 skips the version token
+                    if (f.second)
+                    {
+                        if (second[f.row] >= 0) { WireBreak("duplicate second-half field for row " + f.row); return false; }
+                        second[f.row] = at;
+                    }
+                    else
+                    {
+                        if (first[f.row] >= 0) { WireBreak("duplicate field for row " + f.row); return false; }
+                        first[f.row] = at;
+                    }
+                }
+                // A row may carry a second half only if it carries a first.
+                for (int r = 0; r < ROWS.Length; r++)
+                    if (second[r] >= 0 && first[r] < 0) { WireBreak("orphan second-half field for row " + r); return false; }
+
+                wireFirstAt = first;
+                wireSecondAt = second;
+                wireValid = true;
+            }
+            catch { wireValid = false; }
+            return wireValid;
+        }
+
+        private static void WireBreak(string why)
+        {
+            // Loud, once, into BepInEx's log (what bug-report bundles capture):
+            // a silent no-op here would look exactly like "the server never got
+            // the build" and cost a debugging session (#83).
+            try { Plugin.Log?.LogWarning("[TABSTATS] build-stat wire table inconsistent (" + why + ") - capture disabled"); }
+            catch { }
+        }
+
+        /// <summary>Exactly the server's numeric field shape:
+        /// <c>-?\d{1,7}(\.\d{1,3})?</c> — the numeric half of _END_STATS_RE.
+        /// A length test alone is NOT equivalent: "12345678901" is 11 chars
+        /// (inside any sane length bound) and has 11 integer digits, which the
+        /// anchored server regex rejects — taking the whole 22-field record
+        /// with it. Hand-rolled rather than a Regex so it stays allocation-free
+        /// on the game-over frame (#171 forbids delaying finalisation).</summary>
+        private static bool WireFieldShapeOk(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length > WIRE_FIELD_MAX) return false;
+            int i = 0;
+            if (s[i] == '-') i++;
+            int intDigits = 0;
+            while (i < s.Length && s[i] >= '0' && s[i] <= '9') { i++; intDigits++; }
+            if (intDigits < 1 || intDigits > 7) return false;
+            if (i == s.Length) return true;
+            if (s[i] != '.') return false;
+            i++;
+            int decDigits = 0;
+            while (i < s.Length && s[i] >= '0' && s[i] <= '9') { i++; decDigits++; }
+            if (decDigits < 1 || decDigits > 3) return false;
+            return i == s.Length;
+        }
+
+        /// <summary>Invariant, at most 7 integer digits and 3 decimals,
+        /// trailing zeros trimmed. Anything the server's grammar would refuse
+        /// becomes the "-" unavailable token — which that grammar accepts — so
+        /// one absurd stat costs one field rather than the whole build.
+        /// The check is on the FORMATTED string, not the magnitude: rounding at
+        /// the boundary (9999999.6 -> "10000000") crosses the 7-digit limit
+        /// after formatting, so a pre-format bound would still emit a record
+        /// the server NULLs.</summary>
+        private static string WireNum(float v)
+        {
+            if (float.IsNaN(v) || float.IsInfinity(v)) return WIRE_MISSING;
+            if (v == 0f) return "0";                       // also normalises -0
+            // Custom numeric format strings never produce exponential notation,
+            // so this is always a plain decimal expansion — a float big enough
+            // to matter simply fails the shape check below.
+            string s = v.ToString("0.###", CultureInfo.InvariantCulture);
+            return WireFieldShapeOk(s) ? s : WIRE_MISSING;
+        }
+
+        private static string WireValue(WireField f, Player p)
+        {
+            // Per-FIELD catch, mirroring the board's per-row catch: one stat a
+            // card has nulled out renders "-" and the other twenty still land.
+            try
+            {
+                var row = ROWS[f.row];
+                var reader = f.second ? row.number2 : row.number;
+                return reader == null ? WIRE_MISSING : WireNum(reader(p));
+            }
+            catch { return WIRE_MISSING; }
+        }
+
+        /// <summary>
+        /// Encode one player's CURRENT build stats for match history.
+        /// Returns null when there is nothing to record (no player / no data /
+        /// a broken wire table) — callers omit the field rather than sending
+        /// a row of dashes.
+        ///
+        /// Synchronous and allocation-light (one StringBuilder, 274 chars max)
+        /// so it can run in the game-over frame itself. It reads the LIVE
+        /// objects, never the 8 Hz overlay snapshot — that cache only refills
+        /// while Tab is held, so at game end it is usually stale or empty.
+        /// Per #171 the caller must call this from the current frame and never
+        /// delay finalisation for it.
+        /// </summary>
+        public static string CaptureBuildStats(Player p)
+        {
+            try
+            {
+                if (p == null || p.data == null) return null;
+                if (!WireTableValid()) return null;
+                var sb = new StringBuilder(192);
+                sb.Append(BUILD_STATS_WIRE_VERSION);
+                for (int i = 0; i < WIRE_V1.Length; i++)
+                {
+                    sb.Append('|');
+                    sb.Append(WireValue(WIRE_V1[i], p));
+                }
+                return sb.ToString();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Every currently-spawned player's build stats, keyed by PlayerID.
+        /// Never null; a player whose objects are gone is simply absent (#222 —
+        /// departed players linger in PlayerManager.players in FFA, and their
+        /// entries fake-null out).
+        /// </summary>
+        public static Dictionary<int, string> CaptureAllBuildStats()
+        {
+            var byPlayerId = new Dictionary<int, string>(4);
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return byPlayerId;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.data == null) continue;
+                    string wire = CaptureBuildStats(p);
+                    // Indexer, not Add: a duplicated PlayerID during a spawn
+                    // race must not throw out of a report path.
+                    if (!string.IsNullOrEmpty(wire)) byPlayerId[p.PlayerID] = wire;
+                }
+            }
+            catch { }
+            return byPlayerId;
+        }
+
+        /// <summary>One decoded stat, ready to render: the overlay's own
+        /// localised label plus the value formatted the way the board formats
+        /// it ("45/100", "0.75s", "1.5/s", or "-" when it could not be read at
+        /// capture time).</summary>
+        public struct BuildStatLine
+        {
+            public string label;
+            public string value;
+            public BuildStatLine(string l, string v) { label = l; value = v; }
+        }
+
+        private static WireField[] WireTableFor(string version)
+        {
+            // One entry per shipped version. A v2 must ADD a case here, never
+            // replace this one — rows stored as v1 have to keep decoding.
+            if (version == WIRE_V1_TOKEN) return WIRE_V1;
+            return null;
+        }
+
+        /// <summary>
+        /// Decode a stored build string into ordered label/value pairs, in the
+        /// overlay's row order, using the overlay's own localised labels.
+        ///
+        /// Never null. Returns an EMPTY list — i.e. render no build at all —
+        /// for an unknown/absent version prefix or a field-count mismatch:
+        /// labelling a payload written by a different version with this
+        /// version's table would silently mislabel every stat, which is worse
+        /// than showing nothing.
+        /// </summary>
+        public static List<BuildStatLine> DecodeBuildStats(string wire)
+        {
+            var lines = new List<BuildStatLine>(ROWS.Length);
+            try
+            {
+                if (string.IsNullOrEmpty(wire)) return lines;
+                if (!WireTableValid()) return lines;
+
+                string[] parts = wire.Split('|');   // always >= 1 element
+                var table = WireTableFor(parts[0]);
+                if (table == null) return lines;                       // unknown/absent version
+                // wireFirstAt/wireSecondAt are built from WIRE_V1 only. A future
+                // WIRE_V2 must ship its own maps and be selected here — without
+                // this fence it would decode against v1's positions, i.e. the
+                // exact mislabelling the version token exists to prevent.
+                if (table != WIRE_V1) return lines;
+                if (parts.Length != table.Length + 1) return lines;    // field-count mismatch
+
+                EnsureLocaleStringsSafe();
+                for (int r = 0; r < ROWS.Length; r++)
+                {
+                    int a = wireFirstAt[r];
+                    if (a < 0) continue;                               // row not carried by this version
+                    int b = wireSecondAt[r];
+                    lines.Add(new BuildStatLine(
+                        LabelFor(r),
+                        FormatDecodedCell(ROWS[r], parts[a], b >= 0 ? parts[b] : null)));
+                }
+            }
+            catch { lines.Clear(); }
+            return lines;
+        }
+
+        private static string LabelFor(int r)
+        {
+            var labels = trLabels;
+            if (labels != null && r >= 0 && r < labels.Length && !string.IsNullOrEmpty(labels[r]))
+                return labels[r];
+            return ROWS[r].label;
+        }
+
+        private static string FormatDecodedCell(StatRow row, string a, string b)
+        {
+            // Parsed invariantly (that is how it was written), re-rendered
+            // through the row's own fmt/suffix so a history cell reads like the
+            // board cell. NOT a bit-exact round trip and does not claim to be:
+            // the wire keeps 3 decimals, the board renders 2, so a value that
+            // sits exactly on the 3rd-decimal rounding boundary can land one
+            // step off the digit the board showed. Harmless for a build
+            // read-out, and storing the full float would spend wire width on
+            // digits no surface renders.
+            if (!TryParseWire(a, out float fa)) return WIRE_MISSING;
+            if (b == null) return fa.ToString(row.fmt) + row.suffix;
+            if (!TryParseWire(b, out float fb)) return WIRE_MISSING;
+            return fa.ToString(row.fmt) + "/" + fb.ToString(row.fmt) + row.suffix;
+        }
+
+        private static bool TryParseWire(string s, out float v)
+        {
+            v = 0f;
+            if (string.IsNullOrEmpty(s) || s == WIRE_MISSING) return false;
+            return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v);
+        }
+
         // Fallback team palette when PlayerSkinBank can't be read (orange/blue
         // first — ROUNDS' default 1v1 pairing).
         private static readonly Color[] FALLBACK = {
@@ -199,7 +601,7 @@ namespace CompetitiveRounds
                 var values = cachedValues[i];
                 for (int r = 0; r < ROWS.Length; r++)
                 {
-                    try { values[r] = ROWS[r].value(p); }
+                    try { values[r] = DisplayCell(ROWS[r], p); }
                     catch { values[r] = "-"; }
                 }
             }

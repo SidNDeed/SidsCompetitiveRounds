@@ -13,6 +13,7 @@ advance_tournament_match(series_id) — see the hook instructions at the
 bottom of this file for where that wires into main.py.
 """
 import json
+import math
 import os
 import random
 import uuid
@@ -133,6 +134,64 @@ ASYNC_POST_COMPLETION_DAYS = 2
 TOURNAMENT_FEED_CHANNEL_ID = int(os.getenv("TOURNAMENT_FEED_CHANNEL", "1224180565129822258"))
 
 
+# ── Photon region selection (Aug 13, region VERDICT) ──────────────
+#
+# SYNC ONLY. A sync tournament puts a pair in a room at a scheduled instant, so
+# both clients must agree on a region or each creates its own room and both
+# forfeit (learning #49). ASYNC does not pin a region at all: main.py:744
+# rejects a non-"sct-" room for SYNC ONLY, an async match binds by PLAYER PAIR
+# from any room, its series row is minted at bracket activation, and its
+# forfeit is deadline-driven — so there is nothing for async to converge on.
+#
+# Regions ROUNDS itself offers. Verified against the shipped assembly:
+# NetworkConnectionHandler.REGIONS is exactly these 15. Note "hk" and "uae" DO
+# appear in our own match history and are deliberately NOT here — they are
+# unreachable through the game's region selector, and RegionToCode() maps a
+# region to a char by its INDEX in REGIONS, returning '-' for anything else, so
+# an off-list pick is not even encodable in a ROUNDS room code.
+ROUNDS_REGIONS = frozenset({
+    "us", "usw", "ussc", "eu", "au", "za", "asia", "cae", "in", "jp",
+    "sa", "kr", "tr", "ru", "rue",
+})
+# Charged once per player who has no usable measurement in a candidate region.
+# This is the term that stops an UNMEASURED region from scoring perfectly off a
+# single player's data — without it, a EU player paired with a USW player picks
+# "eu" (29ms, one measurement) over "us" (113ms, BOTH measured). Verified
+# against production: with it, that real pair resolves to "us".
+REGION_UNKNOWN_PENALTY_MS = 100
+# Ping medians are taken over this window. Ping reporting only began
+# 2026-07-20 and fills 48% of the last 30 days' match rows, so a short window
+# is mostly empty; 120 days is what makes coverage usable for the regulars who
+# actually enter tournaments (measured Aug 13: 70 players carry ping samples,
+# 3043 samples across 14 regions).
+REGION_PING_WINDOW_DAYS = 120
+# Below this, a player's median in a region is noise and the player counts as
+# UNMEASURED there (and pays the penalty).
+REGION_MIN_PING_SAMPLES = 3
+# A region is only a candidate if real matches have been played in it recently.
+# This is the guard against pinning a region Photon has retired: both clients
+# would fail to connect identically and both would forfeit.
+REGION_LIVE_WINDOW_DAYS = 45
+# Last rung. A sync tournament must never serve an empty region, because an
+# empty region has never meant "let Photon choose" on the client: StartNCHConnect
+# sets RegionSelector.region only when the string is non-empty and then sets
+# m_ForceRegion UNCONDITIONALLY, and NCH.WaitForConnect force-connects to
+# whatever RegionSelector.region happens to hold — i.e. each client goes to its
+# own dropdown value and the two create same-named rooms in different regions.
+# That is learning #49 verbatim. The current client now REFUSES to join an
+# "sct-" room with no region rather than guessing (Plugin.cs GateTournamentRegion
+# / StartNCHConnect), so on an up-to-date client an empty value costs a delay
+# instead of a double forfeit — but older clients still fall through to the
+# dropdown, and the refusal is a safety net, not a licence to send nothing.
+REGION_FALLBACK = "us"
+# The tournament-wide region may be trusted as the mode of reported signups
+# only when a meaningful share of the locked field actually reported it. The
+# threshold is max(count, share) and the reasoning is at the one place that
+# uses these — the region block in lock_tournament.
+REGION_MODE_MIN_REPORTERS = 2
+REGION_MODE_MIN_SHARE = 0.25
+
+
 def _kind_label(kind: Optional[str]) -> str:
     return "Asynchronous" if kind == "async" else "Synchronized"
 
@@ -140,6 +199,222 @@ def _kind_label(kind: Optional[str]) -> str:
 def _dts(dt: Optional[datetime]) -> str:
     """Discord-native absolute timestamp (<t:unix:F>) for a datetime."""
     return f"<t:{int(dt.timestamp())}:F>" if dt else "TBD"
+
+
+# ── Region resolver ───────────────────────────────────────────────
+
+def _effective_match_region(match_region: Optional[str],
+                            tournament_region: Optional[str],
+                            kind: Optional[str]) -> Optional[str]:
+    """THE single expression of "which region does this match play in".
+
+    Both read endpoints (/current and /my-active-matches) call this and nothing
+    else derives it. That is not tidiness: if the two endpoints ever disagree,
+    player A dispatches from the tab and player B from the heartbeat, each ends
+    up alone in their own room, and BOTH lose their tournament run to a
+    double no-show forfeit. It is the highest-severity failure this feature
+    has, and one shared function is the whole mitigation (#152/#329).
+
+    Async always answers None — its lifecycle does not use a region at all, so
+    even a legacy row that still carries one (a pre-migration-219 row, or a
+    completed tournament whose history we keep truthful) must not reach a
+    client.
+    """
+    if kind == "async":
+        return None
+    r = (match_region or "").strip()
+    if r:
+        return r
+    r = (tournament_region or "").strip()
+    return r or None
+
+
+async def _region_candidate_volumes(db: AsyncSession) -> dict:
+    """{region: matches played there in the last REGION_LIVE_WINDOW_DAYS}.
+
+    Two jobs in one query. (a) LIVENESS: a region nobody has played in recently
+    is not offered, because pinning a region Photon has retired makes both
+    clients fail to connect identically and both forfeit. (b) The last
+    numeric tie-break, standing in for "which region is Photon actually
+    serving well".
+
+    The VERDICT specified a 90-day volume for (b); this uses the 45-day
+    liveness count instead so both jobs come from one query. Stated precisely
+    rather than hand-waved: the two windows do NOT produce the same ordering
+    everywhere (measured Aug 13, `au` sits 7th over 120d and 10th over 45d),
+    but the top six by volume — ussc, us, eu, usw, ru, cae, i.e. every region
+    this community actually plays in — are identically ordered in both, and
+    this tie-break is only reached when two regions have the SAME minimax cost
+    AND the same total, which needs identical medians. The window cannot
+    plausibly decide a pairing on its own.
+
+    Deliberately NOT filtered on invalidated_at: an invalidated match still
+    proves Photon served that region.
+    """
+    rows = (await db.execute(text("""
+        SELECT region, COUNT(*) AS n
+          FROM matches
+         WHERE created_at > NOW() - make_interval(days => :live)
+           AND region IS NOT NULL AND region <> ''
+         GROUP BY region
+    """), {"live": REGION_LIVE_WINDOW_DAYS})).all()
+    return {r.region: int(r.n) for r in rows}
+
+
+async def _region_profiles(db: AsyncSession, player_ids: list) -> dict:
+    """{(player_id, region): (games, ping_samples, median_ping_or_None)}.
+
+    percentile_cont ignores NULL inputs, so `samples` (COUNT of non-NULL
+    pings) and `games` (COUNT(*)) are genuinely different numbers: `samples`
+    decides whether the median is trustworthy, `games` is the habit fallback.
+    """
+    rows = (await db.execute(text("""
+        WITH s AS (
+            SELECT player1_id AS pid, region, p1_ping_avg AS ping
+              FROM matches
+             WHERE invalidated_at IS NULL
+               AND created_at > NOW() - make_interval(days => :win)
+               AND region IS NOT NULL AND region <> ''
+               AND player1_id = ANY(:pids)
+            UNION ALL
+            SELECT player2_id, region, p2_ping_avg
+              FROM matches
+             WHERE invalidated_at IS NULL
+               AND created_at > NOW() - make_interval(days => :win)
+               AND region IS NOT NULL AND region <> ''
+               AND player2_id = ANY(:pids)
+        )
+        SELECT pid, region,
+               COUNT(*) AS games,
+               COUNT(ping) AS samples,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ping) AS med
+          FROM s
+         GROUP BY pid, region
+    """), {"win": REGION_PING_WINDOW_DAYS, "pids": list(player_ids)})).all()
+    out = {}
+    for r in rows:
+        med = None if r.med is None else float(r.med)
+        out[(r.pid, r.region)] = (int(r.games), int(r.samples), med)
+    return out
+
+
+async def _pick_region_for_players(db: AsyncSession, player_ids: list,
+                                   fallback_region: Optional[str],
+                                   label: str = "") -> str:
+    """Pick the one Photon region that best serves EVERY player in the group.
+
+    MINIMAX, not sum. A region's cost is its WORST player's ping, because
+    "serves both" is literally the question. A sum lets a 30ms player subsidise
+    a 250ms one, and in single-elim that decides who advances.
+
+    The ladder, in order. Every rung yields a value both clients read from the
+    same stored column, so no rung can split the room:
+
+      1/2. argmin over live ROUNDS regions of
+              max(known medians) + REGION_UNKNOWN_PENALTY_MS * (unmeasured)
+           skipping any region where NOBODY in the group is measured. This is
+           ONE argmin, not two rungs with a hard partition: the penalty is
+           precisely what lets a both-measured region beat a one-measured one,
+           and a strict "both-measured first, else one-measured" partition
+           would make the penalty term constant within each rung and therefore
+           dead code (#314). Worked example against production: a 29ms-in-eu
+           player paired with a 31ms-in-usw player resolves to "us" (113) —
+           eu scores 129 and usw 131 once the unmeasured side is charged.
+      3.   HABIT — the region this group has actually played in most over the
+           ping window. Available for essentially everyone including players
+           with zero ping samples, and it is why a brand-new entrant never
+           drops the group straight to "us".
+      4.   `fallback_region` — the tournament-wide value, itself derived by
+           this same function over the whole roster at lock.
+      5.   REGION_FALLBACK.
+
+    NEVER returns None and never raises. A region is a quality choice, not a
+    precondition: this runs inside the LOCK and ACTIVATION transactions, and a
+    failure here must not be able to stall a bracket.
+
+    That is why the reads run on their OWN session rather than the caller's.
+    A bare try/except would not do it — under asyncpg a caught SQL error
+    poisons the whole transaction, so the bracket would die anyway (#235) — and
+    neither would a SAVEPOINT: activation reaches here with unflushed ORM state
+    (p1/p2 signup ids, the new series, the room name), autoflush would push
+    that INSIDE the savepoint, and rolling the savepoint back would silently
+    undo bracket assignments the caller believes it made. A separate read-only
+    session has neither failure mode, sees only committed data (`matches`
+    history, which the caller's transaction never touches), and follows the
+    existing pattern at main.py:350. The caller's transaction is not in this
+    function's failure domain at all.
+    """
+    ids = [p for p in dict.fromkeys(player_ids) if p is not None]
+    fb = (fallback_region or "").strip() or REGION_FALLBACK
+    if not ids:
+        return fb
+
+    volumes: dict = {}
+    profiles: dict = {}
+    try:
+        async with async_session() as rdb:
+            volumes = await _region_candidate_volumes(rdb)
+            profiles = await _region_profiles(rdb, ids)
+    except Exception as e:
+        print(f"[TOURNAMENT-REGION] {label} profile query failed ({e}) — "
+              f"falling back to {fb}")
+        return fb
+
+    candidates = sorted(r for r in volumes if r in ROUNDS_REGIONS)
+    if not candidates:
+        print(f"[TOURNAMENT-REGION] {label} no live ROUNDS region in the last "
+              f"{REGION_LIVE_WINDOW_DAYS}d — falling back to {fb}")
+        return fb
+
+    scored = []
+    for r in candidates:
+        known = []
+        unknown = 0
+        for pid in ids:
+            games, samples, med = profiles.get((pid, r), (0, 0, None))
+            if med is not None and samples >= REGION_MIN_PING_SAMPLES:
+                known.append(med)
+            else:
+                unknown += 1
+        if not known:
+            continue   # nobody in this group has ever measured r
+        penalty = REGION_UNKNOWN_PENALTY_MS * unknown
+        scored.append((max(known) + penalty,          # minimax cost
+                       sum(known) + penalty,          # tie-break 1: total
+                       -volumes.get(r, 0),            # tie-break 2: busier region
+                       r))                            # tie-break 3: stable
+    if scored:
+        scored.sort()
+        best = scored[0]
+        print(f"[TOURNAMENT-REGION] {label} picked {best[3]} "
+              f"(cost {best[0]:.0f}ms over {len(ids)} players)")
+        return best[3]
+
+    # Rung 3 — habit: where has this group actually played?
+    #
+    # The VERDICT specified a plain mode (total games per region). This ranks
+    # by HOW MANY OF THE GROUP have history there first, and only then by total
+    # games. That is a deliberate refinement in the direction of the same
+    # minimax principle the rung above uses: a region both players have played
+    # in should beat one where a single 900-game regular drags the total up and
+    # the other player has never connected. Ties fall through to total games,
+    # which is the plain mode, so the common case is unchanged.
+    habit: dict = {}
+    for (pid, r), (games, _s, _m) in profiles.items():
+        if games > 0 and r in ROUNDS_REGIONS and r in volumes:
+            seen, total = habit.get(r, (0, 0))
+            habit[r] = (seen + 1, total + games)
+    if habit:
+        best_r = sorted(habit.items(),
+                        key=lambda kv: (-kv[1][0], -kv[1][1], kv[0]))[0][0]
+        print(f"[TOURNAMENT-REGION] {label} no ping data — habit picked "
+              f"{best_r} ({habit[best_r][0]}/{len(ids)} players, "
+              f"{habit[best_r][1]} games)")
+        return best_r
+
+    print(f"[TOURNAMENT-REGION] {label} no ping or habit data — falling back "
+          f"to {fb}")
+    return fb
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -407,7 +682,13 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         FROM tournament_signups s
         JOIN players p ON p.id = s.player_id
         WHERE s.tournament_id = :tid
-        ORDER BY s.is_speculative, s.penalty_at_signup, s.signed_up_at
+        -- Seed order (Aug 13 item 6). The client renders "#{seed}" beside every
+        -- entrant, so returning them in SIGNUP order made the list read as
+        -- shuffled. Seeds are only assigned at lock, and only to the confirmed
+        -- roster, so NULLS LAST keeps speculatives below the bracket and leaves
+        -- the pre-lock ordering byte-for-byte what it was.
+        ORDER BY s.seed NULLS LAST,
+                 s.is_speculative, s.penalty_at_signup, s.signed_up_at
     """)
     rows = (await db.execute(sq, {"tid": t.id})).all()
     now = datetime.now(timezone.utc)
@@ -441,7 +722,7 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
                m.p1_signup_id, m.p2_signup_id, m.prereq_match_ids,
                m.is_bye, m.status, m.series_id, m.winner_signup_id,
                m.ready_deadline_at, m.deadline_at, m.started_at, m.ended_at,
-               m.photon_room_name,
+               m.photon_room_name, m.photon_region AS m_region,
                p1.display_name AS p1_name, p2.display_name AS p2_name,
                rs.p1_series_wins, rs.p2_series_wins,
                rs.player1_id AS rs_p1_player_id, s1.player_id AS s1_player_id
@@ -526,6 +807,38 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         tallies = [TournamentTimeSlotTally(slot_ts=r.slot_ts, votes=r.votes)
                    for r in (await db.execute(tq, {"tid": t.id, "now": datetime.now(timezone.utc)})).all()]
 
+    # Per-requester region (Aug 13). The top-level photon_region is the field
+    # every client reads to decide which Photon region to force before joining
+    # its match room, and the region is now PER MATCH — a bracket re-pairs every
+    # round, so one tournament-wide value provably cannot serve every pair.
+    #
+    # Shaping this field to the CALLER's own live match is what makes clients
+    # OLDER than this batch correct for free, through a field they already
+    # parse, with no version gate. It is safe because /current is already
+    # per-requester (it takes steam_id) and nothing caches it: the only layer in
+    # front of the API is nginx, and backend/nginx/app.conf has a bare
+    # `proxy_pass` with no `proxy_cache` (its one cache directive is
+    # ssl_session_cache, which is TLS session resumption and holds no bodies).
+    # If a response cache is ever put in front of this API, THIS field leaks
+    # one player's region to another and both end up alone in their own room.
+    #
+    # Callers with no live match (spectators, the whole field pre-start) keep
+    # the tournament-wide value — and async keeps nothing, because
+    # _effective_match_region answers None for it.
+    my_region = _effective_match_region(None, t.photon_region, t.kind)
+    if my_signup_id is not None:
+        _live = [r for r in mrows
+                 if r.status in ("active", "ready", "scheduled")
+                 and my_signup_id in (r.p1_signup_id, r.p2_signup_id)]
+        if _live:
+            # A player has at most one live match per bracket; sort anyway so
+            # the answer is deterministic rather than result-order dependent.
+            _prio = {"active": 0, "ready": 1, "scheduled": 2}
+            _live.sort(key=lambda r: (_prio.get(r.status, 9), -(r.round or 0),
+                                      r.slot_idx or 0))
+            my_region = _effective_match_region(_live[0].m_region,
+                                                t.photon_region, t.kind)
+
     # Force vote count
     fvc = (await db.execute(
         select(func.count()).select_from(TournamentForceVote).where(
@@ -558,7 +871,7 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         time_slot_options=[s for s in _offered_time_slots(t.default_start_ts)
                            if s > datetime.now(timezone.utc)],
         time_slot_tallies=tallies, force_vote_count=fvc,
-        photon_region=t.photon_region,
+        photon_region=my_region,
     )
 
 
@@ -819,28 +1132,69 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
     else:
         t.prize_tier = "thirty"
 
-    # Pick the tournament's canonical Photon region as the mode of all signups'
-    # region_at_signup values (alphabetical tiebreak on count ties). All
-    # auto-connect handoffs will pin both clients to this region, so cross-
-    # region brackets always land in the same Photon room. Falls back to None
-    # if nobody reported a region — clients then use whichever region they're
-    # currently on.
-    region_counts: dict[str, int] = {}
-    for s in signups:
-        r = s.region_at_signup
-        if not r:
-            continue
-        region_counts[r] = region_counts.get(r, 0) + 1
-    if region_counts:
-        top_count = max(region_counts.values())
-        top_regions = sorted(r for r, c in region_counts.items() if c == top_count)
-        t.photon_region = top_regions[0]
+    # ── Tournament-wide Photon region ────────────────────────────
+    #
+    # ASYNC PINS NOTHING. main.py:744 rejects a non-"sct-" room for SYNC ONLY;
+    # an async match binds by PLAYER PAIR from any room, its series row exists
+    # from bracket activation, and its forfeit is deadline-driven — so no part
+    # of the async lifecycle depends on a region, and there is nothing for the
+    # two clients to converge on. Leaving it NULL is the point, not an
+    # oversight: the live async tournament had photon_region='ru' and was
+    # force-connecting every entrant to Russia.
+    #
+    # SYNC still needs one, because the server puts a pair in a room at a
+    # scheduled instant (#49). This value is now only the FALLBACK rung —
+    # each match resolves its own region at activation — but it must still be
+    # right, because it is what /current serves a caller with no live match and
+    # what every client reads when a per-match value is missing.
+    #
+    # WHY THE MODE ALONE IS NOT ENOUGH. The mode ignores empties, and until
+    # this batch's client change the signup call sent no region at all: of the
+    # 25 signups in production on Aug 13, 24 were empty and one said 'ru'. The
+    # "nobody reported" fallback never fired because the population was not
+    # empty — it had exactly one element, and one legacy row pinned a whole
+    # tournament. The client will start reporting, but coverage will stay
+    # partial for as long as old clients sign up, so the mode is trusted only
+    # when the WINNING region was reported by a meaningful share of the locked
+    # field; otherwise we ignore the reports entirely and resolve from
+    # match-history pings, which is better data anyway.
+    #
+    # The threshold is max(2, 25% of the field), not "2 OR 25%". The VERDICT
+    # wrote OR; at min_players=8 that makes the share arm non-binding (25% of 8
+    # is 2, and it only gets weaker as the field grows), i.e. dead (#314). max()
+    # keeps both arms live, matches the owner's wording ("a meaningful share of
+    # confirmed signups"), and errs strict — which is the safe direction here,
+    # because what we fall through TO is strictly better data, not worse.
+    if t.kind == "async":
+        t.photon_region = None
     else:
-        # Zero signups reported a region (older clients pre-region-tracking, or
-        # failed Photon region resolution). Fall back to "us" so auto-connect
-        # still converges on one region. Clients that can't reach "us" will
-        # forfeit but the bracket stays consistent. (Review #9)
-        t.photon_region = "us"
+        region_counts: dict[str, int] = {}
+        for s in signups:
+            r = (s.region_at_signup or "").strip()
+            # An off-list report cannot be something a ROUNDS client is
+            # actually on, so it must not be able to win the mode.
+            if not r or r not in ROUNDS_REGIONS:
+                continue
+            region_counts[r] = region_counts.get(r, 0) + 1
+        needed = max(REGION_MODE_MIN_REPORTERS,
+                     math.ceil(len(signups) * REGION_MODE_MIN_SHARE))
+        top_region, top_count = None, 0
+        if region_counts:
+            top_count = max(region_counts.values())
+            top_region = sorted(r for r, c in region_counts.items()
+                                if c == top_count)[0]
+        if top_region is not None and top_count >= needed:
+            t.photon_region = top_region
+            print(f"[TOURNAMENT-REGION] lock {t.id}: mode '{top_region}' "
+                  f"reported by {top_count}/{len(signups)} (needed {needed})")
+        else:
+            if top_region is not None:
+                print(f"[TOURNAMENT-REGION] lock {t.id}: mode '{top_region}' "
+                      f"only {top_count}/{len(signups)} (needed {needed}) — "
+                      f"resolving from match history instead")
+            t.photon_region = await _pick_region_for_players(
+                db, [s.player_id for s in signups], REGION_FALLBACK,
+                label=f"lock {t.id}")
 
     # Pick scheduled_start_ts from vote tallies (highest count wins, random
     # tiebreak). The sync non-force path already set it via the agreement
@@ -1153,6 +1507,28 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         # so older clients that still derive client-side won't see a
         # mismatch (they'll arrive at the same room name).
         m.photon_room_name = "sct-" + str(m.id).replace("-", "")[:12]
+        # ASYNC KEEPS ITS ROOM NAME even though nothing uses it any more: a
+        # client older than this batch still reads photon_room_name for async
+        # matches, and removing it would strand those players mid-tournament
+        # with no room to join at all. Async simply stops SHOWING it. What
+        # async does NOT get is a region — see the lock-time block for why
+        # (it binds by player pair from any room, so there is nothing to
+        # converge on and #49 cannot apply to it).
+        #
+        # SYNC: resolve the region for THIS PAIR, here, in the same statement
+        # block as the room name. This is the right grain and the right
+        # moment — both signups are final, the bracket has just re-paired for
+        # this round, and it is minutes ahead of play and off the critical
+        # path. IMMUTABLE from here on: a recompute after one client has
+        # already dispatched (the client memoizes per match_id) puts the two
+        # in different rooms, which is a DOUBLE no-show forfeit. The
+        # `not m.photon_region` guard makes that structural rather than a
+        # promise — this loop only visits status='pending' rows and sets the
+        # status away from pending, so a second visit should be impossible;
+        # the guard is what makes "should be" not matter.
+        if t.kind != "async" and not m.photon_region:
+            m.photon_region = await _pick_region_for_players(
+                db, player_ids, t.photon_region, label=f"match {m.id}")
         # Sync matches downstream of a played match: don't go straight to
         # 'ready' — give both players a breather (item 2). The match sits in
         # 'scheduled' with the room provisioned; _flip_scheduled_matches
@@ -1922,6 +2298,24 @@ async def _decided_series_takes_precedence(db: AsyncSession, m: TournamentMatch)
     return row is not None
 
 
+async def _match_is_async(db: AsyncSession, m: TournamentMatch) -> bool:
+    """True when this match belongs to an ASYNC tournament.
+
+    Deliberately a fresh scalar rather than a cached flag: the sweep loads the
+    match row alone, and getting this wrong in the FAIL-OPEN direction would
+    forfeit a sync pair who ARE both present. On any error we return False —
+    i.e. keep the old readiness behaviour — because a stalled async bracket is
+    recoverable by an admin, while a wrongly-forfeited sync match is not.
+    """
+    try:
+        return (await db.execute(
+            text("SELECT kind FROM tournaments WHERE id = :tid"),
+            {"tid": str(m.tournament_id)})).scalar_one_or_none() == "async"
+    except Exception as ex:
+        print(f"[TOURNAMENT] kind lookup failed for match {m.id}: {ex}")
+        return False
+
+
 async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: datetime) -> None:
     """Resolve ONE overdue ready match (decided-series SKIP / ban forfeit /
     no-show forfeit — the sweep never advances a series itself, see the
@@ -2025,8 +2419,19 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
             .execution_options(populate_existing=True))).scalar_one_or_none()
         p1_ready = bool(p1 and p1.ready_at and (now - p1.ready_at).total_seconds() <= READY_STALE_SECONDS) and not p1_banned
         p2_ready = bool(p2 and p2.ready_at and (now - p2.ready_at).total_seconds() <= READY_STALE_SECONDS) and not p2_banned
-    if p1_ready and p2_ready:
+    if p1_ready and p2_ready and not await _match_is_async(db, m):
         return  # both ready, client will start match
+    # ASYNC IS DEADLINE-ONLY (Codex round 3, HIGH). For a SYNC match "both
+    # ready" means the pair is present at the scheduled instant and the clients
+    # are about to be put in a room, so returning is right. For ASYNC it is not
+    # a signal at all: readiness is a ~20s heartbeat that fires whenever ROUNDS
+    # is merely OPEN, so two players who simply leave the game running — and
+    # never play each other — refresh both ready_at values forever, this sweep
+    # returns forever, the match never forfeits and THE BRACKET CANNOT ADVANCE.
+    # The lock DM promises the opposite ("miss the deadline and you forfeit").
+    # Hiding the Ready Up button client-side does not fix it: the heartbeat is
+    # separate, and an old client keeps sending it regardless. The deadline has
+    # to be resolved server-side without consulting readiness.
     # Round-24 find 1 (tail): last-moment authority recheck before the
     # irreversible no-show writes — a deciding result that committed
     # during this iteration's queries must never be forfeited over.
@@ -2634,11 +3039,24 @@ async def play_now(
 
 @router.get("/history")
 async def history(limit: int = 25, offset: int = 0, db: AsyncSession = Depends(get_db)):
+    """Site-wide completed-tournament history — the Tournaments tab's "Recent
+    Tournaments" section.
+
+    Aug 13 item 7. Runner-up, third place, entrant count, kind and date were
+    ALREADY served here; the client simply never parsed past winner/kind/
+    count/date, so this endpoint needed almost nothing. The additions are the
+    three podium steam_ids (so a row can be clicked through to a player, the
+    way every other name surface in the tab is) and started_at (a tournament's
+    duration is the one obviously-useful fact the payload was missing, and
+    async brackets run for weeks). Everything already present is preserved
+    byte-for-byte — an older client parses this response unchanged.
+    """
     q = text("""
-        SELECT t.id AS tournament_id, t.kind, t.format, t.ended_at, t.prize_tier,
-               w.display_name AS winner_name,
-               r.display_name AS runner_up_name,
-               tp.display_name AS third_place_name,
+        SELECT t.id AS tournament_id, t.kind, t.format, t.started_at, t.ended_at,
+               t.prize_tier,
+               w.display_name AS winner_name,   w.steam_id AS winner_steam,
+               r.display_name AS runner_up_name, r.steam_id AS runner_up_steam,
+               tp.display_name AS third_place_name, tp.steam_id AS third_place_steam,
                (SELECT COUNT(*) FROM tournament_signups s WHERE s.tournament_id = t.id AND NOT s.is_speculative) AS signup_count
         FROM tournaments t
         LEFT JOIN tournament_signups ws ON ws.id = t.winner_signup_id
@@ -2654,10 +3072,14 @@ async def history(limit: int = 25, offset: int = 0, db: AsyncSession = Depends(g
     rows = (await db.execute(q, {"limit": limit, "offset": offset})).all()
     return [{
         "tournament_id": r.tournament_id, "kind": r.kind, "format": r.format,
+        "started_at": r.started_at,
         "ended_at": r.ended_at, "prize_tier": r.prize_tier,
         "winner_display_name": r.winner_name,
+        "winner_steam_id": r.winner_steam,
         "runner_up_display_name": r.runner_up_name,
+        "runner_up_steam_id": r.runner_up_steam,
         "third_place_display_name": r.third_place_name,
+        "third_place_steam_id": r.third_place_steam,
         "signup_count": r.signup_count,
     } for r in rows]
 
@@ -2792,7 +3214,7 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
         SELECT m.id AS match_id, m.status, m.bracket_side, m.round,
                m.photon_room_name, m.ready_deadline_at,
                m.scheduled_ready_at, m.early_ok_signup_ids,
-               m.p1_signup_id, m.p2_signup_id,
+               m.p1_signup_id, m.p2_signup_id, m.photon_region AS m_region,
                t.id AS tournament_id, t.kind, t.photon_region,
                p1.steam_id AS p1_steam_id, p1.display_name AS p1_name,
                p2.steam_id AS p2_steam_id, p2.display_name AS p2_name,
@@ -2843,7 +3265,14 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
             "opponent_steam_id": (r.p2_steam_id if is_p1 else r.p1_steam_id),
             "opponent_display_name": (r.p2_name if is_p1 else r.p1_name),
             "photon_room_name": r.photon_room_name,
-            "photon_region": r.photon_region,
+            # Per-match region, through the SAME helper /current uses. If these
+            # two endpoints ever disagree, one player dispatches from the tab
+            # and the other from the heartbeat, each lands alone in their own
+            # room, and BOTH lose their run to a double no-show forfeit —
+            # so the fallback is expressed in exactly one place (#152/#329).
+            # Async answers None: it does not use a region at all.
+            "photon_region": _effective_match_region(r.m_region,
+                                                     r.photon_region, r.kind),
             "my_ready": my_ready is not None and my_ready >= ready_cutoff,
             "opp_ready": opp_ready is not None and opp_ready >= ready_cutoff,
             "ready_seconds_left": secs_left,

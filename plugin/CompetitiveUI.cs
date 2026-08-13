@@ -81,6 +81,100 @@ namespace CompetitiveRounds
             notifColor = color;
             notifTimer = duration;
             notifCriticalUntil = Time.unscaledTime + duration;
+            // A critical cue OWNS the whole notification surface for its
+            // duration (#356), and the set band is part of that surface. This
+            // is a no-op for every pre-existing caller: the band can only be
+            // non-empty once something calls ShowNotificationSet.
+            notifSetEntries.Clear();
+        }
+
+        // ── Multi-entry notification band (item 10) ───────────────────────
+        // The single slot above is LATEST-WINS and the notifQueue serialises
+        // in TIME, so a caller that raises N toasts in one loop shows exactly
+        // one of them (the FFA manifest apply, which announces every player's
+        // pick, is the reported case). This is a SECOND, parallel surface that
+        // shows a whole SET at once, laid out horizontally across the bottom.
+        //
+        // It is deliberately parallel rather than a replacement: every
+        // existing ShowNotification / QueueNotification / ShowNotificationCritical
+        // caller keeps the exact single-slot renderer it has today, byte for
+        // byte, and the only interaction is that the single toast lifts by the
+        // band's height while the band is on screen (a state that cannot
+        // occur at all until something calls ShowNotificationSet).
+        public struct NotifSetItem
+        {
+            public string text;
+            public Color color;
+            public NotifSetItem(string text, Color color) { this.text = text; this.color = color; }
+        }
+
+        private class NotifSetEntry
+        {
+            public string text;
+            public Color color;
+            public float until;    // Time.unscaledTime deadline (per-entry expiry)
+            public Rect rect;      // laid out lazily; see LayoutNotificationSet
+            public bool shown;     // survived the overflow cull
+        }
+
+        private static readonly List<NotifSetEntry> notifSetEntries = new List<NotifSetEntry>();
+        private static GUIStyle notifSetStyle;
+        private static int notifSetLayoutWidth = -1;   // Screen.width the layout was built for
+        private static int notifSetLayoutCount = -1;   // entry count it was built for
+        private static float notifSetRowH = 0f;
+        private static string notifSetOverflowText = "";
+        private static Rect notifSetOverflowRect;
+        /// <summary>Hard per-cell character cap. Bounds the width budget at the
+        /// SOURCE so no single entry can ever exceed the band (see the budget
+        /// model on LayoutNotificationSet).</summary>
+        private const int NOTIF_SET_MAX_CHARS = 34;
+
+        /// <summary>Show a whole SET of short messages together, as one
+        /// horizontal band across the bottom. Latest set wins (same semantics
+        /// as the single slot); every entry carries its own expiry.
+        /// Respects BOTH the ShowNotifications preference and the
+        /// critical-cue window, exactly like ShowNotification.
+        ///
+        /// L10N TRAP — READ BEFORE CONVERTING A CALLER. This is NOT a harvest
+        /// site: tools/i18n_extract.py matches
+        /// `ShowNotification(?:Critical)?\s*\(`, which "ShowNotificationSet("
+        /// deliberately does not satisfy (its argument is a list, not a
+        /// literal). So moving an existing single-message call that passes a
+        /// string literal onto this method RETIRES that string's translations
+        /// in every locale (#289/#357).
+        /// NOTE: do NOT write an example call with a quoted argument in this
+        /// comment — the extractor matches the call pattern without stripping
+        /// comments, so it harvests the example itself as a bogus catalogue
+        /// key. It did exactly that once ('some text').
+        /// Callers must build each entry's text through
+        /// I18n.Tr / I18n.TrF with the LITERAL at their own call site — which
+        /// is also where the key belongs, since only the caller knows the
+        /// sentence.</summary>
+        public static void ShowNotificationSet(IList<NotifSetItem> items, float duration = 4.5f)
+        {
+            if (items == null || items.Count == 0) return;
+            if (!Plugin.ShowNotifications.Value) return;
+            // Same rule as the single slot: while a critical cue owns the
+            // surface, an ordinary push is DROPPED, not queued (#356).
+            if (Time.unscaledTime < notifCriticalUntil) return;
+            notifSetEntries.Clear();
+            float until = Time.unscaledTime + duration;
+            for (int i = 0; i < items.Count; i++)
+            {
+                string t = items[i].text ?? "";
+                // Rich-text neutralisation is the CALLER's job for anything it
+                // sources from a player (the FFA path already runs display
+                // names through GameStateWatcher.StripRichText); the band's
+                // own style additionally has richText OFF, so a tag that slips
+                // through renders literally instead of colouring the band.
+                try { t = I18n.Tr(t); } catch { }
+                if (t.Length > NOTIF_SET_MAX_CHARS)
+                    t = t.Substring(0, NOTIF_SET_MAX_CHARS - 2) + "..";
+                if (t.Length == 0) continue;
+                notifSetEntries.Add(new NotifSetEntry
+                { text = t, color = items[i].color, until = until });
+            }
+            notifSetLayoutWidth = -1;   // force a fresh layout
         }
 
         // Match-found notification sound
@@ -142,8 +236,70 @@ namespace CompetitiveRounds
             // site is try/caught in Plugin.Update, so it survives an OnGUI that
             // throws every frame (bug #128, FINDING 6).
             TickChatLockWatchdog();
+            // Bug 213: keep the published chat-mute marker in step with the
+            // config. The M hotkey publishes directly and OnJoinedRoom
+            // republishes per room, but ShowIngameChat is ALSO writable from
+            // the F5 Settings toggle — a surface this file does not own — so
+            // this reconciler makes the marker correct no matter which path
+            // changed the value. Nearly free: PublishChatMuteState reads one
+            // dictionary entry and returns when the value already matches, so
+            // the 2s throttle is about the InRoom check, not the write.
+            if (Time.unscaledTime - chatMutePublishTickAt > 2f)
+            {
+                chatMutePublishTickAt = Time.unscaledTime;
+                PublishChatMuteState();
+            }
             NativeUI.Tick();
         }
+
+        private static float chatMutePublishTickAt = -999f;
+
+        // ── The modal set, defined ONCE ─────────────────────────────────────
+        // Three hand-maintained copies of "is a modal on screen" used to exist:
+        // the click-blocker assignment in DrawUI, DrawChatInput's T/M guard and
+        // DrawQuickChat's Y guard. They had drifted — neither hotkey guard
+        // listed the generic yes/no confirm (DrawConfirm) or the spectator
+        // leave menu, so pressing M behind either cycled and PERSISTED the chat
+        // overlay mode underneath it and toasted about it, and Y opened the
+        // quick-chat popup behind it (Aug 12 UI review).
+        // Adding the missing flag to each copy would leave the next one to
+        // drift the same way, so the list itself is now the single source of
+        // truth and the copies are gone (#310: remove the reachability, don't
+        // add an exception to it).
+        //
+        // BackdroplessModalOpen — modals that paint IMGUI with no uGUI backdrop
+        // of their own, so clicks behind them have to be absorbed explicitly on
+        // BOTH input paths (#141/#200). This is exactly the old anyModal list.
+        private static bool BackdroplessModalOpen =>
+               bugModalOpen || logViewerOpen || bugAdminOpen
+            || adminPromptOpen
+            // ArtistPromptOpen is itself a composite: artist input, artist
+            // picker, player search, cosmetic test, cosmetic review.
+            || ArtistPromptOpen
+            || cosReleaseOpen
+            || flagEvidenceOpen
+            || NativeUI.CustomBetPromptOpen || NativeUI.LfpPromptOpen
+            // Spectator leave-confirm and the generic yes/no confirm: both
+            // backdrop-less, so a click outside their box would otherwise reach
+            // the very rows they exist to guard.
+            || SpectatorHud.MenuOpen
+            || confirmOpen;
+
+        // AnyModalOwnsInput — the above PLUS every modal that raises its own
+        // uGUI backdrop. A backdrop absorbs EventSystem clicks; NOTHING absorbs
+        // a raw keystroke, so every keyboard hotkey (T, M, Y) must consult THIS
+        // one, not the click-blocker set. Consent is included via
+        // !DataConsentAsked for the same reason.
+        //
+        // quickChatOpen is deliberately ABSENT: the popup is itself one of the
+        // hotkey surfaces gated by this property, so including it would make
+        // DrawChatInput's guard close the popup that DrawQuickChat is drawing.
+        // Each consumer ORs it in explicitly where it means "a modal is up".
+        private static bool AnyModalOwnsInput =>
+               BackdroplessModalOpen
+            || NativeUI.InfoPopupOpen || NativeUI.TournBetsPopupOpen
+            || NativeUI.PickerOpen || NativeUI.LangPromptOpen
+            || !Plugin.DataConsentAsked;
 
         /// <summary>Called from OnGUI. FPS + notifications + match status. The server-down
         /// banner moved to the F5 menu (NativeUI.RefreshServerBanner) — it was constantly
@@ -161,6 +317,10 @@ namespace CompetitiveRounds
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
             DrawSpawnSpotlight();
+            // Item 10: the horizontal multi-entry band draws BEFORE the single
+            // slot, because DrawNotification reads NotificationSetLift() to
+            // step above it and must see this pass's freshly-ticked state.
+            DrawNotificationSet();
             DrawNotification();
             DrawSpectatorRoster();   // fighter-side "Spectators (N)" (design §6.8)
             DrawFfaScoreStrip();
@@ -206,43 +366,22 @@ namespace CompetitiveRounds
             // (SetClickBlocker's raycast-absorbing Image) AND the mod's own
             // ClickHandler poller, which hit-tests Input.GetMouseButtonDown itself
             // and ignores the uGUI blocker (bug #75 — artist price/stock modal).
-            // Consent modal has its OWN dedicated blocker (EnsureConsentBlocker) so
-            // it isn't in this set; adminPromptOpen was previously missing from the
-            // uGUI list too — added here so both paths cover it.
-            bool anyModal = bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen
-                           || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosTestOpen || cosReviewOpen
-                           || cosReleaseOpen
-                           || flagEvidenceOpen
-                          || adminPromptOpen || NativeUI.LfpPromptOpen
-                          // Wave-2 find 10: the quick-chat popup can overlap
-                          // live F5 buttons — a phrase click must not ALSO
-                          // fire the shop/queue control underneath, on
-                          // EITHER input path.
-                          || quickChatOpen
-                          // Spectator leave-confirm: an IMGUI modal with no
-                          // uGUI backdrop of its own, so it needs BOTH gates
-                          // (#200) — a [Leave] click must not fall through to
-                          // an F5 button underneath.
-                          || SpectatorHud.MenuOpen
-                          // Aug 7: the generic yes/no confirm was missing from
-                          // this list since it was written — also backdrop-less,
-                          // so while it was up a click outside its box still
-                          // reached the very Unban/Reverse/Void rows it exists
-                          // to guard, on both input paths. It can't strand
-                          // either gate on: DrawConfirm runs earlier in this
-                          // same DrawUI pass and clears confirmOpen on Escape,
-                          // on either button, and on the menu closing.
-                          || confirmOpen;
+            // Consent modal has its OWN dedicated blocker (EnsureConsentBlocker),
+            // which is why it is not in the click-blocker half.
+            //
+            // Both halves come from the shared predicates above; the only thing
+            // stated here is quick chat, which those deliberately exclude.
+            // Wave-2 find 10: the quick-chat popup can overlap live F5 buttons —
+            // a phrase click must not ALSO fire the shop/queue control
+            // underneath, on EITHER input path.
+            bool anyModal = BackdroplessModalOpen || quickChatOpen;
             NativeUI.SetClickBlocker(anyModal);
-            // InfoPopupOpen: the uGUI info popup's backdrop absorbs EventSystem
-            // clicks itself, but raw-polling ClickHandlers behind it need this
-            // flag (learning #141); its own backdrop sets bypassModalBlock.
-            // Aug 6 item 2: PickerOpen joins ModalBlockInput ONLY — deliberately
-            // not anyModal/SetClickBlocker. The picker raises its own uGUI
-            // backdrop, so it needs the raw-poll half of the gate (#141/#200)
-            // and nothing else; adding it to anyModal would double-blocker it.
-            // Mirrors InfoPopupOpen, which is in this list for the same reason.
-            ClickHandler.ModalBlockInput = anyModal || NativeUI.InfoPopupOpen || NativeUI.PickerOpen || NativeUI.LangPromptOpen || !Plugin.DataConsentAsked;
+            // The raw-poll half additionally covers the modals that DO raise
+            // their own uGUI backdrop (info popup, picker, language prompt,
+            // consent) — a backdrop stops EventSystem clicks but not a
+            // ClickHandler polling Input.GetMouseButtonDown itself (#141/#200).
+            // Adding them to anyModal instead would double-blocker them.
+            ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -281,7 +420,7 @@ namespace CompetitiveRounds
                             }
                             catch { }
                             // Neutralise rich-text (IMGUI label, same rule as quick-chat).
-                            names = names.Replace("<", "(").Replace(">", ")");
+                            names = SanitizeForImgui(names);
                             if (names.Length > 60) names = names.Substring(0, 60);
                             specRosterLine = names.Length > 0
                                 ? I18n.TrF("Spectators ({0}): {1}", n, names)
@@ -2517,14 +2656,29 @@ namespace CompetitiveRounds
                          : (hit.Value.isOpponent ? I18n.Tr("Opponent's picks") : I18n.Tr("Your picks"));
             bool showTitle = !string.IsNullOrEmpty(title);
 
-            float w = 260f;
-            float lineH = 16f;
             float headH = showTitle ? 22f : 6f;   // title band height (or just top pad)
-            float h = headH + lineCount * lineH + 8f;
+            // Fit the box to the SCREEN, not just to the cursor. Position was
+            // clamped here from the start; HEIGHT never was, so the box simply
+            // grew with its line count. Once the end-of-game build block was
+            // added under the cards, the 2v2 body (two players, each cards +
+            // build) models at ~42 lines / ~686px — taller than the whole client
+            // area of an 800x600 window, so it pinned to y=4 and painted its
+            // last ~90px off the bottom edge, silently, with no scrolling and no
+            // marker (Aug 12 UI review). EnsureTipLayout flows the body into
+            // columns and MEASURES the result, so h below can never exceed
+            // Screen.height - 8.
+            EnsureTipLayout(body, lineCount, showTitle, headH);
+            var tipCols = _tipLayCols;
+            float w = tipCols.Length * TIP_COL_W + (tipCols.Length - 1) * TIP_COL_GAP;
+            float h = headH + _tipLayBodyH + 8f;
             float x = Input.mousePosition.x + 14f;
             float y = (Screen.height - Input.mousePosition.y) + 14f;  // IMGUI y is top-down
-            // Clamp inside screen
+            // Clamp inside screen. The x floor matters now that the box can be
+            // wider than one column: EnsureTipLayout caps the column count at
+            // what the screen is wide enough for, so this only ever backstops a
+            // narrower-than-modelled window.
             if (x + w > Screen.width) x = Screen.width - w - 4f;
+            if (x < 4f) x = 4f;
             if (y + h > Screen.height) y = Screen.height - h - 4f;
             if (y < 4f) y = 4f;
 
@@ -2544,9 +2698,152 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(x + 8, y + 6, w - 16, 18),
                           $"<color=#{(hit.Value.isOpponent ? "FF9988" : "8BB6FF")}>{title}</color>",
                           _cardTipTitleStyle);
-            GUI.Label(new Rect(x + 8, y + headH, w - 16, h - headH - 4f),
-                      $"<color=#DDDDDD>{body}</color>",
-                      _cardTipBodyStyle);
+            for (int c = 0; c < tipCols.Length; c++)
+            {
+                float cx = x + c * (TIP_COL_W + TIP_COL_GAP);
+                if (c > 0)
+                    GUI.DrawTexture(new Rect(cx - TIP_COL_GAP / 2f, y + headH, 1, h - headH - 6f),
+                                    Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                                    new Color(1f, 1f, 1f, 0.12f), 0, 0);
+                GUI.Label(new Rect(cx + 8, y + headH, TIP_COL_W - 16, h - headH - 4f),
+                          $"<color=#DDDDDD>{tipCols[c]}</color>",
+                          _cardTipBodyStyle);
+            }
+        }
+
+        // ── Tooltip column layout ────────────────────────────────────────────
+        // One 260px column, 16px a line, is the shape this tooltip has always
+        // had; what is new is that the content can outgrow the screen (see the
+        // call site). The rule, in order:
+        //
+        //   1. A column holds floor((Screen.height - 8 - headH - 8) / 16) lines
+        //      — 36 in an 800x600 window with no title band, 65 at 1080p.
+        //   2. Flow into as many columns as the body needs, capped at what the
+        //      screen is wide enough for: 2 at 800px, 4 at 1280px. So the
+        //      smallest window we model holds 72 lines against a ~42-line worst
+        //      case, which is why the elision below is a backstop and not a
+        //      normal path.
+        //   3. Only if it still does not fit: drop lines from the END, skipping
+        //      card bullets and player-name headers on the first pass, and add a
+        //      "+N more" marker so a cut is never silent. Both body builders
+        //      (NativeUI.CardsPlusBuildBody and BuildTeamCardsTooltipBody) emit
+        //      a player's build AFTER that player's cards, so the build block is
+        //      what this eats; a card line can only be reached in a window too
+        //      small to hold the card list on its own.
+        //
+        // The whole layout is memoised on (body, title, screen size) because
+        // OnGUI runs several times a frame (#162) — so the per-event cost is one
+        // string compare, and the CalcHeight measurement (#237: model line
+        // counts lie the moment a long localised card name wraps) is paid once.
+        private const float TIP_COL_W = 260f;
+        private const float TIP_COL_GAP = 8f;
+        private const float TIP_LINE_H = 16f;
+        private static string[] _tipLayCols = new string[0];
+        private static float _tipLayBodyH;
+        private static string _tipLayBody;
+        private static bool _tipLayTitle;
+        private static int _tipLayScrW, _tipLayScrH;
+
+        private static void EnsureTipLayout(string body, int lineCount, bool showTitle, float headH)
+        {
+            int sw = Screen.width, sh = Screen.height;
+            if (_tipLayCols.Length > 0 && _tipLayScrW == sw && _tipLayScrH == sh
+                && _tipLayTitle == showTitle
+                && string.Equals(_tipLayBody, body, StringComparison.Ordinal))
+                return;
+            _tipLayBody = body; _tipLayTitle = showTitle; _tipLayScrW = sw; _tipLayScrH = sh;
+
+            // 4px margin top and bottom, plus the box's own 8px bottom pad.
+            float availBodyH = Math.Max(TIP_LINE_H, sh - 8f - headH - 8f);
+            int maxCols = Math.Max(1, (int)((sw - 8f + TIP_COL_GAP) / (TIP_COL_W + TIP_COL_GAP)));
+            int perCol = Math.Max(1, (int)(availBodyH / TIP_LINE_H));
+
+            for (int attempt = 0; ; attempt++)
+            {
+                FlowTipColumns(body, lineCount, perCol, maxCols);
+                float measured = 0f;
+                for (int c = 0; c < _tipLayCols.Length; c++)
+                {
+                    string col = _tipLayCols[c];
+                    // Fall back to the row model if the style is somehow not
+                    // built yet — never to a value from a previous layout.
+                    float ch = TIP_LINE_H;
+                    for (int k = 0; k < col.Length; k++) if (col[k] == '\n') ch += TIP_LINE_H;
+                    try { ch = _cardTipBodyStyle.CalcHeight(new GUIContent(col), TIP_COL_W - 16f); }
+                    catch { }
+                    if (ch > measured) measured = ch;
+                }
+                // Wrapped lines make the rendered column taller than the row
+                // model; shrink the per-column budget by the overflow and re-flow
+                // (which spends the difference on another column, or on the
+                // elision if there is no room for one). Bounded: three passes,
+                // then take the clamp and accept the model.
+                if (measured <= availBodyH || attempt >= 2 || perCol <= 1)
+                {
+                    _tipLayBodyH = Math.Min(measured, availBodyH);
+                    return;
+                }
+                int over = (int)Math.Ceiling((measured - availBodyH) / TIP_LINE_H);
+                perCol = Math.Max(1, perCol - Math.Max(1, over));
+            }
+        }
+
+        private static void FlowTipColumns(string body, int lineCount, int perCol, int maxCols)
+        {
+            if (lineCount <= perCol)
+            {
+                // Common case (a 1v1 cards+build body is ~15 lines): no split, no
+                // per-line allocation, byte-identical to the pre-column render.
+                _tipLayCols = new[] { body };
+                return;
+            }
+            var lines = new List<string>(body.Split('\n'));
+            int nCols = Math.Min(maxCols, Math.Max(1, (lines.Count + perCol - 1) / perCol));
+            int capacity = nCols * perCol;
+            if (lines.Count > capacity)
+            {
+                int dropped = lines.Count - capacity + 1;   // +1 reserves the marker row
+                int drop = dropped;
+                for (int i = lines.Count - 1; i >= 0 && drop > 0; i--)
+                {
+                    if (IsTipCardLine(lines[i])) continue;
+                    lines.RemoveAt(i); drop--;
+                }
+                while (drop > 0 && lines.Count > 0) { lines.RemoveAt(lines.Count - 1); drop--; }
+                lines.Add("<color=#888888>" + I18n.TrF("+{0} more lines", dropped) + "</color>");
+            }
+            int rows = Math.Min(perCol, Math.Max(1, (lines.Count + nCols - 1) / nCols));
+            var cols = new string[nCols];
+            var sb = new System.Text.StringBuilder(body.Length / nCols + 32);
+            int idx = 0;
+            for (int c = 0; c < nCols; c++)
+            {
+                sb.Length = 0;
+                for (int r = 0; r < rows && idx < lines.Count; r++, idx++)
+                {
+                    if (r > 0) sb.Append('\n');
+                    sb.Append(lines[idx]);
+                }
+                cols[c] = sb.ToString();
+            }
+            _tipLayCols = cols;
+        }
+
+        /// <summary>A line the overflow rule keeps if it possibly can: a card
+        /// bullet, or the bold player-name header that owns the bullets under
+        /// it. COUPLED to the two body builders in NativeUI — CardsBulletBody
+        /// emits "• name", BuildTeamCardsTooltipBody emits "&lt;b&gt;Name&lt;/b&gt;" and
+        /// "  • name", and every line of a build block opens with a colour tag
+        /// instead. Change that format and this predicate has to change with
+        /// it, or the elision stops protecting the cards.</summary>
+        private static bool IsTipCardLine(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return false;
+            int i = 0;
+            while (i < line.Length && line[i] == ' ') i++;
+            if (i >= line.Length) return false;
+            if (line[i] == '•') return true;                              // • bullet
+            return string.CompareOrdinal(line, i, "<b>", 0, 3) == 0;           // player name
         }
 
         // ── Stuck match-found overlay (v1.26.8) ─────────────────────────
@@ -3246,10 +3543,208 @@ namespace CompetitiveRounds
             return layout;
         }
 
+        // ── Chat overlay mode: ONE key cycles three states (bugs 211 + 213) ──
+        // Sid's chosen design, M cycles:
+        //   Normal : show = true,  pinned = false  -> fades after the TTL
+        //   Pinned : show = true,  pinned = true   -> never fades
+        //   Muted  : show = false, pinned = false  -> hidden + marker published
+        //
+        // The on/off half of the state IS Plugin.ShowIngameChat — the SAME
+        // ConfigEntry the Settings toggle writes — so the hotkey and the
+        // toggle cannot disagree; only "pinned" needed a new config key.
+        // A hand-edited cfg holding (show=false, pinned=true) reads as Muted
+        // (the !show test comes first) and the next cycle normalises it away.
+        internal enum ChatOverlayMode { Normal, Pinned, Muted }
+
+        internal static ChatOverlayMode CurrentChatOverlayMode()
+        {
+            // Null entry == pre-Awake init order: treat as the shipped default
+            // (visible, unpinned), exactly like the old ShowIngameChat guard.
+            bool show = Plugin.ShowIngameChat == null || Plugin.ShowIngameChat.Value;
+            if (!show) return ChatOverlayMode.Muted;
+            bool pinned = Plugin.ChatOverlayPinned != null && Plugin.ChatOverlayPinned.Value;
+            return pinned ? ChatOverlayMode.Pinned : ChatOverlayMode.Normal;
+        }
+
+        /// <summary>True while this client has the community chat muted (M's
+        /// third state, or the Settings toggle turned off). Public so any
+        /// other chat-shaped pop-up surface can suppress itself.</summary>
+        public static bool ChatMuted => CurrentChatOverlayMode() == ChatOverlayMode.Muted;
+
+        /// <summary>Advance Normal -> Pinned -> Muted -> Normal, persist,
+        /// republish the marker and ANNOUNCE the new state. The announcement
+        /// is not decoration: a silent mode key is exactly the invisible-timer
+        /// failure of #250/#221 — the player must be told which state they
+        /// just entered, especially Muted.</summary>
+        internal static void CycleChatOverlayMode()
+        {
+            ChatOverlayMode next;
+            switch (CurrentChatOverlayMode())
+            {
+                case ChatOverlayMode.Normal: next = ChatOverlayMode.Pinned; break;
+                case ChatOverlayMode.Pinned: next = ChatOverlayMode.Muted;  break;
+                default:                     next = ChatOverlayMode.Normal; break;
+            }
+            try
+            {
+                if (Plugin.ShowIngameChat != null)
+                    Plugin.ShowIngameChat.Value = next != ChatOverlayMode.Muted;
+                if (Plugin.ChatOverlayPinned != null)
+                    Plugin.ChatOverlayPinned.Value = next == ChatOverlayMode.Pinned;
+            }
+            catch { }
+            try { PublishChatMuteState(); } catch { }
+            NativeUI.MarkDirty();   // the Settings label reads the same entries
+            Plugin.Log.LogInfo($"[CHAT] overlay mode -> {next}");
+            // Literals at the call site: ShowNotification IS the l10n
+            // chokepoint for this surface and the extractor harvests literals
+            // there, so these must NOT be composed or pre-Tr'd (#295a).
+            // ASCII hyphen, never an em-dash: Gravity has no U+2014 (#47).
+            switch (next)
+            {
+                case ChatOverlayMode.Pinned:
+                    ShowNotification("Chat overlay: PINNED - messages stay on screen",
+                                     new Color(0.7f, 0.9f, 1f), 3f);
+                    break;
+                case ChatOverlayMode.Muted:
+                    ShowNotification("Chat overlay: MUTED - hidden, and the room is told",
+                                     new Color(1f, 0.75f, 0.5f), 3f);
+                    break;
+                default:
+                    ShowNotification("Chat overlay: NORMAL - messages fade out",
+                                     new Color(0.7f, 1f, 0.8f), 3f);
+                    break;
+            }
+        }
+
+        // ── "chat muted" marker, published to the room (bug 213) ──────────
+        // A courtesy indicator, NOT a capability gate: it carries no gameplay
+        // meaning, so eventual consistency is fine and it does not need the
+        // pre-join staging discipline (#287) that cr_pois2 / cr_grow1 do.
+        internal const string CHAT_MUTE_PROP = "cr_cmute";
+        private static string chatMuteLine = "";
+        private static float chatMuteLineCachedAt = -999f;
+        // The room the cached line describes. Part of the cache KEY, not a
+        // check performed after the cache is returned — see MutedPlayersLine.
+        private static string chatMuteLineRoom = "";
+
+        /// <summary>Neutralise rich text in USER-AUTHORED strings before they
+        /// reach a richText IMGUI style. Mirrors NativeUI.Escape (private
+        /// there, so every IMGUI site in the mod restates the rule): ASCII
+        /// parens, never the CJK/fullwidth twins, which are tofu outside the
+        /// TMP fallback atlas (#47).</summary>
+        internal static string SanitizeForImgui(string s)
+        {
+            return string.IsNullOrEmpty(s) ? "" : s.Replace("<", "(").Replace(">", ")");
+        }
+
+        /// <summary>Publish (or clear) this seat's chat-mute marker. Safe to
+        /// call from anywhere; a no-op outside an online room.</summary>
+        public static void PublishChatMuteState()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                int want = ChatMuted ? 1 : 0;
+                // Write only on a real change. SetCustomProperties broadcasts
+                // to every client in the room, and a redundant publish storm
+                // is exactly what made the F5 menu hitch on the OPPONENT's
+                // machine (#109). The value is written as 0 rather than
+                // removed so a stale 1 from a previous room cannot survive
+                // (player props persist across rooms, #182).
+                object cur = null;
+                var props = local.CustomProperties;
+                if (props != null) props.TryGetValue(CHAT_MUTE_PROP, out cur);
+                if (cur is int && (int)cur == want) return;
+                var h = new ExitGames.Client.Photon.Hashtable();
+                h[CHAT_MUTE_PROP] = want;
+                local.SetCustomProperties(h);
+                chatMuteLineCachedAt = -999f;   // our own row changed — re-read now
+            }
+            catch { }
+        }
+
+        /// <summary>"chat muted: A, B" for every actor in the room carrying
+        /// the marker, or "" when nobody is (or we are not in an online
+        /// room). Cached for 3s: OnGUI runs several times per frame (#162)
+        /// and PhotonNetwork.PlayerList sorts + allocates on every read.
+        /// Public so the F5 Home chat pane can render the same line.</summary>
+        public static string MutedPlayersLine()
+        {
+            // The room is part of the cache KEY. It used to be checked only
+            // INSIDE the miss path, so the hit path could hand back a line
+            // naming players from the room we had just left — up to 3s of
+            // "chat muted: Alice" after leaving room A or joining room B, and
+            // nothing invalidated on a room change (Aug 12 UI review). Reading
+            // the room name first makes that unrepresentable rather than
+            // narrower. "" is both "not in an online room" and the key the
+            // empty line is cached under, so the menu case still costs one
+            // property read.
+            string room = "";
+            try
+            {
+                if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode)
+                {
+                    var cr = PhotonNetwork.CurrentRoom;
+                    room = cr != null ? (cr.Name ?? "") : "";
+                }
+            }
+            catch { room = ""; }
+            if (Time.unscaledTime - chatMuteLineCachedAt <= 3f
+                && string.Equals(room, chatMuteLineRoom, StringComparison.Ordinal))
+                return chatMuteLine;
+            chatMuteLineCachedAt = Time.unscaledTime;
+            chatMuteLineRoom = room;
+            chatMuteLine = "";
+            try
+            {
+                if (room.Length == 0) return chatMuteLine;
+                // ALL actors, spectators included: a spectator can mute chat
+                // too, and the fighters should see that.
+                var list = PhotonNetwork.PlayerList;
+                if (list == null) return chatMuteLine;
+                string names = "";
+                int shown = 0, extra = 0;
+                for (int i = 0; i < list.Length; i++)
+                {
+                    var p = list[i];
+                    if (p == null) continue;
+                    object v = null;
+                    var props = p.CustomProperties;
+                    if (props == null || !props.TryGetValue(CHAT_MUTE_PROP, out v)) continue;
+                    if (!(v is int) || (int)v != 1) continue;
+                    if (shown >= 4) { extra++; continue; }
+                    // NickName is user-authored: sanitise BEFORE it reaches
+                    // the richText overlay style, then truncate.
+                    string n = SanitizeForImgui(p.NickName ?? "");
+                    if (n.Length == 0) n = "?";
+                    if (n.Length > 14) n = n.Substring(0, 14);
+                    names = shown == 0 ? n : names + ", " + n;
+                    shown++;
+                }
+                if (shown == 0) return chatMuteLine;
+                // Two whole templates, never a composed suffix (#298c): a
+                // "(N more)" fragment appended after Tr cannot be translated,
+                // and a leading "+{1}" risks the extractor's +-folding rule
+                // (#295b).
+                chatMuteLine = extra > 0
+                    ? I18n.TrF("chat muted: {0} and {1} more", names, extra)
+                    : I18n.TrF("chat muted: {0}", names);
+            }
+            catch { chatMuteLine = ""; }
+            return chatMuteLine;
+        }
+
         private static void DrawInGameChat()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
-            if (Plugin.ShowIngameChat != null && !Plugin.ShowIngameChat.Value) return;
+            // Bug 211/213: Muted is stored AS ShowIngameChat=false, so this is
+            // the same predicate the old guard used — one state for both the
+            // Settings toggle and the M hotkey.
+            var chatMode = CurrentChatOverlayMode();
+            if (chatMode == ChatOverlayMode.Muted) return;
             if (!Plugin.DataConsentGranted) return;
             /* Aug 7 item 3: the old `if (NativeUI.IsOpen) return;` assumed "the
              * F5 chat panel covers this" — true only on the Home tab. Now chat
@@ -3282,10 +3777,37 @@ namespace CompetitiveRounds
             var alphas = _chatAlphaScratch;
             float maxAlpha = 0f;
             int visibleCount = 0;
+            // Item 4: TTL is configurable. READ AND CLAMP ONCE, above the loop
+            // — OnGUI runs several times per rendered frame (#162), and a
+            // per-entry ConfigEntry read plus clamp would repeat that cost for
+            // every line every pass. Null-guarded for init order exactly like
+            // the ShowIngameChat read above. The 10s fade tail stays fixed;
+            // only the fully-opaque window is user-controlled.
+            //
+            // NOTE for whoever next "fixes a TTL that appears not to work":
+            // the overlay draws at most the last 8 entries (CopyChatTail
+            // above) out of a ring capped at NativeUI.CHAT_LOG_MAX = 60. A
+            // longer TTL therefore cannot show MORE lines, cannot grow the
+            // panel past 8 rows, and cannot resurrect an evicted line — it
+            // only decides how long those 8 stay opaque.
+            const double CHAT_FADE_SECONDS = 10.0;
+            double ttl = Plugin.ChatOverlaySeconds != null
+                ? Mathf.Clamp(Plugin.ChatOverlaySeconds.Value, 1f, 600f)
+                : 25f;
+            // Pinned never fades (bug 211): the TTL does not apply at all.
+            bool pinned = chatMode == ChatOverlayMode.Pinned;
             for (int i = 0; i < entries.Count; i++)
             {
-                double age = (now - entries[i].AddedUtc).TotalSeconds;
-                float a = age < 25 ? 1f : age < 35 ? 1f - (float)((age - 25) / 10.0) : 0f;
+                float a;
+                if (pinned) a = 1f;
+                else
+                {
+                    double age = (now - entries[i].AddedUtc).TotalSeconds;
+                    a = age < ttl ? 1f
+                      : age < ttl + CHAT_FADE_SECONDS
+                          ? 1f - (float)((age - ttl) / CHAT_FADE_SECONDS)
+                          : 0f;
+                }
                 alphas[i] = a;
                 if (a > 0.02f) { visibleCount++; if (a > maxAlpha) maxAlpha = a; }
             }
@@ -3312,6 +3834,24 @@ namespace CompetitiveRounds
                 layouts[i] = MeasureChatLine(entries[i].Line, w);
                 totalH += layouts[i].H + lineGap;
             }
+            // Bug 213: who in this room has chat muted, as a dim header row
+            // inside the same panel (Sid picked the chat panel as the place
+            // for the indicator). "" whenever nobody is muted or we are not in
+            // an online room, and the row is then omitted entirely.
+            // SCOPE, stated so nobody mistakes this for a persistent HUD
+            // element: it is an annotation ON the chat panel, so it appears
+            // only while the panel itself is up (there is recent, still-
+            // visible chat and this seat is not Muted). The always-available
+            // surface is the F5 Home chat pane, which renders the same string
+            // from MutedPlayersLine().
+            string muteLine = MutedPlayersLine();
+            var muteLayout = default(ChatLineLayout);
+            bool hasMuteLine = muteLine.Length > 0;
+            if (hasMuteLine)
+            {
+                muteLayout = MeasureChatLine(muteLine, w);
+                totalH += muteLayout.H + lineGap;
+            }
             float panelH = totalH - lineGap + padding * 2;
             float yBottom = Screen.height - 90;   // above FPS/ping overlay, clear of HUD
             float yTop = yBottom - panelH;
@@ -3335,6 +3875,16 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(x, yCursor, w, layouts[i].H), layouts[i].Disp, ingameChatStyle);
                 GUI.contentColor = prev;
                 yCursor -= lineGap;
+            }
+            if (hasMuteLine)
+            {
+                // Top row of the panel — the cursor has already walked past
+                // every message, so this lands exactly at yTop + padding.
+                var prevC = GUI.contentColor;
+                GUI.contentColor = new Color(0.72f, 0.76f, 0.84f, maxAlpha * 0.75f);
+                yCursor -= muteLayout.H;
+                GUI.Label(new Rect(x, yCursor, w, muteLayout.H), muteLayout.Disp, ingameChatStyle);
+                GUI.contentColor = prevC;
             }
         }
 
@@ -5667,6 +6217,7 @@ namespace CompetitiveRounds
         // the memo correct by construction rather than by enumeration.
         private static string chatHeaderCache, chatHeaderChan, chatHeaderLocale;
         private static int chatHeaderGen = -1;
+        private static GUIStyle chatHeaderStyle;
 
         private static void DrawChatInput()
         {
@@ -5684,29 +6235,37 @@ namespace CompetitiveRounds
             // there is no "next open" to resume into, and holding the player's
             // typed text after they opted out is the wrong default (F4).
             if (!Plugin.DataConsentGranted) { CloseChatInput(discardDraft: true); return; }
-            // Don't hijack T while a modal IMGUI input is taking keystrokes —
-            // bug report form, log viewer, admin bug viewer, and the Compare-tab
-            // search field all have their own text entry that need T to type
-            // "the", "tree", etc. (lopi: typing "t" in Compare search opened chat).
+            // Don't hijack T or M while a modal owns the screen. Two distinct
+            // reasons, one guard: a modal with a text field needs 't'/'m' as
+            // typed characters (lopi: typing "t" in Compare search opened chat),
+            // and a modal WITHOUT one still must not have hotkeys acting behind
+            // it. Position is why this guard is load-bearing rather than
+            // cosmetic: DrawChatInput is the EIGHTH call in DrawUI and
+            // DrawConfirm/DrawAdminPrompt (and every uGUI-backed modal) come
+            // after it, so we see the key first and would consume it — the
+            // modal never gets a say (#141/#200: a raw input path has to
+            // consult modal state itself; nothing absorbs a keystroke for it).
+            //
+            // AnyModalOwnsInput is the shared set (see the property): this used
+            // to be a hand-copied subset of it, and the generic yes/no confirm
+            // was one of the flags it was missing — pressing M behind it cycled
+            // and persisted the chat overlay mode and toasted about it.
+            // The three *Focused flags are not modals (they are focus states on
+            // an ordinary F5 field), so they stay stated here.
+            //
             // CloseChatInput (not a bare return): a modal opening while the box
             // is up must not leave it "open" and holding the input lock with
             // nothing rendering it.
             // F4: this is THE incidental close — the two Aug-3 chat pickers
             // (Change view / Typing channel) are ArtistPromptOpen modals, so
-            // clicking either used to eat the draft. Stashing here fixes every
-            // modal in this list at once, not just those two.
-            if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
+            // clicking either used to eat the draft. Stashing here covers every
+            // modal in the set at once, not just those two.
+            if (AnyModalOwnsInput
+                || compareSearchFocused
                 // July 22 item 8: leaderboard search takes typed text too.
                 || lbSearchFocused
                 // Aug 6 item 2: the metric/card dropdown's search field.
-                || pickerSearchFocused
-                || NativeUI.CustomBetPromptOpen
-                // July 21 item 8: the LFP message box takes typed text — 't'
-                // there must not open chat.
-                || NativeUI.LfpPromptOpen
-                // July 12 round 2 item 4: the artist input / roster picker / player
-                // search modals all take typed text — 't' there must not open chat.
-                || ArtistPromptOpen) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
+                || pickerSearchFocused) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -5758,6 +6317,22 @@ namespace CompetitiveRounds
                     // Take the lock on the same frame the box opens, so the 't'
                     // that opened it can't also be read as gameplay input.
                     SetGameplayInputLock(true);
+                }
+                // Bugs 211 + 213: M cycles the overlay Normal -> Pinned ->
+                // Muted. Deliberately placed INSIDE the !chatInputOpen branch
+                // and AFTER the same guard sequence T passes (consent,
+                // AnyModalOwnsInput, IsVanillaChatTyping, IsAnotherTextInput
+                // Active) rather than inventing its own — which also means it
+                // cannot fire while OUR box is open, where 'm' is a literal
+                // character in the player's message. That claim only became
+                // true with the shared modal set above: the guard it inherited
+                // was a hand-copied SUBSET, so M did fire behind a confirm
+                // dialog (Aug 12 UI review). No gameplay-input lock is taken:
+                // this is a one-shot toggle, not a typing surface.
+                else if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.M)
+                {
+                    CycleChatOverlayMode();
+                    ev.Use();
                 }
                 return;
             }
@@ -5868,12 +6443,48 @@ namespace CompetitiveRounds
                 chatAltTapClean = false;
             }
 
-            // Position: above the F5 menu's bottom bar (Discord/GitHub/Refresh buttons
-            // are around y=Screen.height-30). Doubled size per request.
-            float w = 1000, h = 56;
-            float x = 20, y = Screen.height - 130;
+            // ── Position (item 13) ────────────────────────────────────────
+            // Sid: "the T-chat popup lays overtop of some of the text box
+            // text ... probably move the typing box since I like the spot for
+            // the messages themselves." So the MESSAGE LIST does not move; the
+            // input assembly moves BELOW it.
+            //
+            // The assembly has a 60px band to live in, and TWO invariants:
+            //   TOP    >= the message panel's bottom edge. DrawInGameChat
+            //             anchors that panel at Screen.height - 90 and grows
+            //             it UPWARD, so the top may not go above H-90.
+            //   BOTTOM <= the F5 menu's bottom bar, a 26px row that sits at
+            //             roughly Screen.height - 30 (the box renders over the
+            //             open menu, so it must not bury Discord / Update /
+            //             Refresh).
+            //
+            // The old box was a 56px field with a 24px backdrop overhang on
+            // top, so the assembly spanned H-154 .. H-44 and its top 64px sat
+            // straight through the message panel — the reported overlap.
+            // Shrinking the field to 34 is what buys the room to move down:
+            //
+            //   pad 3 + header 18 + gap 2 + field 34 + pad 3 = 60 total
+            //   backdrop  H-90 .. H-30   (exactly the free band)
+            //   header    H-87 .. H-69   (INSIDE the backdrop)
+            //   field     H-67 .. H-33
+            //
+            // Other neighbours below: the spectator roster line occupies
+            // H-28..H-6 (right-aligned from Screen.width-420) and the debug
+            // input overlay sits at H-14. Both are clear of H-30.
+            const float ChatInPadTop = 3f, ChatInHeaderH = 18f, ChatInGap = 2f;
+            const float ChatInFieldH = 34f, ChatInPadBot = 3f;
+            const float ChatInBackdropH = ChatInPadTop + ChatInHeaderH + ChatInGap
+                                        + ChatInFieldH + ChatInPadBot;   // 60
+            // Clamp so the assembly cannot run off a narrow window; a no-op at
+            // every resolution at or above 1040 wide.
+            float w = Mathf.Min(1000f, Screen.width - 40f);
+            float h = ChatInFieldH;
+            float x = 20;
+            float bdTop = Screen.height - 90f;                 // == message panel bottom
+            float headerY = bdTop + ChatInPadTop;
+            float y = headerY + ChatInHeaderH + ChatInGap;     // field top
 
-            GUI.DrawTexture(new Rect(x - 6, y - 24, w + 12, h + 30),
+            GUI.DrawTexture(new Rect(x - 6, bdTop, w + 12, ChatInBackdropH),
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.82f), 0, 0);
             // Item 13: ONE header for every locale — the cycle is ungated now,
             // so the old "English clients get a shorter line with no channel
@@ -5889,7 +6500,17 @@ namespace CompetitiveRounds
                     "Chat [{0}]  —  Enter to send, Esc to cancel, Alt switches channel",
                     ChannelDisplayLabel(hdrChan));
             }
-            GUI.Label(new Rect(x, y - 22, w, 20), chatHeaderCache);
+            // Overflow clipping + no wrap on the header: it is a TRANSLATED
+            // line in an 18px box (2px tighter than before), and OS-fallback
+            // glyphs (Cyrillic/CJK) have taller metrics than Gravity at the
+            // same point size — under the global Truncate default that renders
+            // the whole line BLANK (#292/#297). Same font and size as before;
+            // only clipping and wrapping change, and the bleed lands in the
+            // backdrop's own 3px pad.
+            if (chatHeaderStyle == null)
+                chatHeaderStyle = new GUIStyle(GUI.skin.label)
+                { wordWrap = false, clipping = TextClipping.Overflow };
+            GUI.Label(new Rect(x, headerY, w, ChatInHeaderH), chatHeaderCache, chatHeaderStyle);
 
             GUI.SetNextControlName("CRChat");
             chatInputText = GUI.TextField(new Rect(x, y, w, h), chatInputText ?? "", 480, chatStyle);
@@ -5977,13 +6598,15 @@ namespace CompetitiveRounds
             // Liveness stamp read by DrawChatInput's guardian.
             quickChatDrawStampedAt = Time.unscaledTime;
             if (!Plugin.DataConsentGranted) { quickChatOpen = false; return; }
-            // Same modal-typing exclusions as the chat box: Y must type into
-            // those inputs, not open the popup — and an already-open popup
-            // yields to them.
-            if (chatInputOpen || bugModalOpen || logViewerOpen || bugAdminOpen
-                || compareSearchFocused || lbSearchFocused || pickerSearchFocused
-                || NativeUI.CustomBetPromptOpen || NativeUI.LfpPromptOpen
-                || ArtistPromptOpen) { quickChatOpen = false; return; }
+            // Same modal exclusions as the chat box, from the same shared set:
+            // Y must type into a modal's text field rather than open the popup,
+            // and no hotkey may fire behind a modal that has no text field at
+            // all. An already-open popup yields to any of them. This was a
+            // hand-copied subset of AnyModalOwnsInput and had drifted the same
+            // way DrawChatInput's copy had (Aug 12 UI review) — one list now.
+            if (chatInputOpen || AnyModalOwnsInput
+                || compareSearchFocused || lbSearchFocused
+                || pickerSearchFocused) { quickChatOpen = false; return; }
             if (IsVanillaChatTyping()) { quickChatOpen = false; return; }
 
             bool inRoom = false;
@@ -6411,11 +7034,224 @@ namespace CompetitiveRounds
             float x = (Screen.width - width) / 2f;
             // Size to rendered content (multi-line grows upward from the same baseline).
             float h = Mathf.Clamp(notifStyle.CalcHeight(new GUIContent(notifText), width), 24f, 120f);
-            float y = Screen.height - 80 - (h - 24f);
+            // The set band (item 10) occupies this exact baseline when it is
+            // live, so the single toast steps above it. Zero — i.e. the
+            // original rect, byte for byte — whenever no set is on screen,
+            // which is every case that existed before the band did.
+            float y = Screen.height - 80 - (h - 24f) - NotificationSetLift();
 
             var bgTex = Texture2D.whiteTexture;
             GUI.DrawTexture(new Rect(x, y - 6, width, h + 12), bgTex, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, alpha * 0.5f), 0, 0);
             GUI.Label(new Rect(x, y, width, h), notifText, notifStyle);
+            GUI.contentColor = origColor;
+        }
+
+        /// <summary>Vertical room the live set band is occupying at the single
+        /// toast's baseline, or 0 when the band is empty.</summary>
+        private static float NotificationSetLift()
+        {
+            return notifSetEntries.Count > 0 ? notifSetRowH + 14f : 0f;
+        }
+
+        // Baseline of the set band's TOP edge. Same anchor as the single
+        // toast, and the band is short by design, so it lives in the strip
+        // BETWEEN the neighbours it must not cover. RECTS BEING AVOIDED —
+        // do not move this without re-checking them:
+        //   chat message panel : x 8..452, BOTTOM edge Screen.height - 90,
+        //                        grows UPWARD  -> band top must stay below it
+        //   chat input assembly: x 14..w+26, Screen.height-90 .. -30 (only
+        //                        while the player is typing; it is drawn
+        //                        LATER in DrawUI so it paints on top, which
+        //                        is the correct precedence for a focused
+        //                        text field — a ~4s toast band losing to the
+        //                        box the player is actively typing in)
+        //   spectator roster   : x Screen.width-420.., Screen.height-28 .. -6
+        //   F5 menu bottom bar : a 26px row at roughly Screen.height - 30
+        //   debug input overlay: Screen.height - 14
+        // At rowH ~26 the band spans H-83 .. H-51, clear of the roster, the
+        // menu's bottom bar and the input overlay at every width, which is why
+        // it needs no horizontal constraint and can use the full screen for
+        // its width budget.
+        private const float NOTIF_SET_BASE_Y = 80f;
+        private const float NOTIF_SET_MARGIN = 24f;   // free space at each edge
+        private const float NOTIF_SET_GAP = 10f;      // between cells
+        private const float NOTIF_SET_PAD_X = 9f;     // inside each cell
+        private static readonly int[] NOTIF_SET_FONT_LADDER = { 15, 13, 11 };
+
+        /// <summary>Measure + place every cell. Runs only when the set or the
+        /// screen width changes — NEVER per Repaint: CalcSize on N cells for
+        /// every IMGUI pass is exactly the #162 trap.
+        ///
+        /// WIDTH BUDGET (the overflow rule, and its worst case):
+        /// entries are capped at NOTIF_SET_MAX_CHARS = 34 characters, so a
+        /// cell is at most ~34 glyphs plus 18px of padding. The font shrinks
+        /// down the ladder 15 -> 13 -> 11 until the row fits the usable width;
+        /// if it still does not fit at 11, leading cells are kept and the tail
+        /// collapses into a "+N" cell. Worst case is a 10-player FFA cycle
+        /// announcing 9 picks AND 9 rolling removals = 18 cells: at 11pt that
+        /// is roughly 18 x 160px = 2880px against 1872px usable at 1920 wide,
+        /// so about 11 cells render and the rest read "+7". It is ONE row at
+        /// every size — the request was "horizontal ... so it doesn't get in
+        /// the way of gameplay", and a band that wraps upward would fail that
+        /// however horizontal each row was.
+        ///
+        /// The "+N" cull is the load-bearing half, not the ladder: if ROUNDS'
+        /// IMGUI skin font ignores fontSize (a non-dynamic font would make all
+        /// three ladder steps measure identically), the ladder simply becomes
+        /// a no-op and the cull still bounds the row to the usable width. The
+        /// band can therefore never run off screen, whichever way the font
+        /// behaves.</summary>
+        private static void LayoutNotificationSet()
+        {
+            notifSetLayoutWidth = Screen.width;
+            notifSetLayoutCount = notifSetEntries.Count;
+            notifSetOverflowText = "";
+            float usable = Mathf.Max(120f, Screen.width - NOTIF_SET_MARGIN * 2f);
+
+            var content = new GUIContent();
+            float[] widths = new float[notifSetEntries.Count];
+            int chosenFont = NOTIF_SET_FONT_LADDER[NOTIF_SET_FONT_LADDER.Length - 1];
+            float total = 0f;
+            bool fits = false;
+            for (int f = 0; f < NOTIF_SET_FONT_LADDER.Length; f++)
+            {
+                notifSetStyle.fontSize = NOTIF_SET_FONT_LADDER[f];
+                total = 0f;
+                for (int i = 0; i < notifSetEntries.Count; i++)
+                {
+                    content.text = notifSetEntries[i].text;
+                    widths[i] = notifSetStyle.CalcSize(content).x + NOTIF_SET_PAD_X * 2f;
+                    total += widths[i];
+                }
+                total += NOTIF_SET_GAP * Mathf.Max(0, notifSetEntries.Count - 1);
+                chosenFont = NOTIF_SET_FONT_LADDER[f];
+                if (total <= usable) { fits = true; break; }
+            }
+            notifSetStyle.fontSize = chosenFont;
+            notifSetRowH = Mathf.Max(22f, notifSetStyle.lineHeight + 8f);
+
+            int shownCount = notifSetEntries.Count;
+            if (!fits)
+            {
+                // Keep leading cells, reserving room for the "+N" marker.
+                float markerW = notifSetStyle.CalcSize(new GUIContent("+99")).x + NOTIF_SET_PAD_X * 2f;
+                float run = 0f;
+                shownCount = 0;
+                for (int i = 0; i < notifSetEntries.Count; i++)
+                {
+                    float add = widths[i] + (shownCount > 0 ? NOTIF_SET_GAP : 0f);
+                    if (run + add + NOTIF_SET_GAP + markerW > usable) break;
+                    run += add;
+                    shownCount++;
+                }
+                // A single cell wider than the whole band: clamp it to the
+                // band and show it alone (the Overflow clipping lets the text
+                // bleed) rather than rendering an empty band.
+                if (shownCount == 0)
+                {
+                    shownCount = 1;
+                    widths[0] = Mathf.Min(widths[0], usable);
+                    run = widths[0];
+                }
+                int hidden = notifSetEntries.Count - shownCount;
+                notifSetOverflowText = "+" + hidden.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                total = run + NOTIF_SET_GAP + markerW;
+                notifSetOverflowRect = new Rect(0f, 0f, markerW, notifSetRowH);
+            }
+
+            float x = (Screen.width - total) * 0.5f;
+            float y = Screen.height - NOTIF_SET_BASE_Y;
+            for (int i = 0; i < notifSetEntries.Count; i++)
+            {
+                var e = notifSetEntries[i];
+                e.shown = i < shownCount;
+                if (!e.shown) { e.rect = new Rect(0, 0, 0, 0); continue; }
+                e.rect = new Rect(x, y, widths[i], notifSetRowH);
+                x += widths[i] + NOTIF_SET_GAP;
+            }
+            if (notifSetOverflowText.Length > 0)
+                notifSetOverflowRect = new Rect(x, y, notifSetOverflowRect.width, notifSetRowH);
+        }
+
+        private static bool notifSetErrorLogged = false;
+
+        /// <summary>Fenced because this method is inserted BEFORE
+        /// DrawNotification in the draw chain and DrawUI has no try/catch: an
+        /// unhandled throw here would starve the single-slot toast and every
+        /// overlay after it for as long as the band had entries (#255). The
+        /// band clears itself on the way out so a throwing set cannot repeat.</summary>
+        private static void DrawNotificationSet()
+        {
+            try { DrawNotificationSetInner(); }
+            catch (Exception ex)
+            {
+                notifSetEntries.Clear();
+                if (!notifSetErrorLogged)
+                {
+                    notifSetErrorLogged = true;
+                    Plugin.Log.LogWarning($"[NOTIF] set band draw failed (band disabled for this set): {ex.Message}");
+                }
+            }
+        }
+
+        private static void DrawNotificationSetInner()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            if (notifSetEntries.Count == 0) return;
+
+            // Per-entry expiry, ticked ONCE per Repaint (#162 — with N entries
+            // the multi-pass OnGUI cost the single slot already documents gets
+            // N times worse, and an expiry deadline in unscaled time is also
+            // immune to the pick-phase slow-mo that makes Time.time crawl,
+            // #221).
+            float now = Time.unscaledTime;
+            bool dropped = false;
+            for (int i = notifSetEntries.Count - 1; i >= 0; i--)
+                if (notifSetEntries[i].until <= now) { notifSetEntries.RemoveAt(i); dropped = true; }
+            if (notifSetEntries.Count == 0) return;
+
+            if (notifSetStyle == null)
+            {
+                notifSetStyle = new GUIStyle(GUI.skin.label);
+                notifSetStyle.fontStyle = FontStyle.Bold;
+                notifSetStyle.alignment = TextAnchor.MiddleCenter;
+                notifSetStyle.wordWrap = false;     // width is the variable here
+                // ROUNDS' IMGUI skin has taller font metrics than the nominal
+                // point size, and OS-fallback glyphs (Cyrillic/CJK) are taller
+                // still — Clip would render a translated cell BLANK
+                // (#292/#297). Overflow bleeds inside the row's own padding.
+                notifSetStyle.clipping = TextClipping.Overflow;
+                // Hostile-input rule (#237): these cells carry player display
+                // names. richText OFF means a tag that survived the caller's
+                // sanitiser renders literally instead of recolouring the band.
+                notifSetStyle.richText = false;
+            }
+
+            if (dropped || notifSetLayoutWidth != Screen.width
+                || notifSetLayoutCount != notifSetEntries.Count)
+                LayoutNotificationSet();
+
+            var bgTex = Texture2D.whiteTexture;
+            var origColor = GUI.contentColor;
+            for (int i = 0; i < notifSetEntries.Count; i++)
+            {
+                var e = notifSetEntries[i];
+                if (!e.shown) continue;
+                float alpha = Mathf.Clamp01((e.until - now) / 0.75f);
+                GUI.DrawTexture(new Rect(e.rect.x, e.rect.y - 3f, e.rect.width, e.rect.height + 6f),
+                    bgTex, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, alpha * 0.55f), 0, 0);
+                GUI.contentColor = new Color(e.color.r, e.color.g, e.color.b, alpha);
+                GUI.Label(e.rect, e.text, notifSetStyle);
+            }
+            if (notifSetOverflowText.Length > 0)
+            {
+                float alpha = Mathf.Clamp01((notifSetEntries[0].until - now) / 0.75f);
+                GUI.DrawTexture(new Rect(notifSetOverflowRect.x, notifSetOverflowRect.y - 3f,
+                        notifSetOverflowRect.width, notifSetOverflowRect.height + 6f),
+                    bgTex, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, alpha * 0.55f), 0, 0);
+                GUI.contentColor = new Color(0.8f, 0.8f, 0.85f, alpha);
+                GUI.Label(notifSetOverflowRect, notifSetOverflowText, notifSetStyle);
+            }
             GUI.contentColor = origColor;
         }
 

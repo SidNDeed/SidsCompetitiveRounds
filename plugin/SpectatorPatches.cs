@@ -314,6 +314,20 @@ namespace CompetitiveRounds
                 // sequence, driven from the observed values. Replaces the
                 // hard black reconcile flash spectators used to get here.
                 SpectatorSync.PlayPointSequence(conversion, gameOver, visP1, visP2, p1r, p2r, winningTeamID);
+
+                // Aug 12 item 9a: the game boundary is the moment the
+                // fighters reset their own cards, and it is the only signal a
+                // spectator gets before game 2's picks start landing live.
+                // Kept OUT of PlayPointSequence deliberately — that method
+                // owns the point VISUALS; this is match state.
+                //
+                // GM modes only, by construction: the FFA branch above returns
+                // before this point and drives its own observer. FFA spectate
+                // needs the same flush wired into FfaMode's game-over path —
+                // its card bars and baselines are FfaMode's own state, and
+                // cross-mode state sharing is how stale-slot bugs happen
+                // (#149), so it is deliberately not reached from here.
+                if (gameOver) SpectatorSync.OnGameOverObserved();
             }
             catch { }
             return false;

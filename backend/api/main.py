@@ -18,6 +18,7 @@ import unicodedata as _unicodedata
 import string
 import time
 import urllib.request as _urlreq
+import zlib   # PNG chunk CRC verification (_png_walk_chunks)
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import uuid
@@ -250,18 +251,30 @@ async def _rank_info(db: AsyncSession, rating: float | None) -> tuple[str, str]:
 
 def _display_title_sync(colors: dict, sku: str | None, name: str | None,
                         color: str | None, rating: float | None,
-                        podium_pos: int | None = None) -> tuple[str | None, str | None]:
+                        podium_pos: int | None = None,
+                        podium_pos_2v2: int | None = None,
+                        podium_pos_ffa: int | None = None) -> tuple[str | None, str | None]:
     """Resolve the DISPLAYED title text/color for a player row. The dynamic
     'Current Rank' title renders as the player's live rank tier + tier color;
-    the dynamic 'Podium' title renders as 1st/2nd/3rd Place (gold/silver/
-    bronze) — or disappears entirely (None, None) when the holder is no
-    longer on the leaderboard podium (podium_pos=None, intended UX);
-    every other title passes through unchanged."""
+    the dynamic podium titles render as 1st/2nd/3rd Place (gold/silver/
+    bronze), per ladder — or disappear entirely (None, None) when the holder is
+    no longer on that board's podium (pos=None, intended UX); every other title
+    passes through unchanged.
+
+    The three podium params default to None so the 14 pre-existing call sites
+    need no change. That default is also the SAFE one: an un-wired site renders
+    a podium title as nothing rather than leaking the raw shop-item name
+    ("2v2 Podium") into a player row — the same failure the 1v1 podium branch
+    was written to avoid."""
     if sku == TITLE_RANK_SKU:
         rn = _rank_name_for(rating)
         return rn, colors.get(rn) or _rank_fallback_color(rn)
     if sku == TITLE_PODIUM_SKU:
         return PODIUM_TITLES.get(podium_pos, (None, None))
+    if sku == TITLE_PODIUM_2V2_SKU:
+        return PODIUM_TITLES_2V2.get(podium_pos_2v2, (None, None))
+    if sku == TITLE_PODIUM_FFA_SKU:
+        return PODIUM_TITLES_FFA.get(podium_pos_ffa, (None, None))
     return name, color
 
 
@@ -371,6 +384,160 @@ async def _podium_map(db: AsyncSession) -> dict:
     """{str(player_id): 1|2|3} for the current leaderboard podium."""
     await _podium_player_ids(db)
     return _podium_cache["map"]
+
+
+# ── Per-mode placement titles (Aug 12 item 2, migration 216) ───────────────
+# 'title_podium' is defined as the 1v1 podium and is granted only from the 1v1
+# board; cross-granting it from another ladder would silently widen an existing
+# cosmetic's meaning (the same reasoning the 1v2 podium helper records). So 2v2
+# and FFA get their own skus, their own grants, and their own rendered text.
+TITLE_PODIUM_2V2_SKU = "title_podium_2v2"
+TITLE_PODIUM_FFA_SKU = "title_podium_ffa"
+PODIUM_TITLES_2V2 = {
+    1: ("2v2 1st Place", "#FFD700"),   # gold
+    2: ("2v2 2nd Place", "#C0C0C0"),   # silver
+    3: ("2v2 3rd Place", "#CD7F32"),   # bronze
+}
+PODIUM_TITLES_FFA = {
+    1: ("FFA 1st Place", "#FFD700"),
+    2: ("FFA 2nd Place", "#C0C0C0"),
+    3: ("FFA 3rd Place", "#CD7F32"),
+}
+
+# Eligibility mirrors each board AS ACTUALLY CALLED (#153), not the endpoint's
+# parameter defaults: the in-game client fetches /team/leaderboard and
+# /ffa/leaderboard with only limit + sort_by, so min_series and min_games both
+# resolve to 1. Matching the board is the whole point — a title that attaches
+# to someone displayed at #4 is a bug (that is exactly what a >= 5 filter did
+# to the 1v1 podium once).
+_podium_2v2_cache: dict = {"at": 0.0, "ids": [], "map": {}}
+_podium_ffa_cache: dict = {"at": 0.0, "ids": [], "map": {}}
+
+_PODIUM_2V2_QUERY = """
+    SELECT p.id
+      FROM glicko_ratings_2v2 g2
+      JOIN players p ON p.id = g2.player_id
+     WHERE COALESCE(g2.completed_series, 0) >= 1
+       AND p.deleted_at IS NULL
+     ORDER BY g2.rating DESC
+     LIMIT 3
+"""
+
+_PODIUM_FFA_QUERY = """
+    SELECT p.id
+      FROM glicko_ratings_ffa g
+      JOIN players p ON p.id = g.player_id
+     WHERE COALESCE(g.games_played, 0) >= 1
+       AND p.deleted_at IS NULL
+     ORDER BY g.rating DESC
+     LIMIT 3
+"""
+
+
+async def _grant_mode_podium_titles(sku: str, player_ids: list) -> None:
+    """Idempotently grant a per-mode podium title to that board's current top
+    3. Own session, exactly like _grant_podium_titles: the cache refresh fires
+    from arbitrary request contexts (including inside a match-report
+    transaction), so it must commit without touching the caller's. Grant only,
+    never revoke — falling off the podium is a render-time decision."""
+    if not player_ids:
+        return
+    try:
+        from database import async_session
+        async with async_session() as gdb:
+            res = await gdb.execute(text(
+                "INSERT INTO player_items (player_id, item_id, purchase_price) "
+                "SELECT p.id, si.id, 0 "
+                "FROM players p "
+                "JOIN shop_items si ON si.sku = :sku "
+                "WHERE p.id::text = ANY(:pids) "
+                "ON CONFLICT (player_id, item_id) DO NOTHING"
+            ), {"sku": sku, "pids": list(player_ids)})
+            await gdb.commit()
+            if res.rowcount:
+                print(f"[PODIUM] granted {sku} to {res.rowcount} new podium holder(s)")
+    except Exception as ex:
+        print(f"[PODIUM] {sku} grant failed: {ex}")
+
+
+async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) -> dict:
+    """{str(player_id): 1|2|3} for one mode's podium. 60s TTL; a failure serves
+    the stale copy and never raises.
+
+    SAVEPOINT-wrapped (#235): these run from render paths that can sit inside a
+    match-report transaction, and under asyncpg a caught statement error would
+    otherwise leave that transaction aborted — so 'serve the stale copy' would
+    be a lie and the report would 500. It also covers the deploy-order window
+    before migration 216 has seeded the skus: the grant is a separate session,
+    but the SELECT here must not poison a live report either way."""
+    now = time.monotonic()
+    if now - cache["at"] > 60:
+        try:
+            async with db.begin_nested():
+                rows = (await db.execute(text(query))).scalars().all()
+            ids = [str(r) for r in rows]
+            cache["ids"] = ids
+            cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
+            await _grant_mode_podium_titles(sku, ids)
+        except Exception as ex:
+            print(f"[PODIUM] {sku} cache refresh failed: {ex}")
+        cache["at"] = now
+    return cache["map"]
+
+
+async def _podium_map_2v2(db: AsyncSession) -> dict:
+    return await _mode_podium_map(db, _podium_2v2_cache, _PODIUM_2V2_QUERY,
+                                  TITLE_PODIUM_2V2_SKU)
+
+
+async def _podium_map_ffa(db: AsyncSession) -> dict:
+    return await _mode_podium_map(db, _podium_ffa_cache, _PODIUM_FFA_QUERY,
+                                  TITLE_PODIUM_FFA_SKU)
+
+
+async def _podium_maps_for(db: AsyncSession, skus) -> tuple[dict, dict, dict]:
+    """(1v1, 2v2, FFA) podium maps for one response.
+
+    Each ladder's map is fetched ONLY when some row in THIS response actually
+    wears that ladder's dynamic podium title — so a response with no podium
+    holders costs nothing, and a response with one costs a single cached
+    lookup. Keeping the three guards in one helper is what makes it practical
+    to wire every render site: a title that resolves on the 2v2 board and
+    renders blank in chat is the failure mode this avoids (#126)."""
+    s = {x for x in skus if x}
+    return (
+        (await _podium_map(db)) if TITLE_PODIUM_SKU in s else {},
+        (await _podium_map_2v2(db)) if TITLE_PODIUM_2V2_SKU in s else {},
+        (await _podium_map_ffa(db)) if TITLE_PODIUM_FFA_SKU in s else {},
+    )
+
+
+async def bootstrap_mode_podium_titles(db: AsyncSession) -> None:
+    """Grant the 2v2/FFA podium titles to whoever currently tops those boards.
+
+    THE GRANT CANNOT BOOTSTRAP ITSELF (Codex round 3, HIGH). The only path that
+    reaches `_grant_mode_podium_titles` is `_mode_podium_map`, and every caller
+    of that was gated on somebody ALREADY wearing the sku — `_podium_maps_for`
+    filters on the skus present in the response, and `get_player_stats`'s branch
+    fires only when the title is the player's EQUIPPED one. Nobody can wear a
+    title nobody has been granted, so after migration 216 the two new skus would
+    have been owned by exactly zero players, forever, with no error anywhere.
+
+    The 1v1 `title_podium` never showed this because it was seeded and granted
+    long before those guards existed — which is precisely why the copied shape
+    looked correct.
+
+    Called UNCONDITIONALLY from the two ladder boards, which is the one place
+    the podium is the whole point of the request. Both maps are 60s-cached and
+    serve stale on failure, so the cost is one query per minute per ladder, and
+    the render-time guards above stay exactly as they are.
+    """
+    for fn, name in ((_podium_map_2v2, "2v2"), (_podium_map_ffa, "ffa")):
+        try:
+            await fn(db)
+        except Exception as ex:
+            # Never let a cosmetic grant take down a leaderboard.
+            print(f"[PODIUM] {name} bootstrap failed: {ex}")
 
 
 # ── Presence (mod clients online, v1.29) ───────────────────────
@@ -1718,6 +1885,7 @@ _VERSION_GATE_BYPASS = frozenset({
     "/api/v1/i18n/history",
     "/api/v1/i18n/approved",            # Aug-3: live-translation list for the portal
     "/api/v1/i18n/progress",            # Aug-11: per-language progress bars
+    "/api/v1/i18n/contributors",        # Aug-12: per-language contributor list
     # Aug-3: the SPA's keep-alive. It MUST be listed or the browser is 426'd
     # before _portal_auth runs — and a session that cannot be extended is the
     # bug this route exists to fix. (The MINT, /i18n/portal-session, is called
@@ -1777,6 +1945,41 @@ async def _live_points_capable(db: AsyncSession, player_ids) -> bool:
         except Exception:
             return False
     return True
+
+
+async def _live_points_capable_bulk(db: AsyncSession, player_ids) -> dict:
+    """Per-player {player_id: can_report_live_points} in ONE query.
+
+    Same rule as _live_points_capable, but for a whole listing page — calling
+    the single-group helper per row would issue one query per series. Missing,
+    NULL and unparseable versions are all False (fail closed), so a caller can
+    use `.get(pid, False)` and never has to special-case a lookup miss.
+
+    Savepointed (#235): under asyncpg a caught SQL error poisons the whole
+    transaction, so a bare try/except around this SELECT would leave the rest
+    of the endpoint failing anyway. On error every player reads incapable,
+    which closes betting rather than opening it."""
+    out: dict = {}
+    ids = [x for x in (player_ids or []) if x is not None]
+    if not ids:
+        return out
+    floor = _parse_version(LIVE_POINTS_MIN_VERSION)
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text(
+                "SELECT id, mod_version FROM players WHERE id = ANY(:pids)"
+            ), {"pids": list(set(ids))})).all()
+    except Exception as ex:
+        print(f"[BETS] live-points capability lookup failed: {ex}")
+        return out
+    for pid, v in rows:
+        if not v:
+            continue
+        try:
+            out[pid] = _parse_version(v) >= floor
+        except Exception:
+            out[pid] = False
+    return out
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -2006,6 +2209,40 @@ async def version_gate(request: Request, call_next):
 
 
 # ── Helpers ────────────────────────────────────────────────────
+
+# End-of-game BUILD STATS (Aug 12 item 1, migration 216). ONE fixed-shape,
+# numbers-only string per player per game:
+#
+#   1|hp|maxhp|dmg|aspd|reload|ammo|bullets|bursts|bounces|bspd|slow|knock|
+#    spread|lifesteal|blockcd|blocks|regen|movespd|jump|jumps|size
+#
+# Field 0 is the literal format version "1"; fields 1..21 are each a decimal
+# (optionally negative, at most 3 decimal places) or the literal "-" for
+# unavailable. 22 fields exactly. No labels cross the wire — the client renders
+# them from its own localised catalogue — so this column can never carry
+# user-authored text, which is the entire point of the format.
+#
+# TREAT AS HOSTILE INPUT. The value is client-supplied and outside every frozen
+# HMAC canonical, so it is anchored-matched here and NULLed out on any
+# mismatch. NULLing rather than rejecting is deliberate: a malformed build
+# string must never fail an otherwise-valid match report, and a NULL reads as
+# "not recorded" everywhere downstream (#257).
+#
+# Structural maximum is 274 chars (1 + 21 * len("|-1234567.890")). The length
+# check runs FIRST so an oversized body never reaches the regex.
+_END_STATS_MAX_LEN = 300
+_END_STATS_RE = _re.compile(r"^1(?:\|(?:-|-?\d{1,7}(?:\.\d{1,3})?)){21}$")
+
+
+def _clean_end_stats(raw) -> str | None:
+    """Validated end-of-game build string, or None. See _END_STATS_RE."""
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s or len(s) > _END_STATS_MAX_LEN or not _END_STATS_RE.match(s):
+        return None
+    return s
+
 
 def _hash_steam_id(steam_id: str) -> str:
     """Server-salted one-way hash. Used to identify previously-purged Steam IDs
@@ -2320,7 +2557,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.4"
+LATEST_MOD_VERSION = "1.38.5"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -3506,6 +3743,12 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         p2_max_health=_p2c[2], p2_best_bounce_kill=_p2c[3],
         p2_damage_timeline=_p2c[4], p2_deaths=_p2c[5],
         p2_deaths_boundary=_p2c[6], p2_deaths_own_bullet=_p2c[7],
+        # Aug 12 item 1 (migration 216) — end-of-game build. No local/opp
+        # orientation mapping needed: the value rides PlayerMatchData, so it
+        # already arrives on the right seat. Validated + NULLed on mismatch;
+        # ADVISORY, outside the frozen 7-field HMAC canonical (hard rule #5).
+        p1_end_stats=_clean_end_stats(report.player1.end_stats),
+        p2_end_stats=_clean_end_stats(report.player2.end_stats),
     )
     db.add(match)
     await db.flush()  # Get match.id
@@ -4312,15 +4555,18 @@ async def get_leaderboard(
     rows = result.mappings().all()
 
     _colors = await _rank_colors(db)
-    # Podium map is fetched once per request, and only when some row actually
-    # wears the dynamic podium title (the 60s cache makes it cheap anyway).
-    _pmap = await _podium_map(db) if any(
-        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    # Podium maps are fetched once per request, and only for the ladders some
+    # row actually wears a podium title from (the 60s caches make it cheap
+    # anyway). All three, because a 2v2/FFA podium holder can appear on this
+    # board too and must not render blank.
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     entries = []
     for row in rows:
         _title, _title_color = _display_title_sync(
             _colors, row["title_sku"], row["title"], row["title_color"], float(row["rating"]),
-            podium_pos=_pmap.get(row["player_id"]))
+            podium_pos=_pmap.get(row["player_id"]),
+            podium_pos_2v2=_pmap2.get(row["player_id"]),
+            podium_pos_ffa=_pmapf.get(row["player_id"]))
         _rank = _rank_name_for(float(row["rating"]))
         entries.append(LeaderboardEntry(
             # ROW_NUMBER() is evaluated over the whole filtered set BEFORE
@@ -4658,6 +4904,14 @@ async def get_player_stats(
                 _ppos = (await _podium_map(db)).get(str(player.id))
                 active_title_name, active_title_color = PODIUM_TITLES.get(
                     _ppos, (None, None))
+            # Aug 12 item 2: the same treatment per ladder, resolved against
+            # that mode's own board.
+            elif row[1] == TITLE_PODIUM_2V2_SKU:
+                active_title_name, active_title_color = PODIUM_TITLES_2V2.get(
+                    (await _podium_map_2v2(db)).get(str(player.id)), (None, None))
+            elif row[1] == TITLE_PODIUM_FFA_SKU:
+                active_title_name, active_title_color = PODIUM_TITLES_FFA.get(
+                    (await _podium_map_ffa(db)).get(str(player.id)), (None, None))
         elif kind == "trail":
             active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
         elif kind == "color":
@@ -4976,16 +5230,33 @@ async def get_player_stats(
     rank_name, rank_color = await _rank_info(db, glicko.rating if glicko else None)
     team_rating = 0.0
     team_completed = 0
+    # Aug 12 item 2 — the 2v2 pane needs RD and peak beside the rating, exactly
+    # like the 1v1 pane. Both were already stored; only /team/team-stats
+    # returned them, which the My Stats pane does not call.
+    team_rd = 0.0
+    team_peak = 0.0
     try:
-        trow = (await db.execute(text(
-            "SELECT rating, COALESCE(completed_series, 0) AS cs "
-            "  FROM glicko_ratings_2v2 WHERE player_id = :pid"
-        ), {"pid": player.id})).mappings().first()
+        # begin_nested, not the bare try/except this block used to carry
+        # (#235): under asyncpg a caught statement error still leaves the
+        # TRANSACTION aborted, so "degrade to zeros" would be a lie — every
+        # query after this one, and the response itself, would fail. Widened
+        # here because this pass added two columns to the SELECT.
+        async with db.begin_nested():
+            trow = (await db.execute(text(
+                "SELECT rating, rating_deviation, peak_rating,"
+                "       COALESCE(completed_series, 0) AS cs "
+                "  FROM glicko_ratings_2v2 WHERE player_id = :pid"
+            ), {"pid": player.id})).mappings().first()
         if trow and (trow["cs"] or 0) > 0:
             team_rating = round(float(trow["rating"] or 0), 1)
             team_completed = int(trow["cs"] or 0)
-    except Exception:
-        pass
+            team_rd = round(float(trow["rating_deviation"] or GLICKO2_DEFAULT_RD), 1)
+            # A NULL peak means "never written", not "peaked at zero" — never
+            # report a peak below the live rating.
+            team_peak = (round(float(trow["peak_rating"]), 1)
+                         if trow["peak_rating"] is not None else team_rating)
+    except Exception as ex:
+        print(f"[STATS] 2v2 headline block failed: {ex}")
 
     # ── 1v2 record, split by seat (bug #130) ──────────────────────────────
     # Per GAME (not per series) so it reads the same as the 1v2 tab. Own
@@ -5018,10 +5289,14 @@ async def get_player_stats(
     # maintained per game); kills and damage need the per-match rows.
     ffa_games = ffa_wins = ffa_top3 = 0
     ffa_avg_place = ffa_avg_kills = ffa_avg_dmg = 0.0
+    # Aug 12 item 2 — FFA rating/RD/peak. All three were stored (peak has been
+    # maintained on every rated game since FFA shipped) and returned nowhere.
+    ffa_rating = ffa_rd = ffa_peak = 0.0
     try:
         async with db.begin_nested():
             frow = (await db.execute(text(
-                "SELECT games_played, wins, top3, placement_sum "
+                "SELECT games_played, wins, top3, placement_sum,"
+                "       rating, rating_deviation, peak_rating "
                 "  FROM glicko_ratings_ffa WHERE player_id = :pid"
             ), {"pid": player.id})).mappings().first()
             if frow and (frow["games_played"] or 0) > 0:
@@ -5029,6 +5304,10 @@ async def get_player_stats(
                 ffa_wins = int(frow["wins"] or 0)
                 ffa_top3 = int(frow["top3"] or 0)
                 ffa_avg_place = round(float(frow["placement_sum"] or 0) / ffa_games, 2)
+                ffa_rating = round(float(frow["rating"] or GLICKO2_DEFAULT_RATING), 1)
+                ffa_rd = round(float(frow["rating_deviation"] or GLICKO2_DEFAULT_RD), 1)
+                ffa_peak = (round(float(frow["peak_rating"]), 1)
+                            if frow["peak_rating"] is not None else ffa_rating)
     except Exception as ex:
         print(f"[STATS] FFA record block failed: {ex}")
     ffa_damage_games = 0
@@ -5081,7 +5360,13 @@ async def get_player_stats(
     # the endpoint's opening select(Player) reads every mapped column, so a
     # missing column would have failed the endpoint at the top, not here.)
     casual_rage_quit_pct = 0.0
-    casual_dc = int(player.casual_dc_count or 0)
+    # Aug 12 item 12 — "Rage Quit %" is now about the player's OPPONENTS, so
+    # the headline numerator is their reporter-side event count, not
+    # players.casual_dc_count. The old leaver-side number is preserved and
+    # returned under casual_own_dc_count; neither the column nor its rows are
+    # touched.
+    casual_own_dc = int(player.casual_dc_count or 0)
+    casual_dc = 0
     casual_matches_played = 0
     ranked_dps = 0.0
     ffa_dps = 0.0
@@ -5130,34 +5415,170 @@ async def get_player_stats(
                 if deaths_total > 0:
                     self_death_pct = round(
                         (deaths_boundary + deaths_own_bullet) / deaths_total, 4)
-            # Rage-quit rate, third attempt — and this time computed from the
-            # EVENTS rather than from two aggregate counters.
+            # ── "Rage Quit %" — RE-ORIENTED (Aug 12 item 12) ─────────────
             #
-            # History: the original denominator was matches + DCs, which
-            # double-counted a leave at 4-0 (that one game is BOTH a recorded
-            # casual match and a DC event). Round 1 changed it to
-            # max(matches, DCs), and round 2 correctly pointed out that max()
-            # is not the union either: one finished game plus one separate
-            # early quit that produced no match row gives max(1,1)=1 and
-            # displays 100% instead of 50%.
+            # It now answers "how often do my quickplay opponents quit on me",
+            # which is what the name has always promised. It used to answer
+            # "how often do I abandon my own casual games" — a shame stat about
+            # the leaver, attributed to the person reading it. The NAME stays
+            # (owner decision); the number and every description change.
             #
-            # The union is only computable from the event rows, and it is:
-            # casual games played = recorded casual matches + DC events whose
-            # room produced NO match row. casual_dc_events stores room_id
-            # exactly so this join is possible. Anything older than the
-            # Aug-6 deploy has no DC rows at all and simply reads 0%.
-            _dc_no_match = (await db.execute(text("""
-                SELECT COUNT(*) FROM casual_dc_events e
-                 WHERE e.leaver_id = :pid
-                   AND NOT EXISTS (
-                       SELECT 1 FROM matches m
-                        WHERE m.photon_room_id = e.room_id
-                          AND m.invalidated_at IS NULL
-                          AND (m.player1_id = :pid OR m.player2_id = :pid))
-            """), {"pid": player.id})).scalar() or 0
-            _rq_den = casual_matches_played + int(_dc_no_match)
-            if _rq_den > 0:
-                casual_rage_quit_pct = round(min(1.0, casual_dc / _rq_den), 4)
+            # The flip needs no new data: casual_dc_events already stores
+            # reporter_id (the mod player who was LEFT BEHIND) beside leaver_id
+            # and room_id, with an index on (reporter_id, created_at DESC).
+            #
+            #   numerator   = my reporter-side DC events
+            #   denominator = my recorded casual 1v1 matches
+            #                 + my reporter-side DC events whose own game
+            #                   produced NO match row
+            #
+            # The denominator is the UNION of casual games I took part in, not
+            # a sum: a leave at 4-0 is BOTH a recorded casual match AND a DC
+            # event, and counting it twice halves the rate. Only the event rows
+            # make that union computable, which is why room_id is stored.
+            #
+            # This measures VANILLA opponents just fine: the client's casual DC
+            # branch has no has-mod gate and resolves the leaver from ROUNDS'
+            # own `u_id` player property, which every unmodded peer publishes.
+            #
+            # ── THE TWO IDENTIFIERS ARE NOT THE SAME STRING (Codex Aug 12,
+            # server lens, MEDIUM) ────────────────────────────────────────────
+            # This subquery used to test `m.photon_room_id = e.room_id`, and
+            # those columns can never be equal:
+            #   casual_dc_events.room_id  = PhotonNetwork.CurrentRoom.Name, raw
+            #                               ("109775241946109263")
+            #   matches.photon_room_id    = BuildReportRoomId(), which is
+            #                               "{room}_{token}_r{roundTotal}"
+            #                               ("109775241946109263_114446_r8")
+            # Measured against production: 0 of 25 events matched by equality,
+            # 16 of 25 match the room by prefix. So NOT EXISTS was a constant
+            # TRUE and `dcs_without_match` was simply COUNT(*) — every 4-0
+            # leave was counted twice, which is the reviewer's 50%-instead-of-
+            # 100% scenario. Normalised here rather than by changing what
+            # either side stores (that would need a backfill AND a client
+            # release, and the relation is exact as it stands: the report id
+            # is the raw room name plus "_" plus suffixes).
+            #
+            # ── MATCH THE EVENT TO ITS GAME, NOT TO ITS ROOM ─────────────────
+            # The denominator asks a PER-GAME question: did the game this
+            # opponent walked out of produce a match row? A Photon room hosts a
+            # whole SITTING — production has a room with 7 recorded matches —
+            # so "some match exists in this room" has never been an answer to
+            # it.
+            #
+            # The old shape asked the room question and patched it with an
+            # ordering heuristic (`m.ended_at >= e.created_at`), on the
+            # reasoning that only the DC-decided report can land AFTER the
+            # leave. That much is true of the DC report, but it is not a
+            # per-game identity — it is a clock comparison between two INSERT
+            # times (matches.ended_at is the ORM default, i.e. the server's
+            # receipt time, not the moment the game ended). Anything that puts
+            # an unrelated report on the far side of the leave satisfies the
+            # exclusion for a game that was never recorded: the client's
+            # durable report outbox retrying a transient failure, or simply
+            # another game being played in that room afterwards.
+            #
+            # THE COMMENT THAT USED TO SIT HERE HAD THE ERROR DIRECTION
+            # BACKWARDS (Codex round 2, MEDIUM, CONFIRMED). It called the
+            # residual an under-statement and called under-stating the safe
+            # direction. Both halves are false — every reachable error here
+            # INFLATES a player-facing number, which is the one direction it
+            # must not err in. Worked, with n = my reporter-side events and
+            # d = casual_matches_played + dcs_without_match, baseline 1/10:
+            #
+            #   (a) a FALSE event — one for a game nobody abandoned — is +1 to
+            #       BOTH sides, because it also lands in dcs_without_match:
+            #           n/d -> (n+1)/(d+1)  =  1/10 (10.0%) -> 2/11 (18.2%)
+            #       (n+1)/(d+1) > n/d for every rate below 100%.
+            #   (b) a TRUE event whose abandoned game is wrongly excluded from
+            #       dcs_without_match loses a denominator entry it had earned:
+            #           n/d -> n/(d-1)
+            #       and if (a) and (b) land on the same event, 2/11 -> 2/10
+            #       (20.0%), the reviewer's own worked case.
+            #
+            # THE FIX. game_room_id (migration 218) carries the client's own
+            # per-game key, "{room}_{token}" — the first two segments of the
+            # report id, so the same prefix idiom now resolves to exactly one
+            # GAME. The trailing "_r{rounds}" is excluded on purpose and must
+            # never be added: it is the round total at REPORT time, and the
+            # DC-decided path advances the survivor to the terminal score
+            # before reporting (#179), so the value the leave sees and the
+            # value the report writes differ by construction. Production
+            # confirms it — event 19 fired at a 4-0 leave and its match landed
+            # 4s later as "..._211428_r5"; matching on "..._211428_" succeeds,
+            # matching on the full leave-time id would have failed and counted
+            # that game twice.
+            #
+            # With an exact key the ordering clause is not merely unnecessary,
+            # it is deleted: presence of a match row for THAT game is decisive
+            # whenever it arrives, so neither a retried outbox report nor a
+            # later game in the same room can move the answer.
+            #
+            # Old clients send no key. NULL selects the legacy room-prefix path
+            # verbatim, so their numbers are unchanged (better a documented
+            # heuristic than a silently different one), and mixed populations
+            # are handled per row rather than per player.
+            #
+            # SCOPE, stated rather than implied (#351): this makes the
+            # DENOMINATOR exact. The NUMERATOR is still every reporter-side
+            # event, and whether an event is a genuine mid-game abandon is
+            # decided entirely by the client's `isTracking && !gameOverReported`
+            # gate, which the server cannot verify. Case (a) above is therefore
+            # bounded by that gate, not by anything here. It does not appear to
+            # be reachable today: OnGameOver sets gameOverReported AND clears
+            # isTracking, so both conjuncts of that gate are false for the whole
+            # between-games window, and a leave there fires nothing. Measured to
+            # agree — all 26 production events as of 2026-08-13 are consistent
+            # with genuine mid-game leaves, including the two tightest (12s and
+            # 20s after the previous game's report), which sit inside the
+            # FOLLOWING game rather than between games.
+            #
+            # DEPLOY ORDER: migration 218 MUST be applied BEFORE this code goes
+            # live — it reads a column the migration adds. The savepoint below
+            # is what keeps that from being an outage rather than a gap: under
+            # asyncpg a failed statement poisons the whole transaction (#235),
+            # so without it a missing column would take down every remaining
+            # query in this endpoint, not just this stat.
+            _rq = None
+            try:
+                async with db.begin_nested():
+                    _rq = (await db.execute(text("""
+                        SELECT COUNT(*) AS opp_dcs,
+                               COUNT(*) FILTER (
+                                   WHERE NOT EXISTS (
+                                       SELECT 1 FROM matches m
+                                        WHERE m.invalidated_at IS NULL
+                                          AND NOT COALESCE(m.is_ranked, false)
+                                          AND (m.player1_id = :pid
+                                               OR m.player2_id = :pid)
+                                          AND CASE WHEN e.game_room_id IS NOT NULL
+                                              THEN left(m.photon_room_id,
+                                                        length(e.game_room_id) + 1)
+                                                   = e.game_room_id || '_'
+                                              ELSE left(m.photon_room_id,
+                                                        length(e.room_id) + 1)
+                                                   = e.room_id || '_'
+                                                   AND m.ended_at >= e.created_at
+                                          END)
+                               ) AS dcs_without_match
+                          FROM casual_dc_events e
+                         WHERE e.reporter_id = :pid
+                    """), {"pid": player.id})).mappings().first()
+            except Exception as _rqex:
+                # player.id, not player.steam_id: a savepoint rollback can
+                # expire ORM state, and a read of an expired attribute issues a
+                # refresh SELECT from inside the handler for the query that just
+                # failed. The primary key is the one attribute SQLAlchemy never
+                # expires (the identity map needs it), so it is always safe to
+                # read here — and it is the value the failing query was bound
+                # with anyway, which is what an operator would grep for.
+                print(f"[STATS] rage-quit query failed for player {player.id}: {_rqex}")
+                _rq = None
+            if _rq:
+                casual_dc = int(_rq["opp_dcs"] or 0)
+                _rq_den = casual_matches_played + int(_rq["dcs_without_match"] or 0)
+                if _rq_den > 0:
+                    casual_rage_quit_pct = round(min(1.0, casual_dc / _rq_den), 4)
 
             # FFA DPS — same one-filter-both-sides shape over the per-player
             # FFA rows (roster ghosts excluded like the averages above; both
@@ -5196,6 +5617,154 @@ async def get_player_stats(
                     ranked_unique_opponents / ranked_total_series, 4)
     except Exception as ex:
         print(f"[STATS] Aug-6 compare block failed: {ex}")
+
+    # ── Aug 12 item 2: numeric standings on all four boards ───────────────
+    # "#7 of 312" for every mode the player appears on. Each query mirrors its
+    # board's ELIGIBILITY FILTER and ORDERING as the board is ACTUALLY CALLED
+    # (#153) — the in-game client fetches /leaderboard with min_matches=1,
+    # /team/leaderboard and /ffa/leaderboard with only limit + sort_by (so
+    # min_series and min_games both default to 1), and /ovt/leaderboard with
+    # role=combined — so the number always agrees with the row the player sees.
+    #
+    # Standing is COMPETITION-STYLE: 1 + the count of eligible players strictly
+    # ahead. The boards break exact ties with ROW_NUMBER (arbitrary among
+    # equals), so a shared number is the honest answer rather than a guess at
+    # which side of the tie the board happened to render.
+    #
+    # 0 means NOT ON THAT BOARD. The `me` CTE is empty for a non-eligible
+    # player, so the cross join yields no rows, `ahead` is 0, and on_board is 0
+    # — which is exactly why the standing must be read through on_board and not
+    # from ahead+1 (that would report every absent player as #1).
+    #
+    # ONE savepoint for the whole group (#235): the block reads four different
+    # rating tables, and a failure in any of them must degrade the standings to
+    # "unknown" (0) rather than poison the transaction for the return below.
+    standing = standing_pop = 0
+    team_standing = team_standing_pop = 0
+    ffa_standing = ffa_standing_pop = 0
+    ovt_standing = ovt_standing_pop = 0
+    try:
+        async with db.begin_nested():
+            # 1v1 — same series+legacy CTE the board and _PODIUM_QUERY use.
+            srow = (await db.execute(text("""
+                WITH series_stats AS (
+                    SELECT sub.player_id, COUNT(*) AS total
+                    FROM (
+                        SELECT rs.player1_id AS player_id FROM ranked_series rs WHERE rs.status = 'completed'
+                        UNION ALL
+                        SELECT rs.player2_id AS player_id FROM ranked_series rs WHERE rs.status = 'completed'
+                    ) sub GROUP BY sub.player_id
+                ),
+                legacy_stats AS (
+                    SELECT p.id AS player_id, COUNT(m.id) AS total
+                    FROM players p
+                    LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
+                        AND m.is_ranked = true AND m.series_id IS NULL
+                    GROUP BY p.id
+                ),
+                combined AS (
+                    SELECT p.id AS player_id,
+                           COALESCE(ss.total, 0) + COALESCE(ls.total, 0) AS total
+                    FROM players p
+                    LEFT JOIN series_stats ss ON ss.player_id = p.id
+                    LEFT JOIN legacy_stats ls ON ls.player_id = p.id
+                ),
+                elig AS (
+                    SELECT p.id AS pid, gr.rating AS rating
+                      FROM glicko_ratings gr
+                      JOIN players p ON p.id = gr.player_id
+                      LEFT JOIN combined c ON c.player_id = p.id
+                     WHERE COALESCE(c.total, 0) >= 1 AND p.deleted_at IS NULL
+                ),
+                me AS (SELECT rating FROM elig WHERE pid = :pid)
+                SELECT (SELECT COUNT(*) FROM elig) AS pop,
+                       (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
+                       (SELECT COUNT(*) FROM me) AS on_board
+            """), {"pid": player.id})).mappings().first()
+            if srow:
+                standing_pop = int(srow["pop"] or 0)
+                if int(srow["on_board"] or 0) > 0:
+                    standing = int(srow["ahead"] or 0) + 1
+
+            # 2v2 — completed_series >= 1, ORDER BY rating DESC.
+            trow2 = (await db.execute(text("""
+                WITH elig AS (
+                    SELECT p.id AS pid, g2.rating AS rating
+                      FROM glicko_ratings_2v2 g2
+                      JOIN players p ON p.id = g2.player_id
+                     WHERE COALESCE(g2.completed_series, 0) >= 1
+                       AND p.deleted_at IS NULL
+                ),
+                me AS (SELECT rating FROM elig WHERE pid = :pid)
+                SELECT (SELECT COUNT(*) FROM elig) AS pop,
+                       (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
+                       (SELECT COUNT(*) FROM me) AS on_board
+            """), {"pid": player.id})).mappings().first()
+            if trow2:
+                team_standing_pop = int(trow2["pop"] or 0)
+                if int(trow2["on_board"] or 0) > 0:
+                    team_standing = int(trow2["ahead"] or 0) + 1
+
+            # FFA — games_played >= 1, ORDER BY rating DESC.
+            frow2 = (await db.execute(text("""
+                WITH elig AS (
+                    SELECT p.id AS pid, g.rating AS rating
+                      FROM glicko_ratings_ffa g
+                      JOIN players p ON p.id = g.player_id
+                     WHERE COALESCE(g.games_played, 0) >= 1
+                       AND p.deleted_at IS NULL
+                ),
+                me AS (SELECT rating FROM elig WHERE pid = :pid)
+                SELECT (SELECT COUNT(*) FROM elig) AS pop,
+                       (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
+                       (SELECT COUNT(*) FROM me) AS on_board
+            """), {"pid": player.id})).mappings().first()
+            if frow2:
+                ffa_standing_pop = int(frow2["pop"] or 0)
+                if int(frow2["on_board"] or 0) > 0:
+                    ffa_standing = int(frow2["ahead"] or 0) + 1
+
+            # 1v2 — NO RATING EXISTS (glicko_ratings_1v2's rating columns are
+            # never written by anything), so this mirrors the board's actual
+            # ordering instead: games DESC, then win rate DESC NULLS LAST, over
+            # the COMBINED role. Same UNION ALL over ovt_matches, same
+            # invalidated_at / deleted_at filters, same >= 1 game floor.
+            orow2 = (await db.execute(text("""
+                WITH per_player AS (
+                    SELECT pid, SUM(played) AS games, SUM(won) AS wins
+                    FROM (
+                        SELECT solo_id AS pid, 1 AS played,
+                               CASE WHEN winner_side = 1 THEN 1 ELSE 0 END AS won
+                          FROM ovt_matches WHERE invalidated_at IS NULL
+                        UNION ALL
+                        SELECT duo_a_id, 1, CASE WHEN winner_side = 2 THEN 1 ELSE 0 END
+                          FROM ovt_matches WHERE invalidated_at IS NULL
+                        UNION ALL
+                        SELECT duo_b_id, 1, CASE WHEN winner_side = 2 THEN 1 ELSE 0 END
+                          FROM ovt_matches WHERE invalidated_at IS NULL
+                    ) u GROUP BY pid
+                ),
+                elig AS (
+                    SELECT pp.pid AS pid, pp.games AS games,
+                           pp.wins::float / NULLIF(pp.games, 0) AS wr
+                      FROM per_player pp
+                      JOIN players p ON p.id = pp.pid
+                     WHERE p.deleted_at IS NULL AND pp.games >= 1
+                ),
+                me AS (SELECT games, wr FROM elig WHERE pid = :pid)
+                SELECT (SELECT COUNT(*) FROM elig) AS pop,
+                       (SELECT COUNT(*) FROM elig e, me
+                         WHERE e.games > me.games
+                            OR (e.games = me.games
+                                AND COALESCE(e.wr, -1) > COALESCE(me.wr, -1))) AS ahead,
+                       (SELECT COUNT(*) FROM me) AS on_board
+            """), {"pid": player.id})).mappings().first()
+            if orow2:
+                ovt_standing_pop = int(orow2["pop"] or 0)
+                if int(orow2["on_board"] or 0) > 0:
+                    ovt_standing = int(orow2["ahead"] or 0) + 1
+    except Exception as ex:
+        print(f"[STATS] standings block failed: {ex}")
 
     # LFP-ping cooldown surface (July 21): seconds until this player may fire
     # the next Discord LFP ping — same MAX(created_at) source the /lfp-ping
@@ -5315,8 +5884,14 @@ async def get_player_stats(
         ffa_damage_games=ffa_damage_games,
         lfp_seconds_left=lfp_seconds_left,
         # Aug 6 item 1 — Compare-tab scalar additions (migration 191).
+        # casual_dc_count is the RE-ORIENTED numerator (opponents who quit on
+        # this player) so it stays in step with the percentage on every client,
+        # including ones that predate the rename; casual_own_dc_count carries
+        # the old leaver-side number.
         casual_rage_quit_pct=casual_rage_quit_pct,
         casual_dc_count=casual_dc,
+        casual_opponent_dc_count=casual_dc,
+        casual_own_dc_count=casual_own_dc,
         casual_matches=casual_matches_played,
         ranked_dps=ranked_dps,
         ffa_dps=ffa_dps,
@@ -5330,6 +5905,20 @@ async def get_player_stats(
         ranked_unique_opponents=ranked_unique_opponents,
         ranked_total_series=ranked_total_series,
         ranked_uniqueness_pct=ranked_uniqueness_pct,
+        # Aug 12 item 2 — multi-mode ratings + numeric standings.
+        standing=standing,
+        standing_population=standing_pop,
+        team_rating_deviation=team_rd,
+        team_peak_rating=team_peak,
+        team_standing=team_standing,
+        team_standing_population=team_standing_pop,
+        ffa_rating=ffa_rating,
+        ffa_rating_deviation=ffa_rd,
+        ffa_peak_rating=ffa_peak,
+        ffa_standing=ffa_standing,
+        ffa_standing_population=ffa_standing_pop,
+        ovt_standing=ovt_standing,
+        ovt_standing_population=ovt_standing_pop,
     )
 
 
@@ -5576,6 +6165,11 @@ async def get_player_matches(
             CASE WHEN m.player1_id = :pid THEN m.p2_deaths ELSE m.p1_deaths END AS op_deaths,
             CASE WHEN m.player1_id = :pid THEN m.p2_deaths_boundary ELSE m.p1_deaths_boundary END AS op_deaths_bnd,
             CASE WHEN m.player1_id = :pid THEN m.p2_deaths_own_bullet ELSE m.p1_deaths_own_bullet END AS op_deaths_own,
+            -- Aug 12 item 1 (migration 216): viewer-relative end-of-game
+            -- build, beside the card lists it is rendered with. NULL on every
+            -- pre-216 row — passed straight through (#257).
+            CASE WHEN m.player1_id = :pid THEN m.p1_end_stats ELSE m.p2_end_stats END AS pl_end_stats,
+            CASE WHEN m.player1_id = :pid THEN m.p2_end_stats ELSE m.p1_end_stats END AS op_end_stats,
             (m.player1_id = :pid) AS viewer_is_p1,
             m.point_timeline,
             -- Bug batch item 4: game length. duration_seconds is canonical
@@ -5612,9 +6206,8 @@ async def get_player_matches(
     # the raw shop-item name "Current Rank" leaked into history rows and the
     # client rendered a literal "[Current Rank]".
     _colors = await _rank_colors(db)
-    # Podium map only when some opponent wears the dynamic podium title.
-    _pmap = await _podium_map(db) if any(
-        r["opp_title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    # Podium maps only for the ladders some opponent wears a podium title from.
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["opp_title_sku"] for r in rows))
 
     entries = []
     for row in rows:
@@ -5660,7 +6253,9 @@ async def get_player_matches(
         _opp_title, _opp_title_color = _display_title_sync(
             _colors, row["opp_title_sku"], row["opp_title"], row["opp_title_color"],
             float(row["opp_rating"]) if row["opp_rating"] is not None else None,
-            podium_pos=_pmap.get(str(row["opp_id"])))
+            podium_pos=_pmap.get(str(row["opp_id"])),
+            podium_pos_2v2=_pmap2.get(str(row["opp_id"])),
+            podium_pos_ffa=_pmapf.get(str(row["opp_id"])))
 
         entries.append(MatchHistoryEntry(
             match_id=row["match_id"],
@@ -5716,6 +6311,9 @@ async def get_player_matches(
             opp_deaths=row["op_deaths"],
             opp_deaths_boundary=row["op_deaths_bnd"],
             opp_deaths_own_bullet=row["op_deaths_own"],
+            # Aug 12 item 1 — end-of-game builds, viewer-relative.
+            player_end_stats=row["pl_end_stats"],
+            opp_end_stats=row["op_end_stats"],
         ))
 
     return entries
@@ -8627,13 +9225,15 @@ async def presence_online(db: AsyncSession = Depends(get_db)):
     """), {"sids": online_ids or [""]})).mappings().all()
 
     _colors = await _rank_colors(db)
-    _pmap = await _podium_map(db) if any(
-        r["title_sku"] == TITLE_PODIUM_SKU for r in list(online_rows) + list(recent_rows)) else {}
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(
+        db, (r["title_sku"] for r in list(online_rows) + list(recent_rows)))
 
     def _entry(r) -> dict:
         _title, _tcolor = _display_title_sync(
             _colors, r["title_sku"], r["title"], r["title_color"], float(r["rating"]),
-            podium_pos=_pmap.get(r["player_id"]))
+            podium_pos=_pmap.get(r["player_id"]),
+            podium_pos_2v2=_pmap2.get(r["player_id"]),
+            podium_pos_ffa=_pmapf.get(r["player_id"]))
         return {"display_name": r["display_name"], "steam_id": r["steam_id"],
                 "rating": int(r["rating"]), "title": _title or "",
                 "title_color": _tcolor or "", "minutes_ago": int(r["minutes_ago"])}
@@ -9671,43 +10271,192 @@ async def report_disconnect(
     }
 
 
+# Per-reporter hourly cap on casual DC reports.
+#
+# Was 4, sized when this fed a stat ABOUT OTHER PEOPLE (an anti-griefing
+# number where a low ceiling cost the reporter nothing). Since Aug 12 the same
+# rows drive the reporter's OWN "Rage Quit %", i.e. "how often do randoms quit
+# on me" — a metric collected across a whole quickplay session, where a
+# 4/hour ceiling silently clips real events and understates the rate for
+# exactly the players who suffer most from it (rejections are swallowed with a
+# client-side warning; nobody would ever see the truncation).
+#
+# 30 is the ceiling, not 4 and not unlimited. Measured in production over
+# 9,014 timed casual 1v1s, the average game runs 300 seconds — so ~12
+# completed games an hour is the realistic maximum; 30 leaves ample headroom
+# for a session of very short games that all end in a quit, while still
+# bounding what a modified client can write. The other
+# containments are unchanged and do the heavy lifting: the reporter must hold
+# a valid Steam session, rows dedup on (room_id, leaver), and every row is an
+# audit trail.
+CASUAL_DC_REPORTS_PER_HOUR = 30
+
+
 @app.post("/api/v1/matches/casual-dc", tags=["Players"])
 async def report_casual_dc(
     request: Request,
     reporter_steam_id: str = Query(...),
     leaver_steam_id: str = Query(...),
     room_id: str = Query(..., min_length=1, max_length=64),
+    # OPTIONAL and accepted ahead of the client that sends it: the leaver may
+    # now be created here (see below), and without a name a brand-new row shows
+    # its raw account id forever unless some later call carries a real one.
+    # Old clients omit it and behave exactly as before; _clean_display_name
+    # decides whether the value is real, so a placeholder can never clobber a
+    # stored name.
+    leaver_display_name: str | None = Query(None, max_length=64),
+    # OPTIONAL per-GAME key, "{room}_{token}" — the first two segments of the
+    # client's own report id (BuildReportRoomId), WITHOUT its "_r{rounds}"
+    # suffix. This is what lets the rage-quit denominator match an event to the
+    # exact game it belongs to instead of to the whole sitting; see the long
+    # note at the query in get_player_stats. Old clients omit it and keep the
+    # legacy room-prefix behaviour.
+    #
+    # NO max_length HERE, unlike its neighbours, and that is deliberate: this
+    # field is advisory and must never be able to cost us a real rage-quit
+    # event. FastAPI rejects the WHOLE REQUEST at 422 when a Query constraint
+    # fails, so a max_length would convert an over-long key into a dropped
+    # event. The length is enforced in the body instead, where failing it
+    # simply drops the key. (The overflow is not reachable today — the key is
+    # room + "_" + a 6-digit token and room_id is itself capped at 64, so it
+    # would need a 58+ character room name — but "not reachable today" is not
+    # a reason to leave a request-killing constraint on an optional field.)
+    game_room_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """Aug 6 item 1 — casual rage-quit tracking. The surviving client reports
     a mid-game leave in a CASUAL 1v1 (any midgame leave counts, including at
-    4-0 — Sid's rule). Feeds the Compare tab's casual rage-quit %, whose
-    denominator is the UNION of casual games played: recorded casual matches
-    plus DC events whose room produced no match row. (Deliberately NOT
-    matches + dc_count: a 4-0 leave is BOTH and would be counted twice —
-    which is why room_id is stored on every event, so the union is
-    computable.)
+    4-0 — Sid's rule). Feeds "Rage Quit %", which since Aug 12 (item 12) reads
+    from the REPORTER's side: how often this player's quickplay opponents quit
+    on them. Denominator is the UNION of casual games played: recorded casual
+    matches plus DC events whose own game produced no match row. (Deliberately
+    NOT matches + dc_count: a 4-0 leave is BOTH and would be counted twice —
+    which is why room_id is stored on every event, so the union is computable.)
+
+    room_id here is the RAW Photon room name. It is deliberately not the
+    report id: matches.photon_room_id is BuildReportRoomId()
+    ("{room}_{token}_r{rounds}"), which does not exist yet at leave time. The
+    union query in get_player_stats normalises the two by prefix — see the
+    long note there before changing what this column stores, because equality
+    between the two columns is impossible and was a live bug.
+
+    game_room_id narrows that prefix from the ROOM to the GAME: it is
+    "{room}_{token}", the same two segments the report id starts with, and the
+    token changes at every game start. A room hosts a whole sitting, so without
+    it the query could only ask "was ANY game in this room recorded" and had to
+    guess the rest from timestamps — which inflated the rate (see the query's
+    worked arithmetic). It stays OPTIONAL, and is stored as NULL when absent or
+    when it fails any of the checks below, because an advisory field must never
+    cost us a real rage-quit event; NULL simply selects the legacy path.
 
     No series exists for casual games, so the ranked endpoint's shared-series
     reality check can't apply. Containment instead: (1) the REPORTER must hold
     a valid Steam session; (2) dedup on (room_id, leaver) — the all-NOT-NULL
     unique in casual_dc_events (#147), room_id required non-blank; (3) a
-    reporter can land at most 4 casual-DC reports per hour, so an abusive
-    session inflates a rival slowly at best and leaves an audit trail.
-    The cap is enforced under a per-reporter advisory lock so concurrent
-    requests cannot all pass the count (round-1 finding).
-    Residual accepted: a determined authed attacker can add ~4/h — this feeds
-    a cosmetic stat, not ratings or gold."""
+    per-reporter hourly cap, enforced under a per-reporter advisory lock so
+    concurrent requests cannot all pass the count (round-1 finding).
+    Residual accepted: a determined authed attacker can add rows up to the cap
+    — this feeds a cosmetic stat, not ratings or gold.
+
+    DEPLOY ORDER: migration 218 MUST land before this code. The INSERT names
+    game_room_id, so an API deployed ahead of the migration 500s EVERY casual DC
+    report. That one is deliberately NOT savepointed the way the read side is:
+    swallowing a failed insert here would return "recorded" for an event that
+    was never stored, and losing the event is the worse outcome than a loud
+    error somebody fixes by running the migration."""
     room_id = (room_id or "").strip()
     if not room_id:
         raise HTTPException(status_code=422, detail="room_id required")
+    # The per-game key is ADVISORY: it makes the denominator exact when it is
+    # trustworthy, and the legacy room-prefix path is correct without it. So a
+    # value that fails these checks is DROPPED, never 422'd — rejecting the
+    # request would throw away a real rage-quit event to punish a malformed
+    # optional field.
+    #
+    # Three conditions, each for a different reason:
+    #   startswith(room_id + "_")  — it must name THIS room. Without this a
+    #       client could point the exclusion at some other room's recorded game
+    #       and delete an entry from its own denominator (case (b) in the
+    #       query's arithmetic — an inflation, and a self-serving one).
+    #   len > len(room_id) + 1     — it must carry a non-empty second segment.
+    #       A key equal to the room plus a bare "_" would degrade the exact
+    #       branch back to room granularity while ALSO skipping the ordering
+    #       clause that made room granularity survivable — strictly worse than
+    #       either path on its own.
+    #   len <= 64                  — the column width, checked here rather than
+    #       as a Query constraint (see the parameter). Truncating instead would
+    #       store a key that matches nothing, which is merely the conservative
+    #       outcome, but dropping it is honest: NULL says "no key", a truncated
+    #       key says "here is a key" and lies.
+    # What none of them can check is whether the TOKEN names the right game;
+    # that is bounded by the client building it from live per-game state.
+    _grid = (game_room_id or "").strip()
+    if _grid and not (_grid.startswith(room_id + "_")
+                      and len(_grid) > len(room_id) + 1
+                      and len(_grid) <= 64):
+        print(f"[DC] ignoring game_room_id {_grid!r}: does not name room {room_id!r}")
+        _grid = ""
     reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
-    leaver = (await db.execute(select(Player).where(Player.steam_id == leaver_steam_id))).scalar_one_or_none()
-    if not reporter or not leaver:
+    if not reporter:
         raise HTTPException(status_code=404, detail="Player not found")
-    if reporter.id == leaver.id:
+    if reporter.steam_id == leaver_steam_id:
         raise HTTPException(status_code=400, detail="Cannot report yourself")
     await _check_steam_session(request, reporter_steam_id, db)
+
+    # The leaver may have NO players row, and that is the headline case rather
+    # than an edge one: a vanilla opponent whose FIRST ever contact with a mod
+    # user is a rage-quit has never been registered — and because the DC stops
+    # that game from ever being reported, nothing else will register them
+    # either. Requiring an existing row 404'd exactly those events, silently
+    # dropping the ones the re-oriented stat is most about (23 of the first 24
+    # production rows had a leaver who has never run the mod).
+    #
+    # Validate the id BEFORE creating anything: this is the only path here that
+    # can mint a players row from an unauthenticated field, so a junk id must be
+    # rejected rather than persisted.
+    #
+    # The rule is "an all-digit account id that fits the column", NOT "a
+    # SteamID64". A 7656119-prefix check looks obviously right and is wrong:
+    # measured against production, 649 of 3,851 player rows (17%) carry
+    # NON-Steam ids — Xbox/Game Pass XUIDs (2535...) and Epic account ids —
+    # every one of them a passive opponent record with mod_seen_at NULL, i.e.
+    # exactly the unmodded quickplay population this stat is about. That gate
+    # would have 422'd a large slice of the real leavers while looking strict
+    # and safe (#314: measure a filter's selectivity against real data).
+    # ROUNDS' vanilla `u_id` carries whatever the platform's account id is.
+    #
+    # All-digit is the discriminator that matters: the ONLY non-digit ids in
+    # production are the two `photon_N` rows that leaked in once, and
+    # photon_/unity_ are precisely the client's own "I could not resolve an
+    # identity" fallbacks. 4..20 digits keeps it inside String(20).
+    _lv = (leaver_steam_id or "").strip()
+    if not (4 <= len(_lv) <= 20 and _lv.isdigit()):
+        raise HTTPException(status_code=422,
+                            detail="leaver_steam_id must be a numeric account id")
+    # Same discover-then-create advisory gate submit_match uses (#207): the
+    # lock keys on the VALUE, so it exists before the row does and makes this
+    # path serialize against the other creator of the same steam_id rather than
+    # racing it into a unique violation.
+    #
+    # Two locks are taken in this transaction, always in this order: the
+    # leaver's id key, then the 'casualdc:' rate key below. Nothing else in the
+    # codebase takes a 'casualdc:' key, and submit_match — the only other
+    # holder of id keys — takes id keys ONLY, so neither can be the middle of a
+    # wait chain. (The one residual is a hashtext collision between an id key
+    # and the rate key, which submit_match's own comment already accepts: it
+    # costs a needless serialization, and in the worst case Postgres aborts one
+    # side on its deadlock timeout and the client retries.)
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
+        {"sid": _lv},
+    )
+    # Fall back to the id when no name was sent: _clean_display_name treats the
+    # id as "no name offered", which keeps a real stored name from being
+    # clobbered and leaves a brand-new row with the placeholder rather than a
+    # fake one.
+    leaver = await get_or_create_player(db, _lv, (leaver_display_name or "").strip() or _lv)
+    if reporter.id == leaver.id:
+        raise HTTPException(status_code=400, detail="Cannot report yourself")
 
     # Codex round 1 (MEDIUM): the COUNT below is a check-then-act. Five
     # concurrent requests with distinct room ids all read zero and all insert,
@@ -9723,14 +10472,23 @@ async def report_casual_dc(
         "SELECT COUNT(*) FROM casual_dc_events"
         " WHERE reporter_id = :rp AND created_at > NOW() - INTERVAL '1 hour'"
     ), {"rp": reporter.id})).scalar() or 0
-    if recent >= 4:
+    if recent >= CASUAL_DC_REPORTS_PER_HOUR:
         raise HTTPException(status_code=429, detail="casual DC report rate limit")
 
+    # Dedup stays on (room_id, leaver) — deliberately NOT widened to the game
+    # key. The leaver is gone once they leave, so one room can only ever yield
+    # one event from them; widening the unique would weaken a working replay
+    # guard (#147) to buy nothing. The conflict path also leaves an existing
+    # row's game_room_id alone: DO NOTHING is what makes "already_recorded"
+    # distinguishable from a fresh insert, and nothing reachable produces a
+    # second report of the same (room, leaver) carrying a better key.
     inserted = (await db.execute(text(
-        "INSERT INTO casual_dc_events (room_id, leaver_id, reporter_id)"
-        " VALUES (:room, :lv, :rp) ON CONFLICT (room_id, leaver_id) DO NOTHING"
+        "INSERT INTO casual_dc_events (room_id, leaver_id, reporter_id, game_room_id)"
+        " VALUES (:room, :lv, :rp, :grid)"
+        " ON CONFLICT (room_id, leaver_id) DO NOTHING"
         " RETURNING id"
-    ), {"room": room_id[:64], "lv": leaver.id, "rp": reporter.id})).first()
+    ), {"room": room_id[:64], "lv": leaver.id, "rp": reporter.id,
+        "grid": _grid[:64] or None})).first()
     if inserted is None:
         await db.commit()
         return {"status": "already_recorded"}
@@ -9740,7 +10498,8 @@ async def report_casual_dc(
         " WHERE id = :lv"
     ), {"lv": leaver.id})
     await db.commit()
-    print(f"[DC] casual rage-quit: {leaver_steam_id} left room {room_id} (reported by {reporter_steam_id})")
+    print(f"[DC] casual rage-quit: {leaver_steam_id} left room {room_id}"
+          f" game={_grid or '-'} (reported by {reporter_steam_id})")
     return {"status": "recorded"}
 
 
@@ -10450,12 +11209,13 @@ async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | No
             row = r.mappings().first()
             if row is None:
                 return {"rating": None, "title": None, "title_color": None}
-            _ppos = None
-            if row["title_sku"] == TITLE_PODIUM_SKU:
-                _ppos = (await _podium_map(db)).get(row["player_id"])
+            _pm, _pm2, _pmf = await _podium_maps_for(db, (row["title_sku"],))
             _title, _tcolor = _display_title_sync(
                 await _rank_colors(db), row["title_sku"], row["title"],
-                row["title_color"], row["rating"], podium_pos=_ppos)
+                row["title_color"], row["rating"],
+                podium_pos=_pm.get(row["player_id"]),
+                podium_pos_2v2=_pm2.get(row["player_id"]),
+                podium_pos_ffa=_pmf.get(row["player_id"]))
             return {
                 "rating": int(round(row["rating"])) if row["rating"] is not None else None,
                 "title": _title,
@@ -10970,14 +11730,15 @@ async def get_recent_chat(
     # (so the LAST key must be a string value — keep "timestamp" last, and the
     # numeric "id" strictly in the middle or scrollback drops every entry).
     _colors = await _rank_colors(db)
-    # Podium map only when some chatter wears the dynamic podium title.
-    _pmap = await _podium_map(db) if any(
-        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    # Podium maps only for the ladders some chatter wears a podium title from.
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     entries = []
     for r in rows:
         _title, _tcolor = _display_title_sync(
             _colors, r["title_sku"], r["title"], r["title_color"], r["rating"],
-            podium_pos=_pmap.get(r["player_id"]))
+            podium_pos=_pmap.get(r["player_id"]),
+            podium_pos_2v2=_pmap2.get(r["player_id"]),
+            podium_pos_ffa=_pmapf.get(r["player_id"]))
         entries.append({
             "source": r["source"],
             "id": r["id"],
@@ -12096,17 +12857,47 @@ async def i18n_pack(locale: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+async def _portal_display_name(db: AsyncSession, steam_id: str) -> str:
+    """The signed-in translator's display name for the portal header.
+
+    Aug-12 item 11d: the header read "Signed in as 76561198040410653", which
+    tells nobody anything. Same lookup every other portal surface already uses
+    for proposer/approver names (/history, /approved, the grants roster).
+
+    Callers reach this only after _portal_auth, which has ALREADY proven a live
+    (non-deleted) players row exists for this steam_id — so in practice the
+    only empty answer is a genuinely empty display_name. The extra guards are
+    not load-bearing, they are cheap: a name is decoration, and neither a
+    missing row nor a failed query may 500 the one call that decides whether
+    the portal renders at all. The SPA falls back to the raw id."""
+    if not steam_id:
+        return ""
+    try:
+        # Savepoint (#235): under asyncpg a failed statement poisons the whole
+        # transaction, so a bad lookup here would take the grants read with it.
+        async with db.begin_nested():
+            return str((await db.execute(text(
+                "SELECT COALESCE(display_name, '') FROM players"
+                " WHERE steam_id = :sid AND deleted_at IS NULL"
+            ), {"sid": steam_id})).scalar() or "")
+    except Exception:
+        return ""
+
+
 @app.get("/api/v1/i18n/grants/mine", tags=["I18n"])
 async def i18n_my_grants(request: Request, db: AsyncSession = Depends(get_db)):
     steam_id = await _portal_auth(request, db)
+    # Resolved for BOTH branches — the admin branch returns early, and that is
+    # exactly the seat that reported the raw id in the header.
+    name = await _portal_display_name(db, steam_id)
     if await _is_admin(db, steam_id):
-        return {"steam_id": steam_id, "admin": True,
+        return {"steam_id": steam_id, "display_name": name, "admin": True,
                 "languages": [{"language_code": l, "scope": "translate"} for l in I18N_LANGS]}
     rows = (await db.execute(text(
         "SELECT language_code, scope FROM language_grants"
         " WHERE steam_id = :sid AND revoked_at IS NULL ORDER BY language_code"
     ), {"sid": steam_id})).mappings().all()
-    return {"steam_id": steam_id, "admin": False,
+    return {"steam_id": steam_id, "display_name": name, "admin": False,
             "languages": [dict(r) for r in rows]}
 
 
@@ -12162,6 +12953,77 @@ async def i18n_progress(request: Request, db: AsyncSession = Depends(get_db)):
         "language_code": r["lang"], "total": int(r["total"]),
         "approved": int(r["approved"]), "pending": int(r["pending"]),
         "includes_base_game": r["lang"] in I18N_GAME_LANGS,
+    } for r in rows]}
+
+
+I18N_CONTRIBUTORS_LIMIT = 10
+
+
+@app.get("/api/v1/i18n/contributors", tags=["I18n"])
+async def i18n_contributors(request: Request, lang: str = Query(...),
+                            db: AsyncSession = Depends(get_db)):
+    """Top contributors for ONE language, for the portal's progress block.
+
+    CREDIT IS THE CANONICAL EXPRESSION, not a new one: DISTINCT key_id over
+    APPROVED proposals where the person was the proposer OR the reviewer,
+    'claude-mt' excluded. That is exactly what _translator_credit counts (and
+    what migration 214 grants titles from) with the language pinned instead of
+    the person — so a translator's rank here can never disagree with the badge
+    they hold. If that definition ever changes, all three change together.
+
+    The split (`translated` / `reviewed`) is presentation only: a person who
+    filled both roles on one string still contributes ONE to `approved`, so
+    the two halves can legitimately sum to more than the total.
+
+    Portal-authenticated but NOT grant-gated per language, deliberately: this
+    mirrors /progress, which shows every shipped language on purpose ("there is
+    an end, and here is where everyone is"). It names contributors and counts —
+    no source strings and no translations — so a grant gates nothing here.
+    """
+    await _portal_auth(request, db)
+    lang = (lang or "").lower()[:8]
+    if lang not in I18N_LANGS:
+        raise HTTPException(400, f"unsupported language (allowed: {', '.join(I18N_LANGS)})")
+    # The two roles are UNIONed with a role tag rather than unnest()'d into one
+    # column (migration 214's shape) because the portal wants the per-role
+    # split too. COUNT(DISTINCT key_id) over the already-distinct set gives the
+    # same number unnest+DISTINCT does: a key where one person both proposed
+    # and reviewed contributes two rows here and one to `n`.
+    rows = (await db.execute(text(
+        "WITH d AS ("
+        "  SELECT DISTINCT key_id, person, role FROM ("
+        "    SELECT key_id, proposer_steam_id AS person, 'p' AS role"
+        "      FROM i18n_proposals"
+        "     WHERE status = 'approved' AND language_code = :lang"
+        "    UNION ALL"
+        "    SELECT key_id, reviewed_by_steam_id, 'r'"
+        "      FROM i18n_proposals"
+        "     WHERE status = 'approved' AND language_code = :lang"
+        "  ) x"
+        "  WHERE person IS NOT NULL AND person <> 'claude-mt'"
+        "), credit AS ("
+        "  SELECT person, COUNT(DISTINCT key_id) AS n,"
+        "         COUNT(DISTINCT key_id) FILTER (WHERE role = 'p') AS translated,"
+        "         COUNT(DISTINCT key_id) FILTER (WHERE role = 'r') AS reviewed"
+        "    FROM d GROUP BY person"
+        ") "
+        # LEFT JOIN + COALESCE, never an inner join: account deletion rewrites
+        # the identity columns to a tombstone, and a contributor whose account
+        # is gone still did the work — render the raw label rather than
+        # silently dropping their rows out of the totals.
+        "SELECT c.person, c.n, c.translated, c.reviewed,"
+        "       COALESCE(p.display_name, '') AS display_name"
+        "  FROM credit c"
+        "  LEFT JOIN players p ON p.steam_id = c.person AND p.deleted_at IS NULL"
+        " ORDER BY c.n DESC, c.person"
+        " LIMIT :lim"
+    ), {"lang": lang, "lim": I18N_CONTRIBUTORS_LIMIT})).mappings().all()
+    return {"language": lang, "limit": I18N_CONTRIBUTORS_LIMIT, "contributors": [{
+        # steam_id ships beside the name for the same reason every other portal
+        # surface does it: a display name is not an identity.
+        "steam_id": r["person"], "display_name": r["display_name"],
+        "approved": int(r["n"]), "translated": int(r["translated"]),
+        "reviewed": int(r["reviewed"]),
     } for r in rows]}
 
 
@@ -12294,8 +13156,67 @@ async def i18n_key_history(request: Request, key_id: str = Query(...),
     }
 
 
+def _i18n_search_filter_sql(target_col: str) -> str:
+    """Shared WHERE fragment: namespace scope + substring search, for the
+    portal's Review-queue and Approved views (Aug-12 item 11e — both tabs are
+    SERVER-paged, so a client-side filter would only ever filter the visible
+    25 rows).
+
+    `target_col` is a hard-coded SQL identifier chosen at the two call sites
+    below — never request text. Every VALUE is a bound parameter (#188).
+
+    strpos(lower(...)) rather than ILIKE: it is a plain substring test with no
+    wildcard semantics, so a '%' or '_' typed into the search box means those
+    characters and nothing else, with no escaping to get wrong. Same
+    case-insensitive substring rule as the Keys tab's client-side indexOf(),
+    over four of its five fields — English source, key context, key id and the
+    translation. Namespace is deliberately NOT searched as text here: these two
+    views carry namespace CHIPS, so typing "game" should find the word, not
+    silently switch scope.
+
+    CAST(:x AS text), never `:x::text` — asyncpg cannot tell PG's cast operator
+    from a bind-parameter prefix when the two are adjacent, and the adjacent
+    form 500s every request (same trap as the /keys namespace filter).
+
+    The SAME fragment must go into the page query AND the past-the-end COUNT,
+    or `total` describes a different set than the rows do."""
+    return (
+        " AND (CAST(:ns AS text) IS NULL OR k.namespace = :ns)"
+        " AND (CAST(:q AS text) IS NULL"
+        "      OR strpos(lower(k.msgctxt), lower(CAST(:q AS text))) > 0"
+        "      OR strpos(lower(COALESCE(k.context, '')), lower(CAST(:q AS text))) > 0"
+        "      OR strpos(lower(k.key_id), lower(CAST(:q AS text))) > 0"
+        f"      OR strpos(lower(COALESCE({target_col}, '')), lower(CAST(:q AS text))) > 0)"
+    )
+
+
+_I18N_QUEUE_FILTER_SQL = _i18n_search_filter_sql("p.proposed_target")
+_I18N_APPROVED_FILTER_SQL = _i18n_search_filter_sql("e.target")
+
+
+def _i18n_search_term(q):
+    """Normalise the portal search box: blank/whitespace means UNSCOPED (SQL
+    NULL), which is what the fragment above tests for. Length-capped so a
+    pathological paste cannot turn every row into a long scan."""
+    s = str(q or "").strip()[:120]
+    return s or None
+
+
+def _i18n_namespace_param(namespace):
+    """None (unscoped) or one of the two real namespaces. Anything else is a
+    400 rather than a silent full-corpus fallback — the caller is our own SPA,
+    so a bad value is a bug worth surfacing."""
+    if namespace is None or namespace == "" or namespace == "all":
+        return None
+    if namespace not in ("client", "game"):
+        raise HTTPException(400, "namespace must be client|game")
+    return namespace
+
+
 @app.get("/api/v1/i18n/approved", tags=["I18n"])
 async def i18n_approved_list(request: Request, lang: str = Query(...),
+                             namespace: str = Query(None),
+                             q: str = Query(None),
                              offset: int = Query(0, ge=0),
                              limit: int = Query(50, ge=1, le=200),
                              db: AsyncSession = Depends(get_db)):
@@ -12330,6 +13251,8 @@ async def i18n_approved_list(request: Request, lang: str = Query(...),
     lang = lang.lower()[:8]
     if await _i18n_role(db, steam_id, lang, "translate") is None:
         raise HTTPException(403, "no translate grant for this language")
+    ns = _i18n_namespace_param(namespace)
+    term = _i18n_search_term(q)
     # CTE + ROW_NUMBER for "newest approved proposal per key", never LATERAL
     # (learning #32: LATERAL is incompatible with asyncpg).
     #
@@ -12365,10 +13288,11 @@ async def i18n_approved_list(request: Request, lang: str = Query(...),
         "  LEFT JOIN players av ON av.steam_id = e.approved_by_steam_id"
         "  LEFT JOIN players pv ON pv.steam_id = ap.proposer_steam_id"
         " WHERE e.language_code = :lang AND e.state = 'approved'"
-        "   AND k.retired_at IS NULL"
+        "   AND k.retired_at IS NULL" + _I18N_APPROVED_FILTER_SQL +
         " ORDER BY e.updated_at DESC NULLS LAST, e.key_id"
         " LIMIT :lim OFFSET :off"
-    ), {"lang": lang, "lim": limit, "off": offset})).mappings().all()
+    ), {"lang": lang, "lim": limit, "off": offset,
+        "ns": ns, "q": term})).mappings().all()
     total = int(rows[0]["total_rows"]) if rows else 0
     if not rows and offset > 0:
         # Only a page PAST THE END has no row to carry the window column, and
@@ -12376,18 +13300,14 @@ async def i18n_approved_list(request: Request, lang: str = Query(...),
         # (resetting the final entry of the final page lands exactly here).
         # A second snapshot is harmless in this branch: the page is empty
         # whatever the count says, so the two reads cannot contradict.
+        # SAME filter fragment as the page query above — a count over a wider
+        # predicate would walk the client back to a page the filter cannot
+        # actually fill.
         total = (await db.execute(text(
             "SELECT COUNT(*) FROM i18n_entries e JOIN i18n_keys k ON k.key_id = e.key_id"
-            " WHERE e.language_code = :lang AND e.state = 'approved' AND k.retired_at IS NULL"
-        ), {"lang": lang})).scalar() or 0
-        # Codex Aug-4 r2 find 14: clamp so the client's walk-back is STRICTLY
-        # smaller than its current offset. This count is a second snapshot, and
-        # a row inserted between the two reads can otherwise produce a "last
-        # page" equal to the offset the client is already on — its
-        # `back !== offset` guard then declines to reload and the pager sticks
-        # on a permanently empty page. Under-reporting here is safe: the client
-        # steps back, and the next request reads a fresh, authoritative total.
-        total = min(int(total), offset)
+            " WHERE e.language_code = :lang AND e.state = 'approved'"
+            "   AND k.retired_at IS NULL" + _I18N_APPROVED_FILTER_SQL
+        ), {"lang": lang, "ns": ns, "q": term})).scalar() or 0
         # Codex Aug-4 r2 find 14: clamp so the client's walk-back is STRICTLY
         # smaller than its current offset. This count is a second snapshot, and
         # a row inserted between the two reads can otherwise produce a "last
@@ -12397,7 +13317,8 @@ async def i18n_approved_list(request: Request, lang: str = Query(...),
         # steps back, and the next request reads a fresh, authoritative total.
         total = min(int(total), offset)
     return {"language": lang, "total": int(total), "offset": offset,
-            "limit": limit, "entries": [{
+            "limit": limit, "namespace": ns or "all", "q": term or "",
+            "entries": [{
         "key_id": r["key_id"], "namespace": r["namespace"],
         "context": r["context"],
         "source": r["msgctxt"], "sensitive": r["sensitive"],
@@ -12480,6 +13401,8 @@ async def i18n_propose(payload: dict, request: Request,
 @app.get("/api/v1/i18n/proposals", tags=["I18n"])
 async def i18n_proposal_queue(request: Request, lang: str = Query(...),
                               status: str = Query("pending"),
+                              namespace: str = Query(None),
+                              q: str = Query(None),
                               offset: int = Query(0, ge=0),
                               limit: int = Query(50, ge=1, le=200),
                               db: AsyncSession = Depends(get_db)):
@@ -12501,6 +13424,8 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
     if await _i18n_role(db, steam_id, lang, "translate") is None:
         raise HTTPException(403, "no translate grant for this language")
     status = status if status in ("pending", "approved", "rejected", "superseded") else "pending"
+    ns = _i18n_namespace_param(namespace)
+    term = _i18n_search_term(q)
     # RETIRED KEYS ARE NOT ACTIONABLE (r3 find 8, defence in depth). Sync now
     # supersedes pending proposals on the keys it retires, so this should never
     # match anything — but a proposal on a retired key cannot be approved OR
@@ -12537,24 +13462,30 @@ async def i18n_proposal_queue(request: Request, lang: str = Query(...),
         "  FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
         "  LEFT JOIN players pn ON pn.steam_id = p.proposer_steam_id"
         " WHERE p.language_code = :lang AND p.status = :st" + live_key_only +
+        _I18N_QUEUE_FILTER_SQL +
         " ORDER BY p.created_at, p.id LIMIT :lim OFFSET :off"
-    ), {"lang": lang, "st": status, "lim": limit, "off": offset})).mappings().all()
+    ), {"lang": lang, "st": status, "lim": limit, "off": offset,
+        "ns": ns, "q": term})).mappings().all()
     total = int(rows[0]["total_rows"]) if rows else 0
     if not rows and offset > 0:
         # Page past the end — no row carries the window column, and the SPA
         # needs a real total to walk its offset back to the last page
         # (approving the final proposal of the final page lands exactly here).
         # The extra snapshot is harmless: the page is empty either way.
+        # SAME filter fragment as the page query — a wider count would send the
+        # client back to a page this filter cannot fill.
         total = (await db.execute(text(
             "SELECT COUNT(*) FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
-            " WHERE p.language_code = :lang AND p.status = :st" + live_key_only
-        ), {"lang": lang, "st": status})).scalar() or 0
+            " WHERE p.language_code = :lang AND p.status = :st" + live_key_only +
+            _I18N_QUEUE_FILTER_SQL
+        ), {"lang": lang, "st": status, "ns": ns, "q": term})).scalar() or 0
         # r3 find 12: clamp like the approved list, so the client's walk-back is
         # STRICTLY smaller than its current offset and cannot stall on a page an
         # insertion re-populated between the two reads.
         total = min(int(total), offset)
     return {"language": lang, "status": status, "total": int(total),
-            "offset": offset, "limit": limit, "proposals": [{
+            "offset": offset, "limit": limit,
+            "namespace": ns or "all", "q": term or "", "proposals": [{
         "id": r["id"], "key_id": r["key_id"], "source": r["msgctxt"],
         "target": r["proposed_target"], "proposer": r["proposer_steam_id"],
         "proposer_name": r["proposer_name"],
@@ -12818,37 +13749,87 @@ user-select:none;cursor:not-allowed}
 .badge{font-size:11px;border-radius:3px;padding:1px 6px;margin-left:6px}
 .b-machine{background:#5a4a18}.b-approved{background:#1e4a24}.b-stale{background:#5a1e1e}
 .b-sensitive{background:#4a1e3a}.b-pending{background:#1e3a5a}
-.err{color:#ff8888;white-space:pre-wrap}.muted{color:#889}#filter{margin:8px 0}
+.err{color:#ff8888;white-space:pre-wrap}.muted{color:#889}
+/* Filter bars — CENTRED (Sid, Aug 12 item 11c). The chips are inline-block
+   buttons, so text-align does the centring and the row still wraps cleanly on
+   a narrow window. `margin:auto` matters as well as text-align: the old
+   `#filter{margin:8px 0}` beat body>*'s auto margins on specificity, which is
+   why this one strip sat ~394px left of everything else on a wide monitor.
+   .fbar is the same bar for the Review-queue and Approved tabs (item 11e). */
+#filter,.fbar,#views{margin:8px auto;text-align:center}
 input[type=text]{background:#1c2029;color:#dde;border:1px solid #445;padding:5px}
+/* Selected state for every chip row: sections, languages, view filters,
+   namespace scopes (item 11f). It used to be a bare inline background of
+   #4a5a7a — one step from button:hover's #39435a, so a hovered UNSELECTED chip
+   read as selected and nothing said which language was live. Applied by
+   classList, and .sel:hover (0,2,0) is deliberately more specific than
+   button:hover (0,1,1) so hovering cannot repaint the selection away. */
+.sel{background:#3f6ea8;border-color:#9dc0f0;color:#fff;font-weight:700}
+.sel:hover{background:#4a7cbb}
+/* The language row is the page's primary control — sized like one. */
+#langs{text-align:center;margin:10px auto}
+#langs button{font-size:16px;padding:9px 20px;letter-spacing:1px;min-width:64px}
+#langpick{text-align:center;margin:2px auto 10px auto}
+.langpick-on{color:#ffd94d;font-weight:700;font-size:15px}
+/* Licence checkbox — centred, and the box pinned to the FIRST line of the
+   sentence instead of floating mid-paragraph when it wraps (item 11b). */
+.assent{margin:10px auto;text-align:center}
+.assent label{display:inline-flex;align-items:flex-start;gap:8px;
+  text-align:left;max-width:760px}
+.assent input{margin-top:3px;flex:0 0 auto}
 /* Per-language progress. Three bands, back to front: the track is work with
    no usable draft at all, the buffer is anything awaiting review, the fill is
    approved and live. The buffer starts full (every key ships a machine draft)
    and RETREATS as bad drafts are rejected — that receding edge is the
    "needs writing from scratch" signal, so it must stay visually distinct
-   from the track rather than blending into it. */
-.prog{margin:6px 0 10px 0;max-width:560px}
-.prog-row{display:flex;align-items:center;gap:8px;margin:4px 0}
-.prog-lang{width:34px;font-weight:bold;font-size:12px;color:#cdd}
-.prog-track{position:relative;flex:1;height:14px;background:#23283a;
-  border:1px solid #39405a;border-radius:7px;overflow:hidden}
+   from the track rather than blending into it.
+
+   Aug 12 items 11a + 11g: ONE bar (the selected language), centred, with the
+   track about twice its old length. The old 560px block spent 184px of itself
+   on a 34px code cell and a 150px number cell, leaving a ~360px track with
+   11px digits; 960px with a wider number cell leaves ~710px of track. Every
+   sizing rule is flex-basis + min-width rather than a hard width, so the row
+   wraps instead of crushing the track on a narrow window. */
+.prog{margin:10px auto 12px auto;max-width:960px;text-align:center}
+.prog-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;
+  gap:10px;margin:6px 0}
+.prog-lang{flex:0 0 auto;font-weight:bold;font-size:15px;color:#cdd}
+.prog-track{position:relative;flex:1 1 320px;min-width:180px;height:20px;
+  background:#23283a;border:1px solid #39405a;border-radius:10px;overflow:hidden}
 .prog-buf{position:absolute;left:0;top:0;bottom:0;background:#39527a}
 .prog-fill{position:absolute;left:0;top:0;bottom:0;background:#3f9a52}
-.prog-num{width:150px;text-align:right;font-size:11px;color:#99a;
+.prog-num{flex:0 0 auto;min-width:190px;text-align:right;font-size:14px;color:#bcc;
   font-variant-numeric:tabular-nums}
-.prog-legend{font-size:11px;color:#778;margin-top:2px}
-.prog-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+.prog-legend{font-size:12px;color:#778;margin-top:4px}
+.prog-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;
   margin:0 4px 0 10px;vertical-align:middle}
+/* Top contributors for the selected language (item 11g). The block is centred
+   but its ROWS are left-aligned — a centred ragged list of names is far harder
+   to scan. Names are hostile input and are written with textContent only. */
+.contrib{margin:4px auto 12px auto;max-width:560px;text-align:left}
+.contrib h4{margin:0 0 4px;font-size:13px;color:#9ad0ff;font-weight:600;
+  text-align:center}
+.crow{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:3px 6px;
+  font-size:13px;border-bottom:1px solid #232833}
+.crank{flex:0 0 auto;min-width:26px;text-align:right;color:#889}
+.cname{flex:1 1 auto;color:#dde;font-weight:600;overflow-wrap:anywhere}
+.cnum{flex:0 0 auto;color:#9ad0ff;font-variant-numeric:tabular-nums}
+.csplit{flex:0 0 auto;color:#778;font-size:11px}
 </style></head><body>
 <h1>Sid's Competitive ROUNDS — Translation Portal</h1>
 <div id="auth" class="muted">Checking session…</div>
 <div id="langs"></div>
+<div id="langpick" class="muted"></div>
 <div id="progress" class="prog"></div>
+<div id="contrib" class="contrib"></div>
 <div id="status" class="muted"></div>
-<div id="assentRow" style="display:none;margin:8px 0"><label>
+<div id="assentRow" class="assent" style="display:none"><label>
 <input type="checkbox" id="assent"> I license my submitted translations to the
 project for distribution with the mod (recorded per proposal).</label></div>
 <div id="views"></div>
-<div id="filter"></div><div id="queue"></div><div id="approved"></div><div id="list"></div>
+<div id="filter"></div><div id="qfilter" class="fbar"></div>
+<div id="afilter" class="fbar"></div>
+<div id="queue"></div><div id="approved"></div><div id="list"></div>
 <script>
 "use strict";
 // Token arrives in the URL FRAGMENT (never a query param, never a cookie) and
@@ -13131,6 +14112,22 @@ function bindRun(node,warnEl){
 }
 
 let LANG=null,VIEW="all",IS_ADMIN=false,SECTION="keys",NS="all";
+// Human-readable language names (item 11f). Every heading, status line and
+// progress row names the language instead of printing a two-letter code, so
+// "which language am I looking at" is answerable without decoding ES/RU/UK/SV.
+// English names on purpose: the portal chrome is English, and a translator
+// working ru should still be able to read the sv label.
+const LANG_NAMES={es:"Spanish",ru:"Russian",uk:"Ukrainian",sv:"Swedish"};
+function langLabel(code){
+  const c=String(code||"").toLowerCase();
+  return (LANG_NAMES[c]?LANG_NAMES[c]+" ":"")+"("+c.toUpperCase()+")";
+}
+// Last language worked on, remembered for the tab's lifetime so a reload does
+// not dump an admin with four grants back onto the first one. sessionStorage,
+// not localStorage — same per-tab lifetime discipline as the token above.
+const SS_LANG="scr_portal_lang";
+function rememberLang(code){try{sessionStorage.setItem(SS_LANG,String(code||""));}catch(e){}}
+function recallLang(){try{return sessionStorage.getItem(SS_LANG)||"";}catch(e){return "";}}
 // Section switcher. The key list, the review queue and the approved list used
 // to render stacked, so the queue sat under up to 200 editor boxes and the
 // approved list would have been invisible below both.
@@ -13169,7 +14166,10 @@ function clearLangViews(){
   // painted while the new language loads) finds it inert rather than armed.
   SUBMIT_GATES.forEach(function(g){g.btn.disabled=true;});
   KEYS=[];KEYS_LANG=null;SUBMIT_GATES.length=0;RENDER_LIMIT=RENDER_CAP;
-  ["list","queue","approved"].forEach(function(id){
+  // progress/contrib go too (item 11g): they are now per-language, so leaving
+  // the previous language's bar and leaderboard on screen while the new one
+  // loads would be the same lie the row clearing above exists to prevent.
+  ["list","queue","approved","progress","contrib"].forEach(function(id){
     const e=document.getElementById(id);if(e)e.textContent="";});
   delete VIEW_COUNTS.queue;delete VIEW_COUNTS.approved;
   paintViewButtons();updateFilterCounts();
@@ -13182,12 +14182,21 @@ function buildViews(){
     v.appendChild(b);
   });
 }
+// One selection painter for every chip row (item 11f). classList + aria-pressed,
+// never an inline background: an inline style loses to button:hover, which is
+// exactly why the old selection read as "slightly darker than whatever the
+// mouse is over".
+function paintSel(btn,on){
+  if(!btn)return;
+  btn.classList.toggle("sel",!!on);
+  btn.setAttribute("aria-pressed",on?"true":"false");
+}
 function paintViewButtons(){
   SECTIONS.forEach(function(sv){
     const b=document.getElementById("vbtn_"+sv[0]);if(!b)return;
     const n=VIEW_COUNTS[sv[0]];
     b.textContent=sv[1]+(n===undefined?"":" ("+n+")");
-    b.style.background=(sv[0]===SECTION)?"#4a5a7a":"";
+    paintSel(b,sv[0]===SECTION);
   });
 }
 function setViewCount(sec,n){VIEW_COUNTS[sec]=n;paintViewButtons();}
@@ -13196,28 +14205,44 @@ function showSection(sec){
   const on=function(id,vis){const e=document.getElementById(id);
     if(e)e.style.display=vis?"":"none";};
   on("filter",sec==="keys");on("list",sec==="keys");
-  on("queue",sec==="queue");on("approved",sec==="approved");
+  // Item 11e: the queue and approved tabs get their own filter bar, shown with
+  // the section they belong to.
+  on("qfilter",sec==="queue");on("queue",sec==="queue");
+  on("afilter",sec==="approved");on("approved",sec==="approved");
   paintViewButtons();
 }
 function paintLangButtons(){
   const langs=document.getElementById("langs");if(!langs)return;
   Array.prototype.forEach.call(langs.querySelectorAll("button"),function(b){
-    b.style.background=(b.getAttribute("data-lang")===LANG)?"#4a5a7a":"";
+    paintSel(b,b.getAttribute("data-lang")===LANG);
   });
+  // Item 11f: SAY which language is selected, in words, right under the row of
+  // buttons. The button highlight alone was the only indicator and it read as
+  // a hover state.
+  const p=document.getElementById("langpick");
+  if(p){
+    p.className=LANG?"langpick-on":"muted";
+    p.textContent=LANG?("Now translating: "+langLabel(LANG))
+                      :"Pick a language above to start.";
+  }
 }
 async function selectLang(code){
   const gen=++LANG_GEN;
-  LANG=code;QUEUE_OFFSET=0;APPROVED_OFFSET=0;paintLangButtons();
+  LANG=code;QUEUE_OFFSET=0;APPROVED_OFFSET=0;rememberLang(code);paintLangButtons();
   // Clear FIRST (F1): the previous language's rows must stop being actionable
   // at the instant the selection changes, not when the last fetch returns.
   clearLangViews();paintSubmitGates();
-  setStatus("Loading "+String(code).toUpperCase()+"…",false);
+  setStatus("Loading "+langLabel(code)+"…",false);
   // SEQUENCED, not fired in parallel: one of these pulls the entire 1,384-key
   // list, and the portal is normally opened from inside the LAN where hairpin
   // NAT serializes concurrent flows anyway (learning #223). Counts first so the
   // section buttons are useful while the big list is still loading.
   // Each await is followed by a generation check so a switch made mid-sequence
   // abandons this one instead of racing it.
+  // Progress + contributors lead: they are two small aggregates, and they are
+  // what the top of the page is showing while the key list loads (item 11g).
+  await loadProgress();     if(gen!==LANG_GEN)return;
+  await loadContributors(); if(gen!==LANG_GEN)return;
   await loadQueue();       if(gen!==LANG_GEN)return;
   await loadApproved();    if(gen!==LANG_GEN)return;
   await loadKeys();        if(gen!==LANG_GEN)return;
@@ -13250,17 +14275,33 @@ async function boot(){
     // Stored, not just printed: it gates the Reset button in the Approved
     // view. The SERVER enforces admin-only independently — this is UX.
     IS_ADMIN=!!g.admin;
-    a.textContent="Signed in as "+g.steam_id+(IS_ADMIN?" (admin)":"");
+    // Item 11d: the NAME, not a 17-digit Steam id. The id is still one hover
+    // away, because a display name is not an identity — the same rule every
+    // other portal surface follows by shipping both.
+    const who=String(g.display_name||"").trim();
+    a.textContent="Signed in as "+(who||g.steam_id)+(IS_ADMIN?" (admin)":"");
+    a.title="Steam ID "+g.steam_id;
     const langs=document.getElementById("langs");langs.textContent="";
     const seen=new Set();
     g.languages.forEach(l=>{if(l.scope!=="translate"||seen.has(l.language_code))return;
       seen.add(l.language_code);
       const b=el("button",null,l.language_code.toUpperCase());
       b.setAttribute("data-lang",l.language_code);
+      b.title=langLabel(l.language_code);
       b.onclick=()=>{selectLang(l.language_code)};langs.appendChild(b)});
-    loadProgress();
     if(seen.size)document.getElementById("assentRow").style.display="";
     if(!seen.size)a.textContent+=" — no translate grants. Ask an admin for one.";
+    paintLangButtons();
+    // Open ON a language (items 11f + 11g). Nothing used to call selectLang at
+    // boot, so the portal opened with no selection: no bar to show, no
+    // contributors, and an empty key list that looked broken. Prefer the last
+    // language worked on in this tab, falling back to the first grant.
+    const remembered=recallLang();
+    const first=seen.has(remembered)?remembered:Array.from(seen)[0];
+    if(first)selectLang(first);
+    // No grants: there is nothing to select, so show every shipped language's
+    // bar rather than an empty block.
+    else loadProgress();
     // The keep-alive is already armed by the pre-fetch refresh above and
     // re-arms itself from every server answer, so there is nothing to start
     // here.
@@ -13343,13 +14384,7 @@ function filterBar(){
   filterBuilt=true;
   paintNsButtons();
 }
-function paintNsButtons(){
-  const f=document.getElementById("filter");if(!f)return;
-  Array.prototype.forEach.call(f.querySelectorAll("button"),function(b){
-    const v=b.getAttribute("data-ns");if(!v)return;
-    b.style.background=(v===NS)?"#4a5a7a":"";
-  });
-}
+function paintNsButtons(){paintNsIn(document.getElementById("filter"),NS);}
 // The counts are what make the four buttons distinguishable. With the render
 // cap at 200, All / Untranslated / Has-pending showed the same first 200 rows
 // and looked identical even when the underlying sets differed.
@@ -13370,7 +14405,7 @@ function updateFilterCounts(){
     const v=b.getAttribute("data-view");if(!v)return;
     const hit=FILTERS.filter(function(fv){return fv[0]===v;})[0];
     b.textContent=(hit?hit[1]:v)+" ("+counts[v]+")";
-    b.style.background=(v===VIEW)?"#4a5a7a":"";
+    paintSel(b,v===VIEW);
   });
 }
 let KEYS=[],KEYS_LANG=null,LOAD_GEN=0;
@@ -13545,12 +14580,15 @@ function renderKeys(){
 let QUEUE_GEN=0,QUEUE_OFFSET=0;
 const QUEUE_PAGE=25;
 async function loadQueue(){
+  // Filter bar is built lazily here, exactly like filterBar() in loadKeys.
+  sectionFilterBar("qfilter",QFILTER,function(){QUEUE_OFFSET=0;loadQueue();});
   // Same generation + captured-language discipline as loadKeys (round-3
   // find N8): a slow stale-language response must never render as the
   // currently selected queue, and every row is labelled with its language.
   const gen=++QUEUE_GEN,lang=LANG,lgen=LANG_GEN;
   try{
     const d=await api("/proposals?lang="+encodeURIComponent(lang)+"&status=pending"+
+      filterQuery(QFILTER)+
       "&offset="+QUEUE_OFFSET+"&limit="+QUEUE_PAGE);
     // Stale on either axis: a newer queue load, or a newer language (F1).
     if(gen!==QUEUE_GEN||lgen!==LANG_GEN)return;
@@ -13561,17 +14599,29 @@ async function loadQueue(){
     qd.appendChild(el("div","err","Could not load the review queue. "+errText(e)));
   }
 }
-// ── Per-language progress bars ───────────────────────────────────────────
-// Shows every SHIPPED language, not just the viewer's granted ones: a
-// translator seeing the other languages' bars is the point ("there is an
-// end, and here is where everyone is"). Counts only — no strings — so this
-// leaks nothing a grant would otherwise gate.
+// ── Progress bar for the SELECTED language ───────────────────────────────
+// Item 11g (Sid, Aug 12): four bars at once was noise — show the one being
+// worked on, twice as long, with the contributor list underneath.
+//
+// The endpoint still returns every SHIPPED language and that is deliberate:
+// with no language selected (an account holding no grants) the whole set is
+// drawn, so the block is never blank and the old "there is an end, and here is
+// where everyone is" view survives for the one case that cannot pick a lane.
+// Counts only — no strings — so this leaks nothing a grant would gate.
+let PROGRESS_GEN=0;
 async function loadProgress(){
   const box=document.getElementById("progress");
+  // Same two-axis staleness guard as every other loader: a newer progress load
+  // (PROGRESS_GEN) or a newer language selection (LANG_GEN, F1). Without the
+  // second one, the previous language's bar can land on top of the new one.
+  const gen=++PROGRESS_GEN,lgen=LANG_GEN,want=LANG;
   try{
     const d=await api("/progress");
+    if(gen!==PROGRESS_GEN||lgen!==LANG_GEN)return;
     box.textContent="";
-    (d.languages||[]).forEach(function(L){
+    let langs=(d.languages||[]);
+    if(want)langs=langs.filter(function(L){return L.language_code===want;});
+    langs.forEach(function(L){
       const total=L.total||0;
       // approved is a SUBSET of the buffer: draw the buffer at approved+pending
       // so the fill sits inside it rather than adding to it.
@@ -13579,7 +14629,10 @@ async function loadProgress(){
       const buf=Math.min(done+(L.pending||0),total);
       const pd=total?(done*100/total):0, pb=total?(buf*100/total):0;
       const row=el("div","prog-row");
-      row.appendChild(el("div","prog-lang",L.language_code.toUpperCase()));
+      // One bar: name the language in full. Several bars (the no-grant
+      // fallback): codes only, so every track still starts at the same x.
+      row.appendChild(el("div","prog-lang",
+        langs.length===1?langLabel(L.language_code):L.language_code.toUpperCase()));
       const track=el("div","prog-track");
       const b=el("div","prog-buf");b.style.width=pb.toFixed(1)+"%";
       const f=el("div","prog-fill");f.style.width=pd.toFixed(1)+"%";
@@ -13610,6 +14663,101 @@ async function loadProgress(){
     box.textContent="";
   }
 }
+// ── Top contributors for the selected language ───────────────────────────
+// Item 11g. Credit is the CANONICAL translator credit (approved proposals
+// where you were the proposer OR the reviewer), so a translator's rank here
+// always agrees with the Rosetta/Dragoman/Babel title they hold in game.
+// Names are hostile input; every field is written with textContent.
+let CONTRIB_GEN=0;
+async function loadContributors(){
+  const box=document.getElementById("contrib");if(!box)return;
+  const gen=++CONTRIB_GEN,lgen=LANG_GEN,lang=LANG;
+  // Nothing selected -> nothing to rank. Not an error state.
+  if(!lang){box.textContent="";return;}
+  try{
+    const d=await api("/contributors?lang="+encodeURIComponent(lang));
+    if(gen!==CONTRIB_GEN||lgen!==LANG_GEN||lang!==LANG)return;
+    box.textContent="";
+    box.appendChild(el("h4",null,"Top contributors — "+langLabel(d.language)));
+    const list=d.contributors||[];
+    if(!list.length){
+      box.appendChild(el("div","muted",
+        "No approved translations in this language yet — the first name here is "+
+        "whoever gets one through review."));
+      return;
+    }
+    list.forEach(function(c,i){
+      const r=el("div","crow");
+      r.appendChild(el("div","crank","#"+(i+1)));
+      // Falls back to the raw id when the players row is gone (account
+      // deletion tombstones the identity) or the name is empty.
+      const nm=el("div","cname",c.display_name||c.steam_id);
+      nm.title="Steam ID "+c.steam_id;
+      r.appendChild(nm);
+      r.appendChild(el("div","cnum",c.approved+(c.approved===1?" string":" strings")));
+      // Can legitimately sum to more than the total: one person who both
+      // proposed and reviewed the same string counts once overall and in each
+      // half. Same rule the in-game title uses.
+      r.appendChild(el("div","csplit",
+        "("+c.translated+" translated, "+c.reviewed+" reviewed)"));
+      box.appendChild(r);
+    });
+  }catch(e){
+    // Same rule as the progress bars: information, never the job.
+    box.textContent="";
+  }
+}
+
+// ── Shared filter bar for the Review-queue and Approved tabs ─────────────
+// Item 11e. Both tabs are SERVER-paged, so unlike the Keys tab's view chips
+// these are REFETCHES, not re-renders of a loaded set — which is also why the
+// offset must reset on every change: searching from page 4 otherwise asks for
+// page 4 of a result that now has one page.
+// Built once per container (rebuilding would destroy whatever is typed — the
+// exact bug the Keys tab's filterBuilt guard exists for).
+const QFILTER={ns:"all",q:""},AFILTER={ns:"all",q:""};
+function paintNsIn(f,ns){
+  if(!f)return;
+  Array.prototype.forEach.call(f.querySelectorAll("button"),function(b){
+    const v=b.getAttribute("data-ns");if(!v)return;
+    paintSel(b,v===ns);
+  });
+}
+function sectionFilterBar(id,state,reload){
+  const f=document.getElementById(id);
+  if(!f||f.getAttribute("data-built"))return;
+  f.setAttribute("data-built","1");
+  f.appendChild(el("span","muted","namespace: "));
+  NAMESPACES.forEach(function(nv){
+    const b=el("button",null,nv[1]);b.setAttribute("data-ns",nv[0]);
+    b.onclick=function(){if(state.ns===nv[0])return;state.ns=nv[0];
+      paintNsIn(f,state.ns);reload();};
+    f.appendChild(b);
+  });
+  const s=el("input");s.type="text";s.id=id+"_q";
+  s.placeholder="search English, translation or key id";s.style.minWidth="260px";
+  let t=null;
+  // Debounced like the Keys search: each keystroke here is a round trip, not a
+  // local filter.
+  s.oninput=function(){if(t)clearTimeout(t);
+    t=setTimeout(function(){t=null;
+      const v=s.value.trim();
+      // Whitespace-only edits change the raw value but not the term. Refetching
+      // on those would also reset the pager, which is a real cost for no
+      // change in results.
+      if(v===state.q)return;
+      state.q=v;reload();},250);};
+  f.appendChild(s);
+  paintNsIn(f,state.ns);
+}
+// Query-string tail shared by both tabs. "all" is sent as ABSENCE — the server
+// treats a missing param and the literal "all" the same way, but absence is the
+// contract /keys already uses, and SQL NULL is what means unscoped there.
+function filterQuery(state){
+  return (state.ns==="all"?"":"&namespace="+encodeURIComponent(state.ns))+
+         (state.q?"&q="+encodeURIComponent(state.q):"");
+}
+function filterActive(state){return !!(state.q||state.ns!=="all");}
 
 function renderQueue(d){
   const qd=document.getElementById("queue");qd.textContent="";
@@ -13618,8 +14766,16 @@ function renderQueue(d){
   // "N pending" is the SERVER'S COUNT. Printing d.proposals.length is why this
   // read exactly 200 for both languages forever: the query ended in LIMIT 200
   // and 1,234 rows were waiting behind it.
-  qd.appendChild(el("h1",null,"Review queue — "+d.language.toUpperCase()+" ("+total+" pending)"));
-  if(!total){qd.appendChild(el("div","muted","Nothing pending in this language."));return;}
+  qd.appendChild(el("h1",null,"Review queue — "+langLabel(d.language)+" ("+total+" pending)"));
+  if(!total){
+    // Say WHICH zero this is. With a search or a namespace scope active,
+    // "nothing pending in this language" is a different (and wrong) claim —
+    // that is how a filtered-to-empty queue reads as a finished one.
+    qd.appendChild(el("div","muted",filterActive(QFILTER)
+      ? "No pending proposals match this search or namespace. Clear the filter to see the rest."
+      : "Nothing pending in this language."));
+    return;
+  }
   // Approving the last row of the last page leaves the offset past the end.
   // Recompute to the final page; the new offset is strictly smaller, so this
   // cannot loop.
@@ -13652,7 +14808,11 @@ function renderQueue(d){
         // Refresh the Approved list too: an approval leaving the queue with
         // nothing visibly replacing it is exactly the "it disappeared without
         // a trace" report.
-        await loadQueue();await loadApproved();await loadKeys();await loadProgress();}
+        // Contributors too: an approval is exactly what moves a name up this
+        // list, and leaving it stale is the same "nothing visibly changed"
+        // complaint one surface over.
+        await loadQueue();await loadApproved();await loadKeys();
+        await loadProgress();await loadContributors();}
       catch(e){msg.textContent=errText(e)}};
     const ap=el("button",null,"Approve");ap.onclick=act("approve");
     const rj=el("button",null,"Reject");rj.onclick=act("reject");
@@ -13668,9 +14828,11 @@ function renderQueue(d){
 let APPROVED_GEN=0,APPROVED_OFFSET=0;
 const APPROVED_PAGE=25;
 async function loadApproved(){
+  sectionFilterBar("afilter",AFILTER,function(){APPROVED_OFFSET=0;loadApproved();});
   const gen=++APPROVED_GEN,lang=LANG,lgen=LANG_GEN;
   try{
     const d=await api("/approved?lang="+encodeURIComponent(lang)+
+      filterQuery(AFILTER)+
       "&offset="+APPROVED_OFFSET+"&limit="+APPROVED_PAGE);
     // Stale on either axis: a newer approved load, or a newer language (F1).
     if(gen!==APPROVED_GEN||lgen!==LANG_GEN)return;
@@ -13685,11 +14847,17 @@ function renderApproved(d){
   const ad=document.getElementById("approved");ad.textContent="";
   const total=d.total||0;
   setViewCount("approved",total);
-  ad.appendChild(el("h1",null,"Approved translations — "+d.language.toUpperCase()+" ("+total+")"));
-  if(!total){ad.appendChild(el("div","muted",
-    "Nothing approved in this language yet. Approving a proposal in the review "+
-    "queue puts it here - live for every player of that language (base-game "+
-    "entries ship with the next mod release instead)."));return;}
+  ad.appendChild(el("h1",null,"Approved translations — "+langLabel(d.language)+" ("+total+")"));
+  if(!total){
+    // Filtered-to-empty is not the same claim as nothing-approved (see the
+    // queue's twin).
+    ad.appendChild(el("div","muted",filterActive(AFILTER)
+      ? "No approved translations match this search or namespace. Clear the filter to see the rest."
+      : "Nothing approved in this language yet. Approving a proposal in the review "+
+        "queue puts it here - live for every player of that language (base-game "+
+        "entries ship with the next mod release instead)."));
+    return;
+  }
   if(!d.entries.length&&d.offset>0){
     const back=Math.max(0,(Math.ceil(total/d.limit)-1)*d.limit);
     if(back!==d.offset){APPROVED_OFFSET=back;loadApproved();return;}
@@ -14079,6 +15247,38 @@ def _odds_multiplier(bet_on_rating: float, opponent_rating: float,
         cap = 3.0 - 2.0 * (max_rd - 100.0) / 200.0   # linear: 100→3.0, 300→1.0
 
     return max(1.01, min(mult, cap))
+
+
+# ── THE 1v1 betting cutoff, in exactly one place ──────────────────────────
+# Bug 212 lowered the private-room threshold from 3 to 2, but only in two of
+# the THREE places that computed it: /series/active (the listing) and
+# POST /bets (the enforcement). The live-points POST kept answering with the
+# retired `3 if is_private else 2`, so a room-code series at 1-1 was reported
+# bets_locked=false to the reporter's own client while the listing said true
+# and a wager 409'd — the same-predicate rule (#159/#328) broken by a copy
+# nobody remembered. Both surviving copies even carried "both copies must move
+# together" comments, which is the tell that a constant wants to be one
+# expression rather than a convention.
+#
+# WHY 2 AND NOT MORE: the client posts live points only while the current game
+# is 0-0 in ROUNDS, and a ROUNDS round ends at 2 points, so the counters reset
+# before a third point can exist. Measured over all 1451 series ever recorded,
+# MAX(live_p1_points + live_p2_points) = 2. A threshold above 2 is not a wider
+# betting window, it is no lock at all — do not raise this without also
+# changing what the client sends.
+RANKED_BET_POINT_LOCK = 2
+
+
+def _ranked_score_locked(live_p1, live_p2, p1_series_wins, p2_series_wins) -> bool:
+    """Is 1v1 betting closed on match progress alone?
+
+    Progress only — the caller still ORs in its own reasons (dead odds, an
+    inactive series, a participant that cannot report live points). Kept
+    separate so those per-surface rules can differ while the threshold cannot.
+    """
+    return (((live_p1 or 0) + (live_p2 or 0)) >= RANKED_BET_POINT_LOCK
+            or (p1_series_wins or 0) > 0
+            or (p2_series_wins or 0) > 0)
 
 
 async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
@@ -15034,6 +16234,18 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         LIMIT 20
     """))).mappings().all()
 
+    # Bug 212 (Aug 12), second half. One batched capability lookup for the whole
+    # page — never per-row. See the point-threshold note below for the primary
+    # defect; this is the separate fail-closed gate 2v2 and FFA have had since
+    # they got live points and 1v1 never did (learning #331 corollary: when a
+    # rule's enforcement depends on a client capability, gate CLOSED on it).
+    # Without live points the 2-point cutoff can never fire, so the series
+    # would stay bettable until the whole result lands.
+    _pair_ids = []
+    for r in rows:
+        _pair_ids += [r["p1_id"], r["p2_id"]]
+    _lp_capable = await _live_points_capable_bulk(db, _pair_ids)
+
     series = []
     for r in rows:
         # r2 find 7: keep FULL precision for the odds/flags — the POST prices
@@ -15059,15 +16271,52 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         p2_odds_raw = _odds_multiplier(p2_rating, p1_rating, p2_rd, p1_rd)
         no_profit = max(p1_odds_raw, p2_odds_raw) < 1.10
         is_private = bool(r["is_private"])
-        # Private-room series get a 1-point wider betting window. Their ranked_series
-        # row is created LATE (client-side preflight gated on Photon prop replication),
-        # so by the time the series first appears in /series/active, game 1 may already
-        # have 2 points → bets would lock instantly and never open. Locking at sum >= 3
-        # for private rooms gives a usable window to cover the late row creation. Queue
-        # series (row created at ready-up, before the room is even joined) keep the
-        # tighter >= 2 lock since they appear in time.
-        point_lock_threshold = 3 if is_private else 2
-        score_locked = (live_p1 + live_p2) >= point_lock_threshold or r["p1_series_wins"] > 0 or r["p2_series_wins"] > 0
+        # THE bet cutoff (Sid's rule): 2 points scored in game 1, or any game
+        # decided. ONE threshold for both room kinds — see below for why the
+        # private carve-out was removed.
+        #
+        # BUG 212 ROOT CAUSE. This used to read `3 if is_private else 2`, and 3
+        # is OUTSIDE THE METRIC'S RANGE, so the private lock could never fire —
+        # a private series stayed bettable until a whole game was won, which in
+        # a first-to-5 is many minutes of a visibly-decided match. That is the
+        # report ("able to bet after 4+ points scored"): series
+        # 902f5171 was is_private with live points 1-1, both players on 1.38.4.
+        #
+        # WHY 3 IS UNREACHABLE — the client posts live points only while
+        # curP1Rounds == 0 && curP2Rounds == 0 (GameStateWatcher), i.e. during a
+        # game's FIRST ROUND, and a ROUNDS round ends at 2 points, so the round
+        # is over (and the counters reset) before a third point can exist.
+        # Measured over all 1451 series ever recorded: MAX(live_p1_points) = 1,
+        # MAX(live_p2_points) = 1, MAX(sum) = 2. Zero rows have ever reached 3.
+        #
+        # WHY REMOVING THE CARVE-OUT IS SAFE. Its stated justification was that
+        # a private row is created LATE (client preflight) so game 1 might
+        # already be past 2 points before the row exists. Production says the
+        # opposite: over 60 days, private series posted at least one live point
+        # 96.8% of the time (13 of 402 never did) and reached the 2-point
+        # threshold 71.9% of the time, vs 76.7% / 67.0% for queue series. Private
+        # rows see round-1 points MORE reliably than queue rows, not less, so
+        # the wider window was solving a problem that does not occur.
+        #
+        # DO NOT raise this above 2 again without also changing what the client
+        # sends. A threshold the metric cannot reach is not a wider window — it
+        # is no lock at all.
+        #
+        # The threshold and the progress test are now RANKED_BET_POINT_LOCK /
+        # _ranked_score_locked, shared with POST /bets and the live-points POST
+        # response — the third copy had already drifted back to 3 (Codex Aug 12,
+        # server lens).
+        score_locked = _ranked_score_locked(live_p1, live_p2,
+                                            r["p1_series_wins"], r["p2_series_wins"])
+        # Fail-closed on the reporting capability (see the batched lookup above).
+        # Scope, stated honestly: this catches a NULL or below-floor stored
+        # version. It is NOT proof that both clients will report — /series/preflight
+        # stamps BOTH participants' mod_version from the ONE caller's request
+        # header, so a capable caller can stamp an incapable opponent as capable
+        # (the cross-stamp #294 flags as poisonable). It is strictly better than
+        # the nothing that was here, and it matches what 2v2/FFA enforce.
+        if not _lp_capable.get(r["p1_id"], False) or not _lp_capable.get(r["p2_id"], False):
+            score_locked = True
         is_tournament = bool(r["is_tournament"])
         tournament_kind = r["tournament_kind"]   # "sync" | "async" | None
         # Tournament + private series stay bettable on the same terms as
@@ -15581,16 +16830,18 @@ async def update_live_points(
         raise HTTPException(status_code=409, detail="Series is not active")
     await db.commit()
     series.live_p1_points, series.live_p2_points = _pts[0], _pts[1]
-    # Aug 9 bet audit find 7: mirror the POST /bets predicate exactly — the
-    # private-room threshold is 3 and a decided game locks regardless.
-    _lock_pts = 3 if bool(getattr(series, "is_private", False)) else 2
+    # Aug 9 bet audit find 7: mirror the POST /bets predicate exactly. This
+    # copy was the one bug 212 missed — it still computed
+    # `3 if is_private else 2`, an unreachable threshold (see
+    # RANKED_BET_POINT_LOCK), so a room-code series at 1-1 answered
+    # bets_locked=false here while the listing said true and the wager 409'd.
+    # There is no local threshold any more, by design.
     return {
         "status": "ok",
         "live_p1_points": series.live_p1_points,
         "live_p2_points": series.live_p2_points,
-        "bets_locked": ((series.live_p1_points + series.live_p2_points) >= _lock_pts
-                        or (series.p1_series_wins or 0) > 0
-                        or (series.p2_series_wins or 0) > 0),
+        "bets_locked": _ranked_score_locked(series.live_p1_points, series.live_p2_points,
+                                            series.p1_series_wins, series.p2_series_wins),
     }
 
 
@@ -15884,12 +17135,27 @@ async def place_bet(
     # Bet cutoff: once 2 points are scored in game 1, betting locks. Preserves the
     # "is the favorite actually going to win" mystery and prevents free-money bets
     # placed mid-game once an outcome is obvious.
-    # Private-room series get a 1-point wider window (matches /series/active) — their
-    # row is created late so the first 2 points may already be on the board when bets
-    # first become visible. Queue series keep the tighter >= 2 lock.
-    _bet_lock_pts = 3 if bool(getattr(series, "is_private", False)) else 2
-    if (series.live_p1_points or 0) + (series.live_p2_points or 0) >= _bet_lock_pts:
+    #
+    # BUG 212 — MIRRORS /series/active, which carries the full rationale. In
+    # short: this was `3 if is_private else 2`, and the client's live-points
+    # cadence caps the sum at 2, so the private branch could never fire and a
+    # room-code series stayed bettable for the whole match.
+    #
+    # The threshold now lives once, in RANKED_BET_POINT_LOCK. This site tests
+    # the two halves separately (rather than calling _ranked_score_locked) only
+    # so the 409 can say WHICH rule closed betting — the predicate is identical
+    # to the listing's and to the live-points response's by construction, which
+    # is what the same-predicate rule (#159/#328) actually needs.
+    if (series.live_p1_points or 0) + (series.live_p2_points or 0) >= RANKED_BET_POINT_LOCK:
         raise HTTPException(status_code=409, detail="Bets locked — game 1 has progressed too far")
+    # Fail-closed on the reporting capability — the listing's twin. If either
+    # participant cannot report live points the cutoff above can never fire, so
+    # the series must not be bettable at all (learning #331 corollary). 2v2 and
+    # FFA have enforced this since they got live points; 1v1 never did.
+    _lp_ok = await _live_points_capable(db, [series.player1_id, series.player2_id])
+    if not _lp_ok:
+        raise HTTPException(status_code=409,
+                            detail="Bets locked — live scoring unavailable for this match")
 
     # Bettor can't be a participant — obvious integrity issue.
     if bettor.id in (series.player1_id, series.player2_id):
@@ -16500,12 +17766,78 @@ async def artist_set_price(
     return {"status": "ok", "sku": sku, "price": price}
 
 
+# Printable-ASCII allowlist for artist-supplied display text. Deliberately a
+# WHITELIST: every control character, every newline, every non-ASCII lookalike
+# and every markdown/mention metacharacter is absent by construction rather
+# than by a blacklist someone has to keep complete.
+# Excluded on purpose, with reasons:
+#   < >        TMP rich text (mapped to parens below, not dropped, so the text
+#              stays readable) — the shop renders names inside <color> tags
+#   * _ ~ ` |  Discord markdown emphasis / code fences / spoilers
+#   @ #        Discord mention and channel syntax
+#   [ ]        Discord link syntax, and the client's own [title] decoration
+#   { } \ $ ^ =  no legitimate use in a cosmetic name; all are structure
+#              characters in one format or another
+# Non-ASCII is dropped rather than normalised, on purpose: NFKC would FOLD
+# "Ｄｅｌｅｔｅ ａｌｌ" into readable ASCII, which is the wrong direction — dropping
+# leaves nothing to read. It also keeps names inside the glyph set ROUNDS' own
+# font ships (#47).
+# `"` and `'` are KEPT. Both are ordinary English punctuation and an
+# already-shipped artist description uses double quotes ('the "Healing Field"
+# card'); measured against all 215 live shop rows, excluding them would have
+# been the filter's only collateral damage on real data. Nothing downstream
+# depends on their absence — _untrusted fences with << >> and strips the angle
+# brackets from the value, so quotes cannot forge the fence either.
+_ITEM_TEXT_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    " .,!?'\"-:;()&/+%"
+)
+
+
 def _sanitize_item_text(v: str, max_len: int) -> str:
-    """Artist-supplied display text: strip rich-text angle brackets (the shop
-    renders names inside <color> tags — injection would break rows for
-    everyone) and clamp length."""
-    v = (v or "").replace("<", "(").replace(">", ")").strip()
-    return v[:max_len]
+    """Artist-supplied display text, reduced to a safe printable-ASCII subset.
+
+    These strings do not stay inside the shop UI. On approval a submission name
+    becomes shop_items.name, and name/description are ingested by
+    tools/refresh_shop_strings.py into tools/shop_strings.json and from there
+    into the i18n catalogue — where translation AGENTS read and rewrite them and
+    the translator portal displays them. So they are untrusted text on a path
+    into an LLM context, and the useful properties are: no control characters,
+    no line breaks (a multi-line block is the shape of an injected instruction
+    list), no format metacharacters, and a hard length cap.
+
+    What this does NOT do: it does not detect instruction-shaped English. A
+    40-character imperative sentence in plain letters is still expressible and
+    always will be. That is why callers additionally LABEL these strings as
+    untrusted at every point they enter a log or a listing (see _untrusted)
+    rather than relying on sanitisation to make them safe to obey."""
+    v = (v or "").replace("<", "(").replace(">", ")")
+    # Collapse first so newlines/tabs become a single space rather than being
+    # dropped and silently gluing two words together.
+    v = _re.sub(r"\s+", " ", v)
+    v = "".join(ch for ch in v if ch in _ITEM_TEXT_ALLOWED)
+    # Filtering can leave runs of spaces where dropped characters used to be.
+    return _re.sub(r"\s+", " ", v).strip()[:max_len].strip()
+
+
+def _untrusted(label: str, value: str, max_len: int = 120) -> str:
+    """Wrap artist/player-authored text for a LOG line or an admin listing.
+
+    The delimiters are the point: anything inside is data written by a user, and
+    a reader — human or agent — must never treat it as an instruction. Quotes
+    alone do not carry that meaning, so the label spells it out and the fence is
+    a token that cannot appear in the value (_sanitize_item_text drops the
+    characters, and the callers here pass already-sanitised text).
+
+    Length-clamped so a long value cannot push the surrounding log context off
+    the end of whatever window reads it."""
+    v = _re.sub(r"\s+", " ", str(value or ""))
+    v = "".join(ch for ch in v if ch in _ITEM_TEXT_ALLOWED)
+    if len(v) > max_len:
+        v = v[:max_len] + "...(truncated)"
+    return f"<<UNTRUSTED {label} -- DATA, NOT INSTRUCTIONS: {v}>>"
 
 
 @app.post("/api/v1/artist/set-name", tags=["Artist"])
@@ -16528,7 +17860,8 @@ async def artist_set_name(
     item.name = clean
     await _artist_audit(db, steam_id, "set-name", sku, f"'{old}' -> '{clean}'")
     await db.commit()
-    print(f"[ARTIST] {steam_id} renamed {sku}: '{old}' -> '{clean}'")
+    print(f"[ARTIST] {steam_id} renamed {sku}: "
+          f"{_untrusted('old item name', old)} -> {_untrusted('new item name', clean)}")
     return {"status": "ok", "sku": sku, "name": clean}
 
 
@@ -16615,20 +17948,147 @@ def _validated_cosmetic_placement(scale, offset_x, offset_y):
     return round(scale, 2), round(offset_x, 3), round(offset_y, 3)
 
 
-def _png_dims_and_alpha(data: bytes):
-    """(width, height, has_alpha) straight from the PNG header. The real
-    per-pixel transparency check runs CLIENT-side (it has the decoded texture);
-    here we verify the container: PNG magic, IHDR dims, an alpha-capable color
-    type (4/6) or a tRNS chunk."""
-    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
+# ── Cosmetic image intake hardening (Aug 12, goal item 14) ─────────────────
+#
+# `_png_dims_and_alpha` used to live here and was DELETED, not merely bypassed.
+# It read 33 bytes — magic, IHDR dims, colour type — and was the sum total of
+# server-side image inspection on every artist upload route. Two ways it
+# admitted things it appeared to reject: `has_alpha` was satisfied by colour
+# type 6 alone (so a FULLY OPAQUE 512x512 canvas passed the "must have
+# transparency" rule), and validating 33 bytes says nothing about the other
+# ~1.2 MB, so a valid PNG prologue followed by arbitrary payload was accepted,
+# stored verbatim in cosmetic_submissions.png_data and shipped verbatim to
+# every player in cosmetics.zip. It is deleted rather than kept-but-unused so
+# that a future caller cannot mistake it for a validator.
+# Artist uploads are stored in cosmetic_submissions.png_data and, once
+# approved and bundled, shipped to every player in cosmetics.zip. Until now the
+# only inspection was the 33-byte header peek above, so an upload could carry
+# arbitrary tEXt/zTXt/iTXt/eXIf chunks and arbitrary bytes after IEND, all
+# stored and distributed verbatim.
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+# Chunk types that carry free text or EXIF. Not rejected — re-encoding removes
+# them — but counted and logged so a deliberate payload is VISIBLE rather than
+# silently discarded. (Rejecting would also bounce ordinary exports: GIMP writes
+# a tEXt "Created with GIMP", and one already-shipped community cosmetic has it.)
+_PNG_METADATA_CHUNKS = frozenset({b"tEXt", b"zTXt", b"iTXt", b"eXIf"})
+_PNG_MAX_CHUNKS = 4096
+# Mirrors the client's rule exactly (NativeUI.ValidateCosmeticPngBytes rejects
+# when `transparent < total / 50`), i.e. at least 2% of pixels below alpha 250.
+COSMETIC_MIN_TRANSPARENT_RATIO = 50
+
+
+def _png_walk_chunks(data: bytes):
+    """Strict structural walk. Returns [(chunk_type, payload_len), ...].
+
+    Raises ValueError on anything a real PNG encoder never emits: bad magic,
+    IHDR not first, a declared length running past the buffer, a chunk type
+    that is not four ASCII letters, a bad CRC, a missing IEND, or ANY byte
+    after IEND. The last two matter most — a valid PNG prologue followed by a
+    megabyte of arbitrary payload satisfied the old header peek completely."""
+    if len(data) < len(_PNG_MAGIC) + 12 or data[:8] != _PNG_MAGIC:
         raise ValueError("not a PNG file")
-    if data[12:16] != b"IHDR":
-        raise ValueError("malformed PNG (IHDR missing)")
-    w = int.from_bytes(data[16:20], "big")
-    h = int.from_bytes(data[20:24], "big")
-    color_type = data[25]
-    has_alpha = color_type in (4, 6) or (b"tRNS" in data[:8192])
-    return w, h, has_alpha
+    out = []
+    off = 8
+    n = len(data)
+    saw_iend = False
+    while off < n:
+        if len(out) >= _PNG_MAX_CHUNKS:
+            raise ValueError("PNG has an implausible number of chunks")
+        if off + 8 > n:
+            raise ValueError("truncated PNG (chunk header runs past end of file)")
+        length = int.from_bytes(data[off:off + 4], "big")
+        ctype = data[off + 4:off + 8]
+        if not (len(ctype) == 4 and all(65 <= c <= 90 or 97 <= c <= 122 for c in ctype)):
+            raise ValueError("malformed PNG (invalid chunk type)")
+        end = off + 8 + length + 4          # payload + CRC
+        if length < 0 or end > n:
+            raise ValueError("malformed PNG (chunk length runs past end of file)")
+        if not out and ctype != b"IHDR":
+            raise ValueError("malformed PNG (IHDR is not the first chunk)")
+        payload = data[off + 8:off + 8 + length]
+        want = int.from_bytes(data[off + 8 + length:end], "big")
+        if zlib.crc32(ctype + payload) & 0xFFFFFFFF != want:
+            raise ValueError(f"malformed PNG (bad CRC on {ctype.decode('ascii')} chunk)")
+        out.append((ctype, length))
+        off = end
+        if ctype == b"IEND":
+            saw_iend = True
+            break
+    if not saw_iend:
+        raise ValueError("malformed PNG (no IEND chunk)")
+    if off != n:
+        # No legitimate encoder appends anything here.
+        raise ValueError(f"PNG has {n - off} stray byte(s) after IEND")
+    return out
+
+
+def _sanitize_cosmetic_png(data: bytes, *, require_transparency: bool = True,
+                           context: str = "cosmetic") -> bytes:
+    """Validate a 512x512 cosmetic PNG and return SAFE, RE-ENCODED bytes.
+
+    WHAT THIS GUARANTEES
+      * The returned bytes are rebuilt by Pillow from the decoded pixel buffer
+        alone, so no metadata chunk, no unknown ancillary chunk and no trailing
+        payload from the upload can survive into cosmetic_submissions.png_data
+        or into the cosmetics.zip every player downloads.
+      * The container is structurally sound (see _png_walk_chunks) and the
+        image really decodes at exactly 512x512.
+      * With require_transparency, at least 2% of pixels are below alpha 250 —
+        the client's own rule, enforced server-side for the first time. The old
+        header check passed any color_type 6 image, so a FULLY OPAQUE 512x512
+        canvas satisfied the "must have transparency" rule.
+
+    WHAT THIS DOES NOT GUARANTEE — do not read more into it than this:
+      * Nothing whatsoever about the PIXELS. Art that renders a page of text is
+        a perfectly valid image and still reaches the reviewing admin, and once
+        approved and bundled, every player. Admin review is the control for
+        image CONTENT; this function controls the CONTAINER only.
+      * It does not sandbox Pillow's decoders. MAX_IMAGE_PIXELS bounds the
+        decompression bomb; the 512x512 requirement bounds it further.
+    """
+    if not _PIL_AVAILABLE:
+        # Deliberately fail closed. The owner asked for metadata stripping, so
+        # storing unsanitised bytes when the sanitiser is missing would defeat
+        # the point — and a 503 is loud, whereas a silent fallback is not.
+        # Pillow is pinned in backend/api/requirements.txt; if this fires, the
+        # API image was rebuilt without it (#131/#192 — requirements.txt has to
+        # be copied up, not just the .py files).
+        raise HTTPException(status_code=503, detail="image_processing_unavailable")
+    chunks = _png_walk_chunks(data)          # raises ValueError
+    meta = [(t.decode("ascii"), ln) for t, ln in chunks if t in _PNG_METADATA_CHUNKS]
+    import io as _io
+    try:
+        im = _PILImage.open(_io.BytesIO(data))
+        if (im.format or "").upper() != "PNG":
+            raise ValueError("not a PNG file")
+        w, h = im.width, im.height
+        if (w, h) != (512, 512):
+            raise ValueError(f"must be exactly 512x512 (got {w}x{h})")
+        rgba = im.convert("RGBA")
+    except ValueError:
+        raise
+    except Exception as ex:
+        raise ValueError(f"unreadable PNG: {ex}")
+    if require_transparency:
+        # histogram() is a C loop over the alpha channel — cheap at 512x512.
+        transparent = sum(rgba.getchannel("A").histogram()[:250])
+        total = rgba.width * rgba.height
+        if transparent * COSMETIC_MIN_TRANSPARENT_RATIO < total:
+            raise ValueError("PNG has no transparent background — export with an alpha layer")
+    buf = _io.BytesIO()
+    rgba.save(buf, format="PNG", optimize=True)
+    out = buf.getvalue()
+    # Re-encoding can grow a file that was compressed harder than Pillow does.
+    # Bound the stored size against the same budget the upload was capped at.
+    if len(out) > (COSMETIC_MAX_B64 * 3) // 4:
+        raise ValueError("PNG is too large once re-encoded — reduce its complexity")
+    if meta:
+        # Types and byte counts only. Chunk types come from a fixed 4-letter
+        # alphabet and lengths are integers, so this line cannot itself carry
+        # attacker text into a log an agent later reads.
+        print(f"[COSMETIC] {context}: discarded {len(meta)} metadata chunk(s) "
+              f"on re-encode: {', '.join(f'{t}({ln}B)' for t, ln in meta)}")
+    return out
 
 
 @app.post("/api/v1/artist/submit-cosmetic", tags=["Artist"])
@@ -16728,14 +18188,15 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
         data = base64.b64decode(b64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="png_base64 is not valid base64")
+    # Goal item 14: validate the container and store ONLY re-encoded pixels.
+    # `data` (the artist's literal upload) is deliberately never persisted past
+    # this line — `clean_png` is what goes to the DB and later to cosmetics.zip.
+    # A 503 from a missing Pillow propagates as-is; ValueError is the
+    # artist-facing 400.
     try:
-        w, h, has_alpha = _png_dims_and_alpha(data)
+        clean_png = _sanitize_cosmetic_png(data, context=f"submit {slot} by {steam_id}")
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
-    if (w, h) != (512, 512):
-        raise HTTPException(status_code=400, detail=f"must be exactly 512x512 (got {w}x{h})")
-    if not has_alpha:
-        raise HTTPException(status_code=400, detail="PNG has no transparency layer — export with alpha")
     # Aug 7 item 8: half-uploaded animations ('uploading') hold a cap slot too
     # — otherwise 20 abandoned starts could queue unbounded frame storage.
     # Codex r1 f10: the stale-upload cleanup must run BEFORE the count — at
@@ -16757,7 +18218,7 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
         " render_offset_x, render_offset_y, submission_fingerprint, status, frame_count, anim_fps) "
         "VALUES (:s, :n, :sl, :png, :b, :sc, :ox, :oy, :f, :st, :fc, :fps) "
         "ON CONFLICT (submission_fingerprint) DO NOTHING RETURNING id"
-    ), {"s": steam_id, "n": name, "sl": slot, "png": data, "b": len(data),
+    ), {"s": steam_id, "n": name, "sl": slot, "png": clean_png, "b": len(clean_png),
         "sc": render_scale, "ox": render_offset_x, "oy": render_offset_y,
         "f": submission_fingerprint,
         "st": "uploading" if frame_count > 1 else "pending",
@@ -16772,12 +18233,13 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
         return {"status": "already_submitted", "id": new_id}
     await _artist_audit(
         db, steam_id, "submit-cosmetic", f"sub#{new_id}",
-        f"{name} ({slot}, {len(data)}b, scale={render_scale:.2f}, "
+        f"{name} ({slot}, {len(clean_png)}b, scale={render_scale:.2f}, "
         f"offset={render_offset_x:.3f}:{render_offset_y:.3f}"
         + (f", {frame_count} frames @ {anim_fps:.2f}fps" if frame_count > 1 else "") + ")")
     await db.commit()
-    print(f"[COSMETIC] submission #{new_id} '{name}' ({slot}) from {steam_id}"
-          + (f" [animated start: {frame_count} frames]" if frame_count > 1 else ""))
+    print(f"[COSMETIC] submission #{new_id} ({slot}) from {steam_id}"
+          + (f" [animated start: {frame_count} frames]" if frame_count > 1 else "")
+          + f" {_untrusted('artist-supplied name', name)}")
     return {"status": "uploading" if frame_count > 1 else "submitted", "id": new_id}
 
 
@@ -16816,17 +18278,23 @@ async def artist_submit_cosmetic_frame(payload: dict = Body(...), db: AsyncSessi
         raise HTTPException(status_code=400, detail=f"frame_no must be 2-{sub['frame_count']}")
     try:
         data = base64.b64decode(b64, validate=True)
-        w, h, has_alpha = _png_dims_and_alpha(data)
-    except Exception as ve:
+    except Exception:
+        raise HTTPException(status_code=400, detail="frame png_base64 is not valid base64")
+    # Goal item 14: same container validation + re-encode as the base image.
+    # The client validates every __fN sibling with the identical 2%-alpha rule
+    # (NativeUI.ValidateAndNameCosmetic), so requiring it here rejects nothing
+    # an honest client would send. Note `except ValueError` and NOT
+    # `except Exception` — the old broad catch here would have turned a 503
+    # (Pillow missing) into a misleading 400 about the artist's file.
+    try:
+        clean_png = _sanitize_cosmetic_png(
+            data, context=f"frame {frame_no} of sub#{submission_id}")
+    except ValueError as ve:
         raise HTTPException(status_code=400, detail=f"bad frame PNG: {ve}")
-    if (w, h) != (512, 512):
-        raise HTTPException(status_code=400, detail=f"frames must be exactly 512x512 (got {w}x{h})")
-    if not has_alpha:
-        raise HTTPException(status_code=400, detail="frame has no transparency layer")
     await db.execute(text(
         "INSERT INTO cosmetic_submission_frames (submission_id, frame_no, png_data, png_bytes) "
         "VALUES (:i, :n, :png, :b) ON CONFLICT (submission_id, frame_no) DO NOTHING"
-    ), {"i": submission_id, "n": frame_no, "png": data, "b": len(data)})
+    ), {"i": submission_id, "n": frame_no, "png": clean_png, "b": len(clean_png)})
     await db.commit()
     return {"status": "ok", "frame_no": frame_no}
 
@@ -16915,8 +18383,16 @@ async def artist_submit_cosmetic_gif(payload: dict = Body(...), db: AsyncSession
         raise HTTPException(status_code=400, detail="slot must be eyes, mouth or detail")
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="name too short (letters/numbers/spaces only)")
-    if not b64 or len(b64) > COSMETIC_GIF_MAX_B64:
-        raise HTTPException(status_code=400, detail="GIF missing or too large (~2 MB max)")
+    if not b64:
+        raise HTTPException(status_code=400, detail="GIF is missing")
+    if len(b64) > COSMETIC_GIF_MAX_B64:
+        # Name the limit AND the value received — the artist only ever saw this
+        # as a bare 400 after the whole upload had already gone up the wire.
+        raise HTTPException(
+            status_code=400,
+            detail=f"GIF is {len(b64) * 3 // 4 // 1024} KB — the limit is "
+                   f"{COSMETIC_GIF_MAX_B64 * 3 // 4 // 1024} KB. Reduce the frame "
+                   f"size or the number of colours and re-export.")
     submission_fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     existing_id = (await db.execute(text(
         "SELECT id FROM cosmetic_submissions "
@@ -16935,19 +18411,64 @@ async def artist_submit_cosmetic_gif(payload: dict = Body(...), db: AsyncSession
         if (im.format or "").upper() != "GIF":
             raise HTTPException(status_code=400, detail="not a GIF file")
         if im.width > 2048 or im.height > 2048:
-            raise HTTPException(status_code=400, detail="GIF frame size over 2048px")
-        frames_rgba = []
+            raise HTTPException(
+                status_code=400,
+                detail=f"GIF frames are {im.width}x{im.height} — the limit is 2048x2048")
+        # ── Bound the work BEFORE decoding anything (Codex Aug 12, server
+        # lens, HIGH) ──────────────────────────────────────────────────────
+        # This loop used to append fr.convert("RGBA") to a list and only THEN
+        # compare the list length to the cap, so a 17-frame 2048x2048 GIF —
+        # easily inside COSMETIC_GIF_MAX_B64 once compressed — retained ~272
+        # MiB of RGBA before being rejected. The API runs exactly ONE uvicorn
+        # worker by hard requirement (#125), so every concurrent upload shares
+        # that one process's memory and a handful of them exhaust it.
+        #
+        # Both cheap bounds are header reads that never touch pixel data:
+        # im.width/height above (the GIF logical screen size, known at open)
+        # and n_frames here (a seek walk over an already byte-capped file).
+        # Nothing below retains more than ONE decoded frame at a time.
+        #
+        # Total decoded pixels: Image.MAX_IMAGE_PIXELS (20M, set at import)
+        # bounds any SINGLE frame but says nothing about a sequence — the two
+        # checks here are what bound the sequence (<= COSMETIC_MAX_FRAMES
+        # frames of <= 2048x2048), and since only one frame is resident the
+        # peak is one 2048x2048 RGBA (~16 MiB) plus the encoded PNGs, each
+        # already capped at COSMETIC_MAX_B64.
+        try:
+            _declared = int(getattr(im, "n_frames", 0) or 0)
+        except Exception:
+            _declared = 0          # unavailable — the pass-1 guard below caps it
+        if _declared > COSMETIC_MAX_FRAMES:
+            # Name the REAL count: the artist needs to know how much to cut.
+            raise HTTPException(
+                status_code=400,
+                detail=f"GIF has {_declared} frames — the limit is {COSMETIC_MAX_FRAMES}. "
+                       f"Reduce the frame count in your editor; the server will "
+                       f"not resample it for you (that would change the timing).")
+        # ── Pass 1: durations only. Seeks the sequence WITHOUT converting or
+        # retaining a single frame, so the frame budget and the frame rate are
+        # both proven before the first RGBA buffer exists.
         total_ms = 0
+        n_frames = 0
         for fr in _PILImageSequence.Iterator(im):
+            n_frames += 1
+            if n_frames > COSMETIC_MAX_FRAMES:
+                # Only reachable when n_frames was unavailable above, so this
+                # message can only state the bound it actually knows.
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"GIF has more than {COSMETIC_MAX_FRAMES} frames — the limit "
+                           f"is {COSMETIC_MAX_FRAMES}. Reduce the frame count in your "
+                           f"editor; the server will not resample it for you (that "
+                           f"would change the timing).")
             total_ms += int(fr.info.get("duration", 100) or 100)
-            frames_rgba.append(fr.convert("RGBA"))
-            if len(frames_rgba) > COSMETIC_MAX_FRAMES:
-                raise HTTPException(status_code=400,
-                                    detail=f"GIF has more than {COSMETIC_MAX_FRAMES} frames — reduce it, don't resample")
-        if len(frames_rgba) < 2:
-            raise HTTPException(status_code=400, detail="GIF has fewer than 2 frames — upload a PNG instead")
+        if n_frames < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"GIF has {n_frames} frame(s) — an animation needs at "
+                       f"least 2. Upload a PNG instead for static art.")
         # #317: the SOURCE RATE, from real durations (100ms fallback per frame).
-        anim_fps = round(len(frames_rgba) / max(0.1, total_ms / 1000.0), 2)
+        anim_fps = round(n_frames / max(0.1, total_ms / 1000.0), 2)
         # Codex r1 f12: REJECT out-of-band rates, never clamp — a 50fps GIF
         # silently stored at 15fps plays 3.3x too slowly and the artist has no
         # idea why (#317's exact "flashing by" complaint, inverted). The error
@@ -16955,26 +18476,73 @@ async def artist_submit_cosmetic_gif(payload: dict = Body(...), db: AsyncSession
         _fps_lo = COSMETIC_FPS_CENTI_MIN / 100.0
         _fps_hi = COSMETIC_FPS_CENTI_MAX / 100.0
         if not (_fps_lo <= anim_fps <= _fps_hi):
+            _per_frame_ms = int(round(total_ms / max(1, n_frames)))
+            _want_ms = int(round(1000.0 / _fps_hi)) if anim_fps > _fps_hi else int(round(1000.0 / _fps_lo))
             raise HTTPException(
                 status_code=400,
-                detail=f"GIF frame rate is {anim_fps:.2f} fps — supported range is "
-                       f"{_fps_lo:.1f}-{_fps_hi:.0f} fps; retime the GIF instead of "
-                       f"letting the server change its speed")
-        # One SHARED transform: fit the source rect into 512, centered.
-        sw, sh = frames_rgba[0].width, frames_rgba[0].height
-        ratio = min(512.0 / sw, 512.0 / sh)
-        nw, nh = max(1, int(sw * ratio)), max(1, int(sh * ratio))
-        ox, oy = (512 - nw) // 2, (512 - nh) // 2
+                detail=f"GIF frame rate is {anim_fps:.2f} fps ({n_frames} frames, "
+                       f"~{_per_frame_ms} ms each) — supported range is "
+                       f"{_fps_lo:.1f}-{_fps_hi:.0f} fps. Set the frame delay to "
+                       f"{'at least' if anim_fps > _fps_hi else 'at most'} {_want_ms} ms "
+                       f"and re-export; the server will not change the speed for you.")
+        # ── Pass 2: convert and encode ONE frame at a time. `rgba` and
+        # `canvas` are rebound every iteration, so at most one decoded frame is
+        # live; only the encoded PNGs accumulate, and each already has to pass
+        # the COSMETIC_MAX_B64 check below.
+        #
+        # The shared 512 transform is derived from frame 1 (as before) — every
+        # frame is fitted with the SAME rect, so no frame is re-framed relative
+        # to the placement the artist previewed (#317).
+        nw = nh = ox = oy = 0
         frame_pngs = []
-        for fr in frames_rgba:
+        for _i, fr in enumerate(_PILImageSequence.Iterator(im)):
+            if _i >= n_frames:
+                break               # pass 1 is authoritative about the count
+            rgba = fr.convert("RGBA")
+            if _i == 0:
+                sw, sh = rgba.width, rgba.height
+                ratio = min(512.0 / sw, 512.0 / sh)
+                nw, nh = max(1, int(sw * ratio)), max(1, int(sh * ratio))
+                ox, oy = (512 - nw) // 2, (512 - nh) // 2
             canvas = _PILImage.new("RGBA", (512, 512), (0, 0, 0, 0))
-            canvas.paste(fr.resize((nw, nh), _PILImage.LANCZOS), (ox, oy))
+            canvas.paste(rgba.resize((nw, nh), _PILImage.LANCZOS), (ox, oy))
+            if _i == 0:
+                # Goal item 14: transparency parity with the PNG routes. Frame 1
+                # is what lands in png_data and drives the placement preview and
+                # the shop thumbnail, so it gets the same 2% rule the static
+                # path enforces — which is also what stops a fully opaque
+                # 512x512 page of rendered text entering through this door.
+                # SCOPE, deliberately frame 1 only: all frames share ONE
+                # transform, so for any non-square source every frame carries
+                # identical transparent letterboxing and the check is
+                # equivalent; for a square source, checking every frame would
+                # reject a legitimate animation over a single full-canvas
+                # flash frame. Frames 2..N are re-encoded like everything else.
+                _t = sum(canvas.getchannel("A").histogram()[:250])
+                if _t * COSMETIC_MIN_TRANSPARENT_RATIO < 512 * 512:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="GIF has no transparent background — export it with "
+                               "transparency, or the cosmetic renders as a solid square.")
             buf = _io.BytesIO()
             canvas.save(buf, format="PNG", optimize=True)
             png = buf.getvalue()
             if len(png) * 4 // 3 > COSMETIC_MAX_B64:
-                raise HTTPException(status_code=400, detail="a converted frame exceeds the per-image size cap")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"converted frame {_i + 1} is {len(png) // 1024} KB — the "
+                           f"per-image limit is {COSMETIC_MAX_B64 * 3 // 4 // 1024} KB. "
+                           f"Simplify the art or reduce its colour count.")
             frame_pngs.append(png)
+        if len(frame_pngs) != n_frames:
+            # anim_fps was measured over n_frames in pass 1 while frame_count
+            # is stored as len(frame_pngs); if the two passes ever disagree the
+            # row would claim a rate its own frames cannot produce. Refuse
+            # rather than persist metadata that contradicts the art (#257).
+            raise HTTPException(
+                status_code=400,
+                detail=f"GIF decoded inconsistently ({len(frame_pngs)} of {n_frames} "
+                       f"frames) — re-export it and try again.")
     except HTTPException:
         raise
     except Exception as ex:
@@ -17016,8 +18584,9 @@ async def artist_submit_cosmetic_gif(payload: dict = Body(...), db: AsyncSession
         f"{name} ({slot}, GIF -> {len(frame_pngs)} frames @ {anim_fps:.2f}fps, "
         f"scale={render_scale:.2f})")
     await db.commit()
-    print(f"[COSMETIC] submission #{new_id} '{name}' ({slot}) GIF split: "
-          f"{len(frame_pngs)} frames @ {anim_fps:.2f}fps from {steam_id}")
+    print(f"[COSMETIC] submission #{new_id} ({slot}) GIF split: "
+          f"{len(frame_pngs)} frames @ {anim_fps:.2f}fps from {steam_id} "
+          f"{_untrusted('artist-supplied name', name)}")
     return {"status": "submitted", "id": new_id, "frame_count": len(frame_pngs),
             "anim_fps": anim_fps}
 
@@ -17266,14 +18835,22 @@ async def artist_catalog_cosmetic_placement(
         proposed_offset_y_milli / 1000.0,
     )
     try:
-        png_data = base64.b64decode(b64, validate=True)
-        width, height, has_alpha = _png_dims_and_alpha(png_data)
+        raw_png = base64.b64decode(b64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid PNG data")
-    if width != 512 or height != 512 or not has_alpha:
+    # Goal item 14: this bridge accepts a PNG straight off the CLIENT's disk
+    # (#184 — the art already compiled into the shipped catalog), so it is an
+    # ingest path for arbitrary bytes exactly like the submit routes and gets
+    # the same treatment. Re-encoding rebuilds the container from the decoded
+    # pixels: the PIXELS are unchanged, so "published revision 1 is what
+    # shipped" still holds for everything that renders, and the signature is
+    # unaffected (it covers the b64 the client sent, which is checked above).
+    try:
+        png_data = _sanitize_cosmetic_png(raw_png, context=f"catalog bridge {sku}")
+    except ValueError as ve:
         raise HTTPException(
             status_code=400,
-            detail="Published cosmetic source must be a transparent 512x512 PNG",
+            detail=f"Published cosmetic source must be a transparent 512x512 PNG ({ve})",
         )
 
     # The shop-row lock serializes lost-response retries and simultaneous clicks
@@ -19252,14 +20829,15 @@ async def get_achievement_earners(key: str, db: AsyncSession = Depends(get_db)):
       ORDER BY pa.unlocked_at ASC NULLS LAST
          LIMIT 500"""), {"key": key})).mappings().all()
     _colors = await _rank_colors(db)
-    _pmap = await _podium_map(db) if any(
-        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     earners = []
     for r in rows:
         _title, _title_color = _display_title_sync(
             _colors, r["title_sku"], r["title"], r["title_color"],
             float(r["rating"]) if r["rating"] is not None else None,
-            podium_pos=_pmap.get(r["player_id"]))
+            podium_pos=_pmap.get(r["player_id"]),
+            podium_pos_2v2=_pmap2.get(r["player_id"]),
+            podium_pos_ffa=_pmapf.get(r["player_id"]))
         earners.append({
             "display_name": r["display_name"],
             "steam_id": r["steam_id"],
@@ -24354,11 +25932,19 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                 photon_room_id, game_version, region, hmac_signature, reported_by,
                 is_ranked, started_at, ended_at,
                 solo_rating_at, duo_a_rating_at, duo_b_rating_at,
-                solo_damage_timeline, duo_a_damage_timeline, duo_b_damage_timeline)
+                solo_damage_timeline, duo_a_damage_timeline, duo_b_damage_timeline,
+                solo_end_stats, duo_a_end_stats, duo_b_end_stats)
             VALUES (:id, :sid, :solo, :da, :db, :sr, :dr, :sp, :dp, :ws,
                     :sf, :daf, :dbf, :dur, :room, :gv, :reg, :hmac, :rep, false, :started, NOW(),
-                    :sra, :dar, :dbr, :sdt, :dadt, :dbdt)
+                    :sra, :dar, :dbr, :sdt, :dadt, :dbdt, :ses, :daes, :dbes)
         """), {"id": match_id, "sid": series_uuid, "solo": solo_id, "da": duo_a_id, "db": duo_b_id,
+               # Aug 12 item 1 (migration 216) — per-seat end-of-game build,
+               # read off each seat's PlayerMatchData so no seat mapping is
+               # needed. Validated + NULLed on mismatch; ADVISORY, outside the
+               # frozen 10-field HMAC canonical (hard rule #5).
+               "ses": _clean_end_stats(report.solo.end_stats),
+               "daes": _clean_end_stats(report.duo_a.end_stats),
+               "dbes": _clean_end_stats(report.duo_b.end_stats),
                # Aug-7b item 3 (migration 201): per-seat cumulative damage-dealt
                # CSVs. 1v2 has no telemetry table, so these hang off the match
                # row beside the fps averages. 1v2 stores only an fps AVERAGE,
@@ -24655,8 +26241,7 @@ async def ovt_leaderboard(
     """), {"lim": max(1, min(limit, 500)), "role": role})).mappings().all()
 
     _colors = await _rank_colors(db)
-    _pmap = await _podium_map(db) if any(
-        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     entries = []
     for i, r in enumerate(rows):
         games = int(r["scoped_games"] or 0)
@@ -24669,7 +26254,9 @@ async def ovt_leaderboard(
         duo_w = int(r["duo_wins"] or 0)
         t_name, t_color = _display_title_sync(
             _colors, r["title_sku"], r["title_name"], r["title_color"],
-            r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])))
+            r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])),
+            podium_pos_2v2=_pmap2.get(str(r["player_id"])),
+            podium_pos_ffa=_pmapf.get(str(r["player_id"])))
         entries.append(Ovt1v2LeaderboardEntry(
             rank=i + 1, steam_id=r["steam_id"], display_name=r["display_name"] or "Player",
             games_played=games, wins=wins, losses=losses,
@@ -24754,6 +26341,8 @@ async def ovt_recent(
                    m.solo_fps_avg, m.duo_a_fps_avg, m.duo_b_fps_avg,
                    m.solo_damage_timeline, m.duo_a_damage_timeline,
                    m.duo_b_damage_timeline,
+                   -- Aug 12 item 1 (migration 216) — per-seat end-of-game build.
+                   m.solo_end_stats, m.duo_a_end_stats, m.duo_b_end_stats,
                    solo.steam_id AS solo_sid,
                    duo_a.steam_id AS duo_a_sid,
                    duo_b.steam_id AS duo_b_sid
@@ -24786,15 +26375,19 @@ async def ovt_recent(
             # timeline is OMITTED rather than mapped to "" so the client can
             # tell "not recorded" from a recorded empty series (#257).
             damage_timeline_by_steam = {}
-            for sid_key, fps_key, dmg_key in (
-                ("solo_sid", "solo_fps_avg", "solo_damage_timeline"),
-                ("duo_a_sid", "duo_a_fps_avg", "duo_a_damage_timeline"),
-                ("duo_b_sid", "duo_b_fps_avg", "duo_b_damage_timeline"),
+            # Aug 12 item 1 — end-of-game builds, same omit-when-absent rule.
+            end_stats_by_steam = {}
+            for sid_key, fps_key, dmg_key, es_key in (
+                ("solo_sid", "solo_fps_avg", "solo_damage_timeline", "solo_end_stats"),
+                ("duo_a_sid", "duo_a_fps_avg", "duo_a_damage_timeline", "duo_a_end_stats"),
+                ("duo_b_sid", "duo_b_fps_avg", "duo_b_damage_timeline", "duo_b_end_stats"),
             ):
                 if m[fps_key]:
                     fps_by_steam[m[sid_key]] = int(m[fps_key])
                 if m[dmg_key]:
                     damage_timeline_by_steam[m[sid_key]] = m[dmg_key]
+                if m[es_key]:
+                    end_stats_by_steam[m[sid_key]] = m[es_key]
             matches_by_series.setdefault(str(m["series_id"]), []).append({
                 "match_id": str(m["match_id"]),
                 "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
@@ -24806,6 +26399,7 @@ async def ovt_recent(
                 "duration_seconds": int(m["duration_seconds"] or 0),
                 "fps_by_steam": fps_by_steam,
                 "damage_timeline_by_steam": damage_timeline_by_steam,
+                "end_stats_by_steam": end_stats_by_steam,
                 "cards_by_steam": cards_by_match.get(str(m["match_id"]), {}),
             })
 
@@ -26210,11 +27804,13 @@ async def _lobby_browser_titles(db: AsyncSession, steam_ids) -> dict:
          WHERE p.steam_id = ANY(:sids)
     """), {"sids": sids})).mappings().all()
     _colors = await _rank_colors(db)
-    _pmap = await _podium_map(db)
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     out = {}
     for r in rows:
         t, tc = _display_title_sync(_colors, r["title_sku"], r["title"], r["title_color"],
-                                    float(r["rating_1v1"]), podium_pos=_pmap.get(r["player_id"]))
+                                    float(r["rating_1v1"]), podium_pos=_pmap.get(r["player_id"]),
+                                    podium_pos_2v2=_pmap2.get(r["player_id"]),
+                                    podium_pos_ffa=_pmapf.get(r["player_id"]))
         out[r["steam_id"]] = (t or "", tc or "")
     return out
 
@@ -29053,12 +30649,16 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 xp_gained, gold_gained, fps_avg, ping_avg, bullets_fired, bullets_hit,
                 blocks_activated, blocks_successful, keys_pressed, active_seconds,
                 fps_timeline, ping_timeline, hit_timeline, block_timeline,
-                damage_dealt, damage_dealt_timeline, kill_timeline, absent)
+                damage_dealt, damage_dealt_timeline, kill_timeline, absent, end_stats)
             VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
                     :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,
-                    :dmg, :dmgtl, :killtl, :absent)
+                    :dmg, :dmgtl, :killtl, :absent, :estats)
         """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
                "k": int(getattr(p, "kills", 0) or 0),
+               # Aug 12 item 1 (migration 216) — this player's end-of-game
+               # build. Validated + NULLed on mismatch; ADVISORY, outside the
+               # frozen "ffa:"-tagged HMAC canonical (#213).
+               "estats": _clean_end_stats(getattr(p, "end_stats", None)),
                # Bugs #127/#130. Pass None straight through — do NOT collapse it
                # with `or None`, which would turn a genuine 0 (this player dealt
                # no damage) into "not reported" and quietly drop real zeros out of
@@ -29330,7 +30930,8 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
     rows = (await db.execute(text(f"""
         SELECT p.id AS player_id, p.steam_id, p.display_name, p.total_xp, p.hide_gold,
                p.ffa_gold_earned, p.ffa_xp_earned,
-               g.rating, g.rating_deviation, g.games_played, g.wins, g.top3, g.placement_sum,
+               g.rating, g.rating_deviation, g.peak_rating,
+               g.games_played, g.wins, g.top3, g.placement_sum,
                si.name AS title_name, si.preview_color AS title_color, si.sku AS title_sku,
                gr.rating AS rating_1v1
           FROM glicko_ratings_ffa g
@@ -29342,8 +30943,11 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
          LIMIT :lim
     """), {"ming": max(1, min_games), "lim": max(1, min(limit, 500))})).mappings().all()
     _colors = await _rank_colors(db)
-    _pmap = await _podium_map(db) if any(
-        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    # Unconditional: this is where the FFA podium title gets granted at all.
+    # See bootstrap_mode_podium_titles — the render-time guard below cannot
+    # grant, because it only fires for a sku somebody already wears.
+    await bootstrap_mode_podium_titles(db)
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     entries = []
     for i, r in enumerate(rows):
         games = int(r["games_played"] or 0)
@@ -29351,10 +30955,18 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
         lvl, _, _ = level_from_xp(r["total_xp"] or 0)
         t_name, t_color = _display_title_sync(
             _colors, r["title_sku"], r["title_name"], r["title_color"],
-            r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])))
+            r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])),
+            podium_pos_2v2=_pmap2.get(str(r["player_id"])),
+            podium_pos_ffa=_pmapf.get(str(r["player_id"])))
+        _rating_now = int(round(r["rating"] or 1500))
         entries.append(FfaLeaderboardEntry(
             rank=i + 1, steam_id=r["steam_id"], display_name=r["display_name"] or "Player",
-            rating=int(round(r["rating"] or 1500)), rd=int(round(r["rating_deviation"] or 350)),
+            rating=_rating_now, rd=int(round(r["rating_deviation"] or 350)),
+            # Aug 12 item 2: peak has been maintained on every rated game since
+            # FFA shipped but reached no endpoint. NULL only on rows written
+            # before the column had its NOT NULL DEFAULT — fall back to the
+            # current rating so peak is never rendered BELOW the live value.
+            peak_rating=int(round(r["peak_rating"])) if r["peak_rating"] is not None else _rating_now,
             games_played=games, wins=wins, top3=int(r["top3"] or 0),
             avg_placement=round((r["placement_sum"] or 0) / games, 2) if games else 0.0,
             win_rate=round(wins / games, 3) if games else 0.0,
@@ -29438,12 +31050,13 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
             cards_by_match_player.setdefault((c["match_id"], c["steam_id"]), []).append(
                 {"n": c["card_name"], "r": bool(c["rolled"])})
         _colors = await _rank_colors(db)
-        _pmap = await _podium_map(db) if any(
-            r["title_sku"] == TITLE_PODIUM_SKU for r in prow) else {}
+        _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in prow))
         for r in prow:
             t_name, t_color = _display_title_sync(
                 _colors, r["title_sku"], r["title_name"], r["title_pcolor"],
-                r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])))
+                r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])),
+                podium_pos_2v2=_pmap2.get(str(r["player_id"])),
+                podium_pos_ffa=_pmapf.get(str(r["player_id"])))
             players_by_match[r["match_id"]].append({
                 "steam_id": r["steam_id"],
                 "display_name": r["display_name"] or "Player",
@@ -29483,6 +31096,12 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 # the client's flat JsonUtility parse stays parser-free (#73).
                 "color_name": r.get("color_name") or "",
                 "color_hex": r.get("color_hex") or "",
+                # Aug 12 item 1 (migration 216) — this player's end-of-game
+                # build, beside the cards it is rendered with. `.get` so a
+                # pre-216 row (the query is `fmp.*`) degrades to "" rather
+                # than KeyError-ing the whole feed, and "" — not null —
+                # because the flat value keeps the client parser-free (#73).
+                "end_stats": r.get("end_stats") or "",
                 "cards": cards_by_match_player.get((r["match_id"], r["steam_id"]), []),
             })
     return {
@@ -31272,6 +32891,13 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         reported_by=reporter.id,
         is_ranked=True,
         started_at=report.started_at,
+        # Aug 12 item 1 (migration 216) — per-slot end-of-game build, taken
+        # from each slot's PlayerMatchData so no slot mapping is needed.
+        # Validated + NULLed on mismatch; outside the frozen 11-field HMAC.
+        t1a_end_stats=_clean_end_stats(report.t1a.end_stats),
+        t1b_end_stats=_clean_end_stats(report.t1b.end_stats),
+        t2a_end_stats=_clean_end_stats(report.t2a.end_stats),
+        t2b_end_stats=_clean_end_stats(report.t2b.end_stats),
     )
     db.add(new_match)
     await db.flush()
@@ -32182,10 +33808,10 @@ async def team_all_series_paged(
         pass
 
     _colors = await _rank_colors(db)
-    # Podium map only when some slot wears the dynamic podium title.
-    _pmap = await _podium_map(db) if any(
-        r[f"{pfx}_title_sku"] == TITLE_PODIUM_SKU
-        for r in rows for pfx in ("t1a", "t1b", "t2a", "t2b")) else {}
+    # Podium maps only for the ladders some slot wears a podium title from.
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(
+        db, (r[f"{pfx}_title_sku"]
+             for r in rows for pfx in ("t1a", "t1b", "t2a", "t2b")))
     out_series = []
     for r in rows:
         # Per-series matches.
@@ -32193,6 +33819,9 @@ async def team_all_series_paged(
             SELECT id AS match_id, ended_at, t1_rounds_won, t2_rounds_won,
                    t1_points_total, t2_points_total, duration_seconds,
                    t1a_fps_avg, t1b_fps_avg, t2a_fps_avg, t2b_fps_avg,
+                   -- Aug 12 item 1 (migration 216) — per-slot end-of-game
+                   -- build, keyed out below by the MATCH row's own slot ids.
+                   t1a_end_stats, t1b_end_stats, t2a_end_stats, t2b_end_stats,
                    t1a_id, t1b_id, t2a_id, t2b_id
               FROM team_matches
              WHERE series_id = :sid AND invalidated_at IS NULL
@@ -32255,11 +33884,20 @@ async def team_all_series_paged(
             # match-row slots — series-keyed FPS cross-attributes swapped
             # players). pid_to_sid covers the same 4-player set.
             fps_by_player = {}
+            # Aug 12 item 1: end-of-game builds, keyed by the same match-row
+            # slot ids as the FPS map above (series-row slots can diverge from
+            # match-row slots after a mid-series rebalance). A slot with no
+            # build is OMITTED rather than mapped to "" so the client can tell
+            # "not recorded" from a recorded empty value (#257).
+            end_stats_by_player = {}
             for pfx in ("t1a", "t1b", "t2a", "t2b"):
+                sid_for = pid_to_sid.get(str(m[f"{pfx}_id"]))
+                if not sid_for:
+                    continue
                 if m[f"{pfx}_fps_avg"]:
-                    sid_for = pid_to_sid.get(str(m[f"{pfx}_id"]))
-                    if sid_for:
-                        fps_by_player[sid_for] = int(m[f"{pfx}_fps_avg"])
+                    fps_by_player[sid_for] = int(m[f"{pfx}_fps_avg"])
+                if m[f"{pfx}_end_stats"]:
+                    end_stats_by_player[sid_for] = m[f"{pfx}_end_stats"]
             matches.append({
                 "match_id": str(m["match_id"]),
                 "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
@@ -32267,6 +33905,7 @@ async def team_all_series_paged(
                 "t1_points_total": m["t1_points_total"] or 0, "t2_points_total": m["t2_points_total"] or 0,
                 "duration_seconds": m["duration_seconds"] or 0,
                 "fps_by_player": fps_by_player,
+                "end_stats_by_player": end_stats_by_player,
                 "cards_by_player": cards_by_match.get(str(m["match_id"]), {}),
                 "telemetry_by_player": tele_by_match.get(str(m["match_id"]), {}),
             })
@@ -32276,7 +33915,9 @@ async def team_all_series_paged(
             _t, _tc = _display_title_sync(
                 _colors, r[f"{prefix}_title_sku"], r[f"{prefix}_title"], r[f"{prefix}_title_color"],
                 float(r[f"{prefix}_rating_1v1"]) if r[f"{prefix}_rating_1v1"] is not None else None,
-                podium_pos=_pmap.get(str(r[f"{prefix}_id"])))
+                podium_pos=_pmap.get(str(r[f"{prefix}_id"])),
+                podium_pos_2v2=_pmap2.get(str(r[f"{prefix}_id"])),
+                podium_pos_ffa=_pmapf.get(str(r[f"{prefix}_id"])))
             return {
                 "steam_id": r[f"{prefix}_sid"], "name": r[f"{prefix}_name"],
                 "title": _t, "title_color": _tc,
@@ -32379,6 +34020,10 @@ async def team_leaderboard(
             p.display_name,
             ROUND(g2.rating::numeric, 0) AS rating,
             ROUND(g2.rating_deviation::numeric, 0) AS rd,
+            -- Aug 12 item 2: peak was only reachable through /team/team-stats.
+            -- NULL until a player's first rating update writes it, so the row
+            -- builder falls back to the current rating.
+            ROUND(g2.peak_rating::numeric, 0) AS peak_rating,
             g2.completed_series,
             COALESCE(ss.wins, 0) AS wins,
             COALESCE(ss.losses, 0) AS losses,
@@ -32406,22 +34051,30 @@ async def team_leaderboard(
     """)
     rows = (await db.execute(q, {"min_series": min_series, "limit": limit})).mappings().all()
     _colors = await _rank_colors(db)
-    # Podium map only when some row wears the dynamic podium title.
-    _pmap = await _podium_map(db) if any(
-        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    # Podium maps only for the ladders some row wears a podium title from.
+    # Unconditional: this is where the 2v2 podium title gets granted at all.
+    # See bootstrap_mode_podium_titles — the render-time guard below cannot
+    # grant, because it only fires for a sku somebody already wears.
+    await bootstrap_mode_podium_titles(db)
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     entries = []
     for idx, r in enumerate(rows, start=1):
         # Dynamic 'Current Rank' title (#48) — resolves against the 1v1 ladder.
         _t, _tc = _display_title_sync(
             _colors, r["title_sku"], r["title"], r["title_color"],
             float(r["rating_1v1"]) if r["rating_1v1"] is not None else None,
-            podium_pos=_pmap.get(r["player_id"]))
+            podium_pos=_pmap.get(r["player_id"]),
+            podium_pos_2v2=_pmap2.get(r["player_id"]),
+            podium_pos_ffa=_pmapf.get(r["player_id"]))
         entries.append(Team2v2LeaderboardEntry(
             rank=idx,
             steam_id=r["steam_id"],
             display_name=r["display_name"],
             rating=int(r["rating"]),
             rd=int(r["rd"]),
+            # Never below the live rating: a NULL peak is "never written",
+            # not "peaked at zero".
+            peak_rating=int(r["peak_rating"]) if r["peak_rating"] is not None else int(r["rating"]),
             completed_series=r["completed_series"],
             series_wins=r["wins"],
             series_losses=r["losses"],
@@ -32994,7 +34647,8 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
         """), {"gids": [g["id"] for g in games]})).mappings().all()
         seats_by_game = {r["game_id"]: r["n"] for r in seat_rows}
     _colors = await _rank_colors(db)
-    _pmap = await _podium_map(db)
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(
+        db, (m["title_sku"] for m in meta_by_sid.values()))
 
     async def _ready_batched(g) -> tuple[bool, str]:
         """_spectate_game_ready with the players half prefetched — same
@@ -33043,19 +34697,36 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
         roster = _spectate_roster_list(g["roster"])
         names = []
         titles = []
+        title_colors = []
         ratings = []
         for s in roster:
             r = meta_by_sid.get(s)
             if r is None:
-                names.append("?"); titles.append(""); ratings.append("1500")
+                # EVERY list gets an entry here. They are consumed positionally
+                # against the roster, so skipping one in this branch shifts
+                # every later player's title/colour onto the wrong person.
+                names.append("?"); titles.append(""); title_colors.append("")
+                ratings.append("1500")
                 continue
             names.append(r["display_name"] or "?")
             # Podium pos included (Codex r5 find 6: title_podium resolved
             # to nothing without it).
             t, _tc = _display_title_sync(_colors, r["title_sku"], r["title"],
                                          r["title_color"], float(r["rating"]),
-                                         podium_pos=_pmap.get(r["player_id"]))
+                                         podium_pos=_pmap.get(r["player_id"]),
+                                         podium_pos_2v2=_pmap2.get(r["player_id"]),
+                                         podium_pos_ffa=_pmapf.get(r["player_id"]))
             titles.append(t or "")
+            # The colour half of the same call, which used to be computed and
+            # thrown away — so SpectatorSession.WatchedTitleColors was always
+            # empty and the HUD fell back to its grey for every watched player,
+            # while every other title surface in the mod renders the title in
+            # its own colour (Aug 12 item 9b, closed here).
+            # A '|' in a colour would desynchronise the array against
+            # roster_titles; hex values cannot contain one (production: 0 of 43
+            # title rows have a pipe in name or preview_color), and the strip
+            # keeps that true no matter what a future title colour holds.
+            title_colors.append((_tc or "").replace("|", ""))
             ratings.append(str(int(r["rating"])))
         out.append({
             "game_id": str(g["id"]),
@@ -33064,6 +34735,11 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
             # Pipe-joined, roster-aligned (titles can contain commas; pipes
             # are stripped from display names at ingest).
             "roster_titles": "|".join(titles),
+            # Same length and same order as roster_titles, one hex per title
+            # ("" where there is no title or no colour). The client tolerates a
+            # short/absent array by falling back per entry, so an older client
+            # ignores this field rather than breaking on it.
+            "roster_title_colors": "|".join(title_colors),
             "roster_ratings": ",".join(ratings),
             # Roster steam ids are public identifiers used across the API;
             # the client matches Live-panel series by them when source_ref

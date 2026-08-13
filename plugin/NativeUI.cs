@@ -542,11 +542,21 @@ namespace CompetitiveRounds
         public static void AddLE(GameObject go,float minW=-1,float minH=-1,float prefW=-1,float prefH=-1,float flexW=-1,float flexH=-1){if(tLE==null)return;var le=go.AddComponent(tLE);if(minW>=0)pLEMinW?.SetValue(le,minW);if(minH>=0)pLEMinH?.SetValue(le,minH);if(prefW>=0)pLEPrefW?.SetValue(le,prefW);if(prefH>=0)pLEPrefH?.SetValue(le,prefH);if(flexW>=0)pLEFlexW?.SetValue(le,flexW);if(flexH>=0)pLEFlexH?.SetValue(le,flexH);}
         // Update an EXISTING LayoutElement's preferredHeight (AddLE would stack a second component).
         public static void SetPrefH(GameObject go,float prefH){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le!=null)pLEPrefH?.SetValue(le,prefH);}
+        // Same, for width. CreateButton bakes prefW from its sizeDelta and the
+        // label child has NO LayoutElement (it is anchor-stretched and its LE is
+        // destroyed), so a button can never grow to fit its own text — a caller
+        // that writes a variable-length label must re-derive prefW itself.
+        public static void SetPrefW(GameObject go,float prefW){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le!=null)pLEPrefW?.SetValue(le,prefW);}
         /* Codex v1.36 client find 9: CreateText now pins minH=sizeDelta.y (the
          * L10n anti-compression floor), so any DYNAMIC resize site must move
          * minH along with prefH or Unity clamps the child at its build-time
          * minimum and the row overflows its neighbours again. */
         public static void SetMinH(GameObject go,float minH){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le!=null)pLEMinH?.SetValue(le,minH);}
+        // Width sibling of SetMinH. A cell sized from a MEASUREMENT needs both:
+        // prefW alone is only a request, and an HLG whose children's preferred
+        // widths exceed the row shrinks every child toward its min (0 when
+        // unset) — which is how a measured cell ends up clipped anyway.
+        public static void SetMinW(GameObject go,float minW){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le!=null)pLEMinW?.SetValue(le,minW);}
         public static void SetPrefWH(GameObject go,float prefW,float prefH){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le==null)return;pLEPrefW?.SetValue(le,prefW);pLEPrefH?.SetValue(le,prefH);}
         // Make an EXISTING panel clickable (Button on its own Image) — same wiring as
         // CreateButton but without spawning a new GO. Child buttons still win raycasts.
@@ -653,6 +663,30 @@ namespace CompetitiveRounds
                 return lo <= 0 ? ".." : text.Substring(0, lo).TrimEnd() + "..";
             }
             catch { return text; }
+        }
+
+        /// <summary>TMP's own preferred WIDTH for <paramref name="text"/>, measured
+        /// without assigning it (the same GetPreferredValues(string) call FitToWidth
+        /// uses, so it costs no layout pass and is parsed with this component's real
+        /// font/size/richText settings).
+        ///
+        /// Returns 0 when the measurement API is unavailable. Callers must treat 0 as
+        /// "unknown" and fall back to a conservative estimate — never as "empty", or a
+        /// missing reflection target silently becomes a zero-width control.</summary>
+        public static float MeasureTextWidth(object tmp,string text)
+        {
+            if(tmp==null||string.IsNullOrEmpty(text))return 0f;
+            try
+            {
+                if(mTmpPreferredValues==null)
+                    mTmpPreferredValues=tTMP.GetMethod("GetPreferredValues",
+                        BindingFlags.Public|BindingFlags.Instance,
+                        null,new Type[]{typeof(string)},null);
+                if(mTmpPreferredValues==null)return 0f;
+                var v=mTmpPreferredValues.Invoke(tmp,new object[]{text});
+                return v is Vector2?((Vector2)v).x:0f;
+            }
+            catch{return 0f;}
         }
 
         public static void FitOneLine(object t){SetOverflowMode(t,0);SetWordWrap(t,false);}
@@ -784,6 +818,18 @@ namespace CompetitiveRounds
             return a;
         }
         private static object txtRating,txtRD,txtLevel,txtXPProg,txtTotalXP,txtTopLeftName;private static Component xpFill;
+        /* Aug 12 item 2: the rating pane was structurally single-mode (one big
+         * number + one RD line, both 1v1). These three carry the per-mode block
+         * underneath it: the 1v1 board position, then 2v2 and FFA rating / RD /
+         * peak / standing.
+         *
+         * There is deliberately NO 1v2 line here (owner, Aug 13). 1v2 has no
+         * Elo and never will from this data — glicko_ratings_1v2's rating
+         * columns are written by nothing server-side — so a 1v2 row in a block
+         * headed "Glicko-2 Rating" is a category error however carefully it is
+         * captioned. Its W/L and board position live in the Win/Loss Record box
+         * below, which is where a mode without a rating belongs. */
+        private static object txtStand1v1,txtRate2v2,txtRateFfa;
         private static object txtRankedRec,txtRankedStrk,txtCasualRec,txtCasualStrk,txtSweeps,txtTotalRec,txtAccuracy,txtSessionSum,txtSessionSplit,txtSessionSweeps,txtOppSummary,txtSessionOppLifetime,txtTeam2v2Rec,txtTeam2v2Strk;
         /* Bug #130: My Stats -> Record covered only 1v1 ranked/casual + 2v2. */
         private static object txtOvtRec,txtFfaRec,txtFfaExtra;
@@ -1294,12 +1340,43 @@ namespace CompetitiveRounds
         // only the (at most 3) podium rows' name text on a slow tick — never
         // a full-board repaint (F5 perf, learning #109). Detection is by exact
         // title text: the server never issues another title with these names.
-        internal static bool IsPodiumTitle(string t) =>
-            t == "1st Place" || t == "2nd Place" || t == "3rd Place";
+        // Aug 12 item 2d: the 2v2 and FFA ladders now have their own podium
+        // skus, and the server renders those with a mode prefix — main.py's
+        // PODIUM_TITLES / PODIUM_TITLES_2V2 / PODIUM_TITLES_FFA tables, whose
+        // strings are reproduced EXACTLY here (grepped from that source, not
+        // guessed — a mismatched literal is a silent no-sparkle, #152).
+        // Deliberately an exact-match set rather than an EndsWith("1st Place"):
+        // a future purchasable title that happens to end in those words must
+        // not inherit the podium glitter.
+        internal static bool IsPodiumTitle(string t)
+        {
+            if (string.IsNullOrEmpty(t)) return false;
+            return t == "1st Place"     || t == "2nd Place"     || t == "3rd Place"
+                || t == "2v2 1st Place" || t == "2v2 2nd Place" || t == "2v2 3rd Place"
+                || t == "FFA 1st Place" || t == "FFA 2nd Place" || t == "FFA 3rd Place";
+        }
+        /// <summary>Drop a podium title's ladder prefix when it is being drawn
+        /// ON that ladder's own board. The server ships "2v2 1st Place" /
+        /// "FFA 1st Place" so the title stays unambiguous on mixed surfaces
+        /// (chat, Home, the 1v1 board), but on the 2v2 board itself the prefix
+        /// says nothing and costs 4 characters in a 200px name cell that
+        /// already truncates — i.e. it would eat the "]" and part of the place
+        /// (#292). A title from a DIFFERENT ladder keeps its prefix, which is
+        /// the whole reason the prefix exists.</summary>
+        private static string PodiumTitleOnOwnBoard(string title, string ladderPrefix)
+            => (!string.IsNullOrEmpty(title) && title.StartsWith(ladderPrefix + " ", StringComparison.Ordinal))
+               ? title.Substring(ladderPrefix.Length + 1) : title;
         private static uint _podiumTick = 0;
         private static float _podiumTickAt = 0f;
         // Entries: [0]=txtName object, [1]=base name (no title), [2]=title, [3]=color hex
         private static readonly List<object[]> _podiumLbRows = new List<object[]>();
+        // Aug 12 item 2c: the 2v2 and FFA boards get the same ANIMATED glitter
+        // (they had a static tick-0 span). One list per board because each is
+        // repopulated by its own refresh; the tick walks all three, which costs
+        // nothing — only one board is on screen at a time, and rewriting a
+        // pooled row that is currently inactive is harmless.
+        private static readonly List<object[]> _podiumTeamRows = new List<object[]>();
+        private static readonly List<object[]> _podiumFfaRows = new List<object[]>();
         // Dark SDF outline on podium rows' cells so text stays readable over the
         // gold/silver/bronze tints (Sid: "Stan's elo is hard to read"). Original
         // materials keyed by label; one outline clone per base material.
@@ -1316,6 +1393,65 @@ namespace CompetitiveRounds
             NametagGlowRenderer.ApplyOutlineToLabel(row.txtL,      on, _lbOutlineOrig, _lbOutlineCache);
             NametagGlowRenderer.ApplyOutlineToLabel(row.txtWL,     on, _lbOutlineOrig, _lbOutlineCache);
             NametagGlowRenderer.ApplyOutlineToLabel(row.txtGold,   on, _lbOutlineOrig, _lbOutlineCache);
+        }
+        // Aug 12 item 2c: the same readability outline for the 2v2 and FFA
+        // boards. They now carry the same gold/silver/bronze row tint, so they
+        // inherit the same problem it was added for ("Stan's elo is hard to
+        // read" over the tint). Shares _lbOutlineOrig/_lbOutlineCache on
+        // purpose: the store is keyed by LABEL and the clone cache by BASE
+        // MATERIAL, and every board's cells come off the one Gravity SDF
+        // material, so all three boards want exactly one clone between them.
+        private static void SetTeamLbRowOutline(TeamLBRow row, bool on)
+        {
+            if (row == null) return;
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtRank,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtName,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtRating, on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtWL,     on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtWR,     on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtMate,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtGold,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtXp,     on, _lbOutlineOrig, _lbOutlineCache);
+        }
+        private static void SetFfaLbRowOutline(FfaLBRow row, bool on)
+        {
+            if (row == null) return;
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtRank,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtName,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtRating, on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtGames,  on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtWins,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtTop3,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtAvgPl,  on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtWR,     on, _lbOutlineOrig, _lbOutlineCache);
+        }
+        // The 1v1 podium tints, verbatim (alphas already halved once — 0.22
+        // "read too strong behind text"). Shared so the three boards cannot
+        // drift into three slightly different golds.
+        private static Color PodiumRowTint(int rank)
+            => rank == 1 ? new Color(1f, 0.84f, 0f, 0.11f)
+             : rank == 2 ? new Color(0.75f, 0.75f, 0.78f, 0.10f)
+             : rank == 3 ? new Color(0.8f, 0.5f, 0.2f, 0.10f)
+             : new Color(0.15f, 0.15f, 0.2f, 0.01f);
+        /// <summary>Give a pooled board row the background Image the tint is
+        /// written to. Painted on the row ROOT rather than an inserted wrapper
+        /// object: the root already carries the row's HLG and padding, so this
+        /// changes no layout at all (an Image is not an ILayoutElement) and
+        /// covers the full row width including the padding. raycastTarget is
+        /// FALSE — unlike the 1v1 board these rows are not clickable, and a new
+        /// raycast target under the cursor is not a change worth making for a
+        /// decoration.</summary>
+        private static void AddRowBackground(GameObject root)
+        {
+            if (root == null || UIFactory.tImage == null) return;
+            try
+            {
+                var img = root.AddComponent(UIFactory.tImage);
+                var bf = BindingFlags.Public | BindingFlags.Instance;
+                UIFactory.tImage.GetProperty("color", bf)?.SetValue(img, PodiumRowTint(0));
+                UIFactory.tImage.GetProperty("raycastTarget", bf)?.SetValue(img, false);
+            }
+            catch { }
         }
         internal static string PodiumSparkleSpan(string title, string hex, uint tick)
         {
@@ -1335,11 +1471,17 @@ namespace CompetitiveRounds
         }
         private static void TickPodiumSparkle()
         {
-            if (_podiumLbRows.Count == 0) return;
+            if (_podiumLbRows.Count == 0 && _podiumTeamRows.Count == 0 && _podiumFfaRows.Count == 0) return;
             if (Time.unscaledTime < _podiumTickAt) return;
             _podiumTickAt = Time.unscaledTime + 0.7f;
             _podiumTick++;
-            foreach (var r in _podiumLbRows)
+            RepaintPodiumRows(_podiumLbRows);
+            RepaintPodiumRows(_podiumTeamRows);
+            RepaintPodiumRows(_podiumFfaRows);
+        }
+        private static void RepaintPodiumRows(List<object[]> rows)
+        {
+            foreach (var r in rows)
             {
                 if (r == null || r.Length < 4 || r[0] == null) continue;
                 UIFactory.SetTextRaw(r[0],
@@ -1358,6 +1500,9 @@ namespace CompetitiveRounds
         public static void MaybeRefreshTeamTab()
         {
             if (currentTab != 8) return;
+            // Aug 12 item 2c: BEFORE the throttle, exactly like the 1v1 tab's
+            // ticker — a 0.7s glitter cannot live behind a 2s gate.
+            TickPodiumSparkle();
             if (Time.unscaledTime < teamTabRefreshAt) return;
             teamTabRefreshAt = Time.unscaledTime + 2f;
             // v1.37 host lobbies: one-shot membership rediscovery + the
@@ -1399,7 +1544,7 @@ namespace CompetitiveRounds
 
         private static void BuildPage(Transform canvasParent)
         {
-            try{rankedRows.Clear();casualRows.Clear();lbRows.Clear();cardRows.Clear();sessionOppTexts.Clear();ovtSoloLbRows.Clear();ovtDuoLbRows.Clear();ovtRecentRows.Clear();ffaLbRows.Clear();ffaRecentRows.Clear();ffaRecentCasRows.Clear();
+            try{rankedRows.Clear();casualRows.Clear();lbRows.Clear();cardRows.Clear();sessionOppTexts.Clear();ovtSoloLbRows.Clear();ovtDuoLbRows.Clear();ovtRecentRows.Clear();ovtRecentHoverBodies.Clear();ffaLbRows.Clear();ffaRecentRows.Clear();ffaRecentCasRows.Clear();
             /* Bugs #147/#149/#150: EVERY pool below holds rows parented to the
              * OLD pageGO and is re-Add()ed by a Build*Tab under the new one.
              * Miss one and a SECOND BuildPage — which the language switch and
@@ -1411,7 +1556,7 @@ namespace CompetitiveRounds
              * Deliberately NOT cleared: chatLines (chat history, not views),
              * compareSelected (the user's picks, not views), _lblParts/
              * _lblOrder (per-call scratch). */
-            achRows.Clear();homeCosRows.Clear();_podiumLbRows.Clear();
+            achRows.Clear();homeCosRows.Clear();_podiumLbRows.Clear();_podiumTeamRows.Clear();_podiumFfaRows.Clear();
             shopRows.Clear();shopRowPool.Clear();shopArtistBtns.Clear();shopArtistBtnTexts.Clear();shopArtistBtnNames.Clear();
             teamLBRows.Clear();teamHistRows.Clear();
             tSignupRowPool.Clear();tSignupRowTexts.Clear();tBracketRowPool.Clear();tBracketRowTexts.Clear();_tBracketRowPurposes.Clear();
@@ -1731,6 +1876,14 @@ namespace CompetitiveRounds
         // ── FFA tab (live — first playtest build, ranked from day one) ─────
         private static object txtFfaStatus, txtFfaLobbyHeader, txtFfaLobbyBody, txtFfaLbHeader, txtFfaRecentHeader, txtFfaRecentPage;
         private static GameObject ffaJoinBtn, ffaCreatePrivBtn, ffaLeaveBtn, ffaStartBtn, ffaBetPanel, ffaBetContainer;
+        // Item 7: the FFA Start button carries three labels of wildly different
+        // length (see SizeFfaStartButton), so its label TMP is kept and the button
+        // is re-widened per refresh. Rebuilt with the page, like every other ref.
+        private static object ffaStartBtnTxt;
+        // Base = the 1v2 "Start Game" button (190x28 @16pt) so the normal state is
+        // visually identical across the tabs; the cap keeps a pathological
+        // translation from eating the whole control row.
+        private const float FFA_START_BTN_W = 190f, FFA_START_BTN_MAX = 660f;
         private static GameObject langToggleBtn; private static object langToggleTxt;   // L10n picker
         // v1.36 host settings row (visible while sitting in an OPEN lobby;
         // controls interactable for the host only, labels visible to all).
@@ -1940,34 +2093,80 @@ namespace CompetitiveRounds
             UIFactory.AddLE(scroll.scrollGO,flexH:1);
             ffaTabOuterViewport=scroll.content.transform.parent as RectTransform;
             var panel=new GameObject("FfaInner");panel.transform.SetParent(scroll.content.transform,false);panel.AddComponent<RectTransform>();
-            UIFactory.AddVLG(panel,spacing:8,padL:10,padR:10,padT:8,padB:8);
+            /* Item 15 (owner decision, from Stan's "the three multiplayer tabs
+             * are all different sizes"): 2v2 is the reference and this tab is
+             * sized to it. spacing 8 -> 6 to match Team2v2Inner; the pad was
+             * already 10/10/8/8. Every font/row change below is the same pass —
+             * FFA had been running ~1.25-1.35x the 2v2 scale throughout. */
+            UIFactory.AddVLG(panel,spacing:6,padL:10,padR:10,padT:8,padB:8);
 
             var ffaHdrRow=new GameObject("FfaHdrRow");ffaHdrRow.transform.SetParent(panel.transform,false);ffaHdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(ffaHdrRow,spacing:10);UIFactory.AddLE(ffaHdrRow,prefH:38,flexH:0);
             // No static "- RANKED" claim (find 12): v1.36 lobbies can be
             // toggled Casual by the host, so the header stays neutral and the
             // ranked/casual truth lives on the settings row + status line.
-            UIFactory.CreateText("FfaH",ffaHdrRow.transform,"<b>FFA - FREE-FOR-ALL (3-10 players)</b>",26f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(700,36));
+            /* Item 15: 26pt/700x36 -> the 2v2 header's 20pt/700x28. FitOneLine is
+             * NOT optional at that ratio (28 / 20pt = 1.4): the longest shipped
+             * translation is 37 chars and comes from the OS fallback atlas, whose
+             * line box at 20pt does not fit 28px, and the global Truncate default
+             * would drop the WHOLE header rather than clip it (#292/#297). Width
+             * is unchanged at 700 (37 chars @20pt bold is ~410px), and Overflow's
+             * missing horizontal clip is harmless here — the next sibling is the
+             * flexW:1 spacer. */
+            UIFactory.FitOneLine(UIFactory.CreateText("FfaH",ffaHdrRow.transform,"<b>FFA - FREE-FOR-ALL (3-10 players)</b>",20f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(700,28)));
             // Info button: one size (110x34/18f) and one position (right edge
             // via flex spacer) across the 2v2/1v2/FFA headers — it used to be
             // a different size at a different x on each tab (Sid, July 29).
             var ffaHdrSp=new GameObject("FfaHdrSp");ffaHdrSp.transform.SetParent(ffaHdrRow.transform,false);ffaHdrSp.AddComponent<RectTransform>();UIFactory.AddLE(ffaHdrSp,flexW:1);
             UIFactory.CreateButton("FfaInfo",ffaHdrRow.transform,"Info",18f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.FfaTitle,ModeInfoText.Ffa),sizeDelta:new Vector2(110,34));
-            UIFactory.CreateText("FfaNote",panel.transform,"<color=#888>Ranked by default - the host can switch a lobby to Casual before starting.</color>",18f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
+            /* Item 15: 18pt/29 -> 16pt/24. This is a VLG child, so its sizeDelta.x
+             * is NOT the rendered width (AddVLG force-expands children to the
+             * panel) — only the font and the height matter. 74 chars at 16pt over
+             * a ~1800px row is one line, and 24px clears the 16pt fallback line
+             * box, so the wrap-then-truncate trap stays shut. */
+            UIFactory.CreateText("FfaNote",panel.transform,"<color=#888>Ranked by default - the host can switch a lobby to Casual before starting.</color>",16f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,24));
 
             // Lobby controls row (July 29 redesign: host-controlled lobbies
             // replace the auto-gather queue — Sid's spec).
             var ctl=new GameObject("FfaCtl");ctl.transform.SetParent(panel.transform,false);ctl.AddComponent<RectTransform>();
-            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:44,flexH:0);
-            ffaJoinBtn=UIFactory.CreateButton("FfaCreate",ctl.transform,"Create Lobby",18f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaCreateLobby();dirty=true;},sizeDelta:new Vector2(184,36));
+            /* Item 15: prefH 44 -> 32 with 28px buttons at 16pt, i.e. the
+             * 1v2 host row (which is already inside 2v2's 26-28px band). Widths
+             * scale with the font: 18->16pt is x0.89, so 184->160 and 205->180
+             * are parity, not a squeeze — and they now match the identically
+             * labelled 1v2 buttons exactly. Row budget: 160+180+190+130 + 3x8
+             * spacing = 684 inside ~1824 available (#245). */
+            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:32,flexH:0);
+            ffaJoinBtn=UIFactory.CreateButton("FfaCreate",ctl.transform,"Create Lobby",16f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaCreateLobby();dirty=true;},sizeDelta:new Vector2(160,28));
             /* v1.37 private lobbies: prompt for a password, then create. The
              * artist-input modal already gates BOTH input paths (#141/#200)
              * and its onSubmit is not a CreateButton callback (#158). */
-            ffaCreatePrivBtn=UIFactory.CreateButton("FfaCreatePriv",ctl.transform,"Create Private...",18f,C_WHITE,new Color(0.40f,0.30f,0.55f,0.9f),
+            ffaCreatePrivBtn=UIFactory.CreateButton("FfaCreatePriv",ctl.transform,"Create Private...",16f,C_WHITE,new Color(0.40f,0.30f,0.55f,0.9f),
                 ()=>{CompetitiveUI.OpenArtistInput(I18n.Tr("Create Private FFA Lobby"),I18n.Tr("Password (share it with friends)"),"",
-                    pw=>{ApiClient.FfaCreateLobby(pw);dirty=true;});},sizeDelta:new Vector2(205,36));
-            ffaStartBtn=UIFactory.CreateButton("FfaStart",ctl.transform,"Start Game",18f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),()=>{ApiClient.FfaStartLobby();dirty=true;},sizeDelta:new Vector2(158,36));
-            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",18f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(103,36));
+                    pw=>{ApiClient.FfaCreateLobby(pw);dirty=true;});},sizeDelta:new Vector2(180,28));
+            ffaStartBtn=UIFactory.CreateButton("FfaStart",ctl.transform,"Start Game",16f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),()=>{ApiClient.FfaStartLobby();dirty=true;},sizeDelta:new Vector2(FFA_START_BTN_W,28));
+            /* Item 7 (owner: "the timer in the Start button gets cut off").
+             * CreateButton puts the label on a CHILD with sizeDelta zero, an
+             * anchor stretch and its LayoutElement DESTROYED (see CreateButton),
+             * so the label's own preferred width is never consulted by the row's
+             * HLG — the button is exactly its build-time prefW forever. Combine
+             * that with CreateText's global Truncate default and TMP's default
+             * word wrap and a 40-char countdown wraps to ~3 lines, only the
+             * first fits the box height, and the rest is silently dropped: the
+             * label read "Start unlocks in" with no seconds. Two halves:
+             *   (a) FitOneLine (Overflow + no wrap) so the line can NEVER be
+             *       dropped whole. That failure also hits the plain
+             *       "Start Game (N/M)" state in ru/uk/sv, whose OS-fallback
+             *       glyph metrics are taller than Gravity's at the same pt
+             *       (#297) - i.e. this was broken in every locale, not just
+             *       during the countdown.
+             *   (b) SizeFfaStartButton re-derives prefW from TMP's measurement
+             *       of the string actually written, every refresh. That also
+             *       discharges FitOneLine's caller obligation (Overflow removes
+             *       the horizontal clip too): the box is sized TO the string, so
+             *       nothing can paint over the Leave button beside it. */
+            ffaStartBtnTxt=UIFactory.GetButtonText(ffaStartBtn);
+            UIFactory.FitOneLine(ffaStartBtnTxt);
+            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(130,28));
 
             /* v1.36 host settings row (ffa-configurable-lobbies §1). Compact
              * -/value/+ clusters; each press sends ONLY that field and adopts
@@ -1976,13 +2175,22 @@ namespace CompetitiveRounds
              * §9c is satisfied (same-card shipped v1.36) and consumption has
              * been live since v1.36 (symmetric slot table + _candCount). */
             ffaSettingsRow=new GameObject("FfaCfg");ffaSettingsRow.transform.SetParent(panel.transform,false);ffaSettingsRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(ffaSettingsRow,spacing:5);UIFactory.AddLE(ffaSettingsRow,prefH:36,flexH:0);
+            /* Item 15: this is a control row too, so it takes the same prefH 32 /
+             * 28px / 15-16pt treatment as FfaCtl above. The stepper label's WIDTH
+             * formula is deliberately left at label.Length*11+18: it is computed
+             * from the TRANSLATED label, and dropping the font 17->15pt while
+             * keeping the per-character budget makes every label strictly roomier
+             * (the longest, uk "Opening draws:" at 18 chars, gets 216px for ~150px
+             * of glyphs). Row budget in English: 4 labels (117+128+172+128 = 545)
+             * + 4 steppers (4 x 3 x 28 = 336) + 172 + 110 + 18 gaps x 5 = ~1253
+             * inside ~1824, and the trailing flexW:1 spacer absorbs the rest. */
+            UIFactory.AddHLG(ffaSettingsRow,spacing:5);UIFactory.AddLE(ffaSettingsRow,prefH:32,flexH:0);
             ffaCfgHostBtns.Clear();
             Action<string,string,Func<int>,int,int> mkStepper=(label,field,get,min,max)=>{
-                UIFactory.CreateText("L_"+field,ffaSettingsRow.transform,label,17f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(label.Length*11+18,30));
-                var minus=UIFactory.CreateButton("M_"+field,ffaSettingsRow.transform,"-",18f,C_WHITE,C_BTN,()=>{int v=Mathf.Clamp(get()-1,min,max);ApiClient.FfaSetLobbySetting(field,v);dirty=true;},sizeDelta:new Vector2(30,30));
-                var valTxt=UIFactory.CreateText("V_"+field,ffaSettingsRow.transform,"?",19f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(30,30));
-                var plus=UIFactory.CreateButton("P_"+field,ffaSettingsRow.transform,"+",18f,C_WHITE,C_BTN,()=>{int v=Mathf.Clamp(get()+1,min,max);ApiClient.FfaSetLobbySetting(field,v);dirty=true;},sizeDelta:new Vector2(30,30));
+                UIFactory.CreateText("L_"+field,ffaSettingsRow.transform,label,15f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(label.Length*11+18,28));
+                var minus=UIFactory.CreateButton("M_"+field,ffaSettingsRow.transform,"-",16f,C_WHITE,C_BTN,()=>{int v=Mathf.Clamp(get()-1,min,max);ApiClient.FfaSetLobbySetting(field,v);dirty=true;},sizeDelta:new Vector2(28,28));
+                var valTxt=UIFactory.CreateText("V_"+field,ffaSettingsRow.transform,"?",17f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(28,28));
+                var plus=UIFactory.CreateButton("P_"+field,ffaSettingsRow.transform,"+",16f,C_WHITE,C_BTN,()=>{int v=Mathf.Clamp(get()+1,min,max);ApiClient.FfaSetLobbySetting(field,v);dirty=true;},sizeDelta:new Vector2(28,28));
                 ffaCfgHostBtns.Add(minus);ffaCfgHostBtns.Add(plus);
                 // #217/#5-r5: explicit case per field — the old bare `else`
                 // caught card_cap and would silently bind a 4th field's text
@@ -2004,7 +2212,11 @@ namespace CompetitiveRounds
              * the real gate, §7b). */
             ffaCfgSameBtn=UIFactory.CreateButton("FfaCfgSame",ffaSettingsRow.transform,"Same Cards: OFF",16f,C_WHITE,C_BTN,
                 ()=>{if(!ApiClient.FfaLobbyIsHost){CompetitiveUI.ShowNotification("Only the host can change lobby settings.",C_DIM,3f);return;}
-                     ApiClient.FfaSetLobbySetting("same_card_rule",0,!ApiClient.FfaLobbyCfgSame,true);dirty=true;},sizeDelta:new Vector2(172,30));
+                     /* Item 15: height 30 -> 28 only. The FONT and WIDTH stay at
+                      * 16pt/172 on purpose — uk "Same cards: OFF" is 20 chars,
+                      * about 170px at 16pt bold, so this box has no slack to give
+                      * back and a 15pt/160 "normalisation" would clip it. */
+                     ApiClient.FfaSetLobbySetting("same_card_rule",0,!ApiClient.FfaLobbyCfgSame,true);dirty=true;},sizeDelta:new Vector2(172,28));
             /* Aug 6 item 10 — SUDDEN DEATH IS CUT FROM THIS RELEASE.
              *
              * Codex round 4 (HIGH): the suppression decision reads each
@@ -2029,25 +2241,38 @@ namespace CompetitiveRounds
              */
             ffaCfgRankedBtn=UIFactory.CreateButton("FfaCfgRk",ffaSettingsRow.transform,"Ranked",16f,C_WHITE,C_BTN,
                 ()=>{if(!ApiClient.FfaLobbyIsHost){CompetitiveUI.ShowNotification("Only the host can change lobby settings.",C_DIM,3f);return;}
-                     ApiClient.FfaSetLobbySetting("is_ranked",0,!ApiClient.FfaLobbyCfgRanked,true);dirty=true;},sizeDelta:new Vector2(110,30));
+                     ApiClient.FfaSetLobbySetting("is_ranked",0,!ApiClient.FfaLobbyCfgRanked,true);dirty=true;},sizeDelta:new Vector2(110,28));
             var ffaCfgSp=new GameObject("FfaCfgSp");ffaCfgSp.transform.SetParent(ffaSettingsRow.transform,false);ffaCfgSp.AddComponent<RectTransform>();UIFactory.AddLE(ffaCfgSp,flexW:1);
             ffaSettingsRow.SetActive(false);
 
-            txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Browse open lobbies below, or create your own.",20f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,31));
+            /* Item 15: 20pt/31 -> the 2v2 status line's 17pt/24. FitOneLine because
+             * 24 / 17pt = 1.41 is exactly the #297 edge and this line is always
+             * translated; it owns its own VLG row, so unbounded overflow has no
+             * neighbour to paint over. */
+            txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Browse open lobbies below, or create your own.",17f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,24));
+            UIFactory.FitOneLine(txtFfaStatus);
 
             // Lobby panel: browser (open lobbies + Join buttons) when idle,
             // member list while sitting in one — RenderFfaLobbySection body.
             var lobbyPanel=UIFactory.CreatePanel("FfaQL",panel.transform,C_PANEL);
             UIFactory.AddVLG(lobbyPanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
             UIFactory.AddLE(lobbyPanel,flexH:0);
-            txtFfaLobbyHeader=UIFactory.CreateText("FfaQLH",lobbyPanel.transform,"<b>Open FFA Lobbies</b>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
+            /* Item 15: 21pt/29 -> the 2v2 panel-header scale, 16pt/22. Same 1.375
+             * ratio as before, so FitOneLine goes on for the same reason as the
+             * status line above (panel header, owns its row). */
+            txtFfaLobbyHeader=UIFactory.CreateText("FfaQLH",lobbyPanel.transform,"<b>Open FFA Lobbies</b>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,22));
+            UIFactory.FitOneLine(txtFfaLobbyHeader);
             ffaBrowserContainer=new GameObject("FfaBrowser");
             ffaBrowserContainer.transform.SetParent(lobbyPanel.transform,false);
             ffaBrowserContainer.AddComponent<RectTransform>();
             UIFactory.AddVLG(ffaBrowserContainer,spacing:3);
-            txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,$"<color=#888>{I18n.Tr("Loading...")}</color>",18f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,29));
+            /* Item 15: 18pt/29 -> 16pt/24 (the 2v2 browser body is 14pt/24). NOTE:
+             * RenderFfaLobbySection REWRITES this element's prefH/minH every
+             * refresh (`newH = n==0 ? 24 : 2`), so that constant had to move with
+             * this one or the first refresh would restore 29. */
+            txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,$"<color=#888>{I18n.Tr("Loading...")}</color>",16f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,24));
             var qlbC=txtFfaLobbyBody as Component;
-            if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:29,minH:29,flexH:0);
+            if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:24,minH:24,flexH:0);
             UIFactory.SetWordWrap(txtFfaLobbyBody,true);
 
             // Live FFA betting. Hidden until /ffa/bettable returns at least
@@ -2055,9 +2280,10 @@ namespace CompetitiveRounds
             ffaBetPanel=UIFactory.CreatePanel("FfaBetPanel",panel.transform,C_PANEL);
             UIFactory.AddVLG(ffaBetPanel,spacing:3,padL:10,padR:10,padT:6,padB:7);
             UIFactory.AddLE(ffaBetPanel,flexH:0);
-            UIFactory.CreateText("FfaBetHeader",ffaBetPanel.transform,
-                "<b>Bet on Live FFA Lobbies</b>",21f,C_SUB,UIFactory.AlignMidLeft,
-                sizeDelta:new Vector2(1035,29));
+            /* Item 15: 21pt/29 -> 16pt/22, same as the lobby panel header. */
+            UIFactory.FitOneLine(UIFactory.CreateText("FfaBetHeader",ffaBetPanel.transform,
+                "<b>Bet on Live FFA Lobbies</b>",16f,C_SUB,UIFactory.AlignMidLeft,
+                sizeDelta:new Vector2(1035,22)));
             ffaBetContainer=new GameObject("FfaBetLobbies");
             ffaBetContainer.transform.SetParent(ffaBetPanel.transform,false);
             ffaBetContainer.AddComponent<RectTransform>();
@@ -2068,33 +2294,67 @@ namespace CompetitiveRounds
             // (right, flex). Fixed prefH inside the outer scroll — never
             // flexH:1 (learning #63).
             var bottom=new GameObject("FfaBot");bottom.transform.SetParent(panel.transform,false);bottom.AddComponent<RectTransform>();
-            // prefH 936 -> 1300 (item 6): the right column now stacks TWO
-            // recent lists (ranked + casual). Fixed height per #63 — the
-            // inner scrolls carry their own fixed prefH below.
-            UIFactory.AddHLG(bottom,spacing:8);UIFactory.AddLE(bottom,prefH:1300,minH:520,flexH:0);
+            /* Item 15 — bottom-row height budget, RE-DERIVED (not copied from
+             * 2v2's 720: this tab's right column stacks TWO lists where 2v2 has
+             * one, so a blind 720 would have squeezed both).
+             *
+             *   right column (VLG spacing 4, 3 gaps = 12):
+             *       ranked header row   26   (2v2's THHR)
+             *     + ranked scroll      456   prefH, flexH:1 (absorbs any remainder)
+             *     + casual header row   26
+             *     + casual scroll      260   prefH, flexH:0
+             *     + spacing             12
+             *     = 780
+             *
+             *   left column (VLG spacing 4, 2 gaps = 8):
+             *       LB header            24
+             *     + LB column-header row 24
+             *     + spacing               8   = 56 of fixed overhead
+             *     -> LB scroll (flexH:1) = 780 - 56 = 724, i.e. 31 rows at
+             *        22 prefH + the LB ScrollView's 1px spacing (2v2's own
+             *        664 shows 28 at the same row pitch, so the two tables now
+             *        read at the same density).
+             *
+             * Both scrolls keep an explicit prefH so #63's flex-inside-a-ScrollView
+             * collapse cannot happen, and the two columns sum to exactly 780 so
+             * nothing is compressed into its neighbour (#199/#245). minH is 540,
+             * not the old 520: the right column's own floor is
+             * 26 + 280 + 26 + 180 + 12 = 524, and a row minimum BELOW its
+             * children's would let the two lists overlap under height pressure. */
+            UIFactory.AddHLG(bottom,spacing:8);UIFactory.AddLE(bottom,prefH:780,minH:540,flexH:0);
 
             var lbCol=new GameObject("FfaLBCol");lbCol.transform.SetParent(bottom.transform,false);lbCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(lbCol,spacing:4);
             // flexW:0 explicit + load-bearing (learning #132 — rows inside
             // would otherwise bubble flexW up and stretch the column).
             UIFactory.AddLE(lbCol,prefW:793,minW:736,flexW:0,flexH:1);
-            txtFfaLbHeader=UIFactory.CreateText("FfaLBH",lbCol.transform,"<b>FFA Leaderboard</b>",23f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(575,31));/* item 7c sweep (#297): box under ~1.4x the font size, translated content. */UIFactory.FitOneLine(txtFfaLbHeader);
+            /* Item 15: 23pt/575x31 -> the 2v2 leaderboard header's 18pt/x24. The
+             * WIDTH stays 575 (2v2 uses 560) because this header is rewritten with
+             * a composed "(N players)" suffix at refresh; only the scale changes. */
+            txtFfaLbHeader=UIFactory.CreateText("FfaLBH",lbCol.transform,"<b>FFA Leaderboard</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(575,24));/* item 7c sweep (#297): box under ~1.4x the font size, translated content. */UIFactory.FitOneLine(txtFfaLbHeader);
             var lbHdrRow=new GameObject("FfaLBHR");lbHdrRow.transform.SetParent(lbCol.transform,false);lbHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(lbHdrRow,spacing:4,padL:8,padR:8);UIFactory.AddLE(lbHdrRow,prefH:31,minH:31,flexH:0);
+            UIFactory.AddHLG(lbHdrRow,spacing:4,padL:8,padR:8);UIFactory.AddLE(lbHdrRow,prefH:24,minH:24,flexH:0);
             string[] hdrLabels=new[]{I18n.Tr("#"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("Games"),I18n.Tr("Wins"),I18n.Tr("Top3"),I18n.Tr("AvgPl"),I18n.Tr("WR")};
             string[] hdrSortKey=new[]{null,null,"rating","games","wins","top3","avg_placement","win_rate"};
             ffaLbSortBtns=new List<GameObject>();ffaLbSortKeys=hdrSortKey;ffaLbHeaderTexts=new object[hdrLabels.Length];
             for(int hi=0;hi<hdrLabels.Length;hi++)
             {
                 int idx=hi;
+                /* Item 15: header cells 17pt -> the 2v2 table's 13pt, in the SAME
+                 * FFA_LB_COL_W widths. The FFA columns are not the 2v2 columns
+                 * (Top3/AvgPl vs Avg Mate Elo/Gold/XP), so adopting TLB_COL_W
+                 * would have clipped them; keeping FFA's own widths at the smaller
+                 * font is strictly roomier than today — uk "AvgPl" is 10 chars,
+                 * which needed ~98px at 17pt in an 82px cell (already clipping)
+                 * and needs ~75px at 13pt. */
                 if(hdrSortKey[hi]==null)
                 {
-                    var lbl=UIFactory.CreateText($"FfaLBH_{hi}",lbHdrRow.transform,hdrLabels[hi],17f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
+                    var lbl=UIFactory.CreateText($"FfaLBH_{hi}",lbHdrRow.transform,hdrLabels[hi],13f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
                     ffaLbHeaderTexts[hi]=lbl;ffaLbSortBtns.Add(null);
                 }
                 else
                 {
-                    var b=UIFactory.CreateButton($"FfaLBS_{hdrSortKey[hi]}",lbHdrRow.transform,hdrLabels[hi],17f,C_LABEL,new Color(0.18f,0.20f,0.24f,0.85f),
+                    var b=UIFactory.CreateButton($"FfaLBS_{hdrSortKey[hi]}",lbHdrRow.transform,hdrLabels[hi],13f,C_LABEL,new Color(0.18f,0.20f,0.24f,0.85f),
                         ()=>{ffaLbSortReq=hdrSortKey[idx];dirty=true;ApiClient.FetchFfaLeaderboard(200,hdrSortKey[idx]);},
                         sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
                     ffaLbSortBtns.Add(b);ffaLbHeaderTexts[hi]=UIFactory.GetButtonText(b);
@@ -2110,21 +2370,28 @@ namespace CompetitiveRounds
             var rCol=new GameObject("FfaRCol");rCol.transform.SetParent(bottom.transform,false);rCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(rCol,spacing:4);UIFactory.AddLE(rCol,flexW:1,flexH:1);
             var rHdrRow=new GameObject("FfaRHR");rHdrRow.transform.SetParent(rCol.transform,false);rHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:34,minH:34,flexH:0);
+            /* Item 15: header row 34 -> the 2v2 history header row's 26, and the
+             * pager to 2v2's 28x22 / 48x22 at 13pt. */
+            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:26,minH:26,flexH:0);
             // 345 -> 540 (item 8): the refresh composition "(NN total)" needs
             // ~380+ units at 23pt bold and was truncating at "(65 tot"; the
-            // header row's flex spacer absorbs the growth.
-            txtFfaRecentHeader=UIFactory.CreateText("FfaRH",rHdrRow.transform,"<b>Recent Ranked FFAs</b>",23f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(540,34));
+            // header row's flex spacer absorbs the growth. Width KEPT at 540 by
+            // item 15 (the 2v2 sibling is 460): the suffix is still composed, and
+            // this box has 28-char translations to hold. FitOneLine because 26 /
+            // 18pt = 1.44 is the #297 edge and the next sibling is the spacer.
+            txtFfaRecentHeader=UIFactory.CreateText("FfaRH",rHdrRow.transform,"<b>Recent Ranked FFAs</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(540,26));
+            UIFactory.FitOneLine(txtFfaRecentHeader);
             var rSp=new GameObject("FfaRSp");rSp.transform.SetParent(rHdrRow.transform,false);rSp.AddComponent<RectTransform>();UIFactory.AddLE(rSp,flexW:1);
-            ffaRecentPrevBtn=UIFactory.CreateButton("FfaRP",rHdrRow.transform,"<",17f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ffaRecentPageReq=Math.Max(0,ffaRecentPageReq-1);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(32,29));
-            txtFfaRecentPage=UIFactory.CreateText("FfaRPI",rHdrRow.transform,"1/1",17f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(55,29));
-            ffaRecentNextBtn=UIFactory.CreateButton("FfaRN",rHdrRow.transform,">",17f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ffaRecentPageReq+=1;ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(32,29));
+            ffaRecentPrevBtn=UIFactory.CreateButton("FfaRP",rHdrRow.transform,"<",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentPageReq=Math.Max(0,ffaRecentPageReq-1);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(28,22));
+            txtFfaRecentPage=UIFactory.CreateText("FfaRPI",rHdrRow.transform,"1/1",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(48,22));
+            ffaRecentNextBtn=UIFactory.CreateButton("FfaRN",rHdrRow.transform,">",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentPageReq+=1;ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(28,22));
             var rScroll=UIFactory.CreateScrollView("FfaRSV",rCol.transform,spacing:2);
             // Fixed prefH + flexH:1 (prefH present so #63's collapse can't
-            // happen; flex absorbs the remainder of the fixed 1300 bottom).
-            UIFactory.AddLE(rScroll.scrollGO,prefH:620,minH:300,flexH:1);
+            // happen; flex absorbs any remainder of the fixed bottom row).
+            // 620 -> 456 per the height budget worked out on FfaBot above.
+            UIFactory.AddLE(rScroll.scrollGO,prefH:456,minH:280,flexH:1);
             ffaRecentContainer=rScroll.content;
             ffaRecentViewport=rScroll.content.transform.parent as RectTransform;
             ffaRecentScrollRect=rScroll.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
@@ -2132,16 +2399,19 @@ namespace CompetitiveRounds
             // ── Recent Casual FFAs (item 6): mirrors the ranked section with
             // its own header/pager/scroll/pool against the casual caches. ──
             var cHdrRow=new GameObject("FfaCHR");cHdrRow.transform.SetParent(rCol.transform,false);cHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(cHdrRow,spacing:6);UIFactory.AddLE(cHdrRow,prefH:34,minH:34,flexH:0);
-            txtFfaRecentCasHeader=UIFactory.CreateText("FfaCH",cHdrRow.transform,"<b>Recent Casual FFAs</b>",23f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(540,34));
+            // Item 15: mirrors the ranked block above, same numbers.
+            UIFactory.AddHLG(cHdrRow,spacing:6);UIFactory.AddLE(cHdrRow,prefH:26,minH:26,flexH:0);
+            txtFfaRecentCasHeader=UIFactory.CreateText("FfaCH",cHdrRow.transform,"<b>Recent Casual FFAs</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(540,26));
+            UIFactory.FitOneLine(txtFfaRecentCasHeader);
             var cSp=new GameObject("FfaCSp");cSp.transform.SetParent(cHdrRow.transform,false);cSp.AddComponent<RectTransform>();UIFactory.AddLE(cSp,flexW:1);
-            ffaRecentCasPrevBtn=UIFactory.CreateButton("FfaCP",cHdrRow.transform,"<",17f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ffaRecentCasPageReq=Math.Max(0,ffaRecentCasPageReq-1);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);},sizeDelta:new Vector2(32,29));
-            txtFfaRecentCasPage=UIFactory.CreateText("FfaCPI",cHdrRow.transform,"1/1",17f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(55,29));
-            ffaRecentCasNextBtn=UIFactory.CreateButton("FfaCN",cHdrRow.transform,">",17f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ffaRecentCasPageReq+=1;ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);},sizeDelta:new Vector2(32,29));
+            ffaRecentCasPrevBtn=UIFactory.CreateButton("FfaCP",cHdrRow.transform,"<",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentCasPageReq=Math.Max(0,ffaRecentCasPageReq-1);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);},sizeDelta:new Vector2(28,22));
+            txtFfaRecentCasPage=UIFactory.CreateText("FfaCPI",cHdrRow.transform,"1/1",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(48,22));
+            ffaRecentCasNextBtn=UIFactory.CreateButton("FfaCN",cHdrRow.transform,">",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentCasPageReq+=1;ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);},sizeDelta:new Vector2(28,22));
             var cScroll=UIFactory.CreateScrollView("FfaCSV",rCol.transform,spacing:2);
-            UIFactory.AddLE(cScroll.scrollGO,prefH:340,minH:200,flexH:0);
+            // 340 -> 260 per the FfaBot height budget.
+            UIFactory.AddLE(cScroll.scrollGO,prefH:260,minH:180,flexH:0);
             ffaRecentCasContainer=cScroll.content;
             ffaRecentCasViewport=cScroll.content.transform.parent as RectTransform;
             ffaRecentCasScrollRect=cScroll.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
@@ -2153,21 +2423,28 @@ namespace CompetitiveRounds
             var row=new FfaLBRow();
             row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();
             UIFactory.AddHLG(row.root,spacing:4,padL:8,padR:8);
-            UIFactory.AddLE(row.root,prefH:29,minH:29,flexH:0);
-            row.txtRank  =UIFactory.CreateText("r", row.root.transform,"",20f,C_GOLD, UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[0],22));
-            row.txtName  =UIFactory.CreateText("n", row.root.transform,"",20f,C_WHITE,UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[1],22));
+            /* Item 15: row 29 -> 22 and cells 20/18pt -> the 2v2 table's 15/14pt.
+             * The cell BOXES were already 22 tall, so the old 20pt cells sat at a
+             * 1.1 line-box ratio — a Cyrillic name (OS fallback, taller metrics)
+             * did not fit and the global Truncate default dropped the whole cell
+             * (#297). 15pt/22 is the ratio the 2v2 table has always shipped. */
+            UIFactory.AddLE(row.root,prefH:22,minH:22,flexH:0);
+            // Aug 12 item 2c: podium row tint (the 1v1 board's hlWrap equivalent).
+            AddRowBackground(row.root);
+            row.txtRank  =UIFactory.CreateText("r", row.root.transform,"",15f,C_GOLD, UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[0],22));
+            row.txtName  =UIFactory.CreateText("n", row.root.transform,"",15f,C_WHITE,UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[1],22));
             // Truncate (mode 3), not the TMP default Overflow: a long
             // "name [title]" combo was painting straight into the Rating
             // column (galaxy ice report, July 29). Not Ellipsis — Gravity
             // has no '…' glyph (#47) and would render a square.
             UIFactory.SetOverflowMode(row.txtName,3);
-            row.txtRating=UIFactory.CreateText("rt",row.root.transform,"",20f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[2],22));
+            row.txtRating=UIFactory.CreateText("rt",row.root.transform,"",15f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[2],22));
             UIFactory.SetBold(row.txtRating,true);
-            row.txtGames =UIFactory.CreateText("g", row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[3],22));
-            row.txtWins  =UIFactory.CreateText("w", row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[4],22));
-            row.txtTop3  =UIFactory.CreateText("t3",row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[5],22));
-            row.txtAvgPl =UIFactory.CreateText("ap",row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[6],22));
-            row.txtWR    =UIFactory.CreateText("wr",row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[7],22));
+            row.txtGames =UIFactory.CreateText("g", row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[3],22));
+            row.txtWins  =UIFactory.CreateText("w", row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[4],22));
+            row.txtTop3  =UIFactory.CreateText("t3",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[5],22));
+            row.txtAvgPl =UIFactory.CreateText("ap",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[6],22));
+            row.txtWR    =UIFactory.CreateText("wr",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[7],22));
             row.root.SetActive(false);
             return row;
         }
@@ -2445,7 +2722,24 @@ namespace CompetitiveRounds
         private static string BuildFfaCardsText(ApiClient.FfaRecentPlayer player,out string hoverText)
         {
             hoverText=null;
-            if(player?.cards==null||player.cards.Count==0)return "";
+            if(player==null)return "";
+            /* Round-2 HIGH, FFA sibling (#279 — the same defect the 1v1 and 2v2
+             * halves were reported for, in the mode whose "(hover for build)"
+             * wording the other two now copy). This used to return "" on an
+             * empty card list, BEFORE the build was even decoded, so a
+             * participant who never picked a card had their stored build
+             * dropped and their cards line hidden entirely — no surface at all.
+             * The build is therefore decoded FIRST and a card-less player still
+             * gets a line, because the line is what the hover scan hit-tests
+             * (cardsGO must be active and non-empty for the region to exist). */
+            string buildOnly=BuildStatsTipBlock(player.end_stats,BUILD_TIP_WIDE_COLS);
+            if(player.cards==null||player.cards.Count==0)
+            {
+                if(buildOnly.Length==0)return "";
+                hoverText=buildOnly;
+                return "    <color=#667788>"+I18n.Tr("Cards:")+"</color> "
+                      +I18n.Tr("<color=#667788>none</color>  <color=#556270>(hover for build)</color>");
+            }
             int rolled=0;
             var sb=new StringBuilder("    <color=#667788>"+I18n.Tr("Cards:")+"</color> ");
             bool firstHeld=true;
@@ -2458,10 +2752,17 @@ namespace CompetitiveRounds
                 sb.Append("<color=#8FA0B0>").Append(FfaSafeRich(card?.name??"?")).Append("</color>");
             }
             if(firstHeld)sb.Append(I18n.Tr("<color=#667788>none held</color>"));
+            // Aug 12 item 1: the FFA tab draws its own 470px tooltip
+            // (DrawFfaCardsTooltip) which measures with CalcHeight, so it takes
+            // the WIDE column budget. Decoded above the empty-hand branch
+            // because whether a build exists decides which affordance the line
+            // needs — a tooltip nobody is told about is a tooltip nobody opens.
+            string build=buildOnly;
+            var hv=new StringBuilder();
             if(rolled>0)
             {
                 sb.Append("  ").Append(I18n.TrF("<color=#FF6666>+{0} replaced</color> <color=#556270>(hover)</color>",rolled));
-                var hv=new StringBuilder(I18n.Tr("All picks (oldest first) - red = replaced:")).Append('\n');
+                hv.Append(I18n.Tr("All picks (oldest first) - red = replaced:")).Append('\n');
                 int onLine=0;
                 for(int i=0;i<player.cards.Count;i++)
                 {
@@ -2472,8 +2773,17 @@ namespace CompetitiveRounds
                       .Append(FfaSafeRich(card?.name??"?")).Append("</color>");
                     if(++onLine>=4&&i<player.cards.Count-1){hv.Append('\n');onLine=0;}
                 }
-                hoverText=hv.ToString();
             }
+            else if(build.Length>0)
+            {
+                sb.Append("  ").Append(I18n.Tr("<color=#556270>(hover for build)</color>"));
+            }
+            if(build.Length>0)
+            {
+                if(hv.Length>0)hv.Append('\n');
+                hv.Append(build);
+            }
+            if(hv.Length>0)hoverText=hv.ToString();
             return sb.ToString();
         }
 
@@ -2783,7 +3093,19 @@ namespace CompetitiveRounds
                 if(player!=null&&(player.bullets_fired>0||player.blocks_activated>0
                                   ||player.fps_avg>0||player.ping_avg>0))
                     height+=19f;
-                if(player?.cards==null||player.cards.Count==0)continue;
+                if(player==null)continue;
+                if(player.cards==null||player.cards.Count==0)
+                {
+                    // Round-2 HIGH sibling: a card-less player with a stored
+                    // build now DOES render a cards line ("none (hover for
+                    // build)"), so the estimate has to count it or the inner
+                    // scroll is sized for content that is there (#199 in the
+                    // direction the old `continue` got away with). Presence,
+                    // not a decode: an undecodable wire over-counts by 20px,
+                    // which costs a sliver of scroll and never overpaints.
+                    if(!string.IsNullOrEmpty(player.end_stats))height+=20f;
+                    continue;
+                }
                 // Inline line = held cards only (rolled ones collapse into a
                 // "+N replaced" chip) — count what actually renders.
                 int chars=11;
@@ -2851,6 +3173,17 @@ namespace CompetitiveRounds
         // Per-section variant (item 6): casual rows must clip against THEIR
         // list mask, not the ranked one — callers pass row.ownerViewport.
         private static bool TryGetFfaViewportClippedRect(RectTransform target,RectTransform listViewport,out Rect rect)
+            => TryGetMaskedScreenRect(target,listViewport,ffaTabOuterViewport,out rect);
+
+        /// <summary>Screen rect of `target` clipped to the two scroll masks
+        /// that can hide it: its own list viewport and the whole-tab outer
+        /// viewport. Both are parameters because the 1v2 tab has the identical
+        /// two-mask nesting and had no clipping helper of its own — a raw rect
+        /// test ignores mask clipping entirely (#185), so a row scrolled under
+        /// either edge would keep a live hover region over whatever is drawn
+        /// there.</summary>
+        private static bool TryGetMaskedScreenRect(RectTransform target,RectTransform listViewport,
+                                                   RectTransform outerViewport,out Rect rect)
         {
             rect=default(Rect);
             if(!TryGetFfaScreenRect(target,out Rect raw))return false;
@@ -2863,7 +3196,7 @@ namespace CompetitiveRounds
                 if(xMax<=xMin||yMax<=yMin)return false;
                 raw=new Rect(xMin,yMin,xMax-xMin,yMax-yMin);
             }
-            if(ffaTabOuterViewport!=null&&TryGetFfaScreenRect(ffaTabOuterViewport,out Rect oclip))
+            if(outerViewport!=null&&TryGetFfaScreenRect(outerViewport,out Rect oclip))
             {
                 float xMin=Mathf.Max(raw.xMin,oclip.xMin);
                 float xMax=Mathf.Min(raw.xMax,oclip.xMax);
@@ -3028,8 +3361,27 @@ namespace CompetitiveRounds
         private static GUIStyle ffaCardsTipStyle;
         private static string ffaCardsTipCachedText;
         private static float ffaCardsTipCachedHeight;
+        private static string ffaCardsTipCachedDrawn;
+        private static int ffaCardsTipCachedScreenH;
         private static void DrawFfaCardsTooltip(string tip,Vector2 mouse)
+            => DrawWideTooltip(tip,mouse,470f);
+
+        /// <summary>The FFA-style measured tooltip, shared with the 1v2 recent
+        /// panel. Fixed width, height MEASURED with CalcHeight rather than
+        /// modelled from a line count (#237: a wrapped or localised line breaks
+        /// any row model), memoised on (content, screen height) so the
+        /// per-Repaint cost is one reference compare and one int compare
+        /// (#162).
+        ///
+        /// A body taller than the screen is ELIDED from the end with a visible
+        /// "+N more lines" marker rather than drawn off the bottom. The old
+        /// version clamped the box's Y to >= 8 and stopped there, which keeps
+        /// the TOP on screen and silently loses the tail — the exact shape
+        /// #351/#245 warn about, and reachable here because a 1v2 series can
+        /// carry three games x three players of build lines.</summary>
+        private static void DrawWideTooltip(string tip,Vector2 mouse,float width)
         {
+            if(string.IsNullOrEmpty(tip))return;
             if(ffaCardsTipStyle==null)
             {
                 ffaCardsTipStyle=new GUIStyle(GUI.skin.label)
@@ -3039,19 +3391,44 @@ namespace CompetitiveRounds
                 };
                 ffaCardsTipStyle.normal.textColor=Color.white;
             }
-            const float width=470f,pad=10f;
-            // CalcHeight is exact but too expensive to re-run per Repaint over
-            // a long list (#237) — cache by content (only one tooltip can be
-            // hovered at a time, so a single slot suffices).
-            if(!ReferenceEquals(tip,ffaCardsTipCachedText))
+            const float pad=10f;
+            float maxH=Mathf.Max(80f,Screen.height-16f-pad*2f);
+            // Only one tooltip can be hovered at a time, so a single slot
+            // suffices. Screen height is part of the key because it bounds the
+            // elision — a window resize must re-measure.
+            if(!ReferenceEquals(tip,ffaCardsTipCachedText)||ffaCardsTipCachedScreenH!=Screen.height)
             {
                 ffaCardsTipCachedText=tip;
+                ffaCardsTipCachedScreenH=Screen.height;
+                ffaCardsTipCachedDrawn=tip;
                 ffaCardsTipCachedHeight=ffaCardsTipStyle.CalcHeight(new GUIContent(tip),width-pad*2f);
+                if(ffaCardsTipCachedHeight>maxH)
+                {
+                    // Bounded shrink: drop trailing lines until it fits, then
+                    // say how many went. Halving the search would be faster and
+                    // is not worth it — this runs once per hovered row, and the
+                    // marker line must be measured WITH the body it labels.
+                    var all=tip.Split('\n');
+                    var lines=new List<string>(all);
+                    while(lines.Count>1&&ffaCardsTipCachedHeight>maxH)
+                    {
+                        int drop=Mathf.Max(1,lines.Count/12);
+                        int cut=Mathf.Min(drop,lines.Count-1);
+                        lines.RemoveRange(lines.Count-cut,cut);
+                        int hidden=all.Length-lines.Count;
+                        ffaCardsTipCachedDrawn=string.Join("\n",lines.ToArray())
+                            +"\n<color=#8FA3B8>"+I18n.TrF("+{0} more lines",hidden)+"</color>";
+                        ffaCardsTipCachedHeight=ffaCardsTipStyle.CalcHeight(
+                            new GUIContent(ffaCardsTipCachedDrawn),width-pad*2f);
+                    }
+                }
             }
+            string drawn=ffaCardsTipCachedDrawn??tip;
             float h=ffaCardsTipCachedHeight+pad*2f;
-            // Clamp BOTH edges: an extreme list can measure taller than the
-            // screen, and the Min alone would then place the box at negative
-            // Y (Codex Jul-29 find 9).
+            // Clamp BOTH edges: the Min alone would place a tall box at
+            // negative Y (Codex Jul-29 find 9). With the elision above the box
+            // now also FITS, so the clamp is no longer load-bearing for
+            // legibility — it is the belt to the elision's braces.
             float x=Mathf.Max(8f,Mathf.Min(mouse.x+18f,Screen.width-width-8f));
             float y=Mathf.Max(8f,Mathf.Min(mouse.y+14f,Screen.height-h-8f));
             var box=new Rect(x,y,width,h);
@@ -3059,7 +3436,7 @@ namespace CompetitiveRounds
             GUI.color=new Color(0.07f,0.08f,0.10f,0.96f);
             GUI.DrawTexture(box,Texture2D.whiteTexture);
             GUI.color=prev;
-            GUI.Label(new Rect(box.x+pad,box.y+pad,width-pad*2f,ffaCardsTipCachedHeight),tip,ffaCardsTipStyle);
+            GUI.Label(new Rect(box.x+pad,box.y+pad,width-pad*2f,ffaCardsTipCachedHeight),drawn,ffaCardsTipStyle);
         }
 
         // 2s queue traffic rides the internal throttles; recent + bets 10s,
@@ -3068,6 +3445,8 @@ namespace CompetitiveRounds
         private static void MaybeRefreshFfaTab()
         {
             if(currentTab!=12)return;
+            // Aug 12 item 2c: podium glitter on the FFA board (0.7s internal tick).
+            TickPodiumSparkle();
             // One-shot membership discovery on first tab visit (design review
             // find 6): a relaunched client whose server row survived must
             // find it before offering Create.
@@ -3101,6 +3480,34 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Item 7: widen/narrow the FFA Start button to whatever label it
+        /// is currently showing. The three labels differ by ~35 characters
+        /// ("Start Game (5/10)" vs uk's 51-char "Start unlocks in 60s (settings
+        /// changed)"), so no single constant can serve both without either
+        /// clipping the countdown or leaving a comically wide button at rest.
+        ///
+        /// Measurement, not a character budget: TMP is asked for the width of the
+        /// exact string it will lay out — same font, same size, same rich-text
+        /// parsing, and (crucially) the same OS-fallback atlas for Cyrillic, whose
+        /// advances differ from Gravity's (#110/#297). A character estimate is the
+        /// fallback ONLY if the reflection target is missing, and it is deliberately
+        /// pessimistic (10 px/char at 16 pt) so the fallback errs wide.
+        ///
+        /// Safe by construction on both sides: the row's children in this state are
+        /// Start + Leave = ~320 px inside ~1824 px, so growth is free (learning
+        /// #245's budget check), and the cap stops a bad translation from pushing
+        /// Leave off-row.</summary>
+        private static void SizeFfaStartButton(object startTxt,string label)
+        {
+            if(ffaStartBtn==null)return;
+            // SetText/SetTextRaw wrap in <b>, and rich text is on, so measure the
+            // wrapped form — the tags are parsed, not measured, but the bold face
+            // they select is wider than the regular one.
+            float w=UIFactory.MeasureTextWidth(startTxt,"<b>"+label+"</b>");
+            if(w<=0f)w=(label??"").Length*10f;
+            UIFactory.SetPrefW(ffaStartBtn,Mathf.Clamp(w+24f,FFA_START_BTN_W,FFA_START_BTN_MAX));
+        }
+
         private static void RefreshFfaTab()
         {
             bool polling=ApiClient.IsFfaQueuePolling;
@@ -3124,11 +3531,16 @@ namespace CompetitiveRounds
                     // Bug 163: "Start in {0}s" read as an AUTO-start countdown; it
                     // is actually the settings-change lockout re-arming the 60s
                     // start gate. Name the mechanism so hosts don't panic-wait.
-                    UIFactory.SetText(UIFactory.GetButtonText(ffaStartBtn),
+                    string startLbl=
                         lockS>0.5f?I18n.TrF("Start unlocks in {0}s (settings changed)",Mathf.CeilToInt(lockS))
                         :ApiClient.FfaLobbyCanStart
                         ?I18n.TrF("Start Game ({0}/{1})",ApiClient.FfaLobbyMemberCount,ApiClient.FfaLobbyMaxPlayers)
-                        :I18n.TrF("Start (need {0}+)",ApiClient.FfaLobbyMinPlayers));
+                        :I18n.TrF("Start (need {0}+)",ApiClient.FfaLobbyMinPlayers);
+                    object startTxt=ffaStartBtnTxt??UIFactory.GetButtonText(ffaStartBtn);
+                    // Raw: the three branches are already translated by TrF, and
+                    // a formatted string can never match a catalogue key anyway.
+                    UIFactory.SetTextRaw(startTxt,startLbl);
+                    SizeFfaStartButton(startTxt,startLbl);
                 }
             }
             // v1.36 settings row: values for everyone, controls host-only.
@@ -3199,6 +3611,8 @@ namespace CompetitiveRounds
                         UIFactory.SetImageColor(ffaLbSortBtns[hi],active?new Color(0.38f,0.30f,0.10f,0.98f):new Color(0.18f,0.20f,0.24f,0.85f));
                 }
             }
+            // Aug 12 item 2c: rebuilt every fill, like the 1v1 board's.
+            _podiumFfaRows.Clear();
             for(int i=0;i<ffaLbRows.Count;i++)
             {
                 var row=ffaLbRows[i];
@@ -3214,9 +3628,15 @@ namespace CompetitiveRounds
                 if(!string.IsNullOrEmpty(e.title))
                 {
                     string col=string.IsNullOrEmpty(e.title_color)?"#FFD94D":e.title_color;
-                    nameDisplay=IsPodiumTitle(e.title)
-                        ?$"{nameDisplay} {PodiumSparkleSpan(e.title,col,0)}"
-                        :$"{nameDisplay} <color={col}>[{Trunc(e.title,12)}]</color>";
+                    if(IsPodiumTitle(e.title))
+                    {
+                        // Aug 12 item 2c: animated tick, not frozen at 0; and
+                        // the tick entry stores the same de-prefixed text.
+                        string ttl=PodiumTitleOnOwnBoard(e.title,"FFA");
+                        _podiumFfaRows.Add(new object[]{row.txtName,nameDisplay,ttl,col});
+                        nameDisplay=$"{nameDisplay} {PodiumSparkleSpan(ttl,col,_podiumTick)}";
+                    }
+                    else nameDisplay=$"{nameDisplay} <color={col}>[{Trunc(e.title,12)}]</color>";
                 }
                 UIFactory.SetTextRaw(row.txtName,nameDisplay);
                 UIFactory.SetColor(row.txtName,me?C_GREEN:C_WHITE);
@@ -3227,13 +3647,21 @@ namespace CompetitiveRounds
                 UIFactory.SetText(row.txtTop3,$"{e.top3}");
                 UIFactory.SetText(row.txtAvgPl,e.avg_placement>0f?$"{e.avg_placement:F1}":"-");
                 UIFactory.SetText(row.txtWR,$"{e.win_rate*100f:F0}%");
+                // Aug 12 item 2c: podium tint + readability outline.
+                UIFactory.SetImageColor(row.root,PodiumRowTint(e.rank));
+                SetFfaLbRowOutline(row,e.rank<=3);
                 row.root.SetActive(true);
             }
             if(txtFfaLbHeader!=null)
                 UIFactory.SetTextRaw(txtFfaLbHeader,lb.Count==0
                     ?I18n.Tr("<b>FFA Leaderboard</b>  <color=#888>- no ranked FFAs yet</color>")
                     :I18n.TrF("<b>FFA Leaderboard</b>  <color=#888>({0} ranked)</color>",lb.Count));
-            ToggleInnerScroll(ffaLbScrollRect,Math.Min(lb.Count,ffaLbRows.Count)*30f);
+            // 30f -> 23f: this estimate is (CreateFfaLBRow's prefH) + (the LB
+            // ScrollView's spacing of 1), and item 15 took the row 29 -> 22. Left
+            // stale it would over-report content height and keep the inner
+            // ScrollRect enabled on a list that fits, stealing the wheel from the
+            // outer tab scroll (bug #76's mechanism).
+            ToggleInnerScroll(ffaLbScrollRect,Math.Min(lb.Count,ffaLbRows.Count)*23f);
 
             // F2: the recent rows below RE-REGISTER their Hit/Block/FPS/ping
             // hover regions on every dirty refresh, and the region lists were
@@ -3499,7 +3927,9 @@ namespace CompetitiveRounds
                         :lobbies==null?$"<color=#888>{I18n.Tr("Loading...")}</color>"
                                       :"<color=#888>No open lobbies — create one and invite players on Discord!</color>")
                     :"");
-                newH=n==0?29:2;
+                // Item 15: 29 -> 24, in lockstep with the build-time height of
+                // txtFfaLobbyBody in BuildFfaTab (this write wins otherwise).
+                newH=n==0?24:2;
             }
             var bodyComp=txtFfaLobbyBody as Component;
             if(bodyComp!=null)
@@ -3913,6 +4343,25 @@ namespace CompetitiveRounds
         private static readonly List<object> ovtSoloLbRows = new List<object>();
         private static readonly List<object> ovtDuoLbRows = new List<object>();
         private static readonly List<object> ovtRecentRows = new List<object>();
+        /* Round-2 HIGH: the 1v2 recent panel parsed end_stats_by_steam and then
+         * threw it away — no build surface at all for the mode. Parallel to
+         * ovtRecentRows, one pre-formatted hover body per SERIES row.
+         *
+         * Per SERIES and not per player because the panel renders a whole
+         * series as ONE text element: its per-player card lines are lines
+         * INSIDE that element, and there is no honest way to hit-test a line.
+         * The row's height arithmetic (lines*24) is a LayoutElement budget, not
+         * TMP's laid-out line height, so mapping a mouse Y onto a line index
+         * drifts a little further with every line and would eventually attribute
+         * one player's build to another — silently, and wrongly. One region per
+         * series, body grouped by game then player, is the version that cannot
+         * lie; DrawWideTooltip bounds the height. */
+        private static readonly List<string> ovtRecentHoverBodies = new List<string>();
+        private static RectTransform ovtRecentViewport, ovtTabOuterViewport;
+        private sealed class OneVTwoHoverDrawer : MonoBehaviour
+        {
+            private void OnGUI() { DrawOvtRecentHover(); }
+        }
         public static int ovtRecentPageReq = 0;
         private static GameObject BuildOneVTwoTab(Transform parent,int tabIdx)
         {
@@ -3923,21 +4372,39 @@ namespace CompetitiveRounds
             // here than on 2v2 — the "sub-tabs drift down as you click
             // through 2v2/1v2/FFA" report.
             var outer=new GameObject("OneVTwoOuter");outer.transform.SetParent(parent,false);outer.AddComponent<RectTransform>();
+            /* Round-2 HIGH: the recent-1v2 build hover. Its own drawer, on THIS
+             * tab's outer — the FFA drawer lives on the FFA tab's outer, and
+             * SwitchTab deactivates every other tab's panel, so an OnGUI over
+             * there cannot run while tab 11 is showing. */
+            outer.AddComponent<OneVTwoHoverDrawer>();
+            EnsureFfaWorldToScreenPoint();
             UIFactory.AddVLG(outer,spacing:0);UIFactory.AddLE(outer,flexH:1);
             MakeSubTabAnchor(tabIdx,outer.transform,true);
             // Whole tab in a ScrollView (2v2 pattern) so the boards/recent row
             // below stays reachable at any aspect (learning #199).
             var o1Scroll=UIFactory.CreateScrollView("OneVTwoScroll",outer.transform,spacing:6);
             UIFactory.AddLE(o1Scroll.scrollGO,flexH:1);
+            ovtTabOuterViewport=o1Scroll.content.transform.parent as RectTransform;
             var panel=new GameObject("OneVTwo");panel.transform.SetParent(o1Scroll.content.transform,false);panel.AddComponent<RectTransform>();
-            UIFactory.AddVLG(panel,spacing:8,padL:20,padR:10,padT:8,padB:14);
+            /* Item 15 (Stan: "the three multiplayer tabs are all different sizes";
+             * owner's call is to model them all on 2v2). This tab was the outlier
+             * on PADDING — padL 20 / padB 14 against 2v2's uniform 10/10/8/8 —
+             * which is why its content visibly started further right than the
+             * other two, and on header size (32pt vs 20pt). */
+            UIFactory.AddVLG(panel,spacing:6,padL:10,padR:10,padT:8,padB:8);
             var o1HdrRow=new GameObject("O1HdrRow");o1HdrRow.transform.SetParent(panel.transform,false);o1HdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(o1HdrRow,spacing:10);UIFactory.AddLE(o1HdrRow,prefH:45,flexH:0);
-            /* item 7c sweep (#297): box under ~1.4x the font size, translated content. */UIFactory.FitOneLine(UIFactory.CreateText("O1H",o1HdrRow.transform,"1v2 — Solo vs Duo",32f,C_GOLD,sizeDelta:new Vector2(500,43)));
+            UIFactory.AddHLG(o1HdrRow,spacing:10);UIFactory.AddLE(o1HdrRow,prefH:38,flexH:0);
+            /* Item 15: 32pt/500x43 -> the 2v2 header's 20pt/700x28. The box gets
+             * WIDER as well as shorter — 500 was sized for a 17-char English
+             * title at 32pt, and 700 is what 2v2 gives its own longer header.
+             * item 7c sweep (#297): box under ~1.4x the font size, translated content. */
+            UIFactory.FitOneLine(UIFactory.CreateText("O1H",o1HdrRow.transform,"1v2 — Solo vs Duo",20f,C_GOLD,sizeDelta:new Vector2(700,28)));
             // Standardized Info button (see the FFA header comment).
             var o1HdrSp=new GameObject("O1HdrSp");o1HdrSp.transform.SetParent(o1HdrRow.transform,false);o1HdrSp.AddComponent<RectTransform>();UIFactory.AddLE(o1HdrSp,flexW:1);
             UIFactory.CreateButton("O1Info",o1HdrRow.transform,"Info",18f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.OvtTitle,ModeInfoText.Ovt),sizeDelta:new Vector2(110,34));
-            UIFactory.CreateText("O1Beta",panel.transform,"<color=#FFCC44>UNRATED</color> — stats, gold and XP count. Ratings never change.",19f,C_DIM,sizeDelta:new Vector2(915,29));
+            /* Item 15: 19pt/29 -> 16pt/24, matching the FFA note. VLG child, so the
+             * 915 is not the rendered width (children are force-expanded). */
+            UIFactory.CreateText("O1Beta",panel.transform,"<color=#FFCC44>UNRATED</color> — stats, gold and XP count. Ratings never change.",16f,C_DIM,sizeDelta:new Vector2(915,24));
 
             /* Aug 8 (Sid): the consent-queue "Join 1v2 Lobby" surface is
              * retired - the hosted Custom 1v2 Lobbies panel below is the only
@@ -3946,7 +4413,11 @@ namespace CompetitiveRounds
              * Side / Solo-extra-pick moved into the hosted panel's row. */
             var ovtNote=UIFactory.CreateText("O1Note",panel.transform,"<color=#888>Solo Extra Initial Pick: the solo gets one extra card in the game's FIRST draw only. The HOST's toggle decides it for the match.  <color=#7FDF7F>Active in-game</color> <color=#888>— the solo's first pick screen deals twice.</color>",16f,C_DIM,sizeDelta:new Vector2(915,46));
             UIFactory.SetWordWrap(ovtNote,true);
-            txtOvtStatus=UIFactory.CreateText("O1St",panel.transform,"Not in queue.",20f,C_LABEL,sizeDelta:new Vector2(915,32));
+            /* Item 15: 20pt/32 -> 17pt/24 (2v2's status line). FitOneLine for the
+             * same #297 reason as the FFA status: 24 / 17pt is the edge ratio and
+             * the line owns its own VLG row. */
+            txtOvtStatus=UIFactory.CreateText("O1St",panel.transform,"Not in queue.",17f,C_LABEL,sizeDelta:new Vector2(915,24));
+            UIFactory.FitOneLine(txtOvtStatus);
 
             /* v1.37 private lobbies, Aug 8 revision: hosted CUSTOM lobbies
              * (create / browse / password / host Start) are the ONLY custom
@@ -3957,9 +4428,15 @@ namespace CompetitiveRounds
             var ovtHostPanel=UIFactory.CreatePanel("O1Host",panel.transform,C_PANEL);
             UIFactory.AddVLG(ovtHostPanel,spacing:3,padL:10,padR:10,padT:6,padB:6);
             UIFactory.AddLE(ovtHostPanel,flexH:0);
-            txtOvtHostLobbyHeader=UIFactory.CreateText("O1HH",ovtHostPanel.transform,I18n.Tr("<b>Custom 1v2 Lobbies</b>"),21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(891,29));
+            /* Item 15: panel header 21pt/29 -> 2v2's 16pt/22 (+FitOneLine, #297);
+             * control row 34 -> 32. The BUTTONS below are left at 28px/16pt — that
+             * is already inside 2v2's 26-28 band, and shrinking them further would
+             * put "Solo extra pick (host): OFF" and "Create Private..." at their
+             * translated limits for no visual gain. */
+            txtOvtHostLobbyHeader=UIFactory.CreateText("O1HH",ovtHostPanel.transform,I18n.Tr("<b>Custom 1v2 Lobbies</b>"),16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(891,22));
+            UIFactory.FitOneLine(txtOvtHostLobbyHeader);
             var o1hCtl=new GameObject("O1HCtl");o1hCtl.transform.SetParent(ovtHostPanel.transform,false);o1hCtl.AddComponent<RectTransform>();
-            UIFactory.AddHLG(o1hCtl,spacing:8);UIFactory.AddLE(o1hCtl,prefH:34,minH:34,flexH:0);
+            UIFactory.AddHLG(o1hCtl,spacing:8);UIFactory.AddLE(o1hCtl,prefH:32,minH:32,flexH:0);
             ovtLobbyCreateBtn=UIFactory.CreateButton("O1HCreate",o1hCtl.transform,"Create Lobby",16f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),
                 ()=>{ApiClient.OvtLobbyCreate(ovtPreferredSide,ovtSoloExtraPick);dirty=true;},sizeDelta:new Vector2(160,28));
             ovtLobbyCreatePrivBtn=UIFactory.CreateButton("O1HPriv",o1hCtl.transform,"Create Private...",16f,C_WHITE,new Color(0.40f,0.30f,0.55f,0.9f),
@@ -4021,7 +4498,9 @@ namespace CompetitiveRounds
             ovtLivePanel=UIFactory.CreatePanel("O1Live",panel.transform,C_PANEL);
             UIFactory.AddVLG(ovtLivePanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
             UIFactory.AddLE(ovtLivePanel,flexH:0);
-            txtOvtLiveHeader=UIFactory.CreateText("O1LvH",ovtLivePanel.transform,"<b><color=#FF6688>* Live 1v2 Games</color></b>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(891,29));
+            // Item 15: 21pt/29 -> 16pt/22, same as the panel header above.
+            txtOvtLiveHeader=UIFactory.CreateText("O1LvH",ovtLivePanel.transform,"<b><color=#FF6688>* Live 1v2 Games</color></b>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(891,22));
+            UIFactory.FitOneLine(txtOvtLiveHeader);
             ovtLiveRowsHost=new GameObject("O1LvRows");ovtLiveRowsHost.transform.SetParent(ovtLivePanel.transform,false);ovtLiveRowsHost.AddComponent<RectTransform>();
             UIFactory.AddVLG(ovtLiveRowsHost,spacing:2);UIFactory.AddLE(ovtLiveRowsHost,flexH:0);
             ovtLivePanel.SetActive(false);
@@ -4030,20 +4509,44 @@ namespace CompetitiveRounds
             // + recent 1v2 games (right, flex). Fixed prefH inside the outer
             // scroll — never flexH:1 (learning #63).
             var o1Bot=new GameObject("O1Bot");o1Bot.transform.SetParent(panel.transform,false);o1Bot.AddComponent<RectTransform>();
-            UIFactory.AddHLG(o1Bot,spacing:8);UIFactory.AddLE(o1Bot,prefH:931,minH:532,flexH:0);
+            /* Item 15 — bottom-row height budget, re-derived to land on 2v2's
+             * 720/400 exactly (unlike FFA, this tab's right column holds ONE list,
+             * so the reference number fits without stretching):
+             *
+             *   left column (VLG spacing 4, 3 gaps = 12):
+             *       Solo header  24 + Solo scroll 330
+             *     + Duo  header  24 + Duo  scroll 330 + 12 = 720
+             *     -> 330 at a 23px row pitch (22 prefH + 1 spacing) = 14 rows
+             *        visible per board; it was 399 at 25 = 15.
+             *
+             *   right column (VLG spacing 4, 1 gap = 4):
+             *       recent header row 26 + 4 -> recent scroll (flexH:1) = 690,
+             *     which is the same viewport 2v2's history list gets.
+             *
+             * Both boards keep an explicit prefH (never flexH:1 inside the outer
+             * ScrollView, #63) and minH 200. minH is 470, not 2v2's 400: the left
+             * column's own floor is 24+200+24+200+12 = 460, and a row minimum
+             * below its children's lets the two boards overlap under pressure. */
+            UIFactory.AddHLG(o1Bot,spacing:8);UIFactory.AddLE(o1Bot,prefH:720,minH:470,flexH:0);
 
             // Left column — stacked Solo + Duo boards. flexW:0 explicit +
             // load-bearing (learning #132).
             var lcol=new GameObject("O1LCol");lcol.transform.SetParent(o1Bot.transform,false);lcol.AddComponent<RectTransform>();
             UIFactory.AddVLG(lcol,spacing:4);UIFactory.AddLE(lcol,prefW:554,minW:505,flexW:0,flexH:1);
-            txtOvtSoloLbHeader=UIFactory.CreateText("O1SLH",lcol.transform,"<b><color=#FFB347>Solo Leaderboard</color></b>  <color=#888>(unranked)</color>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(530,29));
+            /* Item 15: board headers 21pt/29 -> the 2v2 leaderboard header's
+             * 18pt/24 (+FitOneLine — these are rewritten with a composed
+             * "(N players)" suffix and 24/18pt is the #297 edge); scrolls
+             * 399 -> 330 per the o1Bot budget above. */
+            txtOvtSoloLbHeader=UIFactory.CreateText("O1SLH",lcol.transform,"<b><color=#FFB347>Solo Leaderboard</color></b>  <color=#888>(unranked)</color>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(530,24));
+            UIFactory.FitOneLine(txtOvtSoloLbHeader);
             var ssv=UIFactory.CreateScrollView("O1SLSV",lcol.transform,spacing:1);
-            UIFactory.AddLE(ssv.scrollGO,prefH:399,minH:200,flexH:0);
+            UIFactory.AddLE(ssv.scrollGO,prefH:330,minH:200,flexH:0);
             ovtSoloLbContainer=ssv.content;
             ovtSoloScrollRect=ssv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
-            txtOvtDuoLbHeader=UIFactory.CreateText("O1DLH",lcol.transform,"<b><color=#88AAFF>Duo Leaderboard</color></b>  <color=#888>(unranked)</color>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(530,29));
+            txtOvtDuoLbHeader=UIFactory.CreateText("O1DLH",lcol.transform,"<b><color=#88AAFF>Duo Leaderboard</color></b>  <color=#888>(unranked)</color>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(530,24));
+            UIFactory.FitOneLine(txtOvtDuoLbHeader);
             var dsv=UIFactory.CreateScrollView("O1DLSV",lcol.transform,spacing:1);
-            UIFactory.AddLE(dsv.scrollGO,prefH:399,minH:200,flexH:0);
+            UIFactory.AddLE(dsv.scrollGO,prefH:330,minH:200,flexH:0);
             ovtDuoLbContainer=dsv.content;
             ovtDuoScrollRect=dsv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
 
@@ -4051,17 +4554,21 @@ namespace CompetitiveRounds
             var rcol=new GameObject("O1RCol");rcol.transform.SetParent(o1Bot.transform,false);rcol.AddComponent<RectTransform>();
             UIFactory.AddVLG(rcol,spacing:4);UIFactory.AddLE(rcol,flexW:1,flexH:1);
             var rHdrRow=new GameObject("O1RHR");rHdrRow.transform.SetParent(rcol.transform,false);rHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:34,minH:34,flexH:0);
-            /* 460 (was 337): the "({0} series)" TrF suffix + RU render clipped at 337 (mirrors the FFA header's 540 fix); the flexW:1 spacer beside it absorbs the width. */txtOvtRecentHeader=UIFactory.CreateText("O1RH",rHdrRow.transform,"<b>Recent 1v2 Games</b>",24f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(460,34));
+            /* Item 15: this row is 2v2's THHR exactly — prefH 26, a 460x26 header
+             * at 18pt, and a 28x22 / 48x22 pager at 13pt. */
+            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:26,minH:26,flexH:0);
+            /* 460 (was 337): the "({0} series)" TrF suffix + RU render clipped at 337 (mirrors the FFA header's 540 fix); the flexW:1 spacer beside it absorbs the width. */txtOvtRecentHeader=UIFactory.CreateText("O1RH",rHdrRow.transform,"<b>Recent 1v2 Games</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(460,26));
+            UIFactory.FitOneLine(txtOvtRecentHeader);
             var rSp=new GameObject("O1RSp");rSp.transform.SetParent(rHdrRow.transform,false);rSp.AddComponent<RectTransform>();UIFactory.AddLE(rSp,flexW:1);
-            ovtRecentPrevBtn=UIFactory.CreateButton("O1RP",rHdrRow.transform,"<",18f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ovtRecentPageReq=Math.Max(0,ovtRecentPageReq-1);ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(34,29));
-            txtOvtRecentPage=UIFactory.CreateText("O1RPI",rHdrRow.transform,"1/1",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(58,29));
-            ovtRecentNextBtn=UIFactory.CreateButton("O1RN",rHdrRow.transform,">",18f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ovtRecentPageReq+=1;ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(34,29));
+            ovtRecentPrevBtn=UIFactory.CreateButton("O1RP",rHdrRow.transform,"<",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ovtRecentPageReq=Math.Max(0,ovtRecentPageReq-1);ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(28,22));
+            txtOvtRecentPage=UIFactory.CreateText("O1RPI",rHdrRow.transform,"1/1",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(48,22));
+            ovtRecentNextBtn=UIFactory.CreateButton("O1RN",rHdrRow.transform,">",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ovtRecentPageReq+=1;ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(28,22));
             var rsv=UIFactory.CreateScrollView("O1RSV",rcol.transform,spacing:2);
             UIFactory.AddLE(rsv.scrollGO,flexH:1);
             ovtRecentContainer=rsv.content;
+            ovtRecentViewport=rsv.content.transform.parent as RectTransform;
             ovtRecentScrollRect=rsv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
             return outer;
         }
@@ -4183,9 +4690,55 @@ namespace CompetitiveRounds
             // Split activity boards (server-ordered; role-scoped W/L).
             FillOvtRoleBoard(ovtSoloLbContainer,ovtSoloLbRows,ApiClient.CachedOvtLeaderboardSolo,txtOvtSoloLbHeader,I18n.Tr("Solo Leaderboard"),"#FFB347");
             FillOvtRoleBoard(ovtDuoLbContainer,ovtDuoLbRows,ApiClient.CachedOvtLeaderboardDuo,txtOvtDuoLbHeader,I18n.Tr("Duo Leaderboard"),"#88AAFF");
-            ToggleInnerScroll(ovtSoloScrollRect,(ApiClient.CachedOvtLeaderboardSolo?.Count??0)*25f);
-            ToggleInnerScroll(ovtDuoScrollRect,(ApiClient.CachedOvtLeaderboardDuo?.Count??0)*25f);
+            // 25f -> 23f: (FillOvtRoleBoard's row height) + (the board ScrollView's
+            // spacing of 1), and item 15 took those rows 24 -> 22. A stale estimate
+            // over-reports content height and leaves the inner ScrollRect enabled
+            // on a list that fits, stealing the wheel from the tab scroll (#76).
+            ToggleInnerScroll(ovtSoloScrollRect,(ApiClient.CachedOvtLeaderboardSolo?.Count??0)*23f);
+            ToggleInnerScroll(ovtDuoScrollRect,(ApiClient.CachedOvtLeaderboardDuo?.Count??0)*23f);
             RefreshOvtRecent();
+        }
+
+        /// <summary>Hover pass for the Recent 1v2 panel: one region per series
+        /// row, popping that series' end-of-game builds.
+        ///
+        /// Runs from the 1v2 tab's own OnGUI (OneVTwoHoverDrawer) because the
+        /// SHARED card-tooltip drawer in CompetitiveUI refuses every tab except
+        /// My Stats and 2v2 — a region registered from here would be collected
+        /// and never drawn. This mirrors the FFA tab, which draws its own for
+        /// the same reason, and reuses its clipping + measured-box helpers so
+        /// there is one implementation of "bounded tooltip over a scrolled
+        /// row", not three.</summary>
+        private static void DrawOvtRecentHover()
+        {
+            try
+            {
+                if(Event.current==null||Event.current.type!=EventType.Repaint)return;
+                if(!isOpen||currentTab!=11)return;
+                Vector2 mouse=Event.current.mousePosition;
+                string tip=null;
+                for(int i=0;i<ovtRecentRows.Count&&tip==null;i++)
+                {
+                    if(i>=ovtRecentHoverBodies.Count)break;
+                    string body=ovtRecentHoverBodies[i];
+                    if(string.IsNullOrEmpty(body))continue;
+                    var comp=ovtRecentRows[i] as Component;
+                    if(comp==null||!comp.gameObject.activeInHierarchy)continue;
+                    var rt=comp.GetComponent<RectTransform>();
+                    if(rt==null)continue;
+                    // Both masks: the recent list's viewport AND the whole-tab
+                    // outer viewport (#185 — a row scrolled under either edge
+                    // must not keep a live region over what is drawn there).
+                    if(TryGetMaskedScreenRect(rt,ovtRecentViewport,ovtTabOuterViewport,out Rect r)
+                       &&r.Contains(mouse))
+                        tip=body;
+                }
+                if(tip==null)return;
+                int previousDepth=GUI.depth;
+                try{GUI.depth=-20000;DrawWideTooltip(tip,mouse,470f);}
+                finally{GUI.depth=previousDepth;}
+            }
+            catch{}
         }
 
         // One rich line per entry: "#N Name  W-L (WR%)  Lv". Name takes the
@@ -4206,8 +4759,12 @@ namespace CompetitiveRounds
                 :I18n.TrF("<b><color={0}>{1}</color></b>  <color=#888>(unranked - {2} players)</color>",accent,label,lb.Count));
             while(pool.Count<lb.Count&&pool.Count<100)
             {
-                var t=UIFactory.CreateText($"{container.name}R{pool.Count}",container.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(518,24));
-                /* item 7c sweep: 18pt in a 24px box holding user-authored display names. */
+                /* Item 15: 18pt/24 -> the 2v2 leaderboard row's 15pt/22. Width is
+                 * unchanged (518 inside the 554 column). This also relaxes the
+                 * line-box ratio from 1.33 to 1.47, which is the safer side of
+                 * #297 for the Cyrillic display names these rows carry. */
+                var t=UIFactory.CreateText($"{container.name}R{pool.Count}",container.transform,"",15f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(518,22));
+                /* item 7c sweep: user-authored display names in a one-line cell. */
                 UIFactory.FitOneLine(t);
                 pool.Add(t);
             }
@@ -4236,12 +4793,18 @@ namespace CompetitiveRounds
                 ovtRecentRows.Add(t);
             }
             float recTotalH=0f;
+            // Kept index-aligned with the row pool BEFORE the loop, so the
+            // hover scan can index it with a row index unconditionally — a
+            // `continue` inside the loop must not be able to leave it short.
+            while(ovtRecentHoverBodies.Count<ovtRecentRows.Count)ovtRecentHoverBodies.Add(null);
             for(int i=0;i<ovtRecentRows.Count;i++)
             {
-                var comp=ovtRecentRows[i] as Component;if(comp==null)continue;
-                if(i>=list.Count){comp.gameObject.SetActive(false);continue;}
+                var comp=ovtRecentRows[i] as Component;if(comp==null){ovtRecentHoverBodies[i]=null;continue;}
+                if(i>=list.Count){comp.gameObject.SetActive(false);ovtRecentHoverBodies[i]=null;continue;}
                 int lines;
-                UIFactory.SetTextRaw(ovtRecentRows[i],BuildOvtRecentRowText(list[i],out lines));
+                string hoverBody;
+                UIFactory.SetTextRaw(ovtRecentRows[i],BuildOvtRecentRowText(list[i],out lines,out hoverBody));
+                ovtRecentHoverBodies[i]=hoverBody;
                 int h=lines*24+10;
                 UIFactory.SetPrefH(comp.gameObject,h);
                 var rt=comp.GetComponent<RectTransform>();
@@ -4263,28 +4826,43 @@ namespace CompetitiveRounds
         // One series = one multi-line rich text: header (solo orange vs duo
         // blue, score, date), then per match a score/winner/duration line +
         // compact per-player cards lines (comma-joined, ~90-char cap).
-        private static string BuildOvtRecentRowText(ApiClient.OvtRecentSeries s,out int lines)
+        //
+        // `hoverBody` is the series' end-of-game BUILDS, pre-formatted for
+        // DrawWideTooltip and NULL when this series has none. Round-2 HIGH: the
+        // server has been sending end_stats_by_steam and ApiClient has been
+        // parsing it, and this renderer read only cards_by_steam — so every 1v2
+        // build was silently dropped. It goes in a hover rather than inline
+        // because a decoded build is ~7 packed lines per player: three players
+        // over a BO3 would add ~60 lines to a row in a panel that already
+        // budgets its height line-by-line (#245).
+        private static string BuildOvtRecentRowText(ApiClient.OvtRecentSeries s,out int lines,out string hoverBody)
         {
             var sb=new StringBuilder();lines=1;
+            hoverBody=null;
+            var hb=new StringBuilder();
+            // Stable order: solo, duo A, duo B (side colors match the header).
+            // One table, used by the cards lines, the builds and the rewards
+            // block, so the three can never disagree about who is who.
+            string[][] who=new[]{
+                new[]{s.solo_steam,s.solo_name,"#FFB347"},
+                new[]{s.duo_a_steam,s.duo_a_name,"#88AAFF"},
+                new[]{s.duo_b_steam,s.duo_b_name,"#88AAFF"}};
             string dt="";
             try{string d=!string.IsNullOrEmpty(s.completed_at)?s.completed_at:s.created_at;if(!string.IsNullOrEmpty(d)&&d.Length>=10)dt=DateFmt.Short(DateTime.Parse(d));}catch{}
             string statusTag=s.status=="completed"?"":"  "+I18n.Tr("<color=#888>(in progress)</color>");
             string extraTag=s.solo_extra_pick?"  "+I18n.Tr("<color=#888>+pick</color>"):"";
-            sb.Append(I18n.TrF("<color=#FFB347><b>{0}</b></color> <color=#888>vs</color> <color=#88AAFF>{1} + {2}</color>  <b>{3}-{4}</b>  <color=#999>{5}</color>",
-                Trunc(s.solo_name??"?",14),Trunc(s.duo_a_name??"?",14),Trunc(s.duo_b_name??"?",14),s.solo_wins,s.duo_wins,dt)).Append(statusTag).Append(extraTag).Append('\n');
+            string header=I18n.TrF("<color=#FFB347><b>{0}</b></color> <color=#888>vs</color> <color=#88AAFF>{1} + {2}</color>  <b>{3}-{4}</b>  <color=#999>{5}</color>",
+                Trunc(s.solo_name??"?",14),Trunc(s.duo_a_name??"?",14),Trunc(s.duo_b_name??"?",14),s.solo_wins,s.duo_wins,dt);
+            int gameNo=0;
             foreach(var m in s.matches)
             {
+                gameNo++;
                 string wTag=m.winner_side==1?I18n.Tr("<color=#FFB347>solo won</color>"):m.winner_side==2?I18n.Tr("<color=#88AAFF>duo won</color>"):"";
                 string dur=m.duration_seconds>0?$"<color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";
                 sb.Append($"  <color=#888>-</color> {m.solo_rounds}-{m.duo_rounds}  {wTag}  {dur}\n");
                 lines++;
                 if(m.cards_by_steam!=null&&m.cards_by_steam.Count>0)
                 {
-                    // Stable order: solo, duo A, duo B (side colors match the header).
-                    string[][] who=new[]{
-                        new[]{s.solo_steam,s.solo_name,"#FFB347"},
-                        new[]{s.duo_a_steam,s.duo_a_name,"#88AAFF"},
-                        new[]{s.duo_b_steam,s.duo_b_name,"#88AAFF"}};
                     foreach(var w in who)
                     {
                         if(string.IsNullOrEmpty(w[0]))continue;
@@ -4296,7 +4874,32 @@ namespace CompetitiveRounds
                         lines++;
                     }
                 }
+                // Builds for this game, into the hover body. The FFA tooltip's
+                // WIDE budget: DrawWideTooltip is the same 470px measured box.
+                if(m.end_stats_by_steam==null||m.end_stats_by_steam.Count==0)continue;
+                var gameBlock=new StringBuilder();
+                foreach(var w in who)
+                {
+                    if(string.IsNullOrEmpty(w[0]))continue;
+                    string wire;
+                    if(!m.end_stats_by_steam.TryGetValue(w[0],out wire))continue;
+                    string block=BuildStatsTipBlock(wire,BUILD_TIP_WIDE_COLS,"  ");
+                    if(block.Length==0)continue;
+                    if(gameBlock.Length>0)gameBlock.Append('\n');
+                    gameBlock.Append("<b><color=").Append(w[2]).Append('>')
+                             .Append(Trunc(w[1]??"?",16)).Append("</color></b>\n").Append(block);
+                }
+                if(gameBlock.Length==0)continue;
+                if(hb.Length>0)hb.Append('\n');
+                hb.Append("<color=#8FA3B8>").Append(I18n.TrF("Game {0}",gameNo)).Append("</color>\n")
+                  .Append(gameBlock);
             }
+            if(hb.Length>0)
+            {
+                hoverBody=hb.ToString();
+                header+="  "+I18n.Tr("<color=#556270>(hover for builds)</color>");
+            }
+            sb.Insert(0,header+statusTag+extraTag+"\n");
             // Bug #129: the per-player series xp/gold. The server has always sent
             // gold_by_steam/xp_by_steam here and the client has always PARSED them —
             // this panel just never drew them, which is a large part of why 1v2 read
@@ -4305,12 +4908,8 @@ namespace CompetitiveRounds
             // must increment it or the text overpaints its neighbours (#199).
             if(s.xp_by_steam!=null||s.gold_by_steam!=null)
             {
-                string[][] rw=new[]{
-                    new[]{s.solo_steam,s.solo_name,"#FFB347"},
-                    new[]{s.duo_a_steam,s.duo_a_name,"#88AAFF"},
-                    new[]{s.duo_b_steam,s.duo_b_name,"#88AAFF"}};
                 var rewards=new List<string>();
-                foreach(var w in rw)
+                foreach(var w in who)
                 {
                     if(string.IsNullOrEmpty(w[0]))continue;
                     int xp=0,gold=0;
@@ -4661,7 +5260,7 @@ namespace CompetitiveRounds
            history column. Setting flexW:0 here (as #132's rule would suggest for a
            fixed-prefW column) silently handed all of that slack to Ranked/Casual History
            and squeezed this column to a bare 380 -- Sid caught it immediately. #132's rule
-           is about columns that must NOT stretch; this one always did. */UIFactory.AddLE(leftSV.scrollGO,prefW:380,minW:340,flexW:1,flexH:1);var left=leftSV.content;UIFactory.AddLE(left,flexH:0);var rBox=UIFactory.CreatePanel("RB",left.transform,C_PANEL);UIFactory.AddVLG(rBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(rBox,flexH:0);var glHdr=UIFactory.CreateText("RL",rBox.transform,"Glicko-2 Rating",19f,C_SUB,sizeDelta:new Vector2(250,28));UIFactory.SetCharSpacing(glHdr,1f);var rRow=new GameObject("RR");rRow.transform.SetParent(rBox.transform,false);rRow.AddComponent<RectTransform>();UIFactory.AddHLG(rRow,spacing:12);UIFactory.AddLE(rRow,prefH:38);txtRating=UIFactory.CreateText("Rat",rRow.transform,"1500",30f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,38));UIFactory.SetBold(txtRating,true);txtRD=UIFactory.CreateText("RD",rRow.transform,"RD: 350",18f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,38));var xBox=UIFactory.CreatePanel("XB",left.transform,C_PANEL);UIFactory.AddVLG(xBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(xBox,flexH:0);var lvRow=new GameObject("LR");lvRow.transform.SetParent(xBox.transform,false);lvRow.AddComponent<RectTransform>();UIFactory.AddHLG(lvRow,spacing:8);UIFactory.AddLE(lvRow,prefH:28);txtLevel=UIFactory.CreateText("Lv",lvRow.transform,"Level 1",19f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(100,28));UIFactory.SetBold(txtLevel,true);txtXPProg=UIFactory.CreateText("XPP",lvRow.transform,"",16f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,28));var xSp=new GameObject("S");xSp.transform.SetParent(lvRow.transform,false);xSp.AddComponent<RectTransform>();UIFactory.AddLE(xSp,flexW:1);/* Aug-3 item: 7-figure totals render "1,144,819 XP" (~115-125px at 16pt bold) and the 110px cell truncated the last glyph. The row's flexW:1 spacer carries ~460px of surplus, so this comes out of dead space. */txtTotalXP=UIFactory.CreateText("TXP",lvRow.transform,"0 XP",16f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(170,28));xpFill=UIFactory.CreateFillBar("XP",xBox.transform,new Color(0.2f,0.2f,0.25f,0.8f),new Color(0.3f,0.7f,1f,0.9f),10f);var recBox=UIFactory.CreatePanel("RecB",left.transform,C_PANEL);UIFactory.AddVLG(recBox,spacing:1,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(recBox,flexH:0);UIFactory.CreateText("RecL",recBox.transform,"Win/Loss Record",19f,C_SUB,sizeDelta:new Vector2(340,28));txtRankedRec=UIFactory.CreateText("RR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtRankedStrk=UIFactory.CreateText("RS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));txtTeam2v2Rec=UIFactory.CreateText("T2",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTeam2v2Strk=UIFactory.CreateText("T2S",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));/* Bug #130: 1v2 (split by seat) + FFA. Placed with the other per-mode lines, above Casual. */txtOvtRec=UIFactory.CreateText("O12",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtFfaRec=UIFactory.CreateText("FFR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtFfaExtra=UIFactory.CreateText("FFX",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtCasualRec=UIFactory.CreateText("CR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtCasualStrk=UIFactory.CreateText("CS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtSweeps=UIFactory.CreateText("SW",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTotalRec=UIFactory.CreateText("TR",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtAccuracy=UIFactory.CreateText("AC",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));var sesBox=UIFactory.CreatePanel("SB",left.transform,C_PANEL);UIFactory.AddVLG(sesBox,spacing:3,padL:10,padR:10,padT:8,padB:8);UIFactory.AddLE(sesBox,flexH:0);UIFactory.CreateText("SL",sesBox.transform,"Session Info",19f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(340,28));txtSessionSum=UIFactory.CreateText("SS",sesBox.transform,"No games this session",17f,C_DIM,sizeDelta:new Vector2(340,26));txtSessionSplit=UIFactory.CreateText("SSp",sesBox.transform,"",16f,C_LABEL,sizeDelta:new Vector2(340,24));txtSessionSweeps=UIFactory.CreateText("SSw",sesBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtSessionOppLifetime=UIFactory.CreateText("SOL",sesBox.transform,"",15f,new Color(0.6f,0.75f,1f),sizeDelta:new Vector2(340,22));sessionOppContainer=new GameObject("SOC");sessionOppContainer.transform.SetParent(sesBox.transform,false);sessionOppContainer.AddComponent<RectTransform>();UIFactory.AddVLG(sessionOppContainer,spacing:1);
+           is about columns that must NOT stretch; this one always did. */UIFactory.AddLE(leftSV.scrollGO,prefW:380,minW:340,flexW:1,flexH:1);var left=leftSV.content;UIFactory.AddLE(left,flexH:0);var rBox=UIFactory.CreatePanel("RB",left.transform,C_PANEL);UIFactory.AddVLG(rBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(rBox,flexH:0);var glHdr=UIFactory.CreateText("RL",rBox.transform,"Glicko-2 Rating",19f,C_SUB,sizeDelta:new Vector2(250,28));UIFactory.SetCharSpacing(glHdr,1f);var rRow=new GameObject("RR");rRow.transform.SetParent(rBox.transform,false);rRow.AddComponent<RectTransform>();UIFactory.AddHLG(rRow,spacing:12);UIFactory.AddLE(rRow,prefH:38);txtRating=UIFactory.CreateText("Rat",rRow.transform,"1500",30f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,38));UIFactory.SetBold(txtRating,true);txtRD=UIFactory.CreateText("RD",rRow.transform,"RD: 350",18f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,38));/* Aug 12 item 2: per-mode block under the 1v1 headline. Deliberately NOT folded into the big number's row — the 30pt figure stays unambiguously 1v1 and its "1v1" marker rides the standing line below, which keeps the existing txtRating/txtRD strings (and their four translations) untouched (#289). FitOneLine on every line: these are single-line cells receiving TRANSLATED text, and the global Truncate default drops the WHOLE line when OS-fallback metrics overflow a tight box (#297). */txtStand1v1=UIFactory.CreateText("St1",rBox.transform,"",15f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,20));UIFactory.FitOneLine(txtStand1v1);txtRate2v2=UIFactory.CreateText("R2v2",rBox.transform,"",15f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,20));UIFactory.FitOneLine(txtRate2v2);txtRateFfa=UIFactory.CreateText("RFfa",rBox.transform,"",15f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,20));UIFactory.FitOneLine(txtRateFfa);var xBox=UIFactory.CreatePanel("XB",left.transform,C_PANEL);UIFactory.AddVLG(xBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(xBox,flexH:0);var lvRow=new GameObject("LR");lvRow.transform.SetParent(xBox.transform,false);lvRow.AddComponent<RectTransform>();UIFactory.AddHLG(lvRow,spacing:8);UIFactory.AddLE(lvRow,prefH:28);txtLevel=UIFactory.CreateText("Lv",lvRow.transform,"Level 1",19f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(100,28));UIFactory.SetBold(txtLevel,true);txtXPProg=UIFactory.CreateText("XPP",lvRow.transform,"",16f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,28));var xSp=new GameObject("S");xSp.transform.SetParent(lvRow.transform,false);xSp.AddComponent<RectTransform>();UIFactory.AddLE(xSp,flexW:1);/* Aug-3 item: 7-figure totals render "1,144,819 XP" (~115-125px at 16pt bold) and the 110px cell truncated the last glyph. The row's flexW:1 spacer carries ~460px of surplus, so this comes out of dead space. */txtTotalXP=UIFactory.CreateText("TXP",lvRow.transform,"0 XP",16f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(170,28));xpFill=UIFactory.CreateFillBar("XP",xBox.transform,new Color(0.2f,0.2f,0.25f,0.8f),new Color(0.3f,0.7f,1f,0.9f),10f);var recBox=UIFactory.CreatePanel("RecB",left.transform,C_PANEL);UIFactory.AddVLG(recBox,spacing:1,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(recBox,flexH:0);UIFactory.CreateText("RecL",recBox.transform,"Win/Loss Record",19f,C_SUB,sizeDelta:new Vector2(340,28));txtRankedRec=UIFactory.CreateText("RR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtRankedStrk=UIFactory.CreateText("RS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));txtTeam2v2Rec=UIFactory.CreateText("T2",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTeam2v2Strk=UIFactory.CreateText("T2S",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));/* Bug #130: 1v2 (split by seat) + FFA. Placed with the other per-mode lines, above Casual. */txtOvtRec=UIFactory.CreateText("O12",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));/* Overflow, not the global Truncate: this cell is written through WriteModeLine, which may split it onto two lines, and 24px at 16pt is inside the ratio where a translated line off the OS-fallback atlas is dropped whole (#297). */UIFactory.FitOneLine(txtOvtRec);txtFfaRec=UIFactory.CreateText("FFR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtFfaExtra=UIFactory.CreateText("FFX",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtCasualRec=UIFactory.CreateText("CR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtCasualStrk=UIFactory.CreateText("CS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtSweeps=UIFactory.CreateText("SW",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTotalRec=UIFactory.CreateText("TR",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtAccuracy=UIFactory.CreateText("AC",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));var sesBox=UIFactory.CreatePanel("SB",left.transform,C_PANEL);UIFactory.AddVLG(sesBox,spacing:3,padL:10,padR:10,padT:8,padB:8);UIFactory.AddLE(sesBox,flexH:0);UIFactory.CreateText("SL",sesBox.transform,"Session Info",19f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(340,28));txtSessionSum=UIFactory.CreateText("SS",sesBox.transform,"No games this session",17f,C_DIM,sizeDelta:new Vector2(340,26));txtSessionSplit=UIFactory.CreateText("SSp",sesBox.transform,"",16f,C_LABEL,sizeDelta:new Vector2(340,24));txtSessionSweeps=UIFactory.CreateText("SSw",sesBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtSessionOppLifetime=UIFactory.CreateText("SOL",sesBox.transform,"",15f,new Color(0.6f,0.75f,1f),sizeDelta:new Vector2(340,22));sessionOppContainer=new GameObject("SOC");sessionOppContainer.transform.SetParent(sesBox.transform,false);sessionOppContainer.AddComponent<RectTransform>();UIFactory.AddVLG(sessionOppContainer,spacing:1);
         /* Discord Link + chat panels moved to the Home tab (v1.33) — the left
          * column here keeps rating/XP/record/session; Home is the social hub. */
         var right=new GameObject("Right");right.transform.SetParent(panel.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);var rkBox=UIFactory.CreatePanel("RkB",right.transform,C_PANEL);UIFactory.AddVLG(rkBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(rkBox,flexH:1);UIFactory.CreateText("RkH",rkBox.transform,"Ranked History",21f,C_GOLD,sizeDelta:new Vector2(250,30));txtOppSummary=UIFactory.CreateText("OS",rkBox.transform,"",15f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(500,22));var rkSV=UIFactory.CreateScrollView("RkSV",rkBox.transform,spacing:1);UIFactory.AddLE(rkSV.scrollGO,flexH:1);rankedContainer=rkSV.content;for(int i=0;i<15;i++)rankedRows.Add(CreateHistoryRow(rankedContainer.transform,$"rr{i}"));var rPg=new GameObject("RPg");rPg.transform.SetParent(rkBox.transform,false);rPg.AddComponent<RectTransform>();UIFactory.AddHLG(rPg,spacing:6,forceExpandH:true);UIFactory.AddLE(rPg,prefH:20,flexH:0);var rS1=new GameObject("S");rS1.transform.SetParent(rPg.transform,false);rS1.AddComponent<RectTransform>();UIFactory.AddLE(rS1,flexW:1);rPrev=UIFactory.CreateButton("rP",rPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(rankedPage>0){rankedPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtRankedPage=UIFactory.CreateText("rPI",rPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));rNext=UIFactory.CreateButton("rN",rPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{rankedPage++;dirty=true;},sizeDelta:new Vector2(50,18));var rS2=new GameObject("S");rS2.transform.SetParent(rPg.transform,false);rS2.AddComponent<RectTransform>();UIFactory.AddLE(rS2,flexW:1);/* Aug-3 item: ES "Cartas: COMPLETO" is ~110px at the 12pt floor and Truncate cut it to "Cartas: COMPLE". The pager row's two flexW:1 spacers hold ~700px of surplus, so widening costs nothing. */rCardModeBtn=UIFactory.CreateButton("rCm",rPg.transform,"",10f,C_LABEL,C_BTN,ToggleHistoryCardMode,sizeDelta:new Vector2(150,18));rCardModeTxt=UIFactory.GetButtonText(rCardModeBtn);
@@ -5455,6 +6054,150 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // the backdrop's own handler carries bypassModalBlock so closing works.
         private static GameObject infoPopupGO;
         public static bool InfoPopupOpen => infoPopupGO != null;
+
+        // ── Tournament Bets popup ─────────────────────────────────────────
+        // A REAL popup, not an inline expander (owner, Aug 13 second pass):
+        // folding the rows away and re-inflating them in the same column just
+        // reproduces the crowding one click later. Living on the overlay canvas
+        // means the rows cost the tab's height budget nothing (#245).
+        //
+        // Differs from ShowInfoPopup in one load-bearing way: that popup closes
+        // on ANY click, because its content is read-only. This one contains BET
+        // BUTTONS, and ClickHandler does its own raw hit-test against the
+        // backdrop's rect — which spans the screen — so a click-anywhere
+        // backdrop would fire on every wager. The backdrop here closes only
+        // when the pointer is OUTSIDE the box, and there is an explicit Close.
+        private static GameObject tournBetsPopupGO, tournBetsPopupRows;
+        public static bool TournBetsPopupOpen => tournBetsPopupGO != null;
+
+        public static void HideTournamentBetsPopup()
+        {
+            try
+            {
+                // The row pool is parented into the popup, so it dies with it —
+                // clear the pool or the next open reuses destroyed objects.
+                tTournBetRowPool.Clear();
+                tournBetsPopupRows = null;
+                if (tournBetsPopupGO != null) UnityEngine.Object.Destroy(tournBetsPopupGO);
+                tournBetsPopupGO = null;
+            }
+            catch { }
+        }
+
+        public static void ShowTournamentBetsPopup()
+        {
+            try
+            {
+                HideTournamentBetsPopup();
+                EnsureOverlayCanvas();
+                tournBetsPopupGO = new GameObject("CR_TournBetsPopup");
+                tournBetsPopupGO.hideFlags = HideFlags.HideAndDontSave;
+                tournBetsPopupGO.transform.SetParent(overlayCanvasGO.transform, false);
+                var rt = tournBetsPopupGO.AddComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+
+                var bd = UIFactory.CreatePanel("BD", tournBetsPopupGO.transform, new Color(0f, 0f, 0f, 0.55f));
+                var bdRT = bd.GetComponent<RectTransform>();
+                bdRT.anchorMin = Vector2.zero; bdRT.anchorMax = Vector2.one;
+                bdRT.offsetMin = Vector2.zero; bdRT.offsetMax = Vector2.zero;
+                var bdImg = bd.GetComponent(UIFactory.tImage);
+                if (bdImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(bdImg, true);
+
+                var box = UIFactory.CreatePanel("Box", tournBetsPopupGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.97f));
+                var boxRT = box.GetComponent<RectTransform>();
+                boxRT.anchorMin = new Vector2(0.5f, 0.5f);
+                boxRT.anchorMax = new Vector2(0.5f, 0.5f);
+                boxRT.pivot = new Vector2(0.5f, 0.5f);
+                // Height clamped to the LIVE canvas, not a constant: a
+                // width-matched scaler leaves a 32:9 window only ~540 vertical
+                // units, so a fixed box clips top and bottom on wide monitors
+                // (#199). The scroll view absorbs whatever is lost.
+                float popupH = 760f;
+                try
+                {
+                    var canvasRT = overlayCanvasGO.GetComponent<RectTransform>();
+                    if (canvasRT != null && canvasRT.rect.height > 200f)
+                        popupH = Mathf.Min(760f, canvasRT.rect.height - 40f);
+                }
+                catch { }
+                boxRT.sizeDelta = new Vector2(900, popupH);
+                UIFactory.AddVLG(box, spacing: 8, padL: 20, padR: 20, padT: 16, padB: 14);
+
+                UIFactory.CreateText("TBPTitle", box.transform, I18n.Tr("Tournament Bets"),
+                    28f, C_GOLD, UIFactory.AlignMidCenter, sizeDelta: new Vector2(850, 38));
+
+                var sv = UIFactory.CreateScrollView("TBPScroll", box.transform, spacing: 2);
+                UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: popupH - 130f);
+                tournBetsPopupRows = sv.content;
+
+                var closeBtn = UIFactory.CreateButton("TBPClose", box.transform, I18n.Tr("Close"),
+                    18f, C_WHITE, C_BTN, () => HideTournamentBetsPopup(),
+                    sizeDelta: new Vector2(160, 30));
+                // Backdrop closes ONLY outside the box — see the class comment.
+                // bypassModalBlock so the close still works while this popup is
+                // itself asserting ModalBlockInput (#141/#200).
+                var bdClick = bd.AddComponent<ClickHandler>();
+                bdClick.bypassModalBlock = true;
+                bdClick.onClick = () =>
+                {
+                    try
+                    {
+                        if (PointerInsideRect(boxRT)) return;   // a click on the content is not a dismiss
+                    }
+                    catch { }
+                    if (ClickGuard.Claim(bd)) HideTournamentBetsPopup();
+                };
+                if (closeBtn == null) { /* CreateButton never returns null today; guard kept honest */ }
+
+                RefreshTournamentBets();   // fills tournBetsPopupRows
+                dirty = true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[TBETS] popup: {ex.Message}");
+                HideTournamentBetsPopup();
+            }
+        }
+
+        /// <summary>Screen-space hit test for a ScreenSpaceCamera canvas rect.
+        /// ROUNDS' canvas needs WorldToScreenPoint rather than raw coordinates
+        /// (#6), which is why this is not a plain Contains().</summary>
+        private static bool PointerInsideRect(RectTransform rt)
+        {
+            if (rt == null) return false;
+            var corners = new Vector3[4];
+            rt.GetWorldCorners(corners);
+            // Canvas lives in UIModule, which this csproj deliberately does not
+            // reference (#15) — reach it through UIFactory's cached Type, the
+            // same way ClickHandler resolves its own canvas camera.
+            Camera cam = null;
+            try
+            {
+                var cc = overlayCanvasGO != null && UIFactory.tCanvas != null
+                    ? overlayCanvasGO.GetComponent(UIFactory.tCanvas) : null;
+                if (cc != null)
+                    cam = UIFactory.tCanvas.GetProperty("worldCamera",
+                        BindingFlags.Public | BindingFlags.Instance)?.GetValue(cc) as Camera;
+            }
+            catch { }
+            if (cam == null) cam = Camera.main;
+            Vector2 min, max;
+            if (cam != null)
+            {
+                Vector3 c0 = cam.WorldToScreenPoint(corners[0]);
+                Vector3 c2 = cam.WorldToScreenPoint(corners[2]);
+                min = new Vector2(Mathf.Min(c0.x, c2.x), Mathf.Min(c0.y, c2.y));
+                max = new Vector2(Mathf.Max(c0.x, c2.x), Mathf.Max(c0.y, c2.y));
+            }
+            else
+            {
+                min = new Vector2(Mathf.Min(corners[0].x, corners[2].x), Mathf.Min(corners[0].y, corners[2].y));
+                max = new Vector2(Mathf.Max(corners[0].x, corners[2].x), Mathf.Max(corners[0].y, corners[2].y));
+            }
+            Vector2 p = Input.mousePosition;
+            return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y;
+        }
         public static void ShowInfoPopup(string title, string body)
         {
             try
@@ -8811,7 +9554,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
-        private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn;
+        private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn, chatTtlBtn;
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
         private static GameObject allowSpectatorsBtn; private static object allowSpectatorsTxt;
@@ -8827,7 +9570,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Bug #159: heavier menu text (the game's own font at a higher SDF weight).
         private static GameObject heavyFontBtn;
         private static object heavyFontTxt;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt, chatTtlTxt;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
         private static GameObject perfMasterBtn, perfStunBtn, perfBulletsBtn, perfHitSndBtn, perfColorGhBtn, perfEdgeBnBtn, perfTagBtn, perfMenuBtn;
@@ -8917,11 +9660,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
 <color=#FFD94D><b>RAGE QUIT % VS LEAVE %</b></color>
 
-- Rage Quit % (Compare tab) is CASUAL 1v1 only:
-  casual disconnects divided by casual matches plus
-  counted casual DCs.
-- The leaderboard's Leave column is the RANKED formula:
-  ranked DCs divided by ranked series wins + losses + DCs.
+- Rage Quit % (Compare tab) is about your OPPONENTS,
+  not about you: how often the other player quits
+  mid-game in your CASUAL 1v1s, counting unmodded
+  quickplay opponents too. Higher is better - it means
+  more of them walked out on you.
+- Your own casual leaves are NOT this number.
+- The leaderboard's Leave column IS about you: the
+  RANKED formula, your ranked DCs divided by ranked
+  series wins + losses + DCs.
 
 <color=#FFD94D><b>AVG GAME LENGTH</b></color>
 
@@ -9156,12 +9903,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             ingameChatToggleBtn = SettingsToggle(intBox.transform, "SIgChat", new Vector2(260, 28),
                 () =>
                 {
-                    Plugin.Log.LogInfo("[SETTINGS] In-game chat overlay toggled");
-                    Plugin.ShowIngameChat.Value = !Plugin.ShowIngameChat.Value;
+                    // Cycles the SAME state the M hotkey does (Normal ->
+                    // Pinned -> Muted) rather than a private bool, so the
+                    // button and the key can never disagree and the button can
+                    // reach Pinned at all.
+                    CompetitiveUI.CycleChatOverlayMode();
                     dirty = true;
                 },
-                "Shows community chat in the corner while you play. Press T to type a reply.");
+                "Shows community chat in the corner while you play. Press T to type a reply, or M in game to cycle normal / pinned / muted.");
             ingameChatToggleTxt = UIFactory.GetButtonText(ingameChatToggleBtn);
+            chatTtlBtn = SettingsToggle(intBox.transform, "SChatTtl", new Vector2(260, 28),
+                () => { Plugin.CycleChatOverlaySeconds(); dirty = true; },
+                "How long a chat message stays fully visible before it fades. Ignored while the overlay is pinned.");
+            chatTtlTxt = UIFactory.GetButtonText(chatTtlBtn);
             // Chat pop-up notifications (moved from its own box, July 26 item 3).
             notifToggleBtn = SettingsToggle(intBox.transform, "SNT", new Vector2(260, 28),
                 () =>
@@ -9666,10 +10420,31 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         ? "Ping / region display: <color=#88FF88>ON</color>"
                         : "Ping / region display: <color=#FF9966>OFF</color>");
             if (ingameChatToggleTxt != null && Plugin.ShowIngameChat != null)
+            {
+                // The ON and OFF literals are kept VERBATIM — rewording OFF to
+                // "MUTED" would retire its four shipped translations (#289).
+                // Only PINNED is a new key.
+                var chatMode = CompetitiveUI.CurrentChatOverlayMode();
                 UIFactory.SetText(ingameChatToggleTxt,
-                    Plugin.ShowIngameChat.Value
-                        ? "In-game chat overlay: <color=#88FF88>ON</color>"
-                        : "In-game chat overlay: <color=#FF9966>OFF</color>");
+                    chatMode == CompetitiveUI.ChatOverlayMode.Muted
+                        ? "In-game chat overlay: <color=#FF9966>OFF</color>"
+                        : chatMode == CompetitiveUI.ChatOverlayMode.Pinned
+                            ? "In-game chat overlay: <color=#88CCFF>PINNED</color>"
+                            : "In-game chat overlay: <color=#88FF88>ON</color>");
+            }
+            if (chatTtlTxt != null)
+            {
+                // The cycle now spans 0, and 0 does not mean "fades instantly"
+                // — it means the overlay never appears at all. "Chat fade
+                // after: 0s" would describe a fade that never happens, so the
+                // whole sentence changes rather than just the number.
+                // Branched on the VALUE, never on the label string: the label
+                // is display text and a display string is not a state.
+                float ttl = Plugin.ChatOverlaySeconds != null ? Plugin.ChatOverlaySeconds.Value : 25f;
+                UIFactory.SetTextRaw(chatTtlTxt, ttl <= 0f
+                    ? I18n.Tr("Chat fade after: <color=#FF9966>Off (chat hidden in game)</color>")
+                    : I18n.TrF("Chat fade after: <color=#88CCFF>{0}</color>", Plugin.ChatOverlaySecondsLabel()));
+            }
             if (cursorShapeTxt != null)
                 UIFactory.SetTextRaw(cursorShapeTxt,
                     I18n.TrF("Cursor: <color=#88CCFF>{0}</color>", I18n.Tr(CursorColorCosmetic.CurrentShapeLabel())));
@@ -9957,12 +10732,214 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         private static void RefreshVersionStatus(){if(txtVersionStatus==null)return;if(ApiClient.ForceUpdateRequired){UIFactory.SetText(txtVersionStatus,"<color=#FF4444>UPDATE REQUIRED</color>");if(updateBtn!=null)updateBtn.SetActive(true);return;}if(ApiClient.UpdateReady){UIFactory.SetText(txtVersionStatus,"<color=#44FF44>Close ROUNDS to apply update</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(ApiClient.IsUpdating){UIFactory.SetText(txtVersionStatus,"<color=#66CCFF>Downloading...</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}string latest=ApiClient.LatestModVersion;if(latest==null){UIFactory.SetText(txtVersionStatus,"");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(latest==Plugin.ModVersion){UIFactory.SetText(txtVersionStatus,"<color=#44AA44>Up to date</color>");if(updateBtn!=null)updateBtn.SetActive(false);}else{UIFactory.SetText(txtVersionStatus,$"<color=#FFAA33>v{latest} available!</color>");if(updateBtn!=null)updateBtn.SetActive(true);}}
 
-        private static void RefreshMyStats(){var s=ApiClient.CachedPlayerStats;if(s==null){UIFactory.SetText(txtRating,"-");return;}/* Top-left player name. Refresh on every stats reload — was set ONCE
+        // ── Aug 12 item 2: per-mode rating / standing formatting ─────────────
+        // ONE set of formatters, consumed by BOTH the My Stats pane and the
+        // Leaderboard detail panel, so the two surfaces cannot drift the way
+        // the 2v2 record line and the 2v2 board already had.
+        //
+        // Mode tokens ("1v1", "2v2", "FFA", "1v2") are glossary-LOCKED and are
+        // deliberately not routed through I18n — see I18nCatalogues' glossary.
+
+        /// <summary>The "Rank #n of N" tail, or "" when this player is not on
+        /// that board. ApiClient.TryFormatStanding is the ONLY way to obtain
+        /// the string: standing 0 is the server's not-on-that-board SENTINEL,
+        /// never position #1, and routing every site through the accessor is
+        /// what stops a hand-written `> 0` from being copied wrong into the
+        /// fifth pane and printing "#0 of 0" at the players with no rank.</summary>
+        private static string StandingTail(int standing,int population)
+        {
+            string t;
+            if(!ApiClient.TryFormatStanding(standing,population,out t))return "";
+            return "<color=#888>"+t+"</color>";
+        }
+
+        /// <summary>rating + RD + peak for one mode. A 0 here means "this
+        /// server predates the field", not a real zero (#257's shape for a
+        /// mid-life column), so nothing prints a zero it did not receive.
+        ///
+        /// Deliberately reuses the pane headline's ALREADY-SHIPPED key
+        /// "RD: {0:F0}    Peak: {1:F0}" — same holes, same arg types, so it
+        /// needs no new translation and the 2v2/FFA lines read identically to
+        /// the 1v1 line above them. A stored peak can be NULL on a row that
+        /// predates its column; peak is by definition never below the current
+        /// rating, so clamping up is truthful and removes the "Peak: 0" case
+        /// entirely (the server does the same for the boards). RD has no such
+        /// floor, so a server that sends none drops the whole segment rather
+        /// than claiming a deviation of zero — which would read as a perfectly
+        /// settled rating, the exact opposite of "unknown".</summary>
+        private static string RatingBits(float rating,float rd,float peak)
+        {
+            if(rating<=0f)return "";
+            string head="<b>"+rating.ToString("F0",_INV)+"</b>";
+            if(rd<=0f)return head;
+            return head+"  <color=#888>"
+                 +I18n.TrF("RD: {0:F0}    Peak: {1:F0}",rd,Mathf.Max(peak,rating))+"</color>";
+        }
+
+        /// <summary>Head + standing tail for each mode, kept SEPARATE because
+        /// the standing is the one part a narrow pane may have to move to a
+        /// second line (see WriteModeLine). Head is "" when the mode has
+        /// nothing to say at all, which is how a player who has never touched
+        /// 2v2 gets no 2v2 line instead of a row of defaults.</summary>
+        private static string ModeLine1v1(ApiClient.PlayerStatsData s,out string tail)
+        {
+            tail="";
+            if(s==null)return "";
+            // The 1v1 rating/RD/peak already sit in the pane's headline figure,
+            // so this line exists purely for the board position the client
+            // could never show before.
+            tail=StandingTail(s.standing,s.standing_population);
+            return tail.Length==0?"":"<color=#8FA3B8>1v1</color>";
+        }
+        private static string ModeLine2v2(ApiClient.PlayerStatsData s,out string tail)
+        {
+            tail="";
+            if(s==null)return "";
+            string bits=RatingBits(s.team_rating,s.team_rating_deviation,s.team_peak_rating);
+            tail=StandingTail(s.team_standing,s.team_standing_population);
+            if(bits.Length==0&&tail.Length==0)return "";
+            return "<color=#FFB347>2v2</color>  "+bits;
+        }
+        private static string ModeLineFfa(ApiClient.PlayerStatsData s,out string tail)
+        {
+            tail="";
+            if(s==null)return "";
+            string bits=RatingBits(s.ffa_rating,s.ffa_rating_deviation,s.ffa_peak_rating);
+            tail=StandingTail(s.ffa_standing,s.ffa_standing_population);
+            if(bits.Length==0&&tail.Length==0)return "";
+            return "<color=#C48CFF>FFA</color>  "+bits;
+        }
+        /// <summary>1v2's board position, for the RECORD surfaces.
+        ///
+        /// It is not a mode line and there is no ModeLineOvt any more (owner,
+        /// Aug 13): 1v2 has no Elo and never will from this data, so it has no
+        /// place in a Glicko-2 block. The board it is a position ON is ordered
+        /// by games then win rate, which makes the standing a record fact, not
+        /// a rating fact — so it rides the W/L line instead. Returns "" when
+        /// this player is not on that board (StandingTail owns the sentinel
+        /// rule).</summary>
+        private static string OvtStandingTail(ApiClient.PlayerStatsData s)
+        {
+            if(s==null)return "";
+            return StandingTail(s.ovt_standing,s.ovt_standing_population);
+        }
+
+        /// <summary>Write one mode line, MEASURED rather than budgeted: the
+        /// pane's cells are ~360px and these strings are short tokens, but a
+        /// locale whose "Rank #{0} of {1}" runs long would otherwise paint out
+        /// of the panel (FitOneLine = Overflow, i.e. #199's mechanism). When
+        /// TMP says the composed string does not fit, the standing moves to a
+        /// second line inside the SAME element and the element grows — nothing
+        /// is ever truncated, and the extra height is only spent where it is
+        /// actually needed. A failed measurement (0 = reflection miss) keeps
+        /// the one-line form, matching every other MeasureTextWidth caller.</summary>
+        /// <param name="lineH">Height of ONE line for this element. The pane's
+        /// own mode lines are 15pt in 20px boxes; the Win/Loss Record box reuses
+        /// this writer at 16pt, where 20px is a 1.25 box-to-font ratio and a
+        /// Cyrillic line off the OS-fallback atlas can lose its whole line
+        /// (#297). Passed in rather than derived so each caller states the
+        /// height its own font was built for.</param>
+        private static void WriteModeLine(object txt,string head,string tail,float lineH=20f)
+        {
+            if(txt==null)return;
+            var comp=txt as Component;
+            if(comp==null)return;
+            if(head.Length==0&&tail.Length==0){UIFactory.SetTextRaw(txt,"");comp.gameObject.SetActive(false);return;}
+            comp.gameObject.SetActive(true);
+            string one=tail.Length>0?head+"  "+tail:head;
+            bool split=false;
+            var rt=comp.GetComponent<RectTransform>();
+            if(tail.Length>0&&rt!=null)
+            {
+                float avail=rt.rect.width;
+                float need=UIFactory.MeasureTextWidth(txt,one);
+                split=avail>1f&&need>0f&&need>avail;
+            }
+            UIFactory.SetTextRaw(txt,split?head+"\n    "+tail:one);
+            float h=split?lineH*2f:lineH;
+            UIFactory.SetPrefH(comp.gameObject,h);
+            // minH moves with prefH or Unity clamps the child at its build-time
+            // minimum and a split line paints over its neighbour (the SetMinH
+            // note in UIFactory).
+            UIFactory.SetMinH(comp.gameObject,h);
+            if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,h);
+        }
+
+        private static void RefreshModeRatingPane(ApiClient.PlayerStatsData s)
+        {
+            // head/tail assigned on their own statements, never as two
+            // arguments of one call — a reader should not have to know C#'s
+            // left-to-right argument order to see that `tail` is already set.
+            string t, head;
+            head = ModeLine1v1(s, out t); WriteModeLine(txtStand1v1, head, t);
+            head = ModeLine2v2(s, out t); WriteModeLine(txtRate2v2,  head, t);
+            head = ModeLineFfa(s, out t); WriteModeLine(txtRateFfa,  head, t);
+            // No 1v2 row: an unrated mode has nothing to say in a rating block.
+            // Its W/L + standing are on the Win/Loss Record line (OvtStandingTail).
+        }
+
+        /// <summary>The same RATING lines, as one composed block for the
+        /// Leaderboard detail panel (which is a single text element, not
+        /// per-line objects). Head and tail are joined on one line here: that
+        /// panel is ~772px wide and word-wraps, so it has none of the pane's
+        /// width problem. Every line is already translated — callers write it
+        /// Raw (#298c). Each line ends with its own newline, or "" when that
+        /// mode has nothing to report, so the block simply disappears for a
+        /// player who has only ever played 1v1.
+        ///
+        /// 1v2 is deliberately absent, exactly as in the My Stats pane — see
+        /// the txtStand1v1/txtRate2v2/txtRateFfa declaration. The detail panel
+        /// carries 1v2 in its RECORD section instead (OvtRecordLine).</summary>
+        private static string ModeRatingBlock(ApiClient.PlayerStatsData s)
+        {
+            if(s==null)return "";
+            var sb=new StringBuilder(200);
+            string t,head;
+            head=ModeLine1v1(s,out t); if(head.Length>0)sb.Append(head).Append(t.Length>0?"  "+t:"").Append('\n');
+            head=ModeLine2v2(s,out t); if(head.Length>0)sb.Append(head).Append(t.Length>0?"  "+t:"").Append('\n');
+            head=ModeLineFfa(s,out t); if(head.Length>0)sb.Append(head).Append(t.Length>0?"  "+t:"").Append('\n');
+            return sb.ToString();
+        }
+
+        /// <summary>1v2's W/L + board position as one RECORD line for the
+        /// Leaderboard detail panel, or "" for a player who has never played
+        /// it. Split by seat (solo / duo) because the two roles are different
+        /// games and the 1v2 boards rank them separately — the same shape the
+        /// My Stats Record box uses, so the two surfaces read alike.</summary>
+        private static string OvtRecordLine(ApiClient.PlayerStatsData s)
+        {
+            string head=OvtRecordHead(s,hideWhenUnplayed:true);
+            if(head.Length==0)return "";
+            string stand=OvtStandingTail(s);
+            return head+(stand.Length>0?"  "+stand:"");
+        }
+
+        /// <summary>The 1v2 W/L half of the record line, split by seat because
+        /// solo and duo are different games and the 1v2 boards rank them
+        /// separately.
+        ///
+        /// The My Stats Record box keeps its "1v2: -" placeholder for a player
+        /// who has never played (its sibling mode lines all show one, and a
+        /// missing row there reads as a load failure). The Leaderboard detail
+        /// panel is a composed paragraph with no fixed rows, so it passes
+        /// hideWhenUnplayed and simply omits the line.</summary>
+        private static string OvtRecordHead(ApiClient.PlayerStatsData s,bool hideWhenUnplayed=false)
+        {
+            if(s==null)return "";
+            int osw=s.ovt_solo_wins,osl=s.ovt_solo_losses,odw=s.ovt_duo_wins,odl=s.ovt_duo_losses;
+            if(osw+osl+odw+odl<=0)
+                return hideWhenUnplayed?"":I18n.Tr("<color=#9BE8A0>1v2:</color> -");
+            string solo=osw+osl>0?I18n.TrF("Solo {0}W/{1}L",osw,osl):I18n.Tr("Solo -");
+            string duo=odw+odl>0?I18n.TrF("Duo {0}W/{1}L",odw,odl):I18n.Tr("Duo -");
+            return I18n.TrF("<color=#9BE8A0>1v2:</color> {0}  <color=#888>|</color>  {1}",solo,duo);
+        }
+
+        private static void RefreshMyStats(){var s=ApiClient.CachedPlayerStats;if(s==null){UIFactory.SetText(txtRating,"-");RefreshModeRatingPane(null);return;}/* Top-left player name. Refresh on every stats reload — was set ONCE
         at panel build time from CachedPlayerStats which could be empty/wrong (e.g., display_name
         defaulted to steam_id during the get_or_create_player initial creation). User reported
         "all of my names are showing up as the steam id instead of the name in the top left". */
         if(txtTopLeftName!=null){string nm=!string.IsNullOrEmpty(s.display_name)&&s.display_name!=s.steam_id?s.display_name:(MatchTracker.LocalDisplayName??s.display_name??"");UIFactory.SetTextRaw(txtTopLeftName,nm);}
-        UIFactory.SetText(txtRating,$"{s.rating:F0}");UIFactory.SetText(txtRD,I18n.TrF("RD: {0:F0}    Peak: {1:F0}",s.rating_deviation,s.peak_rating));UIFactory.SetText(txtLevel,I18n.TrF("Level {0}",s.level));if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,I18n.TrF("{0}/{1} XP",s.xp_into_level,s.xp_for_next_level));UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,I18n.TrF("{0:N0} XP",s.total_xp));var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();
+        UIFactory.SetText(txtRating,$"{s.rating:F0}");/* Aug 13 (owner): the rank TIER sits beside the 1v1 Peak, in the tier's own colour. rank_color is pushed from the real Discord role colours - the same source the leaderboard's rating cell uses - so the two surfaces cannot disagree about what Gold looks like. Reuses the leaderboard detail's EXISTING "Rank:" key verbatim, so this adds no translation (#289). SetTextRaw because both halves are translated separately and a composed string must never be looked up again (#298c). Omitted entirely when the server sent no tier, rather than emitting an empty colour tag. */string _rkCol=string.IsNullOrEmpty(s.rank_color)?"#FFFFFF":s.rank_color;string _rkTier=string.IsNullOrEmpty(s.rank_name)?"":"    "+I18n.TrF("Rank: <b><color={0}>{1}</color></b>",_rkCol,s.rank_name);UIFactory.SetTextRaw(txtRD,I18n.TrF("RD: {0:F0}    Peak: {1:F0}",s.rating_deviation,s.peak_rating)+_rkTier);/* Aug 12 item 2: the per-mode block under the 1v1 headline. */RefreshModeRatingPane(s);UIFactory.SetText(txtLevel,I18n.TrF("Level {0}",s.level));if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,I18n.TrF("{0}/{1} XP",s.xp_into_level,s.xp_for_next_level));UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,I18n.TrF("{0:N0} XP",s.total_xp));var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();
 /* Casual W/L + sweeps come from the SERVER stats, not a local history scan:
  * since the v1.32.1 lazy history load the cache only holds the head ~400
  * matches, so scanning it understated lifetime numbers (Sid: "casual losses
@@ -9976,8 +10953,9 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
  * 400-row cache cap); client CalcStreak stays only as an old-server fallback. */
 {int gCur=s.current_ranked_game_streak!=0?s.current_ranked_game_streak:(sR.Count>0?CalcStreak(sR):0);int gBest=s.best_ranked_game_streak;int srCur=s.current_ranked_series_streak;int srBest=s.best_ranked_series_streak>0?s.best_ranked_series_streak:s.best_ranked_streak;if(gCur==0&&gBest==0&&srCur==0&&srBest==0)UIFactory.SetText(txtRankedStrk,"");else{string gc=gCur>=0?"#00FF00":"#FF6666";string sc2=srCur>=0?"#00FF00":"#FF6666";string l1=(gCur>=0?I18n.TrF("  <color={0}>Game streak: {1}W</color>",gc,gCur):I18n.TrF("  <color={0}>Game streak: {1}L</color>",gc,-gCur))+(gBest>0?I18n.TrF("  Best: {0}W",gBest):"");string l2=(srCur>=0?I18n.TrF("  <color={0}>Series streak: {1}W</color>",sc2,srCur):I18n.TrF("  <color={0}>Series streak: {1}L</color>",sc2,-srCur))+(srBest>0?I18n.TrF("  Best: {0}W",srBest):"");UIFactory.SetText(txtRankedStrk,l1+"\n"+l2);}}/* 2v2 line — shows the parallel Glicko / W-L / streak. Hidden when no 2v2 series played, since the row otherwise reads as a confusing 0-0/1500 default. */{var t2=ApiClient.CachedTeamStats;if(t2!=null&&(t2.series_wins+t2.series_losses)>0){string ratio=t2.series_losses>0?$"{(float)t2.series_wins/t2.series_losses:F1}":t2.series_wins>0?$"{t2.series_wins}:0":"0:0";UIFactory.SetText(txtTeam2v2Rec,I18n.TrF("<color=#FFB347>2v2:</color> {0}W / {1}L ({2})  <color=#888>Rating:</color> {3:F0}  <color=#888>Peak:</color> {4:F0}",t2.series_wins,t2.series_losses,ratio,t2.rating,t2.peak_rating));int st2=t2.current_streak;if(st2!=0){string c2=st2>0?"#00FF00":"#FF6666";UIFactory.SetText(txtTeam2v2Strk,st2>0?I18n.TrF("  <color={0}>Streak: {1}W</color>",c2,st2):I18n.TrF("  <color={0}>Streak: {1}L</color>",c2,-st2));}else UIFactory.SetText(txtTeam2v2Strk,"");}else{UIFactory.SetText(txtTeam2v2Rec,I18n.Tr("<color=#FFB347>2v2:</color> -"));UIFactory.SetText(txtTeam2v2Strk,"");}}/* Bug #130: 1v2 (split by seat, like the 1v2 tab) and FFA. Same
         "hide behind a dash when unplayed" rule as the 2v2 line above — a 0-0 row
-        reads as a bug. 1v2 shows no rating: the mode is unranked beta and
-        glicko_ratings_1v2.rating is 1500 for everyone. */{int osw=s.ovt_solo_wins,osl=s.ovt_solo_losses,odw=s.ovt_duo_wins,odl=s.ovt_duo_losses;if(osw+osl+odw+odl>0){string solo=osw+osl>0?I18n.TrF("Solo {0}W/{1}L",osw,osl):I18n.Tr("Solo -");string duo=odw+odl>0?I18n.TrF("Duo {0}W/{1}L",odw,odl):I18n.Tr("Duo -");UIFactory.SetText(txtOvtRec,I18n.TrF("<color=#9BE8A0>1v2:</color> {0}  <color=#888>|</color>  {1}",solo,duo));}else UIFactory.SetText(txtOvtRec,I18n.Tr("<color=#9BE8A0>1v2:</color> -"));}{int fg=s.ffa_games,fw=s.ffa_wins;if(fg>0){float wr=100f*fw/fg;float t3=100f*s.ffa_top3/fg;UIFactory.SetText(txtFfaRec,I18n.TrF("<color=#C48CFF>FFA:</color> {0}W / {1}L ({2:F0}% win)",fw,fg-fw,wr));/* Gate on the COUNT of games carrying damage telemetry, not on the value
+        reads as a bug. 1v2 carries no rating anywhere in the client (Aug 13):
+        nothing server-side writes glicko_ratings_1v2.rating, so the mode has a
+        record and a board position and no Elo at all. *//* Aug 13 (owner): 1v2 left the Glicko-2 block, so its BOARD POSITION arrives here beside the W/L - the 1v2 board is ordered by games then win rate, which makes the standing a record fact rather than a rating one. Written through WriteModeLine, not SetText, because the composed line plus "Rank #n of N" measures past this cell in several locales: WriteModeLine moves the standing onto a second line inside the SAME element and grows it, so nothing is clipped away and no width is guessed (#292). */WriteModeLine(txtOvtRec,OvtRecordHead(s),OvtStandingTail(s),24f);{int fg=s.ffa_games,fw=s.ffa_wins;if(fg>0){float wr=100f*fw/fg;float t3=100f*s.ffa_top3/fg;UIFactory.SetText(txtFfaRec,I18n.TrF("<color=#C48CFF>FFA:</color> {0}W / {1}L ({2:F0}% win)",fw,fg-fw,wr));/* Gate on the COUNT of games carrying damage telemetry, not on the value
         (review find): pre-telemetry games have no data at all, but a real game
         where the player dealt zero damage is a legitimate 0.0 that must show. */string dmg=s.ffa_damage_games>0?I18n.TrF("  Dmg/game: {0:F0}",s.ffa_avg_damage):"";UIFactory.SetText(txtFfaExtra,I18n.TrF("  Top 3: {0:F0}%  Kills/game: {1:F1}  Avg place: {2:F1}{3}",t3,s.ffa_avg_kills,s.ffa_avg_placement,dmg));}else{UIFactory.SetText(txtFfaRec,I18n.Tr("<color=#C48CFF>FFA:</color> -"));UIFactory.SetText(txtFfaExtra,"");}}UIFactory.SetText(txtCasualRec,cW+cL>0?I18n.TrF("Casual: {0}W / {1}L ({2})",cW,cL,cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":""):I18n.Tr("Casual: -"));if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,(st>0?I18n.TrF("  <color={0}>Streak: {1}W</color>",c,st):I18n.TrF("  <color={0}>Streak: {1}L</color>",c,-st))+(s.best_casual_streak>0?I18n.TrF("  Best: {0}W",s.best_casual_streak):""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,I18n.TrF("Sweeps: <color=#00FF00>5-0 x{0}</color>  <color=#FF6666>0-5 x{1}</color>",sweepG,sweepT));UIFactory.SetText(txtTotalRec,I18n.TrF("Total: {0} ({1}W / {2}L)  <color=#FFD94D>Gold: {3}</color>",s.total_matches,s.wins,s.losses,s.gold_earned - s.gold_spent));/* Hit% / Block% lifetime - one-sided totals (only the reporter-side's client has these
  * counters). Split across two lines in the 44px-tall txtAccuracy field because the
@@ -10033,7 +11011,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         bool viewerReported=ViewerWasReporter(m);
         float dpsStepYou=DpsStepFor(m.player_damage_timeline,m.duration_seconds,viewerReported?DPS_STEP_LOCAL:DPS_STEP_PEER);
         float dpsStepOpp=DpsStepFor(m.opp_damage_timeline,m.duration_seconds,viewerReported?DPS_STEP_PEER:DPS_STEP_LOCAL);
-        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"),m.duration_seconds);if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)),m.duration_seconds);}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetTextRaw(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        {I18n.Tr("Cards:")} {(_historyCardsFull ? m.cards_display : FormatCardLine(m.cards_display))}":"");UIFactory.SetTextRaw(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        {I18n.Tr("Opp:")}   {(_historyCardsFull ? m.opp_cards_display : FormatCardLine(m.opp_cards_display))}":"");if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());RegisterHoverRectFor(row.txtCards,m.cards_display,false);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true);row.root.SetActive(true);}
+        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"),m.duration_seconds);if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)),m.duration_seconds);}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);/* Round-2 HIGH: the bodies are built FIRST because whether a build exists decides what the cell says. A row with no cards but a stored build used to render an empty cell and register no hover, so its build had no surface at all. */string myBuildBody=CardsPlusBuildBody(m.cards_display,m.player_end_stats);string oppBuildBody=CardsPlusBuildBody(m.opp_cards_display,m.opp_end_stats);UIFactory.SetTextRaw(row.txtCards,HistoryCardCellText(I18n.Tr("Cards:"),m.cards_display,myBuildBody));UIFactory.SetTextRaw(row.txtOppCards,HistoryCardCellText(I18n.Tr("Opp:")+"  ",m.opp_cards_display,oppBuildBody));if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());/* Aug 12 item 1: one hover, cards AND the end-of-game build. CardsPlusBuildBody returns NULL for a row with no stored build (every match before this shipped), and a null bodyOverride is exactly the pre-existing call — so old rows keep the identical tooltip and CompetitiveUI's memoised comma-split body. */RegisterHoverRectFor(row.txtCards,m.cards_display,false,null,myBuildBody);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true,null,oppBuildBody);row.root.SetActive(true);}
 
         // Resolve a TMP text component's screen-space rect via its parent
         // chain. Handles both Screen Space - Overlay (corners are screen
@@ -10109,10 +11087,177 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             catch { return false; }
         }
 
+        // ── Aug 12 item 1: end-of-game build stats inside the card tooltips ──
+        // TabStatsOverlay.DecodeBuildStats owns BOTH the labels (the hold-Tab
+        // overlay's own localised ones) and the value formatting, so nothing
+        // here names a stat and this file therefore cannot mislabel one. It
+        // returns an EMPTY list for a row with no build — the column is NULL
+        // for every match recorded before this shipped — or for a wire version
+        // this client cannot decode, and every caller below then renders the
+        // card list exactly as it did before. That is what makes an old row
+        // look deliberate rather than broken: nothing is added, nothing is
+        // replaced by a dash.
+        //
+        // COLUMN BUDGETS (#245 — measured, not guessed). The SHARED tooltip
+        // (CompetitiveUI.DrawCardHoverTooltip) is a hard 260px box: its body
+        // rect is 244px at fontSize 12, and its HEIGHT comes from the '\n'
+        // COUNT alone. So a line long enough to WRAP is drawn past the bottom
+        // of the box and clipped away — text silently missing (#292/#237),
+        // which is the one failure mode that must not be possible here.
+        // 34 chars x ~6.3px (IMGUI Arial 12, mixed case) = ~214px, ~30px slack.
+        // The widest single cell any shipped locale can produce is 27 chars
+        // ("Kulors bromseffekt" (sv, 18) + space + "100.00"), measured straight
+        // off I18nCatalogues — so one cell always fits a line on its own, and
+        // the packer below can only ever degrade to FEWER columns, never to a
+        // wrapped line. The FFA tab draws its OWN 470px tooltip and measures it
+        // with GUIStyle.CalcHeight, so it can take a wider line safely.
+        private const int BUILD_TIP_NARROW_COLS = 34;
+        private const int BUILD_TIP_WIDE_COLS = 56;
+
+        /// <summary>Lay a stored build-stat wire out as tooltip lines, packing
+        /// as many stats per line as <paramref name="budgetChars"/> allows.
+        /// Returns "" (never null) when there is no build to show.</summary>
+        private static string BuildStatsTipBlock(string wire, int budgetChars, string indent = "")
+        {
+            if (string.IsNullOrEmpty(wire)) return "";
+            List<TabStatsOverlay.BuildStatLine> rows;
+            try { rows = TabStatsOverlay.DecodeBuildStats(wire); }
+            catch { return ""; }
+            if (rows == null || rows.Count == 0) return "";
+            if (indent == null) indent = "";
+            int budget = Math.Max(12, budgetChars - indent.Length);
+            var sb = new StringBuilder(rows.Count * 40);
+            // Names WHEN the snapshot was taken. It is load-bearing copy, not
+            // decoration: HP is terminal health, so the loser's row honestly
+            // reads "0/100" and without this header that reads as a bug.
+            sb.Append(indent).Append("<color=#66809A>").Append(I18n.Tr("Build at game end")).Append("</color>");
+            int lineLen = 0;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                string label = rows[i].label ?? "";
+                string val = rows[i].value ?? "";
+                // Budget on the PLAIN text — rich-text tags occupy no width.
+                int cell = label.Length + 1 + val.Length;
+                if (lineLen == 0 || lineLen + 3 + cell > budget)
+                {
+                    sb.Append('\n').Append(indent);
+                    lineLen = 0;
+                }
+                else
+                {
+                    sb.Append("   ");
+                    lineLen += 3;
+                }
+                sb.Append("<color=#8FA3B8>").Append(label).Append("</color> <b>").Append(val).Append("</b>");
+                lineLen += cell;
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>The bullet card list CompetitiveUI derives from a comma
+        /// line, reproduced here so a body carrying BOTH cards and a build can
+        /// be handed over as one pre-formatted override. Kept byte-identical to
+        /// DrawCardHoverTooltip's own derivation (same bullet, same
+        /// CardTextLocalizer lookup) so the tooltip does not change appearance
+        /// depending on which of the two paths built it.</summary>
+        private static string CardsBulletBody(string cardsDisplay)
+        {
+            if (string.IsNullOrEmpty(cardsDisplay)) return "";
+            var sb = new StringBuilder(cardsDisplay.Length + 32);
+            string[] cards;
+            try { cards = cardsDisplay.Split(','); }
+            catch { cards = new[] { cardsDisplay }; }
+            foreach (var c in cards)
+            {
+                string name = (c ?? "").Trim();
+                if (name.Length == 0) continue;
+                string disp = null;
+                try { disp = CardTextLocalizer.PrettyName(name, name); } catch { }
+                if (sb.Length > 0) sb.Append('\n');
+                sb.Append("• ").Append(disp ?? name);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Body override for a My Stats history row's card cell:
+        /// the full card list PLUS the end-of-game build.
+        ///
+        /// Returns NULL when there is no build to add, which is the point —
+        /// the caller then passes no override at all and CompetitiveUI keeps
+        /// using its own memoised comma-split body (#162: that memo is why the
+        /// pre-build path costs nothing per Repaint). So rows recorded before
+        /// this feature keep byte-identical rendering AND their old perf.
+        ///
+        /// It does NOT require cards. It used to, with a comment claiming an
+        /// empty card cell "could only ever attach to an invisible element" —
+        /// a self-fulfilling claim (#351), since the cell was empty precisely
+        /// because this path refused to give it anything to say. A player who
+        /// finished a game without picking a card has a perfectly valid stored
+        /// build, and that was the only surface it could ever have had
+        /// (round-2 HIGH). The caller now renders an explicit "no cards +
+        /// hover for build" line for exactly this case — see
+        /// HistoryCardCellText for why the visible text is load-bearing and
+        /// not decoration.</summary>
+        private static string CardsPlusBuildBody(string cardsDisplay, string endStats)
+        {
+            string build = BuildStatsTipBlock(endStats, BUILD_TIP_NARROW_COLS);
+            if (build.Length == 0) return null;
+            string cards = CardsBulletBody(cardsDisplay);
+            // Cards FIRST, build second — not just for reading order. The
+            // drawer's overflow rule (CompetitiveUI.EnsureTipLayout) drops from
+            // the end and skips card bullets, so this ordering is what makes
+            // the build the part that gets elided in a window too small to hold
+            // everything.
+            return cards.Length > 0 ? cards + "\n" + build : build;
+        }
+
+        /// <summary>Text for a My Stats history row's card cell.
+        ///
+        /// Normally the card line, exactly as before. When the row has NO
+        /// cards but DOES carry a decodable build (`body` non-null), it
+        /// renders an explicit "no cards" line plus the hover hint instead of
+        /// the empty string it used to render.
+        ///
+        /// That line is load-bearing, not decoration. RegisterHoverRectFor
+        /// will now happily register a body-only region, but the region's
+        /// WIDTH comes from the element's rendered text, and an empty element
+        /// measures 0 — which ResolveHoverSource turns into a full-width
+        /// invisible hover trap. Giving the cell real text is what makes the
+        /// zone both hittable and bounded to the words it belongs to. The hint
+        /// wording mirrors the FFA tab's, which is the surface players already
+        /// know this gesture from.
+        ///
+        /// `label` arrives already translated (the caller's literal sits at
+        /// its own Tr call site) and callers write the result Raw, so nothing
+        /// here re-enters the catalogue.</summary>
+        private static string HistoryCardCellText(string label, string cardsDisplay, string body)
+        {
+            if (!string.IsNullOrEmpty(cardsDisplay))
+                return $"        {label} {(_historyCardsFull ? cardsDisplay : FormatCardLine(cardsDisplay))}";
+            if (string.IsNullOrEmpty(body)) return "";
+            return $"        {label} " + I18n.Tr("<color=#666>no cards</color>  <color=#556270>(hover for build)</color>");
+        }
+
+        /// <summary>Register a card-tooltip hover zone over `txt`.
+        ///
+        /// The gate is "cards OR body", matching CompetitiveUI's own
+        /// (RegisterCardHoverRegion refuses only when BOTH are empty). It used
+        /// to demand a non-empty card line, which made a build-only row
+        /// unreachable on every surface that has one (round-2 HIGH).
+        ///
+        /// CALLER CONTRACT, and the reason the relaxation is not enough on its
+        /// own: ResolveHoverSource derives the region's width from the
+        /// element's RENDERED text (#90). An element rendering nothing has
+        /// preferredWidth 0, which it reads as "no fraction" and falls back to
+        /// the FULL element width — an invisible hover trap across the whole
+        /// row (the 1v1 review [8] bug). So a caller passing a bodyOverride for
+        /// a cell with no card text must give that cell something visible to
+        /// say first; every caller in this file does.</summary>
         private static void RegisterHoverRectFor(object txt, string fullLine, bool isOpponent,
                                                  string titleOverride = null, string bodyOverride = null)
         {
-            if (txt == null || string.IsNullOrEmpty(fullLine)) return;
+            if (txt == null) return;
+            if (string.IsNullOrEmpty(fullLine) && string.IsNullOrEmpty(bodyOverride)) return;
             try
             {
                 RectTransform rt; Camera cam; float frac; Rect rect; RectTransform clip;
@@ -10624,7 +11769,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
         }
 
-        private static void RefreshLeaderboard(){_podiumLbRows.Clear();/* Item 1 (the "Oro v" bug): translate the base label FIRST, then append the arrow, and write Raw so the composed string is never re-looked-up. */string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetTextRaw(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":/* Aug 6 item 6: hide_gold players carry gold==-1 — treat as +infinity so they sit at the TOP of the default descending sort (they were sorting below 0-gold players). */entries.Sort((a,b)=>{int ga=a.gold<0?int.MaxValue:a.gold;int gb=b.gold<0?int.MaxValue:b.gold;return lbSortDesc?gb.CompareTo(ga):ga.CompareTo(gb);});break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}/* SetTextRaw (find 15): a bare display name must never hit the translation catalogue — a player literally named "Done." would render as "Hecho.". */UIFactory.SetTextRaw(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetTextRaw(txtLBCount,lbQ.Length>0?I18n.TrF("{0} of {1} players",entries.Count,board.total_players):I18n.TrF("{0} players ranked",board.total_players));lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetTextRaw(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>{I18n.TrF("Level {0}",ps.level)}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?I18n.TrF("Rank: <b><color={0}>{1}</color></b>",string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color,ps.rank_name)+"   ":"";string detail="\n"+_rkLine+I18n.TrF("Rating: {0}   RD: {1}   Peak: {2}",ps.rating.ToString("F0",_INV),ps.rating_deviation.ToString("F0",_INV),ps.peak_rating.ToString("F0",_INV))+"\n"+I18n.TrF("{0} matches ({1}W / {2}L)  WR: {3}%",ps.total_matches,ps.wins,ps.losses,(ps.total_matches>0?ps.wins*100f/ps.total_matches:0f).ToString("F0",_INV))+"\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=I18n.TrF("<color=#FFD94D>Ranked (series): {0}W / {1}L</color>",ps.ranked_series_wins,ps.ranked_series_losses)+"\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=I18n.TrF("<color={0}>Leave: {1}/{2} ({3}%)</color>",dcCol,dc,totalRanked,pct.ToString("F0",_INV))+"\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.bullets_hit*100f/ps.bullets_fired).ToString("F1",_INV),ps.bullets_hit,ps.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=ps.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.blocks_successful*100f/ps.blocks_activated).ToString("F1",_INV),ps.blocks_successful,ps.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+        private static void RefreshLeaderboard(){_podiumLbRows.Clear();/* Item 1 (the "Oro v" bug): translate the base label FIRST, then append the arrow, and write Raw so the composed string is never re-looked-up. */string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetTextRaw(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":/* Aug 6 item 6: hide_gold players carry gold==-1 — treat as +infinity so they sit at the TOP of the default descending sort (they were sorting below 0-gold players). */entries.Sort((a,b)=>{int ga=a.gold<0?int.MaxValue:a.gold;int gb=b.gold<0?int.MaxValue:b.gold;return lbSortDesc?gb.CompareTo(ga):ga.CompareTo(gb);});break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}/* SetTextRaw (find 15): a bare display name must never hit the translation catalogue — a player literally named "Done." would render as "Hecho.". */UIFactory.SetTextRaw(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetTextRaw(txtLBCount,lbQ.Length>0?I18n.TrF("{0} of {1} players",entries.Count,board.total_players):I18n.TrF("{0} players ranked",board.total_players));lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetTextRaw(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>{I18n.TrF("Level {0}",ps.level)}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?I18n.TrF("Rank: <b><color={0}>{1}</color></b>",string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color,ps.rank_name)+"   ":"";string detail="\n"+_rkLine+I18n.TrF("Rating: {0}   RD: {1}   Peak: {2}",ps.rating.ToString("F0",_INV),ps.rating_deviation.ToString("F0",_INV),ps.peak_rating.ToString("F0",_INV))+"\n"/* Aug 12 item 2: the panel was 1v1-only. ModeRatingBlock adds the 1v1 board position plus the 2v2/FFA ratings and every mode's standing, and returns "" for a mode the player has never touched — the whole block vanishes for a pure-1v1 player rather than printing four rows of defaults. Standing 0 is the server's not-on-that-board sentinel and can never reach the string (ApiClient.TryFormatStanding refuses it). */+ModeRatingBlock(ps)+I18n.TrF("{0} matches ({1}W / {2}L)  WR: {3}%",ps.total_matches,ps.wins,ps.losses,(ps.total_matches>0?ps.wins*100f/ps.total_matches:0f).ToString("F0",_INV))+"\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=I18n.TrF("<color=#FFD94D>Ranked (series): {0}W / {1}L</color>",ps.ranked_series_wins,ps.ranked_series_losses)+"\n";/* Aug 13 (owner): 1v2 belongs with the RECORDS, not in the rating block above - ModeRatingBlock no longer emits it. "" for a player who has never played it, so this adds no row to anyone else. */{string _ovtRec=OvtRecordLine(ps);if(_ovtRec.Length>0)detail+=_ovtRec+"\n";}/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=I18n.TrF("<color={0}>Leave: {1}/{2} ({3}%)</color>",dcCol,dc,totalRanked,pct.ToString("F0",_INV))+"\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.bullets_hit*100f/ps.bullets_fired).ToString("F1",_INV),ps.bullets_hit,ps.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=ps.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.blocks_successful*100f/ps.blocks_activated).ToString("F1",_INV),ps.blocks_successful,ps.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
  * limited to the viewer's most-recent 500 matches and silently dropped
  * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+="\n"+I18n.TrF("<b>vs You:</b> <color={0}>{1}W - {2}L ({3} games)</color>",h2hColor,h2hAll,h2hAllL,h2hAll+h2hAllL)+"\n";if(h2hSW+h2hSL>0)detail+="  "+I18n.TrF("Ranked Series: {0}W / {1}L",h2hSW,h2hSL)+"\n";if(h2hCW+h2hCL>0)detail+="  "+I18n.TrF("Casual: {0}W / {1}L",h2hCW,h2hCL)+"\n";}}/* Mod version this player was last seen running (X-Mod-Version
@@ -12416,7 +13561,16 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 case "Avg Game Length": title = I18n.Tr("Avg Game Length (minutes)"); break;
                 case "2v2 Rating": title = I18n.Tr("2v2 Rating"); break;
                 // Aug 6 item 1 — simple single-value bars off PlayerStatsData.
-                case "Rage Quit %": title = I18n.Tr("Casual Rage-Quit % (lower is better)"); unit = "%"; break;
+                /* Aug 12 item 12: the stat FLIPPED SIDES. casual_rage_quit_pct
+                 * is now the rate at which this player's casual 1v1 OPPONENTS
+                 * quit on them (unmodded quickplay opponents included), not
+                 * the rate at which the player quits. So the direction word
+                 * reverses with it. The metric NAME stays "Rage Quit %" (owner
+                 * decision, and it doubles as the internal switch key); only
+                 * the meaning-carrying copy changes, which re-keys it for
+                 * translation rather than carrying the old wording over
+                 * (#289 — the old sentence is now false in every locale). */
+                case "Rage Quit %": title = I18n.Tr("Casual Opponents Who Quit on You % (higher is better)"); unit = "%"; break;
                 case "FFA Avg Kills": title = I18n.Tr("FFA Average Kills per Game"); break;
                 case "FFA Avg Placement": title = I18n.Tr("FFA Average Placement (lower is better)"); break;
                 case "Ranked DPS": title = I18n.Tr("Ranked Damage per Second"); break;
@@ -15104,8 +16258,21 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             string send = "global";
             try { send = ChatClient.SendChannel ?? "global"; } catch { }
             if (txtChatHeader != null)
+            {
+                // Bug 213: name who in this room currently has chat muted, so
+                // you know before typing at them. MutedPlayersLine() returns ""
+                // when nobody is muted or we are not in an online room, so the
+                // header falls back to its normal form and no row is wasted.
+                // This is the ALWAYS-AVAILABLE surface — the in-game overlay's
+                // copy only shows while the chat panel itself is up.
+                string mutedLine = "";
+                try { mutedLine = CompetitiveUI.MutedPlayersLine(); } catch { }
                 UIFactory.SetTextRaw(txtChatHeader,
-                    I18n.TrF("Viewing: {0}  <color=#888>(press T to chat)</color>", ChatChannelDisplayName(filter)));
+                    mutedLine.Length > 0
+                        ? I18n.TrF("Viewing: {0}  <color=#888>(press T to chat)</color>", ChatChannelDisplayName(filter))
+                          + "  <color=#997766>" + mutedLine + "</color>"
+                        : I18n.TrF("Viewing: {0}  <color=#888>(press T to chat)</color>", ChatChannelDisplayName(filter)));
+            }
             if (chatViewBtn != null)
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(chatViewBtn), I18n.Tr("Change view"));
             if (chatSendBtn != null)
@@ -17240,6 +18407,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // is stale >45s.
 
         private static object txtTState, txtTWhen, txtTPenalty, txtTForceCount, txtTMyMatch, txtTDiscordGate, txtTMyHistory, txtTRoomCode, txtTTzNow;
+        // The Recent Tournaments header names the ladder it is listing, because
+        // the list is now filtered to the active sub-tab and an empty sync list
+        // beside a busy async one otherwise reads as a fetch failure.
+        private static object txtTHistHeader;
         // July 26 item 1: instructions + prizes render in the on-demand info
         // popup instead of the column; RefreshTournaments rebuilds these
         // strings, the popup buttons read them at click time. Defaults are the
@@ -17281,8 +18452,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // "Upcoming Match Bets" section in the Tournament tab — surfaces
         // tournament series that exist server-side but haven't gone live
         // in-game yet. Rebuilds on each refresh from CachedActiveSeries.
-        private static GameObject tTournBetsBox, tTournBetsContainer;
+        private static GameObject tTournBetsBox, tTournBetsContainer, tTournBetsToggleBtn;
         private static object tTournBetsHeader;
+        // Collapsed by default (owner): the expanded list was the largest thing
+        // on the tab. Session-scoped, deliberately not persisted — it is a
+        // "show me the odds right now" gesture, not a preference.
+        private static bool _tBetsExpanded = false;
         private static List<GameObject> tTournBetRowPool = new List<GameObject>();
         // Per-row "purpose" - what the row represents on the current refresh.
         // Populated in RefreshTournaments' bracket render so the row's click
@@ -17403,13 +18578,32 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddHLG(tzRow, spacing: 6, forceExpandH: true);
             UIFactory.AddLE(tzRow, prefH: 26, flexH: 0);
             // 112/56 (was 80/40): the RU labels ("Часовой пояс:"/"Формат:")
-            // clipped at the old widths (Aug 3 screenshots) — widen ~40%; the
-            // row's trailing 180px "now:" text has the slack.
+            // clipped at the old widths (Aug 3 screenshots) — widen ~40%.
+            //
+            // Aug 13 (owner): the clock is no longer the fifth cell of this row.
+            // Budget, which is what makes this a layout bug rather than a
+            // too-small box: 112 + 80 + 56 + 60 + 180 + 4 gaps = 512 preferred
+            // against a 430-pref / 360-min column. Over budget, so the HLG
+            // shrinks EVERY child toward its min (0 — CreateText/CreateButton
+            // set no minW), and the clock, sized for exactly its own English
+            // string, was the one that visibly lost. Widening it would take
+            // width from the buttons instead. Its own row removes the
+            // contention entirely, and the cell is then MEASURED per refresh
+            // (SizeTzNowCell) so no locale can outgrow it either.
             UIFactory.CreateText("TZL", tzRow.transform, "Timezone:", 14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(112, 24));
             txtTTzButton = UIFactory.CreateButton("TZBtn", tzRow.transform, _TzLabel(), 14f, C_WHITE, C_BTN, () => _CycleTz(), sizeDelta: new Vector2(80, 24));
             UIFactory.CreateText("TDL", tzRow.transform, "Clock:", 14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(56, 24));
             txtTDateFmtButton = UIFactory.CreateButton("TDFBtn", tzRow.transform, _DateFormat(), 14f, C_WHITE, C_BTN, () => _CycleDateFormat(), sizeDelta: new Vector2(60, 24));
-            txtTTzNow = UIFactory.CreateText("TZN", tzRow.transform, "", 13f, new Color(0.8f, 0.9f, 1f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(180, 24));
+            var tzNowRow = new GameObject("TZNowRow"); tzNowRow.transform.SetParent(left.transform, false);
+            tzNowRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(tzNowRow, spacing: 0, forceExpandH: true);
+            UIFactory.AddLE(tzNowRow, prefH: 22, flexH: 0);
+            txtTTzNow = UIFactory.CreateText("TZN", tzNowRow.transform, "", 13f, new Color(0.8f, 0.9f, 1f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 22));
+            // Overflow, not the global Truncate: with the cell measured to its
+            // own content a clip should be unreachable, and if the measurement
+            // ever misses (reflection) an overhang into this row's own empty
+            // space is far kinder than a silently cut clock.
+            UIFactory.FitOneLine(txtTTzNow);
 
             // Signup action row
             var sRow = new GameObject("TSAct"); sRow.transform.SetParent(left.transform, false);
@@ -17634,16 +18828,29 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // ranked_series row but no in-game activity yet. RefreshLiveSeries
             // hides these from the Live Ranked Games panel until they go live;
             // betting still happens here so people can wager pre-game.
-            tTournBetsBox = UIFactory.CreatePanel("TBetsBox", right.transform, C_PANEL);
+            // Aug 13 (owner, second pass): the first attempt put the list behind
+            // an inline expander, which does not solve anything — clicking it
+            // re-inflates the same rows in the same column and reproduces
+            // exactly the crowding the owner asked to remove, just one click
+            // later. A real button opening a real POPUP is the ask, and the
+            // popup is free of the tab's layout budget entirely.
+            // The button lives on the LEFT column (owner), beside the match
+            // panel, where it reads as an action rather than a section header.
+            tTournBetsBox = UIFactory.CreatePanel("TBetsBox", left.transform, C_PANEL);
             UIFactory.AddVLG(tTournBetsBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
             UIFactory.AddLE(tTournBetsBox, flexH: 0);
-            tTournBetsHeader = UIFactory.CreateText("TBH_Bets", tTournBetsBox.transform,
-                "<color=#FFD94D>Upcoming Match Bets</color>",
-                17f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(360, 24));
-            tTournBetsContainer = new GameObject("TBetsRows");
-            tTournBetsContainer.transform.SetParent(tTournBetsBox.transform, false);
-            tTournBetsContainer.AddComponent<RectTransform>();
-            UIFactory.AddVLG(tTournBetsContainer, spacing: 2);
+            tTournBetsToggleBtn = UIFactory.CreateButton("TBH_Bets", tTournBetsBox.transform,
+                "<color=#FFD94D>Tournament Bets</color>",
+                17f, C_WHITE, C_BTN, () => ShowTournamentBetsPopup(),
+                sizeDelta: new Vector2(360, 30));
+            // No second AddLE: CreateButton already bakes prefW/prefH from the
+            // sizeDelta, and a stacked LayoutElement is the trap SetPrefH's own
+            // comment warns about.
+            tTournBetsHeader = UIFactory.GetButtonText(tTournBetsToggleBtn);
+            // The rows container now lives in the POPUP, not the tab. It is
+            // built on demand and destroyed with the popup, so the tab's height
+            // budget never sees it.
+            tTournBetsContainer = null;
             tTournBetsBox.SetActive(false); // hidden until there's a pre-match tournament series
 
             var brkBox = UIFactory.CreatePanel("TBrkBox", right.transform, C_PANEL);
@@ -17715,7 +18922,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             var histBox = UIFactory.CreatePanel("TRH", right.transform, C_PANEL);
             UIFactory.AddVLG(histBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
             UIFactory.AddLE(histBox, prefH: 150, flexH: 0);
-            UIFactory.CreateText("TRH_h", histBox.transform, "Recent Tournaments", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(260, 22));
+            txtTHistHeader = UIFactory.CreateText("TRH_h", histBox.transform, "Recent Tournaments", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(300, 22));
+            UIFactory.FitOneLine(txtTHistHeader);
             var hSv = UIFactory.CreateScrollView("TRHSV", histBox.transform, spacing: 1);
             UIFactory.AddLE(hSv.scrollGO, flexH: 1);
             tHistoryList = hSv.content;
@@ -17724,7 +18932,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 var row = new GameObject($"TH{i}"); row.transform.SetParent(tHistoryList.transform, false);
                 row.AddComponent<RectTransform>(); UIFactory.AddHLG(row, spacing: 4, forceExpandH: true);
                 UIFactory.AddLE(row, prefH: 20, flexH: 0);
-                var t = UIFactory.CreateText("txt", row.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(520, 20));
+                // 820 (was 520): the row went from "date + winner + (8p)" to a
+                // full podium plus an unabbreviated entrant count. Worst case
+                // measured on the format below — 3 x Trunc(12) names, the
+                // longest shipped date form and a 2-digit count — is ~92 chars,
+                // ~640px at 13pt, and a locale running 30% long still clears
+                // 820. The right column is ~1400px wide, so this comes out of
+                // slack, not out of a neighbour (#245).
+                var t = UIFactory.CreateText("txt", row.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(820, 20));
                 tHistoryRowPool.Add(row);
                 tHistoryRowTexts.Add(t);
                 row.SetActive(false);
@@ -17750,6 +18965,61 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             ("JST",    "Tokyo Standard Time"),
             ("AEST",   "AUS Eastern Standard Time"),
         };
+
+        /// <summary>"  deadline: 4d 6h left" for an async match, or "" when the
+        /// row carries no deadline (every sync match — the column is null
+        /// there). Colour escalates as it runs out, and a passed deadline says
+        /// so rather than rendering a negative span.
+        ///
+        /// This is the async panel's replacement for the ready/room machinery:
+        /// the forfeit sweep keys on exactly this timestamp
+        /// (tournaments.py's ready_deadline_at, which for async IS the 7-day
+        /// deadline), so it is the one number that actually governs an async
+        /// match.</summary>
+        private static string AsyncDeadlineTail(string deadlineAt)
+        {
+            if (string.IsNullOrEmpty(deadlineAt)) return "";
+            try
+            {
+                var dl = DateTime.Parse(deadlineAt, _INV, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
+                var remaining = dl - DateTime.UtcNow;
+                if (remaining.TotalSeconds <= 0) return "   " + I18n.Tr("<color=#FF4040>deadline passed</color>");
+                return remaining.TotalDays >= 1
+                    ? "   " + I18n.TrF("<color=#FFAA44>deadline: {0}d {1}h left</color>", (int)remaining.TotalDays, remaining.Hours)
+                    : "   " + I18n.TrF("<color=#FF6060>deadline: {0}h {1}m left</color>", remaining.Hours, remaining.Minutes);
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Size the "now: …" cell to the string it is about to lay
+        /// out — the SizeFfaStartButton technique, on a text element.
+        ///
+        /// Measurement, not a character budget, for the reason that made the
+        /// old fixed 180px wrong across locales rather than merely tight: the
+        /// widest form is the US clock ("Wed 08/13 12:00 AM") behind a
+        /// translated "now:" prefix, and the translated prefixes come from the
+        /// runtime OS-fallback atlas, whose advances are not Gravity's
+        /// (#110/#297) — so no per-character estimate made from the English
+        /// string can bound it. TMP is asked for the width of the exact
+        /// rich-text string, in the same wrapped form SetTextRaw hands it
+        /// (_BoldWrap adds an outer &lt;b&gt;, and the bold face is wider).
+        ///
+        /// Budget: the cell owns its whole row inside a 430-pref / 360-min
+        /// column, so growth up to 410 is free — this can never squeeze a
+        /// neighbour, which is exactly why the clock was moved out of the
+        /// timezone row (see BuildTournamentsTab). The fallback estimate is
+        /// deliberately pessimistic and the clamp keeps a pathological
+        /// translation inside the column.</summary>
+        private static void SizeTzNowCell(string composed)
+        {
+            var comp = txtTTzNow as Component;
+            if (comp == null) return;
+            float w = UIFactory.MeasureTextWidth(txtTTzNow, "<b>" + composed + "</b>");
+            if (w <= 0f) w = (composed ?? "").Length * 9f;
+            w = Mathf.Clamp(w + 10f, 180f, 410f);
+            UIFactory.SetPrefW(comp.gameObject, w);
+            UIFactory.SetMinW(comp.gameObject, w);
+        }
 
         private static TimeZoneInfo _ResolveTz()
         {
@@ -18164,25 +19434,43 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return list.ToArray();
         }
 
-        /// <summary>Render the Tournament tab's "Upcoming Match Bets" section.
+        /// <summary>Render the Tournament tab's "Tournament Bets" section.
         /// Pulls every active tournament series in pre_match phase from
         /// CachedActiveSeries (which polls server-side every few seconds via
         /// /series/active), builds the same 3-row bet UI used in the Live
         /// Ranked Games panel for each one. Hides the whole box when there's
-        /// nothing to bet on.</summary>
+        /// nothing to bet on, and folds the rows behind the header button
+        /// otherwise (owner, Aug 13).
+        ///
+        /// Filtered to the sub-tab's KIND: an async tournament's pairings have
+        /// no business on the sync tab and vice versa — the two are separate
+        /// events with separate brackets, and the panel gave no clue which one
+        /// a row belonged to. A series whose kind the server did not state is
+        /// shown on BOTH tabs on purpose: hiding a live bettable match because
+        /// of a missing field is the worse error, and the field is only ever
+        /// absent from a server older than the tab split.</summary>
         private static void RefreshTournamentBets()
         {
-            if (tTournBetsBox == null || tTournBetsContainer == null) return;
+            if (tTournBetsBox == null) return;
             // Reset pool.
             foreach (var r in tTournBetRowPool) r.SetActive(false);
 
+            // Read straight from ApiClient rather than taking the caller's
+            // `isAsync`: this runs FIRST in RefreshTournaments, before that
+            // local exists, and one source for the answer is what keeps the
+            // two from drifting.
+            bool wantAsync = ApiClient.TournamentKind == "async";
             var raw = ApiClient.CachedActiveSeries;
             var preMatch = new List<ApiClient.ActiveSeriesEntry>();
             if (raw != null)
             {
                 foreach (var s in raw)
-                    if (s.is_tournament && s.phase == "pre_match")
-                        preMatch.Add(s);
+                {
+                    if (!s.is_tournament || s.phase != "pre_match") continue;
+                    if (!string.IsNullOrEmpty(s.tournament_kind)
+                        && (s.tournament_kind == "async") != wantAsync) continue;
+                    preMatch.Add(s);
+                }
             }
             if (preMatch.Count == 0)
             {
@@ -18190,9 +19478,19 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 return;
             }
             tTournBetsBox.SetActive(true);
-            UIFactory.SetText(tTournBetsHeader,
-                $"<color=#FFD94D>Upcoming Match Bets</color>  <color=#888>({preMatch.Count})</color>");
+            UIFactory.SetTextRaw(tTournBetsHeader,
+                I18n.TrF("<color=#FFD94D>Tournament Bets</color>  <color=#888>({0})</color>", preMatch.Count));
+            // The rows are built into the POPUP, not here — the tab only owns
+            // the button and its count. Rebuild the popup's contents in place
+            // while it is open so odds/lock state stay live behind it.
+            if (tournBetsPopupRows != null) FillTournamentBetRows(preMatch);
+        }
 
+        /// <summary>Build the bet rows into whichever container currently owns
+        /// them (the popup). Split out so the popup can be refreshed in place
+        /// on the normal tab tick without reopening it.</summary>
+        private static void FillTournamentBetRows(List<ApiClient.ActiveSeriesEntry> preMatch)
+        {
             int idx = 0;
             foreach (var s in preMatch)
             {
@@ -18211,7 +19509,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             while (tTournBetRowPool.Count <= idx)
             {
                 var go = new GameObject($"tbet{tTournBetRowPool.Count}");
-                go.transform.SetParent(tTournBetsContainer.transform, false);
+                go.transform.SetParent(tournBetsPopupRows.transform, false);
                 go.AddComponent<RectTransform>();
                 UIFactory.AddHLG(go, spacing: 4, forceExpandH: true);
                 UIFactory.AddLE(go, prefH: 26, flexH: 0);
@@ -18307,7 +19605,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     case "EU":  nowStr = nowLocal.ToString("ddd dd/MM HH:mm", _INV); break;
                     default:    nowStr = nowLocal.ToString("yyyy-MM-dd HH:mm", _INV); break;
                 }
-                UIFactory.SetTextRaw(txtTTzNow, I18n.TrF("now: <b>{0}</b>", nowStr));
+                string nowLine = I18n.TrF("now: <b>{0}</b>", nowStr);
+                UIFactory.SetTextRaw(txtTTzNow, nowLine);
+                SizeTzNowCell(nowLine);
             }
             catch { UIFactory.SetText(txtTTzNow, ""); }
             string whenText = "";
@@ -18466,7 +19766,16 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 {
                     if (m.status != "ready" && m.status != "active") continue;
                     if (m.p1_signup_id != t.my_signup_id && m.p2_signup_id != t.my_signup_id) continue;
-                    if (!string.IsNullOrEmpty(m.match_id))
+                    // Aug 13 (owner): ASYNC never shows a room code. Nothing in
+                    // the async lifecycle uses one — the series row is created
+                    // at bracket activation, the report binds it by PLAYER PAIR
+                    // from ANY room (main.py's sct- prefix check is explicitly
+                    // sync-only), and the forfeit is deadline-driven. The code
+                    // was pure noise inherited from reusing the sync panel, and
+                    // it invited players to hunt for a lobby that means nothing.
+                    // The server still SENDS photon_room_name for async and
+                    // must keep doing so — older clients read it.
+                    if (!isAsync && !string.IsNullOrEmpty(m.match_id))
                         myRoomCode = !string.IsNullOrEmpty(m.photon_room_name)
                             ? m.photon_room_name
                             : "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
@@ -18480,11 +19789,25 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                             if (s.signup_id == oppSignupId) { oppReady = s.ready; break; }
                         }
                     }
-                    string readyState = t.my_ready
-                        ? (oppReady ? "<color=#60FF80>both ready - connecting...</color>"
-                                    : "<color=#FFD94D>waiting on opponent to ready</color>")
-                        : "<color=#FF9060>press Ready Up</color>";
-                    myMatchLine = $"Your match (R{m.round}{(m.bracket_side == "TP" ? " 3rd Place" : "")}): vs <color=#FFDE88>{opp ?? "?"}</color>  -  {readyState}";
+                    if (isAsync)
+                    {
+                        // Async is coordinate-and-play: opponent, deadline, and
+                        // how to reach them. No ready state, because readying
+                        // up decides nothing here.
+                        myMatchLine = I18n.TrF("Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>",
+                                          m.round, m.bracket_side == "TP" ? I18n.Tr(" 3rd Place") : "",
+                                          FfaSafeRich(Trunc(opp ?? "?", 18)))
+                                    + AsyncDeadlineTail(m.deadline_at)
+                                    + "\n" + I18n.Tr("<color=#888>Agree a time in Discord (or /dm-opponent), then play a private lobby - it counts automatically.</color>");
+                    }
+                    else
+                    {
+                        string readyState = t.my_ready
+                            ? (oppReady ? "<color=#60FF80>both ready - connecting...</color>"
+                                        : "<color=#FFD94D>waiting on opponent to ready</color>")
+                            : "<color=#FF9060>press Ready Up</color>";
+                        myMatchLine = $"Your match (R{m.round}{(m.bracket_side == "TP" ? " 3rd Place" : "")}): vs <color=#FFDE88>{opp ?? "?"}</color>  -  {readyState}";
+                    }
                     showMyMatch = true;
 
                     // Auto-connect: sync only. Async is self-paced - players coordinate
@@ -18508,15 +19831,43 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     break;
                 }
             }
-            UIFactory.SetText(txtTMyMatch, myMatchLine);
-            string regionBadge = string.IsNullOrEmpty(t.photon_region)
+            UIFactory.SetTextRaw(txtTMyMatch, myMatchLine);
+            // HEIGHT BUDGET (#199 — the element is 400px wide with wrap on, and
+            // the global Truncate default drops what does not fit rather than
+            // growing). Sync is the one-or-two-line form it was built for (54).
+            // The async form is two authored lines and the second wraps: ~104
+            // chars over ~390px at 17pt is 3 lines, +30% for a long locale is
+            // 4, plus the match line = 5 x ~22px. minH moves with prefH or
+            // Unity clamps the child at its build-time minimum (the SetMinH
+            // note in UIFactory).
+            {
+                var mmGO = (txtTMyMatch as Component)?.gameObject;
+                if (mmGO != null)
+                {
+                    float mmH = (isAsync && showMyMatch) ? 116f : 54f;
+                    UIFactory.SetPrefH(mmGO, mmH);
+                    UIFactory.SetMinH(mmGO, mmH);
+                }
+            }
+            // The region badge rides the room-code line, and async now shows
+            // neither: an async pair converges on nothing, so a [RU] tag beside
+            // a code they must not use is two wrong claims in one string. Sync
+            // keeps both unchanged — it genuinely puts a pair in one room at a
+            // scheduled instant, which is what the region is for (#49).
+            string regionBadge = (isAsync || string.IsNullOrEmpty(t.photon_region))
                 ? ""
                 : $"  <color=#AABBEE>[{t.photon_region.ToUpper()}]</color>";
             UIFactory.SetText(txtTRoomCode, string.IsNullOrEmpty(myRoomCode) ? ""
                 : $"Room code: <color=#C0E0FF>{myRoomCode}</color>{regionBadge}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>");
-            if (txtTReconnectBtn != null) txtTReconnectBtn.SetActive(showMyMatch && !inBreak);
-            if (tPlayNowBtn != null) tPlayNowBtn.SetActive(showPlayNow);
-            if (txtTReadyBtn != null) txtTReadyBtn.SetActive(showMyMatch && !inBreak);
+            // Ready Up / Reconnect are sync-only from here on. Both exist to
+            // get two players into ONE server-issued room at the same moment;
+            // async has no such moment, so on that tab they were buttons that
+            // could only mislead. Play Now is likewise a sync break-skip — an
+            // async match is never 'scheduled', so showPlayNow is already false
+            // there, but it is gated explicitly rather than left to that.
+            if (txtTReconnectBtn != null) txtTReconnectBtn.SetActive(!isAsync && showMyMatch && !inBreak);
+            if (tPlayNowBtn != null) tPlayNowBtn.SetActive(!isAsync && showPlayNow);
+            if (txtTReadyBtn != null) txtTReadyBtn.SetActive(!isAsync && showMyMatch && !inBreak);
             if (tMyMatchPanel != null) tMyMatchPanel.SetActive(showMyMatch);
 
             // Signups list (right column). Seed numbers are only shown once the
@@ -18773,6 +20124,15 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             }
 
             // Site-wide recent tournaments panel (bottom of right column).
+            //
+            // Aug 13 (owner), three changes: filtered to THIS sub-tab's kind
+            // (the async and sync ladders are separate events and the list
+            // never said which was which); the podium is now 1st/2nd/3rd rather
+            // than the winner alone; and the entrant count says "players"
+            // instead of "8p" — an abbreviation that saved four characters in
+            // a row with room to spare. A row whose kind the server did not
+            // state shows on BOTH tabs, same rule and same reason as the bets
+            // list above.
             var hist = ApiClient.CachedSiteTournamentHistory;
             int hIdx = 0;
             if (hist != null)
@@ -18780,19 +20140,42 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 for (int i = 0; i < hist.Length && hIdx < tHistoryRowPool.Count; i++)
                 {
                     var te = hist[i];
+                    if (!string.IsNullOrEmpty(te.kind) && (te.kind == "async") != isAsync) continue;
                     string dt = te.ended_at;
                     // Item 9: the local EU/US ternary is retired — DateFmt
                     // honors the global picker (TournamentDateFormat keeps
                     // owning only the date+TIME _FmtSlot sites).
                     try { if (!string.IsNullOrEmpty(dt)) dt = DateFmt.FullShortYear(TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at, _INV, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(), _ResolveTz())); } catch { }
-                    string winner = string.IsNullOrEmpty(te.winner_display_name) ? "-" : te.winner_display_name;
-                    UIFactory.SetTextRaw(tHistoryRowTexts[hIdx],
-                        I18n.TrF("<color=#AABBEE>{0}</color>  Winner: <color=#FFE580>{1}</color>  <color=#888>({2}p)</color>", dt, winner, te.signup_count));
+                    // Names are user-authored: truncated so the row cannot run
+                    // past its 820px cell, and the whole line is written Raw so
+                    // a player literally named "Done." is never translated
+                    // (#298c / find 15).
+                    string winner = string.IsNullOrEmpty(te.winner_display_name) ? "-" : Trunc(te.winner_display_name, 12);
+                    string runnerUp = string.IsNullOrEmpty(te.runner_up_display_name) ? "-" : Trunc(te.runner_up_display_name, 12);
+                    string third = string.IsNullOrEmpty(te.third_place_display_name) ? "" : Trunc(te.third_place_display_name, 12);
+                    // Two WHOLE templates rather than a base plus a "3rd {0}"
+                    // fragment: the fragment has two letters, which is under
+                    // the extractor's 3-letter floor, so it would never have
+                    // become a key and would have rendered English forever
+                    // inside an otherwise translated line (#295c).
+                    string line = third.Length > 0
+                        ? I18n.TrF("<color=#AABBEE>{0}</color>  <color=#FFE580>1st {1}</color>  <color=#C8C8C8>2nd {2}</color>  <color=#D4894A>3rd {3}</color>",
+                              dt, winner, runnerUp, third)
+                        : I18n.TrF("<color=#AABBEE>{0}</color>  <color=#FFE580>1st {1}</color>  <color=#C8C8C8>2nd {2}</color>",
+                              dt, winner, runnerUp);
+                    line += "  " + I18n.TrF("<color=#888>{0} players</color>", te.signup_count);
+                    UIFactory.SetTextRaw(tHistoryRowTexts[hIdx], line);
                     tHistoryRowPool[hIdx].SetActive(true);
                     hIdx++;
                 }
             }
             for (int i = hIdx; i < tHistoryRowPool.Count; i++) tHistoryRowPool[i].SetActive(false);
+            if (txtTHistHeader != null)
+                UIFactory.SetTextRaw(txtTHistHeader, hIdx == 0
+                    ? (isAsync ? I18n.Tr("Recent Tournaments <color=#888>- async, none yet</color>")
+                               : I18n.Tr("Recent Tournaments <color=#888>- sync, none yet</color>"))
+                    : (isAsync ? I18n.Tr("Recent Tournaments <color=#888>- async</color>")
+                               : I18n.Tr("Recent Tournaments <color=#888>- sync</color>")));
         }
 
         private static bool _tVoteLocalEdited = false;
@@ -19465,6 +20848,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             row.root.AddComponent<RectTransform>();
             UIFactory.AddHLG(row.root, spacing: 4, padL: 8, padR: 8);
             UIFactory.AddLE(row.root, prefH: 22, minH: 22, flexH: 0);
+            // Aug 12 item 2c: podium row tint (the 1v1 board's hlWrap equivalent).
+            AddRowBackground(row.root);
             row.txtRank   = UIFactory.CreateText("r",  row.root.transform, "", 15f, C_GOLD,  UIFactory.AlignMidLeft,   sizeDelta: new Vector2(TLB_COL_W[0], 22));
             row.txtName   = UIFactory.CreateText("n",  row.root.transform, "", 15f, C_WHITE, UIFactory.AlignMidLeft,   sizeDelta: new Vector2(TLB_COL_W[1], 22));
             row.txtRating = UIFactory.CreateText("rt", row.root.transform, "", 15f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(TLB_COL_W[2], 22));
@@ -19728,6 +21113,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 }
             }
 
+            // Aug 12 item 2c: this board's animated-glitter registrations are
+            // rebuilt from scratch every fill, exactly like the 1v1 board's.
+            _podiumTeamRows.Clear();
             for (int i = 0; i < teamLBRows.Count; i++)
             {
                 var row = teamLBRows[i];
@@ -19745,9 +21133,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (!string.IsNullOrEmpty(e.title))
                 {
                     string col = string.IsNullOrEmpty(e.title_color) ? "#FFD94D" : e.title_color;
-                    nameDisplay = IsPodiumTitle(e.title)
-                        ? $"{nameDisplay} {PodiumSparkleSpan(e.title, col, 0)}"
-                        : $"{nameDisplay} <color={col}>[{Trunc(e.title, 12)}]</color>";
+                    if (IsPodiumTitle(e.title))
+                    {
+                        // Aug 12 item 2c: registered for the animated tick
+                        // instead of frozen at tick 0. The tick entry stores
+                        // the SAME (de-prefixed) text this render uses, or the
+                        // first glitter frame would silently change the label.
+                        string ttl = PodiumTitleOnOwnBoard(e.title, "2v2");
+                        _podiumTeamRows.Add(new object[] { row.txtName, nameDisplay, ttl, col });
+                        nameDisplay = $"{nameDisplay} {PodiumSparkleSpan(ttl, col, _podiumTick)}";
+                    }
+                    else nameDisplay = $"{nameDisplay} <color={col}>[{Trunc(e.title, 12)}]</color>";
                 }
                 UIFactory.SetTextRaw(row.txtName, nameDisplay);
                 UIFactory.SetColor(row.txtName, me ? C_GREEN : C_WHITE);
@@ -19763,6 +21159,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 UIFactory.SetText(row.txtMate, e.avg_teammate_elo > 0 ? $"{e.avg_teammate_elo}" : "—");
                 UIFactory.SetText(row.txtGold, $"{e.team_gold_earned}");
                 UIFactory.SetText(row.txtXp,   $"{e.team_xp_earned}");
+                // Aug 12 item 2c: podium tint + the readability outline that
+                // has to come with it. No selection branch — unlike the 1v1
+                // board these rows are not clickable, so there is no selected
+                // state to paint.
+                UIFactory.SetImageColor(row.root, PodiumRowTint(e.rank));
+                SetTeamLbRowOutline(row, e.rank <= 3);
                 row.root.SetActive(true);
             }
             /* Bug #76: the leaderboard's INNER ScrollRect captured mouse-wheel
@@ -19948,8 +21350,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     else
                         gOut = "<color=#888>·</color>";
 
-                    string leftCards  = BuildTeamCardsColumnChips(m, leftA, leftB);
-                    string rightCards = BuildTeamCardsColumnChips(m, rightA, rightB);
+                    // Round-2 HIGH: a column whose players picked nothing can
+                    // still carry stored builds; resolved once here and used
+                    // by BOTH the chip cell (so it advertises the hover) and
+                    // the registration gate (so the hover exists at all).
+                    bool leftHasBuild  = TeamColumnHasBuild(m, leftA,  leftB);
+                    bool rightHasBuild = TeamColumnHasBuild(m, rightA, rightB);
+                    string leftCards  = BuildTeamCardsColumnChips(m, leftA, leftB, leftHasBuild);
+                    string rightCards = BuildTeamCardsColumnChips(m, rightA, rightB, rightHasBuild);
 
                     var row = teamHistRows[rowIdx++];
                     row.isHeader = false;
@@ -19987,8 +21395,19 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     // then one card per line) so a team column's two players don't
                     // merge into one undifferentiated blob, and titleOverride="" drops
                     // the My-Stats "Your/Opponent's picks" header (wrong framing for a
-                    // 2-player team column). fullLine is still passed as the non-empty
-                    // gate so columns with no card data simply don't register.
+                    // 2-player team column).
+                    //
+                    // GATE: cards OR build, resolved inside RegisterHoverRectFor.
+                    // It used to be fullLine alone, so a column carrying builds
+                    // and no picks registered nothing and its builds had no
+                    // surface (round-2 HIGH). That works only because
+                    // BuildTeamCardsTooltipBody now returns "" for a column with
+                    // neither — otherwise the body's unconditional player-name
+                    // headings would put a "(no cards)" tooltip on every column
+                    // of every pre-telemetry series. The chip cell always renders
+                    // text ("(card data not recorded)" at minimum), so the
+                    // width-fraction trap in RegisterHoverRectFor's contract
+                    // cannot bite here.
                     RegisterHoverRectFor(row.txtCardsLeft,  BuildTeamCardsFullLine(m, leftA, leftB), false,
                         "", BuildTeamCardsTooltipBody(m, leftA, leftB));
                     RegisterHoverRectFor(row.txtCardsRight, BuildTeamCardsFullLine(m, rightA, rightB), true,
@@ -20071,14 +21490,36 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return $"{nm}{title}{elo}";
         }
 
+        /// <summary>True when either player in this team column has a stored
+        /// build this client can decode. Decoded, not merely "the string is
+        /// present": an undecodable wire version renders nothing, and a hover
+        /// hint pointing at nothing is worse than no hint.</summary>
+        private static bool TeamColumnHasBuild(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b)
+        {
+            if (m == null || m.end_stats_by_player == null) return false;
+            foreach (var slot in new[] { a, b })
+            {
+                if (slot == null || string.IsNullOrEmpty(slot.steam_id)) continue;
+                string wire;
+                if (!m.end_stats_by_player.TryGetValue(slot.steam_id, out wire)) continue;
+                if (BuildStatsTipBlock(wire, BUILD_TIP_NARROW_COLS, "  ").Length > 0) return true;
+            }
+            return false;
+        }
+
         // Compact 2-letter card chips per player for the expanded game detail.
         // Player name is rendered LARGER (size=120%) than the chips so the name
         // reads as a heading; chips are [MA][EM]… exactly like the My Stats page
         // (FormatCardLine). No long-form card names. Two cards... actually chips
         // are tiny so we fit many per line and let word-wrap break them.
-        private static string BuildTeamCardsColumnChips(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b)
+        //
+        // `hasBuild` is passed in rather than re-derived so the cell and the
+        // hover registration can never disagree about whether there is a build
+        // to advertise (round-2 HIGH).
+        private static string BuildTeamCardsColumnChips(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b, bool hasBuild)
         {
-            if (m == null || m.cards_by_player == null) return "";
+            if (m == null || m.cards_by_player == null)
+                return hasBuild ? I18n.Tr("<color=#666><i>no cards</i></color>  <color=#556270>(hover for build)</color>") : "";
             bool anyCards = false;
             foreach (var slot in new[] { a, b })
             {
@@ -20086,7 +21527,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (m.cards_by_player.TryGetValue(slot.steam_id, out var cs) && cs != null && cs.Count > 0)
                 { anyCards = true; break; }
             }
-            if (!anyCards) return "<color=#666><i>(card data not recorded)</i></color>";
+            if (!anyCards)
+                return hasBuild
+                    ? I18n.Tr("<color=#666><i>no cards</i></color>  <color=#556270>(hover for build)</color>")
+                    : "<color=#666><i>(card data not recorded)</i></color>";
             var sb = new StringBuilder();
             void appendFor(ApiClient.TeamSeriesSlot s)
             {
@@ -20103,10 +21547,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return sb.ToString();
         }
 
-        // Flat comma-separated FULL card-name list for a whole team column — used
-        // only as the non-empty GATE for tooltip registration (so a column with no
-        // card data doesn't register). The visible tooltip BODY comes from
-        // BuildTeamCardsTooltipBody below.
+        // Flat comma-separated FULL card-name list for a whole team column — one
+        // half of the tooltip-registration gate (the other half is the body,
+        // which can carry a build with no cards behind it). The visible tooltip
+        // BODY comes from BuildTeamCardsTooltipBody below.
         private static string BuildTeamCardsFullLine(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b)
         {
             if (m == null || m.cards_by_player == null) return "";
@@ -20126,16 +21570,33 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // bold heading, then one FULL card name per line beneath it. Grouping by
         // player keeps the two teammates' picks visually separate (the bug was both
         // players' cards merging into one clump) and one-per-line keeps them legible.
+        //
+        // Returns "" for a column with NEITHER cards nor a decodable build. That
+        // is what lets the caller gate registration on "cards OR body" (round-2
+        // HIGH) without putting a content-free "(no cards)" tooltip on every
+        // column of every series recorded before card capture existed — the
+        // player-name headings below are emitted unconditionally, so the body's
+        // own length is not evidence that it says anything.
         private static string BuildTeamCardsTooltipBody(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b)
         {
-            if (m == null || m.cards_by_player == null) return "";
+            if (m == null) return "";
+            bool hasBuild = TeamColumnHasBuild(m, a, b);
+            if (m.cards_by_player == null && !hasBuild) return "";
+            if (m.cards_by_player != null && !hasBuild
+                && string.IsNullOrEmpty(BuildTeamCardsFullLine(m, a, b))) return "";
             var sb = new StringBuilder();
             void addFor(ApiClient.TeamSeriesSlot s)
             {
                 if (s == null || string.IsNullOrEmpty(s.steam_id)) return;
                 if (sb.Length > 0) sb.Append('\n');
                 sb.Append("<b>").Append(Trunc(s.name ?? "?", 16)).Append("</b>");
-                bool has = m.cards_by_player.TryGetValue(s.steam_id, out var cards) && cards != null && cards.Count > 0;
+                // Hoisted, not folded into the && chain: with cards_by_player
+                // nullable the TryGetValue is no longer unconditionally
+                // evaluated, so `out var` inside the chain would not be
+                // definitely assigned below.
+                List<string> cards = null;
+                if (m.cards_by_player != null) m.cards_by_player.TryGetValue(s.steam_id, out cards);
+                bool has = cards != null && cards.Count > 0;
                 if (!has) { sb.Append("\n  <color=#888>(no cards)</color>"); return; }
                 foreach (var raw in cards)
                 {
@@ -20149,8 +21610,44 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     sb.Append("\n  • ").Append(name);
                 }
             }
+            // Aug 12 item 1: this player's end-of-game build, under their
+            // cards. Indented to the same "  " gutter the bullets use so the
+            // block reads as part of that teammate's section rather than a new
+            // one; the packer subtracts the indent from its column budget.
+            //
+            // HEIGHT BUDGET (#245): this is the tallest tooltip in the client,
+            // because one hover covers TWO players. Worst case against the
+            // shared drawer's arithmetic (no title band, 16px a line, +8 pad):
+            // 2 x (1 name + ~8 cards + 1 build header + ~11 packed stat lines)
+            // ~= 42 lines ~= 680px.
+            //
+            // This comment used to end "the drawer pins y >= 4, so the box
+            // cannot leave the screen", which was false and is exactly the
+            // shape #351 warns about: pinning y clamps the TOP edge, and 680px
+            // does not fit an 800x600 window at all, so the bottom ~90px —
+            // build lines — painted off-screen. The drawer now flows the body
+            // into columns and measures the result, so the box is bounded by
+            // the screen whatever this returns. Two properties of the FORMAT
+            // below are load-bearing for that: a player's build is emitted
+            // AFTER their cards (so the drawer's overflow rule eats build lines
+            // before card lines), and card/name lines are identifiable by their
+            // leading "•" / "<b>" (CompetitiveUI.IsTipCardLine). Keep both if
+            // you change the layout, and re-do the sum before adding another
+            // per-player section.
+            void addBuildFor(ApiClient.TeamSeriesSlot s)
+            {
+                if (s == null || string.IsNullOrEmpty(s.steam_id)) return;
+                if (m.end_stats_by_player == null) return;
+                string wire;
+                if (!m.end_stats_by_player.TryGetValue(s.steam_id, out wire)) return;
+                string build = BuildStatsTipBlock(wire, BUILD_TIP_NARROW_COLS, "  ");
+                if (build.Length == 0) return;
+                sb.Append('\n').Append(build);
+            }
             addFor(a);
+            addBuildFor(a);
             addFor(b);
+            addBuildFor(b);
             return sb.ToString();
         }
 

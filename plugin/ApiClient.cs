@@ -250,8 +250,30 @@ namespace CompetitiveRounds
             // slicers (#25). Field names are copied verbatim from
             // schemas.py PlayerStatsResponse; a rename on either side silently
             // yields 0 with no error (#152), so do not "tidy" them.
+            // ⚠ RE-ORIENTED Aug 12 (item 12). This is NO LONGER "how often this
+            // player rage-quits". Since the server flip it is the rate at which
+            // this player's QUICKPLAY OPPONENTS quit on THEM — a victim rate, so
+            // HIGHER IS WORSE FOR THE OPPONENTS, not for this player, and any
+            // surface that still calls it a shame stat is now lying. The
+            // denominator is a UNION (casual matches played + DC events whose
+            // room produced no match row), so a 4-0 leave is not double-counted.
             public float casual_rage_quit_pct;
+            // The percentage's OWN numerator, i.e. opponents who quit on this
+            // player. It must move with casual_rage_quit_pct — a surface
+            // rendering "3% (n/N)" needs n to be THIS field, not the one below.
+            // Kept under the old name because the server keeps it in step for
+            // clients that predate the flip; casual_opponent_dc_count is the
+            // same value under a name that cannot be misread.
             public int casual_dc_count;
+            // Same number as casual_dc_count, unambiguously named. Bind here in
+            // any NEW code.
+            public int casual_opponent_dc_count;
+            // The OLD leaver-side number, preserved: casual games THIS player
+            // abandoned (players.casual_dc_count). Nothing about the column or
+            // its data changed — only which number the headline percentage is
+            // computed from. Do NOT feed this into casual_rage_quit_pct's
+            // fraction; they are different populations.
+            public int casual_own_dc_count;
             public int casual_matches;
             public float ranked_dps;
             public float ffa_dps;
@@ -270,6 +292,81 @@ namespace CompetitiveRounds
             public int ranked_unique_opponents;
             public int ranked_total_series;
             public float ranked_uniqueness_pct;
+
+            // ── Aug 12 item 2: multi-mode ratings + numeric board standings ──
+            // Every field below is a FLAT scalar, so JsonUtility fills them with
+            // ZERO parser changes (#73); only nested arrays need the manual
+            // slicers (#25). Names copied verbatim from schemas.py
+            // PlayerStatsResponse — a rename on either side silently yields 0
+            // with no error anywhere (#152), so do not "tidy" them.
+            //
+            // ⚠ STANDING SEMANTICS — read before rendering any *_standing field.
+            // 0 is the server's NOT-ON-THAT-BOARD sentinel (no games, below the
+            // board's entry floor, or a deleted row). It is NEVER position #1.
+            // A render site that does `$"#{s.standing}"` prints "#0" to the very
+            // players who have no rank at all, which reads as a bug in the
+            // ranking rather than an absence of one. Do not hand-write the
+            // `> 0` check either: call TryFormatStanding (below), which cannot
+            // hand back a string without the caller having taken the branch.
+            // *_standing_population is the "of N" half — that board's total
+            // eligible population, NOT the page size.
+            //
+            // Each standing is competition-style (1 + however many eligible
+            // players are strictly ahead) under the same filter and ordering its
+            // board uses AS CALLED, so ties legitimately SHARE a number and the
+            // value agrees with the row the player sees on that board.
+            public int standing;                    // 1v1
+            public int standing_population;
+            // 2v2. team_rating / team_completed_series already exist above.
+            public float team_rating_deviation;
+            public float team_peak_rating;
+            public int team_standing;
+            public int team_standing_population;
+            // FFA. peak has been maintained server-side since FFA shipped but
+            // reached no endpoint until now.
+            public float ffa_rating;
+            public float ffa_rating_deviation;
+            public float ffa_peak_rating;
+            public int ffa_standing;
+            public int ffa_standing_population;
+            // 1v2 has NO RATING AT ALL — glicko_ratings_1v2's rating columns are
+            // never written by anything server-side, so there is deliberately no
+            // ovt_rating/rd/peak here and one must not be invented from the 1v1
+            // number. The 1v2 record is W/L only (ovt_solo_* / ovt_duo_* above);
+            // this standing is that board's own ordering (games played, then win
+            // rate) over the COMBINED role, which is the role it opens on.
+            public int ovt_standing;
+            public int ovt_standing_population;
+        }
+
+        /// <summary>The server's "not on that board" value for every *_standing
+        /// field on <see cref="PlayerStatsData"/>. It is a SENTINEL, not a rank:
+        /// position #1 is 1.</summary>
+        public const int STANDING_NONE = 0;
+
+        /// <summary>Render a board standing, or refuse to. Returns false — and
+        /// leaves <paramref name="text"/> null — when the player is not on that
+        /// board (standing == STANDING_NONE, or a nonsensical population).
+        ///
+        /// This exists so a render site CANNOT produce "#0 of 0": the formatted
+        /// string is only reachable through the branch that already proved there
+        /// is a position to show. Prefer it over a hand-written `standing > 0`
+        /// at each call site — that check is exactly the thing that gets copied
+        /// wrong into the fifth pane.
+        ///
+        /// The `standing > population` arm is a CONSISTENCY check, not a rule of
+        /// the domain: competition-style standing is 1 + (players strictly
+        /// ahead) over the same eligible set that population counts, so it
+        /// cannot legitimately exceed it. If a future server ever sources the
+        /// two numbers from different filters this suppresses the line rather
+        /// than printing "#5 of 3" — the safe direction, but worth knowing about
+        /// if a real rank ever goes missing.</summary>
+        public static bool TryFormatStanding(int standing, int population, out string text)
+        {
+            text = null;
+            if (standing <= STANDING_NONE || population <= 0 || standing > population) return false;
+            text = I18n.TrF("Rank #{0} of {1}", standing, population);
+            return true;
         }
 
         /// <summary>Sentinel for a `record_*` career column the server returned as
@@ -374,6 +471,17 @@ namespace CompetitiveRounds
             public string player_damage_timeline, opp_damage_timeline;
             public int player_deaths = RECORD_NONE, player_deaths_boundary = RECORD_NONE, player_deaths_own_bullet = RECORD_NONE;
             public int opp_deaths = RECORD_NONE, opp_deaths_boundary = RECORD_NONE, opp_deaths_own_bullet = RECORD_NONE;
+            // Aug 12 item 1 — end-of-game BUILD (the 22-field TabStatsOverlay
+            // wire string), viewer-relative like every field above it. Server
+            // sends JSON null for every row without one (pre-migration-216, a
+            // client that predates capture, or a value its regex rejected), and
+            // the parser leaves that as "" — so EMPTY means "no build to show".
+            // Render it by handing the raw string to
+            // TabStatsOverlay.DecodeBuildStats: an empty decode result means the
+            // same thing, and positional labelling must never be re-derived here
+            // (a version this client does not know decodes to nothing on
+            // purpose).
+            public string player_end_stats, opp_end_stats;
         }
 
         [Serializable]
@@ -463,6 +571,19 @@ namespace CompetitiveRounds
         // Cached data
         public static List<MatchHistoryEntry> CachedMatchHistory { get; private set; }
         public static Dictionary<string, AchievementData> CachedAchievements { get; private set; }
+
+        /// <summary>Achievement keys already announced to the player this
+        /// session. An achievement unlocks exactly once, so one toast per key
+        /// is always correct — and this is the only thing that closes the
+        /// client/server announce race. The cache pre-mark in UnlockAchievement
+        /// stops the post-report refresh from re-toasting a key the client
+        /// already announced, but not the reverse order: the refresh fires 3s
+        /// after the report while an unlock POST can take longer than that to
+        /// answer, so the refresh diff can toast the key as server-granted and
+        /// the unlock callback then toasts the same key a second time. Both
+        /// announce sites claim through here.</summary>
+        private static readonly HashSet<string> _announcedAchievements =
+            new HashSet<string>(StringComparer.Ordinal);
 
         // ── Initialization ────────────────────────────────────
 
@@ -4575,7 +4696,14 @@ namespace CompetitiveRounds
             int localBestBounceKill = 0, int oppBestBounceKill = 0,
             string localDamageTimeline = null, string oppDamageTimeline = null,
             int localDeaths = 0, int localDeathsBoundary = 0, int localDeathsOwnBullet = 0,
-            int oppDeaths = 0, int oppDeathsBoundary = 0, int oppDeathsOwnBullet = 0)
+            int oppDeaths = 0, int oppDeathsBoundary = 0, int oppDeathsOwnBullet = 0,
+            // Aug 12 item 1 — each seat's end-of-game BUILD, as the 22-field
+            // TabStatsOverlay wire string (TabStatsOverlay.CaptureBuildStats).
+            // Positional by PLAYER SLOT, not viewer-relative: p1EndStats belongs
+            // to p1SteamId. Null = not captured, which is a normal outcome and
+            // simply omits the field. ADVISORY — rides outside the frozen
+            // 7-field HMAC canonical below, which does not change for this.
+            string p1EndStats = null, string p2EndStats = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             var sb = new StringBuilder();
@@ -4584,12 +4712,16 @@ namespace CompetitiveRounds
             AppendCards(sb, p1Cards);
             sb.Append("],\"card_offers\":[");
             AppendOffers(sb, p1Offers);
-            sb.Append("]},");
+            sb.Append("]");
+            AppendEndStats(sb, p1EndStats);
+            sb.Append("},");
             sb.Append($"\"player2\":{{\"steam_id\":\"{Escape(p2SteamId)}\",\"display_name\":\"{Escape(p2Name)}\",\"cards\":[");
             AppendCards(sb, p2Cards);
             sb.Append("],\"card_offers\":[");
             AppendOffers(sb, p2Offers);
-            sb.Append("]},");
+            sb.Append("]");
+            AppendEndStats(sb, p2EndStats);
+            sb.Append("},");
             sb.Append($"\"p1_rounds_won\":{p1RoundsWon},");
             sb.Append($"\"p2_rounds_won\":{p2RoundsWon},");
             sb.Append($"\"p1_points_total\":{p1PointsTotal},");
@@ -4704,6 +4836,7 @@ namespace CompetitiveRounds
                     if (success)
                     {
                         Plugin.Log.LogInfo($"Match reported successfully: {response}");
+                        RefreshAchievementsAfterReport();
 
                         // Parse XP from response
                         int xpGained = ExtractJsonInt(response, "xp_gained");
@@ -4856,6 +4989,56 @@ namespace CompetitiveRounds
                 sb.Append($"\"was_picked\":{(o.WasPicked ? "true" : "false")}");
                 sb.Append("}");
             }
+        }
+
+        /// <summary>Server bound on the end-of-game build string (schemas.py
+        /// END_STATS_MAX_LEN / main.py _END_STATS_MAX_LEN, both 300).
+        ///
+        /// This one matters more than a normal advisory bound: Pydantic's
+        /// max_length runs on the REQUEST MODEL, before _clean_end_stats ever
+        /// sees the value, so an over-length build 422s the ENTIRE match report
+        /// — the field is optional, the report is not.
+        ///
+        /// It is NOT reachable as the code stands, and this comment used to
+        /// claim it was (Codex round-2 LOW, and the stale number is the whole
+        /// reason the round-1 review raised a CRITICAL that did not exist).
+        /// TabStatsOverlay.WIRE_FIELD_MAX is 12 — the widest field the server's
+        /// anchored _END_STATS_RE accepts (sign + 7 integer digits + point + 3
+        /// decimals) — so the capture side's structural worst case is
+        /// 1 + 21 * (1 + 12) = 274 chars, and the two ends agree by
+        /// construction rather than by coincidence.
+        ///
+        /// The check below therefore stays as a fail-closed guard on ONE
+        /// specific future change: widening WIRE_FIELD_MAX (or adding wire
+        /// fields) without widening the server's regex and column. Do not
+        /// delete it because 274 < 300 today, and do not widen either side
+        /// alone.</summary>
+        private const int EndStatsMaxLen = 300;
+
+        /// <summary>Append `,"end_stats":"…"` to a player object that already
+        /// has at least one field written (every caller does — steam_id is
+        /// always first), or append NOTHING.
+        ///
+        /// Omitted rather than sent empty when there is no capture: the server
+        /// stores absent and null identically as "not recorded", and "" would be
+        /// a third state meaning the same thing (#257).
+        ///
+        /// Over-length is ALSO dropped rather than truncated. The format is
+        /// POSITIONAL, so a cut corrupts every field after it and produces
+        /// confidently mislabelled history instead of no history — and sending
+        /// it whole would take the whole report down with it (see the constant).
+        /// This is the last point that knows the server's contract, so the guard
+        /// belongs here and not in the capture code.</summary>
+        private static void AppendEndStats(StringBuilder sb, string wire)
+        {
+            if (string.IsNullOrEmpty(wire)) return;
+            if (wire.Length > EndStatsMaxLen)
+            {
+                Plugin.Log.LogWarning(
+                    $"[TABSTATS] end_stats {wire.Length} chars > {EndStatsMaxLen} server bound - omitted from report");
+                return;
+            }
+            sb.Append($",\"end_stats\":\"{Escape(wire)}\"");
         }
 
         // ── Data fetching ─────────────────────────────────────
@@ -6753,7 +6936,26 @@ namespace CompetitiveRounds
             entry.point_times = ExtractJsonString(chunk, "point_times");
             entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
             ParseDamageTelemetry(entry, chunk);
+            ParseBuildStats(entry, chunk);
             return entry;
+        }
+
+        /// <summary>Aug 12 item 1 — the two end-of-game build strings off a
+        /// /matches row. Its own helper, called from BOTH history parsers, for
+        /// the reason spelled out on ParseDamageTelemetry: they read the SAME
+        /// endpoint, and a field wired into only one of them silently reports
+        /// nothing on the other path (#279).
+        ///
+        /// ExtractJsonString is the right reader even though the column is
+        /// nullable: it searches for `"key":"`, which a JSON null cannot match,
+        /// so "not recorded" arrives as "" — the same value the renderer treats
+        /// as "no build". There is no 0-vs-null ambiguity to preserve here (the
+        /// reason the damage fields needed ExtractNullableInt), because an empty
+        /// build string is not a meaningful reading of anything.</summary>
+        private static void ParseBuildStats(MatchHistoryEntry entry, string chunk)
+        {
+            entry.player_end_stats = ExtractJsonString(chunk, "player_end_stats");
+            entry.opp_end_stats = ExtractJsonString(chunk, "opp_end_stats");
         }
 
         /// <summary>Aug 6 item 4 — damage + death telemetry off a /matches row.
@@ -6818,6 +7020,8 @@ namespace CompetitiveRounds
                 // no damage" value, so skipping them would print a confident
                 // "0.0 dps" on every row instead of a dash (#257).
                 ParseDamageTelemetry(entry, chunk);
+                // Same sibling rule (#279): the detail view renders builds too.
+                ParseBuildStats(entry, chunk);
                 entries.Add(entry);
             }
             return entries;
@@ -9932,22 +10136,29 @@ namespace CompetitiveRounds
             // July 22 item 7 — per-slot telemetry (timelines + counters), same
             // slot ordering as the fps args. Null-safe: absent slots omitted.
             TeamTelemetry t1aTele = null, TeamTelemetry t1bTele = null,
-            TeamTelemetry t2aTele = null, TeamTelemetry t2bTele = null)
+            TeamTelemetry t2aTele = null, TeamTelemetry t2bTele = null,
+            // Aug 12 item 1 — per-slot end-of-game BUILD wire strings, same slot
+            // ordering as the fps/telemetry args above. Null = not captured
+            // (field omitted). ADVISORY: outside the frozen 11-field canonical.
+            string t1aEndStats = null, string t1bEndStats = null,
+            string t2aEndStats = null, string t2bEndStats = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append($"\"series_id\":\"{Escape(seriesId)}\",");
-            void appendPlayer(string field, string sid, string name, List<MatchTracker.CardPickData> cards)
+            void appendPlayer(string field, string sid, string name, List<MatchTracker.CardPickData> cards, string endStats)
             {
                 sb.Append($"\"{field}\":{{\"steam_id\":\"{Escape(sid)}\",\"display_name\":\"{Escape(name)}\",\"cards\":[");
                 AppendCards(sb, cards);
-                sb.Append("],\"card_offers\":[]},");
+                sb.Append("],\"card_offers\":[]");
+                AppendEndStats(sb, endStats);
+                sb.Append("},");
             }
-            appendPlayer("t1a", t1aSteam, t1aName, t1aCards);
-            appendPlayer("t1b", t1bSteam, t1bName, t1bCards);
-            appendPlayer("t2a", t2aSteam, t2aName, t2aCards);
-            appendPlayer("t2b", t2bSteam, t2bName, t2bCards);
+            appendPlayer("t1a", t1aSteam, t1aName, t1aCards, t1aEndStats);
+            appendPlayer("t1b", t1bSteam, t1bName, t1bCards, t1bEndStats);
+            appendPlayer("t2a", t2aSteam, t2aName, t2aCards, t2aEndStats);
+            appendPlayer("t2b", t2bSteam, t2bName, t2bCards, t2bEndStats);
             sb.Append($"\"t1_rounds_won\":{t1Rounds},");
             sb.Append($"\"t2_rounds_won\":{t2Rounds},");
             sb.Append($"\"t1_points_total\":{t1Points},");
@@ -9986,6 +10197,7 @@ namespace CompetitiveRounds
                     if (success)
                     {
                         Plugin.Log.LogInfo($"2v2 match reported: {response}");
+                        RefreshAchievementsAfterReport();
                         string sStatus = ExtractJsonString(response, "series_status");
                         string sScore = ExtractJsonString(response, "series_score");
                         if (sStatus == "completed")
@@ -10071,6 +10283,12 @@ namespace CompetitiveRounds
             public string display_name;
             public int rating;
             public int rd;
+            // Aug 12 item 2. Previously reachable only through
+            // /team/team-stats, so the board could not show it. Falls back to
+            // this row's current rating server-side when the stored peak is
+            // NULL; 0 means an older server that does not send it — render
+            // blank, never "Peak 0".
+            public int peak_rating;
             public int completed_series;
             public int series_wins;
             public int series_losses;
@@ -10120,6 +10338,13 @@ namespace CompetitiveRounds
             public Dictionary<string, TeamPlayerTele> telemetry_by_player = new Dictionary<string, TeamPlayerTele>();
             // steam_id -> [card_name, card_name, ...]
             public Dictionary<string, List<string>> cards_by_player = new Dictionary<string, List<string>>();
+            // Aug 12 item 1 — steam_id -> end-of-game BUILD wire string. The
+            // server keys this off the MATCH row's own slot ids (not the series
+            // row's), so it stays correct across a mid-series rebalance, and it
+            // OMITS a slot with no build rather than mapping it to "" — so an
+            // absent key means "not recorded" and must register no build panel
+            // rather than an empty one (#257).
+            public Dictionary<string, string> end_stats_by_player = new Dictionary<string, string>();
         }
 
         [Serializable]
@@ -10356,6 +10581,11 @@ namespace CompetitiveRounds
                         }
                     }
                 }
+                // Aug 12 item 1 — end_stats_by_player {sid: "1|…"}. Reuses the
+                // shared string-aware reader rather than a fourth hand-rolled
+                // loop: this object sits in the same blob as user-authored card
+                // names, so a plain depth counter is not safe here (#156).
+                entry.end_stats_by_player = ParseSteamStringMap(m, "end_stats_by_player");
                 list.Add(entry);
                 cur = oEnd + 1;
             }
@@ -10551,6 +10781,9 @@ namespace CompetitiveRounds
                                 display_name = ExtractJsonString(chunk, "display_name"),
                                 rating = ExtractJsonInt(chunk, "rating"),
                                 rd = ExtractJsonInt(chunk, "rd"),
+                                // Safe beside "rating" — see the FFA board's
+                                // note: the reader matches the QUOTED key.
+                                peak_rating = ExtractJsonInt(chunk, "peak_rating"),
                                 completed_series = ExtractJsonInt(chunk, "completed_series"),
                                 series_wins = ExtractJsonInt(chunk, "series_wins"),
                                 series_losses = ExtractJsonInt(chunk, "series_losses"),
@@ -11114,7 +11347,13 @@ namespace CompetitiveRounds
             // stores an empty string as NULL, i.e. "not recorded", not zero).
             string soloDamageTimeline = null,
             string duoADamageTimeline = null,
-            string duoBDamageTimeline = null)
+            string duoBDamageTimeline = null,
+            // Aug 12 item 1 — per-seat end-of-game BUILD wire strings. Null =
+            // not captured (field omitted). ADVISORY: rides outside the frozen
+            // 10-field canonical below.
+            string soloEndStats = null,
+            string duoAEndStats = null,
+            string duoBEndStats = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             int winnerSide = soloRounds > duoRounds ? 1 : 2;
@@ -11122,15 +11361,17 @@ namespace CompetitiveRounds
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append($"\"series_id\":\"{Escape(seriesId)}\",");
-            void appendPlayer(string key, string steam, string nm, List<MatchTracker.CardPickData> cards)
+            void appendPlayer(string key, string steam, string nm, List<MatchTracker.CardPickData> cards, string endStats)
             {
                 sb.Append($"\"{key}\":{{\"steam_id\":\"{Escape(steam)}\",\"display_name\":\"{Escape(nm)}\",\"cards\":[");
                 AppendCards(sb, cards ?? new List<MatchTracker.CardPickData>());
-                sb.Append("]},");
+                sb.Append("]");
+                AppendEndStats(sb, endStats);
+                sb.Append("},");
             }
-            appendPlayer("solo", soloSteam, soloName, soloCards);
-            appendPlayer("duo_a", duoASteam, duoAName, duoACards);
-            appendPlayer("duo_b", duoBSteam, duoBName, duoBCards);
+            appendPlayer("solo", soloSteam, soloName, soloCards, soloEndStats);
+            appendPlayer("duo_a", duoASteam, duoAName, duoACards, duoAEndStats);
+            appendPlayer("duo_b", duoBSteam, duoBName, duoBCards, duoBEndStats);
             sb.Append($"\"solo_rounds_won\":{soloRounds},\"duo_rounds_won\":{duoRounds},");
             sb.Append($"\"solo_points_total\":{soloPoints},\"duo_points_total\":{duoPoints},");
             sb.Append($"\"winner_side\":{winnerSide},");
@@ -11156,6 +11397,7 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     Plugin.Log.LogInfo($"[1v2] match reported: {resp}");
+                    RefreshAchievementsAfterReport();
                     string sStatus = ExtractJsonString(resp, "series_status");
                     string sScore = ExtractJsonString(resp, "series_score");
                     if (sStatus == "completed") { CompetitiveUI.ShowNotification(I18n.TrF("1v2 series complete: {0}", sScore), Color.green, 6f); ActiveOvt1v2SeriesId = null; Plugin.ClearPendingOvtSlot(); }
@@ -11198,6 +11440,11 @@ namespace CompetitiveRounds
             // server OMITS a seat whose timeline is null, so an absent key means
             // "not recorded" — register no graph rather than an empty one (#257).
             public Dictionary<string, string> damage_timeline_by_steam = new Dictionary<string, string>();
+            // Aug 12 item 1 — steam_id -> end-of-game BUILD wire string. Same
+            // omit-when-absent rule as the map above: a seat with no build is
+            // simply not a key, so render no build panel rather than an empty
+            // one (#257).
+            public Dictionary<string, string> end_stats_by_steam = new Dictionary<string, string>();
         }
         public class OvtRecentSeries
         {
@@ -11436,6 +11683,8 @@ namespace CompetitiveRounds
                                         fps_by_steam = ParseSteamIntMap(mObj, "fps_by_steam"),
                                         cards_by_steam = ParseSteamCardsMap(mObj, "cards_by_steam"),
                                         damage_timeline_by_steam = ParseSteamStringMap(mObj, "damage_timeline_by_steam"),
+                                        // Aug 12 item 1 — end-of-game builds.
+                                        end_stats_by_steam = ParseSteamStringMap(mObj, "end_stats_by_steam"),
                                     });
                                 }
                             }
@@ -11460,6 +11709,13 @@ namespace CompetitiveRounds
         public class FfaLeaderboardEntry
         {
             public int rank, rating, rd, games_played, wins, top3, level;
+            // Aug 12 item 2. The server has maintained glicko_ratings_ffa
+            // .peak_rating on every rated game since FFA shipped; this board is
+            // the first surface to receive it. It falls back to the row's own
+            // current rating server-side when the stored peak is NULL, so it is
+            // never LOWER than `rating` — but it can be 0 against a server that
+            // predates the field, which must render as blank, not as "Peak 0".
+            public int peak_rating;
             public string steam_id, display_name, title, title_color;
             public float avg_placement, win_rate;
             public int ffa_gold_earned, ffa_xp_earned;
@@ -11484,6 +11740,12 @@ namespace CompetitiveRounds
              * ints — difference consecutive samples for per-interval DPS. */
             public int damage_dealt = RECORD_NONE;
             public string damage_timeline;
+            // Aug 12 item 1 — this player's end-of-game BUILD wire string.
+            // /ffa/recent normalises a missing value to "" (not null), so EMPTY
+            // means "no build to show" — hand it to
+            // TabStatsOverlay.DecodeBuildStats and render nothing on an empty
+            // result; never re-derive positional labels here.
+            public string end_stats;
             public bool left_early;
             public float rating_change;
             public bool has_rating_change;
@@ -14428,6 +14690,10 @@ namespace CompetitiveRounds
                                 display_name = ExtractJsonString(chunk, "display_name"),
                                 rating = ExtractJsonInt(chunk, "rating"),
                                 rd = ExtractJsonInt(chunk, "rd"),
+                                // Safe beside "rating": the reader searches for
+                                // the quoted key, and "peak_rating" cannot match
+                                // "\"rating\":" (the char before is '_').
+                                peak_rating = ExtractJsonInt(chunk, "peak_rating"),
                                 games_played = ExtractJsonInt(chunk, "games_played"),
                                 wins = ExtractJsonInt(chunk, "wins"),
                                 top3 = ExtractJsonInt(chunk, "top3"),
@@ -14549,6 +14815,9 @@ namespace CompetitiveRounds
                                         // DPS tag renders as a dash, not "0.0".
                                         damage_dealt = ExtractNullableInt(pObj, "damage_dealt"),
                                         damage_timeline = ExtractJsonString(pObj, "damage_dealt_timeline"),
+                                        // Aug 12 item 1 — end-of-game build.
+                                        // "" for every pre-migration-216 row.
+                                        end_stats = ExtractJsonString(pObj, "end_stats"),
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
                                         left_early = ExtractJsonBool(pObj, "left_early"),
@@ -14914,6 +15183,13 @@ namespace CompetitiveRounds
             // v2 canonical); old servers ignore them.
             public int damageDealt;
             public string killTimeline, damageTimeline;
+            // Aug 12 item 1 — this seat's end-of-game BUILD wire string
+            // (TabStatsOverlay.CaptureBuildStats). Null = not captured, which
+            // omits the field. ADVISORY: outside the ffa: HMAC canonical, unlike
+            // kills — do not add it to the canonical without a lockstep server
+            // release, and do not add it at all (labels never cross the wire, so
+            // there is nothing here worth signing).
+            public string endStats;
         }
 
         /// <summary>Deterministic cross-language steam-id ordering used by the
@@ -15025,6 +15301,10 @@ namespace CompetitiveRounds
                     sb.Append($"\"active_seconds\":{Math.Max(0f, t.activeSeconds).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
                     sb.Append("}");
                 }
+                // Aug 12 item 1 — end-of-game build. Last field of the entry so
+                // it cannot land inside the telemetry object above; the entry
+                // always has earlier fields, so the leading comma is safe.
+                AppendEndStats(sb, p.endStats);
                 sb.Append("}");
             }
             sb.Append("],");
@@ -15055,6 +15335,7 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     Plugin.Log.LogInfo($"[FFA] match reported: {resp}");
+                    RefreshAchievementsAfterReport();
                     int myPlace = ExtractJsonInt(resp, "placement");
                     int xp = ExtractJsonInt(resp, "xp_gained");
                     if (myPlace > 0)
@@ -15134,17 +15415,99 @@ namespace CompetitiveRounds
         /// <summary>Aug 6 item 1 — casual rage-quit report. The surviving
         /// client reports a mid-game leave in a CASUAL 1v1 (any midgame
         /// leave, including 4-0 — Sid's rule). Server dedups per
-        /// (room, leaver) and rate-limits per reporter.</summary>
-        public static void ReportCasualDc(string reporterSteamId, string leaverSteamId, string roomId)
+        /// (room, leaver) and rate-limits per reporter.
+        ///
+        /// Since Aug 12 (item 12) this is ALSO the numerator of the reporter's
+        /// own "opponents quit on me" rate, and the server now creates the
+        /// leaver's row rather than 404-ing a first-encounter vanilla quitter.
+        /// <paramref name="leaverDisplayName"/> is what stops that brand-new row
+        /// showing a raw account id forever: pass the opponent's resolved
+        /// nickname, never a placeholder — the server accepts any non-blank
+        /// value that is not the steam id itself, so "Opponent" WOULD be stored
+        /// as somebody's name.
+        ///
+        /// <paramref name="gameRoomId"/> (Aug 13) is the PER-GAME identity of
+        /// the game being abandoned — see the parameter's own note below for
+        /// why it is deliberately not the whole report id.</summary>
+        public static void ReportCasualDc(string reporterSteamId, string leaverSteamId, string roomId,
+                                          string leaverDisplayName = null, string gameRoomId = null)
         {
             if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(leaverSteamId)
                 || string.IsNullOrEmpty(roomId)) return;
+            /* Optional and advisory, so it must never cost us the report. The
+             * server declares it Query(max_length=64) and FastAPI rejects the
+             * whole request at 422 on overflow, so trim rather than risk that;
+             * a trailing lone high surrogate (a split emoji) is dropped so the
+             * UTF-8 encoding stays well-formed. Blank is omitted entirely —
+             * the server would only fall back to the id anyway. */
+            string nameQ = "";
+            string nm = (leaverDisplayName ?? "").Trim();
+            if (nm.Length > 64) nm = nm.Substring(0, 64);
+            if (nm.Length > 0 && char.IsHighSurrogate(nm[nm.Length - 1])) nm = nm.Substring(0, nm.Length - 1);
+            if (nm.Length > 0) nameQ = $"&leaver_display_name={UnityWebRequest.EscapeURL(nm)}";
+            /* PER-GAME ID (Aug 13, closes the residual documented in main.py's
+             * rage-quit block). `room_id` is the RAW Photon room name, and one
+             * room hosts a whole sitting — production has rooms with 7 recorded
+             * matches — so "some match exists in this room" cannot answer "was
+             * the game they abandoned recorded?". The server currently
+             * approximates that with an `m.ended_at >= e.created_at` ordering
+             * test, which mis-handles the between-games leave.
+             *
+             * WHAT THIS VALUE IS, precisely: the STABLE prefix of the report id
+             * the match report for this same game would carry —
+             * GameStateWatcher.BuildReportRoomId() is "{room}_{token}_r{rounds}"
+             * and this is "{room}_{token}", i.e. the same string with the score
+             * suffix removed.
+             *
+             * THE SUFFIX MUST BE REMOVED, it is not a simplification. A leave at
+             * 4-0 advances the awarded side to the terminal score BEFORE the
+             * report is filed (#179), so the match row's suffix is "_r5" while
+             * anything captured at leave time reads "_r4" — an equality test on
+             * the full id would then be a constant miss, which is exactly the
+             * failure the server already hit once (0 of 25 events matched by
+             * equality). The server must PREFIX-match this, the same way it
+             * already prefix-matches the room.
+             *
+             * WHEN THE TWO STRINGS PROVABLY AGREE, stated exactly rather than
+             * as "they match":
+             *   - the abandoned game itself: the survivor files both the DC
+             *     event and the DC-decided report, so one client, one token,
+             *     identical either way — including the local start-time
+             *     fallback, which matters because this stat mostly measures
+             *     VANILLA opponents, who never negotiate a shared token at all;
+             *   - a between-games leave where the previous game's report came
+             *     from a MODDED opponent: agrees iff both clients negotiated
+             *     the shared per-game token (#174/#177). Against a modded peer
+             *     on a pre-token build the two fall back to their own local
+             *     start times and can differ.
+             * That last case degrades to exactly today's behaviour — no
+             * matching row means the event counts as an abandoned game, which
+             * is what the ordering heuristic already concludes — so the id can
+             * only make the number better or leave it unchanged, never worse.
+             *
+             * Optional and advisory: omitted entirely when the caller has no
+             * value, and the server keeps its ordering heuristic for old
+             * clients.
+             *
+             * Over-length is DROPPED, never truncated — the opposite of the
+             * display name above. A truncated prefix is not a worse id, it is a
+             * BROADER one: it would match every match in the room and silently
+             * exclude a genuinely abandoned game from the denominator. Dropping
+             * falls back to the server's existing heuristic, which is merely
+             * imprecise. 96 chars is room (server cap 64) + '_' + a 6-digit
+             * token with slack, so a legitimate value can never hit it; the
+             * bound exists because FastAPI 422s the ENTIRE request on a Query
+             * max_length overflow and this must never cost the report. */
+            string gameQ = "";
+            string gid = (gameRoomId ?? "").Trim();
+            if (gid.Length > 96) gid = "";
+            if (gid.Length > 0) gameQ = $"&game_room_id={UnityWebRequest.EscapeURL(gid)}";
             Plugin.Instance.StartCoroutine(PostRequest(
                 /* EscapeURL, never Escape() — the latter is the JSON string
                  * escaper and does nothing useful in a query string (review
                  * find 10). Harmless for numeric steam ids, wrong by
                  * construction. */
-                $"{baseUrl}/api/v1/matches/casual-dc?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}&leaver_steam_id={UnityWebRequest.EscapeURL(leaverSteamId)}&room_id={UnityWebRequest.EscapeURL(roomId)}",
+                $"{baseUrl}/api/v1/matches/casual-dc?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}&leaver_steam_id={UnityWebRequest.EscapeURL(leaverSteamId)}&room_id={UnityWebRequest.EscapeURL(roomId)}{nameQ}{gameQ}",
                 "",
                 (success, response) =>
                 {
@@ -15816,6 +16179,40 @@ namespace CompetitiveRounds
         }
 
 
+        /// <summary>Refresh the achievement list a few seconds after a match
+        /// report lands, so the diff in FetchAchievements can announce anything
+        /// the SERVER granted during submit_match.
+        ///
+        /// Without this the whole server-granted notification path is inert
+        /// (Codex cold review, blocker 2): nothing else calls FetchAchievements
+        /// on a match boundary — the only callers are the startup/consent path,
+        /// opening the F5 Achievements tab, a manual refresh, and the
+        /// client-side unlock callback. A player who never opens F5 would still
+        /// never be told about silent_drill, clutch, lumberjack, the sweeps,
+        /// the slayers or a rank threshold.
+        ///
+        /// Delayed, because the grants are written INSIDE the submit_match
+        /// transaction: fetching in the response callback can race the commit
+        /// on a slow write and read the pre-grant snapshot, which would then be
+        /// cached as the new baseline and suppress the toast for good.</summary>
+        public static void RefreshAchievementsAfterReport()
+        {
+            try
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                if (Plugin.Instance == null) return;
+                Plugin.Instance.StartCoroutine(RefreshAchievementsAfterReportCo(sid));
+            }
+            catch { }
+        }
+
+        private static System.Collections.IEnumerator RefreshAchievementsAfterReportCo(string steamId)
+        {
+            yield return new WaitForSecondsRealtime(3f);
+            FetchAchievements(steamId);
+        }
+
         public static void FetchAchievements(string steamId)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
@@ -15845,9 +16242,62 @@ namespace CompetitiveRounds
                                     gold = ExtractJsonInt(parts[i], "gold")
                                 };
                             }
+                            // Bug 201/209 family: SERVER-detected achievements
+                            // (silent_drill, clutch, lumberjack, collector, the
+                            // 5-0 sweeps, slayers, rank thresholds...) are
+                            // granted inline during submit_match and never pass
+                            // through UnlockAchievement, which is the ONLY site
+                            // in the whole plugin that raises the unlock toast.
+                            // They therefore landed completely silently, every
+                            // time, since they shipped — Stan filed exactly
+                            // that ("got the achievement, no popup, but it
+                            // shows as completed"). Diffing the refreshed list
+                            // against the previous cache is the only mechanism
+                            // that can ever notify for them.
+                            //
+                            // PRIME SILENTLY on the first fetch of a session:
+                            // with no prior cache every already-earned
+                            // achievement reads as a fresh unlock, so a returning
+                            // player would be buried under ~35 toasts at launch.
+                            bool prime = CachedAchievements == null || CachedAchievements.Count == 0;
+                            var freshlyUnlocked = new List<string>();
+                            if (!prime)
+                            {
+                                foreach (var kv in dict)
+                                {
+                                    if (!kv.Value.unlocked) continue;
+                                    if (CachedAchievements.TryGetValue(kv.Key, out var was) && was.unlocked) continue;
+                                    freshlyUnlocked.Add(kv.Key);
+                                }
+                            }
                             CachedAchievements = dict;
                             NativeUI.MarkDirty();
-                            Plugin.Log.LogInfo($"[ACH] Loaded {dict.Count} achievements");
+                            Plugin.Log.LogInfo($"[ACH] Loaded {dict.Count} achievements"
+                                + (prime ? " (primed, no toasts)" : ""));
+                            foreach (var key in freshlyUnlocked)
+                            {
+                                try
+                                {
+                                    // One announcement per key per session, no
+                                    // matter which site sees it first.
+                                    if (!_announcedAchievements.Add(key)) continue;
+                                    // Same display/translation path as the
+                                    // client-side unlock toast so the two are
+                                    // indistinguishable to the player.
+                                    bool hasDef = AchievementDefs.TryGetValue(key, out var def);
+                                    string dispName = hasDef ? I18n.Tr(def[0]) : key;
+                                    string req = hasDef ? I18n.Tr(def[1]) : null;
+                                    string toast = I18n.TrF("Achievement Unlocked: {0}!", dispName)
+                                                 + (string.IsNullOrEmpty(req) ? "" : $"\n{req}");
+                                    // Queued, not latest-wins: a match can grant
+                                    // several server-side achievements at once
+                                    // and ShowNotification would leave only the
+                                    // last one visible.
+                                    CompetitiveUI.QueueNotification(toast, new Color(1f, 0.85f, 0.3f), 8f);
+                                    Plugin.Log.LogInfo($"[ACH] Unlocked (server-granted): {key}");
+                                }
+                                catch { }
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -15886,8 +16336,41 @@ namespace CompetitiveRounds
                             string dispName = hasDef ? I18n.Tr(def[0]) : name;
                             string req = hasDef ? I18n.Tr(def[1]) : null;
                             string toast = I18n.TrF("Achievement Unlocked: {0}!", dispName) + (string.IsNullOrEmpty(req) ? "" : $"\n{req}");
-                            CompetitiveUI.ShowNotification(toast, new Color(1f, 0.85f, 0.3f), 8f);
-                            Plugin.Log.LogInfo($"[ACH] Unlocked: {achievementKey} ({name})");
+                            // Claim the announcement (see _announcedAchievements):
+                            // a slow unlock response can land AFTER the refresh
+                            // already toasted this key as server-granted.
+                            if (_announcedAchievements.Add(achievementKey))
+                            {
+                                CompetitiveUI.ShowNotification(toast, new Color(1f, 0.85f, 0.3f), 8f);
+                                Plugin.Log.LogInfo($"[ACH] Unlocked: {achievementKey} ({name})");
+                            }
+                            else
+                            {
+                                Plugin.Log.LogInfo($"[ACH] Unlocked: {achievementKey} ({name}) — already announced this session");
+                            }
+                            // Mark it unlocked in the cache BEFORE the refresh
+                            // below. The refresh diffs against this cache and
+                            // toasts anything that flipped — without this the
+                            // key we just announced flips false->true there too
+                            // and every client-detected unlock toasts TWICE
+                            // (Codex cold review, blocker 3). Updating the
+                            // cache is also simply true: the server has
+                            // confirmed the unlock.
+                            try
+                            {
+                                if (CachedAchievements == null)
+                                    CachedAchievements = new Dictionary<string, AchievementData>();
+                                CachedAchievements.TryGetValue(achievementKey, out var prevAch);
+                                CachedAchievements[achievementKey] = new AchievementData
+                                {
+                                    achievement_key = achievementKey,
+                                    unlocked = true,
+                                    unlocked_at = prevAch != null ? prevAch.unlocked_at : "",
+                                    global_pct = prevAch != null ? prevAch.global_pct : 0f,
+                                    gold = prevAch != null ? prevAch.gold : 0
+                                };
+                            }
+                            catch { }
                         }
                         else
                         {
@@ -16105,6 +16588,15 @@ namespace CompetitiveRounds
             // on the same room. Falls back to null for older matches
             // that pre-date the column.
             public string photon_room_name;
+            // PER-MATCH Photon region, resolved server-side at bracket
+            // activation from both players' ping/region history. Null on
+            // matches created before the column existed, and on every async
+            // match (async coordinates its own lobby and pins nothing) — the
+            // consumer falls back to the tournament-wide value. A bracket
+            // re-pairs every round, so one region provably cannot serve every
+            // pair: an EU/EU final under a us-locked tournament is a permanent
+            // ~110ms tax on a match whose right answer is obvious.
+            public string photon_region;
         }
 
         // Tracks which kind (sync | async) the client is currently viewing. Set
@@ -16205,6 +16697,7 @@ namespace CompetitiveRounds
                 deadline_at = ExtractString(raw, "deadline_at"),
                 prereq_match_ids = ExtractStringArray(raw, "prereq_match_ids"),
                 photon_room_name = ExtractString(raw, "photon_room_name"),
+                photon_region = ExtractString(raw, "photon_region"),
             });
             return t;
         }
@@ -16338,13 +16831,98 @@ namespace CompetitiveRounds
             return list.ToArray();
         }
 
+        /// <summary>True for a string that could be a Photon region code:
+        /// lowercase alphanumeric, 2-8 chars. Deliberately NOT an allowlist of
+        /// today's 17 codes — a new Photon datacentre must not be silently
+        /// dropped — but tight enough that the failure this guards against
+        /// (see BestKnownPhotonRegion) cannot get through.</summary>
+        private static bool IsPlausibleRegionCode(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length < 2 || s.Length > 8) return false;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) return false;
+            }
+            return true;
+        }
+
+        /// <summary>The best Photon region code we can name for THIS client
+        /// right now, or "" when there is genuinely nothing to report.
+        ///
+        /// PhotonNetwork.CloudRegion returns NetworkingClient.CloudRegion, which
+        /// is populated only while CONNECTED — so a player signing up for a
+        /// tournament from the main menu reports "". That is not an edge case:
+        /// 24 of the 25 signups ever recorded in production carry no region, and
+        /// because the lock picks the MODE of the non-empty values, the single
+        /// legacy outlier decided an entire tournament's region on its own.
+        ///
+        /// PUN caches its own best-region verdict across launches in PlayerPrefs
+        /// (PhotonNetwork.BestRegionSummaryInPreferences, key
+        /// "PUNCloudBestRegion"), and that survives disconnection — which is
+        /// exactly the question a menu-time signup needs answered.
+        ///
+        /// PARSING IS NOT "take field 0". RegionHandler.SummaryToCache emits two
+        /// different shapes:
+        ///     "ussc;36;asia,au,cae,eu,..."  a best region is known  -> field 0
+        ///     "asia,au,cae,eu,..."          none known  -> NO region at all
+        /// The second is the bare available-region list, which it returns
+        /// whenever BestRegion is null or its ping exceeded
+        /// RegionPinger.MaxMillisecondsPerPing. Splitting THAT on ';' yields the
+        /// whole comma-separated list as "field 0", and sending it would put a
+        /// 60-character string into region_at_signup where the server would
+        /// count it as a legitimate vote. So the three-field form is required
+        /// (the middle field must parse as the ping) and the code is validated
+        /// before it is used.
+        ///
+        /// SCOPE: used by the tournament signup only, and NOT because the other
+        /// CloudRegion reads in this file are safe from the same emptiness —
+        /// they are the queue joins, which also run from the menu and also send
+        /// "". The difference is what the server does with it: every queue-lock
+        /// path coerces the room's region with `or "us"`, so a queue room is
+        /// never issued without one, while the tournament lock takes the MODE of
+        /// the reported values and a population of one legacy row wins it
+        /// outright. Feeding this to the queue joins would improve matchmaking
+        /// region accuracy and is worth doing deliberately, with its own review
+        /// of what the server infers from that field — it is not a drive-by.</summary>
+        public static string BestKnownPhotonRegion()
+        {
+            try
+            {
+                string live = (PhotonNetwork.CloudRegion ?? "").Replace("/*", "").Trim().ToLowerInvariant();
+                if (IsPlausibleRegionCode(live)) return live;
+            }
+            catch { }
+            try
+            {
+                string summary = PhotonNetwork.BestRegionSummaryInPreferences ?? "";
+                string[] parts = summary.Split(';');
+                if (parts.Length >= 3)
+                {
+                    int ping;
+                    if (int.TryParse(parts[1], System.Globalization.NumberStyles.Integer,
+                                     System.Globalization.CultureInfo.InvariantCulture, out ping))
+                    {
+                        string code = parts[0].Trim().ToLowerInvariant();
+                        if (IsPlausibleRegionCode(code)) return code;
+                    }
+                }
+            }
+            catch { }
+            return "";
+        }
+
         public static void TournamentSignup(string tournamentId, string steamId, string displayName, string[] slotIsos = null)
         {
-            // Include the client's current Photon region so the server can pick the
-            // tournament's canonical region at lock time (mode of all signups'
-            // regions). Auto-connect then pins every match to that region.
-            string region = "";
-            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            // Include the client's best-known Photon region so the server can pick
+            // the tournament's canonical region at lock time (mode of all signups'
+            // regions). Auto-connect then pins every SYNC match to that region.
+            //
+            // Not a bare CloudRegion read: signup happens at the main menu, where
+            // CloudRegion is empty unless the client happens to be connected.
+            // See BestKnownPhotonRegion for why that emptiness is the root cause
+            // of the "[RU] region" bug and how the cached verdict is parsed.
+            string region = BestKnownPhotonRegion();
             // Item 3: sync signups carry the player's time votes (>= 1 slot
             // required server-side; the UI enforces it before calling).
             var sb = new System.Text.StringBuilder();
@@ -16471,6 +17049,19 @@ namespace CompetitiveRounds
             public string kind;
             public int signup_count;
             public string winner_display_name;
+            // Site-wide Recent Tournaments detail. GET /tournaments/history has
+            // returned all four of these since the endpoint was written; only
+            // the winner was ever parsed, so the panel showed one name for a
+            // bracket that also decided a 2nd and a 3rd.
+            //
+            // This type is SHARED with GET /players/{id}/tournaments, whose
+            // `recent` rows carry only the six fields above — so on that path
+            // these stay null / 0 by design. Any renderer must treat them as
+            // optional rather than assume the /history shape.
+            public string runner_up_display_name;
+            public string third_place_display_name;
+            public string format;      // "single_elim_bo3" | "double_elim_bo3" | ...
+            public string prize_tier;
         }
 
         public static readonly Dictionary<string, PlayerTournamentHistory> CachedPlayerTournaments
@@ -16501,6 +17092,15 @@ namespace CompetitiveRounds
                                 kind = ExtractString(raw, "kind"),
                                 signup_count = ExtractInt(raw, "signup_count", 0),
                                 winner_display_name = ExtractString(raw, "winner_display_name"),
+                                // Absent on this endpoint today (see the type's
+                                // comment). Parsed anyway so that if the server
+                                // ever widens `recent` to the /history shape the
+                                // client picks it up with no release — an absent
+                                // key extracts as null, never an exception.
+                                runner_up_display_name = ExtractString(raw, "runner_up_display_name"),
+                                third_place_display_name = ExtractString(raw, "third_place_display_name"),
+                                format = ExtractString(raw, "format"),
+                                prize_tier = ExtractString(raw, "prize_tier"),
                             }),
                         };
                         CachedPlayerTournaments[steamId] = h;
@@ -16595,6 +17195,72 @@ namespace CompetitiveRounds
             ));
         }
 
+        /// <summary>The region a server-issued tournament room (sct-) must be
+        /// joined in, or "" when the SERVER has not told us one yet.
+        ///
+        /// Every rung is a value the server sent. There is deliberately no rung
+        /// that derives a region locally, because two clients deriving locally
+        /// derive DIFFERENTLY and each creates its own room — learning #49, and
+        /// the double no-show forfeit that follows costs both players their run.
+        /// "" is therefore a real answer meaning "refuse and re-poll", not a
+        /// signal to fall through to whatever the region dropdown last held.
+        ///
+        /// Rungs:
+        ///   1. the per-match region on the active-match row for THIS room
+        ///      (refreshed by the 20s tournament heartbeat, so re-polling is
+        ///      what eventually fills it in);
+        ///   2. <paramref name="allowTournamentLevel"/> — the tournament-wide
+        ///      region, and ONLY once the room has been matched to an active
+        ///      match whose tournament_id equals the cached snapshot's. Without
+        ///      that equality the snapshot could belong to a different
+        ///      tournament (or the other kind — CachedTournament follows the
+        ///      TournamentKind sub-tab), and using it would be a guess wearing
+        ///      a server value's clothes.</summary>
+        public static string TournamentRegionForRoom(string roomName, bool allowTournamentLevel)
+        {
+            if (string.IsNullOrEmpty(roomName)) return "";
+            string tournamentId = null;
+            try
+            {
+                var list = CachedMyActiveTournamentMatches;
+                if (list != null)
+                {
+                    foreach (var m in list)
+                    {
+                        if (m == null || !string.Equals(m.photon_room_name, roomName, StringComparison.Ordinal))
+                            continue;
+                        tournamentId = m.tournament_id;
+                        string per = (m.photon_region ?? "").Trim();
+                        if (per.Length > 0) return per;
+                        break;
+                    }
+                }
+            }
+            catch { }
+            if (!allowTournamentLevel || string.IsNullOrEmpty(tournamentId)) return "";
+            try
+            {
+                var t = CachedTournament;
+                if (t != null
+                    && !string.IsNullOrEmpty(t.photon_region)
+                    && string.Equals(t.tournament_id, tournamentId, StringComparison.Ordinal))
+                    return t.photon_region.Trim();
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>Ask the server again for the region of a tournament room we
+        /// are refusing to join without one. Both fetches are internally
+        /// throttled (20s / 5s), so calling this on a timer is safe.</summary>
+        public static void RepollTournamentRegion()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            try { FetchMyActiveTournamentMatches(sid); } catch { }
+            try { FetchTournamentCurrent(sid); } catch { }
+        }
+
         // Recent completed tournaments (site-wide history), used by the Tournaments
         // tab's "Recent Tournaments" section. Returns a JSON array which we
         // slice row-by-row.
@@ -16620,6 +17286,14 @@ namespace CompetitiveRounds
                             kind = ExtractString(raw, "kind"),
                             signup_count = ExtractInt(raw, "signup_count", 0),
                             winner_display_name = ExtractString(raw, "winner_display_name"),
+                            // Sid, Aug 13 item 7/15: Recent Tournaments needs
+                            // more than the winner. All four have been in this
+                            // endpoint's response since it was written — the
+                            // client simply never read them.
+                            runner_up_display_name = ExtractString(raw, "runner_up_display_name"),
+                            third_place_display_name = ExtractString(raw, "third_place_display_name"),
+                            format = ExtractString(raw, "format"),
+                            prize_tier = ExtractString(raw, "prize_tier"),
                         });
                         NativeUI.MarkDirty();
                     }
@@ -16659,6 +17333,11 @@ namespace CompetitiveRounds
             public string roster = "";   // sorted comma-joined fighter steam ids
             public string names = "";
             public string roster_titles = "";    // pipe-joined, roster-aligned
+            // Per-title colours for roster_titles, same pipe-joined alignment.
+            // OPTIONAL on the wire: a server that predates the field leaves
+            // this empty, and SetWatchedMeta then drops the whole array so the
+            // HUD renders its grey fallback rather than a misaligned colour.
+            public string roster_title_colors = "";
             public string roster_ratings = "";   // comma-joined ints, roster-aligned
             public int spectator_count;
             public int spectator_cap;
@@ -16775,6 +17454,7 @@ namespace CompetitiveRounds
                                             roster = ExtractJsonString(raw, "roster") ?? "",
                                             names = ExtractJsonString(raw, "names") ?? "",
                                             roster_titles = ExtractJsonString(raw, "roster_titles") ?? "",
+                                            roster_title_colors = ExtractJsonString(raw, "roster_title_colors") ?? "",
                                             roster_ratings = ExtractJsonString(raw, "roster_ratings") ?? "",
                                             spectator_count = ExtractJsonInt(raw, "spectator_count"),
                                             spectator_cap = ExtractJsonInt(raw, "spectator_cap"),
@@ -16911,7 +17591,8 @@ namespace CompetitiveRounds
                         foreach (var g in CachedSpectateGames)
                             if (g != null && g.game_id == gameId)
                             {
-                                SpectatorSession.SetWatchedMeta(g.roster, g.names, g.roster_titles, g.roster_ratings);
+                                SpectatorSession.SetWatchedMeta(g.roster, g.names, g.roster_titles,
+                                                                g.roster_ratings, g.roster_title_colors);
                                 break;
                             }
                     }

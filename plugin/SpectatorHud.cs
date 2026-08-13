@@ -97,13 +97,38 @@ namespace CompetitiveRounds
             catch { return styled; }
         }
 
+        // ── item 8: the connect state, made COHERENT ─────────────────────
+        //
+        // WHAT THE COVER IS ACTUALLY FOR (established before changing it —
+        // design §5.3): a spectator that has not yet reached a battle
+        // boundary is not looking at a correct rendering of the match. It
+        // holds no snapshot, so the score, both decks and every applied card
+        // effect are unknown; the map under the bodies may still be the
+        // previous one; and the join-replay quarantine is still burying the
+        // hundreds of cached objects the room replayed into this client at
+        // join (#312). Vanilla never reconstructs mid-round health, deaths,
+        // projectiles or effects for a late joiner and neither do we — so
+        // what renders pre-activation is a partially-correct scene that would
+        // be read as the real state. The cover is also the failure
+        // containment: every sync failure path degrades back to it.
+        //
+        // Sid's report is NOT that the cover is wrong — it is that it reads
+        // as arbitrary, because with F5 open the arena is plainly visible
+        // behind the menu and the black then looks like it is hiding
+        // something that works. That exception cannot simply be removed:
+        // IMGUI paints OVER the uGUI overlay canvas, so covering an open menu
+        // hides it without disabling it, i.e. an invisible click trap.
+        //
+        // So the fix is on the legibility axis (#250 — the axis is
+        // visible-and-announced, not hide-vs-show). The cover now states that
+        // the match is already running and why the picture is held, and ticks
+        // a live wait counter so it can never read as hung; and the bar drawn
+        // in the F5 case carries the SAME "not live yet" statement. The two
+        // states still differ in coverage, but they no longer disagree about
+        // what is happening.
         private static void DrawBlackout(SpectatorSync.Stage stage)
         {
             int w = Screen.width, h = Screen.height;
-            // IMGUI paints OVER the uGUI overlay canvas, so a fullscreen
-            // blackout would hide (but not disable!) an open F5 menu — an
-            // invisible click-trap. With the menu open, drop to the slim bar
-            // instead; the menu's own panels cover most of the arena anyway.
             if (NativeUI.IsOpen)
             {
                 DrawLiveBar();
@@ -112,23 +137,75 @@ namespace CompetitiveRounds
             GUI.color = Color.white;
             GUI.DrawTexture(new Rect(0, 0, w, h), BlackTex());
 
-            string headline = I18n.Tr("SPECTATOR");
-            string status;
-            if (!Photon.Pun.PhotonNetwork.InRoom)
-                status = I18n.Tr("Connecting to the game...");
-            else
-                status = I18n.Tr("Synchronizing - viewing begins next battle");
+            float y = h * 0.34f;
+            GUI.Label(new Rect(0, y, w, 40), I18n.Tr("SPECTATOR"), _title);
+            y += 46;
+            GUI.Label(new Rect(0, y, w, 30), ConnectStatusLine(), _score);
+            y += 38;
 
-            GUI.Label(new Rect(0, h * 0.38f, w, 40), headline, _title);
-            GUI.Label(new Rect(0, h * 0.38f + 44, w, 30), status, _sub);
+            // Why the screen is held. Two short lines rather than one long
+            // one: this box is full screen width but the text is centred, and
+            // a single sentence at 15pt reads as a caption nobody finishes.
+            GUI.Label(new Rect(0, y, w, 26), I18n.Tr("The match is already running."), _sub);
+            y += 26;
+            GUI.Label(new Rect(0, y, w, 26),
+                      I18n.Tr("Your view starts at the next round - that is the first moment the score, cards and health can be shown correctly."),
+                      _sub);
+            y += 36;
 
             string names = NamesLine();
-            if (names.Length > 0)
-                GUI.Label(new Rect(0, h * 0.38f + 78, w, 30), names, _sub);
+            if (names.Length > 0) { GUI.Label(new Rect(0, y, w, 30), names, _sub); y += 32; }
             if (SpectatorViewState.HasScore)
-                GUI.Label(new Rect(0, h * 0.38f + 108, w, 30), SpectatorViewState.ScoreLine(), _score);
+                GUI.Label(new Rect(0, y, w, 30), SpectatorViewState.ScoreLine(), _score);
 
             GUI.Label(new Rect(0, h - 60, w, 24), I18n.Tr("Press Esc to leave"), _sub);
+        }
+
+        // Composed at 4 Hz: the dot cycle and the wait counter are the only
+        // moving parts and this runs on every IMGUI event (#162).
+        private static string _cachedConnectLine = "";
+        private static float _connectCachedAt = -999f;
+
+        /// <summary>The pre-activation state in one line, plus a ticking wait
+        /// counter — a point transition is what triggers activation, so
+        /// joining just after a point means a full round of waiting and the
+        /// screen has to prove it is still working.
+        ///
+        /// Both status literals are carried forward BYTE-FOR-BYTE from before
+        /// this pass (#289: the key is derived from the English source, so
+        /// editing a string retires its translations — these two already have
+        /// es/ru/uk/sv entries and their meaning has not changed). The motion
+        /// is the counter, not an animated ellipsis, precisely so neither
+        /// string had to be reworded.</summary>
+        private static string ConnectStatusLine()
+        {
+            if (Time.unscaledTime - _connectCachedAt < 0.25f) return _cachedConnectLine;
+            _connectCachedAt = Time.unscaledTime;
+            try
+            {
+                bool inRoom = false;
+                try { inRoom = Photon.Pun.PhotonNetwork.InRoom; } catch { }
+                string s = inRoom
+                    ? I18n.Tr("Synchronizing - viewing begins next battle")
+                    : I18n.Tr("Connecting to the game...");
+                // Its OWN builder, not the shared _decorSb: that one is
+                // borrowed by DecorFor/TeamScoreInline from inside the same
+                // draw pass, and a shared builder is exactly how a future
+                // caller order silently corrupts one of the two lines.
+                _connectSb.Length = 0;
+                _connectSb.Append(s);
+                int secs = (int)(Time.unscaledTime - SpectatorSession.SessionStartedAt);
+                // Only past the point where a wait is worth counting — a
+                // counter that appears instantly reads as a stopwatch on a
+                // failure rather than as reassurance.
+                if (SpectatorSession.SessionStartedAt > 0f && secs >= 5)
+                    _connectSb.Append("   <color=#888888>")
+                              .Append(I18n.TrF("waiting {0}s", secs))
+                              .Append("</color>");
+                _cachedConnectLine = _connectSb.ToString();
+            }
+            catch { _cachedConnectLine = ""; }
+            return _cachedConnectLine;
         }
 
         // ROUNDS team hues for the score line (ASCII hex only, #47).
@@ -137,6 +214,7 @@ namespace CompetitiveRounds
 
         private static string _cachedBarLine = "";
         private static float _barCachedAt = -999f;
+        private static float _cachedBarWidth = 960f;
 
         private static void DrawLiveBar()
         {
@@ -150,25 +228,49 @@ namespace CompetitiveRounds
                 _barCachedAt = Time.unscaledTime;
                 // Segments FIRST — NamesLine() clears the shared _sb builder
                 // internally, so it must never run mid-composition.
+                bool live = SpectatorSync.HasEverActivated;
                 string score = TeamScoreInline();
                 string names = score.Length > 0 ? "" : NamesLine();
                 string series = SeriesLine();
                 string session = SessionLine();
                 _sb.Length = 0;
-                _sb.Append(I18n.Tr("SPECTATING"));
+                _sb.Append(live ? I18n.Tr("SPECTATING") : I18n.Tr("SPECTATOR"));
                 if (score.Length > 0) _sb.Append("  |  ").Append(score);
                 else if (names.Length > 0) _sb.Append("  |  ").Append(names);
                 if (series.Length > 0) _sb.Append("  |  ").Append(series);
                 if (session.Length > 0) _sb.Append("  |  ").Append(session);
-                if (SpectatorSync.CurrentStage != SpectatorSync.Stage.Active)
+                if (!live)
+                {
+                    // Item 8: this is the bar the F5 case shows INSTEAD of the
+                    // cover, with the live arena visible behind the menu. It
+                    // has to say the same thing the cover says, or the two
+                    // states contradict each other and the cover reads as an
+                    // arbitrary blindfold. "Syncing..." did not say it.
+                    _sb.Append("  |  <color=#FFD94D>")
+                       .Append(I18n.Tr("NOT LIVE YET - your view starts at the next round"))
+                       .Append("</color>");
+                }
+                else if (SpectatorSync.CurrentStage != SpectatorSync.Stage.Active)
+                {
                     _sb.Append("  |  ").Append(I18n.Tr("Syncing..."));
+                }
                 _cachedBarLine = _sb.ToString();
+                // Measure, never guess (#237): the line already carries names,
+                // titles and ratings, and the pre-activation note is longer
+                // still — a fixed 960 backdrop leaves text hanging off both
+                // ends. Recomputed only with the line, so CalcSize never runs
+                // per IMGUI event (#162).
+                try
+                {
+                    float need = _sub.CalcSize(new GUIContent(_cachedBarLine)).x + 48f;
+                    _cachedBarWidth = Mathf.Min(w, Mathf.Max(320f, need));
+                }
+                catch { _cachedBarWidth = Mathf.Min(w, 960f); }
             }
 
             var rect = new Rect(0, 6, w, 26);
             GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            // Wider backdrop: titles + ratings joined the line (playtest #2b).
-            GUI.DrawTexture(new Rect(w * 0.5f - 480, 4, 960, 28), BlackTex());
+            GUI.DrawTexture(new Rect(w * 0.5f - _cachedBarWidth * 0.5f, 4, _cachedBarWidth, 28), BlackTex());
             GUI.color = Color.white;
             GUI.Label(rect, _cachedBarLine, _sub);
         }
@@ -396,6 +498,46 @@ namespace CompetitiveRounds
             catch { return _allTagStrip.Replace(s, ""); }
         }
 
+        /// <summary>Aug 12 item 9b: THE one place a spectator surface renders a
+        /// title, in the same shape every other title surface in the mod uses —
+        /// a bold bracketed span in the title's OWN colour (NativeUI's Home,
+        /// leaderboard, chat and FFA scoreboard sites all build exactly this).
+        /// It cannot literally call one of those: they are private to NativeUI,
+        /// each takes a different entry type, and they emit for TMP while this
+        /// bar is IMGUI (where SanitizeStyled keeps only b/i/color). Every
+        /// spectator title goes through here so the shape can never drift
+        /// again.
+        ///
+        /// The colour is validated, not trusted: it arrives as free text in a
+        /// pipe-joined server field, and an unvalidated value inside a
+        /// `&lt;color=...&gt;` tag is a rich-text injection into a label that
+        /// also renders player names.</summary>
+        private static string TitleSpan(string title, string hex)
+        {
+            if (string.IsNullOrEmpty(title)) return "";
+            string safe = SanitizeStyled(title);
+            if (safe.Length == 0) return "";
+            return " <b><color=" + SafeHex(hex) + ">[" + safe + "]</color></b>";
+        }
+
+        /// <summary>#RGB / #RRGGBB / #RRGGBBAA only; anything else falls back.
+        /// The fallback matches the mod's other title surfaces that have no
+        /// colour to work with (chat, recent-series rows).</summary>
+        private const string TITLE_FALLBACK_HEX = "#CCCCCC";
+        private static string SafeHex(string hex)
+        {
+            if (string.IsNullOrEmpty(hex)) return TITLE_FALLBACK_HEX;
+            if (hex[0] != '#') return TITLE_FALLBACK_HEX;
+            if (hex.Length != 4 && hex.Length != 7 && hex.Length != 9) return TITLE_FALLBACK_HEX;
+            for (int i = 1; i < hex.Length; i++)
+            {
+                char c = hex[i];
+                bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!ok) return TITLE_FALLBACK_HEX;
+            }
+            return hex;
+        }
+
         /// <summary>Title + elo decoration for a fighter, matched through the
         /// grant-time games-list metadata (roster-aligned arrays).</summary>
         private static string DecorFor(int fighterIndex)
@@ -410,12 +552,13 @@ namespace CompetitiveRounds
                     if (roster[r] == sids[fighterIndex]) { m = r; break; }
                 if (m < 0) return "";
                 var titles = SpectatorSession.WatchedTitles;
+                var colors = SpectatorSession.WatchedTitleColors;
                 var ratings = SpectatorSession.WatchedRatings;
                 string title = titles != null && m < titles.Length ? titles[m] : "";
+                string tcol = colors != null && m < colors.Length ? colors[m] : "";
                 string rating = ratings != null && m < ratings.Length ? ratings[m] : "";
                 _decorSb.Length = 0;
-                if (!string.IsNullOrEmpty(title))
-                    _decorSb.Append(" <color=#BBAA66>").Append(SanitizeStyled(title)).Append("</color>");
+                _decorSb.Append(TitleSpan(title, tcol));
                 if (!string.IsNullOrEmpty(rating))
                     _decorSb.Append(" <color=#999999>(").Append(rating).Append(")</color>");
                 return _decorSb.ToString();
@@ -423,6 +566,7 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
         private static readonly StringBuilder _decorSb = new StringBuilder(64);
+        private static readonly StringBuilder _connectSb = new StringBuilder(96);
 
         private static void AppendFighter(int i)
         {

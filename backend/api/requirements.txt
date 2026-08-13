@@ -1,0 +1,18 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+pydantic==2.9.2
+# Image handling for the artist cosmetic pipeline. Two consumers:
+#   * POST /artist/submit-cosmetic-gif — splits an uploaded GIF into frames.
+#     Without Pillow that route answers 503 gif_processing_unavailable, which
+#     is what kept in-game GIF upload dead since it shipped.
+#   * the PNG submit/frame/placement routes — every accepted image is now
+#     re-encoded through the pixel buffer, which is what strips tEXt/zTXt/
+#     iTXt/eXIf metadata and any bytes trailing IEND.
+# Pinned: 11.3.0 ships a cp312 manylinux2014 x86_64 wheel, so python:3.12-slim
+# needs no compiler or apt packages. Verified against this wheel before
+# pinning: module-level Image.LANCZOS, Image.MAX_IMAGE_PIXELS, Image.new,
+# Image.open and ImageSequence.Iterator all present — those are the exact
+# APIs main.py calls.
+pillow==11.3.0

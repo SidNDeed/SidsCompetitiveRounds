@@ -74,6 +74,32 @@ namespace CompetitiveRounds
         internal enum Stage { None, Synchronizing, Applying, Active }
         internal static Stage CurrentStage { get; private set; } = Stage.None;
 
+        // ── boundary fence, published ────────────────────────────────────
+        //
+        // A boundary reconcile OWNS every fighter body while it runs: it
+        // resets them, replays a deck onto them and then verifies the result.
+        // Anything else that mutates a body or a card bar in that window
+        // fails that verification and costs the spectator a boundary (three
+        // failed deck reconstructions leave the session outright). Any code
+        // outside this class that touches replica card state on a spectator
+        // seat must therefore fence on the same pair of generations this
+        // class fences its own coroutines on:
+        //   BoundaryGeneration        — bumped on every session join/leave.
+        //   BoundaryAttemptGeneration — bumped by every scheduled boundary;
+        //                               a newer boundary supersedes older work.
+        // Published for FfaMode's spectator between-games flush, which owns
+        // the FFA half of the same job and previously fenced only on its own
+        // TransitionGeneration.
+        internal static bool BoundaryApplyInFlight => CurrentStage == Stage.Applying;
+        internal static int BoundaryGeneration => _boundaryGeneration;
+        internal static int BoundaryAttemptGeneration => _boundaryAttemptGen;
+
+        /// <summary>True when either boundary generation has moved past the
+        /// captured pair — the caller's work has been superseded and must
+        /// abort rather than land on bodies a newer reconcile owns.</summary>
+        internal static bool BoundaryFenceMoved(int gen, int attemptGen)
+            => gen != _boundaryGeneration || attemptGen != _boundaryAttemptGen;
+
         /// <summary>Sticky per-session activation flag (Aug 10 design review
         /// find 6): once the first boundary apply succeeds, the fullscreen
         /// blackout and the Synchronizing-stage cache sweeps are RETIRED for
@@ -161,6 +187,7 @@ namespace CompetitiveRounds
                 _roundLatched = false;
                 _seqCo = null;
                 _pendingBoundaryMapId = -1;
+                _flushDeferred = false;
                 _lastCommandedScene = "";
                 _mapLoadGen = 0;
                 _loadInFlight = false;
@@ -255,6 +282,7 @@ namespace CompetitiveRounds
             _roundLatched = false;
             _seqCo = null;
             _pendingBoundaryMapId = -1;
+            _flushDeferred = false;
             _lastCommandedScene = "";
             _mapLoadGen = 0;
             _loadInFlight = false;
@@ -1141,6 +1169,173 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] point sequence: {ex.Message}"); }
         }
 
+        // ── between-games flush (Aug 12 item 9a) ─────────────────────────
+        //
+        // The problem: on a spectator seat NOTHING clears card state at a game
+        // boundary until the NEXT boundary reconcile, which is the call-in at
+        // the END of game 2's pick phase. Every vanilla clear lives behind
+        // GM_ArmsRace.IDoRematch (ResetCardBards, PlayerManager.ResetCharacters
+        // -> Player.FullReset), reached only from the rematch popup, and the
+        // spectator suppresses GameOverTransition — so the popup, and with it
+        // every clear, never happens (#312: a suppressed lifecycle keeps
+        // whichever half already ran). Meanwhile game 2's picks ARE applied
+        // live through vanilla RPCA_Pick the moment they land, and its
+        // CardBarHandler.AddCard stacks them on top of game 1's bar. The Tab
+        // board adds them to game 1's too, because its baseline is written by
+        // the Player.FullReset postfix that just established never runs here,
+        // and ClearCardBaselines is only called from GameStateWatcher's
+        // Left-room branch, which the spectator quiesce returns before (#353).
+        // Net effect, and exactly the report: for the whole of game 2's pick
+        // phase the fighters look like they are carrying game 1's cards plus
+        // new ones.
+        //
+        // The fix is to do at game over what the fighters themselves do at
+        // game over: reset the bodies and clear the bars. Not just the
+        // DISPLAY — the replicas really are still carrying game 1's applied
+        // stats, so hiding the icons alone would leave a body that is wrong
+        // and now also looks right. Because this clears cards for real,
+        // CurrentDeckNames keeps reporting the truth and the next boundary's
+        // pre-scan still compares real state against the snapshot: it sees an
+        // empty deck, treats the snapshot as an extension, and applies it.
+        internal static void OnGameOverObserved()
+        {
+            try
+            {
+                if (!SpectatorSession.IsLocalSpectator || SpectatorSession.LeaveRequested) return;
+                // Pre-activation the boundary machinery owns every body and
+                // the screen is covered anyway — nothing to flush and nothing
+                // that would be seen.
+                if (!HasEverActivated) return;
+                if (Plugin.Instance == null) return;
+                // A reconcile in flight already owns these bodies; resetting
+                // underneath it would fail its own post-apply verification and
+                // cost a boundary (three failed deck reconstructions leave the
+                // session). It must not be DROPPED, though: that apply is
+                // landing a snapshot the master answered while game 1 was
+                // still live, so on its own it leaves game 1's deck in place
+                // and game 2's live picks stack straight onto it for the whole
+                // of the next pick phase — the exact stale-card state this
+                // flush exists to prevent. Wait the apply out instead.
+                if (CurrentStage == Stage.Applying)
+                {
+                    if (_flushDeferred) return;   // one waiter is enough
+                    _flushDeferred = true;
+                    Plugin.Instance.StartCoroutine(
+                        DeferredGameOverFlush(_boundaryGeneration, _boundaryAttemptGen, _lastSeenEpoch));
+                    return;
+                }
+                Plugin.Instance.StartCoroutine(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen));
+            }
+            catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] game-over flush: {ex.Message}"); }
+        }
+
+        // A game-over observed while a boundary apply owned the bodies. One
+        // waiter at a time; cleared when it resolves. Also cleared on session
+        // join/leave so a coroutine killed with its host can never leave the
+        // deferral permanently armed.
+        private static bool _flushDeferred;
+
+        /// <summary>Hold the between-games flush until the boundary apply that
+        /// owns the bodies has finished, then run it.
+        ///
+        /// Three ways this resolves, and only the first one flushes:
+        ///
+        /// 1. The apply ends with the epoch it started from — the master's
+        ///    snapshot predated the fighters' own rematch reset, so the deck
+        ///    on screen is still game 1's and the flush is exactly right.
+        /// 2. The apply ends with a CHANGED epoch — its snapshot was answered
+        ///    after the fighters reset, so it already replayed the new game's
+        ///    deck from scratch (BoundaryAttempt's forceReset path). Flushing
+        ///    now would wipe a deck that is already correct, so this drops.
+        /// 3. A newer boundary supersedes us (attempt generation moved), or
+        ///    the session ends (boundary generation moved) — the reconcile
+        ///    that took over is authoritative and re-applies from its own
+        ///    fresh snapshot.
+        ///
+        /// The wall-clock cap is a safety net for a stage that never leaves
+        /// Applying, NOT a timeout on the apply. Every wait inside
+        /// BoundaryAttempt is itself bounded and its finally always drops the
+        /// stage out of Applying, so a real attempt resolves this through
+        /// 1/2/3 first — but that worst case is already ~43s (16s map + 2x8s
+        /// snapshot + 8s bodies + the deck replay), so the cap has to sit well
+        /// clear of it or it would fire on a legitimately slow boundary and
+        /// drop a flush that was about to run. Waiting longer costs nothing
+        /// now that case 2 covers the flush going stale. If the cap ever does
+        /// fire, the next boundary heals the deck anyway — its epoch has
+        /// changed by then, which forces a full reset+replay.</summary>
+        private static IEnumerator DeferredGameOverFlush(int gen, int attemptGen, int epochAtGameOver)
+        {
+            try
+            {
+                float t0 = Time.unscaledTime;
+                while (Time.unscaledTime - t0 < 90f)
+                {
+                    if (gen != _boundaryGeneration) yield break;
+                    if (attemptGen != _boundaryAttemptGen) yield break;   // a boundary took over
+                    if (!SpectatorSession.IsLocalSpectator || SpectatorSession.LeaveRequested) yield break;
+                    if (CurrentStage != Stage.Applying)
+                    {
+                        if (_lastSeenEpoch != epochAtGameOver)
+                        {
+                            Plugin.Log?.LogInfo("[SPECTATE] between-games flush not needed — "
+                                + "the boundary apply carried the rematch reset");
+                            yield break;
+                        }
+                        if (Plugin.Instance != null)
+                            Plugin.Instance.StartCoroutine(BetweenGamesFlush(gen, attemptGen));
+                        yield break;
+                    }
+                    yield return null;
+                }
+                Plugin.Log?.LogWarning("[SPECTATE] between-games flush abandoned — "
+                    + "a boundary apply held the bodies for 90s");
+            }
+            finally { _flushDeferred = false; }
+        }
+
+        private static IEnumerator BetweenGamesFlush(int gen, int attemptGen)
+        {
+            // Clear the bars first: they are per-TEAM, so this must be one
+            // global pass rather than per body (playtest #169e).
+            try
+            {
+                var bars = CardBarHandler.instance != null ? CardBarHandler.instance.cardBars : null;
+                if (bars != null)
+                    for (int b = 0; b < bars.Length; b++)
+                        try { bars[b].ClearBar(); } catch { }
+            }
+            catch { }
+
+            // Zero-character invariant (design §3.3): a spectator creates no
+            // local player, so every entry here is a fighter replica.
+            int reset = 0;
+            try
+            {
+                var players = PlayerManager.instance?.players;
+                if (players != null)
+                    for (int i = 0; i < players.Count; i++)
+                    {
+                        var p = players[i];
+                        if (p == null || p.data == null || p.data.view == null) continue;
+                        var owner = p.data.view.Owner;
+                        ResetBodyToVanilla(p, owner != null ? owner.ActorNumber : -1);
+                        reset++;
+                    }
+            }
+            catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] game-over reset: {ex.Message}"); }
+
+            // #278: Object.Destroy is END-OF-FRAME, so the zombie/ChildRPC
+            // sweep must not run in the same frame as the FullReset that
+            // scheduled the teardown — it would see every card component
+            // still alive and scrub nothing.
+            yield return null;
+            if (gen != _boundaryGeneration) yield break;
+            if (attemptGen != _boundaryAttemptGen) yield break;   // a boundary took over
+            if (!SpectatorSession.IsLocalSpectator) yield break;
+            try { GMArmsRaceStartGameBlockResetPatch.RunSweep("spectator between-games flush"); } catch { }
+            Plugin.Log?.LogInfo($"[SPECTATE] between-games flush: {reset} body/bodies reset, card bars cleared");
+        }
+
         private static string FighterNamesForTeam(int teamId)
         {
             try
@@ -1766,7 +1961,13 @@ namespace CompetitiveRounds
         /// (kept separate: that one is entangled with FFA's own baseline and
         /// card-bar state, and cross-mode state sharing is how stale-slot
         /// bugs happen, #149).</summary>
-        private static IEnumerator ResetAndReplay(Player body, int actor, List<string> target, int gen)
+        /// <summary>The SYNCHRONOUS half of a card reset: vanilla FullReset,
+        /// the #211 residue fields FullReset does not restore, the currentCards
+        /// clear vanilla never does (#138), and the Tab-board baseline. Shared
+        /// by the boundary replay and by the between-games flush (item 9a) so
+        /// the two can never drift — a body reset by one is in exactly the
+        /// state the other expects.</summary>
+        private static void ResetBodyToVanilla(Player body, int actor)
         {
             try
             {
@@ -1796,6 +1997,11 @@ namespace CompetitiveRounds
                 try { TabStatsOverlay.RecordCardBaseline(body); } catch { }
             }
             catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] reset actor {actor}: {ex.Message}"); }
+        }
+
+        private static IEnumerator ResetAndReplay(Player body, int actor, List<string> target, int gen)
+        {
+            ResetBodyToVanilla(body, actor);
 
             // One frame for ResetStats' Object.Destroy teardown (#278: Destroy
             // is END-OF-FRAME; a same-frame scrub sees everything still alive

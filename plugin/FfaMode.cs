@@ -387,6 +387,140 @@ namespace CompetitiveRounds
         /// the next game's 0-0 seed is the only reliable rematch signal this
         /// seat gets (its game-start lifecycle is suppressed).</summary>
         private static bool spectatorGameOverAnnounced;
+        /// <summary>Clear the observer's card state at an FFA game boundary so
+        /// the next game does not open showing the finished game's hands.
+        ///
+        /// TWO generation domains fence this, because two different things can
+        /// invalidate it (Codex cold review, finding 4), and they need OPPOSITE
+        /// responses:
+        ///   * FfaMode.TransitionGeneration — a newer FFA boundary means this
+        ///     flush is obsolete: ABANDON it, or it wipes the game that has
+        ///     already started.
+        ///   * SpectatorSync's boundary DECK APPLY — the thing this can
+        ///     actually race, living in a domain TransitionGeneration knows
+        ///     nothing about. An apply in flight owns these bodies, and
+        ///     clearing currentCards and the bars underneath it leaves a
+        ///     partial deck. But that flush is NOT obsolete, so WAIT it out
+        ///     rather than dropping it: an apply in flight at game over was
+        ///     scheduled by a call-in from the game that just ENDED, so it is
+        ///     landing the finished game's deck — exactly what has to be
+        ///     cleared. Dropping the flush is the sibling defect the GM-side
+        ///     review confirmed (SpectatorSync:1184): the reconstruction
+        ///     finishes holding game 1's deck and the next game's picks stack
+        ///     onto it for the whole pick phase.
+        ///
+        /// That second domain is SpectatorSync's OWN published pair
+        /// (BoundaryGeneration + BoundaryAttemptGeneration), captured at
+        /// scheduling time and re-tested every frame — the same fence its own
+        /// coroutines and its GM-side DeferredGameOverFlush use, so the two
+        /// halves of one job cannot drift. It is emphatically NOT a clock; see
+        /// the loop for why a timeout here reintroduces the bug.
+        ///
+        /// The frame yield is load-bearing — Object.Destroy is deferred to end
+        /// of frame (#278), so a sweep run synchronously after a teardown
+        /// inspects objects that are all still alive and correctly cleans up
+        /// nothing.</summary>
+        private static IEnumerator SpectatorBetweenGamesFlush(int gen, int boundaryGen, int attemptGen)
+        {
+            yield return null;
+            if (!RoomActors.LocalIsSpectator) yield break;
+            if (gen != TransitionGeneration) yield break;   // a newer boundary owns the seat
+            // Wait the apply out on the FENCE, never on a clock. The first cut
+            // capped this wait and then cleared ANYWAY, which recreates the very
+            // bug the flush exists to fix (round-2 finding): the apply is not
+            // dead when the cap fires, it is slow — its own budgets allow ~43s —
+            // and when it finally reaches its deck step it writes the finished
+            // game's snapshot back onto bodies we just cleared, with no second
+            // flush behind it. A wall-clock number cannot tell "stalled" from
+            // "slow", so it must not be allowed to decide.
+            //
+            // Two ways out, and the generations decide both:
+            //   * the apply finishes inside our fence  -> it landed the ENDED
+            //     game's deck, which is exactly what this clears: flush.
+            //   * a newer boundary is scheduled (attempt generation moves) or
+            //     the session ends (boundary generation moves) -> abandon. The
+            //     reconcile that took over re-applies from its own fresh
+            //     snapshot, and because the fighters' rematch changed the game
+            //     epoch it does a full reset+replay rather than an extension —
+            //     so it heals the deck without us.
+            //
+            // No cap is needed for a stage stuck in Applying either: the next
+            // call-in bumps the attempt generation even while an attempt holds
+            // the stage (ScheduleBoundary does it before it defers, ahead of its
+            // own Applying check), and a session that ends bumps the boundary
+            // generation and drops the stage to None — so every way this seat
+            // can still matter also releases this loop.
+            //
+            // RESIDUAL, deliberate and NOT closed here. The GM path has a third
+            // exit this one cannot express: it also drops the flush when the
+            // apply finished on a CHANGED game epoch, meaning its snapshot was
+            // answered after the fighters' rematch and it has already replayed
+            // the NEW game's deck from scratch. FFA can reach that — the opening
+            // draw runs BEFORE game 2's first call-in (FfaDoStartGame), so a
+            // snapshot answered in that window carries game-2 picks while our
+            // attempt generation has not moved yet — and flushing then wipes a
+            // correct deck, after which the next boundary's pre-scan sees an
+            // empty deck, treats the snapshot as an EXTENSION rather than a
+            // reset, and applies those cards a second time onto bodies that
+            // still hold their stats. Observer-side only (a spectator cannot
+            // damage or kill — the seat-wide lethality clamp), but wrong.
+            // It needs SpectatorSync's _lastSeenEpoch published the way the
+            // boundary pair above already is; that file is not this one's to
+            // edit, so this is written down rather than guessed at. Reaching it
+            // requires an apply still unresolved at game over AND still short of
+            // its snapshot step ~1.25s into the next game — rare on top of rare,
+            // which is why the confirmed defect (clearing on a clock, every
+            // time) was worth fixing first and alone.
+            // The fence is tested BEFORE the in-flight test, so the frame an
+            // apply finishes is also fenced: a superseded attempt drops out of
+            // Applying (its finally restores the prior stage) at the same moment
+            // its successor claims the deck, and clearing there would wipe what
+            // the successor is about to rebuild from.
+            while (true)
+            {
+                if (!RoomActors.LocalIsSpectator) yield break;
+                if (gen != TransitionGeneration) yield break;
+                if (SpectatorSync.BoundaryFenceMoved(boundaryGen, attemptGen))
+                {
+                    Plugin.Log.LogInfo("[FFA] spectator between-games flush abandoned — a newer boundary owns the deck");
+                    yield break;
+                }
+                if (!SpectatorSync.BoundaryApplyInFlight) break;
+                yield return null;
+            }
+            int cleared = 0;
+            try
+            {
+                decks.Clear();
+                deckViewRebuilds.Clear();
+                foreach (var p in PlayerManager.instance?.players ?? new List<Player>())
+                {
+                    if (p == null || p.gameObject == null || p.data == null) continue;
+                    try
+                    {
+                        // currentCards is what the hold-Tab board reads; vanilla
+                        // never clears it anywhere (#138), so on a seat whose
+                        // participant lifecycle is suppressed nothing else will.
+                        p.data.currentCards?.Clear();
+                        TabStatsOverlay.RecordCardBaseline(p);
+                        cleared++;
+                    }
+                    catch { }
+                }
+                // Bars are per-TEAM, so this is one global pass rather than per
+                // body. CardBar.ClearBar() is the real API — CardBarHandler has
+                // no ClearCardBar, however plausible that name sounds. Same
+                // call the GM-mode spectator flush uses; keep them identical so
+                // the two boundaries cannot drift.
+                var bars = CardBarHandler.instance != null ? CardBarHandler.instance.cardBars : null;
+                if (bars != null)
+                    for (int b = 0; b < bars.Length; b++)
+                        try { bars[b].ClearBar(); } catch { }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] spectator between-games flush: {ex.Message}"); }
+            Plugin.Log.LogInfo($"[FFA] spectator between-games flush: cleared {cleared} replica deck(s)");
+        }
+
         private static void SpectatorCheckGameOver()
         {
             try
@@ -414,6 +548,30 @@ namespace CompetitiveRounds
                 }
                 if (spectatorGameOverAnnounced) return;
                 spectatorGameOverAnnounced = true;
+                // Goal item 9a, FFA half. SpectatorSync's between-games flush
+                // is wired from the GM-mode observer path, which returns into
+                // THIS method before reaching it — so without an equivalent
+                // here an FFA spectator carries the finished game's cards into
+                // the next one and it reads as "players started with extra
+                // cards". Deliberately FfaMode's own flush rather than calling
+                // SpectatorSync's: the bars, decks and baselines being cleared
+                // are FfaMode's state, and sharing lifecycle across modes is
+                // exactly how stale-slot bugs happen (#149).
+                // Always SCHEDULED, never conditionally skipped: the coroutine
+                // owns the whole fence (both generation domains — finding 4),
+                // so there is exactly one place that decides when it is safe to
+                // run. A skip here would be the sibling defect the GM-side
+                // review found (SpectatorSync:1184): a flush dropped because an
+                // apply happened to be in flight is a flush that never happens,
+                // and the finished game's cards then survive the whole of the
+                // next pick phase.
+                // The boundary pair is read HERE, at the game over this flush
+                // belongs to, so "has a newer boundary taken over?" is measured
+                // from that instant and not from whenever the coroutine first
+                // gets to look (same capture point as the GM path's).
+                try { if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(SpectatorBetweenGamesFlush(
+                        TransitionGeneration, SpectatorSync.BoundaryGeneration, SpectatorSync.BoundaryAttemptGeneration)); }
+                catch (Exception fex) { Plugin.Log.LogWarning($"[FFA] spectator flush: {fex.Message}"); }
                 try
                 {
                     string who = "Team " + leadTeam;
@@ -874,7 +1032,7 @@ namespace CompetitiveRounds
                 {
                     if (gameNumber != 0)
                     {
-                        Plugin.Log.LogWarning($"[FFA] stale game counter ({gameNumber}) from a previous room — reset (missed OnRoomLeft?)");
+                        Plugin.Log.LogWarning($"[FFA-DRIFT] stale game counter {gameNumber} carried from '{lastGameRoomName}' into '{roomNow}' — reset (missed OnRoomLeft?)");
                         gameNumber = 0;
                         Leavers.Clear();
                     }
@@ -943,7 +1101,10 @@ namespace CompetitiveRounds
             // — on EVERY game, rematches included.
             try { GameStateWatcher.OnFfaMatchStarted(); }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] match-start hook: {ex.Message}"); }
-            Plugin.Log.LogInfo($"[FFA] Game {gameNumber} starting (players needed: {Diag2v2.PlayersNeeded()})");
+            // Room and seat are printed because bug 214's whole diagnosis
+            // turned on "which room was this counter incremented in, and was
+            // the seat a fighter or an observer?" — neither was in the log.
+            Plugin.Log.LogInfo($"[FFA] Game {gameNumber} starting in {PhotonNetwork.CurrentRoom?.Name ?? "(no room)"} (players needed: {Diag2v2.PlayersNeeded()}, spectator={RoomActors.LocalIsSpectator})");
         }
 
         public static void OnRoomLeft()
@@ -960,6 +1121,7 @@ namespace CompetitiveRounds
             catch { }
             matchStartRealtime = 0f;
             gameNumber = 0;
+            ClearPendingLocalPick();
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
             // Per-game, same lifetime as kills (bug #127/#130 telemetry).
             damageDealt.Clear(); killTimeline.Clear(); damageTimeline.Clear();
@@ -1746,6 +1908,15 @@ namespace CompetitiveRounds
             int cycle = cycleNumber;
             int game = gameNumber;
             float phaseStart = Time.realtimeSinceStartup;
+            // Room nonce CAPTURED once here, never re-sampled at publish time.
+            // The pick prop is a PLAYER property and player properties survive
+            // a room change (#182), so a phase coroutine that outlives its room
+            // must not be able to stamp the NEXT room's nonce onto this room's
+            // pick — that would forge a pick nobody made in the new room.
+            // Every publish below is fenced on this value still matching the
+            // live room.
+            string phaseNonce = RoomNonce();
+            ClearPendingLocalPick();
             // Vanilla logs "PICK PHASE" from RoundTransition; GameStateWatcher's
             // log intercept keys inPickPhase (input/achievement gating) on that
             // exact marker. Emit it for parity or pick-phase keystrokes count
@@ -1776,12 +1947,20 @@ namespace CompetitiveRounds
             // PREVIOUS cycle whose manifest, picks, AND result all still
             // exist, and every hold/grace scheme Codex reviewed still let
             // the master collect stale picks and finalize the old namespace.
-            // The population that needed cache adoption — a mid-game
-            // rejoiner with reset counters — does not exist: FFA rooms never
-            // readmit mid-game (roster frozen at start, leavers purged and
-            // reported departed), so every present client's local counters
-            // are continuous. A successor master that LAGGED (missed a
-            // cycle) is corrected by (d) the moment peers publish picks.
+            // The REJECTION above still stands on its own merits. Its former
+            // supporting claim did not: it read "every present client's local
+            // counters are continuous, because FFA rooms never readmit
+            // mid-game." Bug 214 is that sentence's counterexample. A client
+            // that SPECTATED an earlier ffa_ room carried a non-zero counter
+            // into this one with no readmission at all — the spectator seat ran
+            // the participant start flow, incremented gameNumber, and its
+            // teardown never reset it. Two such seats met the quorum below and
+            // dragged the whole room's namespace forward, costing four correct
+            // seats their opening card. Do not restore the claim; the leak is
+            // closed at the source (spectator gates + OnRoomLeft on the
+            // spectator teardown) and this comment records why it was ever
+            // wrong. A successor master that LAGGED (missed a cycle) is still
+            // corrected by (d) the moment peers publish picks.
             System.Func<int, int, bool> aheadOfLocal =
                 (g, c) => g > game || (g == game && c > cycle);
             string rawCycleAtEntry = ReadRawRoomProp(PropCycle);
@@ -1801,12 +1980,25 @@ namespace CompetitiveRounds
                     var adopted = ParseCycleProp(rawNow);
                     if (adopted != null && aheadOfLocal(adopted.Item1, adopted.Item2))
                     {
-                        Plugin.Log.LogWarning($"[FFA] cycle identity drift: local {game}:{cycle} vs master {adopted.Item1}:{adopted.Item2} — adopting");
+                        Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {adopted.Item1}:{adopted.Item2} room={phaseNonce} evidence=manifest-prop");
                         game = adopted.Item1;
                         cycle = adopted.Item2;
                         gameNumber = game;
                         cycleNumber = cycle;
                         manifest = adopted.Item3;
+                        // Nothing has been published this early (the pick UI
+                        // starts below), so this is a no-op today — kept so the
+                        // rule "every adoption re-stamps" holds at EVERY site
+                        // and a future reorder cannot silently orphan a pick.
+                        //
+                        // This site deliberately does NOT use the adoptIdentity
+                        // funnel declared further down: every piece of state
+                        // that funnel resets (lastGotCount, adoptedAt,
+                        // lastPublishedPhotonDeadline, rawCycleAtResultEntry)
+                        // is declared BELOW here and is therefore born under
+                        // the adopted identity already. If any of them ever
+                        // moves above this loop, this site must funnel too.
+                        RepublishLocalPickFor(phaseNonce, game, cycle);
                         break;
                     }
                 }
@@ -1863,7 +2055,7 @@ namespace CompetitiveRounds
             bool iPick = localPlayer != null && manifest.Contains(localPlayer.PlayerID);
             Coroutine localUi = null;
             if (iPick)
-                localUi = gm.StartCoroutine(FfaLocalPickUI(gm, localPlayer, game, cycle));
+                localUi = gm.StartCoroutine(FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce));
 
             // Master: collect picks and close the window adaptively — at
             // least PickBase, extended by PickGrace whenever a pick arrives
@@ -1874,6 +2066,25 @@ namespace CompetitiveRounds
             // comment), so only a crashed/stalled seat is ever finalized
             // without a card.
             float deadline = phaseStart + PickBaseSeconds;
+            // Realtime of the master's most recent identity adoption, or -999.
+            // ADOPTION IS ASYNCHRONOUS: re-stamping the local pick calls
+            // SetCustomProperties, which for an online player is a network op —
+            // the value is not guaranteed to be readable from our own property
+            // cache on the very next line. Without a barrier the master could
+            // adopt at :2016, re-stamp, reach CollectPicks in the SAME
+            // iteration still reading its OLD identity, find `now > deadline`
+            // and publish a result WITHOUT ITS OWN CARD — losing a pick in
+            // exactly the cutoff case the re-stamp exists to save.
+            // (Codex cold review, blocker 1.)
+            float adoptedAt = -999f;
+            // IDENTITY-SCOPED high-water: the largest pick count observed
+            // UNDER THE CURRENT (game,cycle). It is the sole trigger for the
+            // grace extension, so carrying it across an adoption silently
+            // drops picks — the abandoned namespace's 4 picks make the new
+            // namespace's 2 -> 4 climb look like "nothing new arrived", no
+            // extension fires, and the master closes the window early with
+            // 4/6. Reset at EVERY adoption; see adoptIdentity below.
+            // (Codex cold review, finding 1.)
             int lastGotCount = 0;
             float lastCollect = -999f;
             bool wasMaster = PhotonNetwork.IsMasterClient;
@@ -1886,6 +2097,66 @@ namespace CompetitiveRounds
             double lastPublishedPhotonDeadline = -1.0;
             if (wasMaster) PublishSharedDeadline(game, cycle, deadline, ref lastPublishedPhotonDeadline);
             Dictionary<int, string> result = null;
+            // Snapshot for the non-master watch below (round-4 find F1: a
+            // STABLE cached prop is not evidence — only a CHANGE observed
+            // during this loop is a fresh publish). Declared AHEAD of the
+            // master-only pre-pass so the adoption funnel can re-baseline it;
+            // only non-masters ever read it and they never run that pre-pass,
+            // so the snapshot point is unchanged for every client that uses it.
+            string rawCycleAtResultEntry = ReadRawRoomProp(PropCycle);
+
+            // ── ONE owner for "the pick identity changed" ──
+            // Three sites below can move (game,cycle) mid-phase. Maintaining
+            // the follow-up state by hand at each of them is exactly what let
+            // lastGotCount survive an adoption (Codex cold review, finding 1),
+            // so every site funnels through here and a fourth site cannot
+            // reintroduce the class. The loop's locals, classified:
+            //
+            //   IDENTITY-scoped — reset here, or the new namespace inherits a
+            //   verdict formed under the old one:
+            //     game / cycle / gameNumber / cycleNumber  the identity itself
+            //       (the statics matter: FfaLocalPickUI reads them live at
+            //        publish time — see its publish comment);
+            //     manifest        who we collect from and close against;
+            //     lastGotCount    pick high-water; the grace-extension trigger;
+            //     lastPublishedPhotonDeadline  dedup key for a prop that is
+            //       ITSELF keyed by game:cycle — a skipped republish leaves the
+            //       new namespace with NO shared deadline, so every peer falls
+            //       back to the long-lead local mirror;
+            //     rawCycleAtResultEntry  the peer change-detector baseline;
+            //     the local pick prop  moved by RepublishLocalPickFor.
+            //
+            //   PHASE-scoped — deliberately NOT reset:
+            //     phaseStart / phaseNonce  the phase is the same phase;
+            //     deadline        forward-only by design (round-3 find 3a);
+            //     lastCollect     a 4 Hz prop-read throttle;
+            //     wasMaster       a role, not an identity;
+            //     adoptedAt       set here; it IS the propagation barrier.
+            System.Action<int, int, List<int>, bool, string> adoptIdentity =
+                (newGame, newCycle, newManifest, asMaster, observedRaw) =>
+            {
+                game = newGame;
+                cycle = newCycle;
+                gameNumber = newGame;
+                cycleNumber = newCycle;
+                if (newManifest != null) manifest = newManifest;
+                if (asMaster)
+                {
+                    // Publish and collect against the SAME list. pickerIds is
+                    // this seat's physical truth for the phase and is what the
+                    // peers will read back out of the prop; keeping a manifest
+                    // from the abandoned identity would close the window on a
+                    // set nobody agreed to.
+                    manifest = pickerIds;
+                    SetRoomProp(PropCycle, $"{newGame}:{newCycle}:{string.Join(",", pickerIds)}");
+                }
+                RepublishLocalPickFor(phaseNonce, newGame, newCycle);
+                adoptedAt = Time.realtimeSinceStartup;
+                lastGotCount = 0;
+                lastPublishedPhotonDeadline = -1.0;   // force a republish under the new key
+                if (observedRaw != null) rawCycleAtResultEntry = observedRaw;
+            };
+
             // Round-2 find 2: the cached-result short-circuit must not bypass
             // the drift detector — a drifted master could otherwise consume a
             // stale result for its old identity before ever observing peers'
@@ -1895,16 +2166,10 @@ namespace CompetitiveRounds
                 var pre = DetectAheadPickIdentity(manifest, game, cycle);
                 if (pre != null)
                 {
-                    Plugin.Log.LogWarning($"[FFA] master identity {game}:{cycle} behind peers' {pre.Item1}:{pre.Item2} at result entry — adopting");
-                    game = pre.Item1; cycle = pre.Item2;
-                    gameNumber = game; cycleNumber = cycle;
-                    SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
+                    Plugin.Log.LogWarning($"[FFA-DRIFT] master {game}:{cycle} -> {pre.Item1}:{pre.Item2} room={phaseNonce} evidence=peer-picks (result entry)");
+                    adoptIdentity(pre.Item1, pre.Item2, null, true, null);
                 }
             }
-            // Snapshot for the non-master watch below (round-4 find F1: a
-            // STABLE cached prop is not evidence — only a CHANGE observed
-            // during this loop is a fresh publish).
-            string rawCycleAtResultEntry = ReadRawRoomProp(PropCycle);
             while (true)
             {
                 result = ReadCycleResult(game, cycle);
@@ -1922,12 +2187,8 @@ namespace CompetitiveRounds
                         var ahead = DetectAheadPickIdentity(manifest, game, cycle);
                         if (ahead != null)
                         {
-                            Plugin.Log.LogWarning($"[FFA] master identity {game}:{cycle} is behind peers' {ahead.Item1}:{ahead.Item2} — adopting and republishing");
-                            game = ahead.Item1;
-                            cycle = ahead.Item2;
-                            gameNumber = game;
-                            cycleNumber = cycle;
-                            SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
+                            Plugin.Log.LogWarning($"[FFA-DRIFT] master {game}:{cycle} -> {ahead.Item1}:{ahead.Item2} room={phaseNonce} evidence=peer-picks (result loop)");
+                            adoptIdentity(ahead.Item1, ahead.Item2, null, true, null);
                         }
                     }
                     else
@@ -1941,13 +2202,18 @@ namespace CompetitiveRounds
                         var np = rawNow != rawCycleAtResultEntry ? ParseCycleProp(rawNow) : null;
                         if (np != null && (np.Item1 > game || (np.Item1 == game && np.Item2 > cycle)))
                         {
-                            Plugin.Log.LogWarning($"[FFA] non-master identity {game}:{cycle} behind authoritative {np.Item1}:{np.Item2} — adopting");
-                            game = np.Item1;
-                            cycle = np.Item2;
-                            gameNumber = game;
-                            cycleNumber = cycle;
-                            if (np.Item3 != null) manifest = np.Item3;
-                            lastGotCount = 0;
+                            Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {np.Item1}:{np.Item2} room={phaseNonce} evidence=cycle-prop-change");
+                            // The funnel also re-stamps the local pick — THE
+                            // bug-214 amplifier. Without that, the seat that
+                            // adopts is precisely the seat that then logs
+                            // "local pick missed the window": its pick prop is
+                            // still stamped with the identity it just
+                            // abandoned, so the master's CollectPicks prefix
+                            // can never match it. One bug wearing two log
+                            // lines. Re-baselining rawCycleAtResultEntry to the
+                            // value we adopted keeps "changed" meaning "changed
+                            // since the last thing we acted on".
+                            adoptIdentity(np.Item1, np.Item2, np.Item3, false, rawNow);
                         }
                     }
                     var got = CollectPicks(manifest, game, cycle);
@@ -2009,7 +2275,21 @@ namespace CompetitiveRounds
                     if (PhotonNetwork.IsMasterClient)
                     {
                         bool allIn = got.Count >= CountStillPresent(manifest);
-                        if (allIn || now > deadline)
+                        // Propagation barrier: never CLOSE the window inside
+                        // the grace window after an adoption. `allIn` is exempt
+                        // by construction — if every present picker is already
+                        // in the collected set, nothing is waiting to arrive.
+                        // Forward-only and bounded by PickGrace, so this can
+                        // delay a close by at most one grace interval and can
+                        // never move the deadline backwards (round-3 find 3a).
+                        bool adoptSettling = !allIn && (now - adoptedAt) < PickGraceSeconds;
+                        if (adoptSettling)
+                        {
+                            deadline = Mathf.Max(deadline, adoptedAt + PickGraceSeconds);
+                            pickDeadlineRealtime = deadline;
+                            PublishSharedDeadline(game, cycle, deadline, ref lastPublishedPhotonDeadline);
+                        }
+                        if (allIn || (now > deadline && !adoptSettling))
                         {
                             var sb = new System.Text.StringBuilder();
                             sb.Append(game).Append(':').Append(cycle).Append(':');
@@ -2076,9 +2356,28 @@ namespace CompetitiveRounds
             }
 
             // Apply the result — the ONLY apply site, identical on all clients.
+            _cycleToasts.Clear();
             foreach (var kv in result.OrderBy(k => k.Key))
             {
                 yield return ApplyManifestPick(kv.Key, kv.Value, cycle);
+            }
+            // One band for the whole cycle: every grant and every rolling
+            // removal, laid out horizontally across the bottom so it does not
+            // sit over the play area (goal item 10).
+            if (_cycleToasts.Count > 0)
+            {
+                try { CompetitiveUI.ShowNotificationSet(_cycleToasts, 4.5f); } catch { }
+                _cycleToasts.Clear();
+            }
+            // Name who got nothing, and under which identity. Two causes reach
+            // here — a genuinely absent/stalled seat, and an identity drift
+            // that orphaned a real pick — and the printed identity is what
+            // tells them apart in one grep. Before this, diagnosing bug 214
+            // needed a full-log reconstruction plus two SQL queries.
+            if (result.Count < manifest.Count)
+            {
+                var orphaned = manifest.Where(pid => !result.ContainsKey(pid)).ToList();
+                Plugin.Log.LogWarning($"[FFA-DRIFT] cycle {cycle} applied {result.Count}/{manifest.Count} — no card for pid(s) {string.Join(",", orphaned)} (identity {game}:{cycle} room={phaseNonce})");
             }
             Plugin.Log.LogInfo($"[FFA] pick cycle {cycle} applied ({result.Count} picks)");
         }
@@ -2228,6 +2527,62 @@ namespace CompetitiveRounds
             try { return PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { return ""; }
         }
 
+        // ── Local pick re-stamping on adoption (bug 214's amplifier) ──
+        //
+        // FfaLocalPickUI publishes the local pick under the identity that was
+        // current WHEN IT PUBLISHED. Every adoption site in FfaPickPhase can
+        // move that identity afterwards, and the already-written player prop
+        // does not follow — so the adopting seat's own pick is orphaned by the
+        // very adoption that was supposed to make it converge. That is why one
+        // seat logs "adopting" and then "local pick missed the window": it is
+        // one defect, not two.
+        //
+        // Re-stamping is safe and idempotent: PropPick is a single player
+        // property (last-writer-wins) and both CollectPicks and
+        // DetectAheadPickIdentity prefix-match on the whole
+        // "{nonce}:{game}:{cycle}:" key, so no reader can observe a half-moved
+        // identity. The CARD never changes — only the namespace it sits in.
+        private static string pendingPickCard;
+        private static string pendingPickNonce;
+
+        private static void ClearPendingLocalPick()
+        {
+            pendingPickCard = null;
+            pendingPickNonce = null;
+        }
+
+        /// <summary>Record what FfaLocalPickUI just published so a later
+        /// adoption in the same phase can move it.</summary>
+        private static void NotePendingLocalPick(string nonce, string cardName)
+        {
+            pendingPickNonce = nonce;
+            pendingPickCard = cardName;
+        }
+
+        /// <summary>Re-publish the local pick under a newly adopted identity.
+        /// No-op when nothing has been published this phase. Fenced on the
+        /// phase's CAPTURED nonce still matching the live room, so a phase that
+        /// outlived its room can never write into the next room's namespace
+        /// (player props survive room changes — #182).</summary>
+        private static void RepublishLocalPickFor(string nonce, int game, int cycle)
+        {
+            if (string.IsNullOrEmpty(pendingPickCard)) return;
+            if (pendingPickNonce != nonce) return;
+            if (nonce != RoomNonce())
+            {
+                Plugin.Log.LogWarning($"[FFA-DRIFT] pick re-stamp suppressed — room changed under the phase (was {nonce}, now {RoomNonce()})");
+                return;
+            }
+            try
+            {
+                var h = new ExitGames.Client.Photon.Hashtable();
+                h[PropPick] = $"{nonce}:{game}:{cycle}:{pendingPickCard}";
+                PhotonNetwork.LocalPlayer.SetCustomProperties(h);
+                Plugin.Log.LogInfo($"[FFA-DRIFT] re-stamped local pick '{pendingPickCard}' onto {game}:{cycle}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pick re-stamp: {ex.Message}"); }
+        }
+
         private static Dictionary<int, string> CollectPicks(List<int> manifest, int game, int cycle)
         {
             var got = new Dictionary<int, string>();
@@ -2301,7 +2656,7 @@ namespace CompetitiveRounds
 
         private static readonly List<GameObject> localCardObjects = new List<GameObject>();
 
-        private static IEnumerator FfaLocalPickUI(GM_ArmsRace gm, Player localPlayer, int game, int cycle)
+        private static IEnumerator FfaLocalPickUI(GM_ArmsRace gm, Player localPlayer, int game, int cycle, string nonce)
         {
             var choice = CardChoice.instance;
             if (choice == null) yield break;
@@ -2450,16 +2805,41 @@ namespace CompetitiveRounds
             string cardName = shown[chosen].gameObject.name.Replace("(Clone)", "");
             // Publish BEFORE any local application — application happens only
             // from the result manifest, identically on every client.
+            // Publish under the phase's LIVE identity, never the value captured
+            // when this coroutine started. Bug 214's amplifier has TWO
+            // directions and both must be closed:
+            //   adoption AFTER we publish -> RepublishLocalPickFor re-stamps;
+            //   adoption BEFORE we publish -> a by-value capture would write
+            //     into a namespace nobody collects, so read it live here.
+            // gameNumber/cycleNumber are updated at EVERY adoption site
+            // alongside the caller's locals, so they ARE this phase's current
+            // identity. The caller stops this coroutine before the next phase
+            // starts, so they can never belong to a later one.
+            int pubGame = gameNumber, pubCycle = cycleNumber;
             try
             {
-                var h = new ExitGames.Client.Photon.Hashtable();
-                h[PropPick] = $"{RoomNonce()}:{game}:{cycle}:{cardName}";
-                PhotonNetwork.LocalPlayer.SetCustomProperties(h);
+                // Fenced on the phase's CAPTURED nonce, never a live re-sample:
+                // a pick prop written with the NEXT room's nonce would forge a
+                // pick nobody made there (player props survive room changes,
+                // #182).
+                if (nonce == RoomNonce())
+                {
+                    var h = new ExitGames.Client.Photon.Hashtable();
+                    h[PropPick] = $"{nonce}:{pubGame}:{pubCycle}:{cardName}";
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(h);
+                    NotePendingLocalPick(nonce, cardName);
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[FFA-DRIFT] pick publish suppressed — room changed under the pick phase (was {nonce}, now {RoomNonce()})");
+                }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pick publish: {ex.Message}"); }
+            if (pubGame != game || pubCycle != cycle)
+                Plugin.Log.LogWarning($"[FFA-DRIFT] pick published under adopted identity {pubGame}:{pubCycle} (phase started at {game}:{cycle})");
             Plugin.Log.LogInfo(autoPicked
-                ? $"[FFA] local pick AUTO-CONFIRMED at window expiry: {cardName} (cycle {cycle})"
-                : $"[FFA] local pick published: {cardName} (cycle {cycle})");
+                ? $"[FFA] local pick AUTO-CONFIRMED at window expiry: {cardName} key={nonce}:{pubGame}:{pubCycle}"
+                : $"[FFA] local pick published: {cardName} key={nonce}:{pubGame}:{pubCycle}");
             if (autoPicked)
             {
                 try
@@ -2602,6 +2982,15 @@ namespace CompetitiveRounds
 
         // ── Applying picks (the single reducer) ──
 
+        /// <summary>Every "X picked Y" / "X lost Y" line for the cycle being
+        /// applied, accumulated by ApplyManifestPick and flushed as ONE
+        /// horizontal band by FfaPickPhase once the apply loop finishes.
+        /// Accumulate-then-flush is required, not stylistic: ApplyManifestPick
+        /// yields mid-reduce (the rolling reset+replay), so pushing per pick
+        /// would paint the band in pieces as the cycle resolved.</summary>
+        private static readonly List<CompetitiveUI.NotifSetItem> _cycleToasts =
+            new List<CompetitiveUI.NotifSetItem>(12);
+
         private static IEnumerator ApplyManifestPick(int pid, string cardName, int cycle)
         {
             // Self-heal a stale bar-suppression flag (Claude review of the
@@ -2628,6 +3017,15 @@ namespace CompetitiveRounds
             }
             CaptureBaselineIfNeeded(player);
 
+            // Display name for this pid, computed ONCE — both the pick line and
+            // the removal line below need it, and the removal line needs it
+            // before the rolling block's try/catch could swallow it.
+            string who = "P" + pid;
+            try { who = GameStateWatcher.StripRichText(player.data.view?.Owner?.NickName ?? who); } catch { }
+            // 10 chars, not 14: a band cell caps at 34, and "{name} picked {card}"
+            // is 10 + 8 + 14 = 32 at the longest.
+            if (who.Length > 10) who = who.Substring(0, 10);
+
             bool rebuiltDeck = false;
             if (deck.Count >= CardCap)
             {
@@ -2635,16 +3033,33 @@ namespace CompetitiveRounds
                 // path exists in ROUNDS — reset to the cached baseline and
                 // replay the survivors, then apply the new card.
                 var survivors = deck.Skip(deck.Count - (CardCap - 1)).ToList();
-                Plugin.Log.LogInfo($"[FFA] rolling removal for pid {pid}: dropping '{deck[0].gameObject.name}'");
+                string droppedRaw = deck[0].gameObject.name.Replace("(Clone)", "");
+                Plugin.Log.LogInfo($"[FFA] rolling removal for pid {pid}: dropping '{droppedRaw}'");
                 // Mark the earliest un-rolled history entry for this card so
                 // the Recent panel can paint it red (Sid round-2 item 2).
+                // droppedCanon is hoisted OUT of the try: it is also what the
+                // removal toast shows, and leaving it scoped inside meant a
+                // swallowed exception silently cost the player the only
+                // notification they get that a card left their hand.
+                string droppedCanon = droppedRaw;
                 try
                 {
-                    string droppedCanon = CardRarityLookup.GetCanonicalName(
-                        deck[0].gameObject.name.Replace("(Clone)", ""));
+                    droppedCanon = CardRarityLookup.GetCanonicalName(droppedRaw) ?? droppedRaw;
                     if (pickHistory.TryGetValue(pid, out var hist0))
                         foreach (var h in hist0)
                             if (!h.Rolled && h.CardName == droppedCanon) { h.Rolled = true; break; }
+                }
+                catch { }
+                // Removals are announced for EVERY seat, local included — the
+                // local player getting no feedback at all when a card rolls off
+                // their own hand is the larger half of the report. Accumulated,
+                // never shown here: this method yields below (RollingResetAndReplay),
+                // so pushing per-pick would paint the band in pieces.
+                try
+                {
+                    string droppedShown = CardTextLocalizer.PrettyNameIfCached(droppedCanon, droppedRaw);
+                    _cycleToasts.Add(new CompetitiveUI.NotifSetItem(
+                        I18n.TrF("{0} lost {1}", who, droppedShown), new Color(1f, 0.7f, 0.6f)));
                 }
                 catch { }
                 deckViewRebuilds.Add(pid);
@@ -2668,19 +3083,24 @@ namespace CompetitiveRounds
             // bookkeeping (localCards + cr_cards broadcast) happens HERE, at
             // accepted-result time, so the broadcast can never advertise a
             // pick the reducer rejected (bug 204's false "he has Defender").
+            // WHOLE SET, not one line. This used to call ShowNotification per
+            // non-local picker, and ShowNotification is a single latest-wins
+            // slot — so in a 5-player cycle the loop raised 4 toasts that each
+            // overwrote the previous and only the highest pid survived. That is
+            // the "only shows one player's card grant, never the whole set"
+            // report. Entries are ACCUMULATED here and flushed as one band by
+            // the caller after the apply loop finishes.
+            //
+            // The local seat is now included: "the whole set" is the request,
+            // and bug 206's rationale for excluding it was specifically about
+            // the single-slot toast it would have stolen.
             try
             {
-                if (player.data.view == null || !player.data.view.IsMine)
-                {
-                    string who = "P" + pid;
-                    try { who = GameStateWatcher.StripRichText(player.data.view?.Owner?.NickName ?? who); } catch { }
-                    if (who.Length > 14) who = who.Substring(0, 14);
-                    string canon = CardRarityLookup.GetCanonicalName(cardName) ?? cardName;
-                    string shown = CardTextLocalizer.PrettyNameIfCached(canon, cardName);
-                    CompetitiveUI.ShowNotification(I18n.TrF("{0} picked {1}", who, shown),
-                        new Color(0.75f, 0.85f, 1f), 3.5f);
-                }
-                else
+                string canon = CardRarityLookup.GetCanonicalName(cardName) ?? cardName;
+                string shown = CardTextLocalizer.PrettyNameIfCached(canon, cardName);
+                _cycleToasts.Add(new CompetitiveUI.NotifSetItem(
+                    I18n.TrF("{0} picked {1}", who, shown), new Color(0.75f, 0.85f, 1f)));
+                if (player.data.view != null && player.data.view.IsMine)
                 {
                     try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }
                 }
