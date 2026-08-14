@@ -1,5 +1,37 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+**Fixed**
+
+- **The mid-fight hitch in busy games (bug 217).** When a bullet's hit
+  notification arrived for something this client had already cleaned up, the
+  error it threw took the rest of that network packet batch down with it —
+  every other player's position update queued behind it arrived late. That is
+  the "bullets and player positions lag while ping looks fine" feel. The error
+  is now contained (17 hits in the two reported FFA games; the previous
+  night's session had 87), and a companion guard quiets the bullet-pool
+  teardown error that rode the same stacks.
+- **Spectator join is far cleaner (bug 216).** Replayed leftovers from the
+  room's past can no longer collide with anything during the join (they are
+  made physics-inert the moment they appear), and the thousands of harmless
+  "no such PhotonView" warnings a spectator seat used to burn CPU and log
+  space on are silenced and counted instead.
+- **Poison now shows on the spectator seat.** A stale local dead/respawning
+  flag on one replica could eat every accepted poison verdict for that player
+  — their health bar never moved for the whole observation. The observer no
+  longer vetoes the victim's own authority using local lifecycle bits.
+- **FFA scoreboard log lines carry names again** instead of nametag markup,
+  and the stale-projectile sweep's diagnostic no longer goes quiet after the
+  first game.
+
+**New**
+
+- **Network health line in the log.** Every 10 seconds in an online room the
+  log records ping, effective fps, actor count and dispatch-guard counters —
+  so the next "it felt laggy" report can be diagnosed from the bundle instead
+  of guessed at.
+
 ## v1.38.5 — 2026-08-13
 
 **New**

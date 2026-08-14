@@ -132,6 +132,19 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Drop one diagnostic budget entry so a per-sitting diag
+        /// gets a fresh budget. Called from room-TRANSITION edges (today:
+        /// GameStateWatcher's room-exit edge resets the stale-projectile
+        /// sweep's key). Dynamic per-room keys were tried and rejected in
+        /// review (r2/r3): they grow the dict per room and an in-sweep reset
+        /// can only see key CHANGES, so a directly-rejoined room inherited
+        /// its spent budget. Fixed key + edge reset has neither hole.</summary>
+        internal static void ResetDiag(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            try { lock (Sync) { DiagnosticCounts.Remove(key); } } catch { }
+        }
+
         internal static string Float(float value)
         {
             return value.ToString("0.000", CultureInfo.InvariantCulture);
@@ -1042,6 +1055,179 @@ namespace CompetitiveRounds
         {
             if (original != null) return exception;
             return VanillaFixSupport.Cleanup("PhoenixRespawn", exception);
+        }
+    }
+
+    /// <summary>Bug #217 (Aug 13 FFA "latency lag with bullets and player
+    /// positions"): an exception thrown inside a PunRPC body propagates out
+    /// through PhotonNetwork.ExecuteRpc into EnetPeer.DispatchIncomingCommands,
+    /// and Photon ABORTS the remainder of that incoming dispatch batch — every
+    /// position/serialization update queued behind the faulting RPC is deferred
+    /// to a later FixedUpdate. The user feels a hitch in bullets AND player
+    /// positions at the moment a hit lands, while ping/fps/resend telemetry
+    /// stay flat. 23 such aborts in the bug-217 session, 87 in bug-214's
+    /// (v1.38.4), so the class long predates the Radiance change. RPCA_DoHit
+    /// is the only RPC observed faulting: its body dereferences
+    /// GetPhotonView(viewID) results, the map collider array and component
+    /// lookups with no null checks, so a hit replicated after this client
+    /// already retired the target NREs (decompile ProjectileHit.cs:199+).
+    ///
+    /// SWALLOW-ONLY, strictly better than the status quo: today the NRE
+    /// aborts RPCA_DoHit at some statement AND kills the rest of the Photon
+    /// batch; with the finalizer the body aborts at the same statement and
+    /// the batch survives. No new divergence is introduced — whatever this
+    /// client missed was already missed the moment the throw happened.
+    /// #322's DoDamage rule, stated precisely (review r1 find 2 corrected
+    /// this comment's first draft): an exception thrown INSIDE DoDamage —
+    /// after its health commit, before its death RPC — DOES propagate up
+    /// through RPCA_DoHit into this finalizer, so partial-DoDamage state
+    /// (e.g. a negative-health live replica) remains reachable. It is
+    /// reachable IDENTICALLY without this guard: vanilla never caught the
+    /// throw either, so the replica state is byte-for-byte the same in both
+    /// worlds. The swallow changes exactly one thing — that already-thrown
+    /// exception no longer takes the rest of Photon's dispatch batch with
+    /// it. No new state exists.
+    ///
+    /// UNGATED (#151/#286): a local crash guard has no cross-client
+    /// semantics, and gating would exclude the room-code games where most
+    /// rated play happens.</summary>
+    [HarmonyPatch]
+    internal static class RpcDoHitDispatchGuardPatch
+    {
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            // By name, all overloads (#324c); a signature drift in a game
+            // patch must break loudly at attach, never silently no-op (#83).
+            var list = new List<MethodBase>();
+            foreach (var m in typeof(ProjectileHit).GetMethods(AccessTools.all))
+                if (m.Name == "RPCA_DoHit") list.Add(m);
+            if (list.Count == 0)
+                throw new Exception("ProjectileHit.RPCA_DoHit not found — dispatch guard has no target");
+            return list;
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+            {
+                NetDiag.CountRpcSwallow();
+                VanillaFixSupport.DiagLimited(
+                    "RpcDoHitDispatchGuard-swallowed",
+                    "RPCA_DoHit threw " + __exception.GetType().Name +
+                    " — swallowed so Photon's incoming dispatch batch survives (" +
+                    __exception.Message + ")",
+                    20);
+            }
+            return null;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("RpcDoHitDispatchGuard", exception);
+        }
+    }
+
+    /// <summary>Companion to the dispatch guard: FriendlyFoe's pooled-bullet
+    /// teardown NREs when a bullet dies before BulletPoolInstancer.Start ran
+    /// (#94/#156 — the pool wrapper is wired in Start), and the throw rides
+    /// whatever stack destroyed the bullet — including Photon's dispatch loop
+    /// (Ev Destroy) and scene teardown. 85 in the bug-217 session, 179 in
+    /// bug-214's. Swallowing does not repair the pool accounting (the
+    /// instance was never returned — exactly as before), it stops the throw
+    /// from escaping into the destroyer's stack. Type resolved by name: the
+    /// FriendlyFoe types live in Assembly-CSharp but OnDestroy is private
+    /// and the by-name TargetMethods throws if the game update renames it
+    /// (#83/#91 — never a silent no-op).</summary>
+    [HarmonyPatch]
+    internal static class BulletPoolReleaseGuardPatch
+    {
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            var t = AccessTools.TypeByName("FriendlyFoe.BulletPoolInstancer");
+            var m = t == null ? null : AccessTools.Method(t, "OnDestroy");
+            if (m == null)
+                throw new Exception("FriendlyFoe.BulletPoolInstancer.OnDestroy not found — pool guard has no target");
+            return new List<MethodBase> { m };
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+            {
+                NetDiag.CountPoolSwallow();
+                VanillaFixSupport.DiagLimited(
+                    "BulletPoolReleaseGuard-swallowed",
+                    "BulletPoolInstancer.OnDestroy threw " + __exception.GetType().Name +
+                    " — swallowed (pre-Start bullet death; pool entry was never registered)",
+                    20);
+            }
+            return null;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("BulletPoolReleaseGuard", exception);
+        }
+    }
+
+    /// <summary>Bug #217's biggest diagnostic gap (both sweep agents, verdict
+    /// A6): the log carries no rtt/fps/dispatch-health timeline at all, so
+    /// "mild-moderate latency" could not be quantified from a bundle — the
+    /// local-framerate answer had to be reverse-engineered from frame counters
+    /// embedded in unrelated [VANILLA-DIAG] lines. One Info line every 10s
+    /// while in an online room. Counters are process-cumulative; the line
+    /// prints per-interval deltas so any single line reads in isolation.
+    /// Called from GameStateWatcher.TickFrame BEFORE its spectator
+    /// early-return — the spectator seat needs this line most.</summary>
+    internal static class NetDiag
+    {
+        private static float _lastLog = -999f;
+        private static int _lastFrame;
+        private static int _rpcSwallows, _lastRpcSwallows;
+        private static int _poolSwallows, _lastPoolSwallows;
+        private static int _orphanSkips, _lastOrphanSkips;
+
+        internal static void CountRpcSwallow() { _rpcSwallows++; }
+        internal static void CountPoolSwallow() { _poolSwallows++; }
+        internal static void CountOrphanSkip() { _orphanSkips++; }
+
+        internal static void Tick()
+        {
+            float now = Time.unscaledTime;
+            if (now - _lastLog < 10f) return;
+            bool inRoom = false;
+            int actors = 0;
+            try
+            {
+                inRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode;
+                if (inRoom && PhotonNetwork.CurrentRoom != null)
+                    actors = PhotonNetwork.CurrentRoom.PlayerCount;
+            }
+            catch { }
+            if (inRoom)
+            {
+                int fps = (int)((Time.frameCount - _lastFrame) / Mathf.Max(0.01f, now - _lastLog));
+                int ping = 0;
+                try { ping = PhotonNetwork.GetPing(); } catch { }
+                Plugin.Log?.LogInfo(
+                    $"[NET] ping={ping}ms fps~{fps} actors={actors}" +
+                    $" rpcSwallow=+{_rpcSwallows - _lastRpcSwallows}" +
+                    $" poolSwallow=+{_poolSwallows - _lastPoolSwallows}" +
+                    $" orphanSer=+{_orphanSkips - _lastOrphanSkips}");
+            }
+            // Baselines re-sync every interval, in-room or not, so the first
+            // in-room line after a menu stretch spans at most one interval.
+            _lastLog = now;
+            _lastFrame = Time.frameCount;
+            _lastRpcSwallows = _rpcSwallows;
+            _lastPoolSwallows = _poolSwallows;
+            _lastOrphanSkips = _orphanSkips;
         }
     }
 
@@ -1960,6 +2146,9 @@ namespace CompetitiveRounds
         // costs at most one 2-second suppression window, self-healing.
         private static bool _sweepPending;
         private static float _pendingSince = -10f;
+        // Fixed diag key; its budget is reset at the room-LEAVE edge in
+        // GameStateWatcher, not here (see the DiagLimited call for why).
+        internal const string DiagKey = "StaleProjectileSweep-despawn";
 
         [HarmonyPostfix]
         [HarmonyPatch(
@@ -2062,12 +2251,26 @@ namespace CompetitiveRounds
                 }
 
                 if (swept > 0)
+                {
+                    // FIXED key, budget reset at the room-LEAVE edge in
+                    // GameStateWatcher (r1 find 3 → r2 find 1 → r3 find 1
+                    // ended the per-room-key experiment: a name-derived key
+                    // both grew the dict per room AND let a directly-rejoined
+                    // room inherit its spent budget, because any in-sweep
+                    // reset can only see KEY CHANGES. The leave edge fires on
+                    // EVERY transition, sweep or not, so each sitting starts
+                    // with a fresh 50 and the dict never grows.)
                     VanillaFixSupport.DiagLimited(
-                        "StaleProjectileSweep-despawn",
+                        DiagKey,
                         "StaleProjectileSweep despawned " +
                         swept.ToString(CultureInfo.InvariantCulture) +
                         " leftover projectile(s) at " + reason,
-                        10);
+                        // 50, was 10: the 10-line budget ran out mid-game-1 of
+                        // the bug-217 session, hiding the projectile-leak rate
+                        // for every later game (#304's cap trap — a capped
+                        // diag reads as a behaviour change).
+                        50);
+                }
             }
             catch (Exception ex)
             {

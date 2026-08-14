@@ -3485,6 +3485,11 @@ namespace CompetitiveRounds
             try { SpectatorSync.MasterResetSpectatorState(); } catch { }
             // Callback-bound edge reset (Aug 10 r2 find 8).
             try { GameStateWatcher.ResetSpectateAttestEdges(alsoRoomTally: false); } catch { }
+            // Per-sitting diagnostic budgets refresh on the RELIABLE exit
+            // edge (bug-216/217 review r4: the poll-detected exit can miss a
+            // leave+rejoin that lands between samples; this callback cannot).
+            // The poll's Left-room branch keeps a lossy backup copy.
+            try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
             // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
             // materials die with the room too — Reset() previously had NO
             // caller, so the flush the r4 cap depends on never ran and a

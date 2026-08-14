@@ -383,6 +383,53 @@ namespace CompetitiveRounds
 
         internal static void CountReplayBuried() { _replayBuried++; }
 
+        // Reflected physics types: the csproj deliberately references no
+        // Physics2DModule (#212). Collider2D : Behaviour, so .enabled works
+        // through the base type; Rigidbody2D.simulated needs the property
+        // reflected. A failed resolve is logged once (#91 — a reflected name
+        // that stops resolving must never become a silent forever-no-op).
+        private static readonly Type _tCollider2D = HarmonyLib.AccessTools.TypeByName("UnityEngine.Collider2D");
+        private static readonly Type _tRigidbody2D = HarmonyLib.AccessTools.TypeByName("UnityEngine.Rigidbody2D");
+        private static readonly System.Reflection.PropertyInfo _pRbSimulated =
+            _tRigidbody2D == null ? null : HarmonyLib.AccessTools.Property(_tRigidbody2D, "simulated");
+        private static bool _inertTypesWarned;
+
+        /// <summary>Make a cache-replayed clone physics-inert the moment it is
+        /// TAGGED (Awake). The Start-time burial (SetActive false) is the real
+        /// hide — this closes the Awake→Start window where PUN has already
+        /// re-activated the clone (pool contract: NetworkInstantiate calls
+        /// SetActive(true) after wiring views) and its colliders fire
+        /// DamageBox/DamagableEvent against players that do not exist on this
+        /// seat (bug 216, 9 join-burst NREs at L1127-1192).</summary>
+        internal static void MakeReplayCloneInert(GameObject go)
+        {
+            if (go == null) return;
+            if (_tCollider2D == null || _tRigidbody2D == null)
+            {
+                if (!_inertTypesWarned)
+                {
+                    _inertTypesWarned = true;
+                    Plugin.Log?.LogWarning("[SPECTATE] physics types failed to resolve — replay clones stay collidable until Start burial");
+                }
+                return;
+            }
+            try
+            {
+                var cols = go.GetComponentsInChildren(_tCollider2D, true);
+                for (int i = 0; i < cols.Length; i++)
+                {
+                    var b = cols[i] as Behaviour;
+                    if (b != null) b.enabled = false;
+                }
+                var rbs = go.GetComponentsInChildren(_tRigidbody2D, true);
+                for (int i = 0; i < rbs.Length; i++)
+                {
+                    try { _pRbSimulated?.SetValue(rbs[i], false, null); } catch { }
+                }
+            }
+            catch { }
+        }
+
         /// <summary>Disarm at the first LIVE map flow (RPCA_LoadLevel or a
         /// call-in): everything cache-replayed has been delivered by then.</summary>
         internal static void DisarmReplayQuarantine(string why)

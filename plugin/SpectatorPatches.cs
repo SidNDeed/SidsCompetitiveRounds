@@ -416,6 +416,15 @@ namespace CompetitiveRounds
                 if (SpectatorSync.ReplayQuarantineArmed)
                 {
                     SpectatorSync.TagReplayObject(__instance.GetInstanceID());
+                    // Bug 216 join burst: 9 DamagableEvent.TakeDamage NREs from
+                    // replayed clones colliding BEFORE their Start-time burial.
+                    // PUN re-activates an instantiated clone after Awake (pool
+                    // contract), so SetActive cannot stick here — a component-
+                    // level physics kill can. Tagged == cache-replay by
+                    // definition (the window disarms at the first live map
+                    // flow) and every tagged clone is buried at Start anyway,
+                    // so no live object is reachable from this call.
+                    SpectatorSync.MakeReplayCloneInert(__instance.gameObject);
                     return;
                 }
                 // LIVE clone: stamp its map-load generation NOW (r5 find 4 —
@@ -424,6 +433,56 @@ namespace CompetitiveRounds
                 SpectatorSync.StampLiveCloneGen(__instance.GetInstanceID());
             }
             catch { }
+        }
+    }
+
+    /// <summary>Bug 216: 1,843 "no such PhotonView" warnings on one spectator
+    /// seat (100% spectator-phase, none in the fighter room; ~620/s at peak
+    /// during transition bursts). Two BY-DESIGN sources stream into locally
+    /// unregistered views on this seat: the at-join map's pieces (buried while
+    /// dark — activation waits for a fresh call-in and rebuilds from live
+    /// instantiates) and round-end bullet tails (fighters run vanilla slow-mo;
+    /// the spectator's clock is pinned, so its local copies of their bullets
+    /// die seconds earlier while the owners keep streaming). Vanilla's
+    /// missing-view branch is warn-and-return (PUN decompile OnSerializeRead:
+    /// data[0] is the viewID, GetPhotonView, LogWarning, return) — so on a
+    /// spectator the only effect of letting it run is the warning cost: a
+    /// formatted string + stack capture per packet, enough to hitch the seat
+    /// mid-burst and to saturate the log a bug bundle needs. Skip silently,
+    /// count into [NET]. Never skips for fighters, never skips when the view
+    /// exists — behaviour is byte-identical outside the spectator-orphan case.</summary>
+    [HarmonyPatch]
+    internal static class Spectator_OrphanSerializationMute_Patch
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            var m = AccessTools.Method(typeof(PhotonNetwork), "OnSerializeRead");
+            if (m == null)
+                throw new Exception("PhotonNetwork.OnSerializeRead not found — orphan mute has no target");
+            return new System.Collections.Generic.List<System.Reflection.MethodBase> { m };
+        }
+
+        // Signature-agnostic (#83) AND allocation-free on the receive hot
+        // path (review r1 find 1: an __args binding makes Harmony materialize
+        // a 4-slot object[] plus two boxes on EVERY call, every seat — the
+        // exact hitch class this batch reduces, paid by fighters for a
+        // spectator-only guard). __0 binds the FIRST argument (PUN's packed
+        // object[] data) positionally: parameter-name-independent, nothing
+        // materialized.
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix(object[] __0)
+        {
+            try
+            {
+                if (!SpectatorSession.IsLocalSpectator) return true;
+                var data = __0;
+                if (data == null || data.Length < 1 || !(data[0] is int)) return true;
+                int viewId = (int)data[0];
+                if (PhotonNetwork.GetPhotonView(viewId) != null) return true;
+                NetDiag.CountOrphanSkip();
+                return false;   // vanilla would only warn-and-return
+            }
+            catch { return true; }
         }
     }
 

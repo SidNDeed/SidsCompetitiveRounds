@@ -661,9 +661,10 @@ namespace CompetitiveRounds
                 // killed. Display seat, display-sized error.
                 if (RoomActors.LocalIsSpectator)
                 {
-                    // Eaten-verdict evidence (recon gap): accepted ticks that
-                    // never moved HP were swallowed by DoDamage's silent
-                    // gates on this seat only. Cap keeps repeats cheap.
+                    // Eaten-verdict evidence: after bug 216, observer-local
+                    // lifecycle bits are advisory and cannot create this gap.
+                    // A future hit means component resolution or an exception
+                    // still prevented the direct write. Cap keeps repeats cheap.
                     foreach (var kv in _streams)
                     {
                         if ((int)(kv.Key >> 32) != viewId) continue;
@@ -962,8 +963,31 @@ namespace CompetitiveRounds
                 try
                 {
                     var cds = view.GetComponent<CharacterData>();
-                    if (cds != null && !cds.dead && !hh.isRespawning)
+                    if (cds != null)
                     {
+                        // Bug 216: an accepted verdict is authenticated above
+                        // as coming from THIS victim's owner. Do not veto it on
+                        // the observer replica's dead/isRespawning bits: those
+                        // bits are local lifecycle state, so one spectator
+                        // replica can miss/lag its Revive while the real fighter
+                        // is alive and publishing. That produced the exact
+                        // per-victim accepted>applied split in SPECT-EATEN.
+                        // AuthoritativeDot stops publishing from a dead/non-
+                        // playing victim and death/revive stop its host
+                        // coroutine; this seat's stale flags add no authority.
+                        // The direct subtract plus 1-HP floor remains the #338
+                        // structural kill fence — never route this through
+                        // DoDamage and never let this display path reach zero.
+                        if (cds.dead || hh.isRespawning)
+                            VanillaFixSupport.DiagLimited(
+                                "spect-local-lifecycle-ignored",
+                                "[POISON-SYNC] SPECT-LOCAL-LIFECYCLE v" + viewId
+                                + "/s" + streamId + "/t" + tick
+                                + " dead=" + (cds.dead ? 1 : 0)
+                                + " respawning=" + (hh.isRespawning ? 1 : 0)
+                                + " — authoritative display verdict applied",
+                                20);
+
                         float nh = cds.health - rec.Slice.magnitude;
                         cds.health = nh < 1f ? 1f : nh;
                         rec.Applied++;
@@ -975,9 +999,12 @@ namespace CompetitiveRounds
                         // DoDamage — see the header hazard) rendered only the
                         // down-ticks: the holder read as pinned at 1 HP all
                         // game. Invoking the FULL DealtDamage chain here was
-                        // REJECTED in cross-review (Codex, Aug 11): it also
-                        // walks arbitrary DealtDamageEffects, and
-                        // SpawnObjectOnDealDamage keeps per-seat THRESHOLD
+                        // REJECTED in cross-review (Codex, Aug 11) and
+                        // RE-AFFIRMED at the bug-216 fix (Aug 14 — an author
+                        // pass tried to "restore" the full chain from a
+                        // mis-stated brief; this comment is the record of why
+                        // not): it also walks arbitrary DealtDamageEffects,
+                        // and SpawnObjectOnDealDamage keeps per-seat THRESHOLD
                         // state before spawning objects and dealing more
                         // damage — a mid-game-join observer's accumulator is
                         // never in sync, so its spawns would diverge, the

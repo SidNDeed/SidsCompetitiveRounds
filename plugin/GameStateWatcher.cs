@@ -1542,6 +1542,10 @@ namespace CompetitiveRounds
         /// the opponent can read it. Only active while a match is being tracked.</summary>
         public static void TickFrame()
         {
+            // [NET] telemetry BEFORE the spectator early-return — the
+            // spectator seat needs the ping/fps/dispatch line most (bug 217:
+            // the whole latency question was unanswerable from a bundle).
+            try { NetDiag.Tick(); } catch { }
             // Spectator: no local input tracking, no KPS/macro metrics, no
             // spawn-grace edges — there is no local fighter to measure.
             if (RoomActors.LocalIsSpectator) return;
@@ -2435,6 +2439,11 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[FOCUS] Left Photon room — runInBackground restored to {_origRunInBackground}");
                 }
                 catch { }
+                // Room-exit edge, LOSSY BACKUP copy (review r4: a
+                // leave+rejoin between poll samples never shows
+                // InRoom==false here — the authoritative reset lives in
+                // Plugin.OnLeftRoom, the callback that cannot miss).
+                try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
             }
         }
 
