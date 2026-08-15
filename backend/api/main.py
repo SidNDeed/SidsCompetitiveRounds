@@ -11759,6 +11759,77 @@ async def get_recent_chat(
     return {"messages": entries}
 
 
+@app.get("/api/v1/internal/chat/since", tags=["Chat"])
+async def internal_chat_since(
+    after_id: int = Query(..., ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only (X-Internal-Key) CONTIGUOUS chat feed for the Discord relay's
+    durable catchup cursor (bug 226 review finding 3). /chat/recent is a
+    capped, per-channel-fairness, NON-contiguous window — a cursor advanced
+    from it skips forever past any older row that a WS outage bigger than the
+    window pushed out of the fetch. This feed is the cursor's ground truth:
+    every non-deleted row with id > after_id, in id order, so the bot drains
+    the exact gap page by page. The top-level max_id (plain MAX(id) — it
+    seeds a cursor, so deleted rows count too) lets a cold-started bot seed
+    its cursor without draining history. /chat/recent stays untouched for its
+    existing consumers (client scrollback, older bot builds).
+
+    Round-2 finding 4: entries carry the SAME enrichment and key names as
+    /chat/recent (rating/title/title_color via the identical join +
+    _display_title_sync shape, time aliased as "timestamp"), so an
+    outage-recovered message renders in Discord exactly like a live WS one —
+    the first cut omitted the joins and catchup posts lost their
+    title/rating suffix."""
+    _require_internal_key(x_internal_key)
+    max_id = (await db.execute(text("SELECT MAX(id) FROM chat_messages"))).scalar()
+    # Column list + join shape copied from get_recent_chat above (#219: copy
+    # from the working sibling, never from memory) — only the WHERE/ORDER
+    # differ (contiguous id window instead of the fairness CTE).
+    rows = (await db.execute(
+        text(
+            "SELECT cm.id, cm.source, cm.steam_id, cm.discord_id, cm.display_name, cm.message, cm.created_at, "
+            "       cm.channel, "
+            "       ROUND(gr.rating)::int AS rating, p.id::text AS player_id, "
+            "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
+            "FROM chat_messages cm "
+            "LEFT JOIN players p ON "
+            "   (cm.steam_id IS NOT NULL AND p.steam_id = cm.steam_id) OR "
+            "   (cm.steam_id IS NULL AND cm.discord_id IS NOT NULL AND p.discord_id = cm.discord_id) "
+            "LEFT JOIN glicko_ratings gr ON gr.player_id = p.id AND p.deleted_at IS NULL "
+            "LEFT JOIN shop_items si ON si.id = p.active_title_id "
+            "WHERE cm.id > :after_id AND cm.deleted_at IS NULL "
+            "ORDER BY cm.id ASC LIMIT :limit"
+        ),
+        {"after_id": after_id, "limit": limit},
+    )).mappings().all()
+    _colors = await _rank_colors(db)
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
+    messages = []
+    for r in rows:
+        _title, _tcolor = _display_title_sync(
+            _colors, r["title_sku"], r["title"], r["title_color"], r["rating"],
+            podium_pos=_pmap.get(r["player_id"]),
+            podium_pos_2v2=_pmap2.get(r["player_id"]),
+            podium_pos_ffa=_pmapf.get(r["player_id"]))
+        messages.append({
+            "id": r["id"],
+            "source": r["source"],
+            "steam_id": r["steam_id"],
+            "discord_id": r["discord_id"],
+            "display_name": r["display_name"],
+            "rating": r["rating"],
+            "title": _title,
+            "title_color": _tcolor,
+            "channel": r["channel"] or "global",
+            "message": r["message"],
+            "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
+        })
+    return {"max_id": int(max_id or 0), "messages": messages}
+
+
 # ── T-chat moderation (Aug 6 item 5) ──────────────────────────────────────
 #
 # Two roles, ONE authorization helper (_chat_moderator_scope) so the rules

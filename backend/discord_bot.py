@@ -2700,6 +2700,136 @@ def _claim_msg_id(msg_id: str) -> bool:
     return True
 
 
+def _unclaim_msg_id(msg_id: str) -> None:
+    """Release a claim whose SEND failed, so a later pass can retry delivery.
+    Before bug 226 a claim taken ahead of a failed channel.send stayed in the
+    set forever and the message could never be delivered; with the durable
+    cursor below, an orphaned claim is worse — the catchup would read it as
+    "already posted" and advance PAST the message, converting a transient
+    Discord error into a permanently dropped message. Removing from the deque
+    too keeps claim/evict bookkeeping exact: a set-only discard leaves a stale
+    deque entry whose eventual eviction would discard a NEWER claim of the
+    same id from the set early. deque.remove is O(n) with n <= 300 and only
+    runs on send failure — cost is irrelevant."""
+    _recent_ids_set.discard(msg_id)
+    try:
+        _recent_ids_q.remove(msg_id)
+    except ValueError:
+        pass
+
+
+# Finding 4 (bug 226 review): claimed is NOT delivered. A claim marks "some
+# task is handling this id" the instant a sender takes it — BEFORE the send
+# awaits. The catchup used the claim alone as proof of delivery: it saw a
+# "dup" for an id the live WS path had claimed but not yet sent, advanced the
+# cursor past it, and when that WS send then failed (and unclaimed), the
+# message sat below the cursor forever. Delivered is a separate fact, marked
+# ONLY after channel.send returns. The catchup treats a claimed-but-not-
+# delivered id as PENDING: halt advancement at it and retry next tick, same
+# as a failed send. Same cap discipline as the claim set; evicting a
+# genuinely delivered id can at worst cause a duplicate post once its claim
+# evicts too — the chosen at-least-once direction (#167), never a loss.
+_DELIVERED_IDS_CAP = 300
+_delivered_ids_q = collections.deque(maxlen=_DELIVERED_IDS_CAP)
+_delivered_ids_set: set = set()
+
+
+def _mark_delivered(msg_id: str) -> None:
+    """Record a VERIFIED successful send. Synchronous, mirrors _claim_msg_id's
+    deque/set bookkeeping exactly."""
+    if msg_id in _delivered_ids_set:
+        return
+    if len(_delivered_ids_q) == _DELIVERED_IDS_CAP:
+        _delivered_ids_set.discard(_delivered_ids_q[0])
+    _delivered_ids_q.append(msg_id)
+    _delivered_ids_set.add(msg_id)
+
+
+# ── Durable chat-relay cursor (bug 226) ────────────────────────────────────
+# The claim set above is a 300-entry in-memory FIFO. /chat/recent's
+# per-channel-fairness window keeps the quiet language channels' ENTIRE
+# history (~27 es/ru/sv rows) permanently inside the 30s poll's fetch, so
+# every ~300 claims the whole stale block evicted as a chunk and the next
+# catchup re-posted ALL of it to the Discord language channels — repeatedly,
+# forever. Fix per #167: a durable high-water mark of the highest
+# chat_messages.id the CATCHUP has verifiably handled (posted, or confirmed
+# already posted). The catchup only attempts ids above it; the claim set
+# stays as the intra-session fast path that wins the WS-vs-catchup race for
+# new messages. The cursor is deliberately NOT consulted (and not advanced)
+# on the live WS path: two near-simultaneous posts can broadcast out of id
+# order, and a WS-side `id <= cursor` gate would drop the earlier one.
+# Persistence mirrors _RELEASE_STATE_FILE: survives bot restarts (container
+# FS), lost on image rebuild — acceptable: a lost file degrades to the
+# cold-start branch (seed from the feed's max_id, post nothing), so at worst
+# the rebuild gap's messages are skipped, never re-spammed. Ids are monotonic
+# DB sequence values stamped by the server into the WS broadcast,
+# /chat/recent, and the /internal/chat/since feed the catchup drains
+# (finding 3 — /chat/recent's capped fairness window is non-contiguous and
+# must never gate this cursor).
+_CHAT_CURSOR_FILE = "/tmp/chat_relay_cursor.json"
+
+
+def _chat_cursor_load() -> tuple:
+    """Returns (cursor, restored). restored is True when the file held ANY
+    valid nonnegative integer — INCLUDING 0. Finding 2 (bug 226 review): boot
+    must distinguish a TRUE cold start (no file — seed from the feed's
+    max_id, post nothing) from a restart WITH durable state (file present —
+    ids above the cursor arrived while the bot was down and must be POSTED,
+    not primed past; the old unconditional priming claimed them and advanced
+    the cursor without sending). Round-2 finding 1: 0 is a LEGITIMATE durable
+    state (a bot that seeded against an empty chat table), so treating it as
+    "no state" made the next restart re-seed to the new max_id and
+    permanently skip everything that arrived in between. Only a missing /
+    unparseable / negative value degrades to the cold-start branch — the
+    direction that posts nothing."""
+    try:
+        with open(_CHAT_CURSOR_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f).get("max_id")
+        v = int(raw)  # raises on None/garbage → cold start below
+        if v >= 0:
+            return (v, True)
+    except Exception:
+        pass
+    return (0, False)
+
+
+def _chat_cursor_save(v: int) -> None:
+    try:
+        with open(_CHAT_CURSOR_FILE, "w", encoding="utf-8") as f:
+            json.dump({"max_id": int(v)}, f)
+    except Exception as e:
+        print(f"[CHAT] cursor save failed: {e}")
+
+
+_chat_relay_cursor, _chat_cursor_restored = _chat_cursor_load()
+# One catchup pass at a time (same shape as _release_send_lock): a WS-reconnect
+# catchup racing the 30s poll could otherwise watch the same in-flight claim
+# from two passes and advance the cursor past an entry whose send then failed.
+_chat_catchup_lock = asyncio.Lock()
+
+# Poison-message escape valve. The cursor halts at a failed send so transient
+# Discord errors retry in order — but a message that fails EVERY attempt
+# (content-specific 400, permanently unresolvable channel) would otherwise
+# wedge the catchup relay behind it forever (#276: ask which direction the
+# unhandled case fails — "one message lost after 10 tries over ~5 min" beats
+# "all later messages blocked until a deploy"). Keyed by claim key; pruned on
+# success. Given-up entries are KEPT deliberately: the >=CAP pre-check in the
+# catchup is what stops an id-LESS entry (which no cursor can gate) from
+# retrying every pass forever. Growth is bounded by the count of messages
+# that ever failed a send — in-memory, reset on restart like the claim set.
+_CHAT_SEND_FAIL_CAP = 10
+_chat_send_failures: dict = {}
+
+
+def _entry_db_id(data: dict):
+    """chat_messages.id as int, or None (persist-failed / pre-id API rows)."""
+    try:
+        mid = data.get("id")
+        return int(mid) if mid is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _entry_msg_id(data: dict) -> str:
     """Canonical dedup key for a chat entry. The server stamps every message
     with its DB row id and sends THE SAME id via both the WS broadcast and
@@ -2716,28 +2846,40 @@ def _entry_msg_id(data: dict) -> str:
     return f"{data.get('steam_id') or data.get('discord_id') or ''}|{data.get('timestamp') or ''}|{content[:80]}"
 
 
-async def _forward_ingame_to_discord(data: dict) -> bool:
-    """Render one ingame chat entry into the Discord channel. Returns True on
-    success. Dedup layers:
+async def _forward_ingame_to_discord(data: dict) -> str:
+    """Render one ingame chat entry into the Discord channel. Returns an
+    outcome string (bug 226 — the catchup's durable cursor must distinguish
+    "will never be posted" from "should be retried"):
+      "sent" — posted to Discord now.
+      "skip" — never postable (non-ingame source / empty / stale id-less):
+               safe for the cursor to advance past.
+      "dup"  — someone else claimed it (already posted, or a concurrent
+               sender is in flight): the catchup must consult the DELIVERED
+               set before advancing past it (finding 4 — a claim is not
+               proof of delivery).
+      "fail" — send/channel failure; the claim is RELEASED so the next pass
+               retries (at-least-once, #167). The cursor must not advance.
+    The WS call site ignores the return value. Dedup layers:
       1. Synchronous _claim_msg_id on the DB-id key — wins the race between the
          WS path and the catchup poll AND matches across them (same id on both).
       2. _last_relayed_ts — coarse "don't bother with old messages" filter for
          id-LESS (legacy/persist-failed) entries only. Id-bearing entries rely
-         on the claim set + startup priming instead — the WS stamp and the DB
-         created_at were never comparable values."""
+         on the claim set + the durable catchup cursor instead — the WS stamp
+         and the DB created_at were never comparable values."""
     global _last_relayed_ts
     if (data.get("source") or "") != "ingame":
-        return False
+        return "skip"
     content = (data.get("message") or "").strip()
     if not content:
-        return False
+        return "skip"
     ts = data.get("timestamp")
     if data.get("id") is None and ts and _last_relayed_ts and ts <= _last_relayed_ts:
-        return False
+        return "skip"
     # Claim the message id BEFORE any await — synchronous so the second concurrent
     # caller sees the first's add and bails.
-    if not _claim_msg_id(_entry_msg_id(data)):
-        return False
+    claim_key = _entry_msg_id(data)
+    if not _claim_msg_id(claim_key):
+        return "dup"
     name = data.get("display_name") or "player"
     rating = data.get("rating")
     rating_str = f" ({rating:.0f})" if isinstance(rating, (int, float)) else ""
@@ -2772,7 +2914,11 @@ async def _forward_ingame_to_discord(data: dict) -> bool:
             channel = None
     if channel is None:
         print(f"[CHAT] Channel {CHAT_CHAN_BY_LANG.get('global', CHAT_CHANNEL_ID)} not resolvable")
-        return False
+        # Release the claim: nothing was sent, so a later pass may retry once
+        # the channel resolves (pre-226 this leaked the claim and dropped the
+        # message forever).
+        _unclaim_msg_id(claim_key)
+        return "fail"
     try:
         await channel.send(
             f"{lang_prefix}**{discord.utils.escape_markdown(name)}"
@@ -2792,56 +2938,173 @@ async def _forward_ingame_to_discord(data: dict) -> bool:
             allowed_mentions=discord.AllowedMentions.none(),
             suppress_embeds=True,
         )
+        # Finding 4: delivery is a fact distinct from the claim above — mark
+        # it only HERE, after channel.send returned without throwing.
+        _mark_delivered(claim_key)
         if ts:
             _last_relayed_ts = ts
         print(f"[CHAT] Posted to Discord: {name}{title_str}: {content[:60]}")
-        return True
+        return "sent"
     except Exception as e:
         print(f"[CHAT] Post to Discord failed: {e}")
-        return False
+        # Unclaim so the next catchup pass retries. Residual (accepted,
+        # #167): a timeout AFTER Discord actually accepted the send makes the
+        # retry a duplicate — at-least-once is the chosen direction, because
+        # at-most-once here means silently losing player chat.
+        _unclaim_msg_id(claim_key)
+        return "fail"
 
 
 _catchup_primed = False
+_CHAT_SINCE_PAGE_LIMIT = 100
 
 
-async def _catchup_ingame_since():
-    """On WS (re)connect, pull /chat/recent and forward any ingame entries we
-    haven't relayed. Closes the gap where the bot's WS was down and the server
-    broadcast had no subscriber.
-
-    First call after bot boot PRIMES instead of posting: it claims every entry
-    currently in /chat/recent without sending. The claim set is in-memory, so
-    after a restart it's empty — without priming, the first catchup would
-    re-post up to 50 messages the previous bot process already relayed."""
-    global _catchup_primed
-    if http_session is None:
-        return
+async def _fetch_chat_since(after_id: int):
+    """One page of the bot-only contiguous feed (finding 3). Returns the
+    parsed payload dict, or None on any fetch failure (the caller retries
+    next tick). Auth rides http_session's default X-Internal-Key header.
+    Round-2 finding 4: entries carry the same key shape as /chat/recent and
+    the WS broadcast (rating/title/title_color enrichment, time as
+    "timestamp"), so _forward_ingame_to_discord's existing field reads render
+    a catchup-recovered message identically to a live one."""
     try:
         async with http_session.get(
-            f"{API_BASE_URL}/api/v1/chat/recent",
-            params={"limit": 50},
+            f"{API_BASE_URL}/api/v1/internal/chat/since",
+            params={"after_id": int(after_id), "limit": _CHAT_SINCE_PAGE_LIMIT},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
             if resp.status != 200:
-                print(f"[CHAT] catchup fetch status={resp.status}")
-                return
-            payload = await resp.json()
+                print(f"[CHAT] chat/since fetch status={resp.status}")
+                return None
+            return await resp.json()
     except Exception as e:
-        print(f"[CHAT] catchup fetch failed: {e}")
+        print(f"[CHAT] chat/since fetch failed: {e}")
+        return None
+
+
+async def _catchup_ingame_since():
+    """On WS (re)connect and every 30s, drain /internal/chat/since above the
+    durable cursor and forward any ingame entries we haven't relayed. Closes
+    the gap where the bot's WS was down (or a broadcast was silently dropped)
+    and nothing reached Discord.
+
+    Finding 3 (bug 226 review): the cursor used to be advanced from
+    /chat/recent — a capped, per-channel-fairness, NON-CONTIGUOUS window —
+    so a WS outage bigger than the window pushed older missed rows out of the
+    fetch and the cursor advanced past them forever. The catchup now drains
+    the id-ordered internal feed page by page (until a short page, or a
+    halt), so the cursor only ever advances through contiguously processed
+    ids. /chat/recent is no longer fetched here at all.
+
+    Finding 2: the first call after bot boot decides between two cases
+    instead of unconditionally priming. TRUE cold start (no valid cursor
+    file — first deploy, or image rebuild wiped /tmp): seed the cursor from
+    the feed's max_id WITHOUT posting, so the bot never replays history into
+    Discord. Restart WITH a valid persisted cursor: do NOT prime — ids above
+    the cursor arrived while the bot was down and are exactly what this
+    first pass must deliver (the old unconditional priming claimed them and
+    advanced the cursor without sending).
+
+    Finding 4: advancement halts at a send failure AND at any id claimed by
+    a concurrent WS sender that has not verifiably DELIVERED — both are
+    PENDING and retry next tick in order (#167 at-least-once)."""
+    global _catchup_primed, _chat_relay_cursor
+    if http_session is None:
         return
-    msgs = payload.get("messages") or []
-    if not _catchup_primed:
-        for m in msgs:
-            _claim_msg_id(_entry_msg_id(m))
-        _catchup_primed = True
-        print(f"[CHAT] catchup primed {len(msgs)} pre-boot entries (not re-posted)")
-        return
-    forwarded = 0
-    for m in msgs:  # already chronological (oldest first)
-        if await _forward_ingame_to_discord(m):
-            forwarded += 1
-    if forwarded:
-        print(f"[CHAT] catchup forwarded {forwarded} missed in-game messages")
+    async with _chat_catchup_lock:
+        if not _catchup_primed:
+            if not _chat_cursor_restored:
+                # Finding 2: true cold start — no durable state existed, so
+                # nothing above the cursor is "missed while down"; seed from
+                # max_id and post nothing. Fetch failure leaves us unprimed
+                # so the next tick retries the seeding.
+                payload = await _fetch_chat_since(0)
+                if payload is None:
+                    return
+                try:
+                    seed = int(payload.get("max_id") or 0)
+                except (TypeError, ValueError):
+                    return
+                if seed > _chat_relay_cursor:
+                    _chat_relay_cursor = seed
+                # Round-2 finding 1: persist the seed UNCONDITIONALLY — a
+                # seed of 0 (empty chat table) must still write the file so
+                # the NEXT restart is a RESTORE (deliver the gap), never a
+                # re-seed past it. The old `only save when > cursor` guard
+                # skipped exactly the 0 case.
+                _chat_cursor_save(_chat_relay_cursor)
+                _catchup_primed = True
+                print(f"[CHAT] cold start: cursor seeded to max_id={_chat_relay_cursor} (nothing re-posted)")
+                return
+            # Finding 2: valid restored cursor — skip priming entirely and
+            # fall through to the drain, which delivers everything above it.
+            _catchup_primed = True
+            print(f"[CHAT] restart with persisted cursor={_chat_relay_cursor} — delivering ids above it")
+        forwarded = 0
+        while True:
+            payload = await _fetch_chat_since(_chat_relay_cursor)
+            if payload is None:
+                break
+            msgs = payload.get("messages") or []
+            halted = False
+            new_cursor = _chat_relay_cursor
+            for m in msgs:  # id-ascending, every entry id-bearing (DB rows)
+                mid = _entry_db_id(m)
+                if mid is None or mid <= new_cursor:
+                    continue  # defensive; the feed only returns id > after_id
+                key = _entry_msg_id(m)
+                if key in _delivered_ids_set:
+                    # Verifiably posted already (finding 4's delivered fact).
+                    # Checked BEFORE forwarding: in a flood the 300-cap claim
+                    # set can evict this id while the delivered set still
+                    # holds it, and re-forwarding would duplicate the post.
+                    _chat_send_failures.pop(key, None)
+                    new_cursor = mid
+                    continue
+                if _chat_send_failures.get(key, 0) >= _CHAT_SEND_FAIL_CAP:
+                    # Poison-message escape valve (see _CHAT_SEND_FAIL_CAP) —
+                    # given up; treat as handled so the cursor advances.
+                    new_cursor = mid
+                    continue
+                outcome = await _forward_ingame_to_discord(m)
+                if outcome == "sent":
+                    _chat_send_failures.pop(key, None)
+                    forwarded += 1
+                    new_cursor = mid
+                elif outcome == "skip":
+                    new_cursor = mid
+                elif outcome == "dup":
+                    if key in _delivered_ids_set:
+                        # Verifiably posted (finding 4) — safe to pass.
+                        new_cursor = mid
+                    else:
+                        # Finding 4: claimed by a concurrent WS send that has
+                        # not confirmed delivery — PENDING. Halt here; next
+                        # tick it is either delivered (advance) or unclaimed
+                        # (this pass retries the send itself). Never advance
+                        # past an unproven claim.
+                        halted = True
+                        break
+                else:  # "fail" — claim released, count toward the poison cap
+                    n = _chat_send_failures.get(key, 0) + 1
+                    _chat_send_failures[key] = n
+                    if n >= _CHAT_SEND_FAIL_CAP:
+                        print(f"[CHAT] giving up on {key} after {n} failed sends — advancing past it")
+                        new_cursor = mid
+                        continue
+                    # Stop the pass: posting later entries before this one
+                    # would both reorder the channel and strand the cursor
+                    # below them.
+                    halted = True
+                    break
+            # Persist per page so a crash mid-drain doesn't redo the work.
+            if new_cursor > _chat_relay_cursor:
+                _chat_relay_cursor = new_cursor
+                _chat_cursor_save(new_cursor)
+            if halted or len(msgs) < _CHAT_SINCE_PAGE_LIMIT:
+                break  # finding 3: drain until a short page or a halt
+        if forwarded:
+            print(f"[CHAT] catchup forwarded {forwarded} missed in-game messages")
 
 
 async def chat_ws_listener():
@@ -2859,10 +3122,10 @@ async def chat_ws_listener():
             async with http_session.ws_connect(url, heartbeat=30) as ws:
                 print(f"[CHAT] WS connected: {url}")
                 backoff = 2
-                # Close the gap where the bot's WS was down: replay any ingame
-                # messages from /chat/recent that are newer than what we last
-                # relayed. _forward_ingame_to_discord dedupes via timestamp so
-                # the live stream below won't re-post these.
+                # Close the gap where the bot's WS was down: drain the
+                # contiguous /internal/chat/since feed above the durable
+                # cursor (finding 3). The claim set dedupes against the live
+                # stream below so neither path double-posts.
                 await _catchup_ingame_since()
                 async for msg in ws:
                     if msg.type != aiohttp.WSMsgType.TEXT:
@@ -6023,13 +6286,19 @@ async def poll_chat_catchup():
     Background: lopidav reported that his ingame messages persisted to the DB
     (so the server received them on the WS) but never reached Discord — the
     bot's WS subscription appeared healthy yet only some senders' messages
-    came through. Rather than chase the broadcast bug, we poll /chat/recent
-    every 30s and replay anything newer than _last_relayed_ts. The same
-    timestamp dedup that already protects WS reconnect catchup also protects
-    this path, so live WS messages won't double-post."""
+    came through. Rather than chase the broadcast bug, we drain the
+    contiguous /internal/chat/since feed every 30s and replay anything above
+    the durable id cursor (bug 226 / finding 3); the claim set dedupes
+    against the live WS stream so neither path double-posts. Guarded body
+    (#129): the fetch/send layers catch their own errors, but a malformed
+    entry in the payload (non-dict in messages[]) would throw through the
+    parse helpers and kill this loop for the bot's whole uptime."""
     if not http_session:
         return
-    await _catchup_ingame_since()
+    try:
+        await _catchup_ingame_since()
+    except Exception as e:
+        print(f"[CHAT] catchup pass error: {e}")
 
 
 @tasks.loop(seconds=60)
@@ -7792,6 +8061,51 @@ async def before_tournament_board():
 live_bet_messages = {}  # series_id -> message_id (in LIVE_BETS_CHANNEL)
 LIVE_BET_AMOUNTS = (100, 500, 2000)
 
+# Bug 226 companion: last content signature per posted board message, one map
+# per poller beside its message map. The three live-bet editors PATCH
+# messages in the ONE gambler channel; on a shared 10s cadence they hammered
+# the per-channel edit bucket into a continuous 429 storm (~64 rate-limit
+# lines in 6 min of bot log) even when nothing on any board had changed.
+# Fix: skip the fetch+PATCH entirely when the rendered embed + view inputs
+# are identical to the last SUCCESSFUL edit, and stagger the loop cadences
+# (15/20/25s). In-memory like the message maps — a restart posts fresh
+# messages anyway.
+live_bet_last_sig = {}
+team_live_bet_last_sig = {}
+ffa_live_bet_last_sig = {}
+
+# Finding 5 (bug 226 review): the signature skip runs BEFORE fetch_message,
+# so a hand-deleted board message whose content never changes was NEVER
+# reposted — the NotFound repost path became unreachable (the old "residual,
+# accepted" note that used to sit above; now closed). Every
+# _BET_BOARD_VERIFY_EVERY-th consecutive signature-skip per board bypasses
+# the skip and performs the real fetch+edit, bounding a deletion's staleness
+# to ~90-150s at the 15/20/25s cadences while keeping ~5/6 of the PATCH
+# savings the skip exists for. An observed NotFound also invalidates that
+# board's cached signature, so a failed repost can't be signature-skipped
+# back into starvation.
+_BET_BOARD_VERIFY_EVERY = 6
+live_bet_skip_counts = {}       # series_id -> consecutive signature-skips
+team_live_bet_skip_counts = {}  # series_id -> consecutive signature-skips
+ffa_live_bet_skip_counts = {}   # (lobby_id, game) -> consecutive signature-skips
+
+
+def _bet_board_sig(embed: discord.Embed, view_bits) -> str:
+    """Stable signature of what a board edit would render. The embed compares
+    via to_dict (the three formatters embed no timestamps or other volatile
+    fields — verified before trusting the skip); view_bits carries the exact
+    inputs that shape the button/select set, because the view is NOT derivable
+    from the embed (bettable flags change buttons without changing text).
+    Returns "" when unsignable — "" never equals a stored signature, so a
+    signing failure degrades to editing every tick (the old behavior), never
+    to skipping a real change."""
+    try:
+        return json.dumps(embed.to_dict(), sort_keys=True, default=str) \
+            + "|" + repr(view_bits)
+    except Exception:
+        return ""
+
+
 class LiveBetView(discord.ui.View):
     def __init__(self, series_id: str, p1_steam: str, p1_name: str,
                  p2_steam: str, p2_name: str,
@@ -8308,7 +8622,7 @@ def _format_ffa_live_bet_embed(lobby):
     return embed
 
 
-@tasks.loop(seconds=10)
+@tasks.loop(seconds=25)
 async def poll_ffa_live_bets():
     """Post/update one embed per live FFA lobby GAME in the gambler channel.
 
@@ -8318,6 +8632,9 @@ async def poll_ffa_live_bets():
     dies permanently on an unhandled exception (#129), so this must not share
     one with the 1v1/2v2 pollers, and the body must not be able to throw past
     the wrapper (view construction reads payload fields that may be missing).
+    25s (bug 226): the three live-bet editors share ONE channel's edit bucket;
+    15/20/25 staggers them so their ticks rarely coincide (see
+    live_bet_last_sig for the unchanged-skip half of the 429 fix).
     """
     try:
         await _poll_ffa_live_bets_once()
@@ -8345,6 +8662,7 @@ async def _poll_ffa_live_bets_once():
         seen_now.add(key)
         embed = _format_ffa_live_bet_embed(l)
         view = None
+        targets = []
         # bets_open is the server's own window predicate — the listing and the
         # POST must agree or the dropdown is a guaranteed 409 (#159). Per-player
         # `bettable` carries the same information one level down (odds floor),
@@ -8361,6 +8679,22 @@ async def _poll_ffa_live_bets_once():
             if targets:
                 view = FfaLiveBetView(lid, l.get("game_number"), targets)
         msg_id = ffa_live_bet_messages.get(key)
+        # Unchanged since the last successful edit → no fetch, no PATCH
+        # (bug 226 — the 429 storm was three boards editing identical content
+        # every 10s). The targets list IS the view's full determinant.
+        sig = _bet_board_sig(embed, (bool(l.get("bets_open")),
+                                     tuple((t.get("steam_id"), t.get("name"),
+                                            t.get("odds"), t.get("rating"))
+                                           for t in targets)))
+        if msg_id is not None and sig and ffa_live_bet_last_sig.get(key) == sig:
+            # Finding 5: every _BET_BOARD_VERIFY_EVERY-th consecutive skip
+            # falls through to the real fetch+edit so a hand-deleted message
+            # still reaches the NotFound repost path below.
+            _n = ffa_live_bet_skip_counts.get(key, 0) + 1
+            if _n < _BET_BOARD_VERIFY_EVERY:
+                ffa_live_bet_skip_counts[key] = _n
+                continue
+        ffa_live_bet_skip_counts[key] = 0
         try:
             if msg_id is None:
                 msg = await channel.send(embed=embed, view=view)
@@ -8368,10 +8702,16 @@ async def _poll_ffa_live_bets_once():
             else:
                 msg = await channel.fetch_message(msg_id)
                 await msg.edit(embed=embed, view=view)
+            ffa_live_bet_last_sig[key] = sig
         except discord.NotFound:
+            # Finding 5: observed deletion — invalidate the cached signature
+            # FIRST, so a failed repost below can't be signature-skipped for
+            # another verify cycle.
+            ffa_live_bet_last_sig.pop(key, None)
             try:
                 msg = await channel.send(embed=embed, view=view)
                 ffa_live_bet_messages[key] = msg.id
+                ffa_live_bet_last_sig[key] = sig
             except Exception as e:
                 print(f"[FFA-LIVE-BETS] re-post failed for {lid}: {e}")
         except Exception as e:
@@ -8385,16 +8725,21 @@ async def _poll_ffa_live_bets_once():
                 msg = await channel.fetch_message(mid)
                 await msg.edit(view=None)
             ffa_live_bet_messages.pop(key, None)
+            ffa_live_bet_last_sig.pop(key, None)
+            ffa_live_bet_skip_counts.pop(key, None)
         except discord.NotFound:
             ffa_live_bet_messages.pop(key, None)
+            ffa_live_bet_last_sig.pop(key, None)
+            ffa_live_bet_skip_counts.pop(key, None)
         except Exception as e:
             print(f"[FFA-LIVE-BETS] retire failed for {key} (will retry): {e}")
 
 
-@tasks.loop(seconds=10)
+@tasks.loop(seconds=20)
 async def poll_team_live_bets():
     """Mirror of poll_live_bets for 2v2 — embed + bet buttons per active
-    team_series. Fully guarded body (#129)."""
+    team_series. Fully guarded body (#129). 20s (bug 226): staggered against
+    the 1v1 (15s) and FFA (25s) editors sharing this channel's edit bucket."""
     try:
         await _poll_team_live_bets_once()
     except Exception as e:
@@ -8419,17 +8764,29 @@ async def _poll_team_live_bets_once():
         seen_now.add(sid)
         embed = _format_team_live_bet_embed(s)
         view = None
-        if not s.get("bets_locked", False):
-            _t1b = bool(s.get("t1_bettable", True))
-            _t2b = bool(s.get("t2_bettable", True))
-            if _t1b or _t2b:
-                view = TeamLiveBetView(
-                    series_id=sid,
-                    t1_label=_pair_label(s.get("t1a_name", "?"), s.get("t1b_name", "?")),
-                    t2_label=_pair_label(s.get("t2a_name", "?"), s.get("t2b_name", "?")),
-                    t1_bettable=_t1b, t2_bettable=_t2b,
-                )
+        _locked = bool(s.get("bets_locked", False))
+        _t1b = bool(s.get("t1_bettable", True))
+        _t2b = bool(s.get("t2_bettable", True))
+        _t1l = _pair_label(s.get("t1a_name", "?"), s.get("t1b_name", "?"))
+        _t2l = _pair_label(s.get("t2a_name", "?"), s.get("t2b_name", "?"))
+        if not _locked and (_t1b or _t2b):
+            view = TeamLiveBetView(
+                series_id=sid,
+                t1_label=_t1l, t2_label=_t2l,
+                t1_bettable=_t1b, t2_bettable=_t2b,
+            )
         msg_id = team_live_bet_messages.get(sid)
+        # Unchanged since the last successful edit → skip the PATCH (bug 226).
+        sig = _bet_board_sig(embed, (_locked, _t1b, _t2b, _t1l, _t2l))
+        if msg_id is not None and sig and team_live_bet_last_sig.get(sid) == sig:
+            # Finding 5: every _BET_BOARD_VERIFY_EVERY-th consecutive skip
+            # falls through to the real fetch+edit so a hand-deleted message
+            # still reaches the NotFound repost path below.
+            _n = team_live_bet_skip_counts.get(sid, 0) + 1
+            if _n < _BET_BOARD_VERIFY_EVERY:
+                team_live_bet_skip_counts[sid] = _n
+                continue
+        team_live_bet_skip_counts[sid] = 0
         try:
             if msg_id is None:
                 msg = await channel.send(embed=embed, view=view)
@@ -8437,10 +8794,16 @@ async def _poll_team_live_bets_once():
             else:
                 msg = await channel.fetch_message(msg_id)
                 await msg.edit(embed=embed, view=view)
+            team_live_bet_last_sig[sid] = sig
         except discord.NotFound:
+            # Finding 5: observed deletion — invalidate the cached signature
+            # FIRST, so a failed repost below can't be signature-skipped for
+            # another verify cycle.
+            team_live_bet_last_sig.pop(sid, None)
             try:
                 msg = await channel.send(embed=embed, view=view)
                 team_live_bet_messages[sid] = msg.id
+                team_live_bet_last_sig[sid] = sig
             except Exception as e:
                 print(f"[TEAM-LIVE-BETS] re-post failed for {sid}: {e}")
         except Exception as e:
@@ -8455,18 +8818,25 @@ async def _poll_team_live_bets_once():
                 msg = await channel.fetch_message(mid)
                 await msg.edit(view=None)
             team_live_bet_messages.pop(sid, None)
+            team_live_bet_last_sig.pop(sid, None)
+            team_live_bet_skip_counts.pop(sid, None)
         except discord.NotFound:
             team_live_bet_messages.pop(sid, None)   # message is gone; nothing to retire
+            team_live_bet_last_sig.pop(sid, None)
+            team_live_bet_skip_counts.pop(sid, None)
         except Exception as e:
             # Keep the entry so the next tick retries the retirement.
             print(f"[TEAM-LIVE-BETS] retire failed for {sid} (will retry): {e}")
 
 
-@tasks.loop(seconds=10)
+@tasks.loop(seconds=15)
 async def poll_live_bets():
     """Guarded wrapper (#129) — the body reads payload fields that a schema
     change can remove, and one throw would kill this loop for the bot's whole
-    uptime rather than for one tick."""
+    uptime rather than for one tick. 15s (bug 226): staggered against the 2v2
+    (20s) and FFA (25s) editors sharing this channel's edit bucket. NOTE:
+    poll_lobby_bets also runs at 15s in this channel — acceptable, it edits
+    only while an un-started host lobby is open (rare and short-lived)."""
     try:
         await _poll_live_bets_once()
     except Exception as e:
@@ -8491,19 +8861,32 @@ async def _poll_live_bets_once():
         seen_now.add(sid)
         embed = _format_live_bet_embed(s)
         view = None
-        if not s.get("bets_locked", False):
-            _p1b = bool(s.get("p1_bettable", True))
-            _p2b = bool(s.get("p2_bettable", True))
-            if _p1b or _p2b:
-                view = LiveBetView(
-                    series_id=sid,
-                    p1_steam=s.get("p1_steam_id", ""),
-                    p1_name=s.get("p1_name", "?"),
-                    p2_steam=s.get("p2_steam_id", ""),
-                    p2_name=s.get("p2_name", "?"),
-                    p1_bettable=_p1b, p2_bettable=_p2b,
-                )
+        _locked = bool(s.get("bets_locked", False))
+        _p1b = bool(s.get("p1_bettable", True))
+        _p2b = bool(s.get("p2_bettable", True))
+        if not _locked and (_p1b or _p2b):
+            view = LiveBetView(
+                series_id=sid,
+                p1_steam=s.get("p1_steam_id", ""),
+                p1_name=s.get("p1_name", "?"),
+                p2_steam=s.get("p2_steam_id", ""),
+                p2_name=s.get("p2_name", "?"),
+                p1_bettable=_p1b, p2_bettable=_p2b,
+            )
         msg_id = live_bet_messages.get(sid)
+        # Unchanged since the last successful edit → skip the PATCH (bug 226).
+        sig = _bet_board_sig(embed, (_locked, _p1b, _p2b,
+                                     s.get("p1_steam_id", ""), s.get("p1_name", "?"),
+                                     s.get("p2_steam_id", ""), s.get("p2_name", "?")))
+        if msg_id is not None and sig and live_bet_last_sig.get(sid) == sig:
+            # Finding 5: every _BET_BOARD_VERIFY_EVERY-th consecutive skip
+            # falls through to the real fetch+edit so a hand-deleted message
+            # still reaches the NotFound repost path below.
+            _n = live_bet_skip_counts.get(sid, 0) + 1
+            if _n < _BET_BOARD_VERIFY_EVERY:
+                live_bet_skip_counts[sid] = _n
+                continue
+        live_bet_skip_counts[sid] = 0
         try:
             if msg_id is None:
                 msg = await channel.send(embed=embed, view=view)
@@ -8511,11 +8894,16 @@ async def _poll_live_bets_once():
             else:
                 msg = await channel.fetch_message(msg_id)
                 await msg.edit(embed=embed, view=view)
+            live_bet_last_sig[sid] = sig
         except discord.NotFound:
-            # Message was deleted by hand — repost.
+            # Message was deleted by hand — repost. Finding 5: invalidate the
+            # cached signature FIRST, so a failed repost below can't be
+            # signature-skipped for another verify cycle.
+            live_bet_last_sig.pop(sid, None)
             try:
                 msg = await channel.send(embed=embed, view=view)
                 live_bet_messages[sid] = msg.id
+                live_bet_last_sig[sid] = sig
             except Exception as e:
                 print(f"[LIVE-BETS] re-post failed for {sid}: {e}")
         except Exception as e:
@@ -8533,8 +8921,12 @@ async def _poll_live_bets_once():
                 msg = await channel.fetch_message(mid)
                 await msg.edit(view=None)
             live_bet_messages.pop(sid, None)
+            live_bet_last_sig.pop(sid, None)
+            live_bet_skip_counts.pop(sid, None)
         except discord.NotFound:
             live_bet_messages.pop(sid, None)
+            live_bet_last_sig.pop(sid, None)
+            live_bet_skip_counts.pop(sid, None)
         except Exception as e:
             print(f"[LIVE-BETS] retire failed for {sid} (will retry): {e}")
 

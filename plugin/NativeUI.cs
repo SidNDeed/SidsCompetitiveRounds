@@ -15342,11 +15342,40 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         // saved path. Mirrors the "tierlist maker" community tool but with
         // our own per-card stats baked in.
         private static GameObject tierExportPanel;
+        // Review r2 find 2: the capture wait made the export take up to ~45s,
+        // so a second click mid-run destroyed the first coroutine's shared
+        // panel out from under it (the resumed iterator then dereferenced
+        // destroyed layout objects OUTSIDE the synchronous StartCoroutine
+        // catch). In-flight latch with a realtime TTL — a coroutine killed by
+        // its host dying can never wedge the latch for more than one export's
+        // worth of time (#255/#270c: a suppression keyed on "a coroutine will
+        // clear this" needs an expiry).
+        private static float _tierExportInFlightUntil = -1f;
+        // Review r3: the TTL alone cannot own cleanup — realtime keeps running
+        // while a backgrounded game suspends frames, so a queued click can
+        // start run 2 while run 1 is merely SUSPENDED; run 1's resume then
+        // destroyed run 2's panel through the shared static and cleared run
+        // 2's latch. Per-run ownership token (#299's pump-id rule): each run
+        // captures its id, bails at every resume if superseded, cleans ONLY
+        // its own objects, and touches shared state only while newest.
+        private static int _tierExportRun;
         public static void ExportCardTierList()
         {
             if (Plugin.Instance == null) return;
+            if (Time.realtimeSinceStartup < _tierExportInFlightUntil)
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Export already in progress..."),
+                    Color.yellow, 3f);
+                return;
+            }
+            _tierExportInFlightUntil = Time.realtimeSinceStartup + 65f;
+            _tierExportRun++;
             try { Plugin.Instance.StartCoroutine(ExportTierListCoroutine()); }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[TIER-EXPORT] failed: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                _tierExportInFlightUntil = -1f;
+                Plugin.Log.LogWarning($"[TIER-EXPORT] failed: {ex.Message}");
+            }
         }
 
         private static System.Collections.IEnumerator ExportTierListCoroutine()
@@ -15357,8 +15386,10 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             // 1920x1080 screen). RenderTexture lets us pick any output size,
             // so we render a tall portrait PNG (1280×N) regardless of the
             // host screen.
+            int myRun = _tierExportRun;
             if (tierExportPanel != null) UnityEngine.Object.Destroy(tierExportPanel);
             tierExportPanel = new GameObject("CR_TierExport");
+            var myPanel = tierExportPanel;   // this run's own cleanup handle
             tierExportPanel.hideFlags = HideFlags.HideAndDontSave;
             // Park the offscreen canvas FAR from any in-game camera's frustum
             // so it can't accidentally render in the live view.
@@ -15441,6 +15472,87 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 string t = cardTierMap.TryGetValue(CardTierKey(cardFilter, c.card_name), out var tv) ? tv : "";
                 if (!byTier.ContainsKey(t)) t = "";
                 byTier[t].Add(c);
+            }
+
+            // Review r1 find 6 (card-image removal): with no packaged PNGs, a
+            // CLEAN install's first export used to save before a single
+            // native capture finished (~10 frames + 0.55s each, sequential) —
+            // an all-placeholder image, and later captures cannot update a
+            // saved PNG. Pre-request every card and WAIT for each to resolve
+            // (cached or failed), with visible progress and a hard cap.
+            // Subsequent exports are instant (snapshot cache); PNG-fallback
+            // rigs (native disabled or unhealthy) skip the wait entirely.
+            if (CardSnapshot.UseNativeSnapshots && CardSnapshot.SnapshotsHealthy)
+            {
+                var wanted = new List<string>();
+                // Review r2 find 3a: a card name that NORMALIZES empty can
+                // never be captured (RequestSnapshot declines it without
+                // marking it failed) — including it in the wait list spins
+                // the full cap for nothing.
+                foreach (var c in merged)
+                {
+                    try
+                    {
+                        if (string.IsNullOrEmpty(CardImageLoader.NormalizeKey(c.card_name))) continue;
+                        Sprite s0;
+                        if (!CardSnapshot.TryGetSprite(c.card_name, out s0) || s0 == null)
+                        {
+                            CardSnapshot.RequestSnapshot(c.card_name, false);
+                            wanted.Add(c.card_name);
+                        }
+                    }
+                    catch { }
+                }
+                if (wanted.Count > 0)
+                {
+                    // Review r2 find 3b: a locale switch mid-wait invalidates
+                    // the queue and cache (Generation bump) — every wanted
+                    // entry then reads as pending forever. Abort the wait on
+                    // a generation change and build with whatever exists;
+                    // the next export re-captures in the new locale.
+                    int genAtWaitStart = CardSnapshot.Generation;
+                    // ~60 cards x 0.55s sequential + slack. A card the queue
+                    // declines (RequestsBlocked) or that fails its retries
+                    // counts as resolved — the cap only guards a genuinely
+                    // unresolvable tail, and the export then renders whatever
+                    // landed plus placeholders (the pre-fix behaviour).
+                    float capUntil = Time.realtimeSinceStartup + 45f;
+                    int lastShown = -1;
+                    while (Time.realtimeSinceStartup < capUntil)
+                    {
+                        if (CardSnapshot.Generation != genAtWaitStart) break;
+                        int pending = 0;
+                        try
+                        {
+                            for (int i = 0; i < wanted.Count; i++)
+                            {
+                                Sprite s1;
+                                if (CardSnapshot.TryGetSprite(wanted[i], out s1) && s1 != null) continue;
+                                if (CardSnapshot.IsFailed(wanted[i])) continue;
+                                if (!CardSnapshot.SnapshotsHealthy || CardSnapshot.RequestsBlocked) continue;
+                                pending++;
+                            }
+                        }
+                        catch { pending = 0; }
+                        if (pending == 0) break;
+                        int done = wanted.Count - pending;
+                        if (done != lastShown)
+                        {
+                            lastShown = done;
+                            CompetitiveUI.ShowNotification(
+                                I18n.TrF("Rendering card art {0}/{1}...", done, wanted.Count),
+                                new Color(0.7f, 0.85f, 1f), 2.5f);
+                        }
+                        yield return new WaitForSecondsRealtime(0.5f);
+                        if (myRun != _tierExportRun)
+                        {
+                            // Superseded while suspended (r3): clean only this
+                            // run's panel; latch/static belong to the new run.
+                            try { if (myPanel != null) UnityEngine.Object.Destroy(myPanel); } catch { }
+                            yield break;
+                        }
+                    }
+                }
             }
 
             // Layout — 3000 wide × 12 cells per row. Smaller cells
@@ -15589,6 +15701,11 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             // push the bg's preferred height into its RectTransform.
             yield return null;
             yield return null;
+            if (myRun != _tierExportRun)
+            {
+                try { if (myPanel != null) UnityEngine.Object.Destroy(myPanel); } catch { }
+                yield break;
+            }
             try
             {
                 Type canvasT = null;
@@ -15598,6 +15715,11 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
             catch { }
             yield return null;
+            if (myRun != _tierExportRun)
+            {
+                try { if (myPanel != null) UnityEngine.Object.Destroy(myPanel); } catch { }
+                yield break;
+            }
 
             // Resolve final canvas height from the bg's measured preferred size.
             int finalH = Mathf.CeilToInt(bgRT.rect.height);
@@ -15605,6 +15727,11 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             // Resize the canvas root so the world rect matches the content.
             rootRT.sizeDelta = new Vector2(CANVAS_W, finalH);
             yield return null;
+            if (myRun != _tierExportRun)
+            {
+                try { if (myPanel != null) UnityEngine.Object.Destroy(myPanel); } catch { }
+                yield break;
+            }
 
             string outDir;
             try
@@ -15661,8 +15788,17 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 try { if (tex != null) UnityEngine.Object.Destroy(tex); } catch { }
             }
 
-            try { if (tierExportPanel != null) UnityEngine.Object.Destroy(tierExportPanel); } catch { }
-            tierExportPanel = null;
+            // Ownership-scoped cleanup (r3): destroy only THIS run's panel,
+            // and touch the shared static/latch only while still the newest
+            // run — a superseded run must never clear the successor's state.
+            try { if (myPanel != null) UnityEngine.Object.Destroy(myPanel); } catch { }
+            if (myRun == _tierExportRun)
+            {
+                tierExportPanel = null;
+                // Release the reentrancy latch on the normal exit; the
+                // entry-point TTL covers every abnormal one.
+                _tierExportInFlightUntil = -1f;
+            }
 
             CompetitiveUI.ShowNotification($"Tier list saved to {fullPath}", new Color(0.4f, 0.9f, 0.4f), 12f);
             Plugin.Log.LogInfo($"[TIER-EXPORT] done — {fullPath}");

@@ -1197,6 +1197,14 @@ namespace CompetitiveRounds
         private static float _boundaryWindowUntil = -999f;
         private const float BoundaryOrphanCeilingSec = 6f;
         private const float PostResumeGraceSec = 1f;
+        // Monotonic boundary counter (bug 225 follow-up): the arming-time
+        // window below cannot see a stream that armed in live combat and was
+        // then orphaned by the NEXT boundary (the victim's revive kills its
+        // publisher mid-stream) — 4 of bug-225's 18 accusations fired during
+        // the pick phase for exactly that shape. ShadowDot captures this
+        // counter at arming and reports only if no boundary intervened.
+        private static int _boundaryGen;
+        internal static int BoundaryGen => _boundaryGen;
         internal static void NoteRoundBoundary()
         {
             // ACCEPTED RESIDUAL (review r2 LOW): FFA SPECTATOR seats suppress
@@ -1205,6 +1213,7 @@ namespace CompetitiveRounds
             // telemetry is lost. The fighters' seats — the ones whose reports
             // the anti-cheat pipeline actually needs — are unaffected, and a
             // spectator's shadow report is redundant with theirs.
+            _boundaryGen++;
             float until = Time.realtimeSinceStartup + BoundaryOrphanCeilingSec;
             if (until > _boundaryWindowUntil) _boundaryWindowUntil = until;
         }
@@ -1225,6 +1234,7 @@ namespace CompetitiveRounds
             int viewId = view.ViewID;
             int actor = view.Owner != null ? view.Owner.ActorNumber : -1;
             int anchor = PhotonNetwork.ServerTimestamp;
+            int boundaryGenAtArm = _boundaryGen;
 
             // Bug 221 ("knockback but no damage, both clients"): all three
             // production [POISON-SILENT] events sat directly on point
@@ -1272,11 +1282,33 @@ namespace CompetitiveRounds
                         && ServerTsAfter(PhotonNetwork.ServerTimestamp, unchecked(anchor + SilenceReportMs)))
                     {
                         reported = true;
-                        Plugin.Log.LogWarning("[POISON-SILENT] capable victim view=" + viewId
-                            + " actor=" + actor + " has published no verdict " + SilenceReportMs
-                            + "ms into a damage-over-time stream — its damage is not being applied "
-                            + "on ANY client. Expected only on a severe client stall; if it repeats "
-                            + "for one player, treat as a possible modified client.");
+                        if (boundaryGenAtArm != _boundaryGen)
+                        {
+                            // A round boundary crossed this stream AFTER it
+                            // armed: the victim's publisher was revive-killed
+                            // mid-stream (vanilla), so its silence is expected
+                            // and the withheld remainder is vanilla-correct —
+                            // 4 of bug-225's 18 accusations were exactly this
+                            // shape (armed in the final ~1.5s of a point,
+                            // reported during the pick phase). The arming-time
+                            // window above cannot see this case by definition;
+                            // this generation check closes it from the other
+                            // side. Genuine mid-battle silence (no boundary
+                            // between arming and report) still accuses.
+                            VanillaFixSupport.DiagLimited(
+                                "poison-boundary-orphan",
+                                "[POISON-BOUNDARY] stream on view=" + viewId
+                                + " crossed a round boundary after arming — silence expected, not reported",
+                                10);
+                        }
+                        else
+                        {
+                            Plugin.Log.LogWarning("[POISON-SILENT] capable victim view=" + viewId
+                                + " actor=" + actor + " has published no verdict " + SilenceReportMs
+                                + "ms into a damage-over-time stream — its damage is not being applied "
+                                + "on ANY client. Expected only on a severe client stall; if it repeats "
+                                + "for one player, treat as a possible modified client.");
+                        }
                     }
                 }
 

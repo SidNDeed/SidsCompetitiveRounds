@@ -3,48 +3,32 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using UnityEngine;
-#if !THUNDERSTORE
-using System.IO.Compression;
-using System.Net;
-using System.Threading;
-#endif
 
 namespace CompetitiveRounds
 {
     /// <summary>
-    /// Loads card art shipped alongside the DLL in the
-    /// `cards/` subfolder of BepInEx/plugins/CompetitiveRounds/.
-    /// Keyed by canonical lowercase no-space card name. Sprites are
-    /// created lazily on first request and cached for the session.
+    /// Card art resolver. The PRIMARY source is the native snapshot
+    /// pipeline (CardSnapshot — locale-aware, game-authentic renders;
+    /// learning #299). A cards/ folder of jpg/png files beside the DLL
+    /// is read as a SILENT legacy fallback for old installs that still
+    /// carry one — new installs ship no card art and never download any.
     ///
-    /// Self-bootstrapping: if the cards/ folder is missing or sparse on
-    /// first launch (e.g. mod was installed via Discord installer or a
-    /// manual DLL drop without the asset zip), this loader downloads
-    /// cards.zip from the v1.26.0 GitHub release on a background
-    /// thread, extracts it, and rescans. No user action needed.
+    /// History, so the old design is not reintroduced: this class used
+    /// to self-bootstrap the cards/ folder by downloading cards.zip from
+    /// an old GitHub release. That asset was retired (every launch 404'd
+    /// against it) and the native renderer supersedes the PNG pack, so
+    /// the downloader, the expected-count machinery and every folder-scan
+    /// warning were removed outright (Aug 2026, learnings #133/#299).
+    /// With no folder present, GetSprite goes straight to native-or-null;
+    /// every consumer (Card Stats popup, hold-Tab board, tier-list
+    /// export) carries its own text/placeholder fallback for null.
     /// </summary>
     public static class CardImageLoader
     {
-        // Bumped whenever Landfall ships a new card. The auto-bootstrap
-        // (non-Thunderstore builds only) also re-fires if the on-disk
-        // count is lower than this.
-        private const int EXPECTED_CARD_COUNT = 67;
-
-#if !THUNDERSTORE
-        // Stable URL — cards.zip is attached to the v1.26.0 release and
-        // never moves. Future patch releases reuse the same asset since
-        // the cards themselves don't change with our code patches.
-        // Thunderstore builds NEVER reference this URL — Thunderstore
-        // packages must be self-contained, so the bundle ships the
-        // cards directly under plugins/cards/ and the download path is
-        // compiled out entirely.
-        private const string CARDS_ZIP_URL =
-            "https://github.com/SidNDeed/SidsCompetitiveRounds/releases/download/v1.26.0/cards.zip";
-#endif
-
         // Canonical key (lowercase, no spaces) → on-disk file path.
-        // Replaced atomically by the rescan after auto-download so
-        // concurrent reads always see a consistent dictionary.
+        // Written once by Initialize(); volatile retained from the era
+        // when a background thread swapped it (harmless, and keeps any
+        // future async writer honest about publication).
         private static volatile Dictionary<string, string> _filesByKey;
         // Canonical key → cached Sprite. Loaded on demand.
         private static readonly Dictionary<string, Sprite> _spriteCache =
@@ -52,27 +36,14 @@ namespace CompetitiveRounds
         private static bool _scanAttempted;
         // One-shot log guard for the native-snapshot seam (per-frame path).
         private static bool _snapSeamLogged;
-#if !THUNDERSTORE
-        private static int _downloadStarted; // 0 = not started, 1 = in flight or done
-#endif
         private static string _cardsDir;
 
         /// <summary>
-        /// True once the cards/ folder has been scanned and at least
-        /// one image is available. Callers that branch on
-        /// "image present" should check this before calling GetSprite.
-        /// </summary>
-        public static bool IsAvailable =>
-            _filesByKey != null && _filesByKey.Count > 0;
-
-        public static int Count => _filesByKey?.Count ?? 0;
-
-        /// <summary>
-        /// Scans the cards/ folder for jpg/png files and indexes them
-        /// by canonical name. If the folder is missing or has fewer
-        /// than EXPECTED_CARD_COUNT images, kicks off a background
-        /// download of cards.zip from the GitHub release. Safe to
-        /// call repeatedly — only the first call does the sync scan.
+        /// One-time scan of the legacy cards/ folder beside the DLL.
+        /// SILENT when the folder is absent or empty — that is the normal
+        /// state for every new install, not an error, so there is nothing
+        /// to warn about and nothing to fetch. Safe to call repeatedly —
+        /// only the first call scans.
         /// </summary>
         public static void Initialize()
         {
@@ -84,22 +55,11 @@ namespace CompetitiveRounds
                 string dllDir = Path.GetDirectoryName(dllPath);
                 _cardsDir = Path.Combine(dllDir, "cards");
                 _filesByKey = ScanCardsDir();
-                int found = _filesByKey.Count;
-                if (found >= EXPECTED_CARD_COUNT)
-                {
-                    Plugin.Log?.LogInfo($"[CARD-ART] indexed {found} card images from {_cardsDir}");
-                    return;
-                }
-#if THUNDERSTORE
-                // Thunderstore packages ship the cards directly in the
-                // bundle. If the count is below expected here, the user
-                // either has a corrupt install or extracted the bundle
-                // wrong — re-install via the mod manager.
-                Plugin.Log?.LogWarning($"[CARD-ART] only {found}/{EXPECTED_CARD_COUNT} card images present at {_cardsDir}. Reinstall via the mod manager if popups / tier list export look broken.");
-#else
-                Plugin.Log?.LogInfo($"[CARD-ART] {found}/{EXPECTED_CARD_COUNT} card images present at {_cardsDir} — fetching the rest from GitHub release in background.");
-                MaybeStartAutoDownload();
-#endif
+                // Info-only, and only when legacy art is actually present —
+                // tells a log reader which fallback tier this rig has.
+                // Never a prompt to install anything.
+                if (_filesByKey.Count > 0)
+                    Plugin.Log?.LogInfo($"[CARD-ART] legacy PNG fallback available: indexed {_filesByKey.Count} card images from {_cardsDir}");
             }
             catch (Exception ex)
             {
@@ -127,93 +87,10 @@ namespace CompetitiveRounds
             return map;
         }
 
-#if !THUNDERSTORE
-        /// <summary>One-shot guarded auto-download. Spawns a background
-        /// thread that fetches cards.zip from the GitHub release,
-        /// extracts the PNGs into _cardsDir, and rescans. Subsequent
-        /// calls are no-ops thanks to the Interlocked compare-exchange.
-        /// Compiled out of Thunderstore builds — those bundles ship the
-        /// cards directly so runtime download is unnecessary AND would
-        /// violate Thunderstore's "no runtime asset fetching" policy.</summary>
-        private static void MaybeStartAutoDownload()
-        {
-            if (Interlocked.Exchange(ref _downloadStarted, 1) != 0) return;
-            var t = new Thread(AutoDownloadWorker) { IsBackground = true, Name = "CR_CardArtDownload" };
-            t.Start();
-        }
-
-        private static void AutoDownloadWorker()
-        {
-            string tmpZip = null;
-            try
-            {
-                Directory.CreateDirectory(_cardsDir);
-                tmpZip = Path.Combine(Path.GetDirectoryName(_cardsDir), "cards-download.zip");
-                Plugin.Log?.LogInfo($"[CARD-ART] downloading {CARDS_ZIP_URL} → {tmpZip}");
-
-                // GitHub redirects to S3 / objects.githubusercontent.com.
-                // WebClient follows redirects by default. TLS 1.2 needed
-                // on older .NET runtimes; force it explicitly.
-                try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
-
-                using (var wc = new WebClient())
-                {
-                    wc.Headers.Add("User-Agent", "CompetitiveRounds-Mod/" + Plugin.ModVersion);
-                    wc.DownloadFile(CARDS_ZIP_URL, tmpZip);
-                }
-
-                long bytes = new FileInfo(tmpZip).Length;
-                Plugin.Log?.LogInfo($"[CARD-ART] downloaded {bytes / 1024} KB, extracting to {_cardsDir}");
-
-                int extracted = 0;
-                using (var fs = File.OpenRead(tmpZip))
-                using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
-                {
-                    foreach (var entry in zip.Entries)
-                    {
-                        if (string.IsNullOrEmpty(entry.Name)) continue; // directory marker
-                        string lower = entry.Name.ToLowerInvariant();
-                        if (!lower.EndsWith(".png") && !lower.EndsWith(".jpg") && !lower.EndsWith(".jpeg")) continue;
-                        string outPath = Path.Combine(_cardsDir, entry.Name);
-                        try
-                        {
-                            using (var es = entry.Open())
-                            using (var os = File.Create(outPath))
-                            {
-                                es.CopyTo(os);
-                            }
-                            extracted++;
-                        }
-                        catch (Exception exEntry)
-                        {
-                            Plugin.Log?.LogWarning($"[CARD-ART] extract failed for {entry.Name}: {exEntry.Message}");
-                        }
-                    }
-                }
-
-                // Atomic swap — readers either see the old (partial) map
-                // or the new (full) one, never an in-progress mutation.
-                _filesByKey = ScanCardsDir();
-                Plugin.Log?.LogInfo($"[CARD-ART] auto-bootstrap complete: extracted {extracted} files, indexed {_filesByKey.Count}.");
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log?.LogWarning($"[CARD-ART] auto-download failed: {ex.Message} — image popups will fall back to text until the next launch.");
-            }
-            finally
-            {
-                if (tmpZip != null && File.Exists(tmpZip))
-                {
-                    try { File.Delete(tmpZip); } catch { }
-                }
-            }
-        }
-#endif
-
         /// <summary>
-        /// Returns the cached Sprite for cardName, or loads it from
-        /// disk on first request. Returns null if the card has no
-        /// art file in the cards/ folder.
+        /// Returns the best available Sprite for cardName: native
+        /// snapshot first, then any legacy on-disk PNG, else null
+        /// (consumers render their text/placeholder fallback).
         /// </summary>
         public static Sprite GetSprite(string cardName, bool prioritize = false,
             bool allowPngWhilePending = false)
@@ -224,21 +101,23 @@ namespace CompetitiveRounds
             // consumer (Card Stats popup, hold-Tab board, tier-list export)
             // goes through, so all three upgrade at once. Snapshot first;
             // on a miss, kick the async capture. Sits BEFORE the PNG map
-            // null-check so native art can serve even when the cards/
-            // folder is missing/corrupt.
+            // null-check so native art serves even though new installs
+            // have no cards/ folder at all.
             //
             // Aug 6 item 3 ("turn the card images off"): while the pipeline
             // is HEALTHY, a pending capture returns NULL instead of the PNG
             // — consumers show their text/placeholder fallback and upgrade
             // when the native render lands (no more PNG-first flash). The
-            // PNG pack survives purely as the emergency fallback for rigs
-            // where native capture is broken (SnapshotsHealthy=false after
-            // 3 straight failures) — without it those players would have no
-            // card art at all. `prioritize` puts the card the player is
-            // looking at RIGHT NOW at the front of the capture queue;
-            // `allowPngWhilePending` keeps the old PNG-while-capturing
-            // behavior for bulk surfaces (tier-list export) where a null
-            // cell reads worse than old art.
+            // legacy PNG folder — where one still exists on disk — serves
+            // only the rigs where native capture is broken
+            // (SnapshotsHealthy=false after 3 straight failures) or a
+            // per-card dead end below; installs without the folder fall
+            // back to text in those cases, which is the accepted trade for
+            // not shipping/downloading ~15 MB of art (see class header).
+            // `prioritize` puts the card the player is looking at RIGHT NOW
+            // at the front of the capture queue; `allowPngWhilePending`
+            // keeps the old PNG-while-capturing behavior for bulk surfaces
+            // (tier-list export) where a null cell reads worse than old art.
             // CardSnapshot.UseNativeSnapshots is the single master switch
             // back to pure-PNG behavior; any exception here falls through
             // to the PNG path (one log, then permanently quiet — this is a
@@ -258,8 +137,8 @@ namespace CompetitiveRounds
                     // permanently blank while global SnapshotsHealthy stayed
                     // true (the health kill-switch only trips after 3
                     // CONSECUTIVE failures, which interleaved successes reset).
-                    // A per-card dead end must fall through to the PNG, which
-                    // is exactly what the PNG pack still exists for.
+                    // A per-card dead end must fall through to the PNG (when
+                    // a legacy folder has one; text otherwise).
                     // Only withhold the PNG when a capture is genuinely
                     // COMING. Round 2 (finding 10) added RequestsBlocked: the
                     // request can be declined outright (30s env cooldown, or
@@ -275,7 +154,7 @@ namespace CompetitiveRounds
                     if (!_snapSeamLogged)
                     {
                         _snapSeamLogged = true;
-                        Plugin.Log?.LogWarning($"[CARD-ART] native snapshot seam failed ({ex.Message}) — serving PNGs");
+                        Plugin.Log?.LogWarning($"[CARD-ART] native snapshot seam failed ({ex.Message}) — serving legacy PNGs where present");
                     }
                 }
             }

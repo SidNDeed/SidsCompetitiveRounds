@@ -1785,31 +1785,15 @@ namespace CompetitiveRounds
         /// <summary>Bug #102: re-send the local player's face (vanilla RPC,
         /// custom cosmetic ids included — they resolve through the GetItem
         /// prefix on every client) once everyone is definitely in the room.
-        /// Idempotent: EquipFace just re-equips.</summary>
+        /// Idempotent: EquipFace just re-equips. Send mechanics — including
+        /// review find 13's all-zero-face guard — live in the shared
+        /// FaceResync.TrySendLocalFace (bug #224 extended this class to
+        /// team_/ovt_ rooms and factored the send out).</summary>
         private static IEnumerator ResyncLocalFace()
         {
             yield return new WaitForSecondsRealtime(2.5f);
             if (!EngineActive()) yield break;
-            try
-            {
-                var lp = LocalPlayer();
-                if (lp == null || lp.data == null || lp.data.view == null) yield break;
-                var face = CharacterCreatorHandler.instance.selectedPlayerFaces[0];
-                // Review find 13: an account that never opened the character
-                // creator has an all-zero face — re-sending that WIPES the
-                // stock face on every other screen (the cr_face publisher
-                // rejects this exact payload; mirror it).
-                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
-                {
-                    Plugin.Log.LogInfo("[FFA] face resync skipped — all-zero default face");
-                    yield break;
-                }
-                lp.data.view.RPC("RPCA_SetFace", RpcTarget.Others,
-                    face.eyeID, face.eyeOffset, face.mouthID, face.mouthOffset,
-                    face.detailID, face.detailOffset, face.detail2ID, face.detail2Offset);
-                Plugin.Log.LogInfo("[FFA] face resync sent (bug #102)");
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] face resync: {ex.Message}"); }
+            FaceResync.TrySendLocalFace("FFA");
         }
 
         /// <summary>DoStartGame replacement body — game 1 and every rematch.</summary>

@@ -900,16 +900,51 @@ namespace CompetitiveRounds
         // reflection, and a failed sound must never cost the revive (the
         // whole class exists because a crash in this coroutine strands a
         // player; see also bug-186's Sonigon-NRE-aborts-a-damage-RPC event).
+        // Bug 223 incidental (learning #366 cause 5): this runs every 0.1s of
+        // every Phoenix charge, and the old body probed a FIELD named
+        // "intensity" through AccessTools first — which LOGS a HarmonyX
+        // warning on every miss. The member is actually a PROPERTY, so that
+        // was 1,924 warning lines (plus their disk writes) in one bug-223
+        // game, on every seat, during combat — a #91-family reflection miss
+        // functionally masked by the property fallback two lines later.
+        // Resolution is now cached per concrete type and probes with PLAIN
+        // reflection (silent on a miss, unlike AccessTools), property first.
+        private static FieldInfo _fxChargeIntensityField;
+        private static bool _fxChargeIntensityResolved;
+        private static readonly Dictionary<Type, MemberInfo> _intensityMembers = new Dictionary<Type, MemberInfo>();
+
         private static void ChargeIntensity(DeathEffect fx, float value)
         {
             try
             {
-                object sp = AccessTools.Field(typeof(DeathEffect), "soundParameterChargeLoopIntensity")?.GetValue(fx);
+                if (!_fxChargeIntensityResolved)
+                {
+                    _fxChargeIntensityResolved = true;
+                    _fxChargeIntensityField = AccessTools.Field(typeof(DeathEffect), "soundParameterChargeLoopIntensity");
+                }
+                if (_fxChargeIntensityField == null) return;
+                object sp = _fxChargeIntensityField.GetValue(fx);
                 if (sp == null) return;
-                var f = AccessTools.Field(sp.GetType(), "intensity");
-                if (f != null) { f.SetValue(sp, value); return; }
-                var pr = AccessTools.Property(sp.GetType(), "intensity");
-                if (pr != null && pr.CanWrite) pr.SetValue(sp, value, null);
+                Type t = sp.GetType();
+                MemberInfo mi;
+                if (!_intensityMembers.TryGetValue(t, out mi))
+                {
+                    mi = (MemberInfo)t.GetProperty("intensity",
+                             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                         ?? t.GetField("intensity",
+                             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    // Null is cached too: a genuinely missing member logs ONCE
+                    // here instead of ten times a second (#91 — loud once,
+                    // never a silent forever-no-op, never a storm).
+                    _intensityMembers[t] = mi;
+                    if (mi == null)
+                        Plugin.Log?.LogWarning("[VANILLA-FIX] PhoenixRespawn: no 'intensity' member on "
+                            + t.FullName + " — charge-loop volume will not ramp");
+                }
+                var pr = mi as PropertyInfo;
+                if (pr != null) { if (pr.CanWrite) pr.SetValue(sp, value, null); return; }
+                var f = mi as FieldInfo;
+                if (f != null) f.SetValue(sp, value);
             }
             catch { }
         }
@@ -1055,6 +1090,146 @@ namespace CompetitiveRounds
         {
             if (original != null) return exception;
             return VanillaFixSupport.Cleanup("PhoenixRespawn", exception);
+        }
+    }
+
+    /// <summary>Bug 225 ("hitting enemies on my screen isn't doing damage")
+    /// — the POISON half of the #186 Drill registration race, repaired the
+    /// same way (see DiagnoseMissingDrillEffect above; learning #366 cause 1/2).
+    ///
+    /// On a REMOTE bullet copy, RPCA_Init can attach card children AFTER
+    /// ProjectileHit.Start snapshotted `effects`, and an empty/stale list is
+    /// SILENTLY skipped — no exception, no counter (decompile
+    /// ProjectileHit.cs:321). For RayHitPoison that silent skip is the whole
+    /// bug-225 mechanism: poison zeroes the bullet's direct damage (its
+    /// Start sets bulletCanDealDeamage=false, so the direct hit deals ~1)
+    /// and carries ALL of its damage in the DOT — and under the PoisonSync
+    /// protocol the DOT authority arms on the VICTIM'S seat only when the
+    /// victim's own replica runs RayHitPoison.DoHitEffect. A victim replica
+    /// that missed registration = 16 silent streams in one game: full
+    /// knockback, no damage, on every seat.
+    ///
+    /// Unlike Drill, NO deferred replay is needed: RayHitPoison.Start's only
+    /// statement mutates the PARENT (bulletCanDealDeamage=false), and
+    /// DoHitEffect reads nothing that Start initializes — it resolves
+    /// everything via GetComponentInParent at call time (decompile
+    /// RayHitPoison.cs), so a pre-Start child is safe to register
+    /// immediately (#211's trap does not apply); we mirror its Start's
+    /// parent mutation ourselves. PLAYER hits only (viewID != -1): a
+    /// surface has no DamageOverTime component, so poison no-ops there
+    /// anyway. Remote copies only (IsMine false): the owner's BulletInit
+    /// runs synchronously before its own Start, so the owner's snapshot is
+    /// always complete. AnyGameScope like the Drill repair (#286):
+    /// converging a remote toward owner-authoritative behaviour is safe in
+    /// mixed rosters.</summary>
+    [HarmonyPatch]
+    internal static class PoisonEffectRegistrationPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPatch(
+            typeof(ProjectileHit),
+            "RPCA_DoHit",
+            new Type[]
+            {
+                typeof(Vector2), typeof(Vector2), typeof(Vector2),
+                typeof(int), typeof(int), typeof(bool)
+            })]
+        private static void RepairPoisonRegistration(ProjectileHit __instance, int viewID)
+        {
+            try
+            {
+                if (viewID == -1) return;
+                if (!VanillaFixSupport.AnyGameScope()) return;
+                if (__instance == null) return;
+                PhotonView view = __instance.GetComponent<PhotonView>();
+                if (view == null || view.IsMine) return;
+                RayHitPoison[] poisons = __instance.GetComponentsInChildren<RayHitPoison>(true);
+                if (poisons == null || poisons.Length == 0) return;
+
+                if (__instance.effects == null)
+                    __instance.effects = new System.Collections.Generic.List<RayHitEffect>();
+
+                int repaired = 0;
+                for (int i = 0; i < poisons.Length; i++)
+                {
+                    if (poisons[i] == null) continue;
+                    if (__instance.effects.Contains(poisons[i])) continue;
+                    __instance.effects.Add(poisons[i]);
+                    repaired++;
+                }
+
+                if (repaired > 0)
+                {
+                    // Mirror RayHitPoison.Start's parent mutation — the
+                    // child may not have Started yet, and the field is what
+                    // keeps poison's direct damage at ~1 on every seat.
+                    __instance.bulletCanDealDeamage = false;
+                    __instance.ResortHitEffects();
+                    VanillaFixSupport.DiagLimited(
+                        "PoisonRegistration-repair",
+                        "PoisonRegistration re-registered " +
+                        repaired.ToString(CultureInfo.InvariantCulture) +
+                        " RayHitPoison child(ren) missing from ProjectileHit.effects" +
+                        " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        20);
+                }
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("PoisonRegistration", ex);
+            }
+        }
+
+        /// <summary>Review r1 HIGH: the prefix above can insert a RayHitPoison
+        /// BEFORE the bullet's own Start has run (a blocked hit reflects and
+        /// the bullet lives on); vanilla Start then appends its children
+        /// unconditionally, leaving the SAME component in `effects` twice —
+        /// and a later hit would run DoHitEffect twice, publishing two full
+        /// DOT streams room-wide (double poison damage). Reference-dedupe in
+        /// a Start POSTFIX: order-preserving, first occurrence wins, and it
+        /// also retroactively repairs any other duplicate-registration
+        /// source on any bullet.</summary>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(ProjectileHit), "Start")]
+        private static void DedupeEffectsAfterStart(ProjectileHit __instance)
+        {
+            try
+            {
+                var list = __instance != null ? __instance.effects : null;
+                if (list == null || list.Count < 2) return;
+                int removed = 0;
+                for (int i = list.Count - 1; i >= 1; i--)
+                {
+                    for (int j = 0; j < i; j++)
+                    {
+                        if (ReferenceEquals(list[i], list[j]))
+                        {
+                            list.RemoveAt(i);
+                            removed++;
+                            break;
+                        }
+                    }
+                }
+                if (removed > 0)
+                    VanillaFixSupport.DiagLimited(
+                        "PoisonRegistration-dedupe",
+                        "PoisonRegistration removed " +
+                        removed.ToString(CultureInfo.InvariantCulture) +
+                        " duplicate effect reference(s) after ProjectileHit.Start",
+                        20);
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("PoisonRegistration.Dedupe", ex);
+            }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("PoisonRegistration", exception);
         }
     }
 

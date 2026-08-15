@@ -1,5 +1,40 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+**Fixed**
+
+- **Poison hits register reliably (bug 225).** A bullet's poison component
+  could miss registration on the victim's client due to a game init-ordering
+  race — the hit then knocked you back but the poison (all of a poison
+  bullet's real damage) never started on any screen. The missing component is
+  now re-registered at hit time, with a safety net against double-application.
+- **Faces show in 1v2 and 2v2 rooms (bug 224).** The last player to join a
+  team room missed everyone else's face for the whole sitting (a base-game
+  quirk FFA already worked around); the fix now covers team rooms too.
+- **Discord language channels stop reposting ancient messages (bug 226).**
+  The relay now tracks exactly what it has delivered — durably, across
+  restarts — instead of relying on a memory that old test messages could
+  fall out of. The stale test messages themselves are cleaned up too.
+- **Live-bets boards stop fighting Discord's rate limit.** The three boards
+  edited into one channel every 10 seconds and were permanently throttled;
+  they now stagger and skip edits when nothing changed, while still
+  recovering if a board message is deleted.
+- **Round-end poison watchdog accuracy.** Streams orphaned by a round
+  boundary after they started no longer produce false "possible modified
+  client" log entries; genuine mid-fight silence still gets flagged.
+- **Phoenix no longer floods the log** with ~2,000 harmless warnings per game
+  while charging its revive.
+
+**Changed**
+
+- **Card popup images no longer need downloading.** Card art in stats popups,
+  the hold-Tab board and the tier-list export now renders natively from the
+  game itself (correct in every language, always up to date) — the old image
+  pack download (which had been failing quietly) is gone, and the mod's
+  Thunderstore package shrinks by ~15 MB. The tier-list export shows a
+  progress note the first time while it renders each card.
+
 ## v1.38.6 — 2026-08-14
 
 **Fixed**

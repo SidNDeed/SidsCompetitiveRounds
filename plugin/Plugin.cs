@@ -2379,6 +2379,15 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] PlayerSkin re-bake failed: {ex.Message}"); }
 
+                // Bug #224: our face RPC just went out via vanilla's one
+                // UNBUFFERED RpcTarget.All (Player.Start's IsMine branch,
+                // fired during the Instantiate above) — any peer still
+                // mid-join missed it forever (#226). Re-send once the room
+                // settles. Schedule gates on team_/ovt_ itself: the FFA
+                // spawn path lands here too, but FfaMode.ResyncLocalFace
+                // owns ffa_ rooms (it re-sends at every game start).
+                try { FaceResync.Schedule("local-spawn"); } catch { }
+
                 Plugin.Log.LogInfo($"[{(isFfaRoom ? "FFA" : isOvtRoom ? "1v2" : "2v2")}] CreatePlayer override: slot={slot} team={teamID} pid={playerID}");
                 return false;  // skip vanilla
             }
@@ -2704,6 +2713,16 @@ namespace CompetitiveRounds
                     Plugin.Instance.StartCoroutine(ResendLocalFaceForSpectator());
             }
             catch { }
+            // Bug #224: same #226 class for team_/ovt_ entrants — under the
+            // hosted-lobby flow the LAST joiner is the norm, and vanilla's
+            // one UNBUFFERED RpcTarget.All face send at spawn means they
+            // missed every earlier joiner's face for the whole sitting.
+            // Every earlier seat re-sends its own face once the entrant
+            // settles (coalesced inside Schedule; no-op outside team/ovt
+            // rooms and on spectator seats). A spectator entrant in these
+            // rooms also triggers the block above — the double send is
+            // deliberate slack, idempotent per #226.
+            try { FaceResync.Schedule("player-entered"); } catch { }
             // UNAUTHORIZED entrant (frozen roster, no spectator role, not a
             // fighter we froze): the master closes the connection at the door
             // (Codex r1 find 1 — the reserved seats must admit only granted
@@ -2894,29 +2913,13 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Fighter-side face re-send for a just-joined spectator
-        /// (playtest #169b — mirrors FfaMode.ResyncLocalFace, including the
-        /// all-zero-face guard from its review find 13).</summary>
+        /// (playtest #169b). Send mechanics — including the all-zero-face
+        /// guard from FFA review find 13 — live in the shared
+        /// FaceResync.TrySendLocalFace (bug #224 factored them out).</summary>
         private static System.Collections.IEnumerator ResendLocalFaceForSpectator()
         {
             yield return new WaitForSecondsRealtime(2f);   // let the join settle
-            try
-            {
-                if (!Photon.Pun.PhotonNetwork.InRoom) yield break;
-                global::Player lp = null;
-                var players = PlayerManager.instance?.players;
-                if (players != null)
-                    foreach (var pl in players)
-                        if (pl != null && pl.data != null && pl.data.view != null && pl.data.view.IsMine) { lp = pl; break; }
-                if (lp == null) yield break;
-                var face = CharacterCreatorHandler.instance.selectedPlayerFaces[0];
-                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
-                    yield break;   // never wipe a stock face with an all-zero payload
-                lp.data.view.RPC("RPCA_SetFace", Photon.Pun.RpcTarget.Others,
-                    face.eyeID, face.eyeOffset, face.mouthID, face.mouthOffset,
-                    face.detailID, face.detailOffset, face.detail2ID, face.detail2Offset);
-                Plugin.Log.LogInfo("[SPECTATE] face re-sent for new spectator");
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[SPECTATE] face resend: {ex.Message}"); }
+            FaceResync.TrySendLocalFace("SPECTATE");
         }
 
         public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps) { }
@@ -3618,6 +3621,133 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[2v2-DIAG] Player.Start: pid={__instance.PlayerID} team={__instance.TeamID} isLocal={isLocal} actor={actor}");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] Player.Start log error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Bug #224: mode-agnostic local-face re-send for team_/ovt_
+    /// rooms — learning #226's class, third instance. Vanilla sends each
+    /// player's face exactly ONCE, via an UNBUFFERED RpcTarget.All fired
+    /// from Player.Start's IsMine branch at spawn (decompiled Player.cs);
+    /// any peer still mid-join drops it forever. Under the hosted-lobby
+    /// flow the LAST joiner is the NORM, so they saw default faces on
+    /// every earlier joiner for the whole sitting. FFA already re-sends at
+    /// its own game start (FfaMode.ResyncLocalFace, bug #102) and a
+    /// spectator entry already triggers a fighter re-send (playtest #169b)
+    /// — this covers the two team modes whose game start is vanilla-driven,
+    /// from two triggers: the local spawn (covers peers who were mid-join
+    /// when vanilla's RPC fired) and every remote entrant (the earlier
+    /// seats re-send for the late arrival). Idempotent: EquipFace just
+    /// re-equips (#226). TrySendLocalFace is the SINGLE send
+    /// implementation, shared by the FFA and spectator-entry paths too.</summary>
+    internal static class FaceResync
+    {
+        // Coalescing (#98/#272-family bounding): a burst of triggers
+        // (staggered joiners at room assembly) produces ONE send, and every
+        // new trigger PUSHES the send out so the newest entrant still gets
+        // a full settle window before the RPC. A fixed-delay coroutine per
+        // trigger could fire 0.1s after a later entrant joined and lose the
+        // exact mid-join race this exists to close.
+        private const float SettleSeconds = 2.5f;
+        private static bool pending;
+        private static float dueAt;
+
+        /// <summary>2v2/1v2 room? Name prefix, plus the cr_ff room prop for
+        /// 2v2 (the same discriminator Diag2v2.IsActive uses — a cr_ff room
+        /// is definitionally a 2v2 context whatever its name). ffa_ rooms
+        /// are deliberately excluded: FfaMode.ResyncLocalFace owns those
+        /// (task requirement — never double-cover the FFA resync).</summary>
+        internal static bool InTeamOrOvtRoom()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return false;
+                string rn = PhotonNetwork.CurrentRoom.Name ?? "";
+                if (rn.StartsWith("team_") || rn.StartsWith("ovt_")) return true;
+                var props = PhotonNetwork.CurrentRoom.CustomProperties;
+                return props != null && props.ContainsKey("cr_ff");
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Schedule a coalesced re-send. Safe to call from any
+        /// trigger in any room — every guard lives here so the call sites
+        /// stay one-liners.</summary>
+        internal static void Schedule(string reason)
+        {
+            try
+            {
+                // Spectators publish no cosmetics (design §3.5) — and have
+                // no IsMine Player to send from anyway (defense in depth).
+                if (RoomActors.LocalIsSpectator) return;
+                if (!InTeamOrOvtRoom()) return;
+                if (Plugin.Instance == null) return;
+                dueAt = Time.realtimeSinceStartup + SettleSeconds;
+                if (pending) return;   // runner re-reads dueAt — the push above extends its wait
+                pending = true;
+                VanillaFixSupport.DiagLimited("face-resync-sched",
+                    $"face resync scheduled ({reason})", 20);
+                Plugin.Instance.StartCoroutine(Run());
+            }
+            catch { }
+        }
+
+        private static IEnumerator Run()
+        {
+            // Loop-on-dueAt rather than a fixed wait: Schedule pushes dueAt
+            // forward on every trigger. No yield sits between the loop exit
+            // and the pending reset, so a same-frame Schedule either
+            // extends this loop or starts a fresh runner — never lost.
+            while (Time.realtimeSinceStartup < dueAt) yield return null;
+            pending = false;
+            // Re-check after the wait: the coroutine is hosted on the
+            // persistent Plugin.Instance, so the room can have changed (or
+            // been left) underneath it.
+            if (RoomActors.LocalIsSpectator || !InTeamOrOvtRoom()) yield break;
+            TrySendLocalFace("FACE-RESYNC");
+        }
+
+        /// <summary>The shared send mechanics (one implementation for the
+        /// FFA game-start, spectator-entry and team/ovt paths): resolve the
+        /// local player by IsMine view, refuse the all-zero default face
+        /// (FFA review find 13 — an account that never opened the character
+        /// creator has an all-zero face, and re-sending that WIPES the
+        /// stock face on every other screen; the cr_face publisher rejects
+        /// the identical payload), then re-fire vanilla's own face RPC at
+        /// the others. Custom cosmetic ids ride along — they resolve
+        /// through the GetItem prefix on every client (#124). Returns
+        /// false, silently, when the local player has not spawned yet —
+        /// a later trigger covers that entrant.</summary>
+        internal static bool TrySendLocalFace(string tag)
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom) return false;
+                if (RoomActors.LocalIsSpectator) return false;   // §3.5, guarded at the source
+                global::Player lp = null;
+                var players = PlayerManager.instance?.players;
+                if (players != null)
+                    foreach (var pl in players)
+                        if (pl != null && pl.gameObject != null && pl.data != null
+                            && pl.data.view != null && pl.data.view.IsMine) { lp = pl; break; }
+                if (lp == null) return false;
+                var face = CharacterCreatorHandler.instance.selectedPlayerFaces[0];
+                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
+                {
+                    VanillaFixSupport.DiagLimited("face-resync-zero",
+                        $"[{tag}] face resync skipped — all-zero default face", 5);
+                    return false;
+                }
+                lp.data.view.RPC("RPCA_SetFace", RpcTarget.Others,
+                    face.eyeID, face.eyeOffset, face.mouthID, face.mouthOffset,
+                    face.detailID, face.detailOffset, face.detail2ID, face.detail2Offset);
+                Plugin.Log.LogInfo($"[{tag}] face resync sent (#226)");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[{tag}] face resync: {ex.Message}");
+                return false;
+            }
         }
     }
 
