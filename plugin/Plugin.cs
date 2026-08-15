@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.5";   // Aug 13: build stats in match history, multi-mode elo + 2v2/FFA podium titles, chat mute/pin/TTL, FFA card toasts, async tournament simplification, and the Aug 12-13 bug batch
+        public const string ModVersion = "1.38.6";   // Aug 14: latency batch — hit-RPC dispatch-abort guards + [NET] telemetry (bug 217), spectator join hygiene + spectator poison display (bug 216), boundary poison false-flags + single tint pass per transition (bugs 221/222)
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string

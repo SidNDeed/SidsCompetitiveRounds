@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.38.6 — 2026-08-14
 
 **Fixed**
 
