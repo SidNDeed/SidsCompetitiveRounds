@@ -8006,6 +8006,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         public static void OpenCustomBetPrompt(string seriesId, string betOnSteamId, int team, bool isTeam, string targetLabel)
         {
+            // Codex tournament r4 find 2: the tournament bets popup's
+            // children carry bypassModalBlock (bug 230 — the popup's OWN
+            // shield was killing them), which also means the IMGUI modal
+            // this prompt raises cannot block them — a preset bet button
+            // visible BEHIND the prompt would still stake real gold on
+            // click. The popup must not survive under the prompt: hide it
+            // (idempotent; the player reopens it from the same button).
+            try { HideTournamentBetsPopup(); } catch { }
             customBetSeriesId = seriesId;
             customBetOnSteamId = betOnSteamId;
             customBetTeam = team;

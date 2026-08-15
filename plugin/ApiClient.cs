@@ -7402,13 +7402,6 @@ namespace CompetitiveRounds
                     {
                         ActiveRankedSeriesId = sid;
                         Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} status={ExtractJsonString(resp, "status")}");
-                        // Bug 228: THE single setter of the rated-continuation
-                        // latch (room-bound, seat-symmetric — both seats run
-                        // this fenced callback; see the latch's doc comment in
-                        // GameStateWatcher). A series id back from preflight
-                        // means THIS room's pairing is rated, so its rematch
-                        // popups auto-confirm.
-                        try { GameStateWatcher.NoteRatedContinuation(preflightRoom); } catch { }
                         // Aug 15 (bug 231): tournament banner context from the
                         // preflight's contract fields. The key-presence guard is
                         // LOAD-BEARING: an old server that lacks the field must
@@ -7489,13 +7482,6 @@ namespace CompetitiveRounds
                         {
                             Plugin.Log.LogInfo("[PREFLIGHT] server says not_ranked (a player has ranked disabled) — treating match as casual");
                             try { GameStateWatcher.DowngradeToCasual("opponent has ranked disabled"); } catch { }
-                            // Bug 228: an explicit not_ranked verdict for this
-                            // room retracts the latch — its rematch popups are
-                            // the player's to answer (this callback is room-
-                            // fenced above, so the clear can't hit another
-                            // room's latch: a mismatched room already
-                            // early-returned).
-                            try { GameStateWatcher.ClearRatedContinuation(); } catch { }
                         }
                         else
                         {

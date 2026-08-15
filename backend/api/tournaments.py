@@ -2639,9 +2639,17 @@ async def tournament_tick() -> None:
                     # no-op for every already-enqueued (or delivered) row,
                     # so sweeping every currently-ready match each tick is
                     # cheap (a bracket holds at most ~31 matches).
+                    # FOR UPDATE SKIP LOCKED (r4 find 3): a report completing
+                    # match A concurrently holds A's row while it activates B
+                    # and enqueues B's notice — an unlocked sweep could read
+                    # A as still 'ready' and re-arm the player's notice BACK
+                    # to A over the fresher B. Skipping locked rows defers
+                    # them to the next 30s pass, by which time their status
+                    # is settled.
                     for _rm in (await db.execute(select(TournamentMatch).where(and_(
                             TournamentMatch.tournament_id == _tid,
-                            TournamentMatch.status == "ready")))).scalars().all():
+                            TournamentMatch.status == "ready"))
+                            .with_for_update(skip_locked=True))).scalars().all():
                         await _enqueue_match_ready_notices(db, t, _rm)
                     await _maybe_complete_tournament(db, t)
                 await _safe(f"run:{tid}", _run)

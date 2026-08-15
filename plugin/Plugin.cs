@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.7";   // Aug 15: tournament batch — gold tournament banner (bug 231), rated room-code auto-continue latch (bugs 227/228), bets-popup click fix (bug 230), sct- spectate attestation, tournament DMs/tags server+bot side
+        public const string ModVersion = "1.38.7";   // Aug 15: tournament batch — gold tournament banner (bug 231), bets-popup click fix (bug 230), sct- spectate attestation, preflight room-incarnation fences, tournament DMs/tags server+bot side
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -3009,19 +3009,6 @@ namespace CompetitiveRounds
                 // code room is left and re-entered under the same code.
                 ApiClient.RoomIncarnation++;
                 GameStateWatcher.ClearTournamentContext();
-                GameStateWatcher.ClearRatedContinuation();
-                // Remove OUR stale rated-continuation prop from any previous
-                // room — player props persist across rooms (#182), and a
-                // stale cr_rcl matching a reused room CODE would satisfy the
-                // peer half of the handshake for a pairing that never
-                // preflighted here.
-                try
-                {
-                    Photon.Pun.PhotonNetwork.LocalPlayer.SetCustomProperties(
-                        new ExitGames.Client.Photon.Hashtable {
-                            { GameStateWatcher.RATED_CONT_PROP, null } });
-                }
-                catch { }
                 string _rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
                 if (_rn.StartsWith("sct-", StringComparison.Ordinal)
                     && !SpectatorSession.IsLocalSpectator)
@@ -3533,7 +3520,6 @@ namespace CompetitiveRounds
             // (r2 find 2 — a later same-CODE room must not receive them).
             try { ApiClient.RoomIncarnation++; } catch { }
             try { GameStateWatcher.ClearTournamentContext(); } catch { }
-            try { GameStateWatcher.ClearRatedContinuation(); } catch { }
             // r3 find 3: the series id is room-bound state and the polled
             // exit already clears it unconditionally (GameStateWatcher's
             // Left-room branch, #347's documented casual→ranked flow relies
@@ -4582,23 +4568,25 @@ namespace CompetitiveRounds
     /// both clients modded by construction (#286 — matchIsRanked needs
     /// OpponentHasMod), and leaving the popup live meant both seats ignored
     /// it, vanilla dumped the unanswered prompt ~25s after match end, and both
-    /// clients NetworkRestart'd the room dead (bug 228). "Rated" here is the
-    /// rated-continuation HANDSHAKE (GameStateWatcher): the LOCAL room-bound
-    /// latch — set only by the room+generation+incarnation-fenced
-    /// /series/preflight success callback — AND every other non-spectator
-    /// seat's replicated cr_rcl player property matching this room. This is
-    /// the peer-coordinated protocol r2 find 1 demanded, built per the #324
-    /// census doctrine, and it exists because r3's decompile read killed the
-    /// seat-local version: vanilla's Yes (GM_ArmsRace.IDoRematch) starts a
-    /// 10-SECOND timer that NetworkRestarts the answering seat on its own
-    /// when the peer doesn't also answer — so ONE seat auto-answering while
-    /// the other never latched would convert an idle-but-alive popup into
-    /// that seat restarting out at 10s. With the handshake, a seat whose
-    /// preflight failed publishes no prop and NEITHER seat auto-answers
-    /// (symmetric fall-back to vanilla, both humans answer by hand). The
-    /// bare series id and MatchIsRanked are trusted nowhere here — both are
-    /// seat-local (#327/#347, r1 find 1). Genuinely casual private rooms
-    /// keep the vanilla popup: no preflight series, no latch, no props.</summary>
+    /// clients NetworkRestart'd the room dead (bug 228).
+    ///
+    /// KNOWN ISSUE — bug 228 (post-match room deaths in RATED ROOM-CODE
+    /// games) is deliberately NOT fixed here. Four review rounds (Codex
+    /// tournament r1-r4, Aug 15) killed every attempt to widen this gate
+    /// beyond mod-issued rooms, each on a real mechanism: (r1) MatchIsRanked
+    /// / series-id predicates are seat-asymmetric; (r2/r3) a seat-local
+    /// latch is unsafe because vanilla's Yes (GM_ArmsRace.IDoRematch,
+    /// decompile :345-376) starts a 10-SECOND timer that NetworkRestarts
+    /// the answering seat BY ITSELF when the peer doesn't also answer —
+    /// an unanswered popup, by contrast, waits indefinitely — so a
+    /// one-sided auto-Yes actively kills the auto-answering seat; (r4)
+    /// even a replicated-prop handshake fails asymmetrically when one
+    /// seat's SetCustomProperties publish fails while its local latch is
+    /// retained. The revised bug-228 mechanism is vanilla's 10s timer
+    /// racing two HUMAN answers. A real fix needs a peer-coordinated
+    /// commit protocol with an acknowledgment barrier (both seats confirm
+    /// intent, then both answer inside one exchange) — design it as its
+    /// own pass; do not bolt another seat-local predicate onto this gate.</summary>
     [HarmonyPatch(typeof(PopUpHandler), "StartPicking")]
     class PopUpHandler_StartPicking_Competitive_Patch
     {
@@ -4610,29 +4598,11 @@ namespace CompetitiveRounds
                 // §2 census — the auto-confirm would make the spectator
                 // release every player immediately). Defense in depth: the
                 // GM lifecycle that opens the prompt is already suppressed.
-                // Checked BEFORE any rated predicate (r1 find 1's ordering).
                 if (RoomActors.LocalIsSpectator) return false;
-                bool competitiveRoom = CompetitiveRoomDetect.IsCompetitiveRoom();
-                if (!competitiveRoom)
-                {
-                    // Rated room-code game? BOTH halves of the handshake
-                    // (see class comment): our latch AND every other
-                    // fighter's replicated latch prop. Either missing =
-                    // vanilla popup on THIS seat, and by construction the
-                    // peer whose prop is missing never auto-answers either.
-                    bool rated = false;
-                    try
-                    {
-                        string rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
-                        rated = GameStateWatcher.RatedContinuationFor(rn)
-                            && GameStateWatcher.PeersConfirmRatedContinuation(rn);
-                    }
-                    catch { }
-                    if (!rated) return true;
-                }
-                Plugin.Log.LogInfo(competitiveRoom
-                    ? "[POPUP] Auto-confirming Continue prompt (competitive room bypass)"
-                    : "[POPUP] Auto-confirming Continue prompt (rated room-code game — bug 228)");
+                // Mod-issued rooms ONLY — see the KNOWN ISSUE in the class
+                // comment before widening this (r4 pre-committed cut).
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return true;
+                Plugin.Log.LogInfo("[POPUP] Auto-confirming Continue prompt (competitive room bypass)");
                 try { functionToCall?.Invoke(PopUpHandler.YesNo.Yes); }
                 catch (Exception ex) { Plugin.Log.LogError($"[POPUP] Continue auto-invoke failed: {ex.Message}"); }
                 return false;  // skip vanilla picker setup entirely

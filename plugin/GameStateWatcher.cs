@@ -755,88 +755,12 @@ namespace CompetitiveRounds
             tournamentLabel = "";
         }
 
-        // ── Rated-continuation handshake (bug 228; Codex tournament r1 find
-        // 1, r2 find 1, r3 find 1 — three escalations, read all before
-        // touching) ──
-        // "This ROOM's pairing is rated, and BOTH seats know it" for the
-        // rematch-popup auto-confirm. History: the r1 gate (MatchIsRanked ||
-        // series id + OpponentHasMod) was seat-asymmetric and not room-bound;
-        // the r2 latch was room-bound but still SEAT-LOCAL HTTP state, and
-        // the r3 decompile read proved why that matters: vanilla's Yes
-        // (GM_ArmsRace.IDoRematch) starts a 10-SECOND timer that
-        // NetworkRestarts the answering seat on its own if the peer doesn't
-        // answer — so one seat auto-answering while the other's preflight
-        // failed converts "popup waits indefinitely" into "latched seat
-        // restarts out after 10s". The fix is the #324 doctrine: consensus
-        // from REPLICATED data — each seat publishes its latch as a player
-        // property (cr_rcl = room name) at preflight time, minutes before
-        // any popup, and the auto-confirm requires the LOCAL latch AND every
-        // other non-spectator seat's matching property. A seat whose
-        // preflight failed publishes nothing, which disables the
-        // auto-confirm on EVERY seat symmetrically (fail-closed to vanilla,
-        // both humans answer by hand — today's baseline).
-        //
-        // Residual, stated for review: player props are eventually
-        // consistent, so a prop published at preflight time could in
-        // principle be unreplicated at popup time — but the popup fires
-        // minutes later, so the window is unreachable in practice; and a
-        // STALE prop from a previous same-named room incarnation (#182:
-        // props persist across rooms) is neutralized by (a) the join
-        // callback removing our own prop on every room entry and (b) the
-        // LOCAL latch — with its triple-cleared lifecycle and
-        // incarnation-fenced setter — remaining a required conjunct.
-        private static string ratedContinuationRoom = "";
-        internal const string RATED_CONT_PROP = "cr_rcl";
-        public static void NoteRatedContinuation(string room)
-        {
-            if (string.IsNullOrEmpty(room)) return;
-            bool changed = !string.Equals(ratedContinuationRoom, room, StringComparison.Ordinal);
-            ratedContinuationRoom = room;
-            if (!changed) return;   // re-publish only on change (#109)
-            Plugin.Log.LogInfo($"[POPUP] Rated-continuation latch set for room '{room}'");
-            try
-            {
-                if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode)
-                    PhotonNetwork.LocalPlayer.SetCustomProperties(
-                        new ExitGames.Client.Photon.Hashtable { { RATED_CONT_PROP, room } });
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] latch prop publish failed: {ex.Message}"); }
-        }
-        public static bool RatedContinuationFor(string room)
-            => !string.IsNullOrEmpty(room)
-               && string.Equals(ratedContinuationRoom, room, StringComparison.Ordinal);
-        /// <summary>Every OTHER non-spectator seat advertises the latch for
-        /// THIS room (and at least one exists). Raw PlayerListOthers minus
-        /// replicated spectator props, per the #324 census rule — never a
-        /// locally-classified roster.</summary>
-        public static bool PeersConfirmRatedContinuation(string room)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(room)) return false;
-                var others = PhotonNetwork.PlayerListOthers;
-                if (others == null) return false;
-                int fighters = 0;
-                foreach (var p in others)
-                {
-                    if (p == null) continue;
-                    if (RoomActors.IsSpectator(p)) continue;
-                    fighters++;
-                    object v = null;
-                    if (p.CustomProperties == null
-                        || !p.CustomProperties.TryGetValue(RATED_CONT_PROP, out v)
-                        || !(v is string s)
-                        || !string.Equals(s, room, StringComparison.Ordinal))
-                        return false;
-                }
-                return fighters > 0;
-            }
-            catch { return false; }
-        }
-        public static void ClearRatedContinuation()
-        {
-            ratedContinuationRoom = "";
-        }
+        // (The rated-continuation latch/handshake that lived here was CUT in
+        // Codex tournament review r4 — see the KNOWN ISSUE comment on
+        // PopUpHandler_StartPicking_Competitive_Patch in Plugin.cs for the
+        // full history and why no seat-local or best-effort-replicated
+        // predicate can safely widen the rematch auto-confirm. Do not
+        // reintroduce without a real acknowledgment-barrier protocol.)
 
         // ── Resumed-series handoff from the QUEUE LOCK (bug 200) ────────────
         // The queue lock learns the resumed BO3 tally BEFORE the room is
@@ -2804,10 +2728,6 @@ namespace CompetitiveRounds
                 // Bug 231: tournament banner context is per-room, like the
                 // flags above — a fresh room must never inherit it (#353).
                 ClearTournamentContext();
-                // Bug 228 latch: same per-room rule. (Also cleared in the
-                // Photon join/leave callbacks — this polled edge can miss a
-                // fast leave+join, Codex r1 find 5.)
-                ClearRatedContinuation();
                 // Mod-issued competitive rooms are definitionally ranked. Set
                 // immediately at room-join so [POLL] === Match Started === doesn't
                 // log CASUAL while CheckOpponentRanked is still racing. cr_ff
@@ -2995,8 +2915,6 @@ namespace CompetitiveRounds
                 // Bug 231: the tournament banner context binds to the same
                 // pairing/room as the series id — it dies here with it (#353).
                 ClearTournamentContext();
-                // Bug 228 latch: same lifecycle (r1 find 1 — room-bound).
-                ClearRatedContinuation();
                 // Same rule for the 1v2 sitting: leaving the ovt_ room ends it.
                 // Only the reporter's client clears these at series completion;
                 // the other two would otherwise carry a stale series id + slot

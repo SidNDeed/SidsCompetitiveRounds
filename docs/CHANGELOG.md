@@ -29,14 +29,17 @@ Schema changes: migration **221** (`pcolor_poison` body color; applied).
 
 **Fixed**
 
-- **Post-match disconnects in code-room rated games (bugs 227/228).** The
-  game quietly dumps an unanswered rematch popup ~25 seconds after a match
-  ends — in rated room-code games (most ranked play) the mod's auto-confirm
-  wasn't active, so both players got kicked to the menu between games. The
-  auto-confirm now covers every rated game, not just queue-issued rooms.
 - **Tournament bets popup is clickable again (bug 230).** The popup's own
   buttons were being swallowed by its click shield, and a coordinate bug made
   any click read as "outside the popup" and dismiss it.
+- **Better diagnostics for post-match disconnects (bugs 227/228).** The
+  connection-restart tracers now run in every room type, so the next
+  code-room disconnect names its exact trigger in the log. The investigation
+  found the mechanism — the base game restarts a player's connection 10
+  seconds after they answer the rematch prompt if their opponent hasn't
+  answered yet — but a safe fix needs both clients acting together, and
+  every one-sided approach made things worse in review; it's deferred to a
+  dedicated pass rather than shipped half-safe.
 
 - **Poison hits register reliably (bug 225).** A bullet's poison component
   could miss registration on the victim's client due to a game init-ordering
