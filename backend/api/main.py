@@ -2557,12 +2557,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-# DEPLOY HOLD (Aug 15): announce 1.38.6 until the 1.38.7 GitHub release
-# actually exists — the client bump is committed (Plugin.ModVersion=1.38.7)
-# but unreleased, and announcing a latest the updater cannot fetch makes
-# every standalone client download 1.38.6 in a loop and nag each launch.
-# The 1.38.7 /ship pass sets this back to "1.38.7" as its normal step.
-LATEST_MOD_VERSION = "1.38.6"
+LATEST_MOD_VERSION = "1.38.7"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
