@@ -1178,6 +1178,46 @@ namespace CompetitiveRounds
         /// RPCA_Die_Phoenix and Revive all call dot.StopAllCoroutines() on the host,
         /// so a stream that legitimately ends early takes its observer with it and
         /// cannot produce a false report.</summary>
+        // ── Round-boundary orphan window (bug 221, review-round-1 shape) ──
+        // OPENED by StaleProjectileSweepPatch.Schedule (point-over RPC +
+        // MovePlayers, the two boundary signals every mode fires — FFA's
+        // prefix replaces RPCA_NextRound's body but postfixes still run,
+        // #352) with a CEILING, and CLOSED ~1s after the battle actually
+        // resumes (GameStateWatcher's battleOngoing rising edge). Review r1
+        // killed the flat-window draft: battle can resume ~2s after
+        // MovePlayers, so a constant long window suppressed up to ~2.6s of
+        // genuine combat evidence, while a short one re-opens the false
+        // accusations. The resume edge is the only correct end; the ceiling
+        // exists solely so a mode/path that never flips battleOngoing cannot
+        // wedge the window open.
+        // A DOT stream that ARMS inside the window is a boundary orphan: a
+        // leftover hit landing after the revives, which the victim's
+        // authority will never honor (its own copy of the bullet never hit,
+        // or its publisher gate is closed during the transition).
+        private static float _boundaryWindowUntil = -999f;
+        private const float BoundaryOrphanCeilingSec = 6f;
+        private const float PostResumeGraceSec = 1f;
+        internal static void NoteRoundBoundary()
+        {
+            // ACCEPTED RESIDUAL (review r2 LOW): FFA SPECTATOR seats suppress
+            // both engines that flip battleOngoing, so on that one seat the
+            // window always runs to the ceiling and early-combat silence
+            // telemetry is lost. The fighters' seats — the ones whose reports
+            // the anti-cheat pipeline actually needs — are unaffected, and a
+            // spectator's shadow report is redundant with theirs.
+            float until = Time.realtimeSinceStartup + BoundaryOrphanCeilingSec;
+            if (until > _boundaryWindowUntil) _boundaryWindowUntil = until;
+        }
+        internal static void NoteBattleResumed()
+        {
+            // TIGHTEN only — a resume edge must never extend a window that
+            // is already closed or closing sooner.
+            float until = Time.realtimeSinceStartup + PostResumeGraceSec;
+            if (until < _boundaryWindowUntil) _boundaryWindowUntil = until;
+        }
+        internal static bool InBoundaryOrphanWindow()
+            => Time.realtimeSinceStartup < _boundaryWindowUntil;
+
         internal static IEnumerator ShadowDot(
             DamageOverTime host, CharacterData data, PhotonView view,
             Vector2 damage, float time, float interval)
@@ -1185,6 +1225,31 @@ namespace CompetitiveRounds
             int viewId = view.ViewID;
             int actor = view.Owner != null ? view.Owner.ActorNumber : -1;
             int anchor = PhotonNetwork.ServerTimestamp;
+
+            // Bug 221 ("knockback but no damage, both clients"): all three
+            // production [POISON-SILENT] events sat directly on point
+            // transitions, victim identical, PlayerDied adjacent. A stream
+            // armed in the boundary window cannot produce a TRUE silence
+            // report — the victim's revive killed any real stream it had
+            // (this shadow inherits that cleanup only for streams that
+            // existed BEFORE the revive), so an orphan's silence is
+            // expected and its withheld ticks are vanilla-correct (a DOT
+            // cancelled at the boundary deals nothing in vanilla either).
+            // Accusing "possible modified client" here was a false
+            // positive. Cost: streams armed within ~1s after the battle
+            // resumes also skip the report (the resume edge closes the
+            // window; a 6s ceiling covers any path with no edge) —
+            // acceptable for an anti-cheat telemetry line; genuine
+            // mid-battle silence keeps the full accusation path.
+            if (InBoundaryOrphanWindow())
+            {
+                VanillaFixSupport.DiagLimited(
+                    "poison-boundary-orphan",
+                    "[POISON-BOUNDARY] stream on view=" + viewId
+                    + " armed inside the round-boundary window — silence expected, not reported",
+                    10);
+                yield break;
+            }
 
             float damageToDeal = Quantise(damage.magnitude);
             float dpt = damageToDeal / time * interval;

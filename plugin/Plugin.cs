@@ -7008,16 +7008,68 @@ namespace CompetitiveRounds
 
         // Schedule the wall/atmosphere particle tint to run AFTER the MapTransition window.
         // Always hosted on Plugin.Instance so it survives Map destruction during the move.
+        //
+        // COALESCED (bug 221/222 follow-up, shaped by review round 1): Map.Start's
+        // postfix AND the per-round NextArt prefix both schedule a deferred pass
+        // for the SAME map load, so every point transition ran the full
+        // renderer+particle walk TWICE back-to-back — measured 324 passes over
+        // 159 transitions in the bug-221 log and 154/73 in bug-217's, on every
+        // client with a map skin, at exactly the transition moments players
+        // report hitches. One pending pass suffices — but three rules from the
+        // review are load-bearing:
+        //  * EVERY request pushes the shared not-before deadline past ITS OWN
+        //    transition window (r1 HIGH: map B starting <2s after map A must not
+        //    inherit A's earlier deadline — a pass firing inside B's guard is
+        //    the proven MapTransition mid-move NRE, #85);
+        //  * a superseded GENERATION exits before applying (r1 find 4: an
+        //    A→B→A Shift cycle otherwise applies A twice);
+        //  * the slot claim carries a TTL (r1 find 3: the persistent host can
+        //    be destroyed mid-wait, killing the coroutine before it clears the
+        //    slot — #16/#270c class; a wedged claim self-heals instead of
+        //    suppressing deferred tints for the rest of the process).
+        private static string _pendingTintSku;
+        private static int _pendingTintGen;
+        private static float _tintNotBefore;              // Time.time deadline (scaled, matches the guard convention)
+        private static float _pendingTintClaimedAt = -999f; // realtime, for the dead-host TTL
+
+        /// <summary>An IMMEDIATE tint apply (the mid-round manual-Shift branch)
+        /// supersedes whatever deferred pass is pending — review r2 MEDIUM: a
+        /// Shift B then back to A while an A coroutine sleeps in the deadline
+        /// tail otherwise passes both guards and walks the full tint twice.
+        /// The immediate apply reflects the CURRENT selection by definition,
+        /// so any pending pass is stale the moment it runs.</summary>
+        public static void SupersedePendingTints()
+        {
+            _pendingTintGen++;
+            _pendingTintSku = null;
+        }
+
         public static void ScheduleDeferredTints(string sku)
         {
             if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku)) return;
+            float notBefore = Time.time + MapTransitionGuardSec;
+            if (notBefore > _tintNotBefore) _tintNotBefore = notBefore;
+            bool samePending = string.Equals(_pendingTintSku, sku, StringComparison.OrdinalIgnoreCase)
+                && Time.realtimeSinceStartup - _pendingTintClaimedAt < 15f;
+            if (samePending) return;   // the pending pass now honors the pushed deadline
             var host = Plugin.Instance;
-            if (host != null) host.StartCoroutine(DelayedApplyTints(sku));
+            if (host == null) return;
+            _pendingTintSku = sku;
+            _pendingTintClaimedAt = Time.realtimeSinceStartup;
+            int gen = ++_pendingTintGen;
+            host.StartCoroutine(DelayedApplyTints(sku, gen));
         }
 
-        private static System.Collections.IEnumerator DelayedApplyTints(string sku)
+        private static System.Collections.IEnumerator DelayedApplyTints(string sku, int gen)
         {
-            yield return new WaitForSeconds(MapTransitionGuardSec);
+            // Wait for the LATEST requested deadline — it is pushed while we
+            // sleep whenever another map load requests the same sku.
+            while (Time.time < _tintNotBefore) yield return null;
+            // Superseded generation: a later Shift claimed the slot (including
+            // an A→B→A cycle). The newest coroutine owns the slot AND the
+            // apply — exit before the current-sku check, never apply.
+            if (gen != _pendingTintGen) yield break;
+            _pendingTintSku = null;
             // Stale-apply guard: if the player Shift-cycled again during the wait,
             // this scheduled apply is for an OLD sku — proven in Sid's log
             // ("burgundy" tints landing right after "pine" was selected). Skip;
@@ -8156,7 +8208,12 @@ namespace CompetitiveRounds
                     if (inTransition)
                         MapPhysicalColorPatch.ScheduleDeferredTints(sku);
                     else
+                    {
+                        // Immediate apply retires any sleeping deferred pass
+                        // (review r2 MEDIUM — see SupersedePendingTints).
+                        MapPhysicalColorPatch.SupersedePendingTints();
                         MapPhysicalColorPatch.ApplyPhysicalTintsForSku(null, sku);
+                    }
                     Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (deferParticles={inTransition})");
                     return false;
                 }

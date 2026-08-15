@@ -2194,6 +2194,12 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Boundary stamp for PoisonSync's shadow observer (bug 221):
+                // both Schedule triggers — the point-over RPC and MovePlayers —
+                // ARE the round-boundary signals, so one line here covers every
+                // mode. Deliberately before the scope gate: the stamp is inert
+                // data and the poison protocol has its own room gating.
+                try { PoisonSync.NoteRoundBoundary(); } catch { }
                 if (!VanillaFixSupport.AnyGameScope()) return;
                 if (_sweepPending && Time.realtimeSinceStartup - _pendingSince < 2f) return;
                 if (Plugin.Instance == null) return;

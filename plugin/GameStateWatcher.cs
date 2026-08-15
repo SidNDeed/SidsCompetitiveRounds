@@ -1540,12 +1540,24 @@ namespace CompetitiveRounds
         /// can report a true average FPS for this match. Cheap (no allocations, no
         /// reflection); also broadcasts the running average via Photon every ~3s so
         /// the opponent can read it. Only active while a match is being tracked.</summary>
+        private static bool _lastBattleForPoisonEdge;
         public static void TickFrame()
         {
             // [NET] telemetry BEFORE the spectator early-return — the
             // spectator seat needs the ping/fps/dispatch line most (bug 217:
             // the whole latency question was unanswerable from a bundle).
             try { NetDiag.Tick(); } catch { }
+            // Battle-resume rising edge closes PoisonSync's boundary-orphan
+            // window (bug 221 review r1: a flat window overshot into real
+            // combat). Every seat, every mode — FfaMode sets battleOngoing in
+            // its own transitions (#222), vanilla sets it everywhere else.
+            bool battleNow = false;
+            try { battleNow = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+            if (battleNow && !_lastBattleForPoisonEdge)
+            {
+                try { PoisonSync.NoteBattleResumed(); } catch { }
+            }
+            _lastBattleForPoisonEdge = battleNow;
             // Spectator: no local input tracking, no KPS/macro metrics, no
             // spawn-grace edges — there is no local fighter to measure.
             if (RoomActors.LocalIsSpectator) return;

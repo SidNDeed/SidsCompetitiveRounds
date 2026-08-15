@@ -24,6 +24,17 @@
 - **FFA scoreboard log lines carry names again** instead of nametag markup,
   and the stale-projectile sweep's diagnostic no longer goes quiet after the
   first game.
+- **"I poisoned him and nothing happened" at round ends (bug 221).** A poison
+  hit landing in the round-transition window starts a stream no client will
+  ever honor (the revive already cancelled it — vanilla behaviour), but the
+  watchdog treated that silence as a possible cheat and logged accusations
+  against innocent players. Boundary-window streams are now recognized for
+  what they are; genuine mid-fight silence still gets flagged.
+- **Map skins did their full recolor work twice at every round transition.**
+  Two code paths each scheduled the same deferred tint pass, so every client
+  with a map skin walked all renderers and particles twice back-to-back at
+  exactly the moment rounds change — measured in two players' logs at 2x per
+  transition. Now it runs once.
 
 **New**
 
