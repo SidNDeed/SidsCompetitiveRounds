@@ -1243,6 +1243,9 @@ namespace CompetitiveRounds
                 return;
             }
             if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;Close();return;}
+            // r8 find 1: a bet-row refresh deferred by the mid-click guard
+            // lands here on the first fully-released frame.
+            if(tournBetsFillPending&&!Input.GetMouseButton(0)&&!Input.GetMouseButtonUp(0)){try{RefreshTournamentBets();}catch{}}
             if(catalogueRebuildPending)
             {
                 catalogueRebuildPending=false;
@@ -6102,6 +6105,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // when the pointer is OUTSIDE the box, and there is an explicit Close.
         private static GameObject tournBetsPopupGO, tournBetsPopupRows;
         public static bool TournBetsPopupOpen => tournBetsPopupGO != null;
+        // r8 find 1: a refresh requested mid-click retries from Tick() on
+        // the first frame with the mouse fully released.
+        private static bool tournBetsFillPending;
 
         public static void HideTournamentBetsPopup()
         {
@@ -19663,6 +19669,22 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static void RefreshTournamentBets()
         {
             if (tTournBetsBox == null) return;
+            // Codex tournament r8 find 1 (PLAUSIBLE, closed by its own
+            // prescription): never rebuild bet rows mid-click. Old controls
+            // stay alive until end-of-frame destruction while replacements
+            // spawn, so if the series list reordered on the mouse-down
+            // frame, the click's release could land on a control bound to a
+            // DIFFERENT series than the one shown at press time — a wager on
+            // the wrong match. The pending flag matters for the popup's
+            // INITIAL fill, which runs inside the opening click's mouse-up
+            // frame: Tick() retries on the first fully-released frame, so
+            // the popup never sits empty.
+            if (Input.GetMouseButton(0) || Input.GetMouseButtonUp(0))
+            {
+                tournBetsFillPending = true;
+                return;
+            }
+            tournBetsFillPending = false;
             // Reset pool.
             foreach (var r in tTournBetRowPool) r.SetActive(false);
 
