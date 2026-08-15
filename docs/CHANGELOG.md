@@ -3,7 +3,8 @@
 ## v1.38.7 — 2026-08-15
 
 Schema changes: migrations **221** (`pcolor_poison` body color; applied),
-**222** (`ranked_queue.home_region`; applied), **223** (76 machine-translation
+**222** (`ranked_queue.home_region`; applied), **224** (release announcement
+queue row; applied), **223** (76 machine-translation
 seeds for the new shop/vocab keys; applied).
 
 **Added**
