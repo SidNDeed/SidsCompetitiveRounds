@@ -2995,11 +2995,11 @@ namespace CompetitiveRounds
             // Callback-bound edge reset (Aug 10 r2 find 8) — the poll's
             // wasInRoom sampling can miss a fast leave+join.
             try { GameStateWatcher.ResetSpectateAttestEdges(alsoRoomTally: true); } catch { }
-            // Tournament banner + rated-continuation latch: clear-then-seed on
-            // the CALLBACK, not only the 10 Hz polled join edge (Codex
-            // tournament r1 find 5 — a leave+join between polls keeps
-            // inRoom=true, so the polled clear/seed never runs and a stale
-            // tournament flag could leak into this room, or an sct- room
+            // Tournament banner: clear-then-seed on the CALLBACK, not only
+            // the 10 Hz polled join edge (Codex tournament r1 find 5 — a
+            // leave+join between polls keeps inRoom=true, so the polled
+            // clear/seed never runs and a stale tournament flag could leak
+            // into this room, or an sct- room
             // could miss its banner seed entirely). Runs for every role;
             // spectators just carry a cleared context.
             try
@@ -3513,11 +3513,11 @@ namespace CompetitiveRounds
             // leave+rejoin that lands between samples; this callback cannot).
             // The poll's Left-room branch keeps a lossy backup copy.
             try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
-            // Tournament banner + rated-continuation latch die with the room
-            // on the reliable edge too (Codex tournament r1 find 5 — the
-            // polled exit is the lossy backup), and the incarnation bump
-            // retires every in-flight preflight from the room we just left
-            // (r2 find 2 — a later same-CODE room must not receive them).
+            // Tournament banner dies with the room on the reliable edge too
+            // (Codex tournament r1 find 5 — the polled exit is the lossy
+            // backup), and the incarnation bump retires every in-flight
+            // preflight from the room we just left (r2 find 2 — a later
+            // same-CODE room must not receive them).
             try { ApiClient.RoomIncarnation++; } catch { }
             try { GameStateWatcher.ClearTournamentContext(); } catch { }
             // r3 find 3: the series id is room-bound state and the polled
@@ -4562,13 +4562,8 @@ namespace CompetitiveRounds
     /// round on their client; others stuck). Even in 1v1, players found the prompt
     /// annoying and "really don't like hitting Yes". Bypass: Prefix fires the
     /// supplied callback with `Yes` immediately and skips the picker setup.
-    /// Gated to mod-issued rooms (ranked_*, team_*, sct-*, ovt_, ffa_, cr_ff)
-    /// PLUS — bugs 227/228/229 — RATED room-code games. The original "non-mod
-    /// opponents desync" rationale does not apply there: a RATED game requires
-    /// both clients modded by construction (#286 — matchIsRanked needs
-    /// OpponentHasMod), and leaving the popup live meant both seats ignored
-    /// it, vanilla dumped the unanswered prompt ~25s after match end, and both
-    /// clients NetworkRestart'd the room dead (bug 228).
+    /// Gated to MOD-ISSUED ROOMS ONLY (ranked_*, team_*, sct-*, ovt_, ffa_,
+    /// cr_ff). Rated room-code games keep the vanilla prompt — see below.
     ///
     /// KNOWN ISSUE — bug 228 (post-match room deaths in RATED ROOM-CODE
     /// games) is deliberately NOT fixed here. Four review rounds (Codex

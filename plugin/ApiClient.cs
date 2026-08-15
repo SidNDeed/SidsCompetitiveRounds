@@ -7609,8 +7609,8 @@ namespace CompetitiveRounds
         /// room NAME does not identify a room — code rooms are player-typed
         /// and reusable, so "leave rated room CODE, quickly rejoin CODE with
         /// a casual opponent" lets a delayed preflight response pass the
-        /// name-equality fence and reinstall the OLD pairing's series id,
-        /// rated-continuation latch, and tournament context into the new
+        /// name-equality fence and reinstall the OLD pairing's series id
+        /// and tournament context into the new
         /// incarnation. Incremented by Plugin's Photon OnJoinedRoom AND
         /// OnLeftRoom callbacks (synchronous, cannot be missed the way the
         /// 10 Hz polled edges can); every preflight captures it at send and
