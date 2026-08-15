@@ -1104,7 +1104,20 @@ namespace CompetitiveRounds
             try { MaybeShowLanguagePrompt(); } catch { }
         }
 
-        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: the picker is parented to the PERSISTENT overlay canvas, which Close() never deactivates - without this an Escape with the dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}/* Codex tournament r5 finds 1+2 - same persistent-canvas class as the picker, but with GOLD at stake: the tournament bets popup's controls carry bypassModalBlock (bug 230), so a popup surviving an Esc / match-start auto-close would leave live bet buttons over combat; and the IMGUI amount prompt renders independent of IsOpen, so a stale CustomBetPromptOpen would submit its wager on the next Enter mid-game. Both die with the page, before the click blocker releases. */try{HideTournamentBetsPopup();}catch{}try{CancelCustomBet();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        /// <summary>EVERY overlay surface that outlives pageGO (they parent
+        /// to the PERSISTENT overlay canvas), plus the modal statics, plus
+        /// the blocker/fade. ONE list, shared by Close() and Tick()'s
+        /// page-null recovery (Codex tournament r7 find 2 — the recovery
+        /// re-listed a subset by hand and drifted: card preview and cursor
+        /// trail survived a host destruction). Add every future persistent-
+        /// canvas surface HERE, never to one caller. Gold-bearing surfaces
+        /// first (r5 finds 1+2: the bets popup's controls carry
+        /// bypassModalBlock and the IMGUI amount prompt renders independent
+        /// of IsOpen — either surviving a close can stake real gold over
+        /// live combat).</summary>
+        private static void TeardownOverlaySurfaces(){try{HideTournamentBetsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */}
+
+        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
         /// <summary>Sid2's screenshot shows the page title/footer over live
         /// gameplay on his 16:10 monitor while 16:9 machines never see it.
@@ -1223,14 +1236,10 @@ namespace CompetitiveRounds
                 // CustomBetPromptOpen (and the bets popup, its own GO gone
                 // but its flags live) survived host destruction — the IMGUI
                 // amount prompt kept rendering and its next Enter could
-                // submit the stale wager mid-game. Route through the same
-                // shared teardown as every other close.
+                // submit the stale wager mid-game. r7 find 2: ONE shared
+                // teardown, never a hand-copied subset.
                 isOpen=false;pageBuilt=false;
-                try{HideTournamentBetsPopup();}catch{}
-                try{CancelCustomBet();}catch{}
-                try{HideInfoPopup();}catch{}
-                try{HidePicker();}catch{}
-                SetClickBlocker(false);SetMenuFade(false);
+                TeardownOverlaySurfaces();
                 return;
             }
             if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;Close();return;}
@@ -6102,7 +6111,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // clear the pool or the next open reuses destroyed objects.
                 tTournBetRowPool.Clear();
                 tournBetsPopupRows = null;
-                if (tournBetsPopupGO != null) UnityEngine.Object.Destroy(tournBetsPopupGO);
+                if (tournBetsPopupGO != null)
+                {
+                    // Codex tournament r7 find 1: Object.Destroy is DEFERRED
+                    // to end of frame, and this popup's ClickHandlers carry
+                    // bypassModalBlock — a raw-poll handler running later in
+                    // the SAME frame's Update pass could still place a bet
+                    // (or reopen the amount prompt) after a match-start /
+                    // Escape close. Deactivate SYNCHRONOUSLY first:
+                    // ClickHandler.Update never runs on an inactive GO.
+                    try { tournBetsPopupGO.SetActive(false); } catch { }
+                    UnityEngine.Object.Destroy(tournBetsPopupGO);
+                }
                 tournBetsPopupGO = null;
             }
             catch { }
