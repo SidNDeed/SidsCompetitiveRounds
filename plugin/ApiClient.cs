@@ -7936,6 +7936,28 @@ namespace CompetitiveRounds
             SendEscapeRequest(null);
         }
 
+        /// <summary>Photon's cached best-region code ("home" region) from
+        /// PhotonNetwork.BestRegionSummaryInPreferences, or "" when absent.
+        /// Summary format (RegionHandler.SummaryToCache, verified in the
+        /// shipped decompile): "code;ping;available,codes" when a best region
+        /// is cached, OR just the bare comma-separated available list when
+        /// none is — hence both the semicolon guard (no ';' = no best region)
+        /// and the comma guard (a comma in the first token means we grabbed
+        /// the available-list, not a code).</summary>
+        private static string HomeRegionFromPhotonCache()
+        {
+            try
+            {
+                string sum = PhotonNetwork.BestRegionSummaryInPreferences ?? "";
+                int sc = sum.IndexOf(';');
+                if (sc <= 0) return "";
+                string code = sum.Substring(0, sc).Trim().ToLowerInvariant();
+                if (code.Length == 0 || code.Length > 8 || code.Contains(",")) return "";
+                return code;
+            }
+            catch { return ""; }
+        }
+
         public static void JoinQueue(string steamId, string displayName, string region, bool rankedOnly)
         {
             if (SpectatorBlocksQueue()) return;
@@ -7957,8 +7979,18 @@ namespace CompetitiveRounds
             {
                 try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
             }
+            // Aug 15 item 5 (Jarvis/Nix, both-Asian pair on a US room): also
+            // send Photon's cached BEST region — the player's HOME region from
+            // the ping cache. CloudRegion above is a join-time snapshot that
+            // casual region-churn (#82) or a not-connected menu state (#122)
+            // makes wrong or empty, and the server's room-region pick trusted
+            // it blindly (empty+empty fell through to "us"). Summary format is
+            // "code;ping;available,codes" — or just the comma list when no
+            // best region is cached (RegionHandler.SummaryToCache), hence the
+            // semicolon and comma guards.
+            string homeRegion = HomeRegionFromPhotonCache();
             string safeName = Escape(displayName ?? steamId);
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}}}";
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"home_region\":\"{Escape(homeRegion)}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}}}";
 
             int gen = ++queueGen;  // new lifecycle starts at SEND, not at the ack
             Plugin.Instance.StartCoroutine(PostRequest(

@@ -2,7 +2,9 @@
 
 ## v1.38.7 — 2026-08-15
 
-Schema changes: migration **221** (`pcolor_poison` body color; applied).
+Schema changes: migrations **221** (`pcolor_poison` body color; applied),
+**222** (`ranked_queue.home_region`; applied), **223** (76 machine-translation
+seeds for the new shop/vocab keys; applied).
 
 **Added**
 
@@ -65,6 +67,27 @@ Schema changes: migration **221** (`pcolor_poison` body color; applied).
   client" log entries; genuine mid-fight silence still gets flagged.
 - **Phoenix no longer floods the log** with ~2,000 harmless warnings per game
   while charging its revive.
+- **Community cosmetic translations actually show** (reported by Kyltist, our
+  Russian translator). Approved translations for community-made cosmetic
+  names and descriptions now render in the shop, on Home, and in the preview
+  — an early design decision had the game deliberately skip them while the
+  translation portal kept accepting the work, so approved entries (24 in
+  Russian alone) existed but never displayed.
+- **Nametag size previews show again.** The Bigger / XL / Huge / Float rows
+  rendered nothing after "Preview:" in every language — the preview's own
+  size tag was taller than the row and got clipped whole. Those rows now
+  grow to show the name at its true size, which is the point of the preview.
+- **Rarity and item-kind words translate.** "(rare)", "(common)", "(face)",
+  "(nametag)" and friends were never translatable at all. In Russian,
+  Spanish, Ukrainian and Swedish the rarity reads as a labeled phrase
+  ("редкость: эпическая") so the grammar works next to any item type.
+- **Fairer ranked-queue regions.** The room region used to be whichever
+  player's momentary connection region happened to win the coin toss — which
+  is how two same-region players could both end up on a 200-ping US server.
+  Now, when both players' Photon home region (its own ping cache) agrees,
+  that region is used, and any region signal beats the old "us" default.
+  Also fixed a pre-existing race where the two clients could be told
+  different regions for the same match and end up in separate rooms.
 
 **Changed**
 

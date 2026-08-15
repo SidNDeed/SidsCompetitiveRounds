@@ -607,6 +607,11 @@ class QueueJoinRequest(BaseModel):
     steam_id: str = Field(..., max_length=20)
     display_name: str | None = Field(None, max_length=64)
     region: str | None = Field(None, max_length=8)
+    # Aug 15 item 5: Photon's cached best-region ("home") — distinct from
+    # `region` (the live CloudRegion snapshot, which region-churn/offline
+    # states make wrong or empty). Optional so pre-1.38.7 clients keep
+    # working; the room-region pick prefers two AGREEING home regions.
+    home_region: str | None = Field(None, max_length=8)
     ranked_only: bool = False
 
 

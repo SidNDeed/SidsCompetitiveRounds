@@ -5222,9 +5222,10 @@ namespace CompetitiveRounds
                     if((c.kind??"")=="face"&&CustomCosmetics.GetShopSprite(c.sku)==null)
                     {if(row.artImg!=null)TrackAnimatedThumb(row.artImg,null,0f);row.root.SetActive(false);continue;}
                     string col=!string.IsNullOrEmpty(c.previewColor)&&c.previewColor.StartsWith("#")?c.previewColor:"#FFFFFF";
-                    // kind/rarity are finite server sets: Tr(variable) does a
-                    // runtime lookup (catalogue-by-value entries land separately).
-                    string kind=I18n.Tr((c.kind??"").Replace('_',' '));
+                    // kind/rarity are finite server sets — routed through the
+                    // literal-switch helpers so the words are real harvested
+                    // keys (Aug 15 item 3; Tr(variable) alone never harvests).
+                    string kind=TrKindWord(c.kind);
                     string artistLine=!string.IsNullOrEmpty(c.artistName)?"  "+I18n.TrF("<color=#888>by {0}</color>",HomeSan(c.artistName)):"";
                     // F14: same ISO-date preference as the caption above.
                     string addedDisp=c.dateIso.HasValue?DateFmt.Short(c.dateIso.Value):c.added;
@@ -5233,13 +5234,13 @@ namespace CompetitiveRounds
                     // tease — the artist sets the real price when opening
                     // sales, so the seed price would mislead.
                     string priceTag=c.onSale?I18n.TrF("<color=#FFD94D>{0}g</color>",c.price):I18n.Tr("<color=#FF9BE0>coming soon!</color>");
-                    // F12: same rule as the Shop list — FIRST-PARTY names
-                    // (artist empty) go through the runtime Tr lookup;
-                    // artist-authored names stay raw (never translated).
-                    string nameDisp=string.IsNullOrEmpty(c.artistName)?I18n.Tr(c.name):c.name;
+                    // F12: same rule as the Shop list — ALL names go through
+                    // the runtime Tr lookup (design-Q4 reversal, Aug 15
+                    // item 1); a catalogue miss falls back to the raw English.
+                    string nameDisp=I18n.Tr(c.name);
                     UIFactory.SetTextRaw(row.txt,
                         $"<color={col}>{HomeSan(nameDisp)}</color>  {priceTag}\n"
-                        +$"<color=#8FA3B8>({HomeSan(kind)}, {I18n.Tr(HomeSan(c.rarity))})</color>{artistLine}{addedTag}");
+                        +$"<color=#8FA3B8>({HomeSan(kind)}, {HomeSan(TrRarity(c.rarity))})</color>{artistLine}{addedTag}");
                     if(row.artImg!=null)
                     {
                         var pSprite=UIFactory.tImage.GetProperty("sprite",BindingFlags.Public|BindingFlags.Instance);
@@ -8464,6 +8465,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         {
             public GameObject root;
             public object txtName, txtDesc, txtPrice;
+            public GameObject txtDescGO;   // Aug 15 item 2: per-fill desc-box resize (size-preview rows)
             public GameObject buyBtn, setActiveBtn, previewBtn;
             public object buyBtnTxt, previewBtnTxt;
             public long itemId;
@@ -8674,8 +8676,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // ran 2px INTO the next row. The Name Styling preview is instead made
             // to FIT this box (no inline <size=> upscaling; see the preview
             // construction), which needs no layout budget at all.
+            // Aug 15 item 2: EXCEPT the size-family nametag skus, whose preview
+            // renders the sku's own <size=> tag and cannot fit 18px — those
+            // rows resize this box per fill (see tallPreview in ApplyShopRow),
+            // which is why the GO is captured here.
             row.txtDesc = UIFactory.CreateText($"sd{idx}", info.transform, "", 13f, C_DIM,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(500, 18));
+            row.txtDescGO = (row.txtDesc as Component)?.gameObject;
 
             row.txtPrice = UIFactory.CreateText($"sp{idx}", row.root.transform, "", 17f, C_GOLD,
                 UIFactory.AlignMidRight, sizeDelta: new Vector2(120, 30));
@@ -9341,12 +9348,52 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // the SetTextRaw below for how ~52 falls out of the column's width.
         private const int SHOP_NAME_BUDGET = 52;
 
+        // ── Server-enum display vocab (Aug 15 item 3, Kyltist) ─────────────
+        // shop_items.rarity / kind are finite server value sets rendered via
+        // Tr(variable), which the extractor cannot harvest (#295a) — and the
+        // words were never added anywhere harvestable, so "(rare)" and
+        // "(face, common)" rendered English in every locale. These switches
+        // keep the lookup live AND give the extractor literal Tr() sites to
+        // harvest, so the values become real catalogue keys. Keep the arms in
+        // sync with the DB enums; the default arm covers a future value
+        // (renders raw / by-value until an arm is added here).
+        private static string TrRarity(string rarity)
+        {
+            switch (rarity ?? "")
+            {
+                case "common":    return I18n.Tr("common");
+                case "uncommon":  return I18n.Tr("uncommon");
+                case "rare":      return I18n.Tr("rare");
+                case "epic":      return I18n.Tr("epic");
+                case "legendary": return I18n.Tr("legendary");
+                default:          return I18n.Tr(rarity ?? "");
+            }
+        }
+
+        // Kind words use the Home row's display form (underscores → spaces).
+        private static string TrKindWord(string kind)
+        {
+            switch (kind ?? "")
+            {
+                case "face":          return I18n.Tr("face");
+                case "title":         return I18n.Tr("title");
+                case "trail":         return I18n.Tr("trail");
+                case "color":         return I18n.Tr("color");
+                case "nametag":       return I18n.Tr("nametag");
+                case "player_color":  return I18n.Tr("player color");
+                case "cursor_color":  return I18n.Tr("cursor color");
+                case "player_effect": return I18n.Tr("player effect");
+                case "utility":       return I18n.Tr("utility");
+                default:              return I18n.Tr((kind ?? "").Replace('_', ' '));
+            }
+        }
+
         private static void ApplyShopRow(ShopRow r, ApiClient.ShopItemData it, int balance, ApiClient.PlayerStatsData s)
         {
             r.itemId = it.id;
             r.sku = it.sku;
             r.kind = it.kind;
-            r.displayName = it.name;   // Aug 7 item 10
+            r.displayName = I18n.Tr(it.name);   // Aug 7 item 10 (Tr'd Aug 15 item 1 — modal title)
             // Click-to-highlight: tint the whole row while selected. Rows are
             // pooled, so both states must be asserted on every fill.
             UIFactory.SetImageColor(r.root, (!string.IsNullOrEmpty(shopSelectedSku) && shopSelectedSku == it.sku) ? C_ROWSEL : C_PANEL);
@@ -9355,12 +9402,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // elsewhere keep the true color).
             string col = ReadableNameColor(it.preview_color);
             // Item 9: artist credit inline — makes the by-artist grouping legible.
-            // i18n item 2: first-party names/rarity go through Tr(variable)
-            // (runtime lookup; catalogue-by-value entries land separately) —
-            // artist-authored names stay RAW per design Q4.
+            // Aug 15 item 1 (Kyltist): names go through Tr for ALL items now —
+            // the old "artist-authored stays raw" split (design Q4, reversed by
+            // Sid) made every approved community-item translation unrenderable
+            // (24 approved ru entries were dead in prod while the portal kept
+            // inviting the work). A catalogue miss falls back to the raw
+            // English, so untranslated items render exactly as before. The
+            // artist HANDLE stays raw — it is identity, not prose.
             string artistRaw = it.artist_name ?? "";
-            string nameRaw = string.IsNullOrEmpty(artistRaw) ? I18n.Tr(it.name) : it.name;
-            string rarityDisp = I18n.Tr(it.rarity) ?? "";
+            string nameRaw = I18n.Tr(it.name);
+            string rarityDisp = TrRarity(it.rarity);
             /* Aug-3 review find F5 (audit of the FitOneLine sweep). r.txtName now
              * carries FitOneLine — Overflow + no wrap — so nothing clips its tail,
              * and its row's right-hand neighbours are the price cell and the Buy
@@ -9433,8 +9484,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // Aug 7 item 10: face art 80->112 / row 88->120 ("make the preview
             // pictures bigger"). Rows live inside SHSV's flexH:1 ScrollView, so
             // taller rows only cost scroll length (#63/#199 do not bite here).
+            // Aug 15 item 2 (Kyltist, "Имя XL shows no preview"): the size
+            // nametag skus wrap the preview in their OWN <size=> tag (130-160%)
+            // — a ~27px line in the 18px desc box, which the global Truncate
+            // default clips WHOLE, so everything after "Preview:" vanished in
+            // every locale (the earlier fix at the preview construction removed
+            // only the bold-emphasis upscale, not the sku tags). Render the
+            // TRUE size in a taller box instead of shrinking it — showing the
+            // size IS the preview. nametag_float's <voffset> raises the line
+            // extents the same way, so it rides along. Both prefH AND minH
+            // must move (CreateText pins minH = sizeDelta.y — see SetMinH's
+            // note), and both states are asserted every fill because rows are
+            // pooled across kinds.
+            bool tallPreview = it.kind == "nametag"
+                && (NametagStyler.GetSubgroup(it.sku) == "size" || it.sku == "nametag_float");
             if (r.artImgGO != null) UIFactory.SetPrefWH(r.artImgGO, bigArt ? 112 : 40, bigArt ? 112 : 40);
-            UIFactory.SetPrefH(r.root, bigArt ? 120 : 44);
+            UIFactory.SetPrefH(r.root, bigArt ? 120 : tallPreview ? 64 : 44);
+            if (r.txtDescGO != null)
+            {
+                UIFactory.SetPrefH(r.txtDescGO, tallPreview ? 30 : 18);
+                UIFactory.SetMinH(r.txtDescGO, tallPreview ? 30 : 18);
+            }
             bool showSwatches = false;
             if (it.kind == "color" && r.swatchGO != null && CustomMapColors.IsCustomSku(it.sku))
             {
@@ -9510,11 +9580,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             else
             {
-                // i18n item 2 split: FIRST-PARTY descriptions (no artist) go
-                // through Tr(variable) — catalogue-by-value entries land
-                // separately; ARTIST-authored body text stays raw (design Q4).
-                // Mod-authored suffixes are Tr'd/TrF'd BEFORE concatenation.
-                string desc = string.IsNullOrEmpty(it.artist_name) ? I18n.Tr(it.description ?? "") : (it.description ?? "");
+                // Aug 15 item 1: descriptions go through Tr for ALL items —
+                // artist-authored included (design-Q4 reversal; see the name
+                // line above for why). Mod-authored suffixes are Tr'd/TrF'd
+                // BEFORE concatenation (compose-after-Tr, #298c).
+                string desc = I18n.Tr(it.description ?? "");
                 // Limited-stock counter (v1.30). The artist byline lives on the
                 // NAME line only now (round 3 item 1 — twice per row was noise).
                 if (it.stock_limit < 0)
@@ -9532,9 +9602,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
                 if (it.kind == "face")
                     desc += "  " + I18n.Tr("<color=#888>(equip in the character editor)</color>");
-                // Raw stays deliberate: community-item descriptions are
-                // ARTIST-authored user strings, and the composed result can
-                // never be a whole-string key anyway.
+                // SetTextRaw stays deliberate: the COMPOSED string (desc +
+                // stock/editor suffixes) can never be a whole-string catalogue
+                // key — every part was translated individually above (#298c).
                 UIFactory.SetTextRaw(r.txtDesc, desc);
                 // Recycled row - if it was previously showing a glow / typeface preview,
                 // restore the originals in the same order as apply (font first, glow second).

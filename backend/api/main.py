@@ -2557,7 +2557,12 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.7"
+# DEPLOY HOLD (Aug 15): announce 1.38.6 until the 1.38.7 GitHub release
+# actually exists — the client bump is committed (Plugin.ModVersion=1.38.7)
+# but unreleased, and announcing a latest the updater cannot fetch makes
+# every standalone client download 1.38.6 in a loop and nag each launch.
+# The 1.38.7 /ship pass sets this back to "1.38.7" as its normal step.
+LATEST_MOD_VERSION = "1.38.6"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -8854,6 +8859,37 @@ async def _enrollment_identity_gate(db: AsyncSession, steam_id: str) -> None:
             raise HTTPException(status_code=410, detail="account_deleted")
 
 
+def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
+    """Room-region decision for a 1v1 queue pair (Aug 15 item 5, Jarvis/Nix).
+
+    History: the pick used to be `entry.region or opp.region or "us"` —
+    i.e. the join-time CloudRegion snapshot of whichever player's request
+    happened to trigger room issuance. That snapshot is wrong after casual
+    quickplay region-churn (#82) and empty when the client wasn't connected
+    at join (menu after Sandbox, #122; mid-reconnect) — so a both-Asian
+    pair could land on "us" with 200ms ping for BOTH seats.
+
+    New rule, in order:
+      1. Both HOME regions (Photon best-region ping cache, sent by 1.38.7+
+         clients) agree -> use them. Same-region pairs now always land home
+         no matter what either client was connected to at join time.
+      2. Otherwise the old live-snapshot chain, then the home regions as
+         further fallbacks — ANY region signal beats the "us" default
+         (empty+empty previously fell straight through to us).
+    The one-line log makes the next region report diagnosable from logs:api
+    without a repro.
+    """
+    mh = (my_home or "").strip().lower()
+    oh = (opp_home or "").strip().lower()
+    if mh and mh == oh:
+        chosen = mh
+    else:
+        chosen = my_region or opp_region or mh or oh or "us"
+    print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
+          f"live=({my_region},{opp_region}) home=({mh},{oh})")
+    return chosen
+
+
 @app.post("/api/v1/queue/join", tags=["Queue"])
 async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """
@@ -8911,6 +8947,12 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     cur_rating = glicko.rating if glicko else GLICKO2_DEFAULT_RATING
     cur_rd = glicko.rating_deviation if glicko else GLICKO2_DEFAULT_RD
 
+    # Aug 15 item 5: normalized home region (Photon best-region cache, sent
+    # by 1.38.7+ clients; None from older ones). Kept separate from `region`
+    # (the live CloudRegion snapshot) — the room-region pick prefers two
+    # AGREEING home regions over either snapshot.
+    _home_region = (req.home_region or "").strip().lower()[:8] or None
+
     # Upsert into queue
     stmt = pg_insert(RankedQueue).values(
         player_id=player.id,
@@ -8919,6 +8961,7 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
         rating=cur_rating,
         rating_deviation=cur_rd,
         region=req.region,
+        home_region=_home_region,
         ranked_only=req.ranked_only,
         status="searching",
         matched_with=None,
@@ -8935,6 +8978,7 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
             "rating": cur_rating,
             "rating_deviation": cur_rd,
             "region": req.region,
+            "home_region": _home_region,
             "ranked_only": req.ranked_only,
             "matched_with": None,
             "room_name": None,
@@ -9486,8 +9530,8 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         text("""
             SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                    rq.rating_deviation, rq.status, rq.matched_with,
-                   rq.room_name, rq.room_region, rq.region, rq.ready,
-                   rq.joined_at, rq.matched_at
+                   rq.room_name, rq.room_region, rq.region, rq.home_region,
+                   rq.ready, rq.joined_at, rq.matched_at
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -9528,8 +9572,8 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             text("""
                 SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                        rq.rating_deviation, rq.status, rq.matched_with,
-                       rq.room_name, rq.room_region, rq.region, rq.ready,
-                       rq.joined_at, rq.matched_at
+                       rq.room_name, rq.room_region, rq.region, rq.home_region,
+                       rq.ready, rq.joined_at, rq.matched_at
                 FROM ranked_queue rq
                 JOIN players p ON rq.player_id = p.id
                 WHERE p.steam_id = :sid
@@ -9576,7 +9620,8 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         # visible at the point someone would be tempted to reintroduce it.
         opp_result = await db.execute(
             text("""
-                SELECT player_id, steam_id, display_name, rating, ready, room_name, region
+                SELECT player_id, steam_id, display_name, rating, ready, room_name,
+                       region, home_region
                 FROM ranked_queue WHERE player_id = :oid
             """),
             {"oid": entry["matched_with"]},
@@ -9625,6 +9670,15 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         # Both ready — generate room if not already done
         if my_ready and opp_ready:
             room_just_generated = not room_name
+            # Aug 15 item 5 companion: the response must carry the region the
+            # ROWS actually got. On the ISSUING poll, entry[] is the pre-stamp
+            # snapshot (room_region still NULL), so deriving the response from
+            # it could hand THIS client a different region than the one just
+            # stamped for the pair — a split-room recipe the moment the pick
+            # can differ from entry["region"], which the home-agreement rule
+            # makes routine. Replay polls re-read the row, so the stamped
+            # value is already in entry there.
+            _region_out = entry["room_region"] or entry["region"] or "us"
             if not room_name:
                 # ALL-member ban recheck at room issuance (round-17 find 2):
                 # a ban committing after U readied leaves U's ready row
@@ -9652,8 +9706,12 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                         status="not_in_queue" if my_pid in _banned_pids else "searching",
                         wait_time=wait_seconds)
                 room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
-                # Pick region: use our region (first poller), fallback to opponent's, fallback to "us"
-                chosen_region = entry["region"] or opp["region"] or "us"
+                # Aug 15 item 5: agreeing home regions beat the first-poller
+                # live snapshot (see _pick_room_region).
+                chosen_region = _pick_room_region(
+                    entry["region"], entry["home_region"],
+                    opp["region"], opp["home_region"], room_name)
+                _region_out = chosen_region
                 for pid in [my_pid, opp["player_id"]]:
                     await db.execute(
                         text("UPDATE ranked_queue SET room_name = :room, room_region = :region WHERE player_id = :pid"),
@@ -9705,7 +9763,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 opponent_rating=opp["rating"],
                 opponent_ready=True,
                 room_name=room_name,
-                photon_region=entry["room_region"] or entry["region"] or "us",
+                photon_region=_region_out,
                 series_id=str(series.id),
                 p1_steam_id=(steam_id if series.player1_id == my_pid else opp["steam_id"]),
                 p2_steam_id=(opp["steam_id"] if series.player1_id == my_pid else steam_id),
@@ -9899,7 +9957,8 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
 
     entry_result = await db.execute(
         text("""
-            SELECT player_id, status, matched_with, room_name, room_region, region, ready
+            SELECT player_id, status, matched_with, room_name, room_region, region,
+                   home_region, ready
             FROM ranked_queue WHERE player_id = :pid
         """),
         {"pid": player.id},
@@ -9933,7 +9992,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     # the matched_at reset below from letting polls see a half-state) — plain read.
     opp_result = await db.execute(
         text("""
-            SELECT player_id, steam_id, ready, room_name, region
+            SELECT player_id, steam_id, ready, room_name, region, home_region
             FROM ranked_queue WHERE player_id = :oid
         """),
         {"oid": entry["matched_with"]},
@@ -9979,7 +10038,12 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
                 raise HTTPException(409, "match dissolved (participant banned)")
             room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
             room_generated = True
-            chosen_region = entry["region"] or (opp["region"] if opp else None) or "us"
+            # Aug 15 item 5: agreeing home regions beat the readier's live
+            # snapshot (see _pick_room_region). opp is non-None in this
+            # branch (the both-ready gate above).
+            chosen_region = _pick_room_region(
+                entry["region"], entry["home_region"],
+                opp["region"], opp["home_region"], room_name)
             for pid in [player.id, opp["player_id"]]:
                 await db.execute(
                     text("UPDATE ranked_queue SET room_name = :room, room_region = :region WHERE player_id = :pid"),

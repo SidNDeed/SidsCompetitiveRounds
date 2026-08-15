@@ -500,6 +500,13 @@ class RankedQueue(Base):
     rating = Column(Double, nullable=False, default=1500)
     rating_deviation = Column(Double, nullable=False, default=350)
     region = Column(String(8), nullable=True)
+    # Aug 15 item 5: Photon best-region cache ("home") from 1.38.7+ clients;
+    # NULL from older ones. DEPLOY ORDER: migration 222 must apply BEFORE the
+    # API deploy that ships this line — the queue-join pg_insert and the
+    # poll/ready SELECTs reference the column, so an unmigrated DB 500s every
+    # /queue/join (#346's writer-enumeration rule: writers = queue_join
+    # upsert; readers = queue poll + ready region picks).
+    home_region = Column(String(8), nullable=True)
     ranked_only = Column(Boolean, nullable=False, default=False)
     status = Column(String(16), nullable=False, default="searching")
     matched_with = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)

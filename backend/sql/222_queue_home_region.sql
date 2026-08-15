@@ -1,0 +1,29 @@
+-- 222_queue_home_region.sql
+--
+-- Aug 15 item 5 (Jarvis/Nix: both-Asian ranked pair placed on a US room,
+-- 200ms ping for both seats).
+--
+-- The 1v1 room-region pick was `entry.region OR opp.region OR 'us'` —
+-- entry.region being the join-time PhotonNetwork.CloudRegion snapshot of
+-- whichever player's request happened to trigger room issuance. That
+-- snapshot is wrong after casual quickplay region-churn (#82) and empty
+-- when the client wasn't connected at queue join (#122), so a same-region
+-- pair could be sent far away, and empty+empty always fell through to us.
+--
+-- 1.38.7+ clients now also send Photon's cached BEST region (the "home"
+-- region from the ping cache, PhotonNetwork.BestRegionSummaryInPreferences)
+-- at queue join. The pick prefers two AGREEING home regions; the live
+-- snapshot chain stays as fallback (see _pick_room_region in main.py).
+--
+-- DEPLOY ORDER: this migration BEFORE the API deploy — the new code's
+-- queue-join upsert and poll/ready SELECTs reference the column, so an
+-- unmigrated DB would 500 every /queue/join. Old code + migrated DB is
+-- fine (the column just sits NULL), which is the safe direction.
+--
+-- Idempotent statement-by-statement (the deploy wrapper's `||` fallback
+-- re-runs the whole file on any nonzero exit, #243). Single ALTER — no
+-- explicit transaction needed; there is no data backfill (rows are
+-- transient queue state, and NULL means "client didn't report", which is
+-- exactly what pre-1.38.7 rows are).
+
+ALTER TABLE ranked_queue ADD COLUMN IF NOT EXISTS home_region VARCHAR(8);
