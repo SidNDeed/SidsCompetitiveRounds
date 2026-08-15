@@ -68,6 +68,49 @@
 - Uploaded cosmetic images are now fully validated and re-encoded server-side, so
   nothing can ride along inside an image file.
 
+## v1.38.6 — 2026-08-14
+
+**Fixed**
+
+- **The mid-fight hitch in busy games (bug 217).** When a bullet's hit
+  notification arrived for something this client had already cleaned up, the
+  error it threw took the rest of that network packet batch down with it —
+  every other player's position update queued behind it arrived late. That is
+  the "bullets and player positions lag while ping looks fine" feel. The error
+  is now contained (17 hits in the two reported FFA games; the previous
+  night's session had 87), and a companion guard quiets the bullet-pool
+  teardown error that rode the same stacks.
+- **Spectator join is far cleaner (bug 216).** Replayed leftovers from the
+  room's past can no longer collide with anything during the join (they are
+  made physics-inert the moment they appear), and the thousands of harmless
+  "no such PhotonView" warnings a spectator seat used to burn CPU and log
+  space on are silenced and counted instead.
+- **Poison now shows on the spectator seat.** A stale local dead/respawning
+  flag on one replica could eat every accepted poison verdict for that player
+  — their health bar never moved for the whole observation. The observer no
+  longer vetoes the victim's own authority using local lifecycle bits.
+- **FFA scoreboard log lines carry names again** instead of nametag markup,
+  and the stale-projectile sweep's diagnostic no longer goes quiet after the
+  first game.
+- **"I poisoned him and nothing happened" at round ends (bug 221).** A poison
+  hit landing in the round-transition window starts a stream no client will
+  ever honor (the revive already cancelled it — vanilla behaviour), but the
+  watchdog treated that silence as a possible cheat and logged accusations
+  against innocent players. Boundary-window streams are now recognized for
+  what they are; genuine mid-fight silence still gets flagged.
+- **Map skins did their full recolor work twice at every round transition.**
+  Two code paths each scheduled the same deferred tint pass, so every client
+  with a map skin walked all renderers and particles twice back-to-back at
+  exactly the moment rounds change — measured in two players' logs at 2x per
+  transition. Now it runs once.
+
+**New**
+
+- **Network health line in the log.** Every 10 seconds in an online room the
+  log records ping, effective fps, actor count and dispatch-guard counters —
+  so the next "it felt laggy" report can be diagnosed from the bundle instead
+  of guessed at.
+
 ## v1.38.4 (2026-08-11) — Translator titles and portal progress
 
 Schema: migration **214**.
