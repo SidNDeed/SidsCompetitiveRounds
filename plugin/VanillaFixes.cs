@@ -1059,18 +1059,32 @@ namespace CompetitiveRounds
     }
 
     /// <summary>Bug #217 (Aug 13 FFA "latency lag with bullets and player
-    /// positions"): an exception thrown inside a PunRPC body propagates out
-    /// through PhotonNetwork.ExecuteRpc into EnetPeer.DispatchIncomingCommands,
-    /// and Photon ABORTS the remainder of that incoming dispatch batch — every
-    /// position/serialization update queued behind the faulting RPC is deferred
-    /// to a later FixedUpdate. The user feels a hitch in bullets AND player
-    /// positions at the moment a hit lands, while ping/fps/resend telemetry
-    /// stay flat. 23 such aborts in the bug-217 session, 87 in bug-214's
+    /// positions") — mechanism CORRECTED post-ship (Codex ultra, Aug 15;
+    /// learning #366 supersedes #362's queue story): an exception thrown
+    /// inside a PunRPC body propagates out through ExecuteRpc into
+    /// PhotonHandler.Dispatch's per-command loop, whose catch RECORDS the
+    /// exception and KEEPS DRAINING — the batch is NOT aborted and no
+    /// position/serialization update is deferred (decompile: Dispatch()'s
+    /// while-loop catch stores ex and continues; production logs carry
+    /// "Caught 2 exception(s)" aggregates, impossible under an abort).
+    /// What each fault actually cost on 1.38.5: exception + stack-capture
+    /// construction and a multi-line log burst (I/O) per fault, the
+    /// AggregateException rethrow unwinding out of FixedUpdate, and the
+    /// faulting command's own post-callback cleanup being skipped. This
+    /// guard removes those costs and feeds the [NET] counter; it does NOT
+    /// rescue deliveries — the faults are SYMPTOMS of dead/diverged
+    /// projectile replicas (#366's causal model), which is where the real
+    /// fixes live. 23 faults in the bug-217 session, 87 in bug-214's
     /// (v1.38.4), so the class long predates the Radiance change. RPCA_DoHit
     /// is the only RPC observed faulting: its body dereferences
     /// GetPhotonView(viewID) results, the map collider array and component
     /// lookups with no null checks, so a hit replicated after this client
     /// already retired the target NREs (decompile ProjectileHit.cs:199+).
+    /// SCOPE note (#366): RpcTarget.All executes locally SYNCHRONOUSLY, so
+    /// this finalizer also lets the SHOOTER's caller (e.g. RayCastTrail.
+    /// Update) continue past a failed local hit where 1.38.5 unwound one
+    /// component's frame — no damage-suppression path exists either way,
+    /// but the containment is broader than "incoming dispatch".
     ///
     /// SWALLOW-ONLY, strictly better than the status quo: today the NRE
     /// aborts RPCA_DoHit at some statement AND kills the rest of the Photon

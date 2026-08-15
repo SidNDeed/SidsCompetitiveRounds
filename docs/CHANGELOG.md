@@ -6,12 +6,14 @@
 
 - **The mid-fight hitch in busy games (bug 217).** When a bullet's hit
   notification arrived for something this client had already cleaned up, the
-  error it threw took the rest of that network packet batch down with it —
-  every other player's position update queued behind it arrived late. That is
-  the "bullets and player positions lag while ping looks fine" feel. The error
-  is now contained (17 hits in the two reported FFA games; the previous
-  night's session had 87), and a companion guard quiets the bullet-pool
-  teardown error that rode the same stacks.
+  error it threw burned real frame time — building the exception, capturing
+  stacks, and writing a multi-line log burst at exactly the busiest moments —
+  and skipped that packet's own cleanup. The error is now contained (17 hits
+  in the two reported FFA games; the previous night's session had 87), and a
+  companion guard quiets the bullet-pool teardown error that rode the same
+  stacks. *(Correction, Aug 15: this entry originally claimed the error also
+  held up the rest of the packet batch — the decompile disproves that; see
+  the code comments. The containment and its measured benefits stand.)*
 - **Spectator join is far cleaner (bug 216).** Replayed leftovers from the
   room's past can no longer collide with anything during the join (they are
   made physics-inert the moment they appear), and the thousands of harmless
