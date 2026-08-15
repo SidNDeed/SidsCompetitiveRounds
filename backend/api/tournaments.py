@@ -626,6 +626,25 @@ def _bracket_tag(side: Optional[str]) -> str:
     return {"W": "WB", "L": "LB", "GF": "GF", "GF_RESET": "GF Reset", "TP": "TP"}.get(side or "", side or "")
 
 
+def _round_label(side: Optional[str], rnd) -> str:
+    """Human bracket-position label ("Winners R2", "Losers R1", "Grand Final").
+
+    Shared composer for every tournament tag surface (preflight response,
+    /series/recent feed rows, completion-notice payloads) so the label can
+    never drift between the in-game banner and the Discord post (#152/#329).
+    ASCII ONLY — the preflight copy renders in-game and Gravity's SDF atlas
+    has no em-dash/bullet glyphs (#47)."""
+    if side == "GF":
+        return "Grand Final"
+    if side == "GF_RESET":
+        return "Grand Final Reset"
+    if side == "TP":
+        return "Third-Place Match"
+    if side == "L":
+        return f"Losers R{rnd}"
+    return f"Winners R{rnd}"
+
+
 def _compute_progress_labels(tournament: Tournament, all_matches: list) -> dict:
     """For each signup_id in the bracket, return a one-word label that describes
     where they are in the tournament. Called in the /current response builder
@@ -1452,12 +1471,14 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.status = "forfeit"
             m.ended_at = now
             await _apply_terminal_transitions(db, m, m.winner_signup_id)
+            await _enqueue_match_completion_notices(db, m)
             continue
         if p2_ff and not p1_ff and m.p1_signup_id:
             m.winner_signup_id = m.p1_signup_id
             m.status = "forfeit"
             m.ended_at = now
             await _apply_terminal_transitions(db, m, m.winner_signup_id)
+            await _enqueue_match_completion_notices(db, m)
             continue
         if p1_ff and p2_ff:
             # Both no-showed. Downstream matches need a winner_signup_id to
@@ -1477,6 +1498,7 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.winner_signup_id = winner_id
             m.ended_at = now
             await _apply_terminal_transitions(db, m, winner_id)
+            await _enqueue_match_completion_notices(db, m)
             continue
 
         if not (m.p1_signup_id and m.p2_signup_id):
@@ -1735,6 +1757,265 @@ async def _apply_terminal_transitions(db: AsyncSession, m: TournamentMatch, winn
     return _recheck_sid
 
 
+# Terminal bracket-match states. bye_auto is deliberately NOT here for the
+# notice path: a bye completes nothing a player just played.
+_MATCH_TERMINAL_STATES = ("completed", "forfeit", "double_forfeit")
+
+
+async def _enqueue_match_completion_notices(db: AsyncSession, m: TournamentMatch) -> None:
+    """Queue match-completion DM notices for BOTH participants of a match that
+    just reached a terminal state (Aug 14 contract, kinds: match_won_waiting /
+    match_won_next_ready / match_lost_lb / match_lost_out). Same table +
+    delivery/ack shape as availability_check (#105/#167); the bot polls
+    GET /internal/tournament-notices and acks after the DM lands. Old bot
+    builds ack-and-skip unknown notice_type values, so nothing starves.
+
+    NEVER in the failure domain of the bracket advance it announces (#187):
+    everything runs inside a SAVEPOINT and any error is logged, not raised —
+    asyncpg poisons the whole transaction on a failed statement otherwise
+    (#235), which would take the completion itself down with the DM.
+
+    IDEMPOTENCY: the table's UNIQUE is (tournament_id, player_id,
+    notice_type) — one row per kind per player per tournament — but a player
+    legitimately earns the same match_won_* kind once per ROUND. The
+    ON CONFLICT DO UPDATE below re-arms the existing row (fresh payload,
+    notified_at = NULL) ONLY when the payload's match_id differs, so:
+      - a RERUN of the completion path for the same match is a no-op (the
+        contract's per-(match, recipient) idempotency), and
+      - a later round's win supersedes the previous round's row instead of
+        being silently swallowed by DO NOTHING. A superseded-but-undelivered
+        notice is replaced, which is correct — "you won R2" strictly
+        outranks a stale "you won R1" that never sent (rounds are minutes
+        apart at minimum, so the window is theoretical anyway)."""
+    _m_id = m.id
+    try:
+        async with db.begin_nested():
+            await _enqueue_completion_notices_inner(db, m)
+    except Exception as ex:
+        print(f"[TOURNAMENT] completion notices for match {_m_id} failed (non-fatal): {ex}")
+
+
+async def _enqueue_completion_notices_inner(db: AsyncSession, m: TournamentMatch) -> None:
+    if m.status not in _MATCH_TERMINAL_STATES or m.winner_signup_id is None:
+        return
+    if not (m.p1_signup_id and m.p2_signup_id):
+        return
+    t = await _get_tournament(db, m.tournament_id)
+    all_matches = (await db.execute(select(TournamentMatch).where(
+        TournamentMatch.tournament_id == m.tournament_id))).scalars().all()
+    by_id = {x.id: x for x in all_matches}
+
+    winner_id = m.winner_signup_id
+    loser_id = m.p1_signup_id if winner_id == m.p2_signup_id else m.p2_signup_id
+    _done_states = _MATCH_TERMINAL_STATES + ("bye_auto",)
+
+    def _role_at(n: TournamentMatch, i: int) -> str:
+        roles = list(n.prereq_roles or [])
+        r = roles[i] if i < len(roles) else None
+        if r in ("W", "L"):
+            return r
+        # Legacy empty-roles fallback — same rule _activate_ready_matches uses.
+        return "L" if n.bracket_side == "TP" else "W"
+
+    def _loser_of_match(p: TournamentMatch):
+        if p.winner_signup_id is None:
+            return None
+        return p.p1_signup_id if p.winner_signup_id == p.p2_signup_id else p.p2_signup_id
+
+    def _consumer_of(mid, want_role: str):
+        """The match that consumes mid's winner ("W") or loser ("L")."""
+        for n in all_matches:
+            if n.id == mid:
+                continue
+            for i, pid in enumerate(list(n.prereq_match_ids or [])):
+                if pid == mid and _role_at(n, i) == want_role:
+                    return n
+        return None
+
+    def _next_undecided_seated(subject):
+        cands = [n for n in all_matches
+                 if n.winner_signup_id is None
+                 and n.status not in _done_states
+                 and subject in (n.p1_signup_id, n.p2_signup_id)]
+        cands.sort(key=lambda n: (n.round, str(n.id)))
+        return cands[0] if cands else None
+
+    def _opponent_info(n: TournamentMatch, subject):
+        """(opponent_signup_id | None, waiting_prereq_match | None) for the
+        subject's seat in their next match n. Seats win when populated;
+        otherwise the opponent is resolved from n's OTHER prereq's decided
+        contribution, so a forfeit-path notice (no activation ran yet) can
+        still name a known opponent instead of claiming to wait."""
+        opp = None
+        if n.p1_signup_id == subject:
+            opp = n.p2_signup_id
+        elif n.p2_signup_id == subject:
+            opp = n.p1_signup_id
+        if opp is not None:
+            return opp, None
+        pids_n = list(n.prereq_match_ids or [])
+        if len(pids_n) < 2:
+            return None, None
+        subj_idx = None
+        for i, pid in enumerate(pids_n):
+            p = by_id.get(pid)
+            if p is None:
+                continue
+            contrib = p.winner_signup_id if _role_at(n, i) == "W" else _loser_of_match(p)
+            if contrib == subject:
+                subj_idx = i
+                break
+        if subj_idx is None:
+            return None, None
+        j = 1 - subj_idx
+        p = by_id.get(pids_n[j]) if 0 <= j < len(pids_n) else None
+        if p is None:
+            return None, None
+        contrib = p.winner_signup_id if _role_at(n, j) == "W" else _loser_of_match(p)
+        if contrib is not None and contrib != subject:
+            return contrib, None
+        return None, p
+
+    def _fate(subject, want_role: str):
+        """(next_match | None, opponent_signup | None, waiting_match | None).
+        next_match None = no onward match (champion / TP winner / eliminated)."""
+        n = _next_undecided_seated(subject)
+        if n is None:
+            n = _consumer_of(m.id, want_role)
+            # An already-resolved consumer (insta-forfeit cascade — e.g. the
+            # opponent seat was a banned/forfeited signup): follow the chain
+            # while the subject keeps winning; anything else means they are
+            # out. Bounded — a bracket is at most ~5 rounds deep either side.
+            steps = 0
+            while (n is not None and steps < 12
+                   and (n.winner_signup_id is not None or n.status in _done_states)):
+                if n.winner_signup_id != subject:
+                    return None, None, None
+                n = _consumer_of(n.id, "W")
+                steps += 1
+            # Step-cap tail guard: if the walk ran out with n still decided,
+            # answer "no onward match" rather than describing a decided one.
+            if n is not None and (n.winner_signup_id is not None or n.status in _done_states):
+                return None, None, None
+        if n is None:
+            return None, None, None
+        opp, wait = _opponent_info(n, subject)
+        return n, opp, wait
+
+    w_next, w_opp, w_wait = _fate(winner_id, "W")
+    l_next, l_opp, l_wait = _fate(loser_id, "L")
+
+    # One name/player lookup for everyone the payloads mention.
+    need = {winner_id, loser_id, w_opp, l_opp}
+    for w in (w_wait, l_wait):
+        if w is not None:
+            need.add(w.p1_signup_id)
+            need.add(w.p2_signup_id)
+    ids = [str(x) for x in need if x]
+    sig_map = {}
+    if ids:
+        for r in (await db.execute(text(
+            "SELECT ts.id::text AS sig_id, ts.player_id, ts.placed_rank, "
+            "       p.steam_id, p.display_name "
+            "  FROM tournament_signups ts JOIN players p ON p.id = ts.player_id "
+            " WHERE ts.id::text = ANY(:ids)"), {"ids": ids})).mappings().all():
+            sig_map[r["sig_id"]] = r
+
+    def _name(sig_id) -> str:
+        r = sig_map.get(str(sig_id)) if sig_id else None
+        return (r["display_name"] if r else None) or "TBD"
+
+    def _steam(sig_id) -> str:
+        r = sig_map.get(str(sig_id)) if sig_id else None
+        return (r["steam_id"] if r else None) or ""
+
+    def _waiting_str(w) -> str:
+        if w is None:
+            return "TBD"
+        a, b = _name(w.p1_signup_id), _name(w.p2_signup_id)
+        return "TBD" if (a == "TBD" and b == "TBD") else f"{a} vs {b}"
+
+    def _next_extra(n, opp, wait) -> dict:
+        extra = {
+            "next_match_label": _round_label(n.bracket_side, n.round),
+            "next_round": int(n.round or 0),
+            "next_bracket_side": n.bracket_side or "",
+            "next_deadline_ts": int(n.deadline_at.timestamp()) if n.deadline_at else None,
+            # Codex tournament-batch r1 find 7: "opponent known" is NOT
+            # "match ready" — a sync match can sit 'scheduled' through the
+            # between-rounds break with both seats filled. The bot renders
+            # go-now copy only for 'ready' and holding copy otherwise.
+            "next_status": n.status or "",
+        }
+        if opp is not None:
+            extra["opponent_name"] = _name(opp)
+            extra["opponent_steam_id"] = _steam(opp)
+        else:
+            extra["waiting_on"] = _waiting_str(wait)
+        return extra
+
+    async def _ins(recipient_sig_id, ntype: str, extra: dict) -> None:
+        row = sig_map.get(str(recipient_sig_id))
+        if row is None:
+            return
+        payload = json.dumps({
+            "kind": t.kind,
+            "label": f"{_kind_label(t.kind)} tournament",
+            "tournament_id": str(t.id),
+            "match_id": str(m.id),
+            "resolution": m.status,   # completed | forfeit | double_forfeit
+            "round": int(m.round or 0),
+            "bracket_side": m.bracket_side or "",
+            "match_label": _round_label(m.bracket_side, m.round),
+            **extra,
+        })
+        # See the idempotency note in the caller's docstring: DO UPDATE
+        # re-arms ONLY when this is a DIFFERENT match's notice. The conflict
+        # target can only ever collide with a row of the SAME notice_type, so
+        # the stored payload here is always this code's JSON — the ::jsonb
+        # cast cannot hit availability_check's rows.
+        await db.execute(text(
+            "INSERT INTO tournament_notices (tournament_id, player_id, notice_type, payload) "
+            "VALUES (:tid, :pid, :ntype, :payload) "
+            "ON CONFLICT (tournament_id, player_id, notice_type) DO UPDATE "
+            "   SET payload = EXCLUDED.payload, created_at = NOW(), notified_at = NULL "
+            " WHERE COALESCE(tournament_notices.payload::jsonb ->> 'match_id', '') "
+            "       IS DISTINCT FROM COALESCE(EXCLUDED.payload::jsonb ->> 'match_id', '')"
+        ), {"tid": t.id, "pid": row["player_id"], "ntype": ntype, "payload": payload})
+
+    # WINNER. No onward match = champion / TP winner — a terminal-win DM
+    # (Codex tournament-batch r1 find 4: the completion watcher grants roles
+    # and posts publicly but never DMs the winner, so "both participants get
+    # a completion notice" was false exactly at the podium). Ordering makes
+    # placed_rank answerable: _maybe_complete_tournament runs before this
+    # hook, so the champion's rank 1 / TP winner's rank 3 exist in sig_map.
+    if w_next is not None:
+        if w_opp is not None:
+            await _ins(winner_id, "match_won_next_ready", _next_extra(w_next, w_opp, None))
+        else:
+            await _ins(winner_id, "match_won_waiting", _next_extra(w_next, None, w_wait))
+    else:
+        wrow = sig_map.get(str(winner_id))
+        await _ins(winner_id, "tournament_won", {
+            "final_placement": (int(wrow["placed_rank"])
+                                if (wrow and wrow["placed_rank"] is not None) else None),
+        })
+
+    # LOSER. An onward match (LB drop, TP match, GF bracket reset) = NOT
+    # eliminated; no onward match = out, with final placement when the
+    # podium minted one.
+    if l_next is not None:
+        extra = _next_extra(l_next, l_opp, l_wait)
+        extra["eliminated"] = False
+        await _ins(loser_id, "match_lost_lb", extra)
+    else:
+        lrow = sig_map.get(str(loser_id))
+        await _ins(loser_id, "match_lost_out", {
+            "eliminated": True,
+            "final_placement": (int(lrow["placed_rank"])
+                                if (lrow and lrow["placed_rank"] is not None) else None),
+        })
+
 
 class _ResetProvenanceReversed(Exception):
     """Module-private: raised inside advance's SAVEPOINT when the final
@@ -1853,6 +2134,13 @@ async def _advance_terminal_phase(db: AsyncSession, m: TournamentMatch,
     t = await _get_tournament(db, m.tournament_id)
     await _activate_ready_matches(db, m.tournament_id)
     await _maybe_complete_tournament(db, t)
+
+    # Aug 14 contract: completion DM notices for BOTH participants. AFTER
+    # activation + possible tournament completion, so "next match ready" and
+    # the loser's placed_rank are answerable from current state. Inside the
+    # caller's savepoint by construction — a provenance-veto rollback
+    # retracts these rows together with the advance they announce.
+    await _enqueue_match_completion_notices(db, m)
 
     # Round-36 find 1: FINAL provenance recheck for a minted reset podium,
     # placed AFTER every award write — i.e. past the last statement that
@@ -2377,6 +2665,7 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
             m.status = "forfeit"
             m.ended_at = now
             await _apply_terminal_transitions(db, m, winner_sid)
+            await _enqueue_match_completion_notices(db, m)
             return
         # Defensive: no opposing seat to award — fall through; the
         # banned seat still reads as not-ready below.
@@ -2458,11 +2747,13 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
         m.status = "forfeit"
         m.ended_at = now
         await _apply_terminal_transitions(db, m, m.winner_signup_id)
+        await _enqueue_match_completion_notices(db, m)
     elif p2_ready and not p1_ready:
         m.winner_signup_id = m.p2_signup_id
         m.status = "forfeit"
         m.ended_at = now
         await _apply_terminal_transitions(db, m, m.winner_signup_id)
+        await _enqueue_match_completion_notices(db, m)
     else:
         # Mutual no-show. If the BO3 was STARTED, the series-score leader
         # advances (July 20 item 7 — enforces the async 7-day deadline by
@@ -2497,6 +2788,7 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
         m.winner_signup_id = winner_id
         m.ended_at = now
         await _apply_terminal_transitions(db, m, winner_id)
+        await _enqueue_match_completion_notices(db, m)
 
 
 async def _apply_no_show_forfeits(db: AsyncSession, tournament_id: uuid.UUID) -> None:

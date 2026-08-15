@@ -6156,6 +6156,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (closeBtn == null) { /* CreateButton never returns null today; guard kept honest */ }
 
                 RefreshTournamentBets();   // fills tournBetsPopupRows
+                MarkPopupChildrenInteractive(tournBetsPopupGO);
                 dirty = true;
             }
             catch (Exception ex)
@@ -6168,6 +6169,24 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         /// <summary>Screen-space hit test for a ScreenSpaceCamera canvas rect.
         /// ROUNDS' canvas needs WorldToScreenPoint rather than raw coordinates
         /// (#6), which is why this is not a plain Contains().</summary>
+        /// <summary>Bug 230, second half: every interactive child of an open
+        /// modal popup must carry bypassModalBlock — the popup itself asserts
+        /// ModalBlockInput (#200), which otherwise kills its OWN buttons'
+        /// ClickHandlers; the bypassed backdrop dismisser was the only LIVE
+        /// control, so any click could only close. Walk-and-mark covers every
+        /// current and future child; re-run after each row rebuild (the
+        /// refresh recreates rows with fresh, unmarked handlers).</summary>
+        internal static void MarkPopupChildrenInteractive(GameObject popupRoot)
+        {
+            try
+            {
+                if (popupRoot == null) return;
+                foreach (var ch in popupRoot.GetComponentsInChildren<ClickHandler>(true))
+                    if (ch != null) ch.bypassModalBlock = true;
+            }
+            catch { }
+        }
+
         private static bool PointerInsideRect(RectTransform rt)
         {
             if (rt == null) return false;
@@ -6186,7 +6205,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         BindingFlags.Public | BindingFlags.Instance)?.GetValue(cc) as Camera;
             }
             catch { }
-            if (cam == null) cam = Camera.main;
+            // Bug 230: NO Camera.main fallback. The overlay canvas is
+            // ScreenSpaceOverlay (EnsureOverlayCanvas sets renderMode 0), so
+            // worldCamera is LEGITIMATELY null and GetWorldCorners already
+            // returns screen pixels — projecting those through the GAME
+            // camera produced a garbage rect, the inside-test failed for
+            // every click, and the backdrop dismissed clicks that were ON
+            // the content ("clicking a bet just closes the menu"). A null
+            // cam correctly falls through to corners-as-screen below; only
+            // a real ScreenSpaceCamera canvas needs projection (#6), and
+            // this helper only ever serves the overlay canvas.
             Vector2 min, max;
             if (cam != null)
             {
@@ -19619,7 +19647,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // The rows are built into the POPUP, not here — the tab only owns
             // the button and its count. Rebuild the popup's contents in place
             // while it is open so odds/lock state stay live behind it.
-            if (tournBetsPopupRows != null) FillTournamentBetRows(preMatch);
+            if (tournBetsPopupRows != null)
+            {
+                FillTournamentBetRows(preMatch);
+                // Fresh rows = fresh, unmarked ClickHandlers (bug 230) —
+                // re-exempt the popup's own controls from its modal gate.
+                MarkPopupChildrenInteractive(tournBetsPopupGO);
+            }
         }
 
         /// <summary>Build the bet rows into whichever container currently owns

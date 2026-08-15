@@ -7434,10 +7434,27 @@ namespace CompetitiveRounds
             float scoreY;
             if (showBanner)
             {
+                float bannerY = 8f;
+                // Bug 231 (Sid: "make it gold and have it above the RANKED -
+                // Recording message"): tournament matches get a GOLD line
+                // ABOVE the ranked banner. The label comes from the
+                // /series/preflight response (contract 1) via GameStateWatcher,
+                // which sanitized + length-capped it at store time so this
+                // per-Repaint path does zero string work (#162). Empty label
+                // (sct- room-identity seed) falls back to the generic line.
+                if (!ovt && GameStateWatcher.IsTournamentMatch)
+                {
+                    string tLabel = GameStateWatcher.TournamentLabel;
+                    GUI.contentColor = new Color(1f, 0.843f, 0f);   // #FFD700 gold
+                    GUI.Label(new Rect((Screen.width - 420) / 2f, bannerY, 420, 18),
+                        string.IsNullOrEmpty(tLabel) ? I18n.Tr("TOURNAMENT MATCH") : tLabel,
+                        statusStyle);
+                    bannerY += 18f;
+                }
                 GUI.contentColor = ovt ? new Color(0.55f, 0.8f, 1f) : Color.green;
-                GUI.Label(new Rect((Screen.width - 220) / 2f, 8, 220, 18),
+                GUI.Label(new Rect((Screen.width - 220) / 2f, bannerY, 220, 18),
                     ovt ? I18n.Tr("1v2 - UNRATED") : I18n.Tr("RANKED - Recording"), statusStyle);
-                scoreY = 28;
+                scoreY = bannerY + 20f;   // 28 when no tournament line — unchanged layout
             }
             else
             {

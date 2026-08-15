@@ -1,8 +1,42 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.38.7 — 2026-08-15
+
+Schema changes: migration **221** (`pcolor_poison` body color; applied).
+
+**Added**
+
+- **New body color: Poison.** The exact green the Poison card flashes on its
+  victims — taken from the game's own card data rather than matched by eye —
+  for anyone building a poison-themed look. None of the existing greens was
+  close: Forest shares the hue but renders at half the brightness, Emerald
+  leans jade, Neon Lime leans yellow. 3000g, under Body Colors in the shop.
+
+- **Tournament matches announce themselves everywhere.** The in-game HUD now
+  shows a gold TOURNAMENT banner (with your exact bracket position, e.g.
+  "Async Tournament - Winners R2") above the RANKED line; the Discord series
+  results, the live-bets board, the gambler ping, bet confirmations and the
+  settled-bets posts all carry a trophy tag naming the bracket match.
+- **Post-match tournament DMs (the missing notifications).** After every
+  bracket match the bot now DMs both players: winners are told exactly who
+  they face next (with the deadline) or whose match they're waiting on;
+  a first loss leads with "You're not out!" and names your losers-bracket
+  opponent; elimination congratulates the run and shows your placement.
+  Forfeit advances are phrased honestly instead of "you won".
+- **Tournament matches are always spectatable.** The spectator opt-out is
+  bypassed for the two players of a live bracket match — tournament games
+  are public by rule. Every other spectate safety rule still applies.
 
 **Fixed**
+
+- **Post-match disconnects in code-room rated games (bugs 227/228).** The
+  game quietly dumps an unanswered rematch popup ~25 seconds after a match
+  ends — in rated room-code games (most ranked play) the mod's auto-confirm
+  wasn't active, so both players got kicked to the menu between games. The
+  auto-confirm now covers every rated game, not just queue-issued rooms.
+- **Tournament bets popup is clickable again (bug 230).** The popup's own
+  buttons were being swallowed by its click shield, and a coordinate bug made
+  any click read as "outside the popup" and dismiss it.
 
 - **Poison hits register reliably (bug 225).** A bullet's poison component
   could miss registration on the victim's client due to a game init-ordering

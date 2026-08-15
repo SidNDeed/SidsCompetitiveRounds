@@ -5172,6 +5172,20 @@ async def before_ffa_matches_poll():
     print(f"Pre-loaded {len(seen_ffa_matches)} recent FFA matches")
 
 
+def _series_tournament_tag(row):
+    """(is_tournament, label) from a completed-series feed row. Shared
+    contract (Aug 14 tournament batch, item 2): rows gain "tournament" +
+    "tournament_label". Tolerates the server's own column spelling
+    ("is_tournament") and degrades to (False, "") on older payloads, so the
+    posters render exactly as before until the server half ships (#152/#329)."""
+    try:
+        flag = bool(row.get("tournament", row.get("is_tournament", False)))
+        label = str(row.get("tournament_label") or "").strip()
+        return flag, label
+    except Exception:
+        return False, ""
+
+
 async def log_ffa_match_result(guild, m):
     if SERIES_LOG_CHANNEL_ID <= 0:
         return
@@ -5201,9 +5215,16 @@ async def log_ffa_match_result(guild, m):
         _pts, _halves, _kills = _ffa_score_parts(p)
         lines.append(f"{medal} **{nm}** — {_pts}(P) {_halves}(H) "
                      f"{_kills}k{ba_s}{rc_s}{left}")
-    embed = discord.Embed(title=f"🎯 Ranked FFA Complete — {n} players",
-                          color=discord.Color.purple())
-    embed.description = "\n".join(lines[:12]) or "(no players?)"
+    # Tournament marker (contract item 2): trophy title + bracket label line.
+    t_flag, t_label = _series_tournament_tag(m)
+    embed = discord.Embed(
+        title=(f"🏆 Tournament FFA Complete — {n} players" if t_flag
+               else f"🎯 Ranked FFA Complete — {n} players"),
+        color=(discord.Color.gold() if t_flag else discord.Color.purple()))
+    _desc = "\n".join(lines[:12]) or "(no players?)"
+    if t_flag and t_label:
+        _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
+    embed.description = _desc
     # Bug 179 (Stan): carry the /game code so nobody has to open the game.
     _code = str(m.get("match_id") or "").replace("-", "")[:12].upper()
     _foot = f"{dur // 60}m{dur % 60:02d}s" if dur else ""
@@ -5566,12 +5587,20 @@ async def log_team_series_result(guild, s):
         rc_s = f"+{rc:.1f}" if rc > 0 else f"{rc:.1f}"
         return f"**{p['name']}** {p['rating']:.0f} ({rc_s})"
 
-    embed = discord.Embed(title="⚔️ 2v2 Series Complete", color=discord.Color.gold())
-    embed.description = (
+    # Tournament marker (contract item 2). 2v2 tournaments don't exist today,
+    # so this renders only if the feed ever carries the flag — free future-proofing.
+    t_flag, t_label = _series_tournament_tag(s)
+    embed = discord.Embed(
+        title=("🏆 Tournament 2v2 Series Complete" if t_flag else "⚔️ 2v2 Series Complete"),
+        color=discord.Color.gold())
+    _desc = (
         f"👑 **{winners[0]['name']} + {winners[1]['name']}** "
         f"def. **{losers[0]['name']} + {losers[1]['name']}** "
         f"`{score}`"
     )
+    if t_flag and t_label:
+        _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
+    embed.description = _desc
     embed.add_field(name="Winners",
                     value=f"{fmt_player(winners[0])}\n{fmt_player(winners[1])}",
                     inline=True)
@@ -5643,7 +5672,13 @@ async def post_bet_outcomes(s):
         description="\n".join(lines[:15]),
         color=0x33AA55,
     )
-    em.set_footer(text=f"series {s['series_id'][:8]}")
+    # Tournament marker (contract item 2 rides /series/recent): footer tag so
+    # gamblers can tell a bracket settlement from a queue one at a glance.
+    _t_flag, _t_label = _series_tournament_tag(s)
+    _foot = f"series {s['series_id'][:8]}"
+    if _t_flag:
+        _foot = f"🏆 {_t_label} · {_foot}" if _t_label else f"🏆 Tournament · {_foot}"
+    em.set_footer(text=_foot[:2048])
     await ch.send(embed=em)
 
 
@@ -5653,8 +5688,16 @@ async def log_series_result(guild, s):
     if not ch: return
     p1_won = s["winner_steam_id"] == s["p1_steam_id"]
     score = f"{s['p1_series_wins']}-{s['p2_series_wins']}" if p1_won else f"{s['p2_series_wins']}-{s['p1_series_wins']}"
-    embed = discord.Embed(title="⚔️ Ranked Series Complete", color=discord.Color.green())
-    embed.description = f"**{s['winner_name']}** wins {score}!"
+    # Tournament marker (contract item 2): trophy title + bracket label line
+    # + gold tint (matches the live-bets board's tournament color language).
+    t_flag, t_label = _series_tournament_tag(s)
+    embed = discord.Embed(
+        title=("🏆 Tournament Series Complete" if t_flag else "⚔️ Ranked Series Complete"),
+        color=(discord.Color.gold() if t_flag else discord.Color.green()))
+    _desc = f"**{s['winner_name']}** wins {score}!"
+    if t_flag and t_label:
+        _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
+    embed.description = _desc
     # 1 decimal: Glicko changes for converged players are routinely sub-1.0, and :.0f
     # rounded a real +0.4 win to "0" — the series log read as "no rating change" for a
     # ranked win (bug #18). One decimal shows the actual movement.
@@ -7333,13 +7376,257 @@ def _tavail_embed(kind, start_unix, lock_unix):
     return discord.Embed(title="🏆 Synchronized tournament — availability check", description=desc, color=0xFAA61A)
 
 
-async def _ack_tournament_notices(notice_ids):
-    if not notice_ids or http_session is None or not API_SECRET_KEY:
+# ── Tournament match-result notices (Aug 14 batch, shared contract item 3) ──
+# Four new notice kinds ride the SAME tournament_notices table / poller /
+# ack shape as availability_check. The server half ships separately, so every
+# payload key below is read with alias fallbacks and every branch degrades to
+# still-useful copy on a missing key (#152/#329 — never crash or starve the
+# loop on a shape mismatch). Canonical payload keys, verified against the
+# server's builder (tournaments.py _ins/_next_extra, Aug 15 integration):
+#   kind (sync|async), label ("Asynchronous tournament"), match_label
+#     ("Winners R2") — top line composes "Async Tournament - Winners R2"
+#     from kind+match_label, mirroring the preflight banner
+#   resolution (completed|forfeit|double_forfeit) — forfeit rephrasing
+#   opponent_name (str)      — match_won_next_ready / match_lost_lb
+#   waiting_on (str)         — "A vs B" for match_won_waiting / match_lost_lb
+#   next_match_label (str)   — the drop target for match_lost_lb (losers
+#     bracket / Third-Place Match / Grand Final Reset — never hardcode)
+#   next_status (str)        — 'ready' gets go-now copy; anything else holds
+#   next_deadline_ts (epoch) — next match's concrete deadline, optional
+#   final_placement (int)    — match_lost_out / tournament_won, optional
+_TMATCH_NOTICE_KINDS = {
+    "match_won_waiting", "match_won_next_ready", "match_lost_lb", "match_lost_out",
+    # Terminal win — champion / third-place winner (Codex r1 find 4: the
+    # completion watcher posts publicly + grants roles but never DMs).
+    "tournament_won",
+}
+
+
+def _md_name(v, fallback="?"):
+    """Escape a server-supplied display name / matchup string for embed
+    markdown (#261's injection rule — names are player-authored)."""
+    s = str(v).strip() if v is not None else ""
+    return discord.utils.escape_markdown(s) if s else fallback
+
+
+def _tmatch_next_steps(kind, deadline_unix, next_status="ready"):
+    """Instruction lines for a player who has a next match to play. Sid's
+    ask: 'make sure the bot is giving people instructions after each match
+    completes' — every branch tells them what to actually DO next.
+
+    next_status (Codex r1 find 7): "opponent known" is NOT "match ready" —
+    a sync match sits 'scheduled' through the between-rounds break with both
+    seats filled. Go-now copy renders only for 'ready'; anything else gets
+    holding copy (#130 wording: "have ROUNDS open", never "be in the tab")."""
+    lines = []
+    if next_status and next_status != "ready":
+        if kind == "sync":
+            lines.append("Your match isn't live yet — keep ROUNDS open at the "
+                         "main menu and the mod will auto-connect you when it "
+                         "starts.")
+        else:
+            lines.append("Your match isn't activated yet — you'll get the "
+                         "deadline here the moment it goes live.")
+        return lines
+    if kind == "sync":
+        # Wording contract (#130): "have ROUNDS open", never "be in the tab".
+        lines.append("Keep ROUNDS open at the main menu — the mod auto-connects "
+                     "you to your next match.")
+        return lines
+    if deadline_unix:
+        # A concrete match is in hand — render ITS deadline, not the constant
+        # (see the ASYNC_DEADLINE_DAYS note at the top of the file).
+        lines.append(f"⏳ Play it by <t:{deadline_unix}:F> (<t:{deadline_unix}:R>).")
+    elif kind == "async":
+        lines.append(f"⏳ Async matches have a {ASYNC_DEADLINE_DAYS}-day deadline.")
+    if kind == "async" or deadline_unix:
+        lines.append("Use `/dm-opponent` to agree a time, then play a private "
+                     "lobby together — the result records automatically.")
+    else:
+        # Kind unknown (older server / missing key) — generic but actionable.
+        lines.append("Check F5 → Tournaments in-game for your bracket and next match.")
+    return lines
+
+
+def _tmatch_notice_message(ntype, n, payload):
+    """(content, embed) for one match-result notice. Alias-tolerant reads;
+    every branch produces a sendable message even from an empty payload."""
+    kind = (n.get("kind") or payload.get("kind")
+            or payload.get("tournament_kind") or "").lower()
+    # The server's notice payload (tournaments.py _ins) carries label
+    # ("Asynchronous tournament") + match_label ("Winners R2") but no
+    # composed tournament_label — mirror the preflight's composition here
+    # so the DM's top line matches the in-game banner (#329 seam check).
+    label = str(payload.get("tournament_label")
+                or n.get("tournament_label") or "").strip()
+    match_label = str(payload.get("match_label") or "").strip()
+    if not label and match_label:
+        _kp = {"sync": "Sync Tournament - ", "async": "Async Tournament - "}.get(kind, "")
+        label = _kp + match_label
+    if not label:
+        label = str(payload.get("label") or "").strip()
+    opponent = (payload.get("opponent_name") or payload.get("next_opponent")
+                or payload.get("opponent") or "")
+    pending = (payload.get("pending_match") or payload.get("waiting_on")
+               or payload.get("pending_match_label") or "")
+    # Server emits next_deadline_ts (epoch int, tournaments.py _next_extra);
+    # the older aliases stay for forward-compat with any richer payload.
+    deadline_unix = (_unix_ts(payload.get("next_deadline_ts"))
+                     or _unix_ts(payload.get("deadline_ts"))
+                     or _unix_ts(payload.get("deadline_at"))
+                     or _unix_ts(n.get("deadline_at")))
+    placement = payload.get("placement", payload.get("final_placement"))
+    # forfeit | double_forfeit → the match wasn't played; "you won"/"you
+    # lost that one" would be dishonest phrasing (server's deferred note).
+    # double_forfeit is its OWN case (Codex r1 find 9): both players
+    # no-showed and a tiebreak advanced one — "your opponent forfeited"
+    # would be false for the advancer and insulting for the other.
+    _res = str(payload.get("resolution") or "")
+    by_forfeit = _res in ("forfeit", "double_forfeit")
+    by_double_forfeit = _res == "double_forfeit"
+    # match_lost_lb covers every non-eliminating drop: losers bracket, the
+    # single-elim Third-Place match, and the Grand Final bracket reset —
+    # next_match_label names which (server warning; never hardcode "losers").
+    next_label = str(payload.get("next_match_label") or "").strip()
+    # 'ready' | 'scheduled' | 'pending' | '' — see _tmatch_next_steps.
+    next_status = str(payload.get("next_status") or "ready").strip() or "ready"
+
+    lines = []
+    if label:
+        lines.append(f"🏆 **{_md_name(label)}**")
+
+    if ntype == "match_won_next_ready":
+        if by_double_forfeit:
+            content = "🏆 You advance on the no-show tiebreak."
+            title = "🏆 Advanced — your next opponent is ready"
+            lines.append("Neither player made that match's deadline; the "
+                         "tiebreak advanced you.")
+        elif by_forfeit:
+            content = "🏆 You advance — your opponent forfeited."
+            title = "🏆 Advanced by forfeit — your next opponent is ready"
+            lines.append("That match was recorded as a forfeit, so you advance.")
+        else:
+            content = "🏆 You won your tournament match!"
+            title = "🏆 Match won — your next opponent is ready"
+        lines.append(f"Next up: **{_md_name(opponent, 'your next opponent')}**.")
+        lines.extend(_tmatch_next_steps(kind, deadline_unix, next_status))
+        color = 0x57F287
+    elif ntype == "match_won_waiting":
+        if by_double_forfeit:
+            content = "🏆 You advance on the no-show tiebreak."
+            title = "🏆 Advanced — next opponent TBD"
+            lines.append("Neither player made that match's deadline; the "
+                         "tiebreak advanced you.")
+        elif by_forfeit:
+            content = "🏆 You advance — your opponent forfeited."
+            title = "🏆 Advanced by forfeit — next opponent TBD"
+            lines.append("That match was recorded as a forfeit, so you advance.")
+        else:
+            content = "🏆 You won your tournament match!"
+            title = "🏆 Match won — next opponent TBD"
+        if pending:
+            lines.append("Your next opponent isn't decided yet — waiting on "
+                         f"**{_md_name(pending)}**.")
+        else:
+            lines.append("Your next opponent isn't decided yet — their match "
+                         "is still being played.")
+        lines.append("Nothing to do right now — you'll get another DM here the "
+                     "moment your next match is ready.")
+        color = 0x57F287
+    elif ntype == "match_lost_lb":
+        # Copy requirement (contract item 3): MUST lead with "you are NOT
+        # eliminated" energy. The drop target comes from next_match_label —
+        # this same kind covers the losers bracket, the single-elim
+        # Third-Place match, AND the Grand Final bracket reset, so the
+        # destination is never hardcoded (server agent's explicit warning).
+        dest = next_label or "the losers bracket"
+        content = f"🛡️ You're not out! Next for you: {dest}."
+        title = "🛡️ You're NOT out — still in the tournament"
+        if by_double_forfeit:
+            lines.append("Neither player made that match's deadline and the "
+                         "tiebreak went the other way — but "
+                         "**you're still in the tournament.**")
+        elif by_forfeit:
+            lines.append("That match was recorded as a forfeit — but "
+                         "**you're still in the tournament.**")
+        else:
+            lines.append("You lost that one, but "
+                         "**you're still in the tournament.**")
+        if opponent:
+            lines.append(f"Your **{dest}** opponent: **{_md_name(opponent)}**.")
+            lines.extend(_tmatch_next_steps(kind, deadline_unix, next_status))
+        elif pending:
+            lines.append(f"Your **{dest}** opponent is decided by "
+                         f"**{_md_name(pending)}** — you'll get a DM here when "
+                         "your match is ready.")
+        else:
+            lines.append(f"You'll get a DM here the moment your **{dest}** "
+                         "match is ready.")
+        color = 0xFAA61A
+    elif ntype == "tournament_won":
+        # Terminal win — champion (placement 1) or third-place winner.
+        _p1 = False
+        try:
+            _p1 = placement is not None and int(str(placement).strip()) == 1
+        except Exception:
+            _p1 = False
+        if _p1:
+            content = "👑 You WON the tournament!"
+            title = "👑 Tournament champion"
+            lines.append("That was the last match — **you're the champion.** "
+                         "Congratulations!")
+        else:
+            content = "🏆 You won your final tournament match!"
+            title = "🏆 Tournament run complete — final match won"
+            place_s = ""
+            try:
+                if placement is not None and str(placement).strip():
+                    place_s = f" You finish **#{int(str(placement).strip())}**."
+            except Exception:
+                place_s = f" You finish **{_md_name(placement)}**."
+            lines.append(f"You won your last match of the bracket.{place_s}")
+        lines.append("Results and the final bracket are in F5 → Tournaments "
+                     "(and #scr-tournaments).")
+        color = 0xFFD700
+    else:  # match_lost_out — genuinely eliminated; congratulate the run.
+        content = "🏁 Your tournament run is over — well played!"
+        title = "🏁 Tournament run complete"
+        place_s = ""
+        try:
+            if placement is not None and str(placement).strip():
+                place_s = f" You finished **#{int(str(placement).strip())}**."
+        except Exception:
+            # Non-numeric placement string ("5th") — render it as sent.
+            place_s = f" You finished **{_md_name(placement)}**."
+        lines.append(f"You've been eliminated — congrats on the run!{place_s}")
+        lines.append("Follow the rest of the bracket in F5 → Tournaments "
+                     "(or #scr-tournaments).")
+        color = 0x99AAB5
+    embed = discord.Embed(title=title, description="\n".join(lines), color=color)
+    return content, embed
+
+
+async def _ack_tournament_notices(entries):
+    """entries: list of (notice_id, revision_or_None). Match-result rows RE-ARM
+    in place server-side (same UUID, new payload — learning #175's class), so
+    their acks carry the payload match_id the bot actually rendered and the
+    server acks via compare-and-set: a stale ack against a re-armed row fails
+    and the new payload is re-fetched next tick. revision None = legacy
+    id-only ack (availability_check rows never re-arm)."""
+    if not entries or http_session is None or not API_SECRET_KEY:
         return
     try:
+        ids, revs = [], {}
+        for nid, rev in entries:
+            ids.append(nid)
+            if rev is not None:
+                revs[str(nid)] = str(rev)
+        body = {"notice_ids": ids}
+        if revs:
+            body["revisions"] = revs
         async with http_session.post(
             f"{API_BASE_URL}/api/v1/internal/tournament-notices/ack",
-            json={"notice_ids": list(notice_ids)},
+            json=body,
             headers={"X-Internal-Key": API_SECRET_KEY},
             timeout=aiohttp.ClientTimeout(total=8),
         ) as resp:
@@ -7352,7 +7639,9 @@ async def _ack_tournament_notices(notice_ids):
 @tasks.loop(seconds=30)
 async def poll_tournament_notices():
     """Own fully-guarded loop (learning #129 — never chained onto
-    poll_tournaments' tail)."""
+    poll_tournaments' tail). Delivers availability_check prompts AND the four
+    match-result kinds (_TMATCH_NOTICE_KINDS); unknown kinds are logged and
+    ack-skipped so a newer server can never wedge or crash this loop."""
     try:
         data = await api_get("/internal/tournament-notices?unnotified=true")
         if not data or not data.get("notices"):
@@ -7366,26 +7655,14 @@ async def poll_tournament_notices():
             nid = n.get("notice_id") or n.get("id")
             if nid is None:
                 continue
-            if nid in _tavail_seen_notice_ids:
-                # Handled this process-lifetime — earlier ack must have failed;
-                # re-ack, don't re-DM.
-                to_ack.append(nid)
-                continue
-            if (n.get("notice_type") or "") != "availability_check":
-                # Unknown notice type — nothing this bot build can send; ack so
-                # it doesn't come back every 30s forever.
-                _tavail_seen_notice_ids.add(nid)
-                to_ack.append(nid)
-                continue
-            did = n.get("discord_id")
-            tid = n.get("tournament_id")
-            steam = n.get("steam_id")
-            if not did or not tid or not steam:
-                # Unlinked player / malformed row — permanently undeliverable.
-                _tavail_seen_notice_ids.add(nid)
-                to_ack.append(nid)
-                continue
+            ntype = (n.get("notice_type") or "").strip()
             # payload is a JSON string per the contract; tolerate a dict too.
+            # Parsed BEFORE the seen-guard: the match-result kinds re-arm
+            # their row in place (same UUID, new payload keyed by match_id —
+            # Codex tournament-batch r1 find 2 / learning #175), so both the
+            # dedup key and the ack must bind to (id, match_id), never the
+            # bare id — an id-only guard permanently swallows every second-
+            # and-later same-kind DM per player per tournament.
             payload = {}
             raw = n.get("payload")
             try:
@@ -7395,23 +7672,55 @@ async def poll_tournament_notices():
                     payload = raw
             except Exception:
                 payload = {}
-            kind = (n.get("kind") or payload.get("kind") or "sync").lower()
-            start_unix = (_unix_ts(payload.get("start_ts"))
-                          or _unix_ts(n.get("scheduled_start_ts"))
-                          or _unix_ts(n.get("default_start_ts")))
-            lock_unix = _unix_ts(payload.get("lock_ts")) or _unix_ts(n.get("lock_at"))
-            if kind == "async":
-                content = "Are you still in for the **Async tournament**?"
+            _is_match_kind = ntype in _TMATCH_NOTICE_KINDS
+            rev = str(payload.get("match_id") or "") if _is_match_kind else None
+            skey = f"{nid}:{rev}" if _is_match_kind else nid
+            if skey in _tavail_seen_notice_ids:
+                # Handled this process-lifetime — earlier ack must have failed;
+                # re-ack (same revision), don't re-DM.
+                to_ack.append((nid, rev))
+                continue
+            if ntype != "availability_check" and not _is_match_kind:
+                # Unknown notice kind — nothing this bot build can send.
+                # Contract: skip-and-log (never crash the loop), and ack so it
+                # doesn't come back every 30s forever.
+                print(f"[TNOTICE] unknown notice kind '{ntype}' (id {nid}) — ack-skipping")
+                _tavail_seen_notice_ids.add(skey)
+                to_ack.append((nid, rev))
+                continue
+            did = n.get("discord_id")
+            tid = n.get("tournament_id")
+            steam = n.get("steam_id")
+            # availability_check needs tid+steam for its Yes/No custom_ids;
+            # the match-result kinds only need somewhere to deliver the DM.
+            _deliverable = (did and tid and steam) if ntype == "availability_check" else bool(did)
+            if not _deliverable:
+                # Unlinked player / malformed row — permanently undeliverable.
+                _tavail_seen_notice_ids.add(skey)
+                to_ack.append((nid, rev))
+                continue
+            view = None
+            if ntype == "availability_check":
+                kind = (n.get("kind") or payload.get("kind") or "sync").lower()
+                start_unix = (_unix_ts(payload.get("start_ts"))
+                              or _unix_ts(n.get("scheduled_start_ts"))
+                              or _unix_ts(n.get("default_start_ts")))
+                lock_unix = _unix_ts(payload.get("lock_ts")) or _unix_ts(n.get("lock_at"))
+                if kind == "async":
+                    content = "Are you still in for the **Async tournament**?"
+                else:
+                    content = "Are you still available to play in the **Synchronized tournament**?"
+                embed = _tavail_embed(kind, start_unix, lock_unix)
+                view = _tavail_view(tid, steam)
             else:
-                content = "Are you still available to play in the **Synchronized tournament**?"
-            embed = _tavail_embed(kind, start_unix, lock_unix)
-            view = _tavail_view(tid, steam)
+                # Match-result notice (contract item 3) — DM only, no buttons.
+                content, embed = _tmatch_notice_message(ntype, n, payload)
             # Resolve + DM. Transient resolution failure → no ack (retried).
             try:
                 user = bot.get_user(int(did)) or await bot.fetch_user(int(did))
             except discord.NotFound:
-                _tavail_seen_notice_ids.add(nid)
-                to_ack.append(nid)
+                _tavail_seen_notice_ids.add(skey)
+                to_ack.append((nid, rev))
                 continue
             except Exception as ex:
                 print(f"[TAVAIL] fetch_user({did}) failed: {ex}")
@@ -7419,15 +7728,25 @@ async def poll_tournament_notices():
             if user is None:
                 continue
             try:
-                await user.send(content=content, embed=embed, view=view)
-                print(f"[TAVAIL] availability check ({kind}) → {user} for tournament {str(tid)[:8]}")
-                _tavail_seen_notice_ids.add(nid)
-                to_ack.append(nid)
-            except discord.Forbidden:
-                # DMs closed — permanently undeliverable; ack.
-                print(f"[TAVAIL] {did} has DMs closed — acking")
-                _tavail_seen_notice_ids.add(nid)
-                to_ack.append(nid)
+                # allowed_mentions on every send (#261) — the match-result
+                # embeds carry player-authored names.
+                await user.send(content=content, embed=embed, view=view,
+                                allowed_mentions=discord.AllowedMentions.none())
+                if ntype == "availability_check":
+                    print(f"[TAVAIL] availability check ({kind}) → {user} for tournament {str(tid)[:8]}")
+                else:
+                    print(f"[TNOTICE] {ntype} → {user} for tournament {str(tid)[:8]}")
+                _tavail_seen_notice_ids.add(skey)
+                to_ack.append((nid, rev))
+            except (discord.Forbidden, discord.NotFound):
+                # DMs closed / account deleted between fetch and send —
+                # permanently undeliverable; ack (Codex r1 find 10: NotFound
+                # here was treated as transient, so one deleted account could
+                # retry every 30s forever and its stuck row helps fill the
+                # feed's LIMIT 20 page against newer notices).
+                print(f"[TAVAIL] {did} undeliverable (DMs closed or account gone) — acking")
+                _tavail_seen_notice_ids.add(skey)
+                to_ack.append((nid, rev))
             except Exception as ex:
                 # Transient (rate limit / gateway blip) — no ack, retried next poll.
                 print(f"[TAVAIL] DM to {did} failed: {ex}")
@@ -8109,13 +8428,18 @@ def _bet_board_sig(embed: discord.Embed, view_bits) -> str:
 class LiveBetView(discord.ui.View):
     def __init__(self, series_id: str, p1_steam: str, p1_name: str,
                  p2_steam: str, p2_name: str,
-                 p1_bettable: bool = True, p2_bettable: bool = True):
+                 p1_bettable: bool = True, p2_bettable: bool = True,
+                 tournament_tag: str = ""):
         super().__init__(timeout=None)
         self.series_id = series_id
         self.p1_steam = p1_steam
         self.p1_name = p1_name
         self.p2_steam = p2_steam
         self.p2_name = p2_name
+        # "" for queue matches; the bracket label (or "Tournament match") for
+        # tournament rows — echoed into the bet confirmation so the bettor
+        # knows they just wagered on a bracket fixture.
+        self.tournament_tag = tournament_tag
         # Aug 9 bet audit find 3/8: PER-SIDE gating. The endpoint rejects the
         # chosen side below the 1.10x floor while the global bets_locked only
         # trips when BOTH sides are — so a favorite's buttons were a
@@ -8156,11 +8480,12 @@ class LiveBetButton(discord.ui.Button):
         side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
         vs_name = self.parent_view.p2_name if self.on_p1 else self.parent_view.p1_name
         await _place_discord_bet(interaction, self.parent_view.series_id,
-                                 bet_on_steam, side_name, self.amount, vs_name)
+                                 bet_on_steam, side_name, self.amount, vs_name,
+                                 tour_tag=getattr(self.parent_view, "tournament_tag", ""))
 
 async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
                              bet_on_steam: str, side_name: str, amount: int,
-                             vs_name: str = ""):
+                             vs_name: str = "", tour_tag: str = ""):
     """Shared bet-placement path for preset buttons + the custom modal."""
     await _bet_ack(interaction)
     try:
@@ -8186,8 +8511,9 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
         await _bet_reply(interaction, f"❌ {err}")
         return
     vs_part = f" (vs {vs_name}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
+    _tour = f" — 🏆 {tour_tag}" if tour_tag else ""
     await _bet_reply(interaction,
-        f"✅ Bet placed: **{amount:,}g** on **{side_name}**{vs_part}.",)
+        f"✅ Bet placed: **{amount:,}g** on **{side_name}**{vs_part}{_tour}.",)
 
 
 def _discord_bet_error(result) -> str | None:
@@ -8298,7 +8624,8 @@ class LiveBetModal(discord.ui.Modal):
         bet_on_steam = self.parent_view.p1_steam if self.on_p1 else self.parent_view.p2_steam
         side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
         vs_name = self.parent_view.p2_name if self.on_p1 else self.parent_view.p1_name
-        await _place_discord_bet(interaction, self.parent_view.series_id, bet_on_steam, side_name, amount, vs_name)
+        await _place_discord_bet(interaction, self.parent_view.series_id, bet_on_steam, side_name, amount, vs_name,
+                                 tour_tag=getattr(self.parent_view, "tournament_tag", ""))
 
 
 def _format_live_bet_embed(s: dict) -> discord.Embed:
@@ -8308,22 +8635,28 @@ def _format_live_bet_embed(s: dict) -> discord.Embed:
     p1w = s.get("p1_wins", 0);      p2w = s.get("p2_wins", 0)
     locked = s.get("bets_locked", False)
     reason = s.get("lock_reason")
-    is_tournament = s.get("is_tournament", False)
+    # Contract naming first ("tournament"/"tournament_label"), the feed's own
+    # existing spelling as fallback — degrades to the old rendering when the
+    # server half hasn't shipped (#152/#329).
+    is_tournament = bool(s.get("tournament", s.get("is_tournament", False)))
     tournament_kind = s.get("tournament_kind") or ""
+    t_label = str(s.get("tournament_label") or "").strip()
     phase = s.get("phase") or ""
-    # Tournament series get a 🏆 prefix and a kind suffix ("[Async]" /
-    # "[Sync]") so the channel makes it obvious which bracket the match
-    # belongs to without having to dig into the F5 menu. Pre-match
+    # Tournament series get a 🏆 prefix and the bracket label when the feed
+    # carries one ("Async Tournament — Winners R2"), else a kind suffix
+    # ("[Async]" / "[Sync]") so the channel makes it obvious which bracket
+    # the match belongs to without having to dig into the F5 menu. Pre-match
     # tournament series get an additional "PRE-MATCH" callout — bets are
     # still open but the game hasn't started in-game yet, so people
     # know they're betting on an upcoming bracket fixture rather than
     # a live ranked queue match.
     if is_tournament:
         kind_label = f" [{tournament_kind.title()}]" if tournament_kind else ""
+        base = t_label if t_label else f"Tournament{kind_label}"
         if phase == "pre_match":
-            title = f"🏆 Tournament{kind_label} PRE-MATCH: {p1n} ({p1r}) vs {p2n} ({p2r})"
+            title = f"🏆 {base} PRE-MATCH: {p1n} ({p1r}) vs {p2n} ({p2r})"
         else:
-            title = f"🏆 Tournament{kind_label}: {p1n} ({p1r}) vs {p2n} ({p2r})"
+            title = f"🏆 {base}: {p1n} ({p1r}) vs {p2n} ({p2r})"
     else:
         title = f"🎮 {p1n} ({p1r}) vs {p2n} ({p2r})"
     desc_lines = [
@@ -8344,7 +8677,8 @@ def _format_live_bet_embed(s: dict) -> discord.Embed:
         embed_color = 0x666666
     else:
         embed_color = 0xFF6688
-    em = discord.Embed(title=title, description="\n".join(desc_lines), color=embed_color)
+    # [:256] — the label made long titles reachable (embed title hard cap).
+    em = discord.Embed(title=title[:256], description="\n".join(desc_lines), color=embed_color)
     em.set_footer(text=f"series {s['series_id'][:8]}")
     return em
 
@@ -8864,6 +9198,8 @@ async def _poll_live_bets_once():
         _locked = bool(s.get("bets_locked", False))
         _p1b = bool(s.get("p1_bettable", True))
         _p2b = bool(s.get("p2_bettable", True))
+        _t_flag = bool(s.get("tournament", s.get("is_tournament", False)))
+        _t_label = str(s.get("tournament_label") or "").strip()
         if not _locked and (_p1b or _p2b):
             view = LiveBetView(
                 series_id=sid,
@@ -8872,10 +9208,11 @@ async def _poll_live_bets_once():
                 p2_steam=s.get("p2_steam_id", ""),
                 p2_name=s.get("p2_name", "?"),
                 p1_bettable=_p1b, p2_bettable=_p2b,
+                tournament_tag=((_t_label or "Tournament match") if _t_flag else ""),
             )
         msg_id = live_bet_messages.get(sid)
         # Unchanged since the last successful edit → skip the PATCH (bug 226).
-        sig = _bet_board_sig(embed, (_locked, _p1b, _p2b,
+        sig = _bet_board_sig(embed, (_locked, _p1b, _p2b, _t_flag, _t_label,
                                      s.get("p1_steam_id", ""), s.get("p1_name", "?"),
                                      s.get("p2_steam_id", ""), s.get("p2_name", "?")))
         if msg_id is not None and sig and live_bet_last_sig.get(sid) == sig:
@@ -9369,13 +9706,31 @@ async def poll_gambler_pings():
             continue
         guild = getattr(channel, "guild", None)
         role = discord.utils.get(guild.roles, name=GAMBLER_ROLE_NAME) if guild else None
-        p1 = s.get("p1_name") or s.get("player1_name") or s.get("p1_display_name") or "Player 1"
-        p2 = s.get("p2_name") or s.get("player2_name") or s.get("p2_display_name") or "Player 2"
+        # Escape player-authored names (#261 / Codex tournament-batch r1
+        # find 6: a player literally named "<@&ROLE_ID>" in a message sent
+        # with roles=True pings that arbitrary role).
+        p1 = _md_name(s.get("p1_name") or s.get("player1_name")
+                      or s.get("p1_display_name"), "Player 1")
+        p2 = _md_name(s.get("p2_name") or s.get("player2_name")
+                      or s.get("p2_display_name"), "Player 2")
         mention = role.mention if role else f"@{GAMBLER_ROLE_NAME}"
+        # Tournament differentiation (Sid, Aug 14): the ping itself says it's
+        # a bracket fixture. Contract naming first, feed's own as fallback.
+        _t_flag = bool(s.get("tournament", s.get("is_tournament", False)))
+        _t_label = _md_name(s.get("tournament_label"), "") if s.get("tournament_label") else ""
+        if _t_flag:
+            _tag = f"🏆 **{_t_label}**" if _t_label else "🏆 **Tournament match**"
+            body = f"{mention} 🎲 Bets are open — {_tag}: **{p1}** vs **{p2}**! Place yours below."
+        else:
+            body = f"{mention} 🎲 Bets are open — **{p1}** vs **{p2}**! Place yours below."
         try:
+            # ONLY the resolved Gambler role may ping — never everyone/users,
+            # and never a role smuggled in via a display name (r1 find 6).
             await channel.send(
-                f"{mention} 🎲 Bets are open — **{p1}** vs **{p2}**! Place yours below.",
-                allowed_mentions=discord.AllowedMentions(roles=True),
+                body,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=False,
+                    roles=[role] if role else False),
             )
         except Exception as e:
             print(f"[GAMBLER] ping failed for {sid}: {e}")

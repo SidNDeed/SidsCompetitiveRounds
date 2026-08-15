@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.6";   // Aug 14: latency batch — hit-RPC dispatch-abort guards + [NET] telemetry (bug 217), spectator join hygiene + spectator poison display (bug 216), boundary poison false-flags + single tint pass per transition (bugs 221/222)
+        public const string ModVersion = "1.38.7";   // Aug 15: tournament batch — gold tournament banner (bug 231), rated room-code auto-continue latch (bugs 227/228), bets-popup click fix (bug 230), sct- spectate attestation, tournament DMs/tags server+bot side
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -2995,6 +2995,23 @@ namespace CompetitiveRounds
             // Callback-bound edge reset (Aug 10 r2 find 8) — the poll's
             // wasInRoom sampling can miss a fast leave+join.
             try { GameStateWatcher.ResetSpectateAttestEdges(alsoRoomTally: true); } catch { }
+            // Tournament banner + rated-continuation latch: clear-then-seed on
+            // the CALLBACK, not only the 10 Hz polled join edge (Codex
+            // tournament r1 find 5 — a leave+join between polls keeps
+            // inRoom=true, so the polled clear/seed never runs and a stale
+            // tournament flag could leak into this room, or an sct- room
+            // could miss its banner seed entirely). Runs for every role;
+            // spectators just carry a cleared context.
+            try
+            {
+                GameStateWatcher.ClearTournamentContext();
+                GameStateWatcher.ClearRatedContinuation();
+                string _rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
+                if (_rn.StartsWith("sct-", StringComparison.Ordinal)
+                    && !SpectatorSession.IsLocalSpectator)
+                    GameStateWatcher.SetTournamentContext(true, "");
+            }
+            catch { }
             // Esc-menu leave confirm. Disarm FIRST, unconditionally (r4 find
             // 2): if both room-exit observers missed a fast transition and
             // the same scene button survived, an armed guard would otherwise
@@ -3493,6 +3510,11 @@ namespace CompetitiveRounds
             // leave+rejoin that lands between samples; this callback cannot).
             // The poll's Left-room branch keeps a lossy backup copy.
             try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
+            // Tournament banner + rated-continuation latch die with the room
+            // on the reliable edge too (Codex tournament r1 find 5 — the
+            // polled exit is the lossy backup).
+            try { GameStateWatcher.ClearTournamentContext(); } catch { }
+            try { GameStateWatcher.ClearRatedContinuation(); } catch { }
             // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
             // materials die with the room too — Reset() previously had NO
             // caller, so the flush the r4 cap depends on never ran and a
@@ -3534,16 +3556,21 @@ namespace CompetitiveRounds
     {
         static void Prefix()
         {
-            // Fire in ANY competitive room (1v1 ranked OR 2v2), not just 2v2 — this
-            // was `Pending2v2Slot < 0` so 1v1 ranked DCs (e.g. the "instant DC vs Toast"
-            // room-abandonment) captured ZERO stack data. The stack here names whatever
-            // vanilla/mod path triggered the Photon restart that ejected us mid-setup.
-            try { if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return; } catch { return; }
+            // UNGATED (learning #286's tracer gap): this used to early-return
+            // outside CompetitiveRoomDetect.IsCompetitiveRoom(), which made the
+            // tracer silent in room-code rooms — exactly where bug 228's
+            // post-match room deaths needed it. The FIRST call per restart is
+            // the one that names the trigger; while m_restarting is already
+            // true, vanilla bails internally but only AFTER this prefix runs —
+            // and paths like NetworkConnectionHandler.Update can re-call every
+            // frame during a conflicted join, so a full stack capture here
+            // would burn ~60 warning allocations/sec (Codex tournament r1
+            // find 11). Return BEFORE the stack capture on repeat calls.
             try
             {
                 var nch = NetworkConnectionHandler.instance;
-                bool already = nch != null && nch.m_restarting;
-                Plugin.Log.LogWarning($"[NCH-DIAG] NetworkRestart() entered (already_restarting={already}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}");
+                if (nch != null && nch.m_restarting) return;
+                Plugin.Log.LogWarning($"[NCH-DIAG] NetworkRestart() entered {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}");
             }
             catch { }
         }
@@ -3556,8 +3583,12 @@ namespace CompetitiveRounds
     {
         static void Prefix(bool becomeInactive)
         {
-            // Any competitive room (1v1 ranked OR 2v2) — was 2v2-only, blind to 1v1 DCs.
-            try { if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return; } catch { return; }
+            // UNGATED, same reasoning as the NetworkRestart tracer above
+            // (#286's tracer gap, bug 228): LeaveRoom fires a handful of times
+            // per session — room exits are user/flow events, never a burst
+            // path — and the room-code rooms the old IsCompetitiveRoom gate
+            // silenced are precisely where the post-match death forensics were
+            // needed.
             try { Plugin.Log.LogWarning($"[NCH-DIAG] PhotonNetwork.LeaveRoom(becomeInactive={becomeInactive}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}"); }
             catch { }
         }
@@ -4516,9 +4547,25 @@ namespace CompetitiveRounds
     /// pickers this caused desync (player 1 hits Yes → DoContinue locally → next
     /// round on their client; others stuck). Even in 1v1, players found the prompt
     /// annoying and "really don't like hitting Yes". Bypass: Prefix fires the
-    /// supplied callback with `Yes` immediately and skips the picker setup. Gated
-    /// to mod-issued rooms only (ranked_*, team_*, sct-*) — vanilla casual /
-    /// private rooms still get the vanilla popup so non-mod opponents don't desync.</summary>
+    /// supplied callback with `Yes` immediately and skips the picker setup.
+    /// Gated to mod-issued rooms (ranked_*, team_*, sct-*, ovt_, ffa_, cr_ff)
+    /// PLUS — bugs 227/228/229 — RATED room-code games. The original "non-mod
+    /// opponents desync" rationale does not apply there: a RATED game requires
+    /// both clients modded by construction (#286 — matchIsRanked needs
+    /// OpponentHasMod), and leaving the popup live meant both seats ignored
+    /// it, vanilla dumped the unanswered prompt ~25s after match end, and both
+    /// clients NetworkRestart'd the room dead (bug 228). "Rated" here is the
+    /// ROOM-BOUND rated-continuation latch (GameStateWatcher), set only by
+    /// the room+generation-fenced /series/preflight success callback — which
+    /// BOTH seats run, so the two seats answer the popup identically (Codex
+    /// tournament r1 find 1: the previous MatchIsRanked/series-id predicate
+    /// was seat-asymmetric — the elected reporter clears the series id at
+    /// report time while the non-reporter keeps it — and a stale pre-join
+    /// queue-lock id (#327/#347) could auto-answer a genuinely casual room's
+    /// popup). MatchIsRanked stays in the OR as a room-bound accelerant for
+    /// mid-series popups; the bare series id is trusted nowhere here.
+    /// Genuinely casual private rooms (no latch, no flag) keep the vanilla
+    /// popup.</summary>
     [HarmonyPatch(typeof(PopUpHandler), "StartPicking")]
     class PopUpHandler_StartPicking_Competitive_Patch
     {
@@ -4526,13 +4573,29 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return true;
                 // Spectator: never answers a rematch/continue prompt (design
                 // §2 census — the auto-confirm would make the spectator
                 // release every player immediately). Defense in depth: the
                 // GM lifecycle that opens the prompt is already suppressed.
+                // Checked BEFORE any rated predicate (r1 find 1's ordering).
                 if (RoomActors.LocalIsSpectator) return false;
-                Plugin.Log.LogInfo("[POPUP] Auto-confirming Continue prompt (competitive room bypass)");
+                bool competitiveRoom = CompetitiveRoomDetect.IsCompetitiveRoom();
+                if (!competitiveRoom)
+                {
+                    // Rated room-code game? (bug 228 — see class comment.)
+                    bool rated = false;
+                    try
+                    {
+                        string rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
+                        rated = GameStateWatcher.MatchIsRanked
+                            || GameStateWatcher.RatedContinuationFor(rn);
+                    }
+                    catch { }
+                    if (!rated) return true;
+                }
+                Plugin.Log.LogInfo(competitiveRoom
+                    ? "[POPUP] Auto-confirming Continue prompt (competitive room bypass)"
+                    : "[POPUP] Auto-confirming Continue prompt (rated room-code game — bug 228)");
                 try { functionToCall?.Invoke(PopUpHandler.YesNo.Yes); }
                 catch (Exception ex) { Plugin.Log.LogError($"[POPUP] Continue auto-invoke failed: {ex.Message}"); }
                 return false;  // skip vanilla picker setup entirely

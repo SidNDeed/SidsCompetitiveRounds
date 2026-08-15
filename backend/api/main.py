@@ -2557,7 +2557,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.6"
+LATEST_MOD_VERSION = "1.38.7"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -10826,6 +10826,34 @@ async def get_recent_series(
             games_by_series.setdefault(gr["sid"], []).append(
                 str(gr["id"]).replace("-", "")[:12].upper())
 
+    # Aug 14 contract: tournament tag for the bot's series-log poster — one
+    # batched lookup (never per-row). Unlike the preflight's not-yet-terminal
+    # gate, a COMPLETED feed row keeps its tag regardless of the bracket
+    # match's status: the row IS the tournament game that was played. Label
+    # composed by the same _round_label the preflight uses (#152/#329 — one
+    # composer, no drift). Degrades to untagged on any error.
+    tourn_by_series: dict[str, str] = {}
+    if series_ids:
+        try:
+            from tournaments import _round_label
+            # Savepoint (#235): "degrades to untagged" is only true if a
+            # failure here cannot poison the transaction the per-row streak
+            # queries below still need.
+            async with db.begin_nested():
+                _tourn_rows = (await db.execute(text(
+                    "SELECT tm.series_id::text AS sid, tm.round, tm.bracket_side, t.kind"
+                    "  FROM tournament_matches tm"
+                    "  JOIN tournaments t ON t.id = tm.tournament_id"
+                    " WHERE tm.series_id::text = ANY(:ids)"
+                ), {"ids": series_ids})).mappings().all()
+            for tr in _tourn_rows:
+                tourn_by_series[tr["sid"]] = (
+                    ("Async" if tr["kind"] == "async" else "Sync")
+                    + " Tournament - "
+                    + _round_label(tr["bracket_side"], tr["round"]))
+        except Exception as _te:
+            print(f"[SERIES-RECENT] tournament tag lookup failed (non-fatal): {_te}")
+
     series_list = []
     for row in rows:
         p1_streak = await get_ranked_streak(db, row["p1_steam_id"])
@@ -10852,6 +10880,11 @@ async def get_recent_series(
             "winner_steam_id": row["winner_steam_id"],
             "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
             "bets": bets_by_series.get(row["series_id"], []),
+            # Aug 14 contract fields — see the batched lookup above. 2v2/FFA
+            # series cannot be tournament-bound today, and their feeds are
+            # separate endpoints, so only this 1v1 shape carries the tag.
+            "tournament": row["series_id"] in tourn_by_series,
+            "tournament_label": tourn_by_series.get(row["series_id"], ""),
         })
 
     return {"series": series_list}
@@ -16317,6 +16350,32 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         _pair_ids += [r["p1_id"], r["p2_id"]]
     _lp_capable = await _live_points_capable_bulk(db, _pair_ids)
 
+    # Aug 15 (tournament batch): exact bracket label for the bot's live-bets
+    # board / gambler ping / bet confirmation — one batched lookup mirroring
+    # /series/recent's (same _round_label composer, #152/#329 no-drift rule).
+    # Only tournament rows are looked up; the common all-queue page skips the
+    # query entirely. Degrades to "" → the bot falls back to its generic
+    # "Tournament [Async]" tag.
+    _tourn_label_by_sid: dict[str, str] = {}
+    _tourn_sids = [r["series_id"] for r in rows if r["is_tournament"]]
+    if _tourn_sids:
+        try:
+            from tournaments import _round_label
+            async with db.begin_nested():   # #235: degrade, never poison
+                _tl_rows = (await db.execute(text(
+                    "SELECT tm.series_id::text AS sid, tm.round, tm.bracket_side, t.kind"
+                    "  FROM tournament_matches tm"
+                    "  JOIN tournaments t ON t.id = tm.tournament_id"
+                    " WHERE tm.series_id::text = ANY(:ids)"
+                ), {"ids": [str(s) for s in _tourn_sids]})).mappings().all()
+            for tr in _tl_rows:
+                _tourn_label_by_sid[tr["sid"]] = (
+                    ("Async" if tr["kind"] == "async" else "Sync")
+                    + " Tournament - "
+                    + _round_label(tr["bracket_side"], tr["round"]))
+        except Exception as _te:
+            print(f"[SERIES-ACTIVE] tournament label lookup failed (non-fatal): {_te}")
+
     series = []
     for r in rows:
         # r2 find 7: keep FULL precision for the odds/flags — the POST prices
@@ -16438,6 +16497,10 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             "is_private": is_private,
             "is_tournament": is_tournament,
             "tournament_kind": tournament_kind,
+            # Aug 15: exact bracket label ("Async Tournament - Winners R2")
+            # for the bot's board/ping/confirmation; "" when not a tournament
+            # (or on lookup failure — bot degrades to its generic tag).
+            "tournament_label": _tourn_label_by_sid.get(str(r["series_id"]), ""),
             "phase": phase,
             "started_at": r["created_at"].isoformat() if r["created_at"] else None,
         })
@@ -16778,10 +16841,44 @@ async def series_preflight(
         # adopt the resumed BO3 tally into its HUD instead of starting at 0-0.
         sp1 = p1_steam_id if existing.player1_id == p1.id else p2_steam_id
         sp2 = p2_steam_id if existing.player1_id == p1.id else p1_steam_id
+        # Aug 14 contract: tag tournament-bound series so the client can
+        # announce "this is a tournament match" at game start. True only while
+        # the bound bracket match is NOT yet terminal — a series left 'active'
+        # under an already-forfeited match (#350: forfeits write ONLY
+        # tournament_matches.status, never the series) must not claim
+        # tournament status for a game that can no longer advance the bracket.
+        # Savepoint (#235): a failure here degrades to untagged, it must not
+        # poison the transaction this response rides on.
+        _pf_tourn = False
+        _pf_tourn_label = ""
+        if bool(getattr(existing, "is_tournament", False)):
+            try:
+                async with db.begin_nested():
+                    _pf_tm = (await db.execute(text(
+                        "SELECT tm.round, tm.bracket_side, t.kind"
+                        "  FROM tournament_matches tm"
+                        "  JOIN tournaments t ON t.id = tm.tournament_id"
+                        " WHERE tm.series_id = :sid"
+                        "   AND tm.status NOT IN ('completed','forfeit',"
+                        "'double_forfeit','bye_auto')"
+                        " LIMIT 1"), {"sid": str(existing.id)})).mappings().first()
+                if _pf_tm is not None:
+                    from tournaments import _round_label
+                    _pf_tourn = True
+                    # ASCII hyphen, not an em-dash — this renders in-game and
+                    # Gravity's SDF atlas has no em-dash glyph (#47).
+                    _pf_tourn_label = (
+                        ("Async" if _pf_tm["kind"] == "async" else "Sync")
+                        + " Tournament - "
+                        + _round_label(_pf_tm["bracket_side"], _pf_tm["round"]))
+            except Exception as _te:
+                print(f"[PREFLIGHT-DIAG] tournament tag lookup failed (non-fatal): {_te}")
         return {
             "status": "exists", "series_id": str(existing.id),
             "p1_steam_id": sp1, "p2_steam_id": sp2,
             "p1_wins": existing.p1_series_wins, "p2_wins": existing.p2_series_wins,
+            "tournament": _pf_tourn,
+            "tournament_label": _pf_tourn_label,
         }
 
     # Queue (ranked_*) and sync-tournament (sct-*) rooms are mod-issued — series
@@ -16814,6 +16911,13 @@ async def series_preflight(
         "status": "created", "series_id": str(series.id),
         "p1_steam_id": p1_steam_id, "p2_steam_id": p2_steam_id,
         "p1_wins": 0, "p2_wins": 0,
+        # Aug 14 contract: a preflight-CREATED series is never tournament-bound
+        # — tournament series are pre-created at bracket activation and the
+        # reuse arm above always finds them (is_tournament arm of
+        # _find_current_active_series), so this branch is constant by
+        # construction.
+        "tournament": False,
+        "tournament_label": "",
     }
 
 
@@ -19621,6 +19725,15 @@ async def internal_tournament_notices(
 
 class _TournamentNoticeAck(BaseModel):
     notice_ids: list[str]
+    # Aug 15 (Codex tournament-batch r1 find 2, learning #175): the match-
+    # result kinds RE-ARM a row in place (ON CONFLICT DO UPDATE keeps the
+    # UUID, swaps the payload), so an id-only ack can mark a payload the bot
+    # never rendered as delivered. revisions maps notice_id -> the payload's
+    # match_id the bot actually SENT; those ids ack via a compare-and-set on
+    # that value, so a stale or in-flight ack against a re-armed row fails
+    # and the new payload is re-fetched next tick. Ids absent from the map
+    # keep the legacy id-only ack (availability_check rows never re-arm).
+    revisions: dict[str, str] | None = None
 
 
 @app.post("/api/v1/internal/tournament-notices/ack", tags=["Internal"])
@@ -19630,19 +19743,34 @@ async def ack_tournament_notices(
     db: AsyncSession = Depends(get_db),
 ):
     """Bot-only (v1.32): mark tournament notices delivered so the unnotified
-    poll stops returning them (mirror of the bug-report events ack)."""
+    poll stops returning them (mirror of the bug-report events ack). Since
+    Aug 15, match-result acks are revision-CAS — see _TournamentNoticeAck."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     ids = [i for i in body.notice_ids[:200] if i]
     if not ids:
         return {"acked": 0}
-    res = await db.execute(text(
-        "UPDATE tournament_notices SET notified_at = NOW() "
-        "WHERE id::text = ANY(:ids) AND notified_at IS NULL"
-    ), {"ids": ids})
+    revs = body.revisions or {}
+    plain = [i for i in ids if i not in revs]
+    acked = 0
+    if plain:
+        res = await db.execute(text(
+            "UPDATE tournament_notices SET notified_at = NOW() "
+            "WHERE id::text = ANY(:ids) AND notified_at IS NULL"
+        ), {"ids": plain})
+        acked += res.rowcount or 0
+    for nid in ids:
+        if nid not in revs:
+            continue
+        res = await db.execute(text(
+            "UPDATE tournament_notices SET notified_at = NOW() "
+            "WHERE id::text = :id AND notified_at IS NULL "
+            "  AND COALESCE(payload::jsonb ->> 'match_id', '') = :rev"
+        ), {"id": nid, "rev": str(revs[nid] or "")})
+        acked += res.rowcount or 0
     await db.commit()
-    return {"acked": res.rowcount or 0}
+    return {"acked": acked}
 
 
 @app.get("/api/v1/internal/pending-dms", tags=["Internal"])
@@ -34365,6 +34493,43 @@ def _spectate_roster_list(roster: str) -> list:
     return [s for s in (roster or "").split(",") if s]
 
 
+async def _tournament_mandatory_pairs(db: AsyncSession) -> set:
+    """Sorted 'a:b' steam-id pair keys for every not-yet-terminal tournament
+    match with both seats assigned, in a RUNNING tournament.
+
+    Sid (Aug 14): "Tournament games are the only ones where spectating should
+    be mandatorily allowed" — the per-player allow_spectators veto is skipped
+    for exactly these pairs (the veto keeps applying to every non-tournament
+    game). Pair-matching is the key because 1v1 spectate rows carry no
+    source_ref (#286: room-code rooms have no server-side series mapping).
+
+    Bounded: a bracket holds at most ~31 matches and at most one tournament
+    runs at a time, so ONE query serves the whole /spectate/games page —
+    callers fetch this once and test membership (never per-game). Statuses:
+    'ready' is a tournament match being played or awaited; 'scheduled' is the
+    sync between-rounds break ('pending' seats are not final and terminal
+    states are decided — neither may force anything).
+
+    Savepointed (#235, Codex tournament-batch r1 find 8): without it a
+    statement error here aborts the ROOT transaction, and the caller's
+    catch-and-continue then makes every later query in the same request die
+    with InFailedSQLTransaction — /spectate/games 500s instead of degrading
+    to the ordinary opt-out veto."""
+    async with db.begin_nested():
+        rows = (await db.execute(text("""
+            SELECT q1.steam_id AS a, q2.steam_id AS b
+              FROM tournament_matches tm
+              JOIN tournaments t ON t.id = tm.tournament_id
+              JOIN tournament_signups s1 ON s1.id = tm.p1_signup_id
+              JOIN tournament_signups s2 ON s2.id = tm.p2_signup_id
+              JOIN players q1 ON q1.id = s1.player_id
+              JOIN players q2 ON q2.id = s2.player_id
+             WHERE tm.status IN ('ready', 'scheduled')
+               AND t.status = 'running'
+        """))).mappings().all()
+    return {":".join(sorted((r["a"], r["b"]))) for r in rows}
+
+
 async def _spectate_game_ready(db: AsyncSession, game) -> tuple[bool, str]:
     """Completeness check (design §6.3): every roster member holds a FRESH
     attestation byte-matching the game row's tuple, and every member still
@@ -34406,8 +34571,20 @@ async def _spectate_game_ready(db: AsyncSession, game) -> tuple[bool, str]:
          WHERE steam_id = ANY(:sids) AND allow_spectators IS NOT TRUE
     """), {"sids": roster})).scalar() or 0
     if opt > 0:
-        # Generic reason — never reveal WHICH participant opted out (§6.4).
-        return False, "spectating_disabled"
+        # Sid (Aug 14): tournament matches are MANDATORILY spectatable — the
+        # opt-out veto is skipped when this exact pair has a live tournament
+        # match (see _tournament_mandatory_pairs). Every OTHER readiness rule
+        # above still applies; only the veto is bypassed. Fails toward the
+        # veto standing (a lookup error never widens spectating).
+        _mand = False
+        if game["mode"] == "1v1" and len(roster) == 2:
+            try:
+                _mand = ":".join(sorted(roster)) in await _tournament_mandatory_pairs(db)
+            except Exception as _te:
+                print(f"[SPECTATE] tournament pair lookup failed (veto stands): {_te}")
+        if not _mand:
+            # Generic reason — never reveal WHICH participant opted out (§6.4).
+            return False, "spectating_disabled"
     return True, ""
 
 
@@ -34469,6 +34646,28 @@ async def _spectate_authoritative_roster(db: AsyncSession, mode: str, room: str)
         if row is None or not row["sids"]:
             return set(), ""
         return set(row["sids"]), str(row["id"])
+    if room.startswith("sct-"):
+        # Sync tournament rooms have an authoritative mapping BY CONSTRUCTION
+        # (the dispatch stamps photon_room_name on the bracket match), so —
+        # unlike code rooms — they never get fallback trust: no live mapping
+        # under a running tournament = fail closed (Codex tournament-batch r1
+        # find 3's condition for accepting the prefix at all).
+        row = (await db.execute(text("""
+            SELECT tm.id, q1.steam_id AS a, q2.steam_id AS b
+              FROM tournament_matches tm
+              JOIN tournaments t ON t.id = tm.tournament_id
+              JOIN tournament_signups s1 ON s1.id = tm.p1_signup_id
+              JOIN tournament_signups s2 ON s2.id = tm.p2_signup_id
+              JOIN players q1 ON q1.id = s1.player_id
+              JOIN players q2 ON q2.id = s2.player_id
+             WHERE tm.photon_room_name = :room
+               AND tm.status NOT IN ('completed','forfeit','double_forfeit','bye_auto')
+               AND t.status = 'running'
+             ORDER BY tm.round DESC LIMIT 1
+        """), {"room": room})).mappings().first()
+        if row is None or not row["a"] or not row["b"]:
+            return set(), ""
+        return {row["a"], row["b"]}, str(row["id"])
     # 1v1: ranked queue rows may already be pruned by report time; when they
     # exist, enforce them, else accept cardinality+session only (documented
     # residual: two colluding SESSIONS can list a ranked_ room name they
@@ -34498,13 +34697,21 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
     if req.mode == "1v1":
         # 1v1 accepts CODE rooms too (Sid, Aug 7: private ranked lobbies are
         # most real ranked play, #286) — but a 1v1 claim must never wear a
-        # TEAM-mode or tournament prefix (cross-mode masquerade would dodge
-        # the stricter modes' roster verification). Collusion residual is the
-        # documented 1v1 fallback one (§6.6): two sessions can list a room
-        # name they already possess; the room name is the credential either
-        # way, capacity gating fails the lure onto full vanilla rooms, and
-        # modded victims classify-and-suppress the entrant.
-        if any(req.room_name.startswith(p) for p in ("team_", "ovt_", "ffa_", "sct-")):
+        # TEAM-mode prefix (cross-mode masquerade would dodge the stricter
+        # modes' roster verification). Collusion residual is the documented
+        # 1v1 fallback one (§6.6): two sessions can list a room name they
+        # already possess; the room name is the credential either way,
+        # capacity gating fails the lure onto full vanilla rooms, and modded
+        # victims classify-and-suppress the entrant.
+        #
+        # sct- (sync tournament) rooms ARE 1v1 rooms and are accepted here
+        # since the tournament batch (Codex r1 find 3: rejecting the prefix
+        # made mandatory tournament spectating structurally unreachable for
+        # sync tournaments). Unlike code rooms they get NO fallback trust:
+        # _spectate_authoritative_roster resolves the TRUE pair from the
+        # tournament match's own photon_room_name and fails closed when no
+        # running-tournament mapping exists.
+        if any(req.room_name.startswith(p) for p in ("team_", "ovt_", "ffa_")):
             raise HTTPException(status_code=422, detail="room_mode_mismatch")
     elif not req.room_name.startswith(_SPECTATE_ROOM_PREFIX[req.mode]):
         raise HTTPException(status_code=422, detail="room_mode_mismatch")
@@ -34720,6 +34927,15 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
     _colors = await _rank_colors(db)
     _pmap, _pmap2, _pmapf = await _podium_maps_for(
         db, (m["title_sku"] for m in meta_by_sid.values()))
+    # Mandatory-spectate pairs (Sid, Aug 14) — ONE query for the whole page,
+    # membership-tested per game below (the endpoint's batching contract).
+    # Fails toward the empty set = the opt-out veto stands.
+    _tourn_pairs: set = set()
+    if any(g["mode"] == "1v1" for g in games):
+        try:
+            _tourn_pairs = await _tournament_mandatory_pairs(db)
+        except Exception as _te:
+            print(f"[SPECTATE] tournament pair lookup failed (veto stands): {_te}")
 
     async def _ready_batched(g) -> tuple[bool, str]:
         """_spectate_game_ready with the players half prefetched — same
@@ -34739,6 +34955,7 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
                AND attested_at > NOW() - make_interval(secs => :fresh)
         """), {"gid": str(g["id"]), "fresh": SPECTATE_ATTEST_FRESH_SECONDS})).mappings().all()
         a_by_sid = {r["steam_id"]: r for r in arows}
+        _opted_out = False
         for s in roster0:
             a = a_by_sid.get(s)
             if a is None:
@@ -34750,7 +34967,19 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
                     or a["protocol"] < max(g["protocol_min"] or 1, SPECTATE_PROTOCOL)):
                 return False, "room_not_ready"
             m = meta_by_sid.get(s)
-            if m is None or not bool(m["allow_spectators"]):
+            if m is None:
+                # No player row at all — fail closed, tournament or not.
+                return False, "spectating_disabled"
+            if not bool(m["allow_spectators"]):
+                # Deferred, not an early return: the tournament skip below
+                # must mirror _spectate_game_ready's rule exactly (#159 —
+                # a list that hides what the grant allows, or shows what it
+                # 409s, is the same-predicate bug either way).
+                _opted_out = True
+        if _opted_out:
+            _mand = (g["mode"] == "1v1" and len(roster0) == 2
+                     and ":".join(sorted(roster0)) in _tourn_pairs)
+            if not _mand:
                 # Generic — never reveal WHICH participant opted out (§6.4).
                 return False, "spectating_disabled"
         return True, ""

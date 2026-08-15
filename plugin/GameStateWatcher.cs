@@ -713,6 +713,79 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[SESSION] Adopted resumed series score {currentSeriesGamesWon}-{currentSeriesGamesLost}");
         }
 
+        // ── Tournament context (bug 231, contract 1) ─────────────────────
+        // Set by ApiClient's /series/preflight callback from the response's
+        // "tournament" + "tournament_label" fields (both the "exists" and
+        // "created" branches carry them), and seeded from room identity for
+        // sct- rooms (whose game-1 preflight is skipped by the id-empty
+        // gate). Rendered by CompetitiveUI.DrawMatchStatus as a gold line
+        // ABOVE the "RANKED - Recording" banner. Per-ROOM state: cleared at
+        // room join (fresh room) and at room exit next to
+        // ActiveRankedSeriesId, so it can never leak into the next room
+        // (#353). Deliberately NOT cleared in ResetMatchState — a tournament
+        // BO3 spans several games in one room and the banner must survive
+        // the per-game reset.
+        private static bool tournamentMatch = false;
+        private static string tournamentLabel = "";
+        public static bool IsTournamentMatch => tournamentMatch;
+        public static string TournamentLabel => tournamentLabel;
+        public static void SetTournamentContext(bool isTournament, string label)
+        {
+            bool was = tournamentMatch;
+            tournamentMatch = isTournament;
+            // Sanitize ONCE here, never in the IMGUI draw path (#162 — the
+            // label renders on every Repaint, so it must be stored ready to
+            // draw with zero per-frame work). Em-dash -> ASCII hyphen: the
+            // server's label style is "Async Tournament — Winners R2" and
+            // non-ASCII glyph coverage is not guaranteed in every render
+            // font (#47). Length cap keeps the line inside its fixed-width
+            // banner rect (#199 — overflow paints over neighbors).
+            string lbl = isTournament ? (label ?? "") : "";
+            lbl = lbl.Replace('—', '-').Trim();
+            if (lbl.Length > 52) lbl = lbl.Substring(0, 52);
+            tournamentLabel = lbl;
+            // Log only the false->true edge — the preflight legitimately
+            // retries/re-arms (#101), and each response calls back here.
+            if (isTournament && !was)
+                Plugin.Log.LogInfo($"[POLL] Tournament match context set ({(tournamentLabel.Length > 0 ? tournamentLabel : "no label")})");
+        }
+        public static void ClearTournamentContext()
+        {
+            tournamentMatch = false;
+            tournamentLabel = "";
+        }
+
+        // ── Rated-continuation latch (bug 228, Codex tournament r1 find 1) ──
+        // "This ROOM's pairing is rated" for the rematch-popup auto-confirm.
+        // The previous gate (MatchIsRanked || (ActiveRankedSeriesId +
+        // OpponentHasMod)) was neither room-bound nor seat-symmetric: the
+        // elected reporter clears the series id at report time while the
+        // non-reporter keeps it (split popup behavior between the two seats),
+        // and a stale pre-join queue-lock id (#327/#347) could auto-answer a
+        // genuinely casual room's popup. This latch is set ONLY by the
+        // /series/preflight success callback — which is generation- and
+        // room-fenced, and which BOTH seats run (each client preflights
+        // eagerly in code rooms), so it is symmetric by construction — and it
+        // is keyed by ROOM NAME so a stale value cannot match a different
+        // room. Cleared at room join, room exit (both the polled edge and the
+        // Photon callbacks — r1 find 5: a leave+join between 10 Hz polls
+        // skips the polled edges), and by an explicit not_ranked preflight.
+        private static string ratedContinuationRoom = "";
+        public static void NoteRatedContinuation(string room)
+        {
+            if (string.IsNullOrEmpty(room)) return;
+            if (!string.Equals(ratedContinuationRoom, room, StringComparison.Ordinal))
+                Plugin.Log.LogInfo($"[POPUP] Rated-continuation latch set for room '{room}'");
+            ratedContinuationRoom = room;
+        }
+        public static bool RatedContinuationFor(string room)
+            => !string.IsNullOrEmpty(room)
+               && string.Equals(ratedContinuationRoom, room, StringComparison.Ordinal);
+        public static void ClearRatedContinuation()
+        {
+            ratedContinuationRoom = "";
+        }
+
         // ── Resumed-series handoff from the QUEUE LOCK (bug 200) ────────────
         // The queue lock learns the resumed BO3 tally BEFORE the room is
         // joined, and the room-join branch below unconditionally zeroes the
@@ -1178,8 +1251,19 @@ namespace CompetitiveRounds
                 if (RoomActors.LocalIsSpectator) return;
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
                 string room = PhotonNetwork.CurrentRoom?.Name ?? "";
+                // sct- (sync tournament) rooms ARE 1v1 rooms and attest as
+                // such (Codex tournament r1 find 3: without this the mode map
+                // rejected the prefix, so a sync tournament match could never
+                // be listed — making "tournament games are mandatorily
+                // spectatable" structurally unreachable for sync brackets).
+                // The server accepts the prefix ONLY against the bracket
+                // match's own photon_room_name mapping (fail-closed, no code-
+                // room fallback trust). Seat reservation needs no bump here:
+                // the QueueJoiner creates every sct- room with
+                // fighterTarget + SEAT_CAP MaxPlayers like the queue rooms.
                 string mode =
                     room.StartsWith("ranked_", StringComparison.Ordinal) ? "1v1"
+                    : room.StartsWith("sct-", StringComparison.Ordinal) ? "1v1"
                     : room.StartsWith("team_", StringComparison.Ordinal) ? "2v2"
                     : room.StartsWith("ovt_", StringComparison.Ordinal) ? "1v2"
                     : room.StartsWith("ffa_", StringComparison.Ordinal) ? "ffa"
@@ -2665,6 +2749,13 @@ namespace CompetitiveRounds
                 opponentIsRanked = false;
                 matchIsRanked = false;
                 casualDowngradeNotified = false;
+                // Bug 231: tournament banner context is per-room, like the
+                // flags above — a fresh room must never inherit it (#353).
+                ClearTournamentContext();
+                // Bug 228 latch: same per-room rule. (Also cleared in the
+                // Photon join/leave callbacks — this polled edge can miss a
+                // fast leave+join, Codex r1 find 5.)
+                ClearRatedContinuation();
                 // Mod-issued competitive rooms are definitionally ranked. Set
                 // immediately at room-join so [POLL] === Match Started === doesn't
                 // log CASUAL while CheckOpponentRanked is still racing. cr_ff
@@ -2686,6 +2777,17 @@ namespace CompetitiveRounds
                         matchIsRanked = true;
                         opponentIsRanked = true;
                         Plugin.Log.LogInfo($"[POLL] mod-issued competitive room detected ({rname}) — matchIsRanked forced true");
+                        // Bug 231: an sct- room IS a tournament match by
+                        // construction (only the sync-tournament dispatcher
+                        // issues that prefix), and its series pre-exists the
+                        // room — the game-1 /series/preflight that would
+                        // carry the tournament fields is skipped by the
+                        // ActiveRankedSeriesId id-empty gate below. Seed the
+                        // gold banner from room identity (generic label); a
+                        // later preflight response (rematch series) upgrades
+                        // or honestly clears it.
+                        if (rname.StartsWith("sct-"))
+                            SetTournamentContext(true, "");
                     }
                 }
                 catch { }
@@ -2838,6 +2940,11 @@ namespace CompetitiveRounds
                 // report time force-rank a later casual game vs an unrelated
                 // (possibly vanilla) opponent.
                 ApiClient.ActiveRankedSeriesId = null;
+                // Bug 231: the tournament banner context binds to the same
+                // pairing/room as the series id — it dies here with it (#353).
+                ClearTournamentContext();
+                // Bug 228 latch: same lifecycle (r1 find 1 — room-bound).
+                ClearRatedContinuation();
                 // Same rule for the 1v2 sitting: leaving the ovt_ room ends it.
                 // Only the reporter's client clears these at series completion;
                 // the other two would otherwise carry a stale series id + slot
