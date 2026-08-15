@@ -1844,11 +1844,12 @@ app.include_router(tournaments_router)
 # compatibility carve-out around steam-session enforcement, so the floor climbs
 # until the carve-out is gone. 1.33.0 is stage one; raise to 1.34.0 once
 # players.mod_version shows adoption. Old clients get 426 → auto-update.
-# Aug 11 (Sid's go, with the v1.38.2 ship): floor at 1.38.1 — adoption was
-# 17x 1.38.1 vs 2x 1.38.0 among 24h actives. This also restores 2v2/FFA
-# bettability (LIVE_POINTS_MIN_VERSION is 1.38.1). NOT raised to 1.38.2:
-# 1.38.1 clients stay fully compatible with this release's server.
-MIN_MOD_VERSION = "1.38.1"
+# Aug 15 (Sid's go, ~2h after the v1.38.7 ship): floor at 1.38.7 — quiet
+# window (2h actives: 2x 1.38.7, 1x 1.38.6, 2 unstamped), and 1.38.7 carries
+# contract changes older clients lack: the tournament preflight fields, the
+# sct- spectate attestation, and the queue home_region field. Old clients
+# get 426 → auto-update on next launch.
+MIN_MOD_VERSION = "1.38.7"
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # First client build with the fixed hit/block counting semantics (July 21:
