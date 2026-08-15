@@ -755,32 +755,84 @@ namespace CompetitiveRounds
             tournamentLabel = "";
         }
 
-        // ── Rated-continuation latch (bug 228, Codex tournament r1 find 1) ──
-        // "This ROOM's pairing is rated" for the rematch-popup auto-confirm.
-        // The previous gate (MatchIsRanked || (ActiveRankedSeriesId +
-        // OpponentHasMod)) was neither room-bound nor seat-symmetric: the
-        // elected reporter clears the series id at report time while the
-        // non-reporter keeps it (split popup behavior between the two seats),
-        // and a stale pre-join queue-lock id (#327/#347) could auto-answer a
-        // genuinely casual room's popup. This latch is set ONLY by the
-        // /series/preflight success callback — which is generation- and
-        // room-fenced, and which BOTH seats run (each client preflights
-        // eagerly in code rooms), so it is symmetric by construction — and it
-        // is keyed by ROOM NAME so a stale value cannot match a different
-        // room. Cleared at room join, room exit (both the polled edge and the
-        // Photon callbacks — r1 find 5: a leave+join between 10 Hz polls
-        // skips the polled edges), and by an explicit not_ranked preflight.
+        // ── Rated-continuation handshake (bug 228; Codex tournament r1 find
+        // 1, r2 find 1, r3 find 1 — three escalations, read all before
+        // touching) ──
+        // "This ROOM's pairing is rated, and BOTH seats know it" for the
+        // rematch-popup auto-confirm. History: the r1 gate (MatchIsRanked ||
+        // series id + OpponentHasMod) was seat-asymmetric and not room-bound;
+        // the r2 latch was room-bound but still SEAT-LOCAL HTTP state, and
+        // the r3 decompile read proved why that matters: vanilla's Yes
+        // (GM_ArmsRace.IDoRematch) starts a 10-SECOND timer that
+        // NetworkRestarts the answering seat on its own if the peer doesn't
+        // answer — so one seat auto-answering while the other's preflight
+        // failed converts "popup waits indefinitely" into "latched seat
+        // restarts out after 10s". The fix is the #324 doctrine: consensus
+        // from REPLICATED data — each seat publishes its latch as a player
+        // property (cr_rcl = room name) at preflight time, minutes before
+        // any popup, and the auto-confirm requires the LOCAL latch AND every
+        // other non-spectator seat's matching property. A seat whose
+        // preflight failed publishes nothing, which disables the
+        // auto-confirm on EVERY seat symmetrically (fail-closed to vanilla,
+        // both humans answer by hand — today's baseline).
+        //
+        // Residual, stated for review: player props are eventually
+        // consistent, so a prop published at preflight time could in
+        // principle be unreplicated at popup time — but the popup fires
+        // minutes later, so the window is unreachable in practice; and a
+        // STALE prop from a previous same-named room incarnation (#182:
+        // props persist across rooms) is neutralized by (a) the join
+        // callback removing our own prop on every room entry and (b) the
+        // LOCAL latch — with its triple-cleared lifecycle and
+        // incarnation-fenced setter — remaining a required conjunct.
         private static string ratedContinuationRoom = "";
+        internal const string RATED_CONT_PROP = "cr_rcl";
         public static void NoteRatedContinuation(string room)
         {
             if (string.IsNullOrEmpty(room)) return;
-            if (!string.Equals(ratedContinuationRoom, room, StringComparison.Ordinal))
-                Plugin.Log.LogInfo($"[POPUP] Rated-continuation latch set for room '{room}'");
+            bool changed = !string.Equals(ratedContinuationRoom, room, StringComparison.Ordinal);
             ratedContinuationRoom = room;
+            if (!changed) return;   // re-publish only on change (#109)
+            Plugin.Log.LogInfo($"[POPUP] Rated-continuation latch set for room '{room}'");
+            try
+            {
+                if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode)
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(
+                        new ExitGames.Client.Photon.Hashtable { { RATED_CONT_PROP, room } });
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] latch prop publish failed: {ex.Message}"); }
         }
         public static bool RatedContinuationFor(string room)
             => !string.IsNullOrEmpty(room)
                && string.Equals(ratedContinuationRoom, room, StringComparison.Ordinal);
+        /// <summary>Every OTHER non-spectator seat advertises the latch for
+        /// THIS room (and at least one exists). Raw PlayerListOthers minus
+        /// replicated spectator props, per the #324 census rule — never a
+        /// locally-classified roster.</summary>
+        public static bool PeersConfirmRatedContinuation(string room)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(room)) return false;
+                var others = PhotonNetwork.PlayerListOthers;
+                if (others == null) return false;
+                int fighters = 0;
+                foreach (var p in others)
+                {
+                    if (p == null) continue;
+                    if (RoomActors.IsSpectator(p)) continue;
+                    fighters++;
+                    object v = null;
+                    if (p.CustomProperties == null
+                        || !p.CustomProperties.TryGetValue(RATED_CONT_PROP, out v)
+                        || !(v is string s)
+                        || !string.Equals(s, room, StringComparison.Ordinal))
+                        return false;
+                }
+                return fighters > 0;
+            }
+            catch { return false; }
+        }
         public static void ClearRatedContinuation()
         {
             ratedContinuationRoom = "";

@@ -1348,6 +1348,61 @@ async def start_tournament(db: AsyncSession, t: Tournament) -> None:
     await _activate_ready_matches(db, t.id)
 
 
+async def _enqueue_match_ready_notices(db: AsyncSession, t: "Tournament",
+                                       m: "TournamentMatch") -> None:
+    """Durable 'your match is ready' DM rows for BOTH seats of a match that
+    just flipped to 'ready' (Codex tournament r2 find 4: the bot's legacy
+    watcher added the match to an in-memory notified-set BEFORE either DM was
+    awaited, so a transient send failure — or a bot restart — silently lost
+    the readiness DM that match_won_waiting had just PROMISED, and a player
+    who never learns their match went live can run out its deadline and
+    forfeit). Same table / poller / (tournament_id, player_id, notice_type)
+    re-arm semantics as the completion notices: a later round's readiness
+    supersedes (payload match_id differs), a rerun for the same match is a
+    no-op, and the bot acks by (id, match_id) revision CAS. Savepointed —
+    a notice failure must never poison the activation it announces."""
+    try:
+        async with db.begin_nested():
+            if m.p1_signup_id is None or m.p2_signup_id is None:
+                return
+            info = {}
+            for r in (await db.execute(text(
+                "SELECT ts.id::text AS sig_id, ts.player_id, p.steam_id, p.display_name "
+                "  FROM tournament_signups ts JOIN players p ON p.id = ts.player_id "
+                " WHERE ts.id::text = ANY(:ids)"),
+                {"ids": [str(m.p1_signup_id), str(m.p2_signup_id)]})).mappings().all():
+                info[r["sig_id"]] = r
+            a = info.get(str(m.p1_signup_id))
+            b = info.get(str(m.p2_signup_id))
+            if a is None or b is None:
+                return
+            dl_ts = (int(m.deadline_at.timestamp())
+                     if (t.kind == "async" and m.deadline_at) else None)
+            for me, opp in ((a, b), (b, a)):
+                payload = json.dumps({
+                    "kind": t.kind,
+                    "label": f"{_kind_label(t.kind)} tournament",
+                    "tournament_id": str(t.id),
+                    "match_id": str(m.id),
+                    "match_label": _round_label(m.bracket_side, m.round),
+                    "round": int(m.round or 0),
+                    "bracket_side": m.bracket_side or "",
+                    "opponent_name": (opp["display_name"] or "TBD"),
+                    "opponent_steam_id": opp["steam_id"] or "",
+                    "next_deadline_ts": dl_ts,
+                })
+                await db.execute(text(
+                    "INSERT INTO tournament_notices (tournament_id, player_id, notice_type, payload) "
+                    "VALUES (:tid, :pid, 'match_ready', :payload) "
+                    "ON CONFLICT (tournament_id, player_id, notice_type) DO UPDATE "
+                    "   SET payload = EXCLUDED.payload, created_at = NOW(), notified_at = NULL "
+                    " WHERE COALESCE(tournament_notices.payload::jsonb ->> 'match_id', '') "
+                    "       IS DISTINCT FROM COALESCE(EXCLUDED.payload::jsonb ->> 'match_id', '')"
+                ), {"tid": t.id, "pid": me["player_id"], "payload": payload})
+    except Exception as ex:
+        print(f"[TOURNAMENT] match-ready notices for {m.id} failed (non-fatal): {ex}")
+
+
 async def _flip_scheduled_matches(db: AsyncSession, tournament_id: uuid.UUID) -> None:
     """Promote 'scheduled' (break) matches to 'ready' once the break elapses
     OR both players pressed Play Now (early_ok_signup_ids). The ready-up
@@ -1358,6 +1413,7 @@ async def _flip_scheduled_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         TournamentMatch.tournament_id == tournament_id,
         TournamentMatch.status == "scheduled",
     )))).scalars().all()
+    t = None
     for m in rows:
         early = set(m.early_ok_signup_ids or [])
         both_early = (m.p1_signup_id is not None and m.p2_signup_id is not None
@@ -1366,6 +1422,12 @@ async def _flip_scheduled_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             continue
         m.status = "ready"
         m.ready_deadline_at = now + timedelta(seconds=MATCH_READY_GRACE_SECONDS * 2)
+        # Durable readiness DM (r2 find 4) — the break-end flip is a ready
+        # transition like any other.
+        if t is None:
+            t = await _get_tournament(db, tournament_id)
+        if t is not None:
+            await _enqueue_match_ready_notices(db, t, m)
 
 
 async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) -> None:
@@ -1562,6 +1624,11 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.status = "ready"
             m.deadline_at = now + timedelta(days=ASYNC_MATCH_DEADLINE_DAYS)
             m.ready_deadline_at = m.deadline_at
+            # Durable readiness DM (Codex tournament r2 find 4). The
+            # 'scheduled' branch below deliberately does NOT enqueue — its
+            # later break-end flip goes through _flip_scheduled_matches,
+            # which enqueues at the actual ready transition.
+            await _enqueue_match_ready_notices(db, t, m)
         elif came_from_play:
             m.status = "scheduled"
             m.scheduled_ready_at = now + timedelta(seconds=MATCH_BREAK_SECONDS)
@@ -1573,6 +1640,7 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             # slow ROUNDS launches.
             grace = MATCH_READY_GRACE_SECONDS * 2
             m.ready_deadline_at = now + timedelta(seconds=grace)
+            await _enqueue_match_ready_notices(db, t, m)
 
 
 async def _apply_terminal_transitions(db: AsyncSession, m: TournamentMatch, winner_signup_id):
@@ -2560,6 +2628,21 @@ async def tournament_tick() -> None:
                         return
                     await _apply_no_show_forfeits(db, _tid)
                     await _activate_ready_matches(db, _tid)
+                    # match_ready reconciliation (Codex tournament r3 find 4):
+                    # the transition hooks alone cannot cover a match that
+                    # went 'ready' under the PREVIOUS API build (deploy gap)
+                    # or whose notice insert failed inside its non-fatal
+                    # savepoint — with the bot's legacy ready-DM deleted,
+                    # such a match would never be revisited and its players
+                    # would run out the deadline unnotified. The upsert's
+                    # same-match_id conflict predicate makes this a pure
+                    # no-op for every already-enqueued (or delivered) row,
+                    # so sweeping every currently-ready match each tick is
+                    # cheap (a bracket holds at most ~31 matches).
+                    for _rm in (await db.execute(select(TournamentMatch).where(and_(
+                            TournamentMatch.tournament_id == _tid,
+                            TournamentMatch.status == "ready")))).scalars().all():
+                        await _enqueue_match_ready_notices(db, t, _rm)
                     await _maybe_complete_tournament(db, t)
                 await _safe(f"run:{tid}", _run)
         except Exception as e:

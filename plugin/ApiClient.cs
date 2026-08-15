@@ -7329,13 +7329,18 @@ namespace CompetitiveRounds
             // the wider private window). #36.
             string roomName = "";
             try { roomName = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
-            string preflightRoom = roomName;   // find 6: incarnation fence for the callback
+            string preflightRoom = roomName;   // name half of the callback fence
             // r4 find 2: room name alone ALIASES successive series in one
             // room (a rematch reuses the Photon room), so a delayed response
             // could reinstall a completed series and send the NEW series'
             // live points to it. Every send takes a generation; only the
             // newest may bind.
             int myGen = ++preflightGeneration;
+            // Tournament r2 find 2: the name also aliases successive
+            // INCARNATIONS of one code room (leave CODE, rejoin CODE with a
+            // different opponent) — the incarnation counter, bumped by both
+            // Photon room callbacks, is what the name check cannot be.
+            int myIncarnation = RoomIncarnation;
             string url = $"{baseUrl}/api/v1/series/preflight?p1_steam_id={Escape(mySteamId)}&p2_steam_id={Escape(oppSteamId)}"
                        + $"&p1_name={Escape(myName)}&p2_name={Escape(oppName)}"
                        + $"&room_id={UnityEngine.Networking.UnityWebRequest.EscapeURL(roomName)}&sig={sig}";
@@ -7356,6 +7361,34 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogInfo($"[PREFLIGHT] response ignored — superseded (gen {myGen}, "
                                            + $"latest {preflightGeneration}, retired through {preflightRetiredThrough})");
+                        return;
+                    }
+                    if (myIncarnation != RoomIncarnation)
+                    {
+                        // r2 find 2: same NAME, different room — a leave (or
+                        // leave+rejoin) happened since this request was sent,
+                        // so nothing it says may bind to the room we are in
+                        // now. The name check below cannot catch this case.
+                        Plugin.Log.LogInfo($"[PREFLIGHT] response ignored — room incarnation changed "
+                                           + $"(sent in {myIncarnation}, now {RoomIncarnation})");
+                        return;
+                    }
+                    // r3 find 2: PUN flips the client to Leaving SYNCHRONOUSLY
+                    // inside LeaveRoom(), but CurrentRoom stays populated and
+                    // OnLeftRoom (which bumps the incarnation) only fires on a
+                    // later dispatch — so a coroutine resuming in that window
+                    // passes BOTH fences above while the room is already dead.
+                    // Nothing may bind unless the client is actually Joined.
+                    bool joinedNow = false;
+                    try
+                    {
+                        joinedNow = Photon.Pun.PhotonNetwork.InRoom
+                                    && !Photon.Pun.PhotonNetwork.OfflineMode;
+                    }
+                    catch { }
+                    if (!joinedNow)
+                    {
+                        Plugin.Log.LogInfo("[PREFLIGHT] response ignored — client is not in a joined room (leaving/left)");
                         return;
                     }
                     if (!sameRoom)
@@ -7585,6 +7618,18 @@ namespace CompetitiveRounds
         /// was slow (up to 3 x 10s of retries), leaving that game with no
         /// series row and therefore no pre-game betting window.</summary>
         private static int preflightRetiredThrough;
+
+        /// <summary>Room-INCARNATION counter (Codex tournament r2 find 2): a
+        /// room NAME does not identify a room — code rooms are player-typed
+        /// and reusable, so "leave rated room CODE, quickly rejoin CODE with
+        /// a casual opponent" lets a delayed preflight response pass the
+        /// name-equality fence and reinstall the OLD pairing's series id,
+        /// rated-continuation latch, and tournament context into the new
+        /// incarnation. Incremented by Plugin's Photon OnJoinedRoom AND
+        /// OnLeftRoom callbacks (synchronous, cannot be missed the way the
+        /// 10 Hz polled edges can); every preflight captures it at send and
+        /// its callback refuses to bind across a bump.</summary>
+        public static int RoomIncarnation;
         public static QueuePollData LastPollData { get; private set; }
         public static bool IsQueuePolling { get; private set; } = false;
         private static float queuePollTimer = 0f;

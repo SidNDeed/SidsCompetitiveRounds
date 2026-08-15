@@ -6747,7 +6747,8 @@ import collections as _coll
 from datetime import timedelta as _td
 
 _tournament_state = {}          # tournament_id -> last seen status
-_notified_match_ready = set()   # match_ids we've already DM'd "match ready" for
+# (_notified_match_ready removed Aug 15 — the initial-ready DM moved to the
+# durable 'match_ready' notice queue; see the comment at its old send site.)
 _notified_match_scheduled = set()  # match_ids we've already DM'd the break/next-opponent notice for
 _notified_completed = set()     # tournament_ids we've already paid trophies for
 _notified_deadline_warn = set() # match_ids we've already DM'd a 24h-deadline warning for (async only)
@@ -7079,32 +7080,17 @@ async def poll_tournaments():
                 p1d = m.get("p1_discord_id"); p2d = m.get("p2_discord_id")
                 p1n = m.get("p1_name") or "opponent"
                 p2n = m.get("p2_name") or "opponent"
-                # Initial match-ready DM (once per match).
-                if mid not in _notified_match_ready:
-                    _notified_match_ready.add(mid)
-                    if kind == "async":
-                        # No room code and no Ready Up here: the async match
-                        # binds by player pair from ANY room (main.py:744), so
-                        # a private lobby the two of them make themselves is
-                        # what counts. The bracket panel is a bracket, not a
-                        # thing to press.
-                        dl_str = _fmt_pt_rel(m.get("deadline_at"))
-
-                        def _async_ready_body(opp):
-                            return (f"Your async tournament match vs **{opp}** is live. "
-                                    f"Deadline: {dl_str}.\n"
-                                    f"Agree a time with them (`/dm-opponent <message>` or just DM "
-                                    f"them), then **play a private lobby together** — main menu → "
-                                    f"Online → Host Room, one of you sends the other the "
-                                    f"6-character code. The result records automatically as long "
-                                    f"as you both have SCR running with Ranked enabled. "
-                                    f"Bracket: F5 → Tournaments → ASYNC.")
-
-                        await _dm_user(p1d, _async_ready_body(p2n))
-                        await _dm_user(p2d, _async_ready_body(p1n))
-                    else:
-                        await _dm_user(p1d, f"🎮 Your tournament match vs **{p2n}** is ready — **get in ROUNDS now**. The mod auto-connects you from the main menu. No-show forfeits in a few minutes.")
-                        await _dm_user(p2d, f"🎮 Your tournament match vs **{p1n}** is ready — **get in ROUNDS now**. The mod auto-connects you from the main menu. No-show forfeits in a few minutes.")
+                # The initial match-ready DM that lived here is GONE (Codex
+                # tournament r2 find 4): this loop added the match to an
+                # in-memory notified-set BEFORE awaiting either DM, so one
+                # transient send failure (or a restart) lost the readiness
+                # DM forever while the deadline kept running. The server now
+                # enqueues a durable 'match_ready' notice per (match,
+                # recipient) at every ready transition and the acked notices
+                # poller delivers it with retries — do NOT reintroduce a DM
+                # here; that would double-message every activation. The nag /
+                # deadline-warning blocks below stay legacy (best-effort
+                # reminders, promised by nothing).
                 # Sync last-call + stall nag (item 3): if a ready match is
                 # about to hit its no-show deadline (<90s) — or sat past it
                 # for 5+ minutes because both players heartbeat but neither
@@ -7399,6 +7385,11 @@ _TMATCH_NOTICE_KINDS = {
     # Terminal win — champion / third-place winner (Codex r1 find 4: the
     # completion watcher posts publicly + grants roles but never DMs).
     "tournament_won",
+    # Durable "your match is live" (Codex r2 find 4) — replaces the legacy
+    # poll_tournaments initial-ready DM, whose in-memory notified-set was
+    # marked BEFORE the DM was awaited (one transient failure = the promised
+    # readiness DM lost forever, deadline still running).
+    "match_ready",
 }
 
 
@@ -7414,12 +7405,13 @@ def _tmatch_next_steps(kind, deadline_unix, next_status="ready"):
     ask: 'make sure the bot is giving people instructions after each match
     completes' — every branch tells them what to actually DO next.
 
-    next_status (Codex r1 find 7): "opponent known" is NOT "match ready" —
-    a sync match sits 'scheduled' through the between-rounds break with both
-    seats filled. Go-now copy renders only for 'ready'; anything else gets
-    holding copy (#130 wording: "have ROUNDS open", never "be in the tab")."""
+    next_status (Codex r1 find 7 + r2 find 5): "opponent known" is NOT
+    "match ready" — a sync match sits 'scheduled' through the between-rounds
+    break with both seats filled. Go-now copy renders ONLY for an explicit
+    'ready'; anything else — including absent/empty — gets holding copy
+    (#130 wording: "have ROUNDS open", never "be in the tab")."""
     lines = []
-    if next_status and next_status != "ready":
+    if next_status != "ready":
         if kind == "sync":
             lines.append("Your match isn't live yet — keep ROUNDS open at the "
                          "main menu and the mod will auto-connect you when it "
@@ -7489,28 +7481,63 @@ def _tmatch_notice_message(ntype, n, payload):
     # next_match_label names which (server warning; never hardcode "losers").
     next_label = str(payload.get("next_match_label") or "").strip()
     # 'ready' | 'scheduled' | 'pending' | '' — see _tmatch_next_steps.
-    next_status = str(payload.get("next_status") or "ready").strip() or "ready"
+    # Absent/unknown = HOLDING copy (Codex r2 find 5: only an explicit
+    # 'ready' may promise go-now — a false "opponent is ready" against a
+    # scheduled break contradicts the holding instructions below it, while
+    # a holding message for a ready match is corrected seconds later by the
+    # match_ready DM that accompanies every activation).
+    next_status = str(payload.get("next_status") or "").strip()
+    next_is_ready = (next_status == "ready")
 
     lines = []
     if label:
         lines.append(f"🏆 **{_md_name(label)}**")
 
     if ntype == "match_won_next_ready":
+        # Titles are status-aware too (r2 find 5): "opponent is ready" next
+        # to holding instructions was self-contradictory during sync breaks.
+        _next_word = "your next opponent is ready" if next_is_ready \
+            else "your next match is scheduled"
         if by_double_forfeit:
             content = "🏆 You advance on the no-show tiebreak."
-            title = "🏆 Advanced — your next opponent is ready"
+            title = f"🏆 Advanced — {_next_word}"
             lines.append("Neither player made that match's deadline; the "
                          "tiebreak advanced you.")
         elif by_forfeit:
             content = "🏆 You advance — your opponent forfeited."
-            title = "🏆 Advanced by forfeit — your next opponent is ready"
+            title = f"🏆 Advanced by forfeit — {_next_word}"
             lines.append("That match was recorded as a forfeit, so you advance.")
         else:
             content = "🏆 You won your tournament match!"
-            title = "🏆 Match won — your next opponent is ready"
+            title = f"🏆 Match won — {_next_word}"
         lines.append(f"Next up: **{_md_name(opponent, 'your next opponent')}**.")
         lines.extend(_tmatch_next_steps(kind, deadline_unix, next_status))
         color = 0x57F287
+    elif ntype == "match_ready":
+        # Durable replacement for the legacy watcher's initial-ready DM
+        # (r2 find 4) — same copy the players already know, now retried
+        # until it actually lands. This kind IS the ready event, so it
+        # always renders go-now instructions.
+        opp_s = _md_name(opponent, "your opponent")
+        if kind == "async":
+            content = f"🎮 Your async tournament match vs **{opp_s}** is live!"
+            title = "🎮 Async match live — arrange and play"
+            if deadline_unix:
+                lines.append(f"⏳ Deadline: <t:{deadline_unix}:F> (<t:{deadline_unix}:R>).")
+            lines.append(f"Agree a time with **{opp_s}** (`/dm-opponent <message>` "
+                         "or just DM them), then **play a private lobby "
+                         "together** — main menu → Online → Host Room, one of "
+                         "you sends the other the 6-character code.")
+            lines.append("The result records automatically as long as you both "
+                         "have SCR running with Ranked enabled. Bracket: F5 → "
+                         "Tournaments.")
+        else:
+            content = f"🎮 Your tournament match vs **{opp_s}** is ready — get in ROUNDS now!"
+            title = "🎮 Match ready — get in ROUNDS"
+            lines.append(f"Your match vs **{opp_s}** is ready — **get in ROUNDS "
+                         "now**. The mod auto-connects you from the main menu.")
+            lines.append("A no-show forfeits in a few minutes.")
+        color = 0x5865F2
     elif ntype == "match_won_waiting":
         if by_double_forfeit:
             content = "🏆 You advance on the no-show tiebreak."
@@ -7565,26 +7592,45 @@ def _tmatch_notice_message(ntype, n, payload):
         color = 0xFAA61A
     elif ntype == "tournament_won":
         # Terminal win — champion (placement 1) or third-place winner.
+        # Forfeit-aware like every other kind (r2 find 6): a final decided
+        # by no-show must not read "you won your final match".
         _p1 = False
         try:
             _p1 = placement is not None and int(str(placement).strip()) == 1
         except Exception:
             _p1 = False
-        if _p1:
-            content = "👑 You WON the tournament!"
-            title = "👑 Tournament champion"
-            lines.append("That was the last match — **you're the champion.** "
-                         "Congratulations!")
+        if by_double_forfeit:
+            _how = ("Neither player made the final match's deadline; the "
+                    "tiebreak decided it in your favor.")
+        elif by_forfeit:
+            _how = "Your opponent forfeited the final match."
         else:
-            content = "🏆 You won your final tournament match!"
-            title = "🏆 Tournament run complete — final match won"
+            _how = None
+        if _p1:
+            content = ("👑 You take the tournament!" if by_forfeit
+                       else "👑 You WON the tournament!")
+            title = "👑 Tournament champion"
+            if _how:
+                lines.append(_how)
+                lines.append("**You're the champion.** Congratulations!")
+            else:
+                lines.append("That was the last match — **you're the "
+                             "champion.** Congratulations!")
+        else:
+            content = ("🏆 Your final tournament match goes to you."
+                       if by_forfeit else
+                       "🏆 You won your final tournament match!")
+            title = "🏆 Tournament run complete"
             place_s = ""
             try:
                 if placement is not None and str(placement).strip():
                     place_s = f" You finish **#{int(str(placement).strip())}**."
             except Exception:
                 place_s = f" You finish **{_md_name(placement)}**."
-            lines.append(f"You won your last match of the bracket.{place_s}")
+            if _how:
+                lines.append(f"{_how}{place_s}")
+            else:
+                lines.append(f"You won your last match of the bracket.{place_s}")
         lines.append("Results and the final bracket are in F5 → Tournaments "
                      "(and #scr-tournaments).")
         color = 0xFFD700
@@ -7672,9 +7718,25 @@ async def poll_tournament_notices():
                     payload = raw
             except Exception:
                 payload = {}
+            if not isinstance(payload, dict):
+                # Valid-but-non-object JSON ("null", "[]", "1") parses fine
+                # and then every payload.get below raises OUTSIDE the per-row
+                # guard — the loop would exit without acking and the same
+                # oldest row would wedge the LIMIT-20 feed page forever
+                # (Codex tournament r3 find 6).
+                payload = {}
             _is_match_kind = ntype in _TMATCH_NOTICE_KINDS
-            rev = str(payload.get("match_id") or "") if _is_match_kind else None
-            skey = f"{nid}:{rev}" if _is_match_kind else nid
+            # EVERY ack carries the revision (payload match_id, '' when the
+            # payload has none — the server's CAS compares COALESCE'd '', so
+            # availability rows still ack). Codex r2 find 3: the server now
+            # refuses bare-id acks for anything but availability_check, so an
+            # old bot ack-skipping a kind it doesn't know can no longer mark
+            # an undelivered result notice as delivered during a deploy gap —
+            # and this bot must therefore never SEND a bare-id ack either
+            # (an unknown FUTURE kind acked bare-id would be refused forever
+            # and starve the LIMIT-20 feed page).
+            rev = str(payload.get("match_id") or "")
+            skey = f"{nid}:{rev}"
             if skey in _tavail_seen_notice_ids:
                 # Handled this process-lifetime — earlier ack must have failed;
                 # re-ack (same revision), don't re-DM.

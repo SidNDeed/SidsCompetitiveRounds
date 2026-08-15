@@ -19755,9 +19755,17 @@ async def ack_tournament_notices(
     plain = [i for i in ids if i not in revs]
     acked = 0
     if plain:
+        # Bare-id acks are LEGACY (pre-revision bots) and may only touch
+        # availability rows (Codex tournament r2 find 3): during an
+        # api-before-bot rollout the old bot ack-skips every kind it doesn't
+        # recognize with a bare id — without this type restriction that
+        # permanently marked undelivered match-result notices as delivered
+        # before the bot that can send them ever started. A refused bare-id
+        # ack just means the row returns next poll until the new bot lands.
         res = await db.execute(text(
             "UPDATE tournament_notices SET notified_at = NOW() "
-            "WHERE id::text = ANY(:ids) AND notified_at IS NULL"
+            "WHERE id::text = ANY(:ids) AND notified_at IS NULL "
+            "  AND notice_type = 'availability_check'"
         ), {"ids": plain})
         acked += res.rowcount or 0
     for nid in ids:
@@ -35195,7 +35203,22 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
              WHERE steam_id = ANY(:sids) AND allow_spectators IS NOT TRUE
         """), {"sids": _spectate_roster_list(lease["roster"])})).scalar() or 0
         if opt > 0:
-            now_dead = True
+            # Tournament pairs are MANDATORILY spectatable (Sid, Aug 14) —
+            # the SAME predicate the listing and grant use must gate the
+            # heartbeat too (Codex tournament r3 find 5 / #159/#328: the
+            # grant bypassed the opt-out and the very next heartbeat 410'd
+            # the seat for exactly the case the bypass exists to serve).
+            # Fail direction on lookup error: the veto stands (revoke).
+            _mand = False
+            _roster = _spectate_roster_list(lease["roster"])
+            if lease["mode"] == "1v1" and len(_roster) == 2:
+                try:
+                    _mand = (":".join(sorted(_roster))
+                             in await _tournament_mandatory_pairs(db))
+                except Exception as _te:
+                    print(f"[SPECTATE] heartbeat tournament pair lookup failed (veto stands): {_te}")
+            if not _mand:
+                now_dead = True
     if now_dead:
         await db.execute(text("""
             UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, NOW())

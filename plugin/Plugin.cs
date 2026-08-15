@@ -3004,8 +3004,24 @@ namespace CompetitiveRounds
             // spectators just carry a cleared context.
             try
             {
+                // r2 find 2: retire every in-flight preflight from the
+                // PREVIOUS room incarnation — the name fence aliases when a
+                // code room is left and re-entered under the same code.
+                ApiClient.RoomIncarnation++;
                 GameStateWatcher.ClearTournamentContext();
                 GameStateWatcher.ClearRatedContinuation();
+                // Remove OUR stale rated-continuation prop from any previous
+                // room — player props persist across rooms (#182), and a
+                // stale cr_rcl matching a reused room CODE would satisfy the
+                // peer half of the handshake for a pairing that never
+                // preflighted here.
+                try
+                {
+                    Photon.Pun.PhotonNetwork.LocalPlayer.SetCustomProperties(
+                        new ExitGames.Client.Photon.Hashtable {
+                            { GameStateWatcher.RATED_CONT_PROP, null } });
+                }
+                catch { }
                 string _rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
                 if (_rn.StartsWith("sct-", StringComparison.Ordinal)
                     && !SpectatorSession.IsLocalSpectator)
@@ -3512,9 +3528,21 @@ namespace CompetitiveRounds
             try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
             // Tournament banner + rated-continuation latch die with the room
             // on the reliable edge too (Codex tournament r1 find 5 — the
-            // polled exit is the lossy backup).
+            // polled exit is the lossy backup), and the incarnation bump
+            // retires every in-flight preflight from the room we just left
+            // (r2 find 2 — a later same-CODE room must not receive them).
+            try { ApiClient.RoomIncarnation++; } catch { }
             try { GameStateWatcher.ClearTournamentContext(); } catch { }
             try { GameStateWatcher.ClearRatedContinuation(); } catch { }
+            // r3 find 3: the series id is room-bound state and the polled
+            // exit already clears it unconditionally (GameStateWatcher's
+            // Left-room branch, #347's documented casual→ranked flow relies
+            // on exactly that clear) — mirroring it on the RELIABLE edge
+            // closes the fast same-code leave/rejoin where the stale id
+            // suppressed the new room's preflight and posted the new game's
+            // live points into the old pairing. Menu-time queue-staged ids
+            // are untouched: no room exit fires for them, same as today.
+            try { ApiClient.ActiveRankedSeriesId = null; } catch { }
             // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
             // materials die with the room too — Reset() previously had NO
             // caller, so the flush the r4 cap depends on never ran and a
@@ -4555,17 +4583,22 @@ namespace CompetitiveRounds
     /// OpponentHasMod), and leaving the popup live meant both seats ignored
     /// it, vanilla dumped the unanswered prompt ~25s after match end, and both
     /// clients NetworkRestart'd the room dead (bug 228). "Rated" here is the
-    /// ROOM-BOUND rated-continuation latch (GameStateWatcher), set only by
-    /// the room+generation-fenced /series/preflight success callback — which
-    /// BOTH seats run, so the two seats answer the popup identically (Codex
-    /// tournament r1 find 1: the previous MatchIsRanked/series-id predicate
-    /// was seat-asymmetric — the elected reporter clears the series id at
-    /// report time while the non-reporter keeps it — and a stale pre-join
-    /// queue-lock id (#327/#347) could auto-answer a genuinely casual room's
-    /// popup). MatchIsRanked stays in the OR as a room-bound accelerant for
-    /// mid-series popups; the bare series id is trusted nowhere here.
-    /// Genuinely casual private rooms (no latch, no flag) keep the vanilla
-    /// popup.</summary>
+    /// rated-continuation HANDSHAKE (GameStateWatcher): the LOCAL room-bound
+    /// latch — set only by the room+generation+incarnation-fenced
+    /// /series/preflight success callback — AND every other non-spectator
+    /// seat's replicated cr_rcl player property matching this room. This is
+    /// the peer-coordinated protocol r2 find 1 demanded, built per the #324
+    /// census doctrine, and it exists because r3's decompile read killed the
+    /// seat-local version: vanilla's Yes (GM_ArmsRace.IDoRematch) starts a
+    /// 10-SECOND timer that NetworkRestarts the answering seat on its own
+    /// when the peer doesn't also answer — so ONE seat auto-answering while
+    /// the other never latched would convert an idle-but-alive popup into
+    /// that seat restarting out at 10s. With the handshake, a seat whose
+    /// preflight failed publishes no prop and NEITHER seat auto-answers
+    /// (symmetric fall-back to vanilla, both humans answer by hand). The
+    /// bare series id and MatchIsRanked are trusted nowhere here — both are
+    /// seat-local (#327/#347, r1 find 1). Genuinely casual private rooms
+    /// keep the vanilla popup: no preflight series, no latch, no props.</summary>
     [HarmonyPatch(typeof(PopUpHandler), "StartPicking")]
     class PopUpHandler_StartPicking_Competitive_Patch
     {
@@ -4582,13 +4615,17 @@ namespace CompetitiveRounds
                 bool competitiveRoom = CompetitiveRoomDetect.IsCompetitiveRoom();
                 if (!competitiveRoom)
                 {
-                    // Rated room-code game? (bug 228 — see class comment.)
+                    // Rated room-code game? BOTH halves of the handshake
+                    // (see class comment): our latch AND every other
+                    // fighter's replicated latch prop. Either missing =
+                    // vanilla popup on THIS seat, and by construction the
+                    // peer whose prop is missing never auto-answers either.
                     bool rated = false;
                     try
                     {
                         string rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
-                        rated = GameStateWatcher.MatchIsRanked
-                            || GameStateWatcher.RatedContinuationFor(rn);
+                        rated = GameStateWatcher.RatedContinuationFor(rn)
+                            && GameStateWatcher.PeersConfirmRatedContinuation(rn);
                     }
                     catch { }
                     if (!rated) return true;
