@@ -1,3 +1,101 @@
+## v1.38.7 — 2026-08-15
+
+Schema changes: migrations **221** (`pcolor_poison` body color; applied),
+**222** (`ranked_queue.home_region`; applied), **223** (76 machine-translation
+seeds for the new shop/vocab keys; applied).
+
+**Added**
+
+- **New body color: Poison.** The exact green the Poison card flashes on its
+  victims — taken from the game's own card data rather than matched by eye —
+  for anyone building a poison-themed look. None of the existing greens was
+  close: Forest shares the hue but renders at half the brightness, Emerald
+  leans jade, Neon Lime leans yellow. 3000g, under Body Colors in the shop.
+
+- **Tournament matches announce themselves everywhere.** The in-game HUD now
+  shows a gold TOURNAMENT banner (with your exact bracket position, e.g.
+  "Async Tournament - Winners R2") above the RANKED line; the Discord series
+  results, the live-bets board, the gambler ping, bet confirmations and the
+  settled-bets posts all carry a trophy tag naming the bracket match.
+- **Post-match tournament DMs (the missing notifications).** After every
+  bracket match the bot now DMs both players: winners are told who they
+  face next (with the async deadline when one applies) or which match
+  they're waiting on; a first loss leads with "You're not out!" and names
+  your next opponent — or the match that decides them; elimination
+  congratulates the run, with your placement when the bracket records one;
+  champions get their own DM. A separate DM lands the moment your next
+  match actually goes live, and it's delivered reliably — retried until it
+  reaches you. Forfeit advances are phrased honestly instead of "you won".
+- **Tournament matches are always spectatable.** The spectator opt-out is
+  bypassed for the two players of a live bracket match — tournament games
+  are public by rule. Every other spectate safety rule still applies.
+
+**Fixed**
+
+- **Tournament bets popup is clickable again (bug 230).** The popup's own
+  buttons were being swallowed by its click shield, and a coordinate bug made
+  any click read as "outside the popup" and dismiss it.
+- **Better diagnostics for post-match disconnects (bugs 227/228).** The
+  connection-restart tracers now run in every room type, so the next
+  code-room disconnect names its exact trigger in the log. The investigation
+  found the mechanism — the base game restarts a player's connection 10
+  seconds after they answer the rematch prompt if their opponent hasn't
+  answered yet — but a safe fix needs both clients acting together, and
+  every one-sided approach made things worse in review; it's deferred to a
+  dedicated pass rather than shipped half-safe.
+
+- **Poison hits register reliably (bug 225).** A bullet's poison component
+  could miss registration on the victim's client due to a game init-ordering
+  race — the hit then knocked you back but the poison (all of a poison
+  bullet's real damage) never started on any screen. The missing component is
+  now re-registered at hit time, with a safety net against double-application.
+- **Faces show in 1v2 and 2v2 rooms (bug 224).** The last player to join a
+  team room missed everyone else's face for the whole sitting (a base-game
+  quirk FFA already worked around); the fix now covers team rooms too.
+- **Discord language channels stop reposting ancient messages (bug 226).**
+  The relay now tracks exactly what it has delivered — durably, across
+  restarts — instead of relying on a memory that old test messages could
+  fall out of. The stale test messages themselves are cleaned up too.
+- **Live-bets boards stop fighting Discord's rate limit.** The three boards
+  edited into one channel every 10 seconds and were permanently throttled;
+  they now stagger and skip edits when nothing changed, while still
+  recovering if a board message is deleted.
+- **Round-end poison watchdog accuracy.** Streams orphaned by a round
+  boundary after they started no longer produce false "possible modified
+  client" log entries; genuine mid-fight silence still gets flagged.
+- **Phoenix no longer floods the log** with ~2,000 harmless warnings per game
+  while charging its revive.
+- **Community cosmetic translations actually show** (reported by Kyltist, our
+  Russian translator). Approved translations for community-made cosmetic
+  names and descriptions now render in the shop, on Home, and in the preview
+  — an early design decision had the game deliberately skip them while the
+  translation portal kept accepting the work, so approved entries (24 in
+  Russian alone) existed but never displayed.
+- **Nametag size previews show again.** The Bigger / XL / Huge / Float rows
+  rendered nothing after "Preview:" in every language — the preview's own
+  size tag was taller than the row and got clipped whole. Those rows now
+  grow to show the name at its true size, which is the point of the preview.
+- **Rarity and item-kind words translate.** "(rare)", "(common)", "(face)",
+  "(nametag)" and friends were never translatable at all. In Russian,
+  Spanish, Ukrainian and Swedish the rarity reads as a labeled phrase
+  ("редкость: эпическая") so the grammar works next to any item type.
+- **Fairer ranked-queue regions.** The room region used to be whichever
+  player's momentary connection region happened to win the coin toss — which
+  is how two same-region players could both end up on a 200-ping US server.
+  Now, when both players' Photon home region (its own ping cache) agrees,
+  that region is used, and any region signal beats the old "us" default.
+  Also fixed a pre-existing race where the two clients could be told
+  different regions for the same match and end up in separate rooms.
+
+**Changed**
+
+- **Card popup images no longer need downloading.** Card art in stats popups,
+  the hold-Tab board and the tier-list export now renders natively from the
+  game itself (correct in every language, always up to date) — the old image
+  pack download (which had been failing quietly) is gone, and the mod's
+  Thunderstore package shrinks by ~15 MB. The tier-list export shows a
+  progress note the first time while it renders each card.
+
 ## v1.38.5 — 2026-08-13
 
 **New**
