@@ -18,11 +18,14 @@ Schema changes: migration **221** (`pcolor_poison` body color; applied).
   results, the live-bets board, the gambler ping, bet confirmations and the
   settled-bets posts all carry a trophy tag naming the bracket match.
 - **Post-match tournament DMs (the missing notifications).** After every
-  bracket match the bot now DMs both players: winners are told exactly who
-  they face next (with the deadline) or whose match they're waiting on;
-  a first loss leads with "You're not out!" and names your losers-bracket
-  opponent; elimination congratulates the run and shows your placement.
-  Forfeit advances are phrased honestly instead of "you won".
+  bracket match the bot now DMs both players: winners are told who they
+  face next (with the async deadline when one applies) or which match
+  they're waiting on; a first loss leads with "You're not out!" and names
+  your next opponent — or the match that decides them; elimination
+  congratulates the run, with your placement when the bracket records one;
+  champions get their own DM. A separate DM lands the moment your next
+  match actually goes live, and it's delivered reliably — retried until it
+  reaches you. Forfeit advances are phrased honestly instead of "you won".
 - **Tournament matches are always spectatable.** The spectator opt-out is
   bypassed for the two players of a live bracket match — tournament games
   are public by rule. Every other spectate safety rule still applies.

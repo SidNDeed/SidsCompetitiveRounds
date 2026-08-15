@@ -2051,6 +2051,20 @@ async def _enqueue_completion_notices_inner(db: AsyncSession, m: TournamentMatch
             "       IS DISTINCT FROM COALESCE(EXCLUDED.payload::jsonb ->> 'match_id', '')"
         ), {"tid": t.id, "pid": row["player_id"], "ntype": ntype, "payload": payload})
 
+    # A terminal result supersedes THIS match's own undelivered readiness DM
+    # (Codex tournament r6 find 2): if Discord was down from activation
+    # through completion, the unacked match_ready would otherwise deliver on
+    # recovery BEFORE the result, telling players to go play an already-
+    # completed match. Scoped strictly to this match_id and to unnotified
+    # rows — the recipients' NEXT match_ready (different match_id) and every
+    # delivered row are untouched.
+    await db.execute(text(
+        "UPDATE tournament_notices SET notified_at = NOW() "
+        " WHERE tournament_id = :tid AND notice_type = 'match_ready' "
+        "   AND notified_at IS NULL "
+        "   AND COALESCE(payload::jsonb ->> 'match_id', '') = :mid"
+    ), {"tid": t.id, "mid": str(m.id)})
+
     # WINNER. No onward match = champion / TP winner — a terminal-win DM
     # (Codex tournament-batch r1 find 4: the completion watcher grants roles
     # and posts publicly but never DMs the winner, so "both participants get

@@ -1213,7 +1213,26 @@ namespace CompetitiveRounds
 
         public static void Tick()
         {
-            if(!isOpen||!pageBuilt)return;if(pageGO==null){isOpen=false;pageBuilt=false;return;}
+            if(!isOpen||!pageBuilt)return;
+            if(pageGO==null)
+            {
+                // Page host destroyed under us (scene change / UI-host
+                // respawn, e.g. the tournament-room watchdog's
+                // NetworkRestart). Codex tournament r6 find 1: a bare flag
+                // reset here bypassed Close()'s teardown, so the STATIC
+                // CustomBetPromptOpen (and the bets popup, its own GO gone
+                // but its flags live) survived host destruction — the IMGUI
+                // amount prompt kept rendering and its next Enter could
+                // submit the stale wager mid-game. Route through the same
+                // shared teardown as every other close.
+                isOpen=false;pageBuilt=false;
+                try{HideTournamentBetsPopup();}catch{}
+                try{CancelCustomBet();}catch{}
+                try{HideInfoPopup();}catch{}
+                try{HidePicker();}catch{}
+                SetClickBlocker(false);SetMenuFade(false);
+                return;
+            }
             if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;Close();return;}
             if(catalogueRebuildPending)
             {
