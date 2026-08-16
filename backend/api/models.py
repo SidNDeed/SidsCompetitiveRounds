@@ -1058,7 +1058,7 @@ class SpectateGame(Base):
     roster = Column(Text, nullable=False, default="")
     fighter_target = Column(Integer, nullable=False)
     room_capacity = Column(Integer, nullable=False, default=0)
-    spectator_cap = Column(Integer, nullable=False, default=4)
+    spectator_cap = Column(Integer, nullable=False, default=5)  # matches migration 225 (#2: SQL default is authoritative; ORM must agree)
     protocol_min = Column(Integer, nullable=False, default=1)
     phase = Column(String(16), nullable=False, default="")
     started_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

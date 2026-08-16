@@ -550,13 +550,16 @@ PRESENCE_TTL_SEC = 180
 
 
 def _presence_touch(steam_id: str | None) -> None:
-    if steam_id:
+    if steam_id and not _is_broadcast_account(steam_id):
         _presence_seen[steam_id] = time.monotonic()
+    elif steam_id:
+        _presence_seen.pop(steam_id, None)
 
 
 def _presence_online_count() -> int:
     now = time.monotonic()
-    stale = [sid for sid, at in _presence_seen.items() if now - at > PRESENCE_TTL_SEC]
+    stale = [sid for sid, at in _presence_seen.items()
+             if now - at > PRESENCE_TTL_SEC or _is_broadcast_account(sid)]
     for sid in stale:
         _presence_seen.pop(sid, None)
     return len(_presence_seen)
@@ -728,6 +731,7 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
 
     Newest-first so a recent normal series still wins over an old tournament
     row when both exist (learning #52: newest = current match context)."""
+    await _assert_no_service_subject(db, affected_player_ids=[pid_a, pid_b])
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
     recent_match_exists = (
         select(Match.id)
@@ -803,6 +807,7 @@ async def lifespan(app: FastAPI):
     task   = asyncio.create_task(_supervised("queue_cleanup",      queue_cleanup_loop))
     task_t2 = asyncio.create_task(_supervised("team_queue_cleanup", team_queue_cleanup_loop))
     task_t  = asyncio.create_task(_supervised("tournament_tick",   tournament_tick))
+    await _run_service_policy_audit(force=True)
     yield
     task.cancel()
     task_t.cancel()
@@ -852,7 +857,8 @@ async def team_queue_cleanup_loop():
                 stale_series = await db.execute(
                     text("""
                         SELECT DISTINCT tq.series_id,
-                               (ts.created_at < NOW() - INTERVAL '3 hours') AS past_ceiling
+                               (ts.created_at < NOW() - INTERVAL '3 hours') AS past_ceiling,
+                               ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id
                           FROM team_queue tq
                           JOIN team_series ts ON ts.id = tq.series_id
                          WHERE tq.series_id IS NOT NULL
@@ -875,6 +881,8 @@ async def team_queue_cleanup_loop():
                     if _group_game_in_progress(str(sid)) and not srow[1]:
                         print(f"[TEAM-QUEUE-CLEANUP] stale-series cancel VETOED, game in progress: {sid}")
                         continue
+                    await _assert_no_service_subject(
+                        db, affected_player_ids=list(srow[2:6]))
                     # Freshness recheck AT UPDATE TIME (Codex review find): the
                     # discovery SELECT above is unlocked — a poll can refresh a
                     # 61s-stale heartbeat between it and this UPDATE. Cancel
@@ -926,7 +934,7 @@ async def team_queue_cleanup_loop():
                 # and it must never fire on restart-blinded evidence.
                 if _in_match_evidence_trustworthy():
                     husks = (await db.execute(text("""
-                        SELECT ts.id FROM team_series ts
+                        SELECT ts.id, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id
                          WHERE ts.status = 'active'
                            AND COALESCE(ts.room_issued_at, ts.created_at)
                                < NOW() - INTERVAL '60 minutes'
@@ -936,10 +944,13 @@ async def team_queue_cleanup_loop():
                            AND NOT EXISTS (SELECT 1 FROM team_queue tq
                                             WHERE tq.series_id = ts.id)
                          LIMIT 10
-                    """))).scalars().all()
-                    for hsid in husks:
+                    """))).all()
+                    for hrow in husks:
+                        hsid = hrow[0]
                         if _group_game_positively_live(str(hsid)):
                             continue
+                        await _assert_no_service_subject(
+                            db, affected_player_ids=list(hrow[1:5]))
                         # One short transaction per husk (#204 — a wide pass
                         # holding bettor rows across series is exactly the
                         # deadlock shape the per-player rebuild hit): cancel,
@@ -1030,6 +1041,12 @@ async def queue_cleanup_loop():
             await _aio.sleep(60)
         except Exception:
             continue
+        # Daily policy/durable-drain audit.  It is read-only and internally
+        # rate-limited; failures are loud but cannot starve the janitor arms.
+        try:
+            await _run_service_policy_audit()
+        except Exception as e:
+            print(f"[SERVICE-AUDIT] daily runner failed loudly: {e}")
         # July 28: per-sweep transactions + guards, mirroring
         # team_queue_cleanup_loop — one broken sweep must never starve the
         # ovt/ffa janitors behind it (that failure shape killed the whole
@@ -1083,7 +1100,7 @@ async def queue_cleanup_loop():
                 # queue polls stop once a lobby locks, so poll staleness alone
                 # says nothing about a long game 1 still being played.
                 dead_cand = (await db.execute(
-                    text("""SELECT s.id,
+                    text("""SELECT s.id, s.solo_id, s.duo_a_id, s.duo_b_id,
                                    (SELECT array_agg(p.steam_id) FROM players p
                                      WHERE p.id IN (s.solo_id, s.duo_a_id, s.duo_b_id)) AS sids
                               FROM ovt_series s
@@ -1105,6 +1122,8 @@ async def queue_cleanup_loop():
                         break
                     if any(_presence_is_online(s) for s in (c["sids"] or [])):
                         continue
+                    await _assert_no_service_subject(
+                        db, affected_player_ids=[c["solo_id"], c["duo_a_id"], c["duo_b_id"]])
                     upd = await db.execute(
                         text("""UPDATE ovt_series
                                    SET status = 'canceled', invalidated_at = NOW(),
@@ -1149,7 +1168,12 @@ async def queue_cleanup_loop():
                           AND NOT EXISTS (SELECT 1 FROM ovt_matches m
                                           WHERE m.series_id = s.id
                                             AND m.ended_at >= NOW() - INTERVAL '24 hours')
-                        RETURNING s.id"""))
+                          AND NOT EXISTS (
+                              SELECT 1 FROM players p
+                               WHERE p.steam_id = ANY(CAST(:service_ids AS text[]))
+                                 AND p.id IN (s.solo_id, s.duo_a_id, s.duo_b_id))
+                        RETURNING s.id"""),
+                    {"service_ids": list(SPECTATE_BROADCAST_STEAM_IDS)})
                 for r in abandoned_result.fetchall():
                     print(f"[OVT-CLEANUP] Abandoned mid-series canceled: series {r[0]}")
                 # Series rows are always locked before their queue members. Keep
@@ -1214,7 +1238,7 @@ async def queue_cleanup_loop():
                 # item 3 — tonight's live 4-player lobby must never be
                 # cancellable by staleness heuristics while clients ping).
                 ffa_dead_cand = (await db.execute(
-                    text("""SELECT l.id,
+                    text("""SELECT l.id, l.member_ids,
                                    (SELECT array_agg(p.steam_id) FROM players p
                                      WHERE p.id = ANY(l.member_ids)) AS sids
                               FROM ffa_lobbies l
@@ -1234,6 +1258,8 @@ async def queue_cleanup_loop():
                         break
                     if any(_presence_is_online(s) for s in (c["sids"] or [])):
                         continue
+                    await _assert_no_service_subject(
+                        db, affected_player_ids=list(c["member_ids"] or []))
                     upd = await db.execute(
                         text("""UPDATE ffa_lobbies
                                    SET status = 'canceled', invalidated_at = NOW(),
@@ -1308,7 +1334,7 @@ async def queue_cleanup_loop():
                     # janitor-close a live long game). GREATEST(1.0, ...)
                     # means a short target never TIGHTENS the window below
                     # today's values.
-                    text("""SELECT l.id,
+                    text("""SELECT l.id, l.member_ids,
                                    (l.created_at < NOW() - (INTERVAL '1 hour' * 3
                                         * GREATEST(1.0, COALESCE(l.score_target, 5) / 5.0))) AS past_ceiling
                               FROM ffa_lobbies l
@@ -1328,9 +1354,11 @@ async def queue_cleanup_loop():
                     # too-eager sweep into a never-firing one. Past the hard
                     # ceiling the timer wins regardless; 3h is far beyond any
                     # real sitting (longest recorded game: 40 min).
-                    if _group_game_in_progress(r[0]) and not r[1]:
+                    if _group_game_in_progress(r[0]) and not r[2]:
                         print(f"[FFA-CLEANUP] dispersed close VETOED, game in progress: {r[0]}")
                         continue
+                    await _assert_no_service_subject(
+                        db, affected_player_ids=list(r[1] or []))
                     await db.execute(text(
                         "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
                         " WHERE id = :lid AND status = 'active'"), {"lid": r[0]})
@@ -1344,7 +1372,7 @@ async def queue_cleanup_loop():
                 # protect. 6 minutes of lock age keeps a normal assembly, which
                 # legitimately has a quiet gap while everyone loads, out of it.
                 quiet = (await db.execute(text("""
-                    SELECT l.id, ARRAY(SELECT q2.steam_id FROM ffa_queue q2
+                    SELECT l.id, l.member_ids, ARRAY(SELECT q2.steam_id FROM ffa_queue q2
                                         WHERE q2.series_id = l.id) AS sids
                       FROM ffa_lobbies l
                      WHERE l.status = 'active'
@@ -1361,6 +1389,8 @@ async def queue_cleanup_loop():
                     if _group_game_in_progress(qrow["id"]):
                         print(f"[FFA-CLEANUP] quiet close VETOED, game in progress: {qrow['id']}")
                         continue
+                    await _assert_no_service_subject(
+                        db, affected_player_ids=list(qrow["member_ids"] or []))
                     await db.execute(text(
                         "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
                         " WHERE id=:lid AND status='active'"), {"lid": qrow["id"]})
@@ -1666,6 +1696,28 @@ async def queue_cleanup_loop():
         # changes nothing a player can see and must never race a live room.
         try:
             async with async_session() as db:
+                # Persist every occupant before stale game rows close. A DB
+                # lifecycle transition is never proof of Photon departure.
+                # Savepointed (cold review M2, #235 class): if migration 225
+                # has not been applied yet, this INSERT must degrade to a loud
+                # log line, not abort the transaction and kill the close
+                # UPDATE below — stale spectate rows stopping closing is a
+                # worse failure than one sweep's missing tombstones.
+                try:
+                    async with db.begin_nested():
+                        await db.execute(text("""
+                            INSERT INTO spectate_drain_tombstones
+                                (room_name, region, ghost_steam_id, created_at)
+                            SELECT g.room_name, COALESCE(g.room_region, ''),
+                                   l.spectator_steam_id, clock_timestamp()
+                              FROM spectate_games g
+                              JOIN spectate_leases l ON l.game_id = g.id
+                             WHERE g.ended_at IS NULL
+                               AND g.last_attest_at < NOW() - INTERVAL '10 minutes'
+                            ON CONFLICT (room_name, region, ghost_steam_id) DO NOTHING
+                        """))
+                except Exception as tomb_e:
+                    print(f"[SPECTATE-CLEANUP] tombstone insert skipped: {tomb_e}")
                 closed = await db.execute(text("""
                     UPDATE spectate_games
                        SET ended_at = NOW()
@@ -2480,6 +2532,7 @@ async def _maybe_grant_level_rewards(db, player, old_xp: int, match_or_series_re
     total_reward = sum(level_reward_for(lvl) for lvl in range(old_level + 1, new_level + 1))
     if total_reward <= 0:
         return 0
+    await _assert_no_service_subject(db, affected_player_ids=[player.id])
     # r4 find 1: atomic delta + expire — an absolute ORM write here
     # flushes a STALE total and erases any credit committed in
     # between (achievements credit atomically mid-transaction).
@@ -2671,6 +2724,8 @@ ANTICHEAT_INACTIVE_MIN_DURATION_SEC = 120
 
 async def _reverse_match_gold_xp(db: AsyncSession, m: Match) -> None:
     """Add offsetting gold/XP rows for an invalidated match. Called on retro-invalidation."""
+    await _assert_no_service_subject(
+        db, affected_player_ids=[m.player1_id, m.player2_id])
     txns = (await db.execute(
         select(GoldTransaction).where(
             GoldTransaction.reference_id == str(m.id),
@@ -3352,6 +3407,8 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # Validate HMAC if configured
     if not verify_hmac(report):
         raise HTTPException(status_code=403, detail="Invalid match signature")
+    await _assert_no_service_subject(
+        db, affected_steam_ids=[report.player1.steam_id, report.player2.steam_id])
 
     # Validate: players can't be the same person
     if report.player1.steam_id == report.player2.steam_id:
@@ -3444,6 +3501,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         )
     p1 = await get_or_create_player(db, report.player1.steam_id, report.player1.display_name)
     p2 = await get_or_create_player(db, report.player2.steam_id, report.player2.display_name)
+    await _assert_no_service_subject(db, affected_player_ids=[p1.id, p2.id])
     # Aug 9 bet audit r2 find 4: take the SERIES lock here — the moment both
     # players are known — rather than at the identification site far below.
     # Everything between (match insert, telemetry, xp, gold, achievements) is
@@ -7777,12 +7835,14 @@ async def recalculate_ratings(
     result = await db.execute(
         select(GlickoRating)
         .join(Player, Player.id == GlickoRating.player_id)
-        .where(Player.deleted_at.is_(None))
+        .where(Player.deleted_at.is_(None),
+               Player.steam_id.notin_(SPECTATE_BROADCAST_STEAM_IDS))
     )
     all_ratings = result.scalars().all()
 
     for glicko in all_ratings:
         pid = glicko.player_id
+        await _assert_no_service_subject(db, affected_player_ids=[pid])
 
         # Get all matches this player played since last calculation
         matches_query = text("""
@@ -8893,6 +8953,7 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     Upserts the player into ranked_queue with status='searching'.
     """
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
     # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
     await _enrollment_identity_gate(db, req.steam_id)
@@ -9240,12 +9301,14 @@ async def presence_online(db: AsyncSession = Depends(get_db)):
             FROM players p
             LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
             LEFT JOIN shop_items si ON si.id = p.active_title_id
-            WHERE p.steam_id = ANY(:sids)
+             WHERE p.steam_id = ANY(:sids)
+              AND NOT (p.steam_id = ANY(CAST(:service_ids AS text[])))
               AND p.deleted_at IS NULL
               AND p.appear_offline = FALSE
             ORDER BY rating DESC
             LIMIT 40
-        """), {"sids": online_ids})).mappings().all()
+        """), {"sids": online_ids,
+                "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
 
     recent_rows = (await db.execute(text("""
         SELECT p.display_name, p.steam_id, p.id::text AS player_id,
@@ -9260,9 +9323,11 @@ async def presence_online(db: AsyncSession = Depends(get_db)):
           AND p.deleted_at IS NULL
           AND p.appear_offline = FALSE
           AND NOT (p.steam_id = ANY(:sids))
+          AND NOT (p.steam_id = ANY(CAST(:service_ids AS text[])))
         ORDER BY p.last_seen DESC
         LIMIT 15
-    """), {"sids": online_ids or [""]})).mappings().all()
+    """), {"sids": online_ids or [""],
+            "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
 
     _colors = await _rank_colors(db)
     _pmap, _pmap2, _pmapf = await _podium_maps_for(
@@ -9402,6 +9467,7 @@ async def booster_grant(
     )).scalar_one_or_none()
     if player is None:
         return {"status": "not_linked", "discord_id": discord_id}
+    await _assert_no_service_subject(db, affected_player_ids=[player.id])
     existing = (await db.execute(
         select(BoosterGrant).where(BoosterGrant.discord_id == discord_id,
                                    BoosterGrant.month == month)
@@ -9539,6 +9605,8 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     if not entry:
         await db.commit()
         return QueuePollResponse(status="not_in_queue")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[entry["player_id"]], affected_steam_ids=[steam_id])
 
     # The pair we LOCKED came from the unlocked discovery read. If a matcher
     # re-paired us in that window, the opponent row below is one we do NOT hold,
@@ -9637,6 +9705,8 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             )
             await db.commit()
             return QueuePollResponse(status="searching", wait_time=wait_seconds)
+        await _assert_no_service_subject(
+            db, affected_player_ids=[entry["player_id"], opp["player_id"]])
 
         my_ready = entry["ready"]
         opp_ready = opp["ready"]
@@ -9867,11 +9937,13 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
               AND NOT EXISTS (SELECT 1 FROM player_bans pb
                                WHERE pb.steam_id = ranked_queue.steam_id
                                  AND pb.unbanned_at IS NULL)
+              AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
             ORDER BY ABS(rating - :my_rating)
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         """),
-        {"pid": my_pid, "rmin": min_rating, "rmax": max_rating, "my_rating": my_rating},
+        {"pid": my_pid, "rmin": min_rating, "rmax": max_rating,
+         "my_rating": my_rating, "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)},
     )
     opp = candidate.mappings().first()
 
@@ -9977,6 +10049,9 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         print(f"[QUEUE-READY] {steam_id} re-paired during lock acquisition; returning 503 for client retry")
         await db.commit()
         raise HTTPException(status_code=503, detail="queue_contended")
+
+    await _assert_no_service_subject(
+        db, affected_player_ids=[player.id, entry["matched_with"]])
 
     # Set ourselves as ready.
     await db.execute(
@@ -10280,6 +10355,8 @@ async def report_disconnect(
     Only counts if the match was ranked and enough gameplay occurred.
     The client enforces eligibility (ranked, >=2 total points, neither has >=4 rounds).
     """
+    await _assert_no_service_subject(
+        db, affected_steam_ids=[reporter_steam_id, disconnected_steam_id])
     # Validate both players exist
     reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
     disconnected = (await db.execute(select(Player).where(Player.steam_id == disconnected_steam_id))).scalar_one_or_none()
@@ -10304,6 +10381,8 @@ async def report_disconnect(
     if series is None:
         raise HTTPException(status_code=403, detail="no current shared ranked series for this DC report")
     series_id = series.id
+    await _assert_no_service_subject(
+        db, affected_player_ids=[series.player1_id, series.player2_id])
     # Per-series dedup: one DC increment per (series, disconnected player). A
     # FlaggedMatch-style marker row would be heavier; reuse AdminAction's audit
     # table is wrong here, so dedup via a dc-events guard on ranked_dc_count by
@@ -10456,6 +10535,8 @@ async def report_casual_dc(
                       and len(_grid) <= 64):
         print(f"[DC] ignoring game_room_id {_grid!r}: does not name room {room_id!r}")
         _grid = ""
+    await _assert_no_service_subject(
+        db, affected_steam_ids=[reporter_steam_id, leaver_steam_id])
     reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
     if not reporter:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -11581,6 +11662,9 @@ async def ws_chat(ws: WebSocket):
             display_name = str(data.get("display_name", ""))[:64]
             if not message or not steam_id:
                 continue
+            if (_is_broadcast_account(verified_sid or "")
+                    or _is_broadcast_account(steam_id)):
+                continue
             # Any chat send proves the client is alive — feed the online counter.
             _presence_touch(steam_id)
             # Client resend dedup — the mod re-queues a message when its socket
@@ -11698,6 +11782,8 @@ async def post_chat_from_discord(
                 )).first()
             if row and row[0]:
                 _linked_steam = row[0]
+            if _linked_steam and _is_broadcast_account(_linked_steam):
+                return {"status": "service_account_forbidden"}
             if _linked_steam and await _is_banned_via_session(_linked_steam):
                 print(f"[CHAT] dropped banned discord chatter discord_id={discord_id} steam={_linked_steam}")
                 return {"status": "banned"}
@@ -15453,6 +15539,8 @@ async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
     )).scalars().all()
     if not rows:
         return
+    await _assert_no_service_subject(
+        db, affected_player_ids=[bet.player_id for bet in rows])
     now = datetime.now(timezone.utc)
     for bet in rows:
         if bet.bet_on_player_id == series.winner_id:
@@ -15688,6 +15776,7 @@ async def purchase_item(
         raise HTTPException(status_code=404, detail="Player not found")
     if player.deleted_at is not None:
         raise HTTPException(status_code=410, detail="Account deleted")
+    await _assert_no_service_subject(db, affected_player_ids=[player.id])
 
     item = (await db.execute(select(ShopItem).where(ShopItem.sku == sku))).scalar_one_or_none()
     if item is None:
@@ -15733,6 +15822,17 @@ async def purchase_item(
     if balance < item.price:
         raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {item.price}")
 
+    # Resolve and policy-check the indirect beneficiary before the first
+    # economic mutation (the buyer debit below).
+    artist_player = None
+    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and item.price > 0:
+        artist_player = (await db.execute(
+            select(Player).where(Player.steam_id == item.artist_steam_id,
+                                 Player.deleted_at.is_(None))
+        )).scalar_one_or_none()
+        if artist_player is not None:
+            await _assert_no_service_subject(db, affected_player_ids=[artist_player.id])
+
     # Aug 9 bet audit r1 find 3: atomic conditional debit. An absolute
     # assignment here could lost-update against a concurrent bet stake (both
     # read the same gold_spent, both write their own total) — two 100g
@@ -15758,10 +15858,6 @@ async def purchase_item(
     if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and item.price > 0:
         royalty = int(item.price * 0.30)
         if royalty > 0:
-            artist_player = (await db.execute(
-                select(Player).where(Player.steam_id == item.artist_steam_id,
-                                     Player.deleted_at.is_(None))
-            )).scalar_one_or_none()
             if artist_player is not None:
                 # r2 find 3: atomic delta — two simultaneous sales of the same
                 # artist's items each wrote an absolute total, so one royalty
@@ -16187,6 +16283,8 @@ async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_aband
     bets = (await db.execute(
         select(Bet).where(Bet.series_id == sid, Bet.settled_at.is_(None))
     )).scalars().all()
+    await _assert_no_service_subject(
+        db, affected_player_ids=[b.player_id for b in bets])
     for b in bets:
         # Aug 9 bet audit r1 find 3: atomic delta (an absolute write here
         # could clobber a concurrent stake debit and hand back gold twice).
@@ -16228,7 +16326,7 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     stalled_min = 60
     # Mode 1: no match reported → abandon.
     stale_rows_a = (await db.execute(text(
-        "SELECT rs.id FROM ranked_series rs "
+        "SELECT rs.id, rs.player1_id, rs.player2_id FROM ranked_series rs "
         "WHERE rs.status = 'active' "
         "  AND rs.is_tournament = FALSE "
         "  AND rs.created_at < NOW() - (:cutoff_min || ' minutes')::interval "
@@ -16237,7 +16335,7 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     ), {"cutoff_min": str(cutoff_min)})).all()
     # Mode 2: stalled mid-BO3 with unsettled bets → refund bets, KEEP active.
     stale_rows_b = (await db.execute(text(
-        "SELECT rs.id FROM ranked_series rs "
+        "SELECT rs.id, rs.player1_id, rs.player2_id FROM ranked_series rs "
         "WHERE rs.status = 'active' "
         "  AND rs.is_tournament = FALSE "
         "  AND rs.p1_series_wins < 2 "
@@ -16250,13 +16348,20 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         "LIMIT 50"
     ), {"stalled_min": str(stalled_min)})).all()
     changed = 0
-    for (sid,) in stale_rows_b:
+    for sid, player1_id, player2_id in stale_rows_b:
+        await _assert_no_service_subject(
+            db, affected_player_ids=[player1_id, player2_id])
         n = await _refund_series_bets(db, sid, "refund_abandoned")
         if n:
             changed += 1
             print(f"[SERIES] refunded {n} bet(s) on stalled series {sid} (series stays resumable)")
-    abandon_rows = [(sid, "no_match_reported") for (sid,) in stale_rows_a]
-    for (sid, prune_reason) in abandon_rows:
+    abandon_rows = [
+        (sid, player1_id, player2_id, "no_match_reported")
+        for sid, player1_id, player2_id in stale_rows_a
+    ]
+    for sid, player1_id, player2_id, prune_reason in abandon_rows:
+        await _assert_no_service_subject(
+            db, affected_player_ids=[player1_id, player2_id])
         n = await _refund_series_bets(db, sid, "refund_abandoned")
         await db.execute(text(
             "UPDATE ranked_series SET status = 'abandoned', "
@@ -16794,6 +16899,8 @@ async def series_preflight(
     so either player can compute it without knowing who's p1/p2 server-side.
     Server returns the series_id which the client then uses for live-points
     reports during game 1."""
+    await _assert_no_service_subject(
+        db, affected_steam_ids=[p1_steam_id, p2_steam_id])
     _presence_touch(p1_steam_id)
     # Aug 9 bet audit r1 find 6: the incarnation fence for the evictions
     # below. A preflight request delayed in flight must never delete a queue
@@ -17011,6 +17118,8 @@ async def update_live_points(
     series = (await db.execute(select(RankedSeries).where(RankedSeries.id == sid))).scalar_one_or_none()
     if series is None:
         raise HTTPException(status_code=404, detail="Series not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[series.player1_id, series.player2_id])
 
     # Aug 9 bet audit r4 find 2: refuse points for a series that is no longer
     # active. A stale client (delayed preflight, resumed session) could
@@ -17117,6 +17226,12 @@ async def update_team_live_points(
     )).scalar_one_or_none()
     if reporter is None:
         raise HTTPException(status_code=404, detail="Player not found")
+    team_subjects = (await db.execute(text("""
+        SELECT t1a_id, t1b_id, t2a_id, t2b_id FROM team_series WHERE id = :sid
+    """), {"sid": sid})).first()
+    if team_subjects is None:
+        raise HTTPException(status_code=404, detail="Series not found")
+    await _assert_no_service_subject(db, affected_player_ids=list(team_subjects))
 
     # Participants only, and only while the series is genuinely live. Both
     # predicates ride INSIDE the UPDATE so a completion committing mid-request
@@ -17184,6 +17299,13 @@ async def update_ffa_live_points(
     )).scalar_one_or_none()
     if reporter is None:
         raise HTTPException(status_code=404, detail="Player not found")
+
+    ffa_subjects = (await db.execute(text(
+        "SELECT member_ids FROM ffa_lobbies WHERE id = :lid"
+    ), {"lid": lid})).scalar_one_or_none()
+    if ffa_subjects is None:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    await _assert_no_service_subject(db, affected_player_ids=list(ffa_subjects or []))
 
     # A NEW game resets the figure (its own game_number replaces the stored
     # one); the SAME game only ever ratchets upward. Both cases are one
@@ -17293,6 +17415,7 @@ async def place_bet(
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
+    await _assert_no_service_subject(db, affected_player_ids=[bettor.id])
 
     try:
         sid = UUID(series_id)
@@ -17493,6 +17616,7 @@ async def place_team_bet(
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
+    await _assert_no_service_subject(db, affected_player_ids=[bettor.id])
 
     try:
         sid = UUID(team_series_id)
@@ -19534,6 +19658,11 @@ async def artist_gift(
     )).scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=404, detail="Player not found — they need to have used the mod once")
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[target.id],
+        affected_steam_ids=[steam_id],
+    )
     already = (await db.execute(
         select(PlayerItem).where(PlayerItem.player_id == target.id, PlayerItem.item_id == item.id)
     )).scalar_one_or_none()
@@ -20992,6 +21121,7 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
     )
     if existing.scalar_one_or_none():
         return False
+    await _assert_no_service_subject(db, affected_player_ids=[player_id])
     db.add(PlayerAchievement(player_id=player_id, achievement_key=achievement_key))
     gold_amt = _achievement_gold(achievement_key)
     # A 0g achievement writes NEITHER a no-op balance update NOR a 0-amount
@@ -21195,6 +21325,7 @@ async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db
     )
     if existing.scalar_one_or_none():
         return {"status": "already_unlocked", "achievement_key": req.achievement_key}
+    await _assert_no_service_subject(db, affected_player_ids=[player.id])
 
     # Resolve optional match_id
     match_id_val = None
@@ -22239,6 +22370,7 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
     target = (await db.execute(select(Player).where(Player.steam_id == req.target_steam_id))).scalar_one_or_none()
     if target is None:
         raise HTTPException(404, "Target player not found")
+    await _assert_no_service_subject(db, affected_player_ids=[target.id])
     existing = (await db.execute(
         select(PlayerAchievement).where(
             PlayerAchievement.player_id == target.id,
@@ -22323,6 +22455,16 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
         raise HTTPException(404, "Series not found")
     if series.invalidated_at is not None:
         return {"status": "already_invalidated"}
+    await _assert_no_service_subject(
+        db, affected_player_ids=[series.player1_id, series.player2_id])
+    txns = (await db.execute(
+        select(GoldTransaction).where(
+            GoldTransaction.reason.in_(["series_win", "series_loss", "bet_win"]),
+            GoldTransaction.reference_id == str(series.id),
+        )
+    )).scalars().all()
+    await _assert_no_service_subject(
+        db, affected_player_ids=[tx.player_id for tx in txns])
 
     for pid, rc in [(series.player1_id, series.p1_rating_change),
                     (series.player2_id, series.p2_rating_change)]:
@@ -22339,12 +22481,6 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
     # Aug 9 bet audit find 1: bet payouts are clawed back too (the 2v2 twin
     # already reverses team_bet_payout; without bet_win here a reversed series
     # left winners keeping payouts funded by a voided result).
-    txns = (await db.execute(
-        select(GoldTransaction).where(
-            GoldTransaction.reason.in_(["series_win", "series_loss", "bet_win"]),
-            GoldTransaction.reference_id == str(series.id),
-        )
-    )).scalars().all()
     for tx in txns:
         db.add(GoldTransaction(
             player_id=tx.player_id, amount=-tx.amount,
@@ -22788,6 +22924,7 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
     """Upsert player into team_queue. Snapshots their 2v2 + 1v1 ratings so the
     balancer at lock-time uses queue-join values (not drifted live ratings)."""
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
     # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
     await _enrollment_identity_gate(db, req.steam_id)
@@ -23139,6 +23276,8 @@ async def team_queue_poll(steam_id: str, request: Request,
     if not me:
         await db.commit()
         return TeamQueuePollResponse(status="not_in_queue")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[me["player_id"]], affected_steam_ids=[steam_id])
 
     now = datetime.now(timezone.utc)
     wait_seconds = int((now - me["joined_at"]).total_seconds())
@@ -23469,11 +23608,13 @@ async def team_queue_poll(steam_id: str, request: Request,
               AND NOT EXISTS (SELECT 1 FROM player_bans pb
                                WHERE pb.steam_id = tq.steam_id
                                  AND pb.unbanned_at IS NULL)
+              AND NOT (tq.steam_id = ANY(CAST(:service_ids AS text[])))
             ORDER BY ABS(tq.rating - :my_r), tq.joined_at
             LIMIT 3
             FOR UPDATE SKIP LOCKED
         """),
-        {"pid": my_pid, "my_r": me["rating"], "range": elo_range, "qt": my_qtype},
+        {"pid": my_pid, "my_r": me["rating"], "range": elo_range,
+         "qt": my_qtype, "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)},
     )
     others = list(cands.mappings().all())
 
@@ -23518,6 +23659,7 @@ async def team_queue_poll(steam_id: str, request: Request,
         )
         present = list(rs.mappings().all())
         if len(present) == 3:
+            await _assert_no_service_subject(db, affected_player_ids=original_pids)
             # All 4 originals are here. Re-lock them with the EXISTING series.
             print(f"[TEAM-QUEUE-LOCK] sticky-team resume: series={dc_row['id']} caller={steam_id}")
             # Map original team to t1/t2 — keep the original assignments so the
@@ -23640,6 +23782,8 @@ async def team_queue_poll(steam_id: str, request: Request,
 
     # Create the team_series row.
     series_id = uuid_mod.uuid4()
+    await _assert_no_service_subject(
+        db, affected_player_ids=team1_ids_sorted + team2_ids_sorted)
     await db.execute(
         text("""
             INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
@@ -23761,6 +23905,8 @@ async def team_queue_manual_pick_toggle(
     pid = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if pid is None:
         raise HTTPException(404, "Player not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[pid], affected_steam_ids=[steam_id])
     if enabled:
         await db.execute(
             text("UPDATE team_queue SET manual_pick_enabled = TRUE WHERE player_id = :pid"),
@@ -23790,6 +23936,8 @@ async def team_queue_preferred_team(
     pid = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if pid is None:
         raise HTTPException(404, "Player not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[pid], affected_steam_ids=[steam_id])
     await db.execute(
         text("""
             UPDATE team_queue
@@ -23812,10 +23960,16 @@ async def team_queue_ready(request: Request, steam_id: str = Query(...), db: Asy
     player = result.scalar_one_or_none()
     if not player:
         return {"status": "error", "message": "Unknown player"}
+    await _assert_no_service_subject(
+        db, affected_player_ids=[player.id], affected_steam_ids=[steam_id])
     me = await _lock_queue_group_for_player(db, "team_queue", steam_id)
     if not me or not me["series_id"] or me["status"] not in ("matched", "ready"):
         await db.commit()
         return {"status": "error", "message": "Not in a matched 2v2 series"}
+    queue_roster = (await db.execute(text(
+        "SELECT player_id FROM team_queue WHERE series_id = :sid"
+    ), {"sid": me["series_id"]})).scalars().all()
+    await _assert_no_service_subject(db, affected_player_ids=queue_roster)
     await db.execute(
         text("""UPDATE team_queue
                SET ready = (player_id = :pid OR ready),
@@ -23884,6 +24038,15 @@ async def team_series_spawn_confirm(
     pid = p_row.scalar_one_or_none()
     if pid is None:
         raise HTTPException(404, "Unknown player")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[pid], affected_steam_ids=[steam_id])
+    series_roster = (await db.execute(text("""
+        SELECT t1a_id, t1b_id, t2a_id, t2b_id
+          FROM team_series WHERE id = :sid
+    """), {"sid": sid_uuid})).first()
+    if series_roster:
+        await _assert_no_service_subject(
+            db, affected_player_ids=list(series_roster))
 
     # Idempotent atomic update: only increment if this player hasn't already
     # been recorded. asyncpg + jsonb @> for membership.
@@ -23935,7 +24098,8 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
             SELECT id, status, created_at, spawn_confirmations,
                    invalidation_reason, completed_at,
                    dc_grace_until, dc_team_remaining, dc_player_id,
-                   t1_series_wins, t2_series_wins, room_issued_at
+                   t1_series_wins, t2_series_wins, room_issued_at,
+                   t1a_id, t1b_id, t2a_id, t2b_id
               FROM team_series
              WHERE id = :sid
         """),
@@ -23944,6 +24108,7 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     r = row.first()
     if r is None:
         raise HTTPException(404, "Series not found")
+    await _assert_no_service_subject(db, affected_player_ids=list(r[12:16]))
 
     s_status = r[1]
     s_created = r[2]
@@ -24112,6 +24277,8 @@ async def _complete_team_series_with_ratings(
         return {}
     t1a_id, t1b_id, t2a_id, t2b_id = srow["t1a_id"], srow["t1b_id"], srow["t2a_id"], srow["t2b_id"]
     gids = [t1a_id, t1b_id, t2a_id, t2b_id]
+    await _assert_no_service_subject(
+        db, affected_player_ids=[g for g in gids if g is not None])
     if any(g is None for g in gids):
         # Defensive: a series with an unfilled slot can't have ratings applied.
         # Still free the queue rows — the normal path's DELETE at the bottom is
@@ -24125,7 +24292,6 @@ async def _complete_team_series_with_ratings(
         await _lock_queue_rows_ordered(db, "team_queue", [g for g in gids if g is not None])
         await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
         return {}
-
     # Mark completed (winner + reason) up front.
     await db.execute(
         text("""UPDATE team_series SET status='completed', winner_team=:wt,
@@ -24366,6 +24532,8 @@ async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str
                 "  FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL"
                 " ORDER BY player_id::text, id LIMIT 200"
             ), {"sid": series_uuid})).mappings().all()
+            await _assert_no_service_subject(
+                db, affected_player_ids=[b["player_id"] for b in unsettled])
             settled = refunded = 0
             for b in unsettled:
                 if settle_against is not None:
@@ -24440,20 +24608,26 @@ async def admin_resolve_team_series(
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid series_id")
-    if admin_steam_id and admin_ok:
-        db.add(AdminAction(admin_steam_id=admin_steam_id, action="resolve_team_series",
-                           target_series_id=sid_uuid,
-                           details={"action": action, "winner_team": winner_team}))
     srow = (await db.execute(
-        text("SELECT status FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
-    )).scalar_one_or_none()
+        text("SELECT status, t1a_id, t1b_id, t2a_id, t2b_id "
+             "FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
+    )).mappings().first()
     if srow is None:
         raise HTTPException(404, "Series not found")
     # Guard against re-resolution: a completed OR already-voided series must not be
     # re-paid (void→complete would otherwise double-credit). The helper has its own
     # status guard too, but bail early for a clean response.
-    if srow in ("completed", "cancelled", "canceled"):
-        return {"status": "noop", "reason": f"already {srow}"}
+    if srow["status"] in ("completed", "cancelled", "canceled"):
+        return {"status": "noop", "reason": f"already {srow['status']}"}
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[srow["t1a_id"], srow["t1b_id"],
+                             srow["t2a_id"], srow["t2b_id"]],
+    )
+    if admin_steam_id and admin_ok:
+        db.add(AdminAction(admin_steam_id=admin_steam_id, action="resolve_team_series",
+                           target_series_id=sid_uuid,
+                           details={"action": action, "winner_team": winner_team}))
 
     if action == "void":
         await db.execute(
@@ -24653,6 +24827,16 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
 
     slots = [(s["t1a_id"], s["t1a_rating_change"]), (s["t1b_id"], s["t1b_rating_change"]),
              (s["t2a_id"], s["t2a_rating_change"]), (s["t2b_id"], s["t2b_rating_change"])]
+    await _assert_no_service_subject(
+        db, affected_player_ids=[pid for pid, _ in slots if pid is not None])
+    reverse_txns = (await db.execute(text("""
+        SELECT player_id, amount, reason FROM gold_transactions
+         WHERE reference_id = :ref
+           AND reason IN ('team_series_win', 'team_series_loss', 'team_bet_payout')
+         ORDER BY player_id::text, id
+    """), {"ref": str(sid)})).mappings().all()
+    await _assert_no_service_subject(
+        db, affected_player_ids=[tx["player_id"] for tx in reverse_txns])
     # Lock protocol (same as _complete_team_series_with_ratings: series row
     # first — held above — then players sorted str(pid) FOR NO KEY UPDATE,
     # then glicko in the same sorted order). This endpoint previously took
@@ -24678,12 +24862,7 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
     # outside the four held member locks (same accepted class as live bet
     # settlement); ORDER BY player_id::text matches the settle path's order so
     # the two can't invert against each other.
-    for tx in (await db.execute(text("""
-        SELECT player_id, amount, reason FROM gold_transactions
-         WHERE reference_id = :ref
-           AND reason IN ('team_series_win', 'team_series_loss', 'team_bet_payout')
-         ORDER BY player_id::text, id
-    """), {"ref": str(sid)})).mappings().all():
+    for tx in reverse_txns:
         await db.execute(text(
             "UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - :amt) WHERE id = :pid"
         ), {"amt": tx["amount"], "pid": tx["player_id"]})
@@ -24741,8 +24920,12 @@ async def admin_rebuild_team_glicko(
              WHERE status='completed' AND winner_team IN (1,2)
                AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
                AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM players p
+                    WHERE p.steam_id = ANY(CAST(:service_ids AS text[]))
+                      AND p.id IN (t1a_id, t1b_id, t2a_id, t2b_id))
              ORDER BY completed_at ASC NULLS LAST
-        """))).mappings().all()
+        """), {"service_ids": list(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
 
     series_rows = await _read_completed_series()
 
@@ -24792,7 +24975,11 @@ async def admin_rebuild_team_glicko(
     # visible on the 2v2 leaderboard, which filters `completed_series >= 1`.
     # Seeding them gives defaults and zero series, so this really is a replay
     # of history rather than a replay of whoever currently appears in one.
-    for _pid in (await db.execute(text("SELECT player_id FROM glicko_ratings_2v2"))).scalars().all():
+    for _pid in (await db.execute(text("""
+        SELECT g.player_id FROM glicko_ratings_2v2 g
+        JOIN players p ON p.id = g.player_id
+        WHERE NOT (p.steam_id = ANY(CAST(:service_ids AS text[])))
+    """), {"service_ids": list(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all():
         seed(_pid)
 
     # Persist via one SHORT transaction per player: lock that player's row
@@ -24825,6 +25012,7 @@ async def admin_rebuild_team_glicko(
     written = 0
     contended: list = []
     for _idx, (pid, st) in enumerate(_ordered):
+        await _assert_no_service_subject(db, affected_player_ids=[pid])
         await db.execute(
             text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
             {"pid": pid},
@@ -24834,7 +25022,11 @@ async def admin_rebuild_team_glicko(
              WHERE status='completed' AND winner_team IN (1,2)
                AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
                AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
-        """))).scalars().all())
+               AND NOT EXISTS (
+                   SELECT 1 FROM players p
+                    WHERE p.steam_id = ANY(CAST(:service_ids AS text[]))
+                      AND p.id IN (t1a_id, t1b_id, t2a_id, t2b_id))
+        """), {"service_ids": list(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all())
         if live_sids != _snapshot_sids:
             contended = [str(p) for p, _ in _ordered[_idx:]]
             await db.commit()
@@ -24915,6 +25107,10 @@ async def team_series_report_dc(
         raise HTTPException(404, "Series not found")
     if s["status"] not in ("active", "dc_paused"):
         return {"status": s["status"], "ignored": True}
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]],
+    )
 
     # Determine which team the DC'd player was on.
     dc_team = 1 if dc_pid in (s["t1a_id"], s["t1b_id"]) else 2 if dc_pid in (s["t2a_id"], s["t2b_id"]) else None
@@ -25143,6 +25339,8 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     # games after the first series of a 2v2 sitting (bug #70). The idempotent
     # "existing" branch above returns earlier, which is why smoke tests passed.
     new_id = uuid.uuid4()
+    await _assert_no_service_subject(
+        db, affected_player_ids=list(id_by_steam.values()))
     await db.execute(text("""
         INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
                                  status, was_auto_balanced, photon_room_id, region, created_at)
@@ -25373,6 +25571,7 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
     """Join the 1v2 manual lobby (consent queue — no Elo band). Idempotent per
     player; re-joining refreshes preferences and the poll timestamp."""
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     # Identity gate (round-14 find 1, subsumes the round-13 usage-site ban
     # check): lock + ban/tombstone re-read under it.
     await _enrollment_identity_gate(db, req.steam_id)
@@ -25655,6 +25854,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     if me is None:
         await db.commit()
         return {"status": "not_in_queue", "queue_count": 0}
+    await _assert_no_service_subject(
+        db, affected_player_ids=[me["player_id"]], affected_steam_ids=[steam_id])
     await db.execute(
         text("UPDATE ovt_queue SET last_polled = NOW() WHERE player_id = :pid"),
         {"pid": me["player_id"]},
@@ -25757,10 +25958,13 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         # dissolved much earlier by the leave endpoint (watchdog bails and
         # queue-join failures now call /ovt/queue/leave client-side).
         srow = (await db.execute(text(
-            "SELECT s.status, s.created_at,"
+            "SELECT s.status, s.created_at, s.solo_id, s.duo_a_id, s.duo_b_id,"
             "       (SELECT COUNT(*) FROM ovt_matches m WHERE m.series_id = s.id) AS games"
             "  FROM ovt_series s WHERE s.id = :sid"
         ), {"sid": me["series_id"]})).mappings().first()
+        if srow is not None:
+            await _assert_no_service_subject(
+                db, affected_player_ids=[srow["solo_id"], srow["duo_a_id"], srow["duo_b_id"]])
         lock_age = ((datetime.now(timezone.utc) - me["matched_at"]).total_seconds()
                     if me["matched_at"] is not None else 0)
         # Presence gate — same rule as the FFA dead-check (bug #114 item 3):
@@ -25876,10 +26080,11 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
            AND NOT EXISTS (SELECT 1 FROM player_bans pb
                             WHERE pb.steam_id = ovt_queue.steam_id
                               AND pb.unbanned_at IS NULL)
+           AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
          ORDER BY joined_at
          LIMIT 3
          FOR UPDATE SKIP LOCKED
-    """))).mappings().all()
+    """), {"service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
     if len(rows) < 3:
         await db.commit()
         n = (await db.execute(text(
@@ -25915,6 +26120,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     region = next((r["region"] for r in lobby if r["region"]), "us")
     room = f"ovt_{uuid.uuid4().hex[:12]}"
     series_id = uuid.uuid4()
+    await _assert_no_service_subject(
+        db, affected_player_ids=[r["player_id"] for r in lobby])
     await db.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
                                 solo_extra_pick, photon_room_id, region, created_at)
@@ -26059,6 +26266,10 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     # Preserve the SAME solo/duo assignment as the prior series (the client keeps
     # its sides across a sitting; the report path canonicalizes to match).
     new_id = uuid.uuid4()
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[prior["solo_id"], prior["duo_a_id"], prior["duo_b_id"]],
+    )
     await db.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
                                 solo_extra_pick, photon_room_id, region, created_at)
@@ -26086,6 +26297,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     steams = {report.solo.steam_id, report.duo_a.steam_id, report.duo_b.steam_id}
     if len(steams) != 3:
         raise HTTPException(400, "Need three distinct players")
+    await _assert_no_service_subject(db, affected_steam_ids=steams)
 
     prows = (await db.execute(
         select(Player.id, Player.steam_id).where(Player.steam_id.in_(list(steams)))
@@ -26122,6 +26334,8 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     ), {"sid": series_uuid})).mappings().first()
     if series is None:
         raise HTTPException(404, "Series not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[series["solo_id"], series["duo_a_id"], series["duo_b_id"]])
     # Round-20 find 4: bind the report to the sitting's issued room. Report
     # rooms are per-game suffixed ("<room>_<token>_r<total>", the shared
     # BuildReportRoomId helper) while the series stores the raw room, so the
@@ -27130,6 +27344,7 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     player; re-joining refreshes the display fields and poll timestamp but
     never resets a locked row (same contract as the 1v2 join)."""
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     # Identity gate (round-14 find 1, subsumes the round-13 usage-site ban
     # check): lock + ban/tombstone re-read under it.
     await _enrollment_identity_gate(db, req.steam_id)
@@ -27599,6 +27814,7 @@ async def _lobby_create_impl(mode: str, req: _LobbyCreateReq, request: Request,
                              db: AsyncSession) -> dict:
     cfg = _lobby_cfg(mode)
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
     # Identity gate: advisory lock + ban/tombstone re-read under it.
     await _enrollment_identity_gate(db, req.steam_id)
@@ -27634,6 +27850,7 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
                            db: AsyncSession) -> dict:
     cfg = _lobby_cfg(mode)
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
     await _enrollment_identity_gate(db, req.steam_id)
     player = (await db.execute(
@@ -27671,6 +27888,8 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
            AND NOT ({LOBBY_MEMBER_FRESH_SQL})
     """), {"lid": lobby_id})
     live = await _lobby_live_members(db, mode, lobby_id)
+    await _assert_no_service_subject(
+        db, affected_player_ids=[m["player_id"] for m in live] + [player.id])
     if any(m["player_id"] == player.id for m in live):
         # Idempotent rejoin — short-circuit so the capacity check can't 409
         # our own existing seat.
@@ -28445,6 +28664,8 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
     # function-local import inside the queue endpoints, and referencing it from
     # a different function is a NameError at runtime (learning #135, bug #70).
     series_id = uuid.uuid4()
+    await _assert_no_service_subject(
+        db, affected_player_ids=team1_ids + team2_ids)
     await db.execute(text("""
         INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
                                  status, was_auto_balanced, created_at)
@@ -28558,6 +28779,10 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     region = next((m["region"] for m in live if m["region"]), "us")
     room = f"ovt_{uuid.uuid4().hex[:12]}"
     series_id = uuid.uuid4()
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[solo["player_id"], duo[0]["player_id"], duo[1]["player_id"]],
+    )
     await db.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
                                 solo_extra_pick, photon_room_id, region, created_at)
@@ -28826,6 +29051,7 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
 async def ffa_lobby_create(req: _FfaLobbyCreateReq, request: Request, db: AsyncSession = Depends(get_db)):
     """Open a host lobby. The caller becomes host and its only member."""
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
     # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
     await _enrollment_identity_gate(db, req.steam_id)
@@ -28859,6 +29085,7 @@ async def ffa_lobby_create(req: _FfaLobbyCreateReq, request: Request, db: AsyncS
 async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSession = Depends(get_db)):
     """Join an open host lobby from the browser."""
     await _check_steam_session(request, req.steam_id, db)
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
     # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
     await _enrollment_identity_gate(db, req.steam_id)
@@ -28895,6 +29122,8 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
            AND NOT ({FFA_LOBBY_MEMBER_FRESH_SQL})
     """), {"lid": lobby_id})
     live = await _ffa_live_lobby_members(db, lobby_id)
+    await _assert_no_service_subject(
+        db, affected_player_ids=[m["player_id"] for m in live] + [player.id])
     if any(m["player_id"] == player.id for m in live):
         # Idempotent same-lobby rejoin handled in the enroll helper too, but
         # short-circuit so the capacity check below can't 409 our own row.
@@ -29855,6 +30084,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     if me is None:
         await db.commit()
         return {"status": "not_in_queue", "queue_count": 0}
+    await _assert_no_service_subject(
+        db, affected_player_ids=[me["player_id"]], affected_steam_ids=[steam_id])
     await db.execute(
         text("UPDATE ffa_queue SET last_polled = NOW() WHERE player_id = :pid"),
         {"pid": me["player_id"]},
@@ -30010,9 +30241,12 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Already locked → self-heal dead locks, else report the lobby.
     if me["status"] == "ready_join" and me["series_id"] is not None:
         lrow = (await db.execute(text(
-            "SELECT l.status, l.games_played, l.player_count"
+            "SELECT l.status, l.games_played, l.player_count, l.member_ids"
             "  FROM ffa_lobbies l WHERE l.id = :lid"
         ), {"lid": me["series_id"]})).mappings().first()
+        if lrow is not None:
+            await _assert_no_service_subject(
+                db, affected_player_ids=list(lrow["member_ids"] or []))
         lock_age = ((datetime.now(timezone.utc) - me["matched_at"]).total_seconds()
                     if me["matched_at"] is not None else 0)
         # Presence gate (bug #114 item 3, learning #150's rule the hard way):
@@ -30197,21 +30431,25 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
            AND NOT EXISTS (SELECT 1 FROM player_bans pb
                             WHERE pb.steam_id = ffa_queue.steam_id
                               AND pb.unbanned_at IS NULL)
+           AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
          ORDER BY joined_at
          LIMIT :maxp
          FOR UPDATE SKIP LOCKED
-    """), {"maxp": FFA_MAX_PLAYERS})).mappings().all()
+    """), {"maxp": FFA_MAX_PLAYERS,
+             "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
     fresh_count = (await db.execute(text(
         "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
         "   AND last_polled > NOW() - INTERVAL '75 seconds'"
-    ))).scalar() or 0
+        "   AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))"
+    ), {"service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalar() or 0
 
     # Authoritative pool size: PLAIN count (sees rows the SKIP LOCKED slice
     # hides while their own poll briefly holds them — re-review find 4).
     pool10 = (await db.execute(text(
         "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
         "   AND last_polled > NOW() - INTERVAL '10 seconds'"
-    ))).scalar() or 0
+        "   AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))"
+    ), {"service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalar() or 0
     if pool10 < FFA_MIN_PLAYERS:
         # Pool genuinely below the minimum — the gather window restarts when
         # it next reaches 3 (module state, see the FFA_GATHER constants).
@@ -30282,6 +30520,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     region = max(set(regions), key=regions.count) if regions else "us"
     room = f"ffa_{uuid.uuid4().hex[:12]}"
     lobby_id = uuid.uuid4()
+    await _assert_no_service_subject(
+        db, affected_player_ids=[r["player_id"] for r in ordered])
     await db.execute(text("""
         INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_count, member_ids,
                                  created_at, kills_tiebreak)
@@ -30465,6 +30705,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         raise HTTPException(400, "Winner is not among the players")
     if report.reported_by_steam_id not in set(steams):
         raise HTTPException(400, "Reporter is not a participant")
+    await _assert_no_service_subject(db, affected_steam_ids=steams)
     if not (report.photon_room_id or "").strip():
         raise HTTPException(400, "photon_room_id is required")
     # §6 casual path: the ranked AUTHORITY is the LOBBY ROW, decided below the
@@ -30500,6 +30741,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # payloads). The recoverable incident class — a live lobby closed
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
+    await _assert_no_service_subject(db, affected_player_ids=list(lobby["member_ids"] or []))
     # Duplicate-room replay FIRST — before the status/shape/limit branches
     # below, every one of which quarantines (Codex Aug-3 r4 find 1: an honest
     # outbox retry of a committed report, arriving after the lobby closed,
@@ -31681,6 +31923,8 @@ async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, wi
         "  FROM ffa_bets WHERE lobby_id = :lid AND game_number = :g AND settled_at IS NULL"
         " ORDER BY player_id::text, id LIMIT 200"
     ), {"lid": lobby_id, "g": game_no})).mappings().all()
+    await _assert_no_service_subject(
+        db, affected_player_ids=[b["player_id"] for b in open_bets])
     n = 0
     for b in open_bets:
         # FLOOR, never round (Codex round-3 find 11): the odds already carry
@@ -31730,6 +31974,8 @@ async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_n
                 + game_filter +
                 " ORDER BY player_id::text, id LIMIT 200"
             ), params)).mappings().all()
+            await _assert_no_service_subject(
+                db, affected_player_ids=[b["player_id"] for b in rows])
             n = 0
             for b in rows:
                 claimed = (await db.execute(text(
@@ -31897,6 +32143,7 @@ async def place_ffa_bet(
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
+    await _assert_no_service_subject(db, affected_player_ids=[bettor.id])
     try:
         lid = UUID(lobby_id)
     except Exception:
@@ -32073,6 +32320,12 @@ async def _lobby_bet_pay_refund(db: AsyncSession, bet_id, lobby_id) -> int:
 
     Runs in the CALLER's transaction; the caller commits. Returns the amount
     refunded, or 0 when another pass had already claimed it."""
+    subject_id = (await db.execute(text(
+        "SELECT player_id FROM lobby_bets WHERE id = :bid AND status = 'refund_pending'"
+    ), {"bid": bet_id})).scalar_one_or_none()
+    if subject_id is None:
+        return 0
+    await _assert_no_service_subject(db, affected_player_ids=[subject_id])
     claimed = (await db.execute(text("""
         UPDATE lobby_bets SET status = 'refunded', resolved_at = NOW()
          WHERE id = :bid AND status = 'refund_pending'
@@ -32106,6 +32359,12 @@ async def _mark_lobby_bet_refund_pending(db: AsyncSession, bet_id, reason: str) 
     entire transaction (#235)."""
     try:
         async with db.begin_nested():
+            subject_id = (await db.execute(text(
+                "SELECT player_id FROM lobby_bets WHERE id = :bid AND status = 'open'"
+            ), {"bid": bet_id})).scalar_one_or_none()
+            if subject_id is None:
+                return False
+            await _assert_no_service_subject(db, affected_player_ids=[subject_id])
             got = (await db.execute(text("""
                 UPDATE lobby_bets
                    SET status = 'refund_pending', resolved_at = NOW(), resolve_reason = :r
@@ -32195,13 +32454,16 @@ async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str)
     try:
         async with db.begin_nested():
             rows = (await db.execute(text("""
-                SELECT id FROM lobby_bets
+                SELECT id, player_id FROM lobby_bets
                  WHERE mode = :m AND lobby_id = :l AND status = 'open'
                  ORDER BY created_at, id
                  LIMIT 100
                  FOR NO KEY UPDATE
-            """), {"m": mode, "l": lobby_id})).scalars().all()
-            for bid in rows:
+            """), {"m": mode, "l": lobby_id})).mappings().all()
+            await _assert_no_service_subject(
+                db, affected_player_ids=[r["player_id"] for r in rows])
+            for row in rows:
+                bid = row["id"]
                 claimed = (await db.execute(text("""
                     UPDATE lobby_bets
                        SET status = 'refund_pending', resolved_at = NOW(), resolve_reason = :r
@@ -32284,6 +32546,14 @@ async def _bind_one_lobby_bet(db: AsyncSession, mode: str, lobby_id, ctx: dict, 
     # own match" rule the live endpoints enforce, applied at freeze time.
     if bet["player_id"] in ctx["roster_pids"]:
         return "bettor_joined"
+
+    # A directly planted legacy/corrupt wager must not bypass the placement
+    # perimeter. Resolve both bettor and frozen targets from database-owned
+    # context before creating an ordinary wager row.
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=[bet["player_id"], *list(ctx["roster_pids"])],
+    )
 
     if mode == "team":
         if len(want) != 2:
@@ -32481,6 +32751,7 @@ async def place_lobby_bet(
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
+    await _assert_no_service_subject(db, affected_player_ids=[bettor.id])
     # Serialize this bettor's concurrent placements on a value that exists
     # whether or not any row does (#207), before taking any row lock.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
@@ -32909,6 +33180,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     steams = {report.t1a.steam_id, report.t1b.steam_id, report.t2a.steam_id, report.t2b.steam_id}
     if len(steams) != 4:
         raise HTTPException(400, "All four players must be distinct")
+    await _assert_no_service_subject(db, affected_steam_ids=steams)
     if report.t1_rounds_won == report.t2_rounds_won:
         raise HTTPException(400, "Match must have a winner")
     if report.t1_rounds_won > 5 or report.t2_rounds_won > 5:
@@ -32945,6 +33217,9 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         # incident class (a live series cancelled mid-game) always leaves the
         # row behind, so nothing recoverable is lost by rejecting outright.
         raise HTTPException(404, "team_series not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[series["t1a_id"], series["t1b_id"],
+                                 series["t2a_id"], series["t2b_id"]])
     if series["status"] != "active":
         # July 30 lifecycle audit item 1: this rejection fires BEFORE the
         # team_matches insert, so without capture the whole GAME is destroyed —
@@ -33369,6 +33644,8 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                      WHERE b.team_series_id = :sid AND b.settled_at IS NULL
                      ORDER BY b.player_id::text, b.id
                 """), {"sid": series_uuid})).mappings().all()
+                await _assert_no_service_subject(
+                    db, affected_player_ids=[b["player_id"] for b in unsettled])
                 for b in unsettled:
                     won = (b["bet_on_team"] == winner_team)
                     payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
@@ -34503,6 +34780,10 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
         raise HTTPException(404, "Not found")
     if row["status"] != "pending":
         raise HTTPException(409, "Already reviewed")
+    # Acceptance is the durable authorization for a later ordered replay, so
+    # enforce the subject policy here even though this request does not apply
+    # ratings or rewards inline.
+    await _assert_no_service_subject(db, affected_player_ids=row["player_ids"] or ())
     later = await _quarantine_later_rated_count(
         db, row["mode"], row["player_ids"], row["created_at"])
     if later:
@@ -34545,7 +34826,30 @@ _SPECTATE_MODES = {"1v1", "2v2", "1v2", "ffa"}
 _SPECTATE_WATCHABLE_MODES = {"1v1", "2v2", "1v2", "ffa"}
 _SPECTATE_ROOM_PREFIX = {"1v1": "ranked_", "2v2": "team_", "1v2": "ovt_", "ffa": "ffa_"}
 SPECTATE_ATTEST_FRESH_SECONDS = 150      # attest cadence is 60s; 150 covers one miss
-SPECTATE_SEAT_CAP = 4                    # Sid's Aug 6 decision (client SEAT_CAP mirrors)
+SPECTATE_SEAT_CAP = 5                    # reserved fifth seat; public cap remains four
+SPECTATE_DRAIN_SECONDS = 120             # alert/escalation threshold, never proof of departure
+# DEPLOY GATE (cold review H2): drain/tombstone ENFORCEMENT stays OFF until the
+# phase-2 client (masters send complete inventories INCLUDING the empty list)
+# is enforced by MIN_MOD_VERSION. Today's shipped client skips the validate
+# call when zero spectators remain, so an unconfirmed ghost can NEVER be
+# inventory-cleared once a game has no seated spectators — with enforcement on,
+# one lone spectator crashing would make the game inadmissible to every public
+# viewer for the rest of the sitting, and close-path drains would carry that
+# block into reused room codes. While False: tombstones/drains are RECORDED
+# and CLEARED exactly as designed (the durable data phase 2 needs), ended
+# seats consume capacity only within the bounded drain window (self-expiring,
+# no deadlock), and the stale-drain admission conjuncts are not applied.
+# Flip to True in the release whose MIN_MOD_VERSION >= the empty-inventory
+# client. Until then the r3-F6 overgrant residual (Photon may refuse a seat
+# the server advertised) remains the pre-batch status quo, by decision.
+SPECTATE_DRAIN_ENFORCEMENT = False
+SPECTATE_BROADCAST_STEAM_IDS = {"76561198709950406"}
+SERVICE_POLICY_WATERMARK = datetime(2026, 8, 16, tzinfo=timezone.utc)
+BROADCAST_EXCLUSION_MAX = 8
+BROADCAST_EXCLUSION_TTL_SECONDS = 15 * 60
+BROADCAST_ROTATE_SECONDS = 180
+BROADCAST_ACQ_STALL_SECONDS = 30
+BROADCAST_ACQ_CEILING_SECONDS = 240
 # 2 (Aug 10, design-review blocker 3): the spectator desync/safety batch.
 # Protocol-1 clients carry the PlayerDied/master-window RPC hazard, the
 # poison roster-quarantine misfire and unregistered husk views — mixed rooms
@@ -34557,45 +34861,206 @@ SPECTATE_JOIN_WINDOW_SECONDS = 60
 SPECTATE_HEARTBEAT_TTL_SECONDS = 60
 
 
+def _is_broadcast_account(steam_id: str | None) -> bool:
+    return bool(steam_id) and steam_id in SPECTATE_BROADCAST_STEAM_IDS
+
+
+async def _assert_no_service_subject(
+    db: AsyncSession,
+    affected_player_ids=(),
+    affected_steam_ids=(),
+) -> None:
+    """Refuse a competitive/economy mutation involving a service account.
+
+    Settlement callers pass DB-row-resolved player UUIDs.  Creation funnels
+    may additionally pass the claimed Steam ids before get-or-create can dirty
+    a Player row.  Keeping both inputs in one helper makes the DB identity
+    resolution authoritative while still closing first-write creation holes.
+    """
+    steam_ids = {str(s) for s in (affected_steam_ids or ()) if s}
+    if steam_ids.intersection(SPECTATE_BROADCAST_STEAM_IDS):
+        raise HTTPException(status_code=403, detail="service_account_forbidden")
+
+    player_ids = {str(p) for p in (affected_player_ids or ()) if p}
+    if not player_ids:
+        return
+    # Integration fix (cold review M1): this helper rides ~90 sites including
+    # 2-3 s queue polls, and the original per-call lookup cast the pkey COLUMN
+    # (`id::text = ANY(text[])`) which defeats the index -> sequential scan of
+    # players at poll rate. The service set is one constant account whose row
+    # has existed since April, so resolve its UUID(s) ONCE per hour into
+    # module state and make the hot path a pure set intersection.
+    if player_ids.intersection(await _service_player_uuids(db)):
+        raise HTTPException(status_code=403, detail="service_account_forbidden")
+
+
+_service_player_uuid_cache: "set[str] | None" = None
+_service_uuid_cache_monotonic = 0.0
+
+
+async def _service_player_uuids(db: AsyncSession) -> "set[str]":
+    """Player-UUID mirror of SPECTATE_BROADCAST_STEAM_IDS, cached hourly.
+
+    Staleness bound: a service players row created after a cache fill is
+    invisible for <=1 h. Acceptable because the set is a hand-edited constant
+    (SHOP_OWNER pattern) whose rows predate the policy; extending the set is
+    a deploy, which restarts the process and empties the cache anyway.
+    """
+    global _service_player_uuid_cache, _service_uuid_cache_monotonic
+    now_mono = time.monotonic()
+    if (_service_player_uuid_cache is None
+            or now_mono - _service_uuid_cache_monotonic > 3600.0):
+        rows = (await db.execute(text("""
+            SELECT id::text FROM players
+             WHERE steam_id = ANY(CAST(:sids AS text[]))
+        """), {"sids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all()
+        _service_player_uuid_cache = {str(r) for r in rows}
+        _service_uuid_cache_monotonic = now_mono
+    return _service_player_uuid_cache
+
+
+_service_audit_last_monotonic = 0.0
+
+
+async def _run_service_policy_audit(force: bool = False) -> None:
+    """Page loudly on post-watermark service references; never rewrites data."""
+    global _service_audit_last_monotonic
+    now_mono = time.monotonic()
+    if not force and now_mono - _service_audit_last_monotonic < 86400:
+        return
+    _service_audit_last_monotonic = now_mono
+    from database import async_session
+
+    checks = {
+        "ranked_series": """
+            SELECT COUNT(*) FROM ranked_series r
+             WHERE r.created_at >= :wm AND (r.player1_id IN (SELECT id FROM svc)
+                                           OR r.player2_id IN (SELECT id FROM svc))""",
+        "team_series": """
+            SELECT COUNT(*) FROM team_series r
+             WHERE r.created_at >= :wm AND (r.t1a_id IN (SELECT id FROM svc)
+                 OR r.t1b_id IN (SELECT id FROM svc) OR r.t2a_id IN (SELECT id FROM svc)
+                 OR r.t2b_id IN (SELECT id FROM svc))""",
+        "ovt_series": """
+            SELECT COUNT(*) FROM ovt_series r
+             WHERE r.created_at >= :wm AND (r.solo_id IN (SELECT id FROM svc)
+                 OR r.duo_a_id IN (SELECT id FROM svc) OR r.duo_b_id IN (SELECT id FROM svc))""",
+        "ffa_lobbies": """
+            SELECT COUNT(*) FROM ffa_lobbies r
+             WHERE r.created_at >= :wm AND r.member_ids && ARRAY(SELECT id FROM svc)""",
+        "ranked_matches": """
+            SELECT COUNT(*) FROM matches r
+             WHERE r.created_at >= :wm AND (r.player1_id IN (SELECT id FROM svc)
+                 OR r.player2_id IN (SELECT id FROM svc)
+                 OR r.reported_by IN (SELECT id FROM svc))""",
+        "team_matches": """
+            SELECT COUNT(*) FROM team_matches r
+             WHERE r.created_at >= :wm AND (r.t1a_id IN (SELECT id FROM svc)
+                 OR r.t1b_id IN (SELECT id FROM svc) OR r.t2a_id IN (SELECT id FROM svc)
+                 OR r.t2b_id IN (SELECT id FROM svc)
+                 OR r.reported_by IN (SELECT id FROM svc))""",
+        "ovt_matches": """
+            SELECT COUNT(*) FROM ovt_matches r
+             WHERE r.created_at >= :wm AND (r.solo_id IN (SELECT id FROM svc)
+                 OR r.duo_a_id IN (SELECT id FROM svc) OR r.duo_b_id IN (SELECT id FROM svc)
+                 OR r.reported_by IN (SELECT id FROM svc))""",
+        "ffa_matches": """
+            SELECT COUNT(*) FROM ffa_matches r
+             WHERE r.created_at >= :wm AND (r.winner_id IN (SELECT id FROM svc)
+                 OR r.reported_by IN (SELECT id FROM svc)
+                 OR EXISTS (SELECT 1 FROM ffa_match_players mp
+                             WHERE mp.match_id = r.id AND mp.player_id IN (SELECT id FROM svc)))""",
+        "tournament_signups": """
+            SELECT COUNT(*) FROM tournament_signups r
+             WHERE r.signed_up_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "gold_transactions": """
+            SELECT COUNT(*) FROM gold_transactions r
+             WHERE r.created_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "rating_history": """
+            SELECT COUNT(*) FROM rating_history r
+             WHERE r.created_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "bets": """
+            SELECT COUNT(*) FROM bets r
+             WHERE r.created_at >= :wm AND (r.player_id IN (SELECT id FROM svc)
+                                            OR r.bet_on_player_id IN (SELECT id FROM svc))""",
+        "team_bets": """
+            SELECT COUNT(*) FROM team_bets r
+             WHERE r.created_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "ffa_bets": """
+            SELECT COUNT(*) FROM ffa_bets r
+             WHERE r.created_at >= :wm AND (r.player_id IN (SELECT id FROM svc)
+                                            OR r.bet_on_player_id IN (SELECT id FROM svc))""",
+        "lobby_bets": """
+            SELECT COUNT(*) FROM lobby_bets r
+             WHERE r.created_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "glicko_ratings": """
+            SELECT COUNT(*) FROM glicko_ratings r
+             WHERE r.updated_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "glicko_ratings_2v2": """
+            SELECT COUNT(*) FROM glicko_ratings_2v2 r
+             WHERE r.updated_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "glicko_ratings_1v2": """
+            SELECT COUNT(*) FROM glicko_ratings_1v2 r
+             WHERE r.updated_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+        "glicko_ratings_ffa": """
+            SELECT COUNT(*) FROM glicko_ratings_ffa r
+             WHERE r.updated_at >= :wm AND r.player_id IN (SELECT id FROM svc)""",
+    }
+    async with async_session() as db:
+        for label, body in checks.items():
+            try:
+                async with db.begin_nested():
+                    count = (await db.execute(text(
+                        "WITH svc AS (SELECT id FROM players WHERE steam_id = ANY(CAST(:sids AS text[]))) "
+                        + body
+                    ), {"sids": sorted(SPECTATE_BROADCAST_STEAM_IDS),
+                        "wm": SERVICE_POLICY_WATERMARK})).scalar() or 0
+                if count:
+                    print(f"[SERVICE-AUDIT] {label}: {count} post-watermark service reference(s)")
+            except Exception as ex:
+                print(f"[SERVICE-AUDIT] {label}: audit query failed loudly: {type(ex).__name__}: {ex}")
+
+        try:
+            old_tombstones = (await db.execute(text("""
+                SELECT COUNT(*) FROM spectate_drain_tombstones
+                 WHERE created_at < NOW() - INTERVAL '7 days'
+            """))).scalar() or 0
+            if old_tombstones:
+                print(f"[SERVICE-AUDIT] spectate drains: {old_tombstones} tombstone(s) older than one week")
+        except Exception as ex:
+            print(f"[SERVICE-AUDIT] spectate drains: audit query failed loudly: {type(ex).__name__}: {ex}")
+
+
 def _spectate_roster_list(roster: str) -> list:
     return [s for s in (roster or "").split(",") if s]
 
 
-async def _tournament_mandatory_pairs(db: AsyncSession) -> set:
-    """Sorted 'a:b' steam-id pair keys for every not-yet-terminal tournament
-    match with both seats assigned, in a RUNNING tournament.
-
-    Sid (Aug 14): "Tournament games are the only ones where spectating should
-    be mandatorily allowed" — the per-player allow_spectators veto is skipped
-    for exactly these pairs (the veto keeps applying to every non-tournament
-    game). Pair-matching is the key because 1v1 spectate rows carry no
-    source_ref (#286: room-code rooms have no server-side series mapping).
-
-    Bounded: a bracket holds at most ~31 matches and at most one tournament
-    runs at a time, so ONE query serves the whole /spectate/games page —
-    callers fetch this once and test membership (never per-game). Statuses:
-    'ready' is a tournament match being played or awaited; 'scheduled' is the
-    sync between-rounds break ('pending' seats are not final and terminal
-    states are decided — neither may force anything).
-
-    Savepointed (#235, Codex tournament-batch r1 find 8): without it a
-    statement error here aborts the ROOT transaction, and the caller's
-    catch-and-continue then makes every later query in the same request die
-    with InFailedSQLTransaction — /spectate/games 500s instead of degrading
-    to the ordinary opt-out veto."""
-    async with db.begin_nested():
-        rows = (await db.execute(text("""
-            SELECT q1.steam_id AS a, q2.steam_id AS b
-              FROM tournament_matches tm
-              JOIN tournaments t ON t.id = tm.tournament_id
-              JOIN tournament_signups s1 ON s1.id = tm.p1_signup_id
-              JOIN tournament_signups s2 ON s2.id = tm.p2_signup_id
-              JOIN players q1 ON q1.id = s1.player_id
-              JOIN players q2 ON q2.id = s2.player_id
-             WHERE tm.status IN ('ready', 'scheduled')
-               AND t.status = 'running'
-        """))).mappings().all()
-    return {":".join(sorted((r["a"], r["b"]))) for r in rows}
+async def _spectate_mandatory_class(db: AsyncSession, game) -> str:
+    """Classify only an exact, live sync-tournament room binding as mandatory."""
+    # DEPLOY GATE: Sid sign-off required (async tournament narrowing)
+    # Pair-derived async inference is intentionally absent.  A pair sharing an
+    # arbitrary room is ordinary opt-in even when the pair has an async match.
+    mode = game.get("mode") if hasattr(game, "get") else game["mode"]
+    room = game.get("room_name") if hasattr(game, "get") else game["room_name"]
+    source_ref = game.get("source_ref") if hasattr(game, "get") else game["source_ref"]
+    if mode != "1v1" or not str(room or "").startswith("sct-") or not source_ref:
+        return ""
+    try:
+        async with db.begin_nested():
+            bound = (await db.execute(text("""
+                SELECT 1
+                  FROM tournament_matches tm
+                  JOIN tournaments t ON t.id = tm.tournament_id
+                 WHERE tm.id::text = :ref
+                   AND tm.photon_room_name = :room
+                   AND tm.status IN ('ready', 'scheduled')
+                   AND t.status = 'running' AND t.kind = 'sync'
+                 LIMIT 1
+            """), {"ref": str(source_ref), "room": room})).first()
+        return "sync_room" if bound else ""
+    except Exception as ex:
+        print(f"[SPECTATE] mandatory classifier failed closed: {type(ex).__name__}: {ex}")
+        return ""
 
 
 async def _spectate_game_ready(db: AsyncSession, game) -> tuple[bool, str]:
@@ -34639,18 +35104,10 @@ async def _spectate_game_ready(db: AsyncSession, game) -> tuple[bool, str]:
          WHERE steam_id = ANY(:sids) AND allow_spectators IS NOT TRUE
     """), {"sids": roster})).scalar() or 0
     if opt > 0:
-        # Sid (Aug 14): tournament matches are MANDATORILY spectatable — the
-        # opt-out veto is skipped when this exact pair has a live tournament
-        # match (see _tournament_mandatory_pairs). Every OTHER readiness rule
-        # above still applies; only the veto is bypassed. Fails toward the
-        # veto standing (a lookup error never widens spectating).
-        _mand = False
-        if game["mode"] == "1v1" and len(roster) == 2:
-            try:
-                _mand = ":".join(sorted(roster)) in await _tournament_mandatory_pairs(db)
-            except Exception as _te:
-                print(f"[SPECTATE] tournament pair lookup failed (veto stands): {_te}")
-        if not _mand:
+        # DEPLOY GATE: Sid sign-off required (async tournament narrowing)
+        # The exact sct- binding is the sole opt-out bypass. Async pairs and
+        # sync side games remain ordinary opt-in on every consumer.
+        if not await _spectate_mandatory_class(db, game):
             # Generic reason — never reveal WHICH participant opted out (§6.4).
             return False, "spectating_disabled"
     return True, ""
@@ -34662,6 +35119,207 @@ async def _spectate_active_seats(db: AsyncSession, game_id) -> int:
          WHERE game_id = :gid AND revoked_at IS NULL
            AND heartbeat_expires_at > NOW()
     """), {"gid": str(game_id)})).scalar() or 0
+
+
+async def _spectate_record_drains(db: AsyncSession, game, all_leases: bool = False) -> None:
+    """Persist authorization-ended occupants before their game row can vanish."""
+    gid = (game.get("game_id") or game.get("id")) if hasattr(game, "get") else game["id"]
+    await db.execute(text("""
+        INSERT INTO spectate_drain_tombstones
+            (room_name, region, ghost_steam_id, created_at)
+        SELECT :room, :region, l.spectator_steam_id, clock_timestamp()
+          FROM spectate_leases l
+         WHERE l.game_id = :gid
+           AND (:all_leases OR l.revoked_at IS NOT NULL OR l.heartbeat_expires_at <= NOW())
+        ON CONFLICT (room_name, region, ghost_steam_id) DO NOTHING
+    """), {"room": game["room_name"], "region": game["room_region"] or "",
+            "gid": str(gid), "all_leases": bool(all_leases)})
+
+
+async def _spectate_admission(
+    db: AsyncSession,
+    game,
+    requester_steam_id: str | None = None,
+    broadcast: bool = False,
+) -> dict:
+    """One requester-aware seat predicate shared by listing, grant and target."""
+    row = (await db.execute(text("""
+        WITH lease_rows AS (
+            SELECT spectator_steam_id AS steam_id,
+                   (revoked_at IS NULL AND heartbeat_expires_at > NOW()) AS live,
+                   LEAST(heartbeat_expires_at,
+                         COALESCE(revoked_at, heartbeat_expires_at)) AS ended_at
+              FROM spectate_leases
+             WHERE game_id = :gid
+        ), tomb_rows AS (
+            SELECT ghost_steam_id AS steam_id, created_at
+              FROM spectate_drain_tombstones
+             WHERE room_name = :room AND region = :region
+        ), occupied AS (
+            SELECT steam_id FROM lease_rows
+            UNION
+            SELECT steam_id FROM tomb_rows
+        ), occupied_windowed AS (
+            -- Phase-1 semantics (SPECTATE_DRAIN_ENFORCEMENT=False): an ended
+            -- seat consumes capacity only within the bounded drain window, so
+            -- an inventory-less ghost self-expires instead of deadlocking the
+            -- game's public admission (cold review H2).
+            SELECT steam_id FROM lease_rows
+             WHERE live OR ended_at > NOW() - make_interval(secs => :drain_seconds)
+            UNION
+            SELECT steam_id FROM tomb_rows
+             WHERE created_at > NOW() - make_interval(secs => :drain_seconds)
+        ), active_public AS (
+            SELECT DISTINCT spectator_steam_id AS steam_id
+              FROM spectate_leases
+             WHERE game_id = :gid AND revoked_at IS NULL
+               AND heartbeat_expires_at > NOW()
+               AND NOT (spectator_steam_id = ANY(CAST(:service_ids AS text[])))
+        ), stale_drains AS (
+            SELECT spectator_steam_id AS steam_id
+              FROM spectate_leases
+             WHERE game_id = :gid
+               AND (revoked_at <= NOW() - make_interval(secs => :drain_seconds)
+                    OR heartbeat_expires_at <= NOW() - make_interval(secs => :drain_seconds))
+            UNION
+            SELECT ghost_steam_id AS steam_id
+              FROM spectate_drain_tombstones
+             WHERE room_name = :room AND region = :region
+               AND created_at <= NOW() - make_interval(secs => :drain_seconds)
+        )
+        SELECT
+            (SELECT COUNT(*) FROM active_public
+              WHERE CAST(:requester AS text) IS NULL
+                 OR steam_id <> CAST(:requester AS text)) AS public_active,
+            (SELECT COUNT(*) FROM occupied
+              WHERE CAST(:requester AS text) IS NULL
+                 OR steam_id <> CAST(:requester AS text)) AS physical_occupied,
+            (SELECT COUNT(*) FROM occupied_windowed
+              WHERE CAST(:requester AS text) IS NULL
+                 OR steam_id <> CAST(:requester AS text)) AS physical_occupied_windowed,
+            (SELECT COUNT(*) FROM stale_drains
+              WHERE (CAST(:requester AS text) IS NULL
+                     OR steam_id <> CAST(:requester AS text))
+                AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))) AS stale_public,
+            (SELECT COUNT(*) FROM stale_drains
+              WHERE (CAST(:requester AS text) IS NULL
+                     OR steam_id <> CAST(:requester AS text))
+                AND steam_id = ANY(CAST(:service_ids AS text[]))) AS stale_broadcast
+    """), {"gid": str(game["id"]), "room": game["room_name"],
+            "region": game["room_region"] or "", "requester": requester_steam_id,
+            "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS),
+            "drain_seconds": SPECTATE_DRAIN_SECONDS})).mappings().one()
+    public_cap = min(int(game["spectator_cap"] or SPECTATE_SEAT_CAP), 4)
+    headroom = max(0, int(game["room_capacity"] or 0) - int(game["fighter_target"] or 0))
+    # H2 gate: strict occupancy + stale-drain conjuncts apply only once the
+    # phase-2 client can actually clear ghosts (see SPECTATE_DRAIN_ENFORCEMENT).
+    if SPECTATE_DRAIN_ENFORCEMENT:
+        occupied_count = int(row["physical_occupied"])
+        stale_pub_block = int(row["stale_public"]) != 0
+        stale_bc_block = int(row["stale_broadcast"]) != 0
+    else:
+        occupied_count = int(row["physical_occupied_windowed"])
+        stale_pub_block = False
+        stale_bc_block = False
+    public_ok = (int(row["public_active"]) < public_cap
+                 and occupied_count < headroom
+                 and not stale_pub_block)
+    broadcast_ok = (occupied_count < headroom
+                    and not stale_bc_block)
+    return {
+        "allowed": broadcast_ok if broadcast else public_ok,
+        "public_active": int(row["public_active"]),
+        "public_cap": public_cap,
+        "physical_occupied": occupied_count,
+        "physical_headroom": headroom,
+        "stale_drain_blocked": (stale_bc_block if broadcast else stale_pub_block),
+    }
+
+
+# Single-worker module state (#125): one broadcast controller, one sticky
+# rotation clock. A restart may cause one early switch, which is benign.
+_broadcast_rotation = {
+    "incarnation": None,
+    "selected_at": 0.0,
+    "activated_at": None,
+    "last_progress_at": 0.0,
+    "acq_ticket": None,
+    "acq_phase": None,
+    "last_shown": {},
+}
+
+
+def _broadcast_incarnation(game) -> str:
+    # `started_at` is the server-owned attestation generation for this game
+    # row. A reused room gets a new row id/start stamp, so old exclusions do
+    # not suppress the later sitting.
+    started = game["started_at"]
+    generation = int(started.timestamp() * 1000) if started else 0
+    return f"{game['id']}.{generation}"
+
+
+def _broadcast_exclusions(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    out = set()
+    for item in raw.split(",")[:BROADCAST_EXCLUSION_MAX]:
+        try:
+            incarnation, _reason, ttl_raw = item.rsplit(":", 2)
+            ttl = max(0, min(int(ttl_raw), BROADCAST_EXCLUSION_TTL_SECONDS))
+        except (ValueError, TypeError):
+            continue
+        if incarnation and ttl > 0:
+            out.add(incarnation)
+    return out
+
+
+async def _broadcast_candidate(db: AsyncSession, game, requester: str) -> dict | None:
+    ready, _reason = await _spectate_game_ready(db, game)
+    if not ready or game["mode"] not in _SPECTATE_WATCHABLE_MODES:
+        return None
+    admission = await _spectate_admission(
+        db, game, requester_steam_id=requester, broadcast=True)
+    if not admission["allowed"]:
+        return None
+
+    roster = _spectate_roster_list(game["roster"])
+    if not roster:
+        return None
+    rows = (await db.execute(text("""
+        SELECT p.steam_id, p.display_name,
+               CASE
+                 WHEN :mode = '2v2' THEN COALESCE(g2.rating, 1500)
+                 WHEN :mode = 'ffa' THEN COALESCE(gf.rating, 1500)
+                 ELSE COALESCE(g1.rating, 1500)
+               END AS rating
+          FROM players p
+          LEFT JOIN glicko_ratings g1 ON g1.player_id = p.id
+          LEFT JOIN glicko_ratings_2v2 g2 ON g2.player_id = p.id
+          LEFT JOIN glicko_ratings_ffa gf ON gf.player_id = p.id
+         WHERE p.steam_id = ANY(CAST(:sids AS text[]))
+    """), {"mode": game["mode"], "sids": roster})).mappings().all()
+    by_sid = {r["steam_id"]: r for r in rows}
+    ratings = [float(by_sid[s]["rating"]) if s in by_sid else 1500.0 for s in roster]
+    names = [(by_sid[s]["display_name"] or "?") if s in by_sid else "?" for s in roster]
+    mandatory = await _spectate_mandatory_class(db, game)
+    return {
+        "game_id": str(game["id"]),
+        "incarnation": _broadcast_incarnation(game),
+        "mode": game["mode"],
+        "source_ref": game["source_ref"],
+        "is_tournament": bool(mandatory),
+        "tier": 1 if mandatory else 2,
+        "score": float(sum(ratings)),
+        "names": names,
+        "ratings": [round(v, 1) for v in ratings],
+        "phase": game["phase"],
+    }
+
+
+def _broadcast_public(candidate: dict) -> dict:
+    return {k: candidate[k] for k in (
+        "game_id", "incarnation", "mode", "source_ref", "is_tournament",
+        "score", "names", "ratings", "phase")}
 
 
 async def _spectate_authoritative_roster(db: AsyncSession, mode: str, room: str):
@@ -34795,6 +35453,7 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
         raise HTTPException(status_code=422, detail="bad_cardinality")
     if not await _strict_steam_session_ok(request, req.steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
+    await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
 
     # Server-authoritative roster check (fail CLOSED when a mapping should
     # exist): the claimed roster must be members of the room's real locked
@@ -34807,13 +35466,14 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
         # partial clique attest around the excluded members' opt-outs.
         if set(roster) != true_roster or req.steam_id not in true_roster:
             raise HTTPException(status_code=409, detail="roster_mismatch")
+    await _assert_no_service_subject(db, affected_steam_ids=roster)
 
     # Serialize per-room (attests from all fighters land within the same
     # second) — advisory lock on the room name, then upsert game + attest.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
                      {"k": f"spectate:{req.room_name}"})
     game = (await db.execute(text("""
-        SELECT id, roster FROM spectate_games
+        SELECT id, roster, room_name, room_region FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
     """), {"room": req.room_name})).mappings().first()
     is_battle = req.phase == "battle"
@@ -34913,7 +35573,7 @@ async def spectate_close(req: SpectateCloseBody, request: Request,
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
                      {"k": f"spectate:{req.room_name}"})
     game = (await db.execute(text("""
-        SELECT id, roster FROM spectate_games
+        SELECT id, roster, room_name, room_region FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
     """), {"room": req.room_name})).mappings().first()
     if game is None:
@@ -34923,6 +35583,8 @@ async def spectate_close(req: SpectateCloseBody, request: Request,
         return {"status": "ok", "closed": False}
     if req.steam_id not in _spectate_roster_list(game["roster"]):
         raise HTTPException(status_code=403, detail="not_a_participant")
+    await _assert_no_service_subject(
+        db, affected_steam_ids=_spectate_roster_list(game["roster"]))
     await db.execute(text("""
         DELETE FROM spectate_attestations
          WHERE game_id = :gid AND steam_id = :sid
@@ -34935,6 +35597,9 @@ async def spectate_close(req: SpectateCloseBody, request: Request,
            "fresh": SPECTATE_ATTEST_FRESH_SECONDS})).scalar() or 0
     _closed = False
     if _remaining == 0:
+        # Ending the database row ends every lease's authorization, but it is
+        # not evidence that those Photon actors left the reusable room.
+        await _spectate_record_drains(db, game, all_leases=True)
         await db.execute(text("""
             UPDATE spectate_games SET ended_at = NOW()
              WHERE id = :gid AND ended_at IS NULL
@@ -34964,10 +35629,9 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
          ORDER BY started_at DESC
          LIMIT 30
     """), {"fresh": SPECTATE_ATTEST_FRESH_SECONDS})).mappings().all()
-    # BATCHED metadata (Codex r5 find 4: the per-game shape reached ~122
-    # serial queries at 30 games; this bounds it at ~35 — one list query,
-    # one players/title batch, one seats batch, one colors + one podium
-    # call, plus one attest-freshness query per game).
+    # Player/title metadata stays batched. Readiness, mandatory classification,
+    # and physical-seat admission are intentionally per game because all three
+    # are shared authorization predicates, not display-only approximations.
     all_sids = sorted({s for g in games for s in _spectate_roster_list(g["roster"])})
     meta_by_sid: dict = {}
     if all_sids:
@@ -34983,28 +35647,9 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
              WHERE p.steam_id = ANY(:sids)
         """), {"sids": all_sids})).mappings().all()
         meta_by_sid = {r["steam_id"]: r for r in rows}
-    seats_by_game: dict = {}
-    if games:
-        seat_rows = (await db.execute(text("""
-            SELECT game_id, COUNT(*) AS n FROM spectate_leases
-             WHERE game_id = ANY(:gids) AND revoked_at IS NULL
-               AND heartbeat_expires_at > NOW()
-             GROUP BY game_id
-        """), {"gids": [g["id"] for g in games]})).mappings().all()
-        seats_by_game = {r["game_id"]: r["n"] for r in seat_rows}
     _colors = await _rank_colors(db)
     _pmap, _pmap2, _pmapf = await _podium_maps_for(
         db, (m["title_sku"] for m in meta_by_sid.values()))
-    # Mandatory-spectate pairs (Sid, Aug 14) — ONE query for the whole page,
-    # membership-tested per game below (the endpoint's batching contract).
-    # Fails toward the empty set = the opt-out veto stands.
-    _tourn_pairs: set = set()
-    if any(g["mode"] == "1v1" for g in games):
-        try:
-            _tourn_pairs = await _tournament_mandatory_pairs(db)
-        except Exception as _te:
-            print(f"[SPECTATE] tournament pair lookup failed (veto stands): {_te}")
-
     async def _ready_batched(g) -> tuple[bool, str]:
         """_spectate_game_ready with the players half prefetched — same
         rules, one attest query instead of three queries per game."""
@@ -35045,9 +35690,7 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
                 # 409s, is the same-predicate bug either way).
                 _opted_out = True
         if _opted_out:
-            _mand = (g["mode"] == "1v1" and len(roster0) == 2
-                     and ":".join(sorted(roster0)) in _tourn_pairs)
-            if not _mand:
+            if not await _spectate_mandatory_class(db, g):
                 # Generic — never reveal WHICH participant opted out (§6.4).
                 return False, "spectating_disabled"
         return True, ""
@@ -35059,8 +35702,9 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
         # _SPECTATE_WATCHABLE_MODES for why this exists.
         if ready and g["mode"] not in _SPECTATE_WATCHABLE_MODES:
             ready, reason = False, "mode_not_ready"
-        seats = seats_by_game.get(g["id"], 0)
-        if ready and seats >= g["spectator_cap"]:
+        admission = await _spectate_admission(db, g)
+        seats = admission["public_active"]
+        if ready and not admission["allowed"]:
             ready, reason = False, "spectator_full"
         roster = _spectate_roster_list(g["roster"])
         names = []
@@ -35116,11 +35760,172 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
             "phase": g["phase"],
             "names": ", ".join(names),
             "spectator_count": seats,
-            "spectator_cap": g["spectator_cap"],
+            # Anonymous listing is deliberately the conservative PUBLIC view;
+            # the requester-aware broadcast branch runs only at grant/target.
+            "spectator_cap": admission["public_cap"],
             "spectatable": ready,
             "disabled_reason": reason,
         })
     return {"games": out}
+
+
+@app.get("/api/v1/broadcast/target", tags=["Spectate"])
+async def broadcast_target(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    current: str | None = Query(None, max_length=64),
+    activation_age: float | None = Query(None, ge=0, le=86400),
+    exclude: str | None = Query(None, max_length=4096),
+    acq_ticket: str | None = Query(None, max_length=128),
+    acq_phase: str | None = Query(None, max_length=32),
+    acq_age: float | None = Query(None, ge=0, le=600),
+    db: AsyncSession = Depends(get_db),
+):
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    if not _is_broadcast_account(steam_id):
+        raise HTTPException(status_code=403, detail="broadcast_only")
+
+    rows = (await db.execute(text("""
+        SELECT id, mode, source_ref, room_name, room_region, roster,
+               fighter_target, room_capacity, spectator_cap, protocol_min,
+               phase, started_at, last_attest_at, last_battle_at
+          FROM spectate_games
+         WHERE ended_at IS NULL
+           AND last_attest_at > NOW() - make_interval(secs => :fresh)
+         ORDER BY started_at DESC
+         LIMIT 30
+    """), {"fresh": SPECTATE_ATTEST_FRESH_SECONDS})).mappings().all()
+
+    all_candidates = []
+    for game in rows:
+        candidate = await _broadcast_candidate(db, game, steam_id)
+        if candidate is not None:
+            all_candidates.append(candidate)
+
+    exclusions = _broadcast_exclusions(exclude)
+    current_candidate = next((c for c in all_candidates if c["game_id"] == current), None)
+    current_payload = None
+    if current:
+        reason = "ok"
+        still_eligible = current_candidate is not None
+        if current_candidate is not None and current_candidate["incarnation"] in exclusions:
+            still_eligible, reason = False, "excluded"
+        elif current_candidate is None:
+            try:
+                current_uuid = UUID(current)
+            except Exception:
+                current_uuid = None
+            live = None
+            if current_uuid is not None:
+                live = (await db.execute(text("""
+                    SELECT id, mode, source_ref, room_name, room_region, roster,
+                           fighter_target, room_capacity, spectator_cap, protocol_min,
+                           phase, started_at, last_attest_at, last_battle_at, ended_at
+                      FROM spectate_games WHERE id = :gid
+                """), {"gid": current_uuid})).mappings().first()
+            if (live is not None
+                    and _broadcast_incarnation(live) in exclusions):
+                reason = "excluded"
+            elif live is None or live["ended_at"] is not None:
+                reason = "game_ended"
+            else:
+                ready, _ = await _spectate_game_ready(db, live)
+                reason = "unready" if not ready else "inadmissible"
+        current_payload = {"game_id": current, "still_eligible": still_eligible,
+                           "reason": reason}
+
+    eligible = [c for c in all_candidates if c["incarnation"] not in exclusions]
+    eligible.sort(key=lambda c: (c["tier"], -c["score"], c["incarnation"]))
+    tier_one = [c for c in eligible if c["tier"] == 1]
+    if tier_one:
+        rotation_set = tier_one
+    elif eligible:
+        floor = eligible[0]["score"] * 0.85
+        rotation_set = [c for c in eligible if c["score"] >= floor]
+    else:
+        rotation_set = []
+
+    now_mono = time.monotonic()
+    by_inc = {c["incarnation"]: c for c in eligible}
+    selected = by_inc.get(_broadcast_rotation["incarnation"])
+    current_ok = (current_candidate is not None
+                  and current_candidate["incarnation"] not in exclusions)
+
+    if current_ok:
+        selected = current_candidate
+        _broadcast_rotation["incarnation"] = selected["incarnation"]
+        if activation_age is not None:
+            if _broadcast_rotation["activated_at"] is None:
+                _broadcast_rotation["activated_at"] = now_mono - activation_age
+            _broadcast_rotation["last_progress_at"] = now_mono
+        elif (acq_ticket
+              and (acq_ticket != _broadcast_rotation["acq_ticket"]
+                   or acq_phase != _broadcast_rotation["acq_phase"])):
+            _broadcast_rotation["last_progress_at"] = now_mono
+            _broadcast_rotation["acq_ticket"] = acq_ticket
+            _broadcast_rotation["acq_phase"] = acq_phase
+    elif selected is not None and acq_ticket:
+        # Every poll referencing the selected acquisition renews its progress
+        # lease. A phase can legitimately last longer than 30 seconds; the
+        # independent 240-second age ceiling prevents a stuck client from
+        # pinning the selector indefinitely.
+        _broadcast_rotation["last_progress_at"] = now_mono
+        _broadcast_rotation["acq_ticket"] = acq_ticket
+        _broadcast_rotation["acq_phase"] = acq_phase
+
+    acq_stalled = bool(selected) and (
+        now_mono - float(_broadcast_rotation["last_progress_at"] or
+                         _broadcast_rotation["selected_at"] or now_mono)
+        > BROADCAST_ACQ_STALL_SECONDS)
+    acq_over = acq_age is not None and acq_age > BROADCAST_ACQ_CEILING_SECONDS
+    dwell_done = bool(current_ok and activation_age is not None
+                      and activation_age >= BROADCAST_ROTATE_SECONDS)
+
+    choose_new = selected is None or acq_stalled or acq_over
+    if dwell_done and len(rotation_set) > 1:
+        choose_new = True
+    if current_payload is not None and not current_payload["still_eligible"]:
+        choose_new = True
+
+    if choose_new and rotation_set:
+        choices = rotation_set
+        if dwell_done and selected is not None:
+            alternatives = [c for c in choices if c["incarnation"] != selected["incarnation"]]
+            if alternatives:
+                choices = alternatives
+        selected = min(
+            choices,
+            key=lambda c: (_broadcast_rotation["last_shown"].get(c["incarnation"], 0.0),
+                           c["incarnation"]),
+        )
+        _broadcast_rotation["incarnation"] = selected["incarnation"]
+        _broadcast_rotation["selected_at"] = now_mono
+        _broadcast_rotation["activated_at"] = None
+        _broadcast_rotation["last_progress_at"] = now_mono
+        _broadcast_rotation["acq_ticket"] = None
+        _broadcast_rotation["acq_phase"] = None
+        _broadcast_rotation["last_shown"][selected["incarnation"]] = now_mono
+        # L1: bound the dict — drop entries for incarnations no longer live.
+        live_incs = {c["incarnation"] for c in all_candidates}
+        for stale_inc in [k for k in _broadcast_rotation["last_shown"] if k not in live_incs]:
+            del _broadcast_rotation["last_shown"][stale_inc]
+    elif not rotation_set:
+        selected = None
+        _broadcast_rotation["incarnation"] = None
+        _broadcast_rotation["activated_at"] = None
+        _broadcast_rotation["acq_ticket"] = None
+        _broadcast_rotation["acq_phase"] = None
+
+    next_switch = BROADCAST_ROTATE_SECONDS
+    if current_ok and activation_age is not None:
+        next_switch = max(0, int(BROADCAST_ROTATE_SECONDS - activation_age))
+    return {
+        "target": _broadcast_public(selected) if selected else None,
+        "current": current_payload,
+        "rotation": {"set_size": len(rotation_set), "next_switch_in": next_switch},
+        "candidates": [_broadcast_public(c) for c in eligible[:5]],
+    }
 
 
 @app.post("/api/v1/spectate/grant", tags=["Spectate"])
@@ -35156,7 +35961,7 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
 
     # Authoritative re-reads under the locks (#208).
     game = (await db.execute(text("""
-        SELECT id, mode, room_name, room_region, roster, fighter_target,
+        SELECT id, mode, source_ref, room_name, room_region, roster, fighter_target,
                room_capacity, spectator_cap, protocol_min, phase,
                last_attest_at, last_battle_at
           FROM spectate_games
@@ -35177,11 +35982,25 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
     # live lease. This runs BEFORE the seat-cap check (Codex r2 find 12: the
     # caller's own stale lease occupying the last seat otherwise makes their
     # retry 409 spectator_full).
+    # Replacement ends the old authorization but is not proof the old Photon
+    # actor departed. Persist its room-identity drain before revocation.
     await db.execute(text("""
-        UPDATE spectate_leases SET revoked_at = NOW()
+        INSERT INTO spectate_drain_tombstones
+            (room_name, region, ghost_steam_id, created_at)
+        SELECT g.room_name, COALESCE(g.room_region, ''),
+               l.spectator_steam_id, clock_timestamp()
+          FROM spectate_leases l JOIN spectate_games g ON g.id = l.game_id
+         WHERE l.spectator_steam_id = :sid AND l.revoked_at IS NULL
+        ON CONFLICT (room_name, region, ghost_steam_id) DO NOTHING
+    """), {"sid": req.steam_id})
+    await db.execute(text("""
+        UPDATE spectate_leases SET revoked_at = clock_timestamp()
          WHERE spectator_steam_id = :sid AND revoked_at IS NULL
     """), {"sid": req.steam_id})
-    if await _spectate_active_seats(db, game["id"]) >= game["spectator_cap"]:
+    admission = await _spectate_admission(
+        db, game, requester_steam_id=req.steam_id,
+        broadcast=_is_broadcast_account(req.steam_id))
+    if not admission["allowed"]:
         raise HTTPException(status_code=409, detail="spectator_full")
 
     token = secrets.token_urlsafe(24)
@@ -35198,6 +36017,15 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
            "joinw": SPECTATE_JOIN_WINDOW_SECONDS,
            "hbw": SPECTATE_JOIN_WINDOW_SECONDS + SPECTATE_HEARTBEAT_TTL_SECONDS,
            "proto": SPECTATE_PROTOCOL})
+    # A replacement lease is a new authorization generation for this actor.
+    # Retain the physical tombstone, but advance its causal fence once here;
+    # repeated dead heartbeats must not keep refreshing it forever.
+    await db.execute(text("""
+        UPDATE spectate_drain_tombstones
+           SET created_at = clock_timestamp()
+         WHERE room_name = :room AND region = :region AND ghost_steam_id = :sid
+    """), {"room": game["room_name"], "region": game["room_region"] or "",
+            "sid": req.steam_id})
     await db.commit()
     # The ONLY place the room credential leaves the server (§6.2).
     return {
@@ -35225,8 +36053,8 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
         async with db.begin_nested():
             lease = (await db.execute(text("""
                 SELECT l.id, l.game_id, l.revoked_at, l.heartbeat_expires_at, l.protocol,
-                       g.ended_at, g.roster, g.last_attest_at, g.last_battle_at, g.mode,
-                       g.protocol_min
+                        g.ended_at, g.roster, g.last_attest_at, g.last_battle_at, g.mode,
+                        g.protocol_min, g.source_ref, g.room_name, g.room_region
                   FROM spectate_leases l
                   JOIN spectate_games g ON g.id = l.game_id
                  WHERE l.id = CAST(:lid AS UUID) AND l.spectator_steam_id = :sid
@@ -35263,27 +36091,16 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
              WHERE steam_id = ANY(:sids) AND allow_spectators IS NOT TRUE
         """), {"sids": _spectate_roster_list(lease["roster"])})).scalar() or 0
         if opt > 0:
-            # Tournament pairs are MANDATORILY spectatable (Sid, Aug 14) —
-            # the SAME predicate the listing and grant use must gate the
-            # heartbeat too (Codex tournament r3 find 5 / #159/#328: the
-            # grant bypassed the opt-out and the very next heartbeat 410'd
-            # the seat for exactly the case the bypass exists to serve).
-            # Fail direction on lookup error: the veto stands (revoke).
-            _mand = False
-            _roster = _spectate_roster_list(lease["roster"])
-            if lease["mode"] == "1v1" and len(_roster) == 2:
-                try:
-                    _mand = (":".join(sorted(_roster))
-                             in await _tournament_mandatory_pairs(db))
-                except Exception as _te:
-                    print(f"[SPECTATE] heartbeat tournament pair lookup failed (veto stands): {_te}")
-            if not _mand:
+            if not await _spectate_mandatory_class(db, lease):
                 now_dead = True
     if now_dead:
         await db.execute(text("""
-            UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, NOW())
+            UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, clock_timestamp())
              WHERE id = CAST(:lid AS UUID)
         """), {"lid": req.lease_id})
+        # Revocation is part of the same transaction, so the shared helper now
+        # sees this exact authorization-ending lease and persists its drain.
+        await _spectate_record_drains(db, lease)
         await db.commit()
         raise HTTPException(status_code=410, detail="lease_ended")
     await db.execute(text("""
@@ -35300,8 +36117,19 @@ async def spectate_leave(req: SpectateLeaseBody, request: Request,
                          db: AsyncSession = Depends(get_db)):
     if not await _strict_steam_session_ok(request, req.steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
+    # Leave is intent, not departure proof. Enter durable drain first; only a
+    # later complete master inventory may clear it.
     await db.execute(text("""
-        UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, NOW())
+        INSERT INTO spectate_drain_tombstones
+            (room_name, region, ghost_steam_id, created_at)
+        SELECT g.room_name, COALESCE(g.room_region, ''),
+               l.spectator_steam_id, clock_timestamp()
+          FROM spectate_leases l JOIN spectate_games g ON g.id = l.game_id
+         WHERE l.id = CAST(:lid AS UUID) AND l.spectator_steam_id = :sid
+        ON CONFLICT (room_name, region, ghost_steam_id) DO NOTHING
+    """), {"lid": req.lease_id, "sid": req.steam_id})
+    await db.execute(text("""
+        UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, clock_timestamp())
          WHERE id = CAST(:lid AS UUID) AND spectator_steam_id = :sid
     """), {"lid": req.lease_id, "sid": req.steam_id})
     await db.commit()
@@ -35316,14 +36144,53 @@ async def spectate_validate(req: SpectateValidateBody, request: Request,
     a stranger cannot use this endpoint as a lease oracle."""
     if not await _strict_steam_session_ok(request, req.steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
+    # Database clock fence: PostgreSQL NOW() is transaction-start time and
+    # cannot prove receipt ordering. clock_timestamp() is sampled before any
+    # drains created by this inventory and shares the tombstone clock domain.
+    received_at = (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                     {"k": f"spectate:{req.room_name}"})
     game = (await db.execute(text("""
-        SELECT id, roster, mode, protocol_min FROM spectate_games
+        SELECT id, roster, mode, source_ref, room_name, room_region, protocol_min
+          FROM spectate_games
          WHERE room_name = :room AND ended_at IS NULL
     """), {"room": req.room_name})).mappings().first()
     if game is None:
         raise HTTPException(status_code=404, detail="game_not_live")
     if req.steam_id not in _spectate_roster_list(game["roster"]):
         raise HTTPException(status_code=403, detail="not_a_participant")
+    await _assert_no_service_subject(
+        db, affected_steam_ids=_spectate_roster_list(game["roster"]))
+    observed_sids = {entry.steam_id for entry in req.spectators[:8] if entry.steam_id}
+
+    # Materialize every authorization-ended current-row actor as a durable
+    # drain. This includes natural expiry; elapsed time never frees a seat.
+    await _spectate_record_drains(db, game)
+
+    # This submission is the room master's complete observed spectator set
+    # (the cap of eight exceeds physical spectator capacity). Clearance is
+    # fenced to this LIVE room+region and to tombstones that existed before
+    # this request reached the server. A delayed pre-drain snapshot therefore
+    # cannot clear a newer tombstone, regardless of client clocks.
+    await db.execute(text("""
+        DELETE FROM spectate_drain_tombstones
+         WHERE room_name = :room AND region = :region
+           AND created_at < :received
+           AND NOT (ghost_steam_id = ANY(CAST(:observed AS text[])))
+    """), {"room": game["room_name"], "region": game["room_region"] or "",
+            "received": received_at, "observed": sorted(observed_sids)})
+    # Integration fix (cold review H1): only sweep leases whose AUTHORIZATION
+    # already ended. Without the fence this deleted LIVE leases still inside
+    # their join window (a granted-but-not-yet-joined spectator, including the
+    # broadcast seat's long acquisition arc) whenever a validate sweep landed
+    # first -> entry-validate found no lease -> master kicked the newcomer.
+    # Live-but-departed seats still die via expiry -> drain -> next sweep.
+    await db.execute(text("""
+        DELETE FROM spectate_leases
+         WHERE game_id = :gid
+           AND NOT (spectator_steam_id = ANY(CAST(:observed AS text[])))
+           AND (revoked_at IS NOT NULL OR heartbeat_expires_at <= NOW())
+    """), {"gid": str(game["id"]), "observed": sorted(observed_sids)})
     # Codex r1 f8: a rolled-back mode fails validation too, so the fighters'
     # admission set drops existing watchers instead of honoring their leases
     # for the rest of the game.

@@ -54,6 +54,30 @@ from tournament_bracket import SignupInput, build_bracket, build_double_elim_bra
 router = APIRouter(prefix="/api/v1/tournaments", tags=["Tournaments"])
 
 
+async def _assert_tournament_service_policy(
+    db: AsyncSession,
+    player_ids=(),
+    steam_ids=(),
+) -> None:
+    """Late import avoids a module cycle while keeping one policy authority."""
+    from main import _assert_no_service_subject
+    await _assert_no_service_subject(
+        db,
+        affected_player_ids=list(player_ids),
+        affected_steam_ids=list(steam_ids),
+    )
+
+
+async def _assert_signup_service_policy(db: AsyncSession, signup_ids) -> None:
+    ids = [sid for sid in signup_ids if sid is not None]
+    if not ids:
+        return
+    player_ids = (await db.execute(
+        select(TournamentSignup.player_id).where(TournamentSignup.id.in_(ids))
+    )).scalars().all()
+    await _assert_tournament_service_policy(db, player_ids=player_ids)
+
+
 # ── Constants ─────────────────────────────────────────────────────
 
 # July 20 item 7: 60 → 120. Two missed 20s heartbeats or a ~75s API-redeploy
@@ -914,6 +938,8 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         TournamentSignup.is_speculative == False,  # noqa: E712
     ))
     signups = (await db.execute(q)).scalars().all()
+    await _assert_tournament_service_policy(
+        db, player_ids=[s.player_id for s in signups])
     # Round-18 find 2: a ban committed after signup must not reach the
     # bracket — filter here, where the roster is decided. (Bans DURING the
     # locked/running phase are handled at match activation instead.)
@@ -1343,6 +1369,10 @@ async def start_tournament(db: AsyncSession, t: Tournament) -> None:
     """Transition locked -> running. First-round matches (including those with
     pre-filled p1/p2 from bye propagation) become ready."""
     now = datetime.now(timezone.utc)
+    player_ids = (await db.execute(
+        select(TournamentSignup.player_id).where(TournamentSignup.tournament_id == t.id)
+    )).scalars().all()
+    await _assert_tournament_service_policy(db, player_ids=player_ids)
     t.status = "running"
     t.started_at = now
     await _activate_ready_matches(db, t.id)
@@ -1420,6 +1450,8 @@ async def _flip_scheduled_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
                       and m.p1_signup_id in early and m.p2_signup_id in early)
         if not both_early and m.scheduled_ready_at and m.scheduled_ready_at > now:
             continue
+        await _assert_signup_service_policy(
+            db, [m.p1_signup_id, m.p2_signup_id])
         m.status = "ready"
         m.ready_deadline_at = now + timedelta(seconds=MATCH_READY_GRACE_SECONDS * 2)
         # Durable readiness DM (r2 find 4) — the break-end flip is a ready
@@ -1473,13 +1505,16 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         # stamp p2=None, wedging the reset forever. Rewriting the arrays
         # here lets the standard resolver reconstruct WB-vs-LB on the
         # next pass — self-healing, idempotent.
-        if (m.bracket_side == "GF_RESET"
-                and len(list(m.prereq_match_ids or [])) == 1):
-            _gf_id = list(m.prereq_match_ids)[0]
-            m.prereq_match_ids = [_gf_id, _gf_id]
-            m.prereq_roles = ["L", "W"]
-            print(f"[TOURNAMENT] normalized legacy one-prereq GF_RESET {m.id}")
+        _normalize_reset = (m.bracket_side == "GF_RESET"
+                            and len(list(m.prereq_match_ids or [])) == 1)
         prereq_ids = list(m.prereq_match_ids or [])
+        roles = list(m.prereq_roles or [])
+        if _normalize_reset:
+            _gf_id = prereq_ids[0]
+            prereq_ids = [_gf_id, _gf_id]
+            roles = ["L", "W"]
+        resolved_p1 = m.p1_signup_id
+        resolved_p2 = m.p2_signup_id
         # Break eligibility (item 2): only matches downstream of a PLAYED
         # match get the breather. A bye-fed W R2 at tournament start (top
         # seed's first real match) must start immediately — nobody just
@@ -1491,7 +1526,6 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
                 continue
             came_from_play = any(
                 p.status in ("completed", "forfeit", "double_forfeit") for p in prereqs)
-            roles = list(m.prereq_roles or [])
             # Resolve each prereq's contribution by its role tag, falling back
             # to the legacy bracket_side defaults when prereq_roles is empty
             # (sync tournaments built before the column existed).
@@ -1508,16 +1542,26 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
                         resolved.append(_loser_of(pre))
                     else:
                         resolved.append(pre.winner_signup_id)
-            m.p1_signup_id = resolved[0] if len(resolved) >= 1 else None
-            m.p2_signup_id = resolved[1] if len(resolved) >= 2 else None
+            resolved_p1 = resolved[0] if len(resolved) >= 1 else None
+            resolved_p2 = resolved[1] if len(resolved) >= 2 else None
 
         # Forfeit detection: if either signup is forfeited, auto-advance the other.
         p1_sig = None
         p2_sig = None
-        if m.p1_signup_id:
-            p1_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p1_signup_id))).scalar_one_or_none()
-        if m.p2_signup_id:
-            p2_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p2_signup_id))).scalar_one_or_none()
+        if resolved_p1:
+            p1_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == resolved_p1))).scalar_one_or_none()
+        if resolved_p2:
+            p2_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == resolved_p2))).scalar_one_or_none()
+        await _assert_tournament_service_policy(
+            db, player_ids=[s.player_id for s in (p1_sig, p2_sig) if s is not None])
+        # Only persist resolved seats/legacy normalization after the full
+        # authoritative roster has passed the service-account gate.
+        if _normalize_reset:
+            m.prereq_match_ids = prereq_ids
+            m.prereq_roles = roles
+            print(f"[TOURNAMENT] normalized legacy one-prereq GF_RESET {m.id}")
+        m.p1_signup_id = resolved_p1
+        m.p2_signup_id = resolved_p2
         # Round-18 find 2: a ban during the bracket phase becomes a FORFEIT
         # right here, before this match can mint a series/sct-* room — the
         # existing forfeit machinery then advances the opponent exactly as
@@ -1662,6 +1706,8 @@ async def _apply_terminal_transitions(db: AsyncSession, m: TournamentMatch, winn
     forfeited flags, so activation resolves it by forfeit — it is never
     played and never mints (and a PLAYED reset's mint revalidates its GF
     provenance, round-35 find 1)."""
+    await _assert_signup_service_policy(
+        db, [m.p1_signup_id, m.p2_signup_id])
     winner_sig = (await db.execute(select(TournamentSignup).where(
         TournamentSignup.id == winner_signup_id))).scalar_one_or_none()
     if winner_sig is None:
@@ -2162,6 +2208,8 @@ async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> No
     if (series.status != "completed" or not series.winner_id
             or series.invalidated_at is not None):
         return
+    await _assert_tournament_service_policy(
+        db, player_ids=[series.player1_id, series.player2_id])
 
     # Map series winner back to signup. Defensive: tolerate missing signup row
     # (e.g. manual cleanup) rather than exploding the whole match handler.
@@ -2323,6 +2371,12 @@ async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
     # lock first), so exactly one transaction ever claims the flip, with
     # no dependence on ORM freshness and no extra lock edge — HEAD's
     # autoflushed UPDATE took this same row lock at this same point.
+    tournament_player_ids = (await db.execute(
+        select(TournamentSignup.player_id).where(
+            TournamentSignup.tournament_id == t.id)
+    )).scalars().all()
+    await _assert_tournament_service_policy(
+        db, player_ids=tournament_player_ids)
     _claim = await db.execute(text(
         "UPDATE tournaments SET status = 'completed', ended_at = NOW() "
         "WHERE id = :tid AND status = 'running'"), {"tid": t.id})
@@ -2393,6 +2447,8 @@ async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:
                 TournamentSignup.is_speculative == False))  # noqa: E712
         )).scalar_one()
     golds, xps = _prize_amounts(n)
+    await _assert_signup_service_policy(
+        db, [t.winner_signup_id, t.runner_up_signup_id, t.third_place_signup_id])
 
     async def do_grant(signup_id: Optional[uuid.UUID], rank_idx: int) -> None:
         if not signup_id:
@@ -2738,6 +2794,8 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
         return
     p1 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p1_signup_id))).scalar_one_or_none()
     p2 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p2_signup_id))).scalar_one_or_none()
+    await _assert_tournament_service_policy(
+        db, player_ids=[p.player_id for p in (p1, p2) if p is not None])
     # Round-21 find 1 + round-22 find 1: an active ban is the tournament
     # ban lifecycle's forfeit trigger (post-ban games record casual and
     # never attach to this series, so heartbeats alone would wedge the
@@ -3056,6 +3114,8 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     if t.status != "voting":
         raise HTTPException(status_code=400, detail=f"Tournament not accepting signups (status={t.status})")
     player = await _get_player_by_steam(db, req.steam_id)
+    await _assert_tournament_service_policy(
+        db, player_ids=[player.id], steam_ids=[req.steam_id])
     # Round-19 find 2: take the shared per-identity advisory lock so the
     # ban check below is ordered against admin_ban's commit rather than
     # being a READ COMMITTED point read.
@@ -3347,6 +3407,8 @@ async def time_vote(tournament_id: uuid.UUID, req: TournamentTimeVoteRequest, db
     if t.status != "voting":
         raise HTTPException(status_code=400, detail="Voting closed")
     player = await _get_player_by_steam(db, req.steam_id)
+    await _assert_tournament_service_policy(
+        db, player_ids=[player.id], steam_ids=[req.steam_id])
     if not await _get_signup_for(db, tournament_id, player.id):
         raise HTTPException(status_code=400, detail="Must sign up to vote")
     # Shared validate+replace path (item 3): non-empty, offered, still-future.
@@ -3367,6 +3429,8 @@ async def force_vote(tournament_id: uuid.UUID, req: TournamentForceVoteRequest, 
     if t.status != "voting":
         raise HTTPException(status_code=400, detail="Force-start only during voting")
     player = await _get_player_by_steam(db, req.steam_id)
+    await _assert_tournament_service_policy(
+        db, player_ids=[player.id], steam_ids=[req.steam_id])
     if not await _get_signup_for(db, tournament_id, player.id):
         raise HTTPException(status_code=400, detail="Must sign up to vote")
     stmt = pg_insert(TournamentForceVote).values(
@@ -3387,6 +3451,8 @@ async def force_vote(tournament_id: uuid.UUID, req: TournamentForceVoteRequest, 
 async def ready(tournament_id: uuid.UUID, req: TournamentReadyRequest, db: AsyncSession = Depends(get_db)):
     t = await _get_tournament(db, tournament_id)
     player = await _get_player_by_steam(db, req.steam_id)
+    await _assert_tournament_service_policy(
+        db, player_ids=[player.id], steam_ids=[req.steam_id])
     sig = await _get_signup_for(db, tournament_id, player.id)
     if not sig:
         raise HTTPException(status_code=404, detail="Not signed up")
@@ -3409,6 +3475,8 @@ async def play_now(
     (learning #78 family)."""
     t = await _get_tournament(db, tournament_id)
     player = await _get_player_by_steam(db, req.steam_id)
+    await _assert_tournament_service_policy(
+        db, player_ids=[player.id], steam_ids=[req.steam_id])
     sig = await _get_signup_for(db, tournament_id, player.id)
     if not sig:
         raise HTTPException(status_code=404, detail="Not signed up")

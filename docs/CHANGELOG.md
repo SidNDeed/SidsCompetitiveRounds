@@ -1,5 +1,24 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+Schema changes: migration **225** (`spectate_drain_tombstones` table +
+spectator cap default 5; applied 2026-08-16).
+
+**Server**
+
+- Reserved broadcast spectator seat: spectator capacity moves to 5 with the
+  fifth seat reserved for the broadcast account; public capacity and listing
+  semantics unchanged at 4.
+- New `/broadcast/target` director endpoint (broadcast account only) that
+  ranks live spectatable games and rotates between near-tied ones.
+- Service-account policy: the broadcast account is structurally excluded
+  from queues, matches, tournaments, betting, shop, chat, and presence
+  counts, with a detection audit.
+- Spectator seat lifecycle: durable drain records for seats whose physical
+  departure is unconfirmed (enforcement deferred to a future client
+  release).
+
 ## v1.38.7 — 2026-08-15
 
 Schema changes: migrations **221** (`pcolor_poison` body color; applied),
