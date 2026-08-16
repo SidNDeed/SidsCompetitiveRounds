@@ -27,12 +27,16 @@ networks:
 services:
 
   api:
-    # Trust X-Forwarded-For ONLY from the nginx container.
+    # Trust X-Forwarded-For ONLY from the two known proxies:
+    #   - 172.30.0.10     the nginx container (TLS front-end on 8444)
+    #   - 192.168.72.102  the edge proxy CT in front of primary+replica
+    #                     (stamps XFF the same SET-never-append way)
     #
-    # Both entry paths stay correct simultaneously:
-    #   - via nginx (8444): source == 172.30.0.10, trusted -> real client IP
-    #   - direct  (8443):   source == the player, untrusted -> XFF ignored,
-    #                       real IP used (unchanged from today)
+    # All entry paths stay correct simultaneously:
+    #   - via nginx (8444):  source == 172.30.0.10, trusted -> real client IP
+    #   - via the edge CT:   source == .102, trusted -> real client IP
+    #   - direct  (8443):    source == the player, untrusted -> XFF ignored,
+    #                        real IP used (unchanged from today)
     #   - forged XFF straight at 8443: ignored, same reason
     #
     # NEVER set this to "*" while 8443 is publicly reachable — that turns the
@@ -42,7 +46,7 @@ services:
     # flag must be repeated here or query-string HMAC signatures land in
     # uvicorn's access log on the TLS deployment too (Codex review find).
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000",
-              "--proxy-headers", "--forwarded-allow-ips", "172.30.0.10",
+              "--proxy-headers", "--forwarded-allow-ips", "172.30.0.10,192.168.72.102",
               "--no-access-log"]
     networks:
       - default
