@@ -778,6 +778,10 @@ namespace CompetitiveRounds
         internal static void LeaveToMenu(string reason)
         {
             Plugin.Log?.LogInfo($"[SPECTATE] leaving ({reason})");
+            // SCR Broadcast §3a: the director classifies session deaths it
+            // did not order (post-room failure vs normal end) by this reason.
+            // One latched-bool check on non-broadcast installs.
+            try { BroadcastMode.NoteSessionLeave(reason); } catch { }
             SpectatorSession.RequestLeave();
             try { ApiClient.SpectateLeaveNotify(); } catch { }
             // Kill our own loops/coroutines now (they must not act during the

@@ -869,6 +869,15 @@ namespace CompetitiveRounds
                 yield return new WaitForSeconds(20f);
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown") continue;
+                // §2c identity fence (Codex mod-r1 F4): the broadcast service
+                // account never heartbeats tournament readiness and never
+                // auto-dispatches into a fighter room — a stale/misgranted
+                // ready row would otherwise stage a room join that yanks the
+                // seat out of its watched game and logs raw room+region.
+                // Direct identity check (not the logging fence helper): this
+                // fires every 20s and would spam the log. SetPendingRoom's
+                // own discard is the structural backstop.
+                if (BroadcastMode.IsBroadcastIdentity) continue;
                 if (++_hbTournamentCurrentTick >= 3)
                 {
                     _hbTournamentCurrentTick = 0;
@@ -1846,6 +1855,8 @@ namespace CompetitiveRounds
         /// <summary>Place a bet. HMAC over "bet:{bettor}:{series_id}:{bet_on}:{amount}".</summary>
         public static void PlaceBet(string bettorSteamId, string seriesId, string betOnSteamId, int amount, Action<bool, string> callback)
         {
+            // §2c identity fence: the broadcast service account never wagers.
+            if (BroadcastMode.FenceBlocksFighterPath("bet-1v1")) { callback?.Invoke(false, "broadcast-fence"); return; }
             string sig = ComputeHmacHex($"bet:{bettorSteamId}:{seriesId}:{betOnSteamId}:{amount}");
             string url = $"{baseUrl}/api/v1/bets?steam_id={Escape(bettorSteamId)}&series_id={Escape(seriesId)}&bet_on_steam_id={Escape(betOnSteamId)}&amount={amount}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
@@ -1954,6 +1965,8 @@ namespace CompetitiveRounds
 
         public static void PlaceTeamBet(string bettorSteamId, string seriesId, int betOnTeam, int amount, Action<bool, string> callback)
         {
+            // §2c identity fence: the broadcast service account never wagers.
+            if (BroadcastMode.FenceBlocksFighterPath("bet-2v2")) { callback?.Invoke(false, "broadcast-fence"); return; }
             string sig = ComputeHmacHex($"team-bet:{bettorSteamId}:{seriesId}:{betOnTeam}:{amount}");
             string url = $"{baseUrl}/api/v1/team-bets?steam_id={Escape(bettorSteamId)}&team_series_id={Escape(seriesId)}&bet_on_team={betOnTeam}&amount={amount}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
@@ -4706,6 +4719,9 @@ namespace CompetitiveRounds
             string p1EndStats = null, string p2EndStats = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
+            // §2c identity fence: the broadcast account never reports, even if
+            // some state bug ever leaves it looking like a fighter.
+            if (BroadcastMode.FenceBlocksFighterPath("report-1v1")) return;
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append($"\"player1\":{{\"steam_id\":\"{Escape(p1SteamId)}\",\"display_name\":\"{Escape(p1Name)}\",\"cards\":[");
@@ -10094,6 +10110,8 @@ namespace CompetitiveRounds
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
             int t1PointsTotal, int t2PointsTotal)
         {
+            // §2c identity fence: the broadcast service account never reports.
+            if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId)) return;
             string sig = ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc");
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
@@ -10240,6 +10258,8 @@ namespace CompetitiveRounds
             string t2aEndStats = null, string t2bEndStats = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
+            // §2c identity fence: the broadcast account never reports.
+            if (BroadcastMode.FenceBlocksFighterPath("report-2v2")) return;
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append($"\"series_id\":\"{Escape(seriesId)}\",");
@@ -11452,6 +11472,8 @@ namespace CompetitiveRounds
             string duoBEndStats = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
+            // §2c identity fence: the broadcast account never reports.
+            if (BroadcastMode.FenceBlocksFighterPath("report-1v2")) return;
             int winnerSide = soloRounds > duoRounds ? 1 : 2;
             bool isRanked = false;  // unscored at launch
             var sb = new StringBuilder();
@@ -14647,6 +14669,8 @@ namespace CompetitiveRounds
         public static void PlaceLobbyBet(string bettorSteamId, string mode, string lobbyId,
             string targetSteams, int amount, Action<bool, string> callback)
         {
+            // §2c identity fence: the broadcast service account never wagers.
+            if (BroadcastMode.FenceBlocksFighterPath("bet-lobby")) { callback?.Invoke(false, "broadcast-fence"); return; }
             string sig = ComputeHmacHex($"lobby-bet:{bettorSteamId}:{mode}:{lobbyId}:{targetSteams}:{amount}");
             string url = $"{baseUrl}/api/v1/lobby-bets?steam_id={Escape(bettorSteamId)}" +
                          $"&mode={Escape(mode)}&lobby_id={Escape(lobbyId)}" +
@@ -15246,6 +15270,8 @@ namespace CompetitiveRounds
         public static void PlaceFfaBet(string bettorSteamId, string lobbyId,
             string betOnSteamId, int amount, int gameNumber, Action<bool, string> callback)
         {
+            // §2c identity fence: the broadcast service account never wagers.
+            if (BroadcastMode.FenceBlocksFighterPath("bet-ffa")) { callback?.Invoke(false, "broadcast-fence"); return; }
             // game_number is INSIDE the signature (server review find 2) so a
             // lost-response retry can never be replayed onto a later game.
             string sig = ComputeHmacHex($"ffa-bet:{bettorSteamId}:{lobbyId}:{betOnSteamId}:{amount}:{gameNumber}");
@@ -15307,6 +15333,8 @@ namespace CompetitiveRounds
             string timeline = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
+            // §2c identity fence: the broadcast account never reports.
+            if (BroadcastMode.FenceBlocksFighterPath("report-ffa")) return;
             if (players == null || players.Count < 2)
             {
                 Plugin.Log.LogWarning("[FFA-REPORT] not enough players to report");
@@ -15494,6 +15522,8 @@ namespace CompetitiveRounds
 
         public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId)
         {
+            // §2c identity fence: the broadcast service account never reports.
+            if (BroadcastMode.FenceBlocksFighterPath("report-dc")) return;
             if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(disconnectedSteamId)) return;
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}",
@@ -15528,6 +15558,8 @@ namespace CompetitiveRounds
         public static void ReportCasualDc(string reporterSteamId, string leaverSteamId, string roomId,
                                           string leaverDisplayName = null, string gameRoomId = null)
         {
+            // §2c identity fence: the broadcast service account never reports.
+            if (BroadcastMode.FenceBlocksFighterPath("report-casual-dc")) return;
             if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(leaverSteamId)
                 || string.IsNullOrEmpty(roomId)) return;
             /* Optional and advisory, so it must never cost us the report. The
@@ -17411,6 +17443,11 @@ namespace CompetitiveRounds
         /// spectator joiner for the connection).</summary>
         private static bool SpectatorBlocksQueue()
         {
+            // §2c identity fence: the broadcast service account never enters
+            // any queue/lobby enrollment. This helper is the single entry
+            // point every join/create funnel already passes through, so one
+            // check here covers all of them. Identity-keyed, NOT config-keyed.
+            if (BroadcastMode.FenceBlocksFighterPath("queue-join")) return true;
             if (!SpectatorSession.IsLocalSpectator && !spectateGrantInFlight) return false;
             try { CompetitiveUI.ShowNotification(I18n.Tr("Stop spectating first (Esc)."), Color.yellow, 4f); } catch { }
             return true;
@@ -17621,32 +17658,147 @@ namespace CompetitiveRounds
             return false;
         }
 
+        // Grant OWNER TOKENS (Codex mod-r1 F6): every dispatch gets a fresh
+        // seq; the latch records its current owner. Clearing the latch is a
+        // CAS against that owner, so neither a stale callback nor a director
+        // force-release can free (or re-free) a latch a SUCCESSOR grant now
+        // holds. 0 = latch unowned.
+        private static int spectateGrantSeq;
+        private static int spectateGrantOwner;
+
+        // Broadcast-grant TRANSPORT guard (Codex mod-r2 find 4, restructured
+        // per mod-r3 find 2): the latch above is a client-memory admission
+        // gate; releasing it (director budget/cancel) does NOT resolve the
+        // HTTP request, which stays alive for up to its 20s UnityWebRequest
+        // timeout. A NEWER grant reaching the server's serialized
+        // revoke-and-replace section before a DELAYED older one would have
+        // its fresh lease revoked by the straggler — so while any
+        // broadcast-issued grant request is unresolved, NO new grant may be
+        // admitted (director acquisition OR a dispatch on this seat).
+        //
+        // REQUEST-OWNED TOKENS, no clock (r3: an elapsed-time deadman is the
+        // #367 elapsed-time-latch ownership hole — it reopened admission
+        // without a transport-terminal signal, and a shared counter let one
+        // request decrement another's slot). Each broadcast dispatch owns
+        // its grant-seq token; ONLY its own callback (or its synchronous
+        // dispatch failure) releases it. Admission NEVER reopens by clock:
+        // a token outliving TRANSPORT_FAULT_SECONDS makes the DIRECTOR
+        // escalate to FAULTED (BroadcastGrantTransportStuckBeyond below) —
+        // process replacement is what clears every in-flight request.
+        // Non-broadcast installs never add a token, so the public path
+        // elsewhere is untouched.
+        private static readonly Dictionary<int, float> broadcastGrantTransportTokens =
+            new Dictionary<int, float>();
+        public static bool BroadcastGrantTransportUnsettled => broadcastGrantTransportTokens.Count > 0;
+
+        /// <summary>True when any broadcast grant request has been on the
+        /// wire longer than <paramref name="seconds"/> without its terminal
+        /// callback. Read by the director's fault escalation only.</summary>
+        internal static bool BroadcastGrantTransportStuckBeyond(float seconds)
+        {
+            if (broadcastGrantTransportTokens.Count == 0) return false;
+            float now = Time.realtimeSinceStartup;
+            foreach (var kv in broadcastGrantTransportTokens)
+                if (now - kv.Value > seconds) return true;
+            return false;
+        }
+
         /// <summary>Ask the server for a seat. On success, begins the local
         /// spectator session and starts the joiner. Refusals surface as a
         /// notification with the server's stable reason.</summary>
         public static void RequestSpectateGrant(string gameId)
         {
+            RequestSpectateGrantCore(gameId, broadcastTicket: false);
+        }
+
+        /// <summary>Director dispatch (§3a): same flow, but returns the grant
+        /// OWNER TOKEN (0 = not dispatched) so CancelAcquisition can
+        /// CAS-release exactly its own latch (r1 F6), and the stale-arc
+        /// discard below applies ONLY to these dispatches — a public grant
+        /// must never be discarded by a director generation bump (a human's
+        /// WATCH landing during a broadcast cancel is legitimate).</summary>
+        internal static int RequestSpectateGrantForBroadcast(string gameId)
+        {
+            return RequestSpectateGrantCore(gameId, broadcastTicket: true);
+        }
+
+        private static int RequestSpectateGrantCore(string gameId, bool broadcastTicket)
+        {
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
-            if (spectateGrantInFlight) return;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return 0;
+            if (spectateGrantInFlight) return 0;
+            // r2 find 4: NO grant is admitted while a broadcast-issued grant
+            // request is still unresolved on the wire — even a public WATCH
+            // on this seat. A newer grant reaching the server before the
+            // delayed straggler would be revoke-and-replaced BY the
+            // straggler. Only ever armed on the broadcast seat.
+            if (BroadcastGrantTransportUnsettled)
+            {
+                // Deliberately NOT I18n.Tr: this toast is reachable only on
+                // the broadcast seat (the guard arms nowhere else), and
+                // bot-seat-only strings must not enter the translation
+                // catalogue (#295 — same rule as BroadcastHud).
+                if (!broadcastTicket)
+                    CompetitiveUI.ShowNotification("Spectate is settling - try again in a moment.", Color.yellow, 4f);
+                return 0;
+            }
             string blocked;
             if (SpectateCommitmentBlocked(out blocked))
             {
                 CompetitiveUI.ShowNotification(I18n.TrF("Cannot spectate: {0}", blocked), Color.yellow, 4f);
-                return;
+                return 0;
             }
             if (string.IsNullOrEmpty(SteamAuth.SessionToken))
             {
                 CompetitiveUI.ShowNotification(I18n.Tr("Sign-in still pending - try again in a moment."), Color.yellow, 4f);
-                return;
+                return 0;
             }
             spectateGrantInFlight = true;
+            int myGrant = ++spectateGrantSeq;
+            spectateGrantOwner = myGrant;
+            // r3 find 2: request-owned transport token — this dispatch owns
+            // exactly its own slot; only its own callback (or the synchronous
+            // dispatch failure below) can release it.
+            if (broadcastTicket)
+                broadcastGrantTransportTokens[myGrant] = Time.realtimeSinceStartup;
+            // §3a ticket hook (#367): capture the shared-flow generation at
+            // dispatch. A broadcast CancelAcquisition bumps it, making this
+            // callback stale — it then releases without beginning a session.
+            // Consulted ONLY for broadcast-ticket dispatches (see above).
+            int flowGenAtSend = BroadcastMode.SharedFlowGeneration;
             string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"game_id\":\"{Escape(gameId)}\",\"client_protocol\":{SpectatorSession.PROTOCOL}}}";
-            Plugin.Instance.StartCoroutine(PostRequest(
+            var grantReq = PostRequest(
                 $"{baseUrl}/api/v1/spectate/grant", json,
                 (ok, resp) =>
                 {
-                    spectateGrantInFlight = false;
+                    // r2 find 4 / r3 find 2: the transport settled (success,
+                    // HTTP error, or the 20s timeout — PostRequest always
+                    // invokes its callback). Release ONLY this dispatch's own
+                    // token, FIRST, before any early return below.
+                    if (broadcastTicket) broadcastGrantTransportTokens.Remove(myGrant);
+                    // F6 CAS: only the owner clears the latch — a director
+                    // force-release may already have freed it for a successor,
+                    // whose in-flight state must not be clobbered.
+                    if (spectateGrantOwner == myGrant)
+                    {
+                        spectateGrantOwner = 0;
+                        spectateGrantInFlight = false;
+                    }
+                    if (broadcastTicket && BroadcastMode.SharedFlowStale(flowGenAtSend))
+                    {
+                        // Stale ticket: the acquisition was cancelled while
+                        // this round-trip was in flight. Release the lease the
+                        // server may have just granted BY ID — never through
+                        // the global current-lease state, which a successor
+                        // public session may own by now (r1 F6).
+                        Plugin.Log.LogInfo("[SPECTATE] grant response for a cancelled acquisition — discarding");
+                        if (ok)
+                        {
+                            string staleLease = ExtractJsonString(resp, "lease_id");
+                            if (!string.IsNullOrEmpty(staleLease)) SpectateReleaseLeaseById(staleLease);
+                        }
+                        return;
+                    }
                     if (!ok)
                     {
                         string why = I18n.Tr("Could not spectate this game.");
@@ -17694,7 +17846,13 @@ namespace CompetitiveRounds
                     }
                     catch { }
                     string refusal;
-                    if (!SpectatorSession.BeginSession(room, region, leaseId, leaseToken ?? "", gameId, out refusal))
+                    // r2 find 3: the session records its EXACT creator (this
+                    // dispatch's owner token + whether it was broadcast-
+                    // issued) — the director claims sessions by that identity
+                    // alone, and the joiner consumes director-generation
+                    // invalidation only for broadcast-owned sessions.
+                    if (!SpectatorSession.BeginSession(room, region, leaseId, leaseToken ?? "", gameId, out refusal,
+                                                       ownerGrantSeq: myGrant, broadcastOwned: broadcastTicket))
                     {
                         Plugin.Log.LogWarning($"[SPECTATE] session refused: {refusal}");
                         CompetitiveUI.ShowNotification(I18n.TrF("Cannot spectate: {0}", refusal), Color.yellow, 5f);
@@ -17702,7 +17860,26 @@ namespace CompetitiveRounds
                         return;
                     }
                     SpectatorJoiner.StartJoin();
-                }));
+                });
+            try
+            {
+                Plugin.Instance.StartCoroutine(grantReq);
+            }
+            catch (Exception ex)
+            {
+                // r3 find 2: SYNCHRONOUS dispatch failure — nothing left the
+                // client, so this dispatch releases exactly its own state:
+                // its transport token and (by CAS) the latch it owns.
+                if (broadcastTicket) broadcastGrantTransportTokens.Remove(myGrant);
+                if (spectateGrantOwner == myGrant)
+                {
+                    spectateGrantOwner = 0;
+                    spectateGrantInFlight = false;
+                }
+                Plugin.Log.LogWarning($"[SPECTATE] grant dispatch failed synchronously: {ex.Message}");
+                return 0;
+            }
+            return myGrant;
         }
 
         /// <summary>Spectator lease heartbeat (15s cadence from
@@ -17742,6 +17919,194 @@ namespace CompetitiveRounds
             spectateLeaseId = "";
             if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(lease) || Plugin.Instance == null) return;
             string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"lease_id\":\"{Escape(lease)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/spectate/leave", json, (ok, resp) => { }));
+        }
+
+        // ── SCR Broadcast §2a: /broadcast/target poll ────────────────────
+
+        /// <summary>One target entry from GET /broadcast/target. Field names
+        /// mirror the wire keys (authored server: main.py _broadcast_public).</summary>
+        public class BroadcastTargetInfo
+        {
+            public string game_id = "";
+            public string incarnation = "";
+            public string mode = "";
+            public string source_ref = "";
+            public string phase = "";
+            public bool is_tournament;
+            public float score;
+            public List<string> names = new List<string>();
+            public List<double> ratings = new List<double>();
+        }
+
+        public class BroadcastTargetResponse
+        {
+            public BroadcastTargetInfo target;        // null when none selected
+            public bool hasCurrent;
+            public string currentGameId = "";
+            public bool currentStillEligible;
+            public string currentReason = "";
+            public int rotationSetSize;
+            public int rotationNextSwitchIn;
+        }
+
+        /// <summary>GET /api/v1/broadcast/target (director poll, §2a).
+        /// Query params match the AUTHORED server endpoint exactly (verified
+        /// against main.py broadcast_target — the design doc's `acq={...}`
+        /// shorthand is three separate params on the real wire, #329):
+        /// steam_id, current, activation_age, exclude, acq_ticket, acq_phase,
+        /// acq_age. Pass currentGameId=null pre-activation (the server's
+        /// acquisition-progress lease renews on acq polls only in its
+        /// not-current branch). activationAge/acqAge &lt; 0 = omit.</summary>
+        public static void FetchBroadcastTarget(string currentGameId, float activationAge,
+            string acqTicket, string acqPhase, float acqAge, string excludeCsv,
+            Action<bool, BroadcastTargetResponse> callback)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null)
+            { callback?.Invoke(false, null); return; }
+            var url = new StringBuilder(256);
+            url.Append(baseUrl).Append("/api/v1/broadcast/target?steam_id=").Append(Escape(sid));
+            if (!string.IsNullOrEmpty(currentGameId))
+                url.Append("&current=").Append(UnityWebRequest.EscapeURL(currentGameId));
+            if (activationAge >= 0f)
+                url.Append("&activation_age=").Append(activationAge.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
+            if (!string.IsNullOrEmpty(excludeCsv))
+                url.Append("&exclude=").Append(UnityWebRequest.EscapeURL(excludeCsv));
+            if (!string.IsNullOrEmpty(acqTicket))
+            {
+                url.Append("&acq_ticket=").Append(UnityWebRequest.EscapeURL(acqTicket));
+                if (!string.IsNullOrEmpty(acqPhase))
+                    url.Append("&acq_phase=").Append(UnityWebRequest.EscapeURL(acqPhase));
+                if (acqAge >= 0f)
+                    url.Append("&acq_age=").Append(acqAge.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            Plugin.Instance.StartCoroutine(GetRequest(url.ToString(), (ok, resp) =>
+            {
+                if (!ok) { callback?.Invoke(false, null); return; }
+                try { callback?.Invoke(true, ParseBroadcastTarget(resp)); }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning($"[BROADCAST] target parse: {e.Message}");
+                    callback?.Invoke(false, null);
+                }
+            }));
+        }
+
+        /// <summary>Defensive parse by KEY SEARCH (never position — the
+        /// endpoint is new and its emission order is not a contract). Each
+        /// top-level object is SLICED string-aware before extracting fields,
+        /// because names[] carries adversarial display names (#156) and the
+        /// candidates array repeats every key of target.</summary>
+        private static BroadcastTargetResponse ParseBroadcastTarget(string resp)
+        {
+            var outR = new BroadcastTargetResponse();
+            string targetSlice = SliceTopLevelValueObject(resp, "target");
+            if (targetSlice != null)
+                outR.target = ParseBroadcastTargetInfo(targetSlice);
+            string currentSlice = SliceTopLevelValueObject(resp, "current");
+            if (currentSlice != null)
+            {
+                outR.hasCurrent = true;
+                outR.currentGameId = ExtractJsonString(currentSlice, "game_id") ?? "";
+                outR.currentStillEligible = ExtractJsonBool(currentSlice, "still_eligible");
+                outR.currentReason = ExtractJsonString(currentSlice, "reason") ?? "";
+            }
+            string rotSlice = SliceTopLevelValueObject(resp, "rotation");
+            if (rotSlice != null)
+            {
+                outR.rotationSetSize = ExtractJsonInt(rotSlice, "set_size");
+                outR.rotationNextSwitchIn = ExtractJsonInt(rotSlice, "next_switch_in");
+            }
+            return outR;
+        }
+
+        private static BroadcastTargetInfo ParseBroadcastTargetInfo(string slice)
+        {
+            var t = new BroadcastTargetInfo
+            {
+                game_id = ExtractJsonString(slice, "game_id") ?? "",
+                incarnation = ExtractJsonString(slice, "incarnation") ?? "",
+                mode = ExtractJsonString(slice, "mode") ?? "",
+                source_ref = ExtractJsonString(slice, "source_ref") ?? "",
+                phase = ExtractJsonString(slice, "phase") ?? "",
+                is_tournament = ExtractJsonBool(slice, "is_tournament"),
+                score = ExtractJsonFloat(slice, "score"),
+                names = ExtractJsonStringArray(slice, "names"),
+                ratings = ExtractJsonNumberArray(slice, "ratings"),
+            };
+            return string.IsNullOrEmpty(t.game_id) ? null : t;
+        }
+
+        /// <summary>Slice the value OBJECT of a top-level key ("key": {...}),
+        /// or null when the value is JSON null / the key is absent. The
+        /// `"key":` needle cannot be forged from inside a string value —
+        /// producing the raw sequence would need an unescaped quote — and the
+        /// FIRST occurrence is the top-level key on this endpoint.</summary>
+        private static string SliceTopLevelValueObject(string json, string key)
+        {
+            int at = json.IndexOf("\"" + key + "\":", StringComparison.Ordinal);
+            if (at < 0) return null;
+            int i = at + key.Length + 3;
+            while (i < json.Length && (json[i] == ' ' || json[i] == '\t')) i++;
+            if (i >= json.Length || json[i] != '{') return null;   // null / non-object
+            int close = FindMatchingBraceStringAware(json, i);
+            if (close < 0) return null;
+            return json.Substring(i, close - i + 1);
+        }
+
+        /// <summary>Flat numeric array ("ratings":[1523.4,1499]). Numbers
+        /// only — no strings inside, so the naive scan is safe (#156's rule:
+        /// server-generated bracket-free values).</summary>
+        private static List<double> ExtractJsonNumberArray(string json, string key)
+        {
+            var list = new List<double>();
+            try
+            {
+                int at = json.IndexOf("\"" + key + "\":", StringComparison.Ordinal);
+                if (at < 0) return list;
+                int open = json.IndexOf('[', at);
+                if (open < 0) return list;
+                int close = FindMatchingBracketStringAware(json, open);
+                if (close < 0) return list;
+                foreach (var tok in json.Substring(open + 1, close - open - 1).Split(','))
+                {
+                    string s = tok.Trim();
+                    if (s.Length == 0) continue;
+                    if (double.TryParse(s, System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out double v))
+                        list.Add(v);
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        /// <summary>Force-release the grant latch for a cancelled broadcast
+        /// acquisition (§3a via BroadcastMode.CancelAcquisition — the #367
+        /// latch/ownership split). CAS against the ticket's own dispatch
+        /// token (r1 F6): if the latch has since been freed and re-taken by a
+        /// SUCCESSOR grant (a human's public WATCH), the owner differs and
+        /// nothing is touched. The cancelled dispatch's own late callback is
+        /// covered by the same CAS plus its stale-generation discard. NEVER
+        /// called on public spectate paths (no ticket = no cancel).</summary>
+        internal static void ReleaseSpectateGrantLatchForStaleTicket(int ownerSeq)
+        {
+            if (ownerSeq <= 0 || spectateGrantOwner != ownerSeq) return;
+            spectateGrantOwner = 0;
+            spectateGrantInFlight = false;
+        }
+
+        /// <summary>Release a SPECIFIC lease by id (r1 F6): used for a stale
+        /// grant response whose lease was never adopted. Deliberately touches
+        /// NO global lease state — a successor session's spectateLeaseId and
+        /// heartbeats must be unaffected.</summary>
+        internal static void SpectateReleaseLeaseById(string leaseId)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(leaseId) || Plugin.Instance == null) return;
+            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"lease_id\":\"{Escape(leaseId)}\"}}";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/spectate/leave", json, (ok, resp) => { }));
         }

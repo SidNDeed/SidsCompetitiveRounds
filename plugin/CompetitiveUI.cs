@@ -313,6 +313,10 @@ namespace CompetitiveRounds
             // starveable by a later overlay throwing, and everything after it
             // may legitimately paint on top (notifications, Tab stats, chat).
             SpectatorHud.Draw();
+            // Broadcast stat panels (SCR Broadcast §4) sit directly above the
+            // spectator layer: self-gating (broadcast identity + director +
+            // activated session), a no-op everywhere else.
+            BroadcastHud.Draw();
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
@@ -3740,6 +3744,17 @@ namespace CompetitiveRounds
         private static void DrawInGameChat()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            // SCR Broadcast: the broadcast seat keeps stream frames clean —
+            // no floating chat pane. The config is only CONSULTED on the
+            // broadcast identity (a normal install's pane never touches it),
+            // and this hides the render only; the chat log itself keeps
+            // accumulating for the F5 view.
+            try
+            {
+                if (BroadcastMode.IsBroadcastIdentity
+                    && Plugin.BroadcastHideChatPane != null && Plugin.BroadcastHideChatPane.Value) return;
+            }
+            catch { }
             // Bug 211/213: Muted is stored AS ShowIngameChat=false, so this is
             // the same predicate the old guard used — one state for both the
             // Settings toggle and the M hotkey.

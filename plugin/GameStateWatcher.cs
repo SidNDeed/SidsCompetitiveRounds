@@ -2780,7 +2780,15 @@ namespace CompetitiveRounds
                 // stashed rather than adopted at lock time.
                 TryConsumePendingResumedScore(photonRoomId);
                 ovtSoloWins = 0; ovtDuoWins = 0;   // review [4]: 1v2 banner tally
-                Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
+                // §7.1 (Codex mod-r1 F3 sweep): normally unreachable on the
+                // broadcast seat (a spectator session quiesces this poll
+                // before any join), but a ghost join landing after a
+                // cancelled spectate can tick once here before the fence
+                // restart completes — masked so that residual cannot leak
+                // the credential.
+                Plugin.Log.LogInfo(BroadcastMode.IsBroadcastIdentity
+                    ? $"[POLL] Joined room: {BroadcastMode.SafeRoomDesc()} (region: (masked))"
+                    : $"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
                 // Republish all local cosmetic props on every room join. Photon
                 // resets state at room creation; without re-publish, remote clients
                 // can't see our nametag/color/trail until our stats happen to

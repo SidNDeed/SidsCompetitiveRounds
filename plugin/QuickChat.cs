@@ -71,6 +71,12 @@ namespace CompetitiveRounds
         internal static bool Send(int phraseId)
         {
             if (phraseId < 0 || phraseId >= Phrases.Length) return false;
+            // §2c identity fence (Codex mod-r1 F7): quick chat broadcasts a
+            // Photon event directly and never touches the fenced
+            // ChatClient.Send — so the service account needs its own gate
+            // here (e.g. a keypress during the async fence restart out of an
+            // illegitimate room would otherwise reach peers).
+            if (BroadcastMode.FenceBlocksFighterPath("quick-chat")) return false;
             if (RoomActors.LocalIsSpectator) return false;   // spectators cannot chat into the match
             if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return false;
             if (Time.unscaledTime - _lastSendAt < 2f) return false;

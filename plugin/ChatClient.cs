@@ -267,6 +267,10 @@ namespace CompetitiveRounds
         /// <summary>Queue a chat message for send. Drained by the sender task.</summary>
         public static void Send(string steamId, string displayName, string message)
         {
+            // §2c identity fence (broadcast-architecture.md): the broadcast
+            // service account never speaks in chat. Single entry point — every
+            // chat-send surface funnels through here.
+            if (BroadcastMode.FenceBlocksFighterPath("chat-send")) return;
             if (string.IsNullOrEmpty(message)) return;
             // client_msg_id: per-message nonce baked into the queued JSON. When a
             // send fails mid-flight the SAME string is re-queued, so a resend

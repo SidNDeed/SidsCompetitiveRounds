@@ -34,6 +34,51 @@ namespace CompetitiveRounds
     {
         private static bool _running;
 
+        /// <summary>§3a ticket hook (#367 ownership token): a broadcast
+        /// CancelAcquisition force-releases the latch after bumping the
+        /// shared-flow generation. Any still-live coroutine from the old arc
+        /// sees the stale generation on its next check and exits without
+        /// touching the latch again. Never called by public spectate paths.</summary>
+        internal static void ReleaseLatchForStaleTicket()
+        {
+            _running = false;
+        }
+
+        // ── join-op ownership (broadcast r2 find 1) ──────────────────────
+        //
+        // Photon's room-entry handoff spans states an enumeration cannot
+        // safely cover (Joining -> DisconnectingFromMasterServer ->
+        // ConnectingToGameServer -> auth -> Joining -> Joined): an accepted
+        // enter op can still land while the client reads as "not room-bound".
+        // So the op is OWNED explicitly: the flag is set immediately BEFORE
+        // PhotonNetwork.JoinRoom and cleared only on the exact terminal
+        // signals — OnJoinedRoom (success, any room: one op at a time),
+        // OnJoinRoomFailed, full disconnect, or a synchronous send refusal.
+        // CancelAcquisition's teardown, VerifyCancelClean, and this joiner's
+        // own timeout tail all DEFER against it.
+        private static bool _joinOpUnsettled;
+
+        /// <summary>True while a spectate JoinRoom operation is dispatched
+        /// but not yet terminally resolved. Teardown of the spectator role /
+        /// staged props must never run while this holds.</summary>
+        internal static bool JoinOpUnsettled => _joinOpUnsettled;
+
+        private static void NoteJoinIssued()
+        {
+            _joinOpUnsettled = true;
+            Plugin.Log?.LogInfo("[SPECTATE] join op issued");
+        }
+
+        /// <summary>Terminal settlement relay — called from the Photon
+        /// callbacks (joined / join-failed / disconnected) and the refusal
+        /// paths. Idempotent; no-op when no op is outstanding.</summary>
+        internal static void NoteJoinSettled(string how)
+        {
+            if (!_joinOpUnsettled) return;
+            _joinOpUnsettled = false;
+            Plugin.Log?.LogInfo($"[SPECTATE] join op settled ({how})");
+        }
+
         /// <summary>Watchdog budget for the whole connect+join sequence.
         /// Generous: disconnect drain + region connect + join is normally
         /// under 10s; 45s covers a slow relay without stranding the UI.</summary>
@@ -55,15 +100,29 @@ namespace CompetitiveRounds
                 return;
             }
             _running = true;
-            Plugin.Instance.StartCoroutine(ConnectAndJoin());
+            // §3a: capture the shared-flow generation for the whole arc —
+            // consumed ONLY when the session is BROADCAST-OWNED (r2 find 3:
+            // a PUBLIC join is structurally exempt from director-generation
+            // invalidation; a director bump mid-join must never make a
+            // human's joiner abandon its own live session). On non-broadcast
+            // installs broadcastOwned is always false and the checks are
+            // constant pass-throughs (#367 pattern).
+            bool broadcastOwned = false;
+            try { broadcastOwned = SpectatorSession.BroadcastOwned; } catch { }
+            Plugin.Instance.StartCoroutine(ConnectAndJoin(BroadcastMode.SharedFlowGeneration, broadcastOwned));
         }
 
-        private static IEnumerator ConnectAndJoin()
+        private static bool ArcStale(int flowGen, bool broadcastOwned)
+            => broadcastOwned && BroadcastMode.SharedFlowStale(flowGen);
+
+        private static IEnumerator ConnectAndJoin(int flowGen, bool broadcastOwned)
         {
             string room = SpectatorSession.PendingRoom;
             string region = SpectatorSession.PendingRegion;
             float started = Time.unscaledTime;
-            Plugin.Log?.LogInfo($"[SPECTATE] joiner start (region={region})");
+            // §7.1: region is masked on the broadcast seat (the NCH diag patch
+            // masks its region too — one policy for the whole seat).
+            Plugin.Log?.LogInfo($"[SPECTATE] joiner start (region={(BroadcastMode.IsBroadcastIdentity ? "(masked)" : region)})");
 
             // Close menus so the room join doesn't land under an open ListMenu
             // (same courtesy the QueueJoiner extends).
@@ -79,7 +138,8 @@ namespace CompetitiveRounds
                 try { PhotonNetwork.Disconnect(); } catch { }
                 while (true)
                 {
-                    if (!SpectatorSession.IsLocalSpectator) { _running = false; yield break; }   // cancelled
+                    if (!SpectatorSession.IsLocalSpectator
+                        || ArcStale(flowGen, broadcastOwned)) { _running = false; yield break; }   // cancelled
                     bool done = false;
                     try
                     {
@@ -139,16 +199,22 @@ namespace CompetitiveRounds
                     try
                     {
                         if (!SpectatorSession.IsLocalSpectator
+                            || ArcStale(flowGen, broadcastOwned)
                             || !string.Equals(SpectatorSession.PendingRoom, room, StringComparison.Ordinal))
                         {
                             Plugin.Log?.LogWarning("[SPECTATE] session ended/changed during connect — abandoning join");
                             return;
                         }
                         Plugin.Log?.LogInfo("[SPECTATE] connected to master — joining room");
-                        PhotonNetwork.JoinRoom(room);
+                        // r2 find 1: own the op BEFORE dispatch; a refused
+                        // send settles immediately (no op left the client).
+                        NoteJoinIssued();
+                        bool sent = PhotonNetwork.JoinRoom(room);
+                        if (!sent) NoteJoinSettled("send refused");
                     }
                     catch (Exception ex)
                     {
+                        NoteJoinSettled("dispatch threw");
                         Plugin.Log?.LogError($"[SPECTATE] JoinRoom threw: {ex.Message}");
                     }
                 }));
@@ -163,7 +229,8 @@ namespace CompetitiveRounds
             // spectator branch does the real work; we only stop watching).
             while (Time.unscaledTime - started < JOIN_TIMEOUT_SECONDS)
             {
-                if (!SpectatorSession.IsLocalSpectator) { _running = false; yield break; }   // cancelled elsewhere
+                if (!SpectatorSession.IsLocalSpectator
+                    || ArcStale(flowGen, broadcastOwned)) { _running = false; yield break; }   // cancelled elsewhere
                 bool inTarget = false;
                 try
                 {
@@ -178,6 +245,45 @@ namespace CompetitiveRounds
                     yield break;
                 }
                 yield return null;
+            }
+            // Stale-arc guard (§3a): a cancel landing on the exact budget
+            // frame must not let this tail Fail() against a session the
+            // director may already have replaced. Same-frame with Fail, so
+            // there is no yield between check and use.
+            if (ArcStale(flowGen, broadcastOwned)) { _running = false; yield break; }
+            // r2 find 1 + r3 finds 1/3: the deferral below is BROADCAST-ONLY.
+            // A public seat gets the exact pre-batch tail (immediate success
+            // re-check, then Fail + notify + restart — no forced disconnect,
+            // no extra blackout wait); its join-op flag still resolves via
+            // the real terminal relays (Fail's NetworkRestart disconnects,
+            // which fires OnDisconnected). On the BROADCAST seat a timeout
+            // mid-handoff must not tear the role down while the accepted
+            // enter op can still land: force the op dead (Disconnect closes
+            // the socket) and wait for the TERMINAL callback. There is no
+            // synthetic settlement (r3 find 1 — an elapsed-time clear is the
+            // #367 ownership hole): if no terminal signal arrives, the op is
+            // cleanup ambiguity and the director FAULTS (design §11
+            // fault-early floor) — the bot replaces the ROUNDS process,
+            // which is provably clean. The flag clears only via real
+            // terminal signals or process death.
+            if (broadcastOwned && _joinOpUnsettled)
+            {
+                Plugin.Log?.LogWarning("[SPECTATE] join timed out with the op unsettled — forcing disconnect and waiting for its terminal signal");
+                try { PhotonNetwork.Disconnect(); } catch { }
+                float settleStart = Time.unscaledTime;
+                while (_joinOpUnsettled && Time.unscaledTime - settleStart < 10f)
+                {
+                    if (!SpectatorSession.IsLocalSpectator
+                        || ArcStale(flowGen, broadcastOwned)) { _running = false; yield break; }
+                    yield return null;
+                }
+                if (_joinOpUnsettled)
+                {
+                    Plugin.Log?.LogError("[SPECTATE] join op produced no terminal signal after forced disconnect — faulting the director (role/props untouched)");
+                    try { BroadcastMode.FaultDirector("join_op_unsettled"); } catch { }
+                    _running = false;
+                    yield break;   // no Fail(): never tear the role down under an unsettled op
+                }
             }
             // Success re-check BEFORE declaring timeout (Aug 10 r11 find 1:
             // PUN can dispatch the successful join on the exact frame the
@@ -229,10 +335,13 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Photon join-failure callback relay (wired from the
-        /// behaviour's OnJoinRoomFailed). Only reacts while a spectator
-        /// session is pending.</summary>
+        /// behaviour's OnJoinRoomFailed). Settlement bookkeeping runs FIRST,
+        /// unconditionally (r2 find 1 — the op is terminally resolved whether
+        /// or not a session still exists); the Fail teardown keeps its
+        /// session gate.</summary>
         internal static void OnJoinRoomFailed(short code, string message)
         {
+            NoteJoinSettled($"join refused ({code})");
             if (!SpectatorSession.IsLocalSpectator) return;
             Fail($"Photon join refused ({code}): {message}");
         }

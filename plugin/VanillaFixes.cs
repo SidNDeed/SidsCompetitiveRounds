@@ -2098,12 +2098,18 @@ namespace CompetitiveRounds
                 bool normalize = allCap && (modIssued || allRankedIntent);
                 string n = room.Name ?? "";
 
+                // Raw name stays in the DEDUP KEY only (internal comparison);
+                // the LOG line masks it on the broadcast seat (§7.1, Codex
+                // mod-r1 F3: this fires on a SPECTATOR seat too — every seat
+                // simulates every bullet, so a watched fighter firing Grow
+                // logs from here, and the room name is a join credential).
                 string key = n + "|" + normalize + "|" + modIssued + "|" + allRankedIntent + "|" + allCap;
                 if (key != _lastLogKey)
                 {
                     _lastLogKey = key;
+                    string roomForLog = BroadcastMode.IsBroadcastIdentity ? BroadcastMode.SafeRoomDesc() : n;
                     Plugin.Log.LogInfo("[GROW-NORM] " + (normalize ? "NORMALIZING" : "vanilla growth")
-                        + " room=" + n + " modIssued=" + modIssued
+                        + " room=" + roomForLog + " modIssued=" + modIssued
                         + " rankedIntent=" + allRankedIntent
                         + " allCapable=" + allCap + " fighters=" + fighterCount.ToString(CultureInfo.InvariantCulture)
                         + (missingActor >= 0 ? " (no cap: actor " + missingActor.ToString(CultureInfo.InvariantCulture) + ")" : ""));

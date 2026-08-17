@@ -507,7 +507,13 @@ namespace CompetitiveRounds
                 if (anyIncapable && !_sawIncapablePeer)
                 {
                     _sawIncapablePeer = true;
-                    Plugin.Log.LogInfo("[POISON-CAP] room=" + _rosterRoom + " incapable peer present ("
+                    // §7.1 (Codex mod-r1 F3): _rosterRoom stays raw for the
+                    // room-change comparison above; only the LOG masks it on
+                    // the broadcast seat — this line fires while SPECTATING
+                    // whenever a watched fighter lacks the capability, and the
+                    // room name is a join credential.
+                    string roomForLog = BroadcastMode.IsBroadcastIdentity ? BroadcastMode.SafeRoomDesc() : _rosterRoom;
+                    Plugin.Log.LogInfo("[POISON-CAP] room=" + roomForLog + " incapable peer present ("
                         + why + ") caps=" + string.Join(",", detail.ToArray()));
                 }
             }

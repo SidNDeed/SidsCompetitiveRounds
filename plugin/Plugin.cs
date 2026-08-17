@@ -124,6 +124,16 @@ namespace CompetitiveRounds
         // Gates ALL outbound API traffic except the mod-version probe and consent-revocation calls.
         internal static ConfigEntry<string> DataConsent;
 
+        // ── SCR Broadcast (ai-collab/broadcast-architecture.md) ──────────
+        // Enabled gates ONLY the director (§3a). The §2c service-account
+        // fence and §7.1 log masking are IDENTITY-latched inside
+        // BroadcastMode and cannot be turned off here by design.
+        internal static ConfigEntry<bool> BroadcastEnabled;
+        internal static ConfigEntry<string> BroadcastStatusPath;   // §3b lease file
+        internal static ConfigEntry<bool> BroadcastHideChatPane;   // broadcast seat only
+        internal static ConfigEntry<float> BroadcastHudOffsetX;    // §4 1v1 panel pull-in
+        internal static ConfigEntry<float> BroadcastHudOffsetY;
+
         public static bool DataConsentGranted => DataConsent != null && DataConsent.Value == "granted";
         public static bool DataConsentAsked   => DataConsent != null && !string.IsNullOrEmpty(DataConsent.Value);
 
@@ -232,6 +242,13 @@ namespace CompetitiveRounds
 
         public static void SetPendingRoom(string roomName, string region = null)
         {
+            // §2c identity fence (Codex mod-r1 F4): the broadcast service
+            // account never stages a FIGHTER room. Every auto-join dispatch
+            // path (queue ready_join, tournament heartbeat + tab dispatch,
+            // hosted-lobby start) funnels through here, so the discard is
+            // structural — QueueRoomJoiner never sees a pending room, and the
+            // raw room/region below are never stored or logged on this seat.
+            if (BroadcastMode.FenceBlocksFighterPath("pending-fighter-room")) return;
             pendingRankedRoom = roomName;
             pendingRankedRegion = region;
             Log.LogInfo($"[QUEUE] Pending ranked room set: {roomName} (region: {region ?? "auto"})");
@@ -755,6 +772,32 @@ namespace CompetitiveRounds
                 "Privacy", "DataConsent",
                 "",
                 "Consent to report match data to the leaderboard. Values: \"\" (unset — you'll be asked at launch), \"granted\", or \"denied\"."
+            );
+
+            // ── SCR Broadcast (design doc §3a/§3b/§4) ────────────────────
+            // Inert for every normal install: the director additionally
+            // requires the broadcast account's steam id, and the §2c fence /
+            // §7.1 masking key on that identity alone — this flag cannot
+            // enable them elsewhere or disable them on the bot.
+            BroadcastEnabled = Config.Bind(
+                "Broadcast", "Enabled", false,
+                "Run the broadcast director (auto-spectate rotation for the stream bot). Only functions on the broadcast service account; harmless elsewhere."
+            );
+            BroadcastStatusPath = Config.Bind(
+                "Broadcast", "StatusPath", @"C:\broadcast\state\status.json",
+                "Where the director writes its ~1s status lease (JSON) for the VM broadcast bot. Never contains room names or regions."
+            );
+            BroadcastHideChatPane = Config.Bind(
+                "Broadcast", "HideChatPane", true,
+                "Hide the floating in-game chat pane on the broadcast seat so stream frames stay clean. Only consulted on the broadcast identity."
+            );
+            BroadcastHudOffsetX = Config.Bind(
+                "Broadcast", "HudOffsetX", 300f,
+                "Broadcast HUD: how far the 1v1 bottom side panels are pulled inward from each screen edge, in pixels."
+            );
+            BroadcastHudOffsetY = Config.Bind(
+                "Broadcast", "HudOffsetY", 110f,
+                "Broadcast HUD: how far the 1v1 bottom side panels sit above the bottom edge, in pixels."
             );
 
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
@@ -1775,6 +1818,12 @@ namespace CompetitiveRounds
                 Plugin.Log.LogError($"Poll error: {ex.Message}");
             }
 
+            // SCR Broadcast director + §2c identity fence (design §3a). Runs
+            // from THIS persistent tick — never a coroutine host that
+            // NetworkRestart can destroy (#16/#270c). Self-gating: one
+            // latched-identity check and out on every non-broadcast install.
+            try { BroadcastMode.Step(); } catch { }
+
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)
             {
@@ -2642,6 +2691,13 @@ namespace CompetitiveRounds
                 var r = PhotonNetwork.CurrentRoom;
                 int pcount = r.PlayerCount;
                 int max = r.MaxPlayers;
+                // §7.1 (SCR Broadcast): on the broadcast seat the room name is
+                // a credential and never reaches a log — every DescribeRoom
+                // consumer (NCH-DIAG NetworkRestart/LeaveRoom, 2v2-DIAG) is
+                // masked here at the source. Identity-latched, not config.
+                // Non-broadcast seats keep today's raw form exactly.
+                if (BroadcastMode.IsBroadcastIdentity)
+                    return $"room={BroadcastMode.SafeRoomDesc()} players={pcount}/{max}";
                 return $"room={r.Name} players={pcount}/{max}";
             }
             catch { return "(room-describe failed)"; }
@@ -2962,6 +3018,10 @@ namespace CompetitiveRounds
         public void OnConnectedToMaster() { }
         public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
         {
+            // Broadcast r2 find 1: a full disconnect terminally resolves any
+            // in-flight spectate JoinRoom op (the socket is gone; nothing can
+            // deliver it). Must run before the diag early-return below.
+            try { SpectatorJoiner.NoteJoinSettled($"disconnected ({cause})"); } catch { }
             if (Diag2v2.PendingSlot() < 0) return;
             try { Plugin.Log.LogWarning($"[2v2-DIAG] Disconnected: cause={cause} stack={Diag2v2.ShortStack()}"); }
             catch { }
@@ -2979,6 +3039,18 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // Join-op settlement bookkeeping BEFORE anything can early-return
+            // (broadcast r2 find 1): a room entry terminally resolves the one
+            // spectate JoinRoom op that can be in flight. Pure flag clear;
+            // no-op when no op is outstanding.
+            try { SpectatorJoiner.NoteJoinSettled("joined"); } catch { }
+            // §2c fence FIRST among the branches (Codex mod-r1 F2): on the
+            // broadcast identity, a join without an active spectator session
+            // (raw/vanilla join, or a cancelled spectate join landing late —
+            // r1 F1) must abort BEFORE any fighter setup below runs (face
+            // publish, 2v2 GM activation/force-start). BroadcastMode.FenceTick
+            // remains the periodic backup. No-op on every other install.
+            try { if (BroadcastMode.OnJoinedRoomFence()) return; } catch { }
             // Fresh room: the previous room's frozen fighter roster and the
             // master's spectator-admission state are both stale (Codex r1
             // find 1 family). Runs for every role, before any branch.
@@ -6511,6 +6583,14 @@ namespace CompetitiveRounds
                     foreach (var a in __args) if (a is string s) { region = s; break; }
                 string roomName = "(none)";
                 try { roomName = PhotonNetwork.CurrentRoom?.Name ?? "(none)"; } catch { }
+                // §7.1 (SCR Broadcast): this diagnostic logs room AND region —
+                // both are masked on the broadcast seat (identity-latched;
+                // r2-F2 forbids deterministic derivatives too, so no hash).
+                if (BroadcastMode.IsBroadcastIdentity)
+                {
+                    region = "(masked)";
+                    roomName = BroadcastMode.SafeRoomDesc();
+                }
                 // Trim the stack-trace to a manageable size — the top frames
                 // are what matter.
                 var st = new System.Diagnostics.StackTrace(1, false);

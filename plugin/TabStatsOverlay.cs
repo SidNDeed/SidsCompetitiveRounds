@@ -606,6 +606,109 @@ namespace CompetitiveRounds
                 }
             }
             cardLayoutDirty = true;
+            // Broadcast consumers key their derived-string caches on this
+            // (r1 F8: rebuild composite labels exactly when the snapshot
+            // moves, never per-Repaint).
+            broadcastSnapshotGen++;
+        }
+
+        // ── SCR Broadcast §4: read-only snapshot access ──────────────────
+        //
+        // BroadcastHud renders per-fighter stat panels from the SAME cached
+        // snapshot the hold-Tab board uses, without holding Tab. The refresh
+        // shares nextSnapshotAt, so board + HUD together still refresh at
+        // most 8 Hz (#162). Accessors hand out cached strings/values only —
+        // no allocation per call, and ROWS itself stays private (the wire
+        // lock above it must not gain external readers).
+        //
+        // The curated row map is validated against ROWS' own labels once: a
+        // future ROWS reorder makes the map INVALID and every value renders
+        // "-" (fail closed + one log line) instead of silently mislabeling.
+
+        private static readonly int[] BROADCAST_ROW_IDX = { 0, 2, 3, 4, 5, 14, 15, 17, 1 };
+        private static readonly string[] BROADCAST_ROW_LABELS =
+            { "HP", "Damage", "Attack spd", "Reload", "Ammo", "Block CD", "Blocks", "Move spd", "Lives" };
+        private static bool broadcastMapChecked, broadcastMapValid;
+
+        private static bool BroadcastMapValid()
+        {
+            if (broadcastMapChecked) return broadcastMapValid;
+            broadcastMapChecked = true;
+            broadcastMapValid = BROADCAST_ROW_IDX.Length == BROADCAST_ROW_LABELS.Length;
+            if (broadcastMapValid)
+                for (int i = 0; i < BROADCAST_ROW_IDX.Length; i++)
+                {
+                    int r = BROADCAST_ROW_IDX[i];
+                    if (r < 0 || r >= ROWS.Length
+                        || !string.Equals(ROWS[r].label, BROADCAST_ROW_LABELS[i], StringComparison.Ordinal))
+                    { broadcastMapValid = false; break; }
+                }
+            if (!broadcastMapValid)
+                Plugin.Log?.LogWarning("[BROADCAST] TabStatsOverlay curated row map no longer matches ROWS — stat panel values disabled (fail closed)");
+            return broadcastMapValid;
+        }
+
+        /// <summary>Number of curated stats the broadcast accessors expose.</summary>
+        internal static int BroadcastStatCount => BROADCAST_ROW_IDX.Length;
+
+        /// <summary>Monotonic snapshot generation — bumps on every
+        /// RefreshSnapshot. Derived-string caches (BroadcastHud) rebuild
+        /// exactly when this moves (r1 F8) instead of per-Repaint or on a
+        /// wall-clock TTL.</summary>
+        private static int broadcastSnapshotGen;
+        internal static int BroadcastSnapshotGeneration => broadcastSnapshotGen;
+
+        /// <summary>Force the NEXT BroadcastEnsureFresh/Draw to refresh the
+        /// snapshot immediately, bypassing the 8 Hz throttle once (r1 F9:
+        /// boundary/session generation changes must not serve up to 0.5s of
+        /// the previous game's deck/values).</summary>
+        internal static void BroadcastForceNextRefresh()
+        {
+            nextSnapshotAt = 0f;
+        }
+
+        /// <summary>English label of curated stat <paramref name="statIdx"/>
+        /// (broadcast HUD is deliberately English-only — no I18n).</summary>
+        internal static string BroadcastStatLabel(int statIdx)
+            => statIdx >= 0 && statIdx < BROADCAST_ROW_LABELS.Length ? BROADCAST_ROW_LABELS[statIdx] : "";
+
+        /// <summary>Refresh the shared snapshot if due (8 Hz throttle) and
+        /// return the fighter count. 0 = nothing to draw.</summary>
+        internal static int BroadcastEnsureFresh()
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null || pm.players.Count == 0) return 0;
+                EnsureLocaleStringsSafe();   // RefreshSnapshot reads trNoCards
+                if (Time.unscaledTime >= nextSnapshotAt) RefreshSnapshot(pm);
+                return cachedPlayerCount;
+            }
+            catch { return 0; }
+        }
+
+        internal static Player BroadcastFighterBody(int i)
+            => i >= 0 && i < cachedPlayerCount && i < cachedPlayers.Count ? cachedPlayers[i] : null;
+
+        internal static string BroadcastFighterName(int i)
+            => i >= 0 && i < cachedPlayerCount && i < cachedNames.Count ? cachedNames[i] : "";
+
+        internal static Color BroadcastFighterColor(int i)
+            => i >= 0 && i < cachedPlayerCount && i < cachedColors.Count ? cachedColors[i] : Color.white;
+
+        internal static int BroadcastFighterCardCount(int i)
+            => i >= 0 && i < cachedPlayerCount && i < cachedCards.Count ? cachedCards[i].totalCount : 0;
+
+        /// <summary>Curated stat cell (same cached display string the Tab
+        /// board shows). "-" on any invalid index or map mismatch.</summary>
+        internal static string BroadcastStatValue(int i, int statIdx)
+        {
+            if (!BroadcastMapValid()) return "-";
+            if (i < 0 || i >= cachedPlayerCount || i >= cachedValues.Count) return "-";
+            if (statIdx < 0 || statIdx >= BROADCAST_ROW_IDX.Length) return "-";
+            var vals = cachedValues[i];
+            int r = BROADCAST_ROW_IDX[statIdx];
+            return vals != null && r < vals.Length ? (vals[r] ?? "-") : "-";
         }
 
         public static void Draw()

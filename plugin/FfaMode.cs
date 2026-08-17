@@ -1057,7 +1057,7 @@ namespace CompetitiveRounds
                 {
                     if (gameNumber != 0)
                     {
-                        Plugin.Log.LogWarning($"[FFA-DRIFT] stale game counter {gameNumber} carried from '{lastGameRoomName}' into '{roomNow}' — reset (missed OnRoomLeft?)");
+                        Plugin.Log.LogWarning($"[FFA-DRIFT] stale game counter {gameNumber} carried from '{NonceForLog(lastGameRoomName)}' into '{NonceForLog(roomNow)}' — reset (missed OnRoomLeft?)");
                         gameNumber = 0;
                         Leavers.Clear();
                     }
@@ -1129,7 +1129,9 @@ namespace CompetitiveRounds
             // Room and seat are printed because bug 214's whole diagnosis
             // turned on "which room was this counter incremented in, and was
             // the seat a fighter or an observer?" — neither was in the log.
-            Plugin.Log.LogInfo($"[FFA] Game {gameNumber} starting in {PhotonNetwork.CurrentRoom?.Name ?? "(no room)"} (players needed: {Diag2v2.PlayersNeeded()}, spectator={RoomActors.LocalIsSpectator})");
+            // Masked on the broadcast seat (§7.1 — this line RUNS on observer
+            // seats by design, which is why it prints the spectator flag).
+            Plugin.Log.LogInfo($"[FFA] Game {gameNumber} starting in {NonceForLog(PhotonNetwork.CurrentRoom?.Name ?? "(no room)")} (players needed: {Diag2v2.PlayersNeeded()}, spectator={RoomActors.LocalIsSpectator})");
         }
 
         public static void OnRoomLeft()
@@ -1989,7 +1991,7 @@ namespace CompetitiveRounds
                     var adopted = ParseCycleProp(rawNow);
                     if (adopted != null && aheadOfLocal(adopted.Item1, adopted.Item2))
                     {
-                        Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {adopted.Item1}:{adopted.Item2} room={phaseNonce} evidence=manifest-prop");
+                        Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {adopted.Item1}:{adopted.Item2} room={NonceForLog(phaseNonce)} evidence=manifest-prop");
                         game = adopted.Item1;
                         cycle = adopted.Item2;
                         gameNumber = game;
@@ -2175,7 +2177,7 @@ namespace CompetitiveRounds
                 var pre = DetectAheadPickIdentity(manifest, game, cycle);
                 if (pre != null)
                 {
-                    Plugin.Log.LogWarning($"[FFA-DRIFT] master {game}:{cycle} -> {pre.Item1}:{pre.Item2} room={phaseNonce} evidence=peer-picks (result entry)");
+                    Plugin.Log.LogWarning($"[FFA-DRIFT] master {game}:{cycle} -> {pre.Item1}:{pre.Item2} room={NonceForLog(phaseNonce)} evidence=peer-picks (result entry)");
                     adoptIdentity(pre.Item1, pre.Item2, null, true, null);
                 }
             }
@@ -2196,7 +2198,7 @@ namespace CompetitiveRounds
                         var ahead = DetectAheadPickIdentity(manifest, game, cycle);
                         if (ahead != null)
                         {
-                            Plugin.Log.LogWarning($"[FFA-DRIFT] master {game}:{cycle} -> {ahead.Item1}:{ahead.Item2} room={phaseNonce} evidence=peer-picks (result loop)");
+                            Plugin.Log.LogWarning($"[FFA-DRIFT] master {game}:{cycle} -> {ahead.Item1}:{ahead.Item2} room={NonceForLog(phaseNonce)} evidence=peer-picks (result loop)");
                             adoptIdentity(ahead.Item1, ahead.Item2, null, true, null);
                         }
                     }
@@ -2211,7 +2213,7 @@ namespace CompetitiveRounds
                         var np = rawNow != rawCycleAtResultEntry ? ParseCycleProp(rawNow) : null;
                         if (np != null && (np.Item1 > game || (np.Item1 == game && np.Item2 > cycle)))
                         {
-                            Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {np.Item1}:{np.Item2} room={phaseNonce} evidence=cycle-prop-change");
+                            Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {np.Item1}:{np.Item2} room={NonceForLog(phaseNonce)} evidence=cycle-prop-change");
                             // The funnel also re-stamps the local pick — THE
                             // bug-214 amplifier. Without that, the seat that
                             // adopts is precisely the seat that then logs
@@ -2386,7 +2388,7 @@ namespace CompetitiveRounds
             if (result.Count < manifest.Count)
             {
                 var orphaned = manifest.Where(pid => !result.ContainsKey(pid)).ToList();
-                Plugin.Log.LogWarning($"[FFA-DRIFT] cycle {cycle} applied {result.Count}/{manifest.Count} — no card for pid(s) {string.Join(",", orphaned)} (identity {game}:{cycle} room={phaseNonce})");
+                Plugin.Log.LogWarning($"[FFA-DRIFT] cycle {cycle} applied {result.Count}/{manifest.Count} — no card for pid(s) {string.Join(",", orphaned)} (identity {game}:{cycle} room={NonceForLog(phaseNonce)})");
             }
             Plugin.Log.LogInfo($"[FFA] pick cycle {cycle} applied ({result.Count} picks)");
         }
@@ -2536,6 +2538,15 @@ namespace CompetitiveRounds
             try { return PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { return ""; }
         }
 
+        /// <summary>§7.1 (Codex mod-r1 F3 sweep): the room nonce IS the raw
+        /// room name — fine as a comparison/identity value, but every LOG
+        /// interpolation of it must mask on the broadcast seat (FFA spectate
+        /// runs parts of this file on observer seats, and the seat gates that
+        /// keep the pick engine off them are one refactor from moving).
+        /// Comparisons keep the raw value; only log strings call this.</summary>
+        private static string NonceForLog(string nonce)
+            => BroadcastMode.IsBroadcastIdentity ? BroadcastMode.SafeRoomDesc() : nonce;
+
         // ── Local pick re-stamping on adoption (bug 214's amplifier) ──
         //
         // FfaLocalPickUI publishes the local pick under the identity that was
@@ -2579,7 +2590,7 @@ namespace CompetitiveRounds
             if (pendingPickNonce != nonce) return;
             if (nonce != RoomNonce())
             {
-                Plugin.Log.LogWarning($"[FFA-DRIFT] pick re-stamp suppressed — room changed under the phase (was {nonce}, now {RoomNonce()})");
+                Plugin.Log.LogWarning($"[FFA-DRIFT] pick re-stamp suppressed — room changed under the phase (was {NonceForLog(nonce)}, now {NonceForLog(RoomNonce())})");
                 return;
             }
             try
@@ -2840,7 +2851,7 @@ namespace CompetitiveRounds
                 }
                 else
                 {
-                    Plugin.Log.LogWarning($"[FFA-DRIFT] pick publish suppressed — room changed under the pick phase (was {nonce}, now {RoomNonce()})");
+                    Plugin.Log.LogWarning($"[FFA-DRIFT] pick publish suppressed — room changed under the pick phase (was {NonceForLog(nonce)}, now {NonceForLog(RoomNonce())})");
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pick publish: {ex.Message}"); }

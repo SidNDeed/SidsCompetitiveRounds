@@ -19080,7 +19080,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                             : "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
                         _tournamentDispatchedMatches.Remove(m.match_id);
                         Plugin.SetPendingRoom(roomName, t.photon_region);
-                        CompetitiveUI.ShowNotification($"Reconnecting to {roomName} (region {t.photon_region ?? "default"})", new Color(0.5f, 0.8f, 1f));
+                        // §7.1 (mod-r1 F4): the raw room name must not render
+                        // on the broadcast seat's screen (it IS the stream
+                        // frame there); SetPendingRoom already discarded the
+                        // dispatch on that identity.
+                        CompetitiveUI.ShowNotification(BroadcastMode.IsBroadcastIdentity
+                            ? "Reconnect suppressed (broadcast identity)"
+                            : $"Reconnecting to {roomName} (region {t.photon_region ?? "default"})", new Color(0.5f, 0.8f, 1f));
                         break;
                     }
                 }
@@ -20133,7 +20139,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         {
                             _tournamentDispatchedMatches.Add(m.match_id);
                             Plugin.SetPendingRoom(roomName, t.photon_region);
-                            Plugin.Log.LogInfo($"[TOURNAMENT] Auto-connecting to {roomName} in region '{t.photon_region ?? "(client default)"}' for match {m.match_id}");
+                            // §7.1 (mod-r1 F4 related diagnostics): masked on
+                            // the broadcast seat — SetPendingRoom discards the
+                            // dispatch there, but this log would still print
+                            // the raw room+region.
+                            Plugin.Log.LogInfo(BroadcastMode.IsBroadcastIdentity
+                                ? $"[TOURNAMENT] Auto-connect suppressed for match {m.match_id} (broadcast identity)"
+                                : $"[TOURNAMENT] Auto-connecting to {roomName} in region '{t.photon_region ?? "(client default)"}' for match {m.match_id}");
                             CompetitiveUI.ShowNotification($"Tournament match starting vs {opp}", new Color(0.5f, 1f, 0.5f));
                         }
                     }
@@ -20163,10 +20175,19 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // a code they must not use is two wrong claims in one string. Sync
             // keeps both unchanged — it genuinely puts a pair in one room at a
             // scheduled instant, which is what the region is for (#49).
+            //
+            // §7.1 (Codex mod-r2 find 2): on the BROADCAST identity this line
+            // is suppressed entirely AT THE RENDER SOURCE — an existing/stale
+            // tournament row naming the service account would otherwise paint
+            // the raw room credential + region straight into the stream frame
+            // (the read endpoints still serve old rows even though new signup
+            // mutations are server-blocked). The SetPendingRoom discard only
+            // stops the JOIN; it cannot protect this earlier render.
             string regionBadge = (isAsync || string.IsNullOrEmpty(t.photon_region))
                 ? ""
                 : $"  <color=#AABBEE>[{t.photon_region.ToUpper()}]</color>";
-            UIFactory.SetText(txtTRoomCode, string.IsNullOrEmpty(myRoomCode) ? ""
+            UIFactory.SetText(txtTRoomCode,
+                (string.IsNullOrEmpty(myRoomCode) || BroadcastMode.IsBroadcastIdentity) ? ""
                 : $"Room code: <color=#C0E0FF>{myRoomCode}</color>{regionBadge}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>");
             // Ready Up / Reconnect are sync-only from here on. Both exist to
             // get two players into ONE server-issued room at the same moment;

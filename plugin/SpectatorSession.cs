@@ -68,9 +68,15 @@ namespace CompetitiveRounds
         /// (design-review blocker 3). The server floor moves in lockstep.</summary>
         internal const int PROTOCOL = 2;
 
-        /// <summary>Sid's decision (Aug 6): 4 spectator seats per game.
-        /// Rooms are created with MaxPlayers = fighters + SEAT_CAP.</summary>
-        internal const int SEAT_CAP = 4;
+        /// <summary>Spectator seats per game. Rooms are created with
+        /// MaxPlayers = fighters + SEAT_CAP. 4 was Sid's Aug 6 decision;
+        /// 5 (SCR Broadcast §2b): one seat reserved headroom-wise for the
+        /// broadcast account so public spectators cannot starve it. Server
+        /// twin: SPECTATE_SEAT_CAP / migration 225 seed spectator_cap=5 —
+        /// the PUBLIC cap stays 4 there; the extra Photon seat is the
+        /// broadcast one. All three client sites (here, Plugin room
+        /// creation, GameStateWatcher code-room raise) read THIS constant.</summary>
+        internal const int SEAT_CAP = 5;
 
         /// <summary>THE local role flag. Read by RoomActors.LocalIsSpectator
         /// and by every suppression guard. Set only by the spectator join
@@ -90,6 +96,15 @@ namespace CompetitiveRounds
         /// (#252e): every later signal bends toward OUT until the exit is
         /// confirmed.</summary>
         internal static bool LeaveRequested { get; private set; }
+
+        /// <summary>EXACT session ownership (broadcast r2 find 3): which
+        /// grant dispatch created this session. 0 / false = a PUBLIC session
+        /// (human WATCH). The broadcast director claims a session ONLY when
+        /// BroadcastOwned and OwnerGrantSeq equals its own ticket's dispatch
+        /// token — never by game-id coincidence — and public sessions are
+        /// structurally exempt from director-generation invalidation.</summary>
+        internal static int OwnerGrantSeq { get; private set; }
+        internal static bool BroadcastOwned { get; private set; }
 
         // Fighter display metadata from the games-list entry we granted
         // against (playtest #2b): roster-aligned arrays. Display-only.
@@ -140,7 +155,8 @@ namespace CompetitiveRounds
         /// surface that to the user rather than silently cancelling their
         /// queue/match (design §3.1).</summary>
         internal static bool BeginSession(string room, string region, string grantId,
-                                          string leaseToken, string gameId, out string refusal)
+                                          string leaseToken, string gameId, out string refusal,
+                                          int ownerGrantSeq = 0, bool broadcastOwned = false)
         {
             refusal = "";
             try
@@ -173,11 +189,21 @@ namespace CompetitiveRounds
                 LeaseToken = leaseToken ?? "";
                 WatchingGameId = gameId ?? "";
                 LeaveRequested = false;
+                OwnerGrantSeq = ownerGrantSeq;
+                BroadcastOwned = broadcastOwned;
                 SessionStartedAt = Time.unscaledTime;
                 IsLocalSpectator = true;
                 // Room name is a join credential — never log it whole (Codex
-                // r1 find 4; logs travel inside bug-report bundles).
-                Plugin.Log?.LogInfo($"[SPECTATE] session begin room#{room.GetHashCode():X8} region={PendingRegion} game={WatchingGameId}");
+                // r1 find 4; logs travel inside bug-report bundles). On the
+                // BROADCAST seat even the 32-bit hash is out (§7.1 r2-F2: an
+                // unkeyed hash is a brute-force verifier over the small
+                // room-code space) — SafeRoomDesc is the only token there,
+                // and the region is masked with it. Other seats keep today's
+                // hash form exactly.
+                if (BroadcastMode.IsBroadcastIdentity)
+                    Plugin.Log?.LogInfo($"[SPECTATE] session begin {BroadcastMode.SafeRoomDesc()} region=(masked) game={WatchingGameId}");
+                else
+                    Plugin.Log?.LogInfo($"[SPECTATE] session begin room#{room.GetHashCode():X8} region={PendingRegion} game={WatchingGameId}");
                 return true;
             }
             catch (Exception ex)
@@ -221,6 +247,8 @@ namespace CompetitiveRounds
             try { Photon.Pun.PhotonNetwork.EnableCloseConnection = false; } catch { }
             IsLocalSpectator = false;
             LeaveRequested = false;
+            OwnerGrantSeq = 0;
+            BroadcastOwned = false;
             PendingRoom = "";
             PendingRegion = "";
             GrantId = "";
