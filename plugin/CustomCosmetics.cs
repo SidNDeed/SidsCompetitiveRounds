@@ -211,6 +211,10 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_detail_magical_hat",      DisplayName = "Magical Hat",      Slot = CharacterItemType.Detail, PngFile = "detail_magical_hat.png",      Scale = 1.3f, Offset = Vector2.zero, Fps = 2.5f },
             // v1.38.1: approved placement rev 1 (scale/offset from approved_* columns verbatim).
             new CosmeticDef { Sku = "face_detail_twisted_topper",   DisplayName = "Twisted Topper",   Slot = CharacterItemType.Detail, PngFile = "detail_twisted_topper.png",   Scale = 1.3f, Offset = Vector2.zero },
+            // v1.39.0 — the Poison set (approved_* values verbatim, ship step 3b)
+            new CosmeticDef { Sku = "face_eyes_poison_s_eyes",      DisplayName = "Poison's eyes",    Slot = CharacterItemType.Eyes,   PngFile = "eyes_poison_s_eyes.png",      Scale = 1.3f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_mouth_poison_s_mouth",    DisplayName = "Poison's mouth",   Slot = CharacterItemType.Mouth,  PngFile = "mouth_poison_s_mouth.png",    Scale = 1.3f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_poison_s_weeping", DisplayName = "Poison's weeping", Slot = CharacterItemType.Detail, PngFile = "detail_poison_s_weeping.png", Scale = 1.7f, Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

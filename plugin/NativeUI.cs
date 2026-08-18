@@ -1276,6 +1276,7 @@ namespace CompetitiveRounds
             MaybeRefreshOvtTab();
             MaybeRefreshFfaTab();
             MaybeRefreshHomeTab();
+            MaybeRefreshCompareRecords();
             TickAnimatedThumbnails();
             TickCardPreviewUpgrade();
         }
@@ -5062,7 +5063,7 @@ namespace CompetitiveRounds
             txtHomeOnline=UIFactory.CreateText("HOnT",onSV.content.transform,$"<color=#888><i>{I18n.Tr("Loading...")}</i></color>",15f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(380,24));
             UIFactory.SetWordWrap(txtHomeOnline,true);UIFactory.SetTextAutoHeight(txtHomeOnline);
             /* Discord Link panel (moved from My Stats — same statics rewired). */
-            var linkBox=UIFactory.CreatePanel("LkB",left.transform,C_PANEL);UIFactory.AddVLG(linkBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(linkBox,flexH:0);UIFactory.CreateText("LkL",linkBox.transform,"Discord Link",19f,new Color(0.55f,0.55f,0.95f),sizeDelta:new Vector2(340,28));var lkRow=new GameObject("LkR");lkRow.transform.SetParent(linkBox.transform,false);lkRow.AddComponent<RectTransform>();UIFactory.AddHLG(lkRow,spacing:8);UIFactory.AddLE(lkRow,prefH:28);linkCodeBtn=UIFactory.CreateButton("LkBtn",lkRow.transform,"Get Link Code",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.GenerateLinkCode(id);},sizeDelta:new Vector2(130,26));/* Click-to-reveal on the link text - Discord ID/username defaults hidden for streamers.
+            var linkBox=UIFactory.CreatePanel("LkB",left.transform,C_PANEL);UIFactory.AddVLG(linkBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(linkBox,flexH:0);UIFactory.CreateText("LkL",linkBox.transform,"Discord Link",19f,new Color(0.55f,0.55f,0.95f),sizeDelta:new Vector2(340,28));var lkRow=new GameObject("LkR");lkRow.transform.SetParent(linkBox.transform,false);lkRow.AddComponent<RectTransform>();UIFactory.AddHLG(lkRow,spacing:8);UIFactory.AddLE(lkRow,prefH:28);/* 160 wide (Sid, Aug 18): 13 bold chars at 15pt clipped in the old 130px box — rendered "Get Link Cod". */linkCodeBtn=UIFactory.CreateButton("LkBtn",lkRow.transform,"Get Link Code",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.GenerateLinkCode(id);},sizeDelta:new Vector2(160,26));/* Click-to-reveal on the link text - Discord ID/username defaults hidden for streamers.
  * TMP text IS already a Graphic; adding an Image to the same GO throws. Just enable its own raycastTarget. */
             txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Discord",15f,C_DIM,sizeDelta:new Vector2(360,26),raycastTarget:true);{var lkTextComp=txtLinkCode as Component;if(lkTextComp!=null){var ch=lkTextComp.gameObject.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()){discordRevealed=!discordRevealed;dirty=true;}};}}
             /* Newest cosmetics — now shows the ACTUAL art (animated included),
@@ -6349,9 +6350,21 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 UnityEngine.Object.Destroy(recentTournPopupRows.transform.GetChild(i).gameObject);
             if (data == null) { AddRecentTournRow(I18n.Tr("<i>Loading...</i>"), 16f, 26); return; }
             if (data.Length == 0) { AddRecentTournRow(I18n.Tr("<i>No completed tournaments yet.</i>"), 16f, 26); return; }
-            foreach (var tt in data)
+            // TWO SECTIONS, sync then async (Sid, Aug 18: the old inline box
+            // kept them separated and the first popup cut silently merged
+            // them into one chronological list — a regression on an explicit
+            // instruction, not a style choice).
+            for (int sec = 0; sec < 2; sec++)
             {
-                if (tt == null) continue;
+                bool wantAsync = sec == 1;
+                AddRecentTournRow(wantAsync
+                    ? $"<color=#C9A6FF><b>{I18n.Tr("Async (6-week)")}</b></color>"
+                    : $"<color=#7FD4FF><b>{I18n.Tr("Sync (weekly)")}</b></color>", 16f, 28);
+                bool anyInSection = false;
+                foreach (var tt in data)
+                {
+                    if (tt == null || (tt.kind == "async") != wantAsync) continue;
+                    anyInSection = true;
                 string dt = tt.ended_at;
                 try
                 {
@@ -6361,8 +6374,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             _ResolveTz()));
                 }
                 catch { }
-                string kindTag = tt.kind == "async" ? I18n.Tr("Async") : I18n.Tr("Sync");
-                string hdr = $"<b><color=#AABBEE>{dt}</color></b>  <color=#FFD94D>[{kindTag}]</color>  "
+                string hdr = $"<b><color=#AABBEE>{dt}</color></b>  "
                            + I18n.TrF("<color=#BBB>{0} players</color>", tt.signup_count);
                 string dur = FormatTournDuration(tt.kind, tt.duration_seconds);
                 if (dur != null)
@@ -6377,7 +6389,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                                      : p.placed_rank == 2 ? "<color=#C8C8C8>#2</color>"
                                      : p.placed_rank == 3 ? "<color=#D4894A>#3</color>"
                                      : "<color=#555>--</color>";
-                        string nm = FfaSafeRich(Trunc(p.display_name ?? "?", 20));
+                        string nm = FfaSafeRich(Trunc(p.display_name ?? "?", 28));
                         string elo = p.elo > 0 ? $" <color=#9AA0A6>({p.elo})</color>" : "";
                         string seed = p.seed > 0 ? $"  <color=#666>s{p.seed}</color>" : "";
                         string wl = $"  <color=#7CFF7C>{p.wins}</color><color=#888>-</color><color=#FF8888>{p.losses}</color>";
@@ -6394,6 +6406,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     }
                 }
                 AddRecentTournRow("", 8f, 10);   // spacer between tournaments
+                }
+                if (!anyInSection)
+                    AddRecentTournRow($"   <color=#888>{I18n.Tr("none yet")}</color>", 14f, 22);
+                AddRecentTournRow("", 8f, 12);   // spacer between sections
             }
         }
 
@@ -14839,8 +14855,45 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         // server-side but un-listed (its telemetry was cut client-side).
         // longest_game / shortest_game are MATCH boards — both participants
         // render, "A vs B".
-        private static readonly string[] RECORD_BOARDS =
-            { "single_hit", "max_health", "avg_dps", "luckiest", "longest_game", "shortest_game" };
+        // Two pages (Sid, Aug 18: "add a second Records page"). Page 2 opens
+        // with the offers-based Luckiest and is where the future telemetry
+        // records (stun length, bullet speed, cloud size) will land.
+        private static readonly string[][] RECORD_PAGES =
+        {
+            new[] { "single_hit", "max_health", "avg_dps", "rarest_hand", "longest_game", "shortest_game" },
+            new[] { "luckiest" },
+        };
+        private static int recordsPage;
+        // Admin record-removal two-click arm (a mis-click here deletes a board
+        // row with no API undo, so the first click only arms).
+        private static string recExclArmKey;
+        private static float recExclArmAt;
+
+        /// <summary>r3 finding 7: the 300s records TTL needs a WAKE — with
+        /// the Compare tab idle nothing re-renders, so FetchRecordsBoard
+        /// never re-enters to observe expiry and an admin exclusion stayed
+        /// visible until restart. 5s throttle; the fetch itself is
+        /// TTL/in-flight/backoff guarded, so this is a no-op except at
+        /// expiry, and fetch completion MarkDirty()s the re-render.</summary>
+        private static float lastCompareRecordsPoke;
+        private static void MaybeRefreshCompareRecords()
+        {
+            if (currentTab != 9 || compareSubTab == 1) return;
+            string metricName = COMPARE_METRICS[Math.Max(0, Math.Min(compareMetric, COMPARE_METRICS.Length - 1))];
+            if (metricName != "Records") return;
+            if (Time.realtimeSinceStartup - lastCompareRecordsPoke < 5f) return;
+            lastCompareRecordsPoke = Time.realtimeSinceStartup;
+            // r4 f3: the armed "?" only cleared on a rebuild, so on a quiet
+            // tab it sat stale past its 5s window and the next click
+            // re-armed with no visible change (a third click to act).
+            if (recExclArmKey != null && Time.unscaledTime - recExclArmAt > 5f)
+            {
+                recExclArmKey = null;
+                MarkDirty();
+            }
+            var boards = RECORD_PAGES[recordsPage % RECORD_PAGES.Length];
+            foreach (var b in boards) ApiClient.FetchRecordsBoard(b);
+        }
 
         private static string RecordBoardHeading(string board)
         {
@@ -14849,7 +14902,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 case "single_hit": return I18n.Tr("Highest Single Hit");
                 case "max_health": return I18n.Tr("Highest Health");
                 case "avg_dps": return I18n.Tr("Highest Avg DPS");
-                case "luckiest": return I18n.Tr("Luckiest (rare picks)");
+                case "rarest_hand": return I18n.Tr("Rarest Hand");
+                case "luckiest": return I18n.Tr("Luckiest (rare draws)");
                 case "longest_game": return I18n.Tr("Longest Game");
                 case "shortest_game": return I18n.Tr("Shortest Game");
                 default: return board;
@@ -14860,11 +14914,25 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         {
             switch (board)
             {
-                case "avg_dps": return (v / 10f).ToString("0.0", _INV) + "/s";
+                case "avg_dps":
+                    // r4 f2: this branch returned before the >=1M compactor,
+                    // so a forged self-report still overflowed the cell.
+                    float dps = v / 10f;
+                    return (dps >= 1000000f
+                        ? (dps / 1000000f).ToString("0.#", _INV) + "M"
+                        : dps.ToString("0.0", _INV)) + "/s";
+                case "rarest_hand":
                 case "luckiest": return v + "%";
                 case "longest_game":
                 case "shortest_game": return $"{v / 60}:{v % 60:00}";
-                default: return FullNum(v);
+                default:
+                    // r3 finding 9: the 64px value cell renders in Overflow
+                    // mode, so an absurd (forged) value walked left across the
+                    // name cell. Legit records never reach 1M — compact form
+                    // bounds the glyph run deterministically.
+                    return v >= 1000000
+                        ? (v / 1000000f).ToString("0.#", _INV) + "M"
+                        : FullNum(v);
             }
         }
 
@@ -14877,23 +14945,41 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         {
             try
             {
-                MakeGraphLabel("CmpRecTitle", $"<color=#CCC><b>{I18n.Tr("Game records (all players) — hover a row for the cards")}</b></color>",
-                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+                MakeGraphLabel("CmpRecTitle", $"<color=#CCC><b>{I18n.Tr("Game records (all players) - hover a row for the cards")}</b></color>",
+                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 240, 20), UIFactory.AlignMidLeft, 15f);
+
+                // Page flip (Sid, Aug 18). The button is rebuilt with the rest
+                // of the panel every render, so the label always reflects the
+                // live page. CreateButton already ClickGuards (#158).
+                if (recordsPage >= RECORD_PAGES.Length) recordsPage = 0;
+                var boards = RECORD_PAGES[recordsPage];
+                var pgBtn = UIFactory.CreateButton("CmpRecPg", compareGraphPanel.transform,
+                    I18n.TrF("Page {0}/{1}", recordsPage + 1, RECORD_PAGES.Length), 14f, C_WHITE, C_BTN,
+                    () => { recordsPage = (recordsPage + 1) % RECORD_PAGES.Length; recExclArmKey = null; MarkDirty(); },
+                    sizeDelta: new Vector2(90, 20));
+                var pgRt = pgBtn.GetComponent<RectTransform>();
+                pgRt.anchorMin = pgRt.anchorMax = pgRt.pivot = new Vector2(1, 1);
+                pgRt.anchoredPosition = new Vector2(-16f, -4f);
 
                 // Per-board rendering (review F5): the old all-or-nothing gate
                 // held the WHOLE panel on "Loading..." if any single board
                 // never cached — against a pre-batch server the four new
                 // boards 400 forever and even the two legacy boards vanished.
                 bool anyCached = false;
-                foreach (var b in RECORD_BOARDS)
+                foreach (var b in boards)
                 {
-                    if (!ApiClient.RecordsBoards.ContainsKey(b)) ApiClient.FetchRecordsBoard(b);
-                    else anyCached = true;
+                    if (ApiClient.RecordsBoards.ContainsKey(b)) anyCached = true;
+                    // ALWAYS called (r2 finding 5): the 300s refresh TTL lives
+                    // INSIDE FetchRecordsBoard, and a ContainsKey gate here
+                    // made it unreachable — an admin exclusion never reached
+                    // other running clients (#247: verify the trigger can
+                    // actually fire). Dedupe/backoff bound the cadence.
+                    ApiClient.FetchRecordsBoard(b);
                 }
                 if (!anyCached)
                 {
                     MakeGraphLabel("CmpRecLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
-                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter, 14f);
                     return;
                 }
 
@@ -14903,15 +14989,19 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     hi[compareSelected[i]] = COMPARE_COLORS[i % COMPARE_COLORS.Length];
 
                 const int COLS = 3;
-                int gridRows = (RECORD_BOARDS.Length + COLS - 1) / COLS;
+                // Page 2 currently holds one board; a 1-row grid there would
+                // stretch a single section over the whole panel height, so the
+                // section height is always computed from a FULL page's rows —
+                // boards keep the same size on every page.
+                int gridRows = (RECORD_PAGES[0].Length + COLS - 1) / COLS;
                 float colW = (W - 32f) / COLS;
                 float secH = (H - 30f) / gridRows;
                 float rowH = 22f;
                 int maxRows = Mathf.Max(3, (int)((secH - 52f) / rowH));
 
-                for (int c = 0; c < RECORD_BOARDS.Length; c++)
+                for (int c = 0; c < boards.Length; c++)
                 {
-                    string board = RECORD_BOARDS[c];
+                    string board = boards[c];
                     bool isMatchBoard = board == "longest_game" || board == "shortest_game";
                     float x = 16f + (c % COLS) * colW;
                     float secY = -26f - (c / COLS) * secH;
@@ -14921,16 +15011,24 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     if (!ApiClient.RecordsBoards.TryGetValue(board, out var d))
                     {
                         MakeGraphLabel($"CmpRecP{c}", $"<color=#888>{I18n.Tr("Loading...")}</color>",
-                            new Vector2(0, 1), new Vector2(x, secY - 22f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 13f);
+                            new Vector2(0, 1), new Vector2(x, secY - 22f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 14f);
                         continue;
                     }
                     if (d.names.Count == 0)
                     {
                         MakeGraphLabel($"CmpRecNo{c}", $"<color=#888>{I18n.Tr("no data yet")}</color>",
-                            new Vector2(0, 1), new Vector2(x, secY - 22f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 13f);
+                            new Vector2(0, 1), new Vector2(x, secY - 22f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 14f);
                         continue;
                     }
                     bool rich = d.dates.Count == d.names.Count;   // enrichment present
+                    // Admin record-removal (Sid, Aug 18): rows grow a small [x]
+                    // when the server sent match ids and the viewer is admin.
+                    // Everything in the row shifts left by the same amount so
+                    // no cell overlaps (#245's model-the-budget rule).
+                    bool canExcl = ApiClient.IsAdmin && d.matchIds.Count == d.names.Count;
+                    float adm = canExcl ? 20f : 0f;
+                    if (recExclArmKey != null && Time.unscaledTime - recExclArmAt > 5f)
+                        recExclArmKey = null;   // stale arm quietly expires
                     for (int r = 0; r < d.names.Count && r < maxRows; r++)
                     {
                         float y = secY - 22f - r * rowH;
@@ -14958,26 +15056,93 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                         }
                         else
                         {
-                            nameCell = $"{bold}<color=#{nameHex}>{FfaSafeRich(Trunc(d.names[r], 18))}</color>{boldEnd}";
+                            // Full-size suffixes (Sid, Aug 18: nothing below
+                            // the 14pt FPS/Ping floor) — the name budget gives
+                            // the ground the tags gained.
+                            nameCell = $"{bold}<color=#{nameHex}>{FfaSafeRich(Trunc(d.names[r], 16))}</color>{boldEnd}";
                             if (rich && d.titles.Count > r && !string.IsNullOrEmpty(d.titles[r]))
                             {
                                 string tc = (d.titleColors.Count > r && !string.IsNullOrEmpty(d.titleColors[r]))
                                     ? d.titleColors[r] : "#FFD94D";
-                                nameCell += $" <size=80%><color={tc}>[{FfaSafeRich(Trunc(d.titles[r], 10))}]</color></size>";
+                                nameCell += $" <color={tc}>[{FfaSafeRich(Trunc(d.titles[r], 10))}]</color>";
                             }
                             if (rich && d.ratings.Count > r && d.ratings[r] > 0)
-                                nameCell += $" <size=80%><color=#8E99A8>{d.ratings[r]}</color></size>";
+                                nameCell += $" <color=#8E99A8>{d.ratings[r]}</color>";
                         }
                         var nameLbl = MakeGraphLabel($"CmpRecN{c}_{r}",
                             $"<color=#777>{r + 1}.</color> {nameCell}",
-                            new Vector2(0, 1), new Vector2(x, y), new Vector2(colW - 118f, rowH), UIFactory.AlignMidLeft, 13f);
+                            new Vector2(0, 1), new Vector2(x, y), new Vector2(colW - 130f - adm, rowH), UIFactory.AlignMidLeft, 14f);
                         MakeGraphLabel($"CmpRecV{c}_{r}",
                             $"<color=#99CCAA>{RecordValueText(board, d.values.Count > r ? d.values[r] : 0)}</color>",
-                            new Vector2(0, 1), new Vector2(x + colW - 118f, y), new Vector2(64, rowH), UIFactory.AlignMidRight, 13f);
+                            new Vector2(0, 1), new Vector2(x + colW - 130f - adm, y), new Vector2(64, rowH), UIFactory.AlignMidRight, 14f);
                         if (rich && d.dates.Count > r && !string.IsNullOrEmpty(d.dates[r]))
                             MakeGraphLabel($"CmpRecD{c}_{r}",
-                                $"<size=80%><color=#667>{ShortRecDate(d.dates[r])}</color></size>",
-                                new Vector2(0, 1), new Vector2(x + colW - 50f, y), new Vector2(44, rowH), UIFactory.AlignMidRight, 12f);
+                                $"<color=#667>{ShortRecDate(d.dates[r])}</color>",
+                                new Vector2(0, 1), new Vector2(x + colW - 62f - adm, y), new Vector2(56, rowH), UIFactory.AlignMidRight, 14f);
+
+                        if (canExcl && !string.IsNullOrEmpty(d.matchIds[r]))
+                        {
+                            // Two-click arm: click 1 turns the control into a
+                            // yellow "?", click 2 (within 5s, same row) fires
+                            // the exclusion. Seat boards name the row's holder;
+                            // the game-length boards exclude match-wide.
+                            string armKey = $"{board}:{d.matchIds[r]}:{sid}";
+                            bool armed = recExclArmKey == armKey;
+                            string mid = d.matchIds[r];
+                            string exclSid = isMatchBoard ? "" : sid;
+                            var xBtn = UIFactory.CreateButton($"CmpRecX{c}_{r}",
+                                compareGraphPanel.transform, armed ? "?" : "x", 14f,
+                                armed ? new Color(1f, 0.85f, 0.3f) : new Color(1f, 0.45f, 0.45f),
+                                C_BTN, () =>
+                                {
+                                    float armAge = Time.unscaledTime - recExclArmAt;
+                                    // r1 finding 5: the 5s window must be checked
+                                    // HERE, not only at rebuild time — on a quiet
+                                    // tab nothing rebuilds, so key equality alone
+                                    // would honor a minutes-old arm.
+                                    if (recExclArmKey != armKey || armAge > 5f)
+                                    {
+                                        recExclArmKey = armKey;
+                                        recExclArmAt = Time.unscaledTime;
+                                        MarkDirty();
+                                        return;
+                                    }
+                                    // r1 finding 6: a rebuild replacing this button
+                                    // mid-press could let ONE physical click both
+                                    // arm and submit (the replacement has a fresh
+                                    // ClickGuard key). The ghost lands within 1-2
+                                    // frames (<70ms even at 30fps); 0.12s kills it
+                                    // without swallowing a real fast second click
+                                    // (r2 finding 6 measured 0.25s doing exactly
+                                    // that at 60fps).
+                                    if (armAge < 0.12f) return;
+                                    recExclArmKey = null;
+                                    ApiClient.AdminExcludeRecord(MatchTracker.LocalSteamId, board,
+                                        mid, exclSid, "admin removal via Records UI", (ok, resp) =>
+                                        {
+                                            if (ok)
+                                            {
+                                                // r2 finding 7 (accepted, bounded): two
+                                                // overlapping exclusions on ONE board can
+                                                // race a refetch into re-caching the older
+                                                // snapshot. The DB is correct; the display
+                                                // self-heals within the 300s TTL now that
+                                                // the render path actually refetches (F5).
+                                                ApiClient.RecordsBoards.Remove(board);
+                                                ApiClient.FetchRecordsBoard(board);
+                                                CompetitiveUI.ShowNotification(I18n.Tr("Record removed."), Color.green, 4f);
+                                            }
+                                            else
+                                                CompetitiveUI.ShowNotification(
+                                                    I18n.TrF("Record removal failed: {0}", Trunc(resp ?? "", 60)),
+                                                    Color.red, 6f);
+                                            MarkDirty();
+                                        });
+                                }, sizeDelta: new Vector2(18, 18));
+                            var xRt = xBtn.GetComponent<RectTransform>();
+                            xRt.anchorMin = xRt.anchorMax = xRt.pivot = new Vector2(0, 1);
+                            xRt.anchoredPosition = new Vector2(x + colW - 20f, y - 2f);
+                        }
 
                         // Hover: the record game's cards (+ both builds on the
                         // match boards). Registered only when there is a body
@@ -15021,30 +15186,102 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             return iso;
         }
 
+        private static void AppendHoverTitleElo(StringBuilder sb, ApiClient.RecordsBoardData d, int r)
+        {
+            if (d.titles.Count > r && !string.IsNullOrEmpty(d.titles[r]))
+            {
+                string tc = (d.titleColors.Count > r && !string.IsNullOrEmpty(d.titleColors[r]))
+                    ? d.titleColors[r] : "#FFD94D";
+                sb.Append(" <color=").Append(tc).Append(">[").Append(FfaSafeRich(d.titles[r])).Append("]</color>");
+            }
+            if (d.ratings.Count > r && d.ratings[r] > 0)
+                sb.Append(" <color=#8E99A8>(").Append(d.ratings[r]).Append(")</color>");
+        }
+
+        /// <summary>Pipe-joined card list -> one bullet per line, localized
+        /// via the game's own card localization (same treatment as the legacy
+        /// tooltip path) and sanitized (#156 — names are client-reported).
+        /// IMGUI's OS font has the bullet glyph (#47 is a TMP/Gravity limit).</summary>
+        private static string HoverCardLines(string pipeCards, string indent)
+        {
+            if (string.IsNullOrEmpty(pipeCards)) return null;
+            var parts = pipeCards.Split('|');
+            var sb = new StringBuilder();
+            int shown = 0;
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string nm = parts[i].Trim();
+                if (nm.Length == 0) continue;
+                // r3 finding 8: the tooltip's overflow pass drops NON-bullet
+                // lines first, so an unbounded card list evicted the score/
+                // duration/opponent headers this hover exists to show. 40
+                // bullets + headers fit every supported resolution; the rest
+                // collapse into a counted line.
+                if (shown >= 40)
+                {
+                    int extra = 0;
+                    for (int j = i; j < parts.Length; j++)
+                        if (parts[j].Trim().Length > 0) extra++;
+                    sb.Append('\n').Append(indent)
+                      .Append("<color=#888>").Append(I18n.TrF("+{0} more lines", extra)).Append("</color>");
+                    break;
+                }
+                string disp = nm;
+                try { disp = CardTextLocalizer.PrettyName(nm, nm); } catch { }
+                if (sb.Length > 0) sb.Append('\n');
+                sb.Append(indent).Append("\u2022 ").Append(FfaSafeRich(disp));
+                shown++;
+            }
+            return sb.Length > 0 ? sb.ToString() : null;
+        }
+
         private static string BuildRecordHoverBody(ApiClient.RecordsBoardData d, int r, bool isMatchBoard)
         {
             var sb = new StringBuilder();
             string myCards = d.cards.Count > r ? d.cards[r] : "";
+            // Sid (Aug 18): game details up top — score (half-point
+            // convention, server-mirrored) and duration.
+            bool det = d.durations.Count > r && d.scores.Count > r;
+            if (det && (!string.IsNullOrEmpty(d.scores[r]) || d.durations[r] > 0))
+            {
+                if (!string.IsNullOrEmpty(d.scores[r]))
+                    sb.Append("<color=#99CCAA><b>").Append(FfaSafeRich(d.scores[r])).Append("</b></color>");
+                if (d.durations[r] > 0)
+                {
+                    if (sb.Length > 0) sb.Append("  ");
+                    sb.Append("<color=#8FA3B8>").Append(d.durations[r] / 60).Append(':')
+                      .Append((d.durations[r] % 60).ToString("00", _INV)).Append("</color>");
+                }
+                sb.Append('\n');
+            }
             if (isMatchBoard)
             {
                 string oppCards = d.cards2.Count > r ? d.cards2[r] : "";
-                // Card names are CLIENT-REPORTED (round-3 f3) — sanitize
-                // before they touch the richText tooltip.
-                sb.Append("<b>").Append(FfaSafeRich(Trunc(d.names[r] ?? "?", 16))).Append("</b>");
-                if (d.ratings.Count > r && d.ratings[r] > 0) sb.Append(" <color=#8E99A8>(").Append(d.ratings[r]).Append(")</color>");
-                sb.Append('\n').Append(string.IsNullOrEmpty(myCards) ? I18n.Tr("  <color=#888>(no cards recorded)</color>") : "  " + FfaSafeRich(myCards).Replace("|", ", "));
+                // UNTRUNCATED in the hover (Sid, Aug 18) — the row cells
+                // truncate for space; the hover is where the full name lives.
+                sb.Append("<b>").Append(FfaSafeRich(d.names[r] ?? "?")).Append("</b>");
+                AppendHoverTitleElo(sb, d, r);
+                sb.Append('\n').Append(HoverCardLines(myCards, "  ") ?? I18n.Tr("  <color=#888>(no cards recorded)</color>"));
                 if (d.names2.Count > r && !string.IsNullOrEmpty(d.names2[r]))
                 {
-                    sb.Append("\n<b>").Append(FfaSafeRich(Trunc(d.names2[r], 16))).Append("</b>");
+                    sb.Append("\n<b>").Append(FfaSafeRich(d.names2[r])).Append("</b>");
                     if (d.ratings2.Count > r && d.ratings2[r] > 0) sb.Append(" <color=#8E99A8>(").Append(d.ratings2[r]).Append(")</color>");
-                    sb.Append('\n').Append(string.IsNullOrEmpty(oppCards) ? I18n.Tr("  <color=#888>(no cards recorded)</color>") : "  " + FfaSafeRich(oppCards).Replace("|", ", "));
+                    sb.Append('\n').Append(HoverCardLines(oppCards, "  ") ?? I18n.Tr("  <color=#888>(no cards recorded)</color>"));
                 }
             }
             else
             {
+                // r3 finding 6: the holder's UNTRUNCATED title/elo must have a
+                // surface — the row truncates the title to 10 chars and the
+                // tooltip title strip is plain text, so the seat-board body
+                // carries the full name + title + elo line the match boards
+                // already had.
+                sb.Append("<b>").Append(FfaSafeRich(d.names[r] ?? "?")).Append("</b>");
+                AppendHoverTitleElo(sb, d, r);
+                sb.Append('\n');
                 if (d.names2.Count > r && !string.IsNullOrEmpty(d.names2[r]))
-                    sb.Append(I18n.TrF("<color=#889>vs {0}</color>", FfaSafeRich(Trunc(d.names2[r], 16)))).Append('\n');
-                sb.Append(string.IsNullOrEmpty(myCards) ? I18n.Tr("<color=#888>(no cards recorded)</color>") : FfaSafeRich(myCards).Replace("|", ", "));
+                    sb.Append(I18n.TrF("<color=#889>vs {0}</color>", FfaSafeRich(d.names2[r]))).Append('\n');
+                sb.Append(HoverCardLines(myCards, "") ?? I18n.Tr("<color=#888>(no cards recorded)</color>"));
             }
             return sb.ToString();
         }
@@ -20033,9 +20270,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 int opR = isP1 ? g.p2_rounds : g.p1_rounds;
                 int myPts = isP1 ? g.p1_points : g.p2_points;
                 int opPts = isP1 ? g.p2_points : g.p1_points;
+                // Half-point convention, NOT the discarded "(x-y pts)" form
+                // (Sid, Aug 18: "we discarded that in favor of just adding a
+                // .5 for a half point") — same FmtHalfScore the history rows
+                // use, residue rule included.
                 sb.Append("<b>").Append(I18n.TrF("Game {0}", g.n)).Append("</b>  ")
-                  .Append(myR).Append('-').Append(opR)
-                  .Append(" <color=#889>(").Append(myPts).Append('-').Append(opPts).Append(" pts)</color>");
+                  .Append(FmtHalfScore(myR, myPts)).Append('-').Append(FmtHalfScore(opR, opPts));
                 if (g.dur > 0)
                     sb.Append("  <color=#889>").Append(g.dur / 60).Append(':').Append((g.dur % 60).ToString("00")).Append("</color>");
                 int hit = isP1 ? g.p1_hit_pct : g.p2_hit_pct;
@@ -20052,12 +20292,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 string cards = isP1 ? g.p1_cards : g.p2_cards;
                 if (!string.IsNullOrEmpty(cards))
                 {
-                    // Pipe-joined pick-order names from the server; render
-                    // comma-separated and let the tooltip word-wrap. Names
-                    // are CLIENT-REPORTED (round-3 f3): a modified reporter
-                    // can submit markup-shaped card names, so they must not
-                    // reach the richText tooltip raw.
-                    sb.Append("\n  ").Append(FfaSafeRich(cards).Replace("|", ", "));
+                    // One card per line (Sid, Aug 18: the comma-joined form
+                    // word-wrapped mid-name); the tooltip layout flows long
+                    // lists into columns. Names are CLIENT-REPORTED (round-3
+                    // f3) — sanitized inside HoverCardLines.
+                    string lines = HoverCardLines(cards, "  ");
+                    if (lines != null) sb.Append('\n').Append(lines);
                 }
             }
             return sb.ToString();
@@ -20086,8 +20326,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Name width yields room to the elo column when one renders
             // (Sid, Aug 17: elos belong in the bracket); long names clip
             // under the global Truncate default, same as before.
-            float nameW = elo > 0 ? cellW - 74 : cellW - 36;
-            var nTmp = UIFactory.CreateText("N", row.transform, "", 13f, nameColor, UIFactory.AlignMidLeft, sizeDelta: new Vector2(nameW, h));
+            float nameW = elo > 0 ? cellW - 84 : cellW - 36;
+            var nTmp = UIFactory.CreateText("N", row.transform, "", 14f, nameColor, UIFactory.AlignMidLeft, sizeDelta: new Vector2(nameW, h));
             UIFactory.SetTextRaw(nTmp, nameText);
             // Position name with left padding.
             var nGo = row.transform.Find("N");
@@ -20100,14 +20340,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             if (elo > 0)
             {
-                var eTmp = UIFactory.CreateText("E", row.transform, elo.ToString(), 10.5f,
-                    new Color(0.56f, 0.60f, 0.66f), UIFactory.AlignMidRight, sizeDelta: new Vector2(34, h));
+                var eTmp = UIFactory.CreateText("E", row.transform, elo.ToString(), 14f,
+                    new Color(0.56f, 0.60f, 0.66f), UIFactory.AlignMidRight, sizeDelta: new Vector2(44, h));
                 var eGo = row.transform.Find("E");
                 if (eGo != null)
                 {
                     var ert = eGo.GetComponent<RectTransform>();
                     ert.anchorMin = new Vector2(0f, 1f); ert.anchorMax = new Vector2(0f, 1f); ert.pivot = new Vector2(0f, 1f);
-                    ert.anchoredPosition = new Vector2(cellW - 68, 0f);
+                    ert.anchoredPosition = new Vector2(cellW - 78, 0f);
                 }
             }
 

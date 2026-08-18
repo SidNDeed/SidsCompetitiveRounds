@@ -23,9 +23,12 @@ class CardPick(BaseModel):
 
 
 class CardOfferEntry(BaseModel):
-    """A single card the local player was offered during a pick phase."""
+    """A single card the local player was offered during a pick phase.
+    round_number capped (records-v2 r2 finding 3): a real game stays well
+    under 50 rounds; an unbounded value was one leg of a 14 MB report ->
+    78 MB public board response amplification."""
     card_name: str = Field(..., max_length=64)
-    round_number: int = Field(..., ge=1)
+    round_number: int = Field(..., ge=1, le=50)
     was_picked: bool = False
 
 
@@ -51,8 +54,14 @@ class PlayerMatchData(BaseModel):
     """Data about one player in a match report."""
     steam_id: str = Field(..., max_length=20, examples=["76561198012345678"])
     display_name: str = Field(..., max_length=64, examples=["PlayerOne"])
-    cards: list[CardPick] = Field(default_factory=list)
-    card_offers: list[CardOfferEntry] = Field(default_factory=list)
+    cards: list[CardPick] = Field(default_factory=list, max_length=200)
+    # max_length (r2 finding 3): honest clients send <= ~30 offers (prod
+    # max); 1024 is 34x headroom, and only a forged report can exceed it —
+    # rejecting the whole forged report is fine, an honest one never trips.
+    card_offers: list[CardOfferEntry] = Field(default_factory=list, max_length=1024)
+    # r3 finding 1: the picks array was the LAST unbounded list on the
+    # report — 80k entries fit under the body cap and each one persisted.
+    # Honest ceiling is ~30 picks; 200 is generous headroom.
     # Optional: absent from every client that predates the feature, and those
     # reports must still record normally. NULL is "not recorded", never a build
     # of zeroes (#257). Shared by 1v1, 2v2 and 1v2 — the slot this object sits
@@ -1364,6 +1373,14 @@ class RecordsBoardResponse(BaseModel):
     steam_ids2: list[str] = Field(default_factory=list)
     cards2: list[str] = Field(default_factory=list)
     ratings2: list[int] = Field(default_factory=list)
+    # Aug 18: the source match per row, so the admin record-removal control
+    # can name exactly which (board, match, seat) to exclude.
+    match_ids: list[str] = Field(default_factory=list)
+    # Aug 18 (Sid: "show game duration, score"): per-row game details.
+    # scores are preformatted holder-first with the half-point convention
+    # (mirrors the client's FmtHalfScore residue rule — see _rec_half_score).
+    durations: list[int] = Field(default_factory=list)
+    scores: list[str] = Field(default_factory=list)
 
 
 class CardTopPickersResponse(BaseModel):

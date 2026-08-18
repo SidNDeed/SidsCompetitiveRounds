@@ -3692,6 +3692,23 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/reverse-series", body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
+        /// <summary>Exclude one record row from the Records boards (Sid, Aug 18:
+        /// cheated records). steamId "" = match-wide (the game-length boards).
+        /// Sends "signature" (the newer server convention), not "hmac_signature"
+        /// — the two conventions coexist server-side per endpoint (#329: grep
+        /// what the SERVER reads, not what siblings send).</summary>
+        public static void AdminExcludeRecord(string adminSteamId, string board, string matchId,
+            string steamId, string reason, Action<bool, string> callback = null)
+        {
+            string sig = ComputeAdminHmacHex(
+                $"admin:{adminSteamId}:record_exclude:{board}:{matchId}:{(string.IsNullOrEmpty(steamId) ? "-" : steamId)}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"board\":\"{Escape(board)}\","
+                        + $"\"match_id\":\"{Escape(matchId)}\",\"steam_id\":\"{Escape(steamId ?? "")}\","
+                        + $"\"reason\":\"{Escape(reason ?? "")}\",\"signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/records/exclude", body,
+                (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
         public static void AdminReviewFlag(
             string adminSteamId, string flagId, string action,
             int evidenceRevision, Action<bool, string> callback = null)
@@ -5820,6 +5837,12 @@ namespace CompetitiveRounds
             public List<string> steamIds2 = new List<string>();   // opponent / p2 (highlighting)
             public List<string> cards2 = new List<string>();      // game boards only
             public List<int> ratings2 = new List<int>();          // game boards only
+            public List<string> matchIds = new List<string>();    // Aug 18: admin record-removal target
+            public List<int> durations = new List<int>();         // Aug 18: game details (Sid)
+            public List<string> scores = new List<string>();      // holder-first, half-point convention
+            // r1 finding 7: without a TTL, a client that cached a board before
+            // an admin exclusion shows the removed row until process restart.
+            public float fetchedAt;                               // Time.realtimeSinceStartup
         }
         public class CardTopPickersData
         {
@@ -5923,6 +5946,19 @@ namespace CompetitiveRounds
         public static List<CardCatalogEntry> CardCatalog { get; private set; }
 
         private static readonly HashSet<string> _cmpFetching = new HashSet<string>();
+        // r1 finding 8: a failed compare-board fetch on a quiet tab left the
+        // panel at "Loading..." forever (no render → no retry). Failures are
+        // remembered so the retry cannot hammer (15s floor; matters against a
+        // pre-batch server where a new board 400s on every attempt), and a
+        // delayed MarkDirty wakes the quiet tab to actually retry.
+        private static readonly Dictionary<string, float> _cmpFailedAt = new Dictionary<string, float>();
+        private const float CMP_RETRY_SECONDS = 15f;
+
+        private static System.Collections.IEnumerator _CmpRetryDirty()
+        {
+            yield return new WaitForSecondsRealtime(CMP_RETRY_SECONDS);
+            NativeUI.MarkDirty();
+        }
 
         /// <summary>True when every supplied list is the same length. The server
         /// builds these arrays from one row set so they always agree — but a
@@ -5940,20 +5976,44 @@ namespace CompetitiveRounds
         private static void FetchCompareBoard(string cacheKey, string url, Func<string, bool> parse)
         {
             if (string.IsNullOrEmpty(cacheKey) || _cmpFetching.Contains(cacheKey)) return;
+            if (_cmpFailedAt.TryGetValue(cacheKey, out float failedAt)
+                && Time.realtimeSinceStartup - failedAt < CMP_RETRY_SECONDS) return;
             _cmpFetching.Add(cacheKey);
             Plugin.Instance.StartCoroutine(GetRequest(url, (success, response) =>
             {
                 _cmpFetching.Remove(cacheKey);
-                if (!success || string.IsNullOrEmpty(response)) return;
-                try { if (parse(response)) NativeUI.MarkDirty(); }
-                catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] {cacheKey} parse failed: {ex.Message}"); }
+                bool ok = false;
+                if (success && !string.IsNullOrEmpty(response))
+                {
+                    try { ok = parse(response); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] {cacheKey} parse failed: {ex.Message}"); }
+                }
+                if (ok)
+                {
+                    _cmpFailedAt.Remove(cacheKey);
+                    NativeUI.MarkDirty();
+                }
+                else
+                {
+                    _cmpFailedAt[cacheKey] = Time.realtimeSinceStartup;
+                    Plugin.Instance.StartCoroutine(_CmpRetryDirty());
+                }
             }));
         }
 
-        /// <param name="board">single_hit | max_health | avg_dps | longest_game | shortest_game | luckiest</param>
+        /// <param name="board">single_hit | max_health | avg_dps | rarest_hand
+        /// (rare PICKS, deduped per player) | luckiest (rare DRAWS from offers,
+        /// deliberately NOT deduped — repeats are an anti-cheat tell) |
+        /// longest_game | shortest_game</param>
         public static void FetchRecordsBoard(string board)
         {
-            if (string.IsNullOrEmpty(board) || RecordsBoards.ContainsKey(board)) return;
+            if (string.IsNullOrEmpty(board)) return;
+            // r1 finding 7: a cached board refetches after 5 minutes so admin
+            // exclusions reach every running client. Stale data KEEPS rendering
+            // while the refresh is in flight — the panel never blinks back to
+            // "Loading...", and _cmpFetching/_cmpFailedAt bound the cadence.
+            if (RecordsBoards.TryGetValue(board, out var cached)
+                && Time.realtimeSinceStartup - cached.fetchedAt < 300f) return;
             // EscapeURL, never Escape(): Escape() is the JSON string escaper and
             // does nothing useful in a query string (a card name with a space
             // would go out raw). Matches the /players/search call site.
@@ -5974,6 +6034,9 @@ namespace CompetitiveRounds
                     steamIds2 = JsonStringArrayByKey(resp, "steam_ids2"),
                     cards2 = JsonStringArrayByKey(resp, "cards2"),
                     ratings2 = JsonIntArrayByKey(resp, "ratings2"),
+                    matchIds = JsonStringArrayByKey(resp, "match_ids"),
+                    durations = JsonIntArrayByKey(resp, "durations"),
+                    scores = JsonStringArrayByKey(resp, "scores"),
                 };
                 if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.values.Count)) return false;
                 // Enrichment arrays are OPTIONAL (older server / partial body):
@@ -5984,6 +6047,8 @@ namespace CompetitiveRounds
                 _norm(d.dates); _norm(d.titles); _norm(d.titleColors);
                 _normI(d.ratings); _norm(d.cards); _norm(d.names2);
                 _norm(d.steamIds2); _norm(d.cards2); _normI(d.ratings2);
+                _norm(d.matchIds); _normI(d.durations); _norm(d.scores);
+                d.fetchedAt = Time.realtimeSinceStartup;
                 RecordsBoards[board] = d;
                 return true;
             });

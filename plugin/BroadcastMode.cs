@@ -73,6 +73,12 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>r3 finding 10 (idle-throttle gate): any non-Idle director
+        /// state — granting, joining, watching, leaving, recovering — means
+        /// this seat is NOT out of play. Regular players' director never
+        /// starts, so this is permanently false off the broadcast seat.</summary>
+        internal static bool DirectorBusy => _state != State.Idle;
+
         /// <summary>Director gate: identity AND the config flag. The §2c fence
         /// and §7.1 masking deliberately do NOT use this (identity only).</summary>
         internal static bool DirectorActive

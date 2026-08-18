@@ -2611,7 +2611,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.38.7"
+LATEST_MOD_VERSION = "1.39.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -3834,10 +3834,20 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             round_number=card.round_number,
         ))
 
-    # Record per-player offered cards (pass-tracking). Only the local mod has
-    # this for itself; opponent's offers may or may not be present.
+    # Record per-player offered cards (pass-tracking). SEAT-BOUND to the
+    # authenticated reporter (records-v2 r2 finding 2: persisting the
+    # OPPONENT's array let a modified reporter plant fake rare draws under
+    # the innocent opponent's name on the Luckiest board — the framing
+    # inversion of its anti-cheat purpose). _check_steam_session already
+    # proved the session belongs to reported_by_steam_id, so this binds
+    # offers to the caller's real identity. Honest clients always sent an
+    # empty opponent array (prod: 11,538/11,538 matches carry exactly one
+    # seat's offers), so nothing real is dropped. The 120-slice is a second
+    # belt behind the schema's max_length (r2 finding 3).
     for player_obj, side in ((p1, report.player1), (p2, report.player2)):
-        for offer in side.card_offers:
+        if str(side.steam_id) != str(report.reported_by_steam_id):
+            continue
+        for offer in side.card_offers[:120]:
             db.add(CardOffer(
                 match_id=match.id,
                 player_id=player_obj.id,
@@ -7083,7 +7093,7 @@ _RECORDS_SEAT_BOARDS = {
     "max_health": ("p1_max_health", "p2_max_health", True),
     "bounce_kill": ("p1_best_bounce_kill", "p2_best_bounce_kill", False),
 }
-_RECORDS_OTHER_BOARDS = {"avg_dps", "longest_game", "shortest_game", "luckiest"}
+_RECORDS_OTHER_BOARDS = {"avg_dps", "longest_game", "shortest_game", "rarest_hand", "luckiest"}
 
 # Shared per-(match, player) card aggregate. has_growth mirrors submit_match's
 # _cmb_qualifies normalization (lower, no spaces) so the board qualification
@@ -7094,11 +7104,40 @@ _RECORDS_CARDS_CTE = """
                COUNT(*) AS n,
                BOOL_OR(LOWER(REPLACE(mc.card_name, ' ', '')) = 'grow') AS has_growth,
                COUNT(*) FILTER (WHERE mc.card_rarity = 'Rare') AS rares,
-               STRING_AGG(REPLACE(mc.card_name, '|', '/'), '|' ORDER BY mc.pick_order) AS cards
+               LEFT(STRING_AGG(REPLACE(mc.card_name, '|', '/'), '|' ORDER BY mc.pick_order), 2000) AS cards
         FROM match_cards mc
         GROUP BY mc.match_id, mc.player_id
     )
 """
+
+
+def _rec_half_score(rounds, pts) -> str:
+    """Mirror of the client's FmtHalfScore (NativeUI.cs): a live point is a
+    half; pts >= 2 is END-OF-GAME residue (two points convert to a round
+    before the counter resets), never a real half point. Same-predicate rule
+    (#328): the comment there names this mirror."""
+    p = int(pts or 0)
+    if p >= 2:
+        p = 0
+    r = int(rounds or 0)
+    return f"{r}.5" if p > 0 else str(r)
+
+
+def _rec_half_pair(r) -> str:
+    if "my_r" not in r:
+        return ""
+    return f"{_rec_half_score(r['my_r'], r['my_p'])}-{_rec_half_score(r['op_r'], r['op_p'])}"
+
+
+# Admin record-removal filter (Sid, Aug 18; migration 227): a row excluded
+# for this board (or every board, '*') never surfaces again. player_id NULL
+# rows cover both seats. Parameterized :board — never the request string
+# interpolated (#188).
+_RECORDS_EXCL_SEAT = """NOT EXISTS (
+                    SELECT 1 FROM record_exclusions re
+                     WHERE re.match_id = s.match_id
+                       AND (re.board = :board OR re.board = '*')
+                       AND (re.player_id IS NULL OR re.player_id = s.pid))"""
 
 
 @app.get("/api/v1/records", response_model=RecordsBoardResponse, tags=["Players"])
@@ -7111,9 +7150,13 @@ async def get_records_board(
 
     Match-derived (Aug 17): every row is a concrete game, so it carries the
     date, the holder's cards that game, and the opponent. Seat boards
-    (single_hit / max_health / bounce_kill / avg_dps / luckiest) dedupe to
-    each player's best game; the game-length boards are match rows with both
-    participants. Single-hit and health keep the write-path qualification
+    (single_hit / max_health / bounce_kill / avg_dps / rarest_hand) dedupe
+    to each player's best game; LUCKIEST deliberately does NOT dedupe — one
+    player may hold several placements, and that repetition is the signal
+    (r4 f4: the old text promised unique holders). The game-length boards
+    are match rows with both participants. Every seat-grain row is
+    REPORTER-SEAT-ONLY (r3): only the seat whose own client reported the
+    match can place. Single-hit and health keep the write-path qualification
     (<= 5 cards, no growth card — Sid's rule, mirrored from submit_match);
     avg_dps excludes growth builds only (a full build is the normal case for
     whole-game DPS, but Grow damage is frame-rate-shaped, #320).
@@ -7123,23 +7166,31 @@ async def get_records_board(
     if not is_seat and board not in _RECORDS_OTHER_BOARDS:
         raise HTTPException(400, "unknown records board")
 
-    params: dict = {"lim": limit}
+    params: dict = {"lim": limit, "board": board}
     if is_seat:
         c1, c2, qualified = _RECORDS_SEAT_BOARDS[board]
-        qual_where = ("WHERE COALESCE(cp.n, 0) <= 5 AND NOT COALESCE(cp.has_growth, FALSE)"
-                      if qualified else "")
+        qual_where = "WHERE " + _RECORDS_EXCL_SEAT
+        if qualified:
+            qual_where += " AND COALESCE(cp.n, 0) <= 5 AND NOT COALESCE(cp.has_growth, FALSE)"
         # c1/c2 come exclusively from the allowlist dict above (#188).
         q = f"""
             WITH {_RECORDS_CARDS_CTE},
             seat AS (
+                /* Reporter-seat-only (r3 f2/f3): opp_* telemetry and the
+                 * opponent's cards array are reporter-attested, so only the
+                 * seat that reported may place — framing an innocent
+                 * opponent is structurally impossible, same scope rule as
+                 * Luckiest. */
                 SELECT m.id AS match_id, m.ended_at, m.player1_id AS pid,
                        m.player2_id AS opp, m.{c1} AS metric
                   FROM matches m
                  WHERE m.invalidated_at IS NULL AND m.{c1} > 0
+                   AND m.reported_by = m.player1_id
                 UNION ALL
                 SELECT m.id, m.ended_at, m.player2_id, m.player1_id, m.{c2}
                   FROM matches m
                  WHERE m.invalidated_at IS NULL AND m.{c2} > 0
+                   AND m.reported_by = m.player2_id
             ),
             qual AS (
                 SELECT s.*, cp.cards
@@ -7152,12 +7203,18 @@ async def get_records_board(
                 SELECT DISTINCT ON (q.pid) q.*
                   FROM qual q ORDER BY q.pid, q.metric DESC, q.ended_at ASC
             )
-            SELECT b.metric AS val, b.ended_at, b.cards,
+            SELECT b.metric AS val, b.ended_at, b.cards, b.match_id,
+                   COALESCE(mm.duration_seconds, mm.match_duration) AS dur,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p1_rounds_won ELSE mm.p2_rounds_won END AS my_r,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p1_points_total ELSE mm.p2_points_total END AS my_p,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p2_rounds_won ELSE mm.p1_rounds_won END AS op_r,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p2_points_total ELSE mm.p1_points_total END AS op_p,
                    p.id AS player_id, p.display_name, p.steam_id,
                    gr.rating, si.name AS title, si.preview_color AS title_color,
                    si.sku AS title_sku, op.display_name AS opp_name,
                    op.steam_id AS opp_steam
               FROM best b
+              JOIN matches mm ON mm.id = b.match_id
               JOIN players p ON p.id = b.pid AND p.deleted_at IS NULL
               LEFT JOIN players op ON op.id = b.opp
               LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
@@ -7168,17 +7225,20 @@ async def get_records_board(
         q = f"""
             WITH {_RECORDS_CARDS_CTE},
             seat AS (
+                /* Reporter-seat-only — see the seat-board comment (r3 f2). */
                 SELECT m.id AS match_id, m.ended_at, m.player1_id AS pid,
                        m.player2_id AS opp, m.p1_damage_dealt AS dmg,
                        COALESCE(m.duration_seconds, m.match_duration) AS dur
                   FROM matches m
                  WHERE m.invalidated_at IS NULL AND m.p1_damage_dealt > 0
+                   AND m.reported_by = m.player1_id
                 UNION ALL
                 SELECT m.id, m.ended_at, m.player2_id, m.player1_id,
                        m.p2_damage_dealt,
                        COALESCE(m.duration_seconds, m.match_duration)
                   FROM matches m
                  WHERE m.invalidated_at IS NULL AND m.p2_damage_dealt > 0
+                   AND m.reported_by = m.player2_id
             ),
             qual AS (
                 SELECT s.*, cp.cards, (s.dmg * 10.0 / s.dur) AS dps10
@@ -7186,32 +7246,44 @@ async def get_records_board(
                   LEFT JOIN cards_per cp
                     ON cp.match_id = s.match_id AND cp.player_id = s.pid
                  WHERE s.dur >= 120 AND NOT COALESCE(cp.has_growth, FALSE)
+                   AND {_RECORDS_EXCL_SEAT}
             ),
             best AS (
                 SELECT DISTINCT ON (q.pid) q.*
                   FROM qual q ORDER BY q.pid, q.dps10 DESC, q.ended_at ASC
             )
-            SELECT ROUND(b.dps10)::int AS val, b.ended_at, b.cards,
+            SELECT ROUND(b.dps10)::int AS val, b.ended_at, b.cards, b.match_id,
+                   COALESCE(mm.duration_seconds, mm.match_duration) AS dur,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p1_rounds_won ELSE mm.p2_rounds_won END AS my_r,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p1_points_total ELSE mm.p2_points_total END AS my_p,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p2_rounds_won ELSE mm.p1_rounds_won END AS op_r,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p2_points_total ELSE mm.p1_points_total END AS op_p,
                    p.id AS player_id, p.display_name, p.steam_id,
                    gr.rating, si.name AS title, si.preview_color AS title_color,
                    si.sku AS title_sku, op.display_name AS opp_name,
                    op.steam_id AS opp_steam
               FROM best b
+              JOIN matches mm ON mm.id = b.match_id
               JOIN players p ON p.id = b.pid AND p.deleted_at IS NULL
               LEFT JOIN players op ON op.id = b.opp
               LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
               LEFT JOIN shop_items si ON si.id = p.active_title_id
              ORDER BY b.dps10 DESC LIMIT :lim
         """
-    elif board == "luckiest":
+    elif board == "rarest_hand":
+        # Renamed from "luckiest" (Sid, Aug 18): this is the rarest hand
+        # PICKED. "Luckiest" below is the rarest hand DRAWN (offers).
         q = f"""
             WITH {_RECORDS_CARDS_CTE},
             seat AS (
+                /* Reporter-seat-only — see the seat-board comment (r3 f2/f3). */
                 SELECT m.id AS match_id, m.ended_at, m.player1_id AS pid, m.player2_id AS opp
                   FROM matches m WHERE m.invalidated_at IS NULL
+                   AND m.reported_by = m.player1_id
                 UNION ALL
                 SELECT m.id, m.ended_at, m.player2_id, m.player1_id
                   FROM matches m WHERE m.invalidated_at IS NULL
+                   AND m.reported_by = m.player2_id
             ),
             qual AS (
                 SELECT s.*, cp.cards, cp.n, cp.rares,
@@ -7220,22 +7292,144 @@ async def get_records_board(
                   JOIN cards_per cp
                     ON cp.match_id = s.match_id AND cp.player_id = s.pid
                  WHERE cp.n >= 4 AND cp.rares > 0
+                   AND {_RECORDS_EXCL_SEAT}
             ),
             best AS (
                 SELECT DISTINCT ON (q.pid) q.*
                   FROM qual q ORDER BY q.pid, q.pct DESC, q.n DESC, q.ended_at ASC
             )
-            SELECT ROUND(b.pct)::int AS val, b.ended_at, b.cards,
+            SELECT ROUND(b.pct)::int AS val, b.ended_at, b.cards, b.match_id,
+                   COALESCE(mm.duration_seconds, mm.match_duration) AS dur,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p1_rounds_won ELSE mm.p2_rounds_won END AS my_r,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p1_points_total ELSE mm.p2_points_total END AS my_p,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p2_rounds_won ELSE mm.p1_rounds_won END AS op_r,
+                   CASE WHEN mm.player1_id = b.pid THEN mm.p2_points_total ELSE mm.p1_points_total END AS op_p,
                    p.id AS player_id, p.display_name, p.steam_id,
                    gr.rating, si.name AS title, si.preview_color AS title_color,
                    si.sku AS title_sku, op.display_name AS opp_name,
                    op.steam_id AS opp_steam
               FROM best b
+              JOIN matches mm ON mm.id = b.match_id
               JOIN players p ON p.id = b.pid AND p.deleted_at IS NULL
               LEFT JOIN players op ON op.id = b.opp
               LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
               LEFT JOIN shop_items si ON si.id = p.active_title_id
              ORDER BY b.pct DESC, b.n DESC LIMIT :lim
+        """
+    elif board == "luckiest":
+        # Rarest hand DRAWN (Sid, Aug 18): per (game, player), the share of
+        # Rare cards among the cards the game OFFERED them — picked or not.
+        # Deliberately NOT deduped per player: RNG should not favor anyone,
+        # so one person holding several placements here is an alarm bell,
+        # and hiding their extra rows would hide exactly that signal.
+        # Rarity of an offered card comes from the mode-elected canonical
+        # rarity over recorded picks (#316 family) — card_offers rows carry no
+        # rarity of their own. One vote per (match, player, card) and
+        # invalidated matches excluded (r1 finding 4: raw-row votes let one
+        # modified reporter stuff unlimited duplicate rarity claims into a
+        # single report, and an invalidated match kept voting forever).
+        # Floor of 8 offers keeps tiny-sample 100%s off the board (~14 real
+        # offers per recorded player per game in production).
+        #
+        # SCOPE (r1 finding 1, prod-verified 11,538/11,538): card_offers rows
+        # exist ONLY for the elected reporter's seat — the non-reporter's hand
+        # is never recorded, so only reporters can place here. That is the
+        # honest trade until peer offer sharing ships (#166 pattern): the only
+        # actor able to FORGE offers is the reporter, i.e. exactly the
+        # population this board can display.
+        #
+        # dedup (r1 finding 2, prod: 24,816 duplicate rows): the log path
+        # synthesizes the picked card and EndPick then appends the full
+        # candidate set containing it again — without DISTINCT the rare%
+        # depends on WHICH card was picked. real_rounds (r1 finding 3, prod:
+        # 11,298 one-card rounds): opening-pick recovery writes only the
+        # chosen card, an unusable 1/1 sample — a genuine candidate set has
+        # >= 3 distinct cards.
+        q = f"""
+            WITH rarity_map AS (
+                SELECT v.card_name,
+                       MODE() WITHIN GROUP (ORDER BY v.card_rarity) AS rarity
+                  FROM (SELECT DISTINCT mc.match_id, mc.player_id,
+                               mc.card_name, mc.card_rarity
+                          FROM match_cards mc
+                          JOIN matches mv ON mv.id = mc.match_id
+                               AND mv.invalidated_at IS NULL
+                         WHERE mc.card_rarity IS NOT NULL
+                           AND mc.card_rarity <> 'Unknown'
+                           /* r3 f4: votes only from the seat that reported —
+                            * the opponent's array is reporter-authored. A
+                            * sustained fake-match farm can still outvote a
+                            * low-history card (documented residual; the
+                            * structural fix is a static server-side rarity
+                            * table exported from the client's
+                            * CardRarityLookup — TODO). */
+                           AND mc.player_id = mv.reported_by
+                           /* r2 finding 4: a match an admin excluded for
+                            * cheating must stop voting in the election too,
+                            * whatever board the exclusion named. */
+                           AND NOT EXISTS (SELECT 1 FROM record_exclusions rex
+                                            WHERE rex.match_id = mc.match_id)) v
+                 GROUP BY v.card_name
+            ),
+            dedup AS (
+                SELECT DISTINCT co.match_id, co.player_id, co.round_number, co.card_name
+                  FROM card_offers co
+            ),
+            counted AS (
+                /* Round size via a WINDOW, never a dedup-to-itself join: two
+                 * unindexed materialized CTEs joined on 3 columns went
+                 * nested-loop on prod and ran 3+ minutes before being
+                 * cancelled; this form is sub-second on the same data. */
+                SELECT d.*, COUNT(*) OVER (
+                    PARTITION BY d.match_id, d.player_id, d.round_number) AS round_size
+                  FROM dedup d
+            ),
+            offer_stats AS (
+                SELECT c.match_id, c.player_id, COUNT(*) AS n,
+                       COUNT(*) FILTER (WHERE rm.rarity = 'Rare') AS rares,
+                       LEFT(STRING_AGG(REPLACE(c.card_name, '|', '/'), '|'
+                                  ORDER BY c.round_number, c.card_name), 2000) AS cards
+                  FROM counted c
+                  LEFT JOIN rarity_map rm ON rm.card_name = c.card_name
+                 WHERE c.round_size >= 3
+                 GROUP BY c.match_id, c.player_id
+            ),
+            seat AS (
+                /* Reporter-seat-only — see the seat-board comment (r3 f2/f3). */
+                SELECT m.id AS match_id, m.ended_at, m.player1_id AS pid, m.player2_id AS opp
+                  FROM matches m WHERE m.invalidated_at IS NULL
+                   AND m.reported_by = m.player1_id
+                UNION ALL
+                SELECT m.id, m.ended_at, m.player2_id, m.player1_id
+                  FROM matches m WHERE m.invalidated_at IS NULL
+                   AND m.reported_by = m.player2_id
+            ),
+            qual AS (
+                SELECT s.*, os.cards, os.n, os.rares,
+                       (os.rares * 100.0 / os.n) AS pct
+                  FROM seat s
+                  JOIN offer_stats os
+                    ON os.match_id = s.match_id AND os.player_id = s.pid
+                 WHERE os.n >= 8 AND os.rares > 0
+                   AND {_RECORDS_EXCL_SEAT}
+            )
+            SELECT ROUND(q.pct)::int AS val, q.ended_at, q.cards, q.match_id,
+                   COALESCE(mm.duration_seconds, mm.match_duration) AS dur,
+                   CASE WHEN mm.player1_id = q.pid THEN mm.p1_rounds_won ELSE mm.p2_rounds_won END AS my_r,
+                   CASE WHEN mm.player1_id = q.pid THEN mm.p1_points_total ELSE mm.p2_points_total END AS my_p,
+                   CASE WHEN mm.player1_id = q.pid THEN mm.p2_rounds_won ELSE mm.p1_rounds_won END AS op_r,
+                   CASE WHEN mm.player1_id = q.pid THEN mm.p2_points_total ELSE mm.p1_points_total END AS op_p,
+                   p.id AS player_id, p.display_name, p.steam_id,
+                   gr.rating, si.name AS title, si.preview_color AS title_color,
+                   si.sku AS title_sku, op.display_name AS opp_name,
+                   op.steam_id AS opp_steam
+              FROM qual q
+              JOIN matches mm ON mm.id = q.match_id
+              JOIN players p ON p.id = q.pid AND p.deleted_at IS NULL
+              LEFT JOIN players op ON op.id = q.opp
+              LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+              LEFT JOIN shop_items si ON si.id = p.active_title_id
+             ORDER BY q.pct DESC, q.n DESC, q.ended_at ASC LIMIT :lim
         """
     else:
         # longest_game / shortest_game — MATCH rows, both participants shown.
@@ -7247,7 +7441,10 @@ async def get_records_board(
         q = f"""
             WITH {_RECORDS_CARDS_CTE}
             SELECT COALESCE(m.duration_seconds, m.match_duration) AS val,
-                   m.ended_at,
+                   COALESCE(m.duration_seconds, m.match_duration) AS dur,
+                   m.p1_rounds_won AS my_r, m.p1_points_total AS my_p,
+                   m.p2_rounds_won AS op_r, m.p2_points_total AS op_p,
+                   m.ended_at, m.id AS match_id,
                    p1.id AS player_id, p1.display_name, p1.steam_id,
                    gr.rating, si.name AS title, si.preview_color AS title_color,
                    si.sku AS title_sku,
@@ -7265,6 +7462,16 @@ async def get_records_board(
               LEFT JOIN shop_items si ON si.id = p1.active_title_id
              WHERE m.invalidated_at IS NULL AND m.winner_id IS NOT NULL
                AND COALESCE(m.duration_seconds, m.match_duration) >= :floor
+               /* r3 f1: 6h ceiling — the longest honest 1v1 on record is
+                * 124 minutes (prod, June 22); an absurd forged duration
+                * otherwise owns this board forever. */
+               AND COALESCE(m.duration_seconds, m.match_duration) <= 21600
+               AND NOT EXISTS (
+                    SELECT 1 FROM record_exclusions re
+                     WHERE re.match_id = m.id
+                       AND (re.board = :board OR re.board = '*')
+                       AND (re.player_id IS NULL
+                            OR re.player_id IN (m.player1_id, m.player2_id)))
              ORDER BY val {order}, m.ended_at ASC LIMIT :lim
         """
 
@@ -7308,9 +7515,75 @@ async def get_records_board(
         cards=[r["cards"] or "" for r in rows],
         names2=[r["opp_name"] or "" for r in rows],
         steam_ids2=[r["opp_steam"] or "" for r in rows],
+        match_ids=[str(r["match_id"]) for r in rows],
+        durations=[int(r["dur"] or 0) if "dur" in r else 0 for r in rows],
+        scores=[_rec_half_pair(r) for r in rows],
         cards2=[(r["cards2"] or "") if "cards2" in r else "" for r in rows],
         ratings2=[(int(r["rating2"]) if r.get("rating2") is not None else 0) if "rating2" in r else 0 for r in rows],
     )
+
+
+@app.post("/api/v1/admin/records/exclude", tags=["Admin"])
+async def admin_record_exclude(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Remove a record row from the boards (Sid, Aug 18: judgement calls on
+    cheated records). Excludes a (board, match, seat) — the match itself is
+    untouched (invalidation is the ratings/gold hammer; this is display-tier
+    only, so it is deliberately NOT reversible through the API — undo is a
+    one-row SQL DELETE with the audit row saying who and why).
+
+    Admin-HMAC canonical: admin:{admin}:record_exclude:{board}:{match_id}:{steam_or_-}
+    steam_id "" / "-" = match-wide (both seats; the game-length boards)."""
+    admin_id = str(payload.get("admin_steam_id", ""))[:20]
+    board = str(payload.get("board", ""))[:32]
+    match_id = str(payload.get("match_id", ""))[:40]
+    steam_id = str(payload.get("steam_id", ""))[:20]
+    if steam_id == "-":
+        steam_id = ""
+    reason = str(payload.get("reason", ""))[:400]
+    # r4 f1: hmac.compare_digest raises TypeError on non-string / non-ASCII
+    # input — fail closed as a 403, never a 500.
+    _sig = payload.get("signature")
+    if not isinstance(_sig, str) or not _sig.isascii():
+        _sig = ""
+    await _require_admin(db, admin_id, "record_exclude",
+                         f"{board}:{match_id}:{steam_id or '-'}",
+                         _sig)
+    valid_boards = set(_RECORDS_SEAT_BOARDS) | _RECORDS_OTHER_BOARDS | {"*"}
+    if board not in valid_boards:
+        raise HTTPException(400, "unknown board")
+    try:
+        mid = uuid.UUID(match_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(400, "bad match_id")
+    m = (await db.execute(text(
+        "SELECT id, player1_id, player2_id FROM matches WHERE id = :m"
+    ), {"m": str(mid)})).mappings().first()
+    if m is None:
+        raise HTTPException(404, "match not found")
+    pid = None
+    if steam_id:
+        p = (await db.execute(text(
+            "SELECT id FROM players WHERE steam_id = :s"
+        ), {"s": steam_id})).first()
+        if p is None:
+            raise HTTPException(404, "player not found")
+        pid = p[0]
+        # A seat exclusion naming a player who wasn't in the match is a
+        # mis-aimed click, not a valid no-op — refuse it loudly.
+        if pid not in (m["player1_id"], m["player2_id"]):
+            raise HTTPException(400, "player not in that match")
+    await db.execute(text(
+        "INSERT INTO record_exclusions (board, match_id, player_id, reason, created_by)"
+        " VALUES (:b, :m, :p, :r, :a)"
+        " ON CONFLICT (board, match_id, player_id) DO NOTHING"
+    ), {"b": board, "m": str(mid), "p": str(pid) if pid else None,
+        "r": reason or None, "a": admin_id})
+    await _log_admin_action(db, admin_steam_id=admin_id, action="record_exclude",
+                            target_steam_id=steam_id or None,
+                            details={"board": board, "match_id": str(mid),
+                                     "reason": reason})
+    await db.commit()
+    return {"status": "ok"}
 
 
 @app.get("/api/v1/cards/top-pickers", response_model=CardTopPickersResponse, tags=["Cards"])

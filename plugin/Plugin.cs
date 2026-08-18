@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.38.7";   // Aug 15: tournament batch — gold tournament banner (bug 231), bets-popup click fix (bug 230), sct- spectate attestation, preflight room-incarnation fences, tournament DMs/tags server+bot side
+        public const string ModVersion = "1.39.0";   // Aug 18: records v2 (Rarest Hand + Luckiest + admin removal + reporter-seat-only), tournaments popup/bracket corrections, 14pt floor, chat overlay, PlayerName repair, resumed-series score, broadcast seat pin/idle
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -53,6 +53,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowFps;
         internal static ConfigEntry<bool> CapFpsUnfocused;
         internal static ConfigEntry<bool> DeepIdleUnfocused;
+        internal static ConfigEntry<bool> BroadcastIdleFpsCap;
+        internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
         // Bug 211/213 (Sid's chosen design): M cycles the in-game chat overlay
@@ -525,6 +527,23 @@ namespace CompetitiveRounds
                 "Performance", "DeepIdleUnfocused",
                 true,
                 "After 60 seconds continuously unfocused AND outside any online room/battle/queue-match, drop the engine to 15 FPS (deep idle). Restores instantly on focus, on match found, or on joining a room. Never active during online play."
+            );
+
+            // Sid, Aug 18: the broadcast VM's game runs 24/7 and the
+            // focus-gated deep idle never engages there (the seat's window
+            // HOLDS focus — nothing else runs on that machine). Inert for
+            // regular players: the arm is additionally gated on the broadcast
+            // identity, so this key only means anything on the bot account.
+            BroadcastIdleFpsCap = Config.Bind(
+                "Performance", "BroadcastIdleFpsCap",
+                true,
+                "Broadcast seat only: after 16 minutes continuously idle (no spectate session, no room, nothing pending), drop the engine to 15 FPS regardless of window focus. Restores instantly when a broadcast target appears."
+            );
+
+            BroadcastWindowed1080 = Config.Bind(
+                "Broadcast", "BroadcastWindowed1080",
+                true,
+                "Broadcast seat only: pin the game to windowed 1920x1080 (the capture geometry OBS expects), re-asserted every 30 seconds. The VM's RDP display exposes no resolution list, so the in-game picker cannot do this."
             );
 
             ShowRegionPing = Config.Bind(
@@ -1680,12 +1699,56 @@ namespace CompetitiveRounds
         /// DESIGN (TaskbarFlash exists for that flow) and the Photon handshake
         /// should run at stage-1 speed — the predicate flips BEFORE the room
         /// join begins, exactly when we want to wake.</summary>
+        /* Sid, Aug 18 (v1.39.0): pin the broadcast seat's game to WINDOWED
+         * 1920x1080. Why a mod-side pin and not settings: ROUNDS' own options
+         * system (OptionsData.ApplyScreen -> Screen.SetResolution) reapplies
+         * its saved video mode at boot and clamps every choice to
+         * Screen.resolutions — which the VM's RDP virtual display enumerates
+         * as EMPTY, so neither the in-game picker nor Unity's screenmanager
+         * registry values can produce 1920x1080 there. Windowed mode accepts
+         * arbitrary sizes regardless of the display's mode list, OBS
+         * window-capture reads the client area even when the window clips
+         * off a 1080p desktop, and the 30s re-assert outlives any late
+         * ApplyScreen from vanilla's options load. Broadcast identity +
+         * config gated — inert for every regular player. */
+        private float bcastResNextCheckRt;
+        private void TickBroadcastWindowPin()
+        {
+            try
+            {
+                if (Plugin.modDisabled) return;
+                if (Plugin.BroadcastWindowed1080 == null || !Plugin.BroadcastWindowed1080.Value) return;
+                // Identity check BEFORE the cooldown stamp (r3 finding 5):
+                // stamping first burned the whole first 30s window while the
+                // broadcast identity was still resolving at boot, leaving the
+                // seat at the wrong capture geometry exactly when the
+                // director might already be acquiring a target.
+                if (!BroadcastMode.DirectorActive) return;
+                if (Time.realtimeSinceStartup < bcastResNextCheckRt) return;
+                bcastResNextCheckRt = Time.realtimeSinceStartup + 30f;
+                if (Screen.width == 1920 && Screen.height == 1080
+                    && Screen.fullScreenMode == FullScreenMode.Windowed) return;
+                int oldW = Screen.width, oldH = Screen.height;
+                var oldMode = Screen.fullScreenMode;
+                Screen.SetResolution(1920, 1080, FullScreenMode.Windowed);
+                Plugin.Log.LogInfo($"[BROADCAST] window pinned to 1920x1080 windowed (was {oldW}x{oldH} {oldMode})");
+            }
+            catch { }
+        }
+
         private bool WantDeepIdle()
         {
             if (Plugin.modDisabled) return false;                       // disabled mod may only restore
             if (Plugin.DeepIdleUnfocused == null || !Plugin.DeepIdleUnfocused.Value) return false;
             if (unfocusedSinceRt < 0f) return false;
             if (Time.realtimeSinceStartup - unfocusedSinceRt < 60f) return false;
+            return OutOfPlayForIdle();
+        }
+
+        /// <summary>The shared out-of-play gates for BOTH idle arms. Any gate
+        /// failing wakes the engine within one frame (≤67ms at 15fps).</summary>
+        private bool OutOfPlayForIdle()
+        {
             // Aug 11 playtest item 5: a spectator seat is blind to BOTH room
             // gates below — the session quiesces GameStateWatcher before
             // PollRoomState ever writes wasInRoom, and battleOngoing is only
@@ -1695,12 +1758,50 @@ namespace CompetitiveRounds
             // InRoom check fixes the CLASS for any future watcher-sleeping
             // seat (#122 semantics without depending on wasInRoom).
             try { if (SpectatorSession.IsLocalSpectator) return false; } catch { }
+            // r3 finding 10: a granted-but-not-yet-joined broadcast target
+            // passed every gate below for up to 15s — the throttle must lift
+            // the moment the director leaves Idle, not when the spectator
+            // session finally exists. Always false for regular players.
+            try { if (BroadcastMode.DirectorBusy) return false; } catch { }
             try { if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode) return false; } catch { }
             if (GameStateWatcher.IsInOnlineRoom) return false;          // never in online play (#122-safe accessor)
             try { if (GameManager.instance != null && GameManager.instance.battleOngoing) return false; } catch { }
             if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom)) return false;
             if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0 || Plugin.PendingFfaSlot >= 0) return false;
             return true;
+        }
+
+        /* Sid, Aug 18 ("hibernate the game if it's running too long without
+         * viewing/broadcasting a match"): the broadcast VM's game runs 24/7
+         * and the focus-gated arm above never engages there — the seat's
+         * window HOLDS focus, because nothing else runs on that machine.
+         * This arm is focus-INDEPENDENT: broadcast identity + config + the
+         * same out-of-play gates, continuously true for 16 minutes.
+         *
+         * Why a frame throttle and not close/suspend/minimize: the mod is
+         * the only credentialed actor that can DISCOVER a match to broadcast
+         * (the VM bot has no server credentials by design), a closed game
+         * would read as a stale status lease and trigger the bot's fenced
+         * ROUNDS replacement, and OBS window-capture stops producing frames
+         * for a minimized window. 15 FPS keeps the status-lease writer, the
+         * /broadcast/target poll and Photon keepalives all healthy (same
+         * analysis as the deep-idle constant above).
+         *
+         * Why 960s: the director stops public outputs after 900s idle
+         * (idle_stop_seconds). Engaging strictly AFTER that means the
+         * throttle can never interact with a live output scene, whatever
+         * the OBS scene layout captures. */
+        private float broadcastIdleGatesPassRt = -1f;
+        private bool WantBroadcastIdle()
+        {
+            if (Plugin.modDisabled) return false;
+            if (Plugin.BroadcastIdleFpsCap == null || !Plugin.BroadcastIdleFpsCap.Value) return false;
+            bool seat = false;
+            try { seat = BroadcastMode.DirectorActive; } catch { }
+            if (!seat) { broadcastIdleGatesPassRt = -1f; return false; }
+            if (!OutOfPlayForIdle()) { broadcastIdleGatesPassRt = -1f; return false; }
+            if (broadcastIdleGatesPassRt < 0f) { broadcastIdleGatesPassRt = Time.realtimeSinceStartup; return false; }
+            return Time.realtimeSinceStartup - broadcastIdleGatesPassRt >= 960f;
         }
 
         private void TickUnfocusedFpsCap()
@@ -1713,8 +1814,11 @@ namespace CompetitiveRounds
 
                 // ── Stage 2: deep idle (checked first so its restore runs
                 // before stage 1's check in the same tick — the two stages
-                // layer: deep saves whatever stage 1 left in place). ──
-                bool wantDeep = unfocused && WantDeepIdle();
+                // layer: deep saves whatever stage 1 left in place). Two
+                // arms, one mechanism: unfocused players, or the broadcast
+                // seat's focus-independent idle (Sid, Aug 18). ──
+                bool broadcastIdle = WantBroadcastIdle();
+                bool wantDeep = (unfocused && WantDeepIdle()) || broadcastIdle;
                 if (wantDeep && !fpsDeepIdleApplied)
                 {
                     deepSavedTarget = Application.targetFrameRate;
@@ -1722,7 +1826,9 @@ namespace CompetitiveRounds
                     QualitySettings.vSyncCount = 0; // vSync overrides targetFrameRate
                     Application.targetFrameRate = 15;
                     fpsDeepIdleApplied = true;
-                    Plugin.Log.LogInfo("[FPSCAP] deep idle engaged (60s+ unfocused, out of room)");
+                    Plugin.Log.LogInfo(broadcastIdle
+                        ? "[FPSCAP] deep idle engaged (broadcast seat 16min+ idle)"
+                        : "[FPSCAP] deep idle engaged (60s+ unfocused, out of room)");
                 }
                 else if (!wantDeep && fpsDeepIdleApplied)
                 {
@@ -1785,6 +1891,7 @@ namespace CompetitiveRounds
             // ruined session at 15). Apply paths gate on !modDisabled inside;
             // a disabled mod can only ever RESTORE.
             TickUnfocusedFpsCap();
+            TickBroadcastWindowPin();
 
             if (Plugin.modDisabled) return;
 

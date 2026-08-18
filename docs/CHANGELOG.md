@@ -1,10 +1,52 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.39.0 — 2026-08-18
 
 Schema changes: migrations **225** (`spectate_drain_tombstones` table +
 spectator cap default 5; applied 2026-08-16), **226** (`stream_channel_posts`
-living-stream-post table).
+living-stream-post table), **227** (`record_exclusions` — admin record
+removal).
+
+**Records (round 2, Aug 18)**
+
+- **Rarest Hand** — the rare-picks record board's proper name (it measures
+  the rarest hand *picked*).
+- **New: Luckiest** — the rarest hand *drawn*: the share of Rare cards among
+  everything a game offered a player, picked or not (counted over recorded
+  hands with a full candidate set). Deliberately allows the same player to
+  hold several placements — luck shouldn't favor anyone, so a name filling
+  this board up is worth a second look.
+- **Records now has two pages** (button top-right of the panel); new boards
+  land on page 2.
+- **Admins can remove records** — a small control on each row (click twice
+  to confirm) excludes a cheated row from the boards without touching the
+  match itself; every removal is audit-logged.
+- **Record hovers carry the game** — score (half-point convention), duration,
+  the holder's full name and title, and the cards one per line.
+- **Home tab "Get Link Code" button no longer clips its label.**
+
+**Corrections + polish (round 3, Aug 18)**
+
+- Recent Tournaments popup is split into **Sync and Async sections** again.
+- Bracket hover scores use the **half-point convention** (the "(x-y pts)"
+  form is gone for good).
+- **Text floor:** everything this batch touched renders at 14pt bold or
+  bigger — records rows, bracket cells and elos, hover tooltips.
+- Offer telemetry hardened: offers are recorded only for the reporting
+  player's own seat, with size caps, and excluded matches stop voting in
+  the card-rarity election.
+- **Records boards only admit rows the holder's own client reported** — a
+  modified opponent can no longer plant a fake record (stats, cards, or
+  draws) under an innocent player's name. Rarity votes follow the same
+  rule, and forged-length games can't own the Longest Game board.
+- **Every new string is translated** (es/ru/uk/sv — 65 keys x 4 languages).
+
+**Broadcast seat (VM-only, invisible to players)**
+
+- The game pins itself to windowed 1920x1080 (the capture geometry OBS
+  expects) and drops to 15fps after 16 minutes idle — both only on the
+  broadcast identity.
+- Nightly clean cycle at 05:00 (skipped while a stream is live).
 
 **Fixed**
 

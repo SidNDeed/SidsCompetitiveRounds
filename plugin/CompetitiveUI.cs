@@ -2606,14 +2606,17 @@ namespace CompetitiveRounds
 
             if (_cardTipTitleStyle == null)
             {
+                // 14pt bold floor everywhere (Sid, Aug 18: nothing smaller
+                // than the My Stats FPS/Ping text, everything bold).
                 _cardTipTitleStyle = new GUIStyle(GUI.skin.label)
                 {
-                    fontSize = 13, richText = true, fontStyle = FontStyle.Bold,
+                    fontSize = 14, richText = true, fontStyle = FontStyle.Bold,
                     alignment = TextAnchor.MiddleLeft,
                 };
                 _cardTipBodyStyle = new GUIStyle(GUI.skin.label)
                 {
-                    fontSize = 12, richText = true, wordWrap = true,
+                    fontSize = 14, richText = true, wordWrap = true,
+                    fontStyle = FontStyle.Bold,
                     alignment = TextAnchor.UpperLeft,
                 };
             }
@@ -2752,7 +2755,7 @@ namespace CompetitiveRounds
         // counts lie the moment a long localised card name wraps) is paid once.
         private const float TIP_COL_W = 260f;
         private const float TIP_COL_GAP = 8f;
-        private const float TIP_LINE_H = 16f;
+        private const float TIP_LINE_H = 19f;   // 14pt bold line box (was 16 for 12pt)
         private static string[] _tipLayCols = new string[0];
         private static float _tipLayBodyH;
         private static string _tipLayBody;
