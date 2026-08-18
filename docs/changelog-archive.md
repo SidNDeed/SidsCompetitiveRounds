@@ -146,3 +146,10 @@ mode tab · LFP mode multi-select + Discord emoji · deep idle · shop New chip
 + on-body preview · admin tab restructure + ban-velocity gate · uncut
 formatted release notes · Stan #178-181 (FFA before/after ratings, /game
 codes, stats help page, graph redesign + whole-game timelines).
+
+## 2026-08-16/17 — Broadcast infrastructure sessions
+- Spectator broadcast system designed (8 review rounds), implemented across
+  server (deployed, migration 225) and client, with an automated streaming
+  pipeline brought to first light on dedicated infrastructure. Reserved
+  broadcast spectator seat, service-account isolation policy, and stream
+  lifecycle automation. Twitch/YouTube channels: SidsCompetitiveRounds.
