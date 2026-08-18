@@ -238,6 +238,14 @@ namespace CompetitiveRounds
             if (!IsLocalSpectator && string.IsNullOrEmpty(PendingRoom)) return;
             bool wasSpectating = IsLocalSpectator;
             Plugin.Log?.LogInfo($"[SPECTATE] session end ({reason})");
+            // SCR Broadcast §3a: sessions can die WITHOUT LeaveToMenu (the
+            // organic case — vanilla's DoDisconnect cascade on a fighter
+            // leaving yanks the spectator, and Plugin.OnLeftRoom lands here
+            // with "left room"). The director classifies the death by its
+            // recorded reason; unrecorded reads as "unexplained = failure",
+            // which mis-scored every normal sitting end as seat pathology.
+            // Fallback-record: a LeaveToMenu-recorded reason always wins.
+            try { BroadcastMode.NoteSessionLeaveFallback(reason); } catch { }
             // Flag teardown must be independent of the role flag and of the
             // room-exit observation (r11 find 1: a Fail() racing a same-frame
             // successful join cleared the role before the exit was observed,

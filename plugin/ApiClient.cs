@@ -1049,8 +1049,16 @@ namespace CompetitiveRounds
                 }
                 // Auto-fire update on launch if behind. The Update method is no-op
                 // when running the Thunderstore build (it surfaces a notification only).
+                // NOT on the broadcast seat: that binary is installed by the build
+                // pipeline (CopyToPlugins), and the updater's wait-for-exit swap
+                // races the VM bot's ~20s stale-lease relaunch — the game quits
+                // for the swap, the bot relaunches it before the copy window
+                // opens, the still-old build re-arms the updater, and the seat
+                // loops quit/relaunch (observed all night Aug 18 during the
+                // v1.39.0 release window). The F5 Update button stays available.
                 if (!string.IsNullOrEmpty(LatestModVersion) && CompareVersion(Plugin.ModVersion, LatestModVersion) < 0
-                    && !IsUpdating && !UpdateReady)
+                    && !IsUpdating && !UpdateReady
+                    && !BroadcastMode.IsBroadcastIdentity)
                 {
                     Plugin.Log.LogInfo("[VERSION] Auto-firing update on launch");
                     StartAutoUpdate();

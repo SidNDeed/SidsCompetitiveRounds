@@ -259,6 +259,7 @@ namespace CompetitiveRounds
         }
 
         private const float PANEL_W = 232f;
+        private const float PANEL_MARGIN_X = 10f;
 
         private static float PanelHeight(bool withActions)
         {
@@ -266,33 +267,128 @@ namespace CompetitiveRounds
             return 26f + stats * 17f + 16f + (withActions ? 46f : 0f) + 10f;
         }
 
-        /// <summary>1v1: bottom side panels pulled inward (config offsets),
-        /// team 0 left / team 1 right — the same left/right convention the
-        /// spectator top bar uses. Action rows on (1v1 first, §4).</summary>
-        private static void Draw1v1Panels()
+        // ── top anchor: measured just under the vanilla card bars ─────────
+        // (Sid, Aug 18: the mid/low panels sat over the arena — "move them to
+        // the top corners, under the cards".) The bars are uGUI rows under
+        // ROUNDS' ScreenSpaceCamera canvas, so their screen rect must go
+        // through the canvas camera (#6); measured live rather than
+        // hardcoded because the rows' height depends on resolution and the
+        // bars only exist once a game is assembled. 1s cache (#162);
+        // fallback sits below the spectator top bar + tournament tag.
+        private static float _anchorYCache = 90f;
+        private static float _anchorYAt = -999f;
+        private static readonly Vector3[] _cornerScratch = new Vector3[4];
+        private static Type _tCanvasCached;
+        private static System.Reflection.PropertyInfo _piRenderMode, _piWorldCamera;
+
+        /// <summary>The canvas camera for a uGUI element, by reflection (#15:
+        /// no UIModule reference in this assembly). Same walk NativeUI's
+        /// hover-region code uses: nearest Canvas ancestor; renderMode 0
+        /// (ScreenSpaceOverlay) means world corners already ARE screen
+        /// points; otherwise worldCamera (Camera.main fallback), per #6.</summary>
+        private static Camera ResolveUiCamera(Component element, out bool overlay, out bool resolved)
         {
-            float offX = 300f, offY = 110f;
+            overlay = false;
+            resolved = false;
             try
             {
-                if (Plugin.BroadcastHudOffsetX != null) offX = Mathf.Clamp(Plugin.BroadcastHudOffsetX.Value, 0f, Screen.width / 2f - PANEL_W);
-                if (Plugin.BroadcastHudOffsetY != null) offY = Mathf.Clamp(Plugin.BroadcastHudOffsetY.Value, 0f, Screen.height - 100f);
+                if (_tCanvasCached == null)
+                {
+                    _tCanvasCached = UIFactory.tCanvas
+                        ?? Type.GetType("UnityEngine.Canvas, UnityEngine.UIModule");
+                    if (_tCanvasCached != null)
+                    {
+                        var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+                        _piRenderMode = _tCanvasCached.GetProperty("renderMode", bf);
+                        _piWorldCamera = _tCanvasCached.GetProperty("worldCamera", bf);
+                    }
+                }
+                if (_tCanvasCached == null) return null;
+                var t = element.transform;
+                while (t != null)
+                {
+                    var cc = t.GetComponent(_tCanvasCached);
+                    if (cc != null)
+                    {
+                        resolved = true;
+                        int rm = _piRenderMode != null ? (int)_piRenderMode.GetValue(cc) : 0;
+                        if (rm == 0) { overlay = true; return null; }
+                        var cam = _piWorldCamera != null ? _piWorldCamera.GetValue(cc) as Camera : null;
+                        return cam != null ? cam : Camera.main;
+                    }
+                    t = t.parent;
+                }
             }
             catch { }
-            float h = PanelHeight(withActions: true);
-            float y = Screen.height - h - offY;
-            DrawPanel(0, new Rect(offX, y, PANEL_W, h), withActions: true);
-            DrawPanel(1, new Rect(Screen.width - offX - PANEL_W, y, PANEL_W, h), withActions: true);
+            return null;
         }
 
-        /// <summary>2v2 / 1v2: compact panels beside the card bars (top-left /
-        /// top-right), stacked per team. Snapshot order is team-major
-        /// (TabStatsOverlay sorts TeamID then PlayerID), so a simple split by
-        /// TeamID lands teammates on the same side. No action rows (§4:
-        /// action display is 1v1-first).</summary>
+        private static float TopAnchorY()
+        {
+            if (Time.realtimeSinceStartup - _anchorYAt < 1f) return _anchorYCache;
+            _anchorYAt = Time.realtimeSinceStartup;
+            float bottom = 58f;
+            try
+            {
+                var handler = CardBarHandler.instance;
+                var bars = handler != null ? handler.cardBars : null;
+                if (bars != null)
+                {
+                    Camera uiCam = null;
+                    bool overlay = false, camResolved = false;
+                    for (int i = 0; i < bars.Length; i++)
+                    {
+                        var bar = bars[i];
+                        if (bar == null || !bar.gameObject.activeInHierarchy) continue;
+                        var rt = bar.transform as RectTransform;
+                        if (rt == null) continue;
+                        if (!camResolved)
+                        {
+                            uiCam = ResolveUiCamera(bar, out overlay, out camResolved);
+                            if (!camResolved) break;   // no canvas found: keep the fallback anchor
+                        }
+                        rt.GetWorldCorners(_cornerScratch);
+                        float minScreenY = float.MaxValue;
+                        for (int c = 0; c < 4; c++)
+                        {
+                            Vector3 world = _cornerScratch[c];
+                            float sy = overlay || uiCam == null ? world.y : uiCam.WorldToScreenPoint(world).y;
+                            if (sy < minScreenY) minScreenY = sy;
+                        }
+                        // IMGUI y runs downward; screen y upward.
+                        float guiBottom = Screen.height - minScreenY;
+                        if (guiBottom > bottom) bottom = guiBottom;
+                    }
+                }
+            }
+            catch { }
+            _anchorYCache = Mathf.Clamp(bottom + 6f, 58f, Screen.height * 0.35f);
+            return _anchorYCache;
+        }
+
+        /// <summary>1v1: panels in the TOP corners, directly under the card
+        /// bars (measured — TopAnchorY), team 0 left / team 1 right — the
+        /// same left/right convention the spectator top bar uses. Action
+        /// rows on (1v1 first, §4). Replaces the original bottom-side
+        /// placement that floated over the arena (Sid, Aug 18); the old
+        /// BroadcastHudOffsetX/Y config pair is retired with it.</summary>
+        private static void Draw1v1Panels()
+        {
+            float h = PanelHeight(withActions: true);
+            float y = TopAnchorY();
+            DrawPanel(0, new Rect(PANEL_MARGIN_X, y, PANEL_W, h), withActions: true);
+            DrawPanel(1, new Rect(Screen.width - PANEL_MARGIN_X - PANEL_W, y, PANEL_W, h), withActions: true);
+        }
+
+        /// <summary>2v2 / 1v2: compact panels in the top corners under the
+        /// card bars (same measured anchor as 1v1), stacked per team.
+        /// Snapshot order is team-major (TabStatsOverlay sorts TeamID then
+        /// PlayerID), so a simple split by TeamID lands teammates on the
+        /// same side. No action rows (§4: action display is 1v1-first).</summary>
         private static void DrawTeamPanels(int n)
         {
             float h = PanelHeight(withActions: false);
-            float leftY = 90f, rightY = 90f;
+            float leftY = TopAnchorY(), rightY = leftY;
             for (int i = 0; i < n; i++)
             {
                 var body = TabStatsOverlay.BroadcastFighterBody(i);

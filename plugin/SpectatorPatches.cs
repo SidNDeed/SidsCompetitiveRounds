@@ -694,7 +694,17 @@ namespace CompetitiveRounds
                                   || RoomActors.IsImpostorReplicated(otherPlayer)
                                   || RoomActors.IsRejected(otherPlayer)
                                   || RoomActors.IsUnauthorized(otherPlayer);
-                if (!nonFighter) return true;   // inert
+                if (!nonFighter)
+                {
+                    // Broadcast §3a classification evidence (Codex Aug 18
+                    // r2): a genuine fighter's departure is the causal
+                    // precursor of the vanilla cascade that yanks a
+                    // spectating seat at the sitting's organic end — stamp
+                    // it so the director can tell that end from a seat-side
+                    // drop. One latched-bool check off the broadcast seat.
+                    try { BroadcastMode.NoteFighterLeftRoom(); } catch { }
+                    return true;   // inert for vanilla
+                }
                 Plugin.Log?.LogInfo($"[SPECTATE] non-fighter actor {otherPlayer.ActorNumber} left — suppressing vanilla match teardown");
                 return false;
             }

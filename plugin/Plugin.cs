@@ -133,8 +133,9 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastEnabled;
         internal static ConfigEntry<string> BroadcastStatusPath;   // §3b lease file
         internal static ConfigEntry<bool> BroadcastHideChatPane;   // broadcast seat only
-        internal static ConfigEntry<float> BroadcastHudOffsetX;    // §4 1v1 panel pull-in
-        internal static ConfigEntry<float> BroadcastHudOffsetY;
+        // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
+        // bottom sides to the top corners under the card bars (measured
+        // anchor in BroadcastHud.TopAnchorY) — orphan cfg entries are inert.
 
         public static bool DataConsentGranted => DataConsent != null && DataConsent.Value == "granted";
         public static bool DataConsentAsked   => DataConsent != null && !string.IsNullOrEmpty(DataConsent.Value);
@@ -844,15 +845,6 @@ namespace CompetitiveRounds
                 "Broadcast", "HideChatPane", true,
                 "Hide the floating in-game chat pane on the broadcast seat so stream frames stay clean. Only consulted on the broadcast identity."
             );
-            BroadcastHudOffsetX = Config.Bind(
-                "Broadcast", "HudOffsetX", 300f,
-                "Broadcast HUD: how far the 1v1 bottom side panels are pulled inward from each screen edge, in pixels."
-            );
-            BroadcastHudOffsetY = Config.Bind(
-                "Broadcast", "HudOffsetY", 110f,
-                "Broadcast HUD: how far the 1v1 bottom side panels sit above the bottom edge, in pixels."
-            );
-
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──

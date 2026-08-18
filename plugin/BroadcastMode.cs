@@ -531,6 +531,32 @@ namespace CompetitiveRounds
             if (SessionIsForeign(t)) { AbandonToForeignSession("awaiting_activation"); return; }
             if (!SpectatorSession.IsLocalSpectator)
             {
+                // Codex r3 (CONFIRMED HIGH): the causal classification
+                // applies HERE too — a genuine fighter leaving while we
+                // await the first boundary (a late join landing near the
+                // sitting's natural end) yanks this seat through the same
+                // vanilla cascade as a watching-phase organic end, and
+                // unconditional failure here fed the 3-strike seat fault.
+                // Same evidence rule as TickWatching: unannotated death +
+                // fresh fighter-departure stamp = organic — no quarantine,
+                // no streak increment. Deliberately does NOT clear the
+                // streak (unlike the watching-phase organic end): a seat
+                // that never activated has demonstrated nothing, so the
+                // strictest reading of "no normal session between" stands.
+                // Explicit failure reasons and stampless deaths keep the
+                // pre-activation failure semantics unchanged.
+                bool organicPreActivation =
+                    IsUnannotatedRoomExit(_lastLeaveReason)
+                    && _fighterLeftAt >= 0f
+                    && now - _fighterLeftAt <= FIGHTER_EXIT_CASCADE_WINDOW;
+                if (organicPreActivation)
+                {
+                    RetireTicket("sitting ended before activation: "
+                        + (string.IsNullOrEmpty(_lastLeaveReason) ? "left room" : _lastLeaveReason));
+                    SetState(State.Idle, "sitting ended pre-activation");
+                    _nextPollAt = now + 2f;
+                    return;
+                }
                 // Session died before activation (sync failure path already
                 // tore it down and left the room).
                 NotePostRoomFailure(t, string.IsNullOrEmpty(_lastLeaveReason) ? "session_died" : _lastLeaveReason);
@@ -572,6 +598,29 @@ namespace CompetitiveRounds
             {
                 // Session ended and the exit was already observed.
                 bool failure = IsFailureLeaveReason(_lastLeaveReason);
+                // Codex rounds 1+2 (both CONFIRMED HIGH, opposite
+                // directions): an UNANNOTATED room exit ("left room" / the
+                // tick backstop / nothing recorded) cannot be classified by
+                // name (r1: always-organic deletes the 3-strike seat-fault
+                // bound for a seat that keeps dropping) nor by watch
+                // duration (r2: a legitimate LATE-JOIN sitting ending 20-80s
+                // after activation is observationally identical to a short
+                // seat failure). The CAUSAL evidence discriminates exactly:
+                // an organic end IS vanilla's DoDisconnect cascade, and its
+                // precursor — a genuine FIGHTER leaving the room — is
+                // observed on this seat seconds before the yank
+                // (Spectator_LeaveIsInvisible_Patch stamps it). Fighter
+                // departure observed recently => organic, whatever the
+                // watch length; not observed => seat-side death, full
+                // failure semantics (quarantine + streak). Explicit reasons
+                // keep their name-based classification untouched. Accepted
+                // residual: a seat-side drop landing within the 15s window
+                // of an UNRELATED fighter leave (e.g. FFA mid-game leaver
+                // whose cascade is suppressed) misses one streak increment —
+                // a coincidence, not a systematic bypass.
+                if (IsUnannotatedRoomExit(_lastLeaveReason))
+                    failure = !(_fighterLeftAt >= 0f
+                                && now - _fighterLeftAt <= FIGHTER_EXIT_CASCADE_WINDOW);
                 if (failure)
                 {
                     NotePostRoomFailure(t, _lastLeaveReason);
@@ -729,6 +778,7 @@ namespace CompetitiveRounds
             };
             CurrentTargetMeta = target;
             _lastLeaveReason = "";
+            _fighterLeftAt = -1f;   // per-arc evidence; a prior sitting's stamp must not vouch
             SetState(State.Granting, $"target game={target.game_id}");
             // The broadcast dispatch returns its grant OWNER TOKEN (r1 F6):
             // 0 = never dispatched (precheck refused), which TickGranting
@@ -943,6 +993,39 @@ namespace CompetitiveRounds
                 EnterFaulted("3 distinct games failed post-room consecutively");
         }
 
+        /// <summary>How recently a genuine FIGHTER's departure must have been
+        /// observed for an unannotated room exit to classify as the organic
+        /// end of the sitting. Vanilla's cascade (OnPlayerLeftRoom ->
+        /// DoDisconnect -> our yank) completes in ~1-5s; the slack covers
+        /// slow frames without letting an unrelated leave minutes earlier
+        /// vouch for a seat-side drop.</summary>
+        private const float FIGHTER_EXIT_CASCADE_WINDOW = 15f;
+
+        // Stamped by Spectator_LeaveIsInvisible_Patch when a genuine
+        // fighter's departure is observed on this seat — the causal
+        // precursor of the vanilla cascade (#209) that yanks a spectator
+        // out of an ended sitting. Cleared per acquisition arc.
+        private static float _fighterLeftAt = -1f;
+
+        /// <summary>Evidence hook: a genuine (non-spectator) actor left the
+        /// room this seat is in. Inert off the broadcast identity.</summary>
+        internal static void NoteFighterLeftRoom()
+        {
+            if (!IsBroadcastIdentity) return;
+            _fighterLeftAt = Time.realtimeSinceStartup;
+        }
+
+        /// <summary>True for session-death reasons that carry NO diagnosis:
+        /// the bare room-exit observer ("left room"), its tick backstop, or
+        /// nothing recorded at all. These classify by the fighter-departure
+        /// evidence in TickWatching rather than by name.</summary>
+        private static bool IsUnannotatedRoomExit(string reason)
+        {
+            return string.IsNullOrEmpty(reason)
+                || reason.StartsWith("left room", StringComparison.Ordinal)
+                || reason.StartsWith("leave completed", StringComparison.Ordinal);
+        }
+
         /// <summary>Session-leave reasons that count as post-room FAILURES
         /// (quarantine + streak) vs normal ends. The strings are
         /// SpectatorSync's own LeaveToMenu reasons — see NoteSessionLeave.</summary>
@@ -963,6 +1046,30 @@ namespace CompetitiveRounds
         {
             if (!IsBroadcastIdentity) return;
             _lastLeaveReason = reason ?? "";
+        }
+
+        /// <summary>Fallback recorder for session deaths that never went
+        /// through LeaveToMenu — vanilla's DoDisconnect cascade yanks the
+        /// spectator seat too when a fighter leaves the room, and that is how
+        /// nearly every sitting ORGANICALLY ends (Plugin.OnLeftRoom then runs
+        /// EndSession("left room") with no reason recorded anywhere). An
+        /// empty reason classifies as "unexplained death = post-room
+        /// failure", so every normal sitting end fed the 3-strike seat fault
+        /// and the bot killed ROUNDS every third sitting (Aug 18, the 17:10
+        /// double replacement). Only fills an EMPTY slot: a LeaveToMenu
+        /// reason (the richer, failure-classifiable one) always wins, and
+        /// BeginAcquisition clears the slot per arc so nothing goes stale.
+        /// NOTE the recorded "left room" is NOT inherently benign — the
+        /// classifier additionally requires the fighter-departure evidence
+        /// (NoteFighterLeftRoom / FIGHTER_EXIT_CASCADE_WINDOW in
+        /// TickWatching; Codex Aug 18 r1+r2: without causal evidence a seat
+        /// dropping on its own must keep failure semantics or the 3-strike
+        /// bound dies). Inert off the broadcast identity.</summary>
+        internal static void NoteSessionLeaveFallback(string reason)
+        {
+            if (!IsBroadcastIdentity) return;
+            if (string.IsNullOrEmpty(_lastLeaveReason))
+                _lastLeaveReason = reason ?? "";
         }
 
         // ── target poll (§2a) ────────────────────────────────────────────
