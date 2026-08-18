@@ -18349,6 +18349,16 @@ namespace CompetitiveRounds
                 {
                     url.Append("&stream_live=1&stream_session=")
                        .Append(UnityWebRequest.EscapeURL(BroadcastMode.StreamInfoSession));
+                    // Direct VOD links resolved by the VM bot (Aug 18): the
+                    // server stores them on the stream post row so the
+                    // "stream ended" edit can link the VODs. Optional —
+                    // absent until the platform mints the archive.
+                    string tvod = BroadcastMode.StreamInfoTwitchVod;
+                    string yvod = BroadcastMode.StreamInfoYoutubeVod;
+                    if (!string.IsNullOrEmpty(tvod))
+                        url.Append("&stream_tvod=").Append(UnityWebRequest.EscapeURL(tvod));
+                    if (!string.IsNullOrEmpty(yvod))
+                        url.Append("&stream_yvod=").Append(UnityWebRequest.EscapeURL(yvod));
                 }
             }
             catch { }

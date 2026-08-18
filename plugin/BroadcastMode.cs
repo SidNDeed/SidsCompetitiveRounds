@@ -1394,6 +1394,8 @@ namespace CompetitiveRounds
         private static float _streamInfoReadAt = -999f;
         private static bool _streamInfoLive;
         private static string _streamInfoSession = "";
+        private static string _streamInfoTwitchVod = "";
+        private static string _streamInfoYoutubeVod = "";
 
         [Serializable]
         private class StreamInfoFile
@@ -1401,6 +1403,12 @@ namespace CompetitiveRounds
             public int schema_version;
             public bool live;
             public string session_id;
+            // Direct VOD links resolved by the VM bot while live (Aug 18 —
+            // the server's stream-ended post links them). Flat string
+            // fields parse for free via JsonUtility (#73); absent in older
+            // files -> null -> treated as empty.
+            public string twitch_vod;
+            public string youtube_vod;
             public double updated_wall;
         }
 
@@ -1408,6 +1416,10 @@ namespace CompetitiveRounds
         { get { RefreshStreamInfo(); return _streamInfoLive; } }
         internal static string StreamInfoSession
         { get { RefreshStreamInfo(); return _streamInfoSession ?? ""; } }
+        internal static string StreamInfoTwitchVod
+        { get { RefreshStreamInfo(); return _streamInfoTwitchVod ?? ""; } }
+        internal static string StreamInfoYoutubeVod
+        { get { RefreshStreamInfo(); return _streamInfoYoutubeVod ?? ""; } }
 
         private static void RefreshStreamInfo()
         {
@@ -1416,6 +1428,8 @@ namespace CompetitiveRounds
             _streamInfoReadAt = now;
             _streamInfoLive = false;
             _streamInfoSession = "";
+            _streamInfoTwitchVod = "";
+            _streamInfoYoutubeVod = "";
             try
             {
                 string statusPath = Plugin.BroadcastStatusPath != null ? Plugin.BroadcastStatusPath.Value : null;
@@ -1438,6 +1452,15 @@ namespace CompetitiveRounds
                     || parsed.updated_wall - nowWall > 120) return;
                 _streamInfoLive = true;
                 _streamInfoSession = parsed.session_id ?? "";
+                // Only carried while live and only sane-looking https URLs
+                // (the server re-validates against strict per-platform
+                // patterns before they can reach the Discord post — this is
+                // just the cheap client half so junk never even rides the
+                // poll, #159: the server gate is the real one).
+                string tv = parsed.twitch_vod ?? "";
+                string yv = parsed.youtube_vod ?? "";
+                _streamInfoTwitchVod = tv.Length <= 120 && tv.StartsWith("https://", StringComparison.Ordinal) ? tv : "";
+                _streamInfoYoutubeVod = yv.Length <= 120 && yv.StartsWith("https://", StringComparison.Ordinal) ? yv : "";
             }
             catch { }
         }

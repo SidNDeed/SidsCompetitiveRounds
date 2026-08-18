@@ -20345,14 +20345,23 @@ async def internal_stream_posts_pending(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    await db.execute(text("""
-        UPDATE stream_channel_posts
-           SET finalized = TRUE,
-               content = 'The stream has ended - thanks for watching!',
-               revision = revision + 1, updated_at = NOW()
+    # Finalize content is composed per row (Sid, Aug 18): the ended edit
+    # keeps links — the session's own stored VOD urls when the VM bot
+    # resolved them while live, channel archive pages otherwise.
+    stale_rows = (await db.execute(text("""
+        SELECT post_key, twitch_vod_url, youtube_vod_url
+          FROM stream_channel_posts
          WHERE NOT finalized
            AND last_live_at < NOW() - make_interval(secs => :stale)
-    """), {"stale": STREAM_POST_STALE_SECONDS})
+    """), {"stale": STREAM_POST_STALE_SECONDS})).mappings().all()
+    for sr in stale_rows:
+        await db.execute(text("""
+            UPDATE stream_channel_posts
+               SET finalized = TRUE, content = :c,
+                   revision = revision + 1, updated_at = NOW()
+             WHERE post_key = :k AND NOT finalized
+        """), {"k": sr["post_key"],
+               "c": _stream_ended_content(sr["twitch_vod_url"], sr["youtube_vod_url"])})
     await db.commit()
     # Un-finalized rows are ALWAYS returned (review F9): a live post with an
     # acked revision still needs its bottom-anchor check every tick — burial
@@ -36337,6 +36346,35 @@ STREAM_POST_STALE_SECONDS = 240
 _STREAM_SESSION_RE = _re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _STREAM_MODE_LABELS = {"1v1": "Ranked 1v1", "2v2": "2v2", "ovt": "1v2", "ffa": "FFA"}
 
+# Direct VOD links (Aug 18, Sid: the ended post must keep its links and point
+# at the VOD). Resolved by the VM bot with its own platform creds while the
+# stream is LIVE (Twitch mints the archive at broadcast start; the YouTube
+# broadcast id IS the video id), carried on this same authenticated poll,
+# stored on the post row, and rendered only by the finalize edit. STRICT
+# per-platform allowlists — these render as links in an official channel
+# post, so anything not exactly a VOD URL is dropped (#159: server-side
+# validation is the real gate; the mod's https prefix check is cosmetic).
+_STREAM_TVOD_RE = _re.compile(r"^https://www\.twitch\.tv/videos/\d{1,20}$")
+_STREAM_YVOD_RE = _re.compile(r"^https://www\.youtube\.com/watch\?v=[A-Za-z0-9_-]{5,20}$")
+# Channel-level fallbacks when a session ended before its direct VOD
+# resolved (or for pre-feature rows): Twitch's past-broadcasts page and the
+# channel's live tab — never a bare "links removed" post again.
+BROADCAST_TWITCH_VODS_URL = os.getenv(
+    "BROADCAST_TWITCH_VODS_URL", "https://www.twitch.tv/sidscompetitiverounds/videos?filter=archives")
+BROADCAST_YOUTUBE_VODS_URL = os.getenv(
+    "BROADCAST_YOUTUBE_VODS_URL", "https://youtube.com/@SidsCompetitiveRounds/streams")
+
+
+def _stream_ended_content(twitch_vod: str | None, youtube_vod: str | None) -> str:
+    """The finalize body: thanks line + VOD links (direct when the session
+    resolved them, channel archive pages otherwise). Composed in Python at
+    each finalize site so both sites can never drift (#330)."""
+    t = twitch_vod or BROADCAST_TWITCH_VODS_URL
+    y = youtube_vod or BROADCAST_YOUTUBE_VODS_URL
+    return ("The stream has ended - thanks for watching!\n"
+            f"🎬 Twitch VOD: {t}\n"
+            f"▶️ YouTube VOD: {y}")
+
 
 def _stream_md_escape(s: str) -> str:
     """Names go into a Discord embed body — neutralize markdown metacharacters
@@ -36462,7 +36500,9 @@ def _stream_post_content(candidate: dict | None, score: str | None) -> str:
 
 async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
                               stream_session: str | None,
-                              candidate: dict | None) -> None:
+                              candidate: dict | None,
+                              stream_tvod: str | None = None,
+                              stream_yvod: str | None = None) -> None:
     """State machine for the living stream post. Commits its own writes —
     the surrounding poll handler is otherwise read-only. Never raises: the
     poll's real job (the director) must not fail over a Discord nicety
@@ -36471,19 +36511,31 @@ async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
         return
     if not _STREAM_SESSION_RE.match(stream_session):
         return
+    # VOD links: strict allowlist or nothing (they render in an official
+    # embed at finalize). Stored on every live branch via COALESCE — once
+    # known they stick, so a mod restart polling without them cannot erase.
+    tvod = stream_tvod if stream_tvod and _STREAM_TVOD_RE.match(stream_tvod) else None
+    yvod = stream_yvod if stream_yvod and _STREAM_YVOD_RE.match(stream_yvod) else None
     try:
         # A live claim for session K SUPERSEDES every other session (round-2
         # finding 1): the VM runs exactly one stream at a time, so any other
         # un-finalized row is a leftover whose "ended" edit would otherwise
         # wait out the stale window while two LIVE posts fight the
-        # bottom-anchor logic in a delete/repost ping-pong.
-        await db.execute(text("""
-            UPDATE stream_channel_posts
-               SET finalized = TRUE,
-                   content = 'The stream has ended - thanks for watching!',
-                   revision = revision + 1, updated_at = NOW()
+        # bottom-anchor logic in a delete/repost ping-pong. Finalize content
+        # is composed per row so each leftover links ITS OWN stored VODs.
+        stale_rows = (await db.execute(text("""
+            SELECT post_key, twitch_vod_url, youtube_vod_url
+              FROM stream_channel_posts
              WHERE post_key <> :k AND NOT finalized
-        """), {"k": stream_session})
+        """), {"k": stream_session})).mappings().all()
+        for sr in stale_rows:
+            await db.execute(text("""
+                UPDATE stream_channel_posts
+                   SET finalized = TRUE, content = :c,
+                       revision = revision + 1, updated_at = NOW()
+                 WHERE post_key = :sk AND NOT finalized
+            """), {"sk": sr["post_key"],
+                   "c": _stream_ended_content(sr["twitch_vod_url"], sr["youtube_vod_url"])})
         score = await _stream_series_score(db, candidate)
         content = _stream_post_content(candidate, score)
         row = (await db.execute(text("""
@@ -36492,10 +36544,12 @@ async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
         """), {"k": stream_session})).mappings().first()
         if row is None:
             await db.execute(text("""
-                INSERT INTO stream_channel_posts (post_key, channel_id, content)
-                VALUES (:k, :ch, :c)
+                INSERT INTO stream_channel_posts (post_key, channel_id, content,
+                                                  twitch_vod_url, youtube_vod_url)
+                VALUES (:k, :ch, :c, :tv, :yv)
                 ON CONFLICT (post_key) DO NOTHING
-            """), {"k": stream_session, "ch": RANKED_STREAMING_CHANNEL_ID, "c": content})
+            """), {"k": stream_session, "ch": RANKED_STREAMING_CHANNEL_ID, "c": content,
+                   "tv": tvod, "yv": yvod})
         elif row["finalized"]:
             # REOPEN (review F2): a transport-only outage longer than the
             # stale window finalizes a genuinely live session; the fresh live
@@ -36505,21 +36559,28 @@ async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
             await db.execute(text("""
                 UPDATE stream_channel_posts
                    SET finalized = FALSE, content = :c, revision = revision + 1,
+                       twitch_vod_url = COALESCE(:tv, twitch_vod_url),
+                       youtube_vod_url = COALESCE(:yv, youtube_vod_url),
                        last_live_at = NOW(), updated_at = NOW()
                  WHERE post_key = :k AND finalized
-            """), {"k": stream_session, "c": content})
+            """), {"k": stream_session, "c": content, "tv": tvod, "yv": yvod})
         elif row["content"] != content:
             await db.execute(text("""
                 UPDATE stream_channel_posts
                    SET content = :c, revision = revision + 1,
+                       twitch_vod_url = COALESCE(:tv, twitch_vod_url),
+                       youtube_vod_url = COALESCE(:yv, youtube_vod_url),
                        last_live_at = NOW(), updated_at = NOW()
                  WHERE post_key = :k AND NOT finalized
-            """), {"k": stream_session, "c": content})
+            """), {"k": stream_session, "c": content, "tv": tvod, "yv": yvod})
         else:
             await db.execute(text("""
-                UPDATE stream_channel_posts SET last_live_at = NOW()
+                UPDATE stream_channel_posts
+                   SET last_live_at = NOW(),
+                       twitch_vod_url = COALESCE(:tv, twitch_vod_url),
+                       youtube_vod_url = COALESCE(:yv, youtube_vod_url)
                  WHERE post_key = :k AND NOT finalized
-            """), {"k": stream_session})
+            """), {"k": stream_session, "tv": tvod, "yv": yvod})
         await db.commit()
     except Exception as ex:
         try:
@@ -36541,6 +36602,8 @@ async def broadcast_target(
     acq_age: float | None = Query(None, ge=0, le=600),
     stream_live: int | None = Query(None, ge=0, le=1),
     stream_session: str | None = Query(None, max_length=64),
+    stream_tvod: str | None = Query(None, max_length=120),
+    stream_yvod: str | None = Query(None, max_length=120),
     db: AsyncSession = Depends(get_db),
 ):
     if not await _strict_steam_session_ok(request, steam_id, db):
@@ -36688,7 +36751,8 @@ async def broadcast_target(
     # switch is in flight. No-op unless the poll carries stream_live. The
     # series score is derived server-side from the same candidate (review F1).
     await _stream_post_upkeep(db, stream_live, stream_session,
-                              current_candidate if current_ok else selected)
+                              current_candidate if current_ok else selected,
+                              stream_tvod, stream_yvod)
 
     return {
         "target": _broadcast_public(selected) if selected else None,

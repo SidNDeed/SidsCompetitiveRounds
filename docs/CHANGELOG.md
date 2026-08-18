@@ -1,5 +1,31 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+Schema changes: migration **229** (`stream_channel_posts` gains
+`twitch_vod_url` / `youtube_vod_url`; retro-fixed 16 finalized posts —
+applied 2026-08-18).
+
+**Broadcast stream stability (Aug 18)**
+
+- Streams no longer cut in and out: the VM director holds outputs through
+  transient status blips and sitting hops (the teardown/restart cycle was
+  exhausting the push legs' restart budget into up-to-10-minute dead-air
+  windows), organic sitting ends are no longer misread as seat failures
+  (fighter-departure evidence), and the broadcast seat no longer self-
+  updates out from under its supervisor.
+- YouTube title updates fixed (the API rejects two listing filters at once)
+  — the channel side was already healthy.
+- Spectator view: fighter info panels moved to the top corners under the
+  card bars; the camera now zooms out to keep every live fighter in frame
+  (vertical and horizontal), instead of losing airborne players above the
+  fixed vanilla framing.
+- The stream-ended Discord post keeps its links and now points at the VODs
+  — the exact Twitch/YouTube VOD of that session when resolvable while
+  live, the channel archive pages otherwise.
+- Ops: a maintenance pause flag idles the broadcast bot's supervisors for
+  up to 8 hours so builds and tests on the VM aren't fought by it.
+
 ## v1.39.0 — 2026-08-18
 
 Schema changes: migrations **225** (`spectate_drain_tombstones` table +
