@@ -16741,7 +16741,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 // and trap the scroll position past TMP's reachable bottom.
                 if (message.Length > CHAT_LINE_MAX_CHARS)
                     message = message.Substring(0, CHAT_LINE_MAX_CHARS - 3) + "...";
-                string prefix = source == "discord" ? "<color=#A0B4FF>[D]</color>" : "<color=#B0FFB0>[game]</color>";
+                // Stream-chat bridge (Aug 18): Twitch/YouTube viewer chat is
+                // relayed into SCR chat server-side with its own source tag.
+                // Unknown sources still degrade to [game] (server-first
+                // deploys stay safe — older clients render bridged lines as
+                // [game], never drop them).
+                string prefix = source == "discord" ? "<color=#A0B4FF>[D]</color>"
+                    : source == "twitch" ? "<color=#C89BFF>[Twitch]</color>"
+                    : source == "youtube" ? "<color=#FF8080>[YouTube]</color>"
+                    : "<color=#B0FFB0>[game]</color>";
                 // §2.6: language-channel messages get a [RU]/[ES] tag beside
                 // the source tag. Scrollback ordering merges both streams
                 // into the one flat list — no tabs, no per-channel panels.
@@ -20907,12 +20915,25 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     string name = s.display_name ?? "";
                     if (s.is_speculative) name = $"~ {name}";
                     // Aug 17 (Sid): titles belong in the signups list. Server
-                    // pre-resolves dynamic skus (#111); podium skus arrive
-                    // null here and simply render nothing.
+                    // pre-resolves dynamic skus (#111) — INCLUDING podium
+                    // titles ("2v2 1st Place", 13 chars) and rank tiers
+                    // ("Grand Master III", 16 chars). Bug 240: the old flat
+                    // Trunc(title, 12) was sized against the static shop
+                    // catalogue (max 12) and cut every resolved dynamic
+                    // title at exactly its tier numeral. TITLE-PRIORITY fit
+                    // (review r1 F3 — a fair water-filling split re-cut the
+                    // numeral for any 13+ char name): the title renders
+                    // WHOLE (18-char defensive ceiling over the 16-char
+                    // longest reachable) and the NAME yields the remainder
+                    // of the ~31-char cell budget (" []" = 3 structural,
+                    // name floor 6). Names have every other surface; this
+                    // column exists to show titles.
                     if (!string.IsNullOrEmpty(s.title))
                     {
+                        string fitTitle = Trunc(s.title, 18);
+                        string fitName = Trunc(name, Math.Max(6, 28 - fitTitle.Length));
                         string tcol = string.IsNullOrEmpty(s.title_color) ? "#FFD94D" : s.title_color;
-                        name += $" <color={tcol}>[{Trunc(s.title, 12)}]</color>";
+                        name = $"{fitName} <color={tcol}>[{fitTitle}]</color>";
                     }
                     // Priority: placement > bracket progress > ready/forfeit/penalty.
                     string status;

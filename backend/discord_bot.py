@@ -3,6 +3,7 @@ Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
 import os, asyncio, aiohttp, discord, json, io, threading, re
+import random, ssl as ssl_mod, queue as queue_mod
 import urllib.parse
 from typing import Literal
 from discord import app_commands
@@ -385,6 +386,16 @@ async def on_ready():
     # the chat_manager broadcast loop skipped a subscriber due to a transient
     # send failure that didn't propagate as an exception).
     asyncio.create_task(chat_ws_listener())
+    # Stream-chat bridge readers (Aug 18): Twitch/YouTube viewer chat into
+    # SCR chat via /internal/chat/bridge. Each supervises its own reconnects.
+    # Once-guarded: on_ready re-fires on Discord session resumes, and a
+    # second IRC reader would double-relay every line (the server's
+    # native-id guard would drop the copies, but two sockets is still waste).
+    global _bridge_readers_started
+    if not _bridge_readers_started:
+        _bridge_readers_started = True
+        asyncio.create_task(twitch_chat_bridge())
+        asyncio.create_task(youtube_chat_bridge())
     # One-shot backfill — resolve Discord usernames for any player that was
     # linked before the discord_username column existed.
     asyncio.create_task(backfill_discord_usernames())
@@ -2875,7 +2886,12 @@ async def _forward_ingame_to_discord(data: dict) -> str:
          on the claim set + the durable catchup cursor instead — the WS stamp
          and the DB created_at were never comparable values."""
     global _last_relayed_ts
-    if (data.get("source") or "") != "ingame":
+    # Aug 18 stream-chat bridge: twitch/youtube rows are server-bridged
+    # viewer chat and belong on Discord too ("everything can be seen on
+    # discord" — Sid). "discord" stays excluded — those originals already
+    # live here — and unknown sources stay excluded fail-closed.
+    src = (data.get("source") or "")
+    if src not in ("ingame", "twitch", "youtube"):
         return "skip"
     content = (data.get("message") or "").strip()
     if not content:
@@ -2927,11 +2943,12 @@ async def _forward_ingame_to_discord(data: dict) -> str:
         # message forever).
         _unclaim_msg_id(claim_key)
         return "fail"
+    src_label = "(in-game)" if src == "ingame" else "(Twitch)" if src == "twitch" else "(YouTube)"
     try:
         await channel.send(
             f"{lang_prefix}**{discord.utils.escape_markdown(name)}"
             f"{discord.utils.escape_markdown(title_str)}"
-            f"{rating_str}** (in-game): "
+            f"{rating_str}** {src_label}: "
             f"{discord.utils.escape_markdown(content)[:1900]}",
             # Bug #125 adjacent (found by the independent audit of this feature).
             # escape_markdown handles * _ ~ | ` and nothing else — it does NOT
@@ -3148,21 +3165,195 @@ async def chat_ws_listener():
                     content = (data.get("message") or "").strip()
                     name = data.get("display_name") or "player"
                     print(f"[CHAT] WS <- source={src} name={name} msg={content[:60]}")
-                    if src != "ingame":
-                        continue  # Discord originals already live there
+                    # Aug 18 stream-chat bridge: bridged twitch/youtube rows
+                    # relay to Discord like in-game lines. Discord originals
+                    # stay excluded (already there).
+                    if src not in ("ingame", "twitch", "youtube"):
+                        continue
                     await _forward_ingame_to_discord(data)
                     # FAQ auto-responder (v1.33) — live stream only, so the
                     # catchup replay can never answer stale questions. Spawned
                     # as a task so its API lookups never block this receive
                     # loop (heartbeat starvation would drop the bridge).
-                    try:
-                        asyncio.create_task(_faq_ingame_task(data))
-                    except Exception as ex:
-                        print(f"[FAQ] ingame task spawn error: {ex}")
+                    # Deliberately INGAME-ONLY: a busy stream chat triggering
+                    # FAQ answers would spam the game's global channel.
+                    if src == "ingame":
+                        try:
+                            asyncio.create_task(_faq_ingame_task(data))
+                        except Exception as ex:
+                            print(f"[FAQ] ingame task spawn error: {ex}")
         except Exception as e:
             print(f"[CHAT] WS dropped: {e} (reconnect in {backoff}s)")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
+
+
+# ── Stream-chat bridge readers (Aug 18) ─────────────────────────────────────
+# Twitch/YouTube viewer chat -> POST /internal/chat/bridge -> SCR chat. The
+# platform readers live in THIS container deliberately: the core API stays
+# free of scraping dependencies, a wedged reader costs the bridge and nothing
+# else, and the VM broadcast bot stays credential-less (its overlay keeps its
+# own native reads; the server-bridged copies are dropped there by source).
+STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
+_TWITCH_PRIVMSG_RE = re.compile(r"@(?P<tags>[^ ]+) :[^ ]+ PRIVMSG #[^ ]+ :(?P<text>.*)")
+# Video id of the live session's YouTube broadcast; maintained by
+# poll_stream_posts (an un-finalized stream post row = live). None = no live.
+_bridge_youtube_video = None
+_bridge_readers_started = False
+
+
+async def _bridge_post(source: str, author: str, message: str, native_id: str) -> None:
+    """Relay one platform chat line into SCR chat. The server's bridge
+    endpoint owns dedup/rate/censor; a transport failure just drops the
+    line (viewer chat is nice-to-have, never critical path)."""
+    if http_session is None or not API_SECRET_KEY:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/chat/bridge",
+            json={"source": source, "author": author, "message": message, "native_id": native_id},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[BRIDGE] {source} relay HTTP {resp.status}")
+    except Exception as e:
+        print(f"[BRIDGE] {source} relay failed: {e}")
+
+
+async def twitch_chat_bridge():
+    """Anonymous Twitch IRC reader (justinfan nick — read-only, no
+    credentials; the same mechanism the VM overlay uses). Always-on with
+    exponential backoff: Twitch chat is channel-scoped, so there is no
+    per-broadcast lifecycle to track."""
+    backoff = 5
+    while True:
+        writer = None
+        try:
+            reader, writer = await asyncio.open_connection(
+                "irc.chat.twitch.tv", 6697, ssl=ssl_mod.create_default_context())
+            nick = f"justinfan{random.randint(10000, 99999)}"
+            writer.write((f"CAP REQ :twitch.tv/tags twitch.tv/commands\r\n"
+                          f"NICK {nick}\r\n"
+                          f"JOIN #{STREAM_BRIDGE_TWITCH_CHANNEL}\r\n").encode())
+            await writer.drain()
+            print(f"[BRIDGE] twitch chat connected (#{STREAM_BRIDGE_TWITCH_CHANNEL})")
+            backoff = 5
+            while True:
+                # Twitch PINGs every ~5 min; a socket silent past that is dead.
+                line = await asyncio.wait_for(reader.readline(), timeout=420)
+                if not line:
+                    raise ConnectionError("twitch IRC EOF")
+                text_line = line.decode("utf-8", "replace").rstrip("\r\n")
+                if text_line.startswith("PING"):
+                    writer.write(f"PONG{text_line[4:]}\r\n".encode())
+                    await writer.drain()
+                    continue
+                m = _TWITCH_PRIVMSG_RE.match(text_line)
+                if not m:
+                    continue
+                tags = dict(t.split("=", 1) if "=" in t else (t, "") for t in m.group("tags").split(";"))
+                native_id = tags.get("id") or ""
+                if not native_id:
+                    continue   # id tag is the replay-guard key; no id, no relay
+                author = tags.get("display-name") or "Twitch"
+                await _bridge_post("twitch", author, m.group("text"), native_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[BRIDGE] twitch chat dropped: {e} (reconnect in {backoff}s)")
+        finally:
+            try:
+                if writer is not None:
+                    writer.close()
+            except Exception:
+                pass
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 120)
+
+
+async def youtube_chat_bridge():
+    """YouTube live-chat reader, attached to the LIVE session's broadcast
+    (video id via poll_stream_posts). chat_downloader is a blocking sync
+    library, so each attachment runs on a daemon thread pumping an asyncio
+    queue (the VM hub's proven shape). A missing dependency degrades to a
+    one-time log; Twitch is unaffected. Replays after a re-attach are
+    harmless — the server's native-id guard drops them."""
+    try:
+        from chat_downloader import ChatDownloader
+    except Exception as e:
+        print(f"[BRIDGE] youtube chat disabled (chat_downloader unavailable: {e})")
+        return
+    # Thread-safe stdlib queue, bounded AT PRODUCER-SIDE ADMISSION (review
+    # r1 F2 + r2 F1): the producer thread drops on Full with ZERO event-loop
+    # involvement. The earlier call_soon_threadsafe shape staged one loop
+    # callback per message BEFORE any bound could apply — the loop's ready
+    # queue is unbounded, so a chat_downloader backlog burst still scaled
+    # bot memory/latency with the burst. Lossy by design under pressure:
+    # viewer chat is nice-to-have, boundedness is not negotiable.
+    pending: "queue_mod.Queue" = queue_mod.Queue(maxsize=200)
+    current = None
+    thread = None
+    stop_flag = {"stop": False}
+
+    def _pump(video_id: str, flag: dict):
+        try:
+            chat = ChatDownloader().get_chat(url=f"https://www.youtube.com/watch?v={video_id}")
+            for item in chat:
+                if flag["stop"]:
+                    return
+                author = str(((item.get("author") or {}).get("name")) or "YouTube")
+                text_msg = str(item.get("message") or "")
+                native = str(item.get("message_id") or "")
+                if not text_msg:
+                    continue
+                try:
+                    pending.put_nowait((video_id, author, text_msg, native))
+                except queue_mod.Full:
+                    pass   # bounded admission: drop here, on this thread
+        except Exception as e:
+            print(f"[BRIDGE] youtube chat reader ended for {video_id}: {e}")
+
+    def _attach(video_id: str):
+        nonlocal thread, stop_flag
+        stop_flag = {"stop": False}
+        thread = threading.Thread(target=_pump, args=(video_id, stop_flag),
+                                  name="yt-chat-bridge", daemon=True)
+        thread.start()
+
+    while True:
+        try:
+            live = _bridge_youtube_video
+            if live != current:
+                stop_flag["stop"] = True   # old pump exits at its next item
+                thread = None
+                current = live
+                if current:
+                    _attach(current)
+                    print(f"[BRIDGE] youtube chat attached to video {current}")
+            elif current and thread is not None and not thread.is_alive():
+                # Reader died mid-session (network blip): re-attach after a
+                # pause; the native-id guard makes any replays harmless.
+                await asyncio.sleep(10)
+                if _bridge_youtube_video == current:
+                    _attach(current)
+                    print(f"[BRIDGE] youtube chat re-attached to video {current}")
+                continue
+            # Nonblocking drain of the thread-safe queue; stale-video rows
+            # are discarded by the vid check. Idle poll at 2 Hz — the get
+            # must never block the event loop (stdlib queue, not asyncio).
+            try:
+                vid, author, text_msg, native = pending.get_nowait()
+                if vid == current:
+                    await _bridge_post("youtube", author, text_msg, native)
+            except queue_mod.Empty:
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[BRIDGE] youtube bridge loop error: {e}")
+            await asyncio.sleep(5)
+
 
 @bot.event
 async def on_close():
@@ -6315,6 +6506,20 @@ async def poll_stream_posts():
     if http_session is None or not API_SECRET_KEY:
         return
     data = await api_get("/internal/stream-posts/pending")
+    # Stream-chat bridge (Aug 18): an un-finalized row is the "stream live"
+    # signal, and its youtube_vod_url carries the video id the YouTube chat
+    # reader attaches to. Only a REAL payload may move the signal — a
+    # transport/API error must not detach a healthy reader mid-session.
+    global _bridge_youtube_video
+    if isinstance(data, dict) and "posts" in data:
+        live_vid = None
+        for p in (data.get("posts") or []):
+            if p.get("finalized"):
+                continue
+            mvid = re.search(r"[?&]v=([A-Za-z0-9_-]{6,})", str(p.get("youtube_vod_url") or ""))
+            if mvid:
+                live_vid = mvid.group(1)
+        _bridge_youtube_video = live_vid
     if not data or not data.get("posts"):
         return
     for p in data["posts"]:

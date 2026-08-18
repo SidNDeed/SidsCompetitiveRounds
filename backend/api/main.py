@@ -2162,8 +2162,29 @@ _RATE_LIMIT_BYPASS = frozenset({
 @app.middleware("http")
 async def rate_limit_gate(request: Request, call_next):
     path = request.url.path
-    if (not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS \
-            or path.startswith("/api/v1/internal/"):
+    # /api/v1/internal/* — AUTH BEFORE PARSE (Codex Aug-18 review; learning
+    # #386). These routes bypass this limiter AND the body-size gate below, and
+    # FastAPI resolves a handler's `payload: dict` / model / `list[...]` body by
+    # BUFFERING + JSON-PARSING it BEFORE the handler runs its own key check — so
+    # every internal POST was a free parse-DoS lever for any UNAUTHENTICATED
+    # public client on the single-worker API. `request.client.host` is not a
+    # firewall here: 8443 is world-reachable and the proxy stamps a real client
+    # IP into it, and the old "firewalled by 172.x" claim matched 172.0.0.0/8,
+    # mostly public space (#189). So reject a missing/wrong key HERE, in
+    # middleware, before any body is read. Every /internal/ route already
+    # requires this exact key inside its handler, so an authorized bot request
+    # is unaffected — it then stays exempt from the rate limiter as before.
+    # A source-network gate was considered and REJECTED: the only legitimate
+    # caller is the bot container, whose compose IP is DYNAMIC (unlike nginx's
+    # pinned 172.30.0.10), so pinning it would silently break bot polling on any
+    # `up -d` recreate, and #189 deliberately moved this class off source-IP
+    # gating and onto the key. The key fails closed; that is the firewall.
+    if path.startswith("/api/v1/internal/"):
+        expected = os.getenv("API_SECRET_KEY", "")
+        if not expected or request.headers.get("X-Internal-Key") != expected:
+            return JSONResponse(status_code=403, content={"error": "forbidden"})
+        return await call_next(request)   # authorized bot — exempt from RL
+    if (not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS:
         return await call_next(request)
     internal_key = request.headers.get("X-Internal-Key")
     if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
@@ -2224,10 +2245,13 @@ async def version_gate(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/v1/") or path in _VERSION_GATE_BYPASS:
         return await call_next(request)
-    # /api/v1/internal/* endpoints are already firewalled by request.client.host
-    # (localhost + Docker bridge only) inside each handler, so re-gating them on
-    # mod version is redundant and breaks the wrapper-driven Claude commenting
-    # path (curl from the LXC host has no X-Mod-Version header by design).
+    # /api/v1/internal/* endpoints are X-Internal-Key gated — enforced in
+    # rate_limit_gate BEFORE the body is read (auth-before-parse, #386), and
+    # again inside each handler. Re-gating them on mod version is both redundant
+    # and wrong: it would break the wrapper-driven Claude commenting path (curl
+    # from the LXC host has no X-Mod-Version header by design). (The old comment
+    # here claimed these were "firewalled by request.client.host" — that was
+    # never true: 8443 is public and the proxy stamps a real client IP, #189.)
     if path.startswith("/api/v1/internal/"):
         return await call_next(request)
     # Internal callers (Discord bot) authenticate via X-Internal-Key and bypass the version gate.
@@ -12313,6 +12337,106 @@ async def post_chat_from_discord(
     return {"status": "posted", "subscribers": chat_manager.count}
 
 
+# ── Stream-chat bridge (Aug 18): Twitch/YouTube viewer chat -> SCR chat ────
+# The Discord bot container runs the platform readers (anonymous Twitch IRC +
+# YouTube live chat) and relays each line here. This endpoint is the single
+# ingest seam: bridged lines get real chat_messages ids via _persist_chat, so
+# they reach every consumer (in-game WS, /chat/recent scrollback, the Discord
+# relay's id-keyed dedup) through the exact paths in-game lines already use.
+# Chatters have NO steam identity: the censor drops with no strike (mirror of
+# the unlinked-discord branch above), and flood control is keyed per PLATFORM
+# AUTHOR — a bridge is one connection carrying many humans, so the WS gate's
+# per-connection granularity would throttle all of Twitch to one player's
+# budget. A per-source ceiling bounds raid floods outright. In-memory state
+# is fine: the compose override pins uvicorn to a single worker (#125).
+_BRIDGE_SOURCES = frozenset({"twitch", "youtube"})
+_BRIDGE_SOURCE_MAX = 20        # messages per source per _CHAT_RATE_WINDOW
+_bridge_native_q = collections_mod.deque(maxlen=2000)
+_bridge_native_set: set = set()
+_bridge_source_rate: dict = {}
+
+
+@app.post("/api/v1/internal/chat/bridge", tags=["Chat"])
+async def bridge_stream_chat(
+    request: Request,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """Bot -> server relay for stream-platform viewer chat.
+
+    AUTH BEFORE PARSE (review r1 F1): /api/v1/internal/* bypasses the rate
+    limiter and the body-size gate in middleware, so a `payload: dict`
+    signature would have FastAPI buffer + json-parse ANY unauthenticated
+    POST before this handler could refuse it — a free parse-DoS lever on
+    the single-worker API. The raw-Request form checks the key from the
+    headers first, then streams the body under an explicit ceiling (a chat
+    line is <=500 chars; 16KB is generous, larger is hostile)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    raw = b""
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > 16384:
+            raise HTTPException(status_code=413, detail="body too large")
+    try:
+        payload = _json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=422, detail="invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="invalid JSON")
+    source = str(payload.get("source", "")).lower()
+    if source not in _BRIDGE_SOURCES:
+        raise HTTPException(status_code=422, detail="unknown bridge source")
+    message = str(payload.get("message", ""))[:500].strip()
+    if not message:
+        return {"status": "empty"}
+    author = str(payload.get("author", "") or "").strip()[:64] or source.capitalize()
+    # Replay guard on the platform's own message id (IRC id tag / YouTube
+    # message id): a bot restart re-reading recent platform history must not
+    # double-post. Windowed in memory — a restart HERE forgets ids, worst
+    # case one historical dupe, never a loss (same trade as chat nonces).
+    native_id = str(payload.get("native_id", ""))[:128]
+    if native_id:
+        nkey = f"{source}|{native_id}"
+        if nkey in _bridge_native_set:
+            return {"status": "duplicate"}
+        if len(_bridge_native_q) == _bridge_native_q.maxlen:
+            _bridge_native_set.discard(_bridge_native_q[0])
+        _bridge_native_q.append(nkey)
+        _bridge_native_set.add(nkey)
+    now = _time_mod.monotonic()
+    sq = _bridge_source_rate.setdefault(source, collections_mod.deque())
+    while sq and now - sq[0] > _CHAT_RATE_WINDOW:
+        sq.popleft()
+    if len(sq) >= _BRIDGE_SOURCE_MAX:
+        return {"status": "rate_limited_source"}
+    # Per-author gate: _chat_spam_ok's key is opaque (dict key), so a string
+    # key rides the existing window/dup/prune machinery unchanged.
+    if not _chat_spam_ok(f"bridge:{source}:{author.lower()}", message):
+        return {"status": "rate_limited"}
+    sq.append(now)
+    hit = _chat_censor_hit(message)
+    if hit is not None:
+        print(f"[CHAT-MOD] censored bridged {source} chatter {author!r} (no steam identity, no strike)")
+        return {"status": "censored"}
+    out = {
+        "source": source,
+        "display_name": author,
+        "rating": None,
+        "title": None,
+        "title_color": None,
+        "message": message,
+        "channel": "global",
+    }
+    mid, created_iso = await _persist_chat(out)
+    out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
+    if mid is not None:
+        out["id"] = mid
+    print(f"[CHAT] <- {source} {author}: {message[:80]} (subs={chat_manager.count})")
+    await chat_manager.broadcast(out, channel="global")
+    return {"status": "posted", "id": mid}
+
+
 @app.get("/api/v1/chat/recent", tags=["Chat"])
 async def get_recent_chat(
     limit: int = Query(50, ge=1, le=200),
@@ -20369,13 +20493,16 @@ async def internal_stream_posts_pending(
     # case (revision acked AND not buried) without editing.
     rows = (await db.execute(text("""
         SELECT post_key, channel_id, content, revision, finalized,
-               message_id, posted_revision
+               message_id, posted_revision, youtube_vod_url
           FROM stream_channel_posts
          WHERE posted_revision IS DISTINCT FROM revision
             OR NOT finalized
          ORDER BY updated_at
          LIMIT 5
     """))).mappings().all()
+    # youtube_vod_url rides along for the bot's stream-chat bridge: an
+    # un-finalized row IS the "stream live" signal, and its video id is what
+    # the YouTube chat reader attaches to (Aug 18).
     return {"posts": [dict(r) for r in rows]}
 
 

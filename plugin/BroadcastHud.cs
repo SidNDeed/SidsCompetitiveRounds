@@ -59,9 +59,22 @@ namespace CompetitiveRounds
         // (r1 F9) via ResetEdgesIfMoved, which also forces the next snapshot
         // refresh so a rematch's deck reset cannot show stale for 0.5s.
         private static readonly List<string> _headerCache = new List<string>();
+        private static readonly List<string> _nameCache = new List<string>();
         private static readonly List<string> _cardsCache = new List<string>();
         private static readonly List<string> _ffaLine1Cache = new List<string>();
         private static readonly List<string> _ffaLine2Cache = new List<string>();
+        // Bug 239: one-line name fit state, per fighter per surface (FFA
+        // strip cell / corner panel). GUI.skin.label word-wraps by default,
+        // so a long "Name (elo)" wrapped to two lines inside the strip's
+        // 18px-tall rect and rendered clipped top AND bottom. The fit picks
+        // the largest font 14..10 that keeps ONE line inside the cell,
+        // drops the rating before shrinking below readability, and only
+        // then hard-trims the bare name. Cached per (text, width) so
+        // CalcSize runs only when the header or the cell width changes.
+        private struct NameFit { public string src; public float w; public string text; public int size; }
+        private static NameFit[] _ffaNameFit = new NameFit[0];
+        private static NameFit[] _panelNameFit = new NameFit[0];
+        private static readonly GUIContent _measure = new GUIContent();
         // FFA mini card bar (Stan, Aug 18): five 2-letter slots per fighter,
         // rebuilt at snapshot cadence like every other derived string.
         private const int FFA_CARD_SLOTS = 5;
@@ -164,9 +177,15 @@ namespace CompetitiveRounds
                 && _headerCache.Count == n && _cardsCache.Count == n) return;
             _cachesSnapshotGen = snapGen;
             SizeCache(_headerCache, n);
+            SizeCache(_nameCache, n);
             SizeCache(_cardsCache, n);
             SizeCache(_ffaLine1Cache, n);
             SizeCache(_ffaLine2Cache, n);
+            if (_ffaNameFit.Length < n)
+            {
+                _ffaNameFit = new NameFit[n];
+                _panelNameFit = new NameFit[n];
+            }
             while (_ffaCardAbbrevCache.Count < n) _ffaCardAbbrevCache.Add(new string[FFA_CARD_SLOTS]);
             while (_ffaCardAbbrevCache.Count > n) _ffaCardAbbrevCache.RemoveAt(_ffaCardAbbrevCache.Count - 1);
 
@@ -198,6 +217,7 @@ namespace CompetitiveRounds
             {
                 _sb.Length = 0;
                 _sb.Append(TabStatsOverlay.BroadcastFighterName(i));
+                _nameCache[i] = _sb.ToString();
                 if (haveRatings)
                 {
                     int at = _sortScratch.IndexOf(SteamIdOfFighter(i));
@@ -253,6 +273,66 @@ namespace CompetitiveRounds
             if (canonicalName.Length < 2) return a.ToString();
             char b = char.ToLowerInvariant(canonicalName[1]);
             return new string(new[] { a, b });
+        }
+
+        /// <summary>Bug 239: fit one fighter header into availW as a SINGLE
+        /// line. Preference order: full "Name (elo)" at 14..10pt, then the
+        /// bare name at 14..10pt (the rating is the first thing to go —
+        /// the name is what the stream needs), then the bare name
+        /// hard-trimmed with ".." at the 10pt floor. Measures with the
+        /// style's own CalcSize, so the result never overflows the cell;
+        /// cached per (header, width) — recomputes only when the snapshot
+        /// text or the cell width actually changes.</summary>
+        private static void FitNameLine(ref NameFit fit, string header, string bare, float availW, GUIStyle style)
+        {
+            if (fit.text != null && fit.src == header && Math.Abs(fit.w - availW) < 0.5f) return;
+            fit.src = header;
+            fit.w = availW;
+            int prevSize = style.fontSize;
+            try
+            {
+                // Priority (review r1 F4): a READABLE name beats a shrunken
+                // name+rating. The full header only wins at comfortable
+                // sizes (14..12); below that the rating is dropped and the
+                // bare name gets the whole 14..10 range before any header
+                // retry at the floor sizes.
+                for (int s = 14; s >= 12; s--)
+                {
+                    style.fontSize = s;
+                    _measure.text = header;
+                    if (style.CalcSize(_measure).x <= availW) { fit.text = header; fit.size = s; return; }
+                }
+                if (!string.IsNullOrEmpty(bare) && bare != header)
+                {
+                    for (int s = 14; s >= 10; s--)
+                    {
+                        style.fontSize = s;
+                        _measure.text = bare;
+                        if (style.CalcSize(_measure).x <= availW) { fit.text = bare; fit.size = s; return; }
+                    }
+                }
+                else
+                {
+                    // No separate bare form: let the header use the floor
+                    // sizes too before hard-trimming.
+                    for (int s = 11; s >= 10; s--)
+                    {
+                        style.fontSize = s;
+                        _measure.text = header;
+                        if (style.CalcSize(_measure).x <= availW) { fit.text = header; fit.size = s; return; }
+                    }
+                }
+                style.fontSize = 10;
+                string basis = string.IsNullOrEmpty(bare) ? header : bare;
+                for (int len = basis.Length - 1; len >= 1; len--)
+                {
+                    _measure.text = basis.Substring(0, len) + "..";
+                    if (style.CalcSize(_measure).x <= availW) { fit.text = _measure.text; fit.size = 10; return; }
+                }
+                fit.text = basis;
+                fit.size = 10;
+            }
+            finally { style.fontSize = prevSize; }
         }
 
         private static string SteamIdOfFighter(int i)
@@ -445,7 +525,13 @@ namespace CompetitiveRounds
                     new Color(0f, 0f, 0f, 0.62f), 0, 0);
                 var prev = GUI.contentColor;
                 GUI.contentColor = TabStatsOverlay.BroadcastFighterColor(i);
-                GUI.Label(new Rect(r.x + 6, r.y + 2, r.width - 12, 18), _headerCache.Count > i ? _headerCache[i] : "", stName);
+                // Bug 239: fitted single line — long names used to word-wrap
+                // inside this 18px rect and clip top+bottom on stream.
+                string hdr = _headerCache.Count > i ? _headerCache[i] : "";
+                string bare = _nameCache.Count > i ? _nameCache[i] : hdr;
+                FitNameLine(ref _ffaNameFit[i], hdr, bare, r.width - 12f, stName);
+                stName.fontSize = _ffaNameFit[i].size;
+                GUI.Label(new Rect(r.x + 6, r.y + 2, r.width - 12, 18), _ffaNameFit[i].text, stName);
                 GUI.contentColor = prev;
                 // r1 F8: composite lines come pre-built from RefreshCaches
                 // (snapshot cadence) — zero string work per Repaint.
@@ -483,7 +569,16 @@ namespace CompetitiveRounds
             float y = r.y + 4f;
             var prev = GUI.contentColor;
             GUI.contentColor = TabStatsOverlay.BroadcastFighterColor(i);
-            GUI.Label(new Rect(r.x + 8, y, r.width - 16, 20), _headerCache.Count > i ? _headerCache[i] : "", stName);
+            // Bug 239 sibling: the 20px panel header word-wrapped the same way.
+            string hdr = _headerCache.Count > i ? _headerCache[i] : "";
+            string bare = _nameCache.Count > i ? _nameCache[i] : hdr;
+            if (i < _panelNameFit.Length)
+            {
+                FitNameLine(ref _panelNameFit[i], hdr, bare, r.width - 16f, stName);
+                stName.fontSize = _panelNameFit[i].size;
+                hdr = _panelNameFit[i].text;
+            }
+            GUI.Label(new Rect(r.x + 8, y, r.width - 16, 20), hdr, stName);
             GUI.contentColor = prev;
             y += 22f;
 
@@ -595,7 +690,12 @@ namespace CompetitiveRounds
         private static void EnsureStyles()
         {
             if (stName != null) return;
-            stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+            // Bug 239: names are single-line by contract — GUI.skin.label
+            // defaults wordWrap ON, which is what wrapped long names into
+            // the 18px strip rect. Overflow clipping keeps tall glyph
+            // metrics from shaving letter tops (#143); horizontal overflow
+            // cannot happen because FitNameLine measures with this style.
+            stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Overflow };
             stStat = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
             stStatLabel = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
             stStatLabel.normal.textColor = new Color(0.72f, 0.76f, 0.84f);

@@ -4,6 +4,9 @@ ENV PYTHONUNBUFFERED=1
 # Writable matplotlib config/cache dir — without it every import warns and
 # retries slow font-cache builds in the read-only home.
 ENV MPLCONFIGDIR=/tmp
-RUN pip install --no-cache-dir discord.py aiohttp matplotlib
+# chat-downloader: YouTube live-chat reader for the stream-chat bridge
+# (Aug 18). The import site degrades to a one-time log if it is ever absent,
+# so a build from a cached pre-bridge image cannot crash-loop the bot.
+RUN pip install --no-cache-dir discord.py aiohttp matplotlib chat-downloader
 COPY discord_bot.py .
 CMD ["python", "discord_bot.py"]
