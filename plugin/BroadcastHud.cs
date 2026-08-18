@@ -62,6 +62,10 @@ namespace CompetitiveRounds
         private static readonly List<string> _cardsCache = new List<string>();
         private static readonly List<string> _ffaLine1Cache = new List<string>();
         private static readonly List<string> _ffaLine2Cache = new List<string>();
+        // FFA mini card bar (Stan, Aug 18): five 2-letter slots per fighter,
+        // rebuilt at snapshot cadence like every other derived string.
+        private const int FFA_CARD_SLOTS = 5;
+        private static readonly List<string[]> _ffaCardAbbrevCache = new List<string[]>();
         private static int _cachesSnapshotGen = int.MinValue;
         private static readonly List<string> _sortScratch = new List<string>(10);
         private static readonly StringBuilder _sb = new StringBuilder(64);
@@ -163,6 +167,8 @@ namespace CompetitiveRounds
             SizeCache(_cardsCache, n);
             SizeCache(_ffaLine1Cache, n);
             SizeCache(_ffaLine2Cache, n);
+            while (_ffaCardAbbrevCache.Count < n) _ffaCardAbbrevCache.Add(new string[FFA_CARD_SLOTS]);
+            while (_ffaCardAbbrevCache.Count > n) _ffaCardAbbrevCache.RemoveAt(_ffaCardAbbrevCache.Count - 1);
 
             // Ratings from the stored target response (§4): roster-aligned to
             // the server's SORTED-ordinal steam-id roster — the same order
@@ -204,17 +210,23 @@ namespace CompetitiveRounds
                     System.Globalization.CultureInfo.InvariantCulture);
                 // r1 F8: the FFA strip's composite lines are built HERE, at
                 // snapshot cadence — DrawFfaStrip only reads. Curated
-                // indices: 0=HP, 8=Lives, 1=Damage (validated map).
+                // indices: 0=HP, 1=Damage (validated map). Stan's Aug 18
+                // stream notes (Sid agreed): Lives + card-count dropped
+                // (they read "1" and "5" virtually always in FFA), HP and
+                // Dmg share one line, and the freed line carries a mini
+                // card bar — up to five two-letter squares in vanilla
+                // CardBar's own abbreviation style, from the snapshot's
+                // canonical card names.
                 if (ffa)
                 {
                     _sb.Length = 0;
                     _sb.Append("HP ").Append(TabStatsOverlay.BroadcastStatValue(i, 0))
-                       .Append("   Lives ").Append(TabStatsOverlay.BroadcastStatValue(i, 8));
+                       .Append("   Dmg ").Append(TabStatsOverlay.BroadcastStatValue(i, 1));
                     _ffaLine1Cache[i] = _sb.ToString();
-                    _sb.Length = 0;
-                    _sb.Append("Dmg ").Append(TabStatsOverlay.BroadcastStatValue(i, 1))
-                       .Append("   ").Append(_cardsCache[i]);
-                    _ffaLine2Cache[i] = _sb.ToString();
+                    var abbrevs = _ffaCardAbbrevCache[i];
+                    for (int c = 0; c < FFA_CARD_SLOTS; c++)
+                        abbrevs[c] = CardAbbrev(TabStatsOverlay.BroadcastFighterCardName(i, c));
+                    _ffaLine2Cache[i] = "";
                 }
                 else
                 {
@@ -228,6 +240,19 @@ namespace CompetitiveRounds
         {
             while (cache.Count < n) cache.Add("");
             while (cache.Count > n) cache.RemoveAt(cache.Count - 1);
+        }
+
+        /// <summary>Vanilla CardBar's own abbreviation: the first two
+        /// letters, first upper + second lower ("BombsAway" -> "Bo") —
+        /// exactly what CardBar.AddCard renders in its squares, so the
+        /// strip's mini bar reads like the real one. "" for an empty slot.</summary>
+        private static string CardAbbrev(string canonicalName)
+        {
+            if (string.IsNullOrEmpty(canonicalName)) return "";
+            char a = char.ToUpperInvariant(canonicalName[0]);
+            if (canonicalName.Length < 2) return a.ToString();
+            char b = char.ToLowerInvariant(canonicalName[1]);
+            return new string(new[] { a, b });
         }
 
         private static string SteamIdOfFighter(int i)
@@ -403,8 +428,11 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>FFA: one compact strip across the top (below the bar),
-        /// name + HP + Lives + Damage per fighter.</summary>
+        /// <summary>FFA: one compact strip across the top (below the bar) —
+        /// name, then HP + Damage on one line, then the mini card bar: five
+        /// two-letter squares (Stan's Aug 18 stream notes, Sid agreed —
+        /// Lives and the card COUNT are gone; in FFA they read "1" and "5"
+        /// virtually always, and what people actually want is WHICH cards).</summary>
         private static void DrawFfaStrip(int n)
         {
             float cellW = Mathf.Min(180f, (Screen.width - 40f) / Mathf.Max(1, n));
@@ -423,8 +451,24 @@ namespace CompetitiveRounds
                 // (snapshot cadence) — zero string work per Repaint.
                 GUI.Label(new Rect(r.x + 6, r.y + 20, r.width - 12, 17),
                     _ffaLine1Cache.Count > i ? _ffaLine1Cache[i] : "", stStat);
-                GUI.Label(new Rect(r.x + 6, r.y + 37, r.width - 12, 17),
-                    _ffaLine2Cache.Count > i ? _ffaLine2Cache[i] : "", stStat);
+                if (i < _ffaCardAbbrevCache.Count)
+                {
+                    var abbrevs = _ffaCardAbbrevCache[i];
+                    float slotGap = 3f;
+                    float slotW = (r.width - 12f - slotGap * (FFA_CARD_SLOTS - 1)) / FFA_CARD_SLOTS;
+                    float sy = r.y + 39f;
+                    for (int c = 0; c < FFA_CARD_SLOTS; c++)
+                    {
+                        var sr = new Rect(r.x + 6 + c * (slotW + slotGap), sy, slotW, 16f);
+                        bool filled = !string.IsNullOrEmpty(abbrevs[c]);
+                        GUI.DrawTexture(sr, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                            filled ? new Color(0.16f, 0.16f, 0.22f, 0.95f)
+                                   : new Color(0.08f, 0.08f, 0.10f, 0.55f), 0, 0);
+                        GUI.DrawTexture(new Rect(sr.x, sr.y, sr.width, 1), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(1f, 1f, 1f, filled ? 0.35f : 0.12f), 0, 0);
+                        if (filled) GUI.Label(sr, abbrevs[c], stKey);
+                    }
+                }
             }
         }
 

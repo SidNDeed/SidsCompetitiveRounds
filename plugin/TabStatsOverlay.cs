@@ -699,6 +699,17 @@ namespace CompetitiveRounds
         internal static int BroadcastFighterCardCount(int i)
             => i >= 0 && i < cachedPlayerCount && i < cachedCards.Count ? cachedCards[i].totalCount : 0;
 
+        /// <summary>Canonical name of SHOWN card <paramref name="j"/> of
+        /// fighter <paramref name="i"/> ("" past the row's count) — feeds
+        /// the broadcast FFA strip's mini card bar (Stan, Aug 18). Shown
+        /// cards already honor the rematch display baseline (#138).</summary>
+        internal static string BroadcastFighterCardName(int i, int j)
+        {
+            if (i < 0 || i >= cachedPlayerCount || i >= cachedCards.Count) return "";
+            var row = cachedCards[i];
+            return j >= 0 && j < row.count ? (row.cards[j].canonicalName ?? "") : "";
+        }
+
         /// <summary>Curated stat cell (same cached display string the Tab
         /// board shows). "-" on any invalid index or map mismatch.</summary>
         internal static string BroadcastStatValue(int i, int statIdx)
