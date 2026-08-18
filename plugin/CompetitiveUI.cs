@@ -298,6 +298,7 @@ namespace CompetitiveRounds
         private static bool AnyModalOwnsInput =>
                BackdroplessModalOpen
             || NativeUI.InfoPopupOpen || NativeUI.TournBetsPopupOpen
+            || NativeUI.RecentTournPopupOpen
             || NativeUI.PickerOpen || NativeUI.LangPromptOpen
             || !Plugin.DataConsentAsked;
 
@@ -2567,12 +2568,22 @@ namespace CompetitiveRounds
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (!NativeUI.IsOpen) return;
-            // My Stats (tab 0) and the 2v2 tab (tab 8) both register card hover
-            // regions. On any OTHER tab the regions from the last render would
-            // falsely fire when the cursor crosses those screen positions over
-            // the Shop / Admin / Settings panels. SwitchTab also clears the
-            // regions on tab change; this is the cheap belt-and-suspenders.
-            if (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8) return;
+            // My Stats (tab 0), the Tournaments tab (tab 7 — bracket name
+            // hovers, Aug 17), the 2v2 tab (tab 8) and the COMPARE tab
+            // (tab 9 — Records rows; round-2 f6: the first pass allowed tab 1
+            // on the false belief Compare lived inside the Leaderboard panel,
+            // which made every Records tooltip unreachable) register card
+            // hover regions. On any OTHER tab the regions from the last
+            // render would falsely fire when the cursor crosses those screen
+            // positions over the Shop / Admin / Settings panels. SwitchTab
+            // also clears the regions on tab change; this is the cheap
+            // belt-and-suspenders.
+            if (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 7
+                && NativeUI.CurrentTab != 8 && NativeUI.CurrentTab != 9) return;
+            // Review F11 (Aug 17): while any modal owns input, a region under
+            // the popup must not draw its tooltip through it. ModalBlockInput
+            // is the single per-frame assignment of exactly that condition.
+            if (ClickHandler.ModalBlockInput) return;
             if (_cardHoverRegions.Count == 0) return;
 
             Vector2 mp = Input.mousePosition;  // bottom-left origin

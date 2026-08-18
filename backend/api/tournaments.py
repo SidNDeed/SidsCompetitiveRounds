@@ -680,8 +680,19 @@ def _compute_progress_labels(tournament: Tournament, all_matches: list) -> dict:
             if sid is None: continue
             by_sig.setdefault(sid, []).append(m)
     labels: dict[uuid.UUID, str] = {}
+    _SIDE_CHRONO = {"GF": 1, "GF_RESET": 2, "TP": 1}
     for sid, matches in by_sig.items():
-        matches.sort(key=lambda m: m.round)
+        # Chronology, not raw round numbers (Aug 17 review F6): the grand
+        # final is numbered wb_final+1, which in a 16-player bracket is LOWER
+        # than the last LB rounds — a raw round sort made the reverse scan
+        # pick "won LB R6" over "lost GF R5" and label the runner-up
+        # "advanced". Finals sides always sort after W/L rounds; within one
+        # round number a player's L match always postdates their W match
+        # (losers DROP into the LB), so the tertiary key pins that order
+        # instead of trusting the database's return order (round-2 f15).
+        matches.sort(key=lambda m: (_SIDE_CHRONO.get(m.bracket_side, 0),
+                                    m.round,
+                                    1 if m.bracket_side == "L" else 0))
         # Pending / scheduled / ready / active match the player still has to
         # play ('scheduled' = the between-rounds break — without it here, a
         # player in a break would read "eliminated", and the LB champ would
@@ -705,9 +716,13 @@ def _compute_progress_labels(tournament: Tournament, all_matches: list) -> dict:
         won = last_m.winner_signup_id == sid
         if won:
             # Won their last match but nothing pending → tournament over for them
-            # as a winner. In double-elim the GF / GF_RESET winner is CHAMPION.
+            # as a winner. In double-elim the GF / GF_RESET winner is CHAMPION —
+            # but only a series-DECIDED one (round-2 f8): forfeit terminals
+            # deliberately mint no podium/prizes, and "CHAMPION [FF]" beside a
+            # bare "--" medal cell was a contradiction on the popup.
             if last_m.bracket_side in ("GF", "GF_RESET"):
-                labels[sid] = "CHAMPION"
+                labels[sid] = ("CHAMPION" if last_m.status == "completed"
+                               else "won by forfeit")
             else:
                 labels[sid] = "advanced"  # rare: won a match but no next — transient state
         else:
@@ -720,10 +735,16 @@ def _compute_progress_labels(tournament: Tournament, all_matches: list) -> dict:
 async def _build_current_response(db: AsyncSession, t: Tournament, caller_player: Optional[Player]) -> TournamentCurrentResponse:
     # Signups + display names
     sq = text("""
-        SELECT s.id, p.steam_id, p.display_name, s.signed_up_at, s.is_speculative,
-               s.seed, s.penalty_at_signup, s.ready_at, s.forfeited, s.placed_rank
+        SELECT s.id, p.id AS player_id, p.steam_id, p.display_name,
+               s.signed_up_at, s.is_speculative,
+               s.seed, s.penalty_at_signup, s.ready_at, s.forfeited, s.placed_rank,
+               s.cached_elo_at_lock, gr.rating AS live_rating,
+               si.name AS title_name, si.preview_color AS title_color,
+               si.sku AS title_sku
         FROM tournament_signups s
         JOIN players p ON p.id = s.player_id
+        LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+        LEFT JOIN shop_items si ON si.id = p.active_title_id
         WHERE s.tournament_id = :tid
         -- Seed order (Aug 13 item 6). The client renders "#{seed}" beside every
         -- entrant, so returning them in SIGNUP order made the list read as
@@ -736,6 +757,18 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
     rows = (await db.execute(sq, {"tid": t.id})).all()
     now = datetime.now(timezone.utc)
 
+    # Title/rank resolution shares main.py's helpers (#111 — a raw
+    # 'Current Rank' sku must render as the live tier, never the literal
+    # shop-item name). Function-local import: main.py imports this router at
+    # module load, so a top-level import would be circular; by request time
+    # main is fully loaded and this resolves from sys.modules.
+    # Podium maps wired too (review F15: without them every equipped podium
+    # title resolved to nothing here); their keys are str(player_id).
+    import main as _main
+    _rank_color_table = await _main._rank_colors(db)
+    _pmap, _pmap2, _pmapf = await _main._podium_maps_for(
+        db, (r.title_sku for r in rows))
+
     # Compute per-signup bracket progress labels (only meaningful once the
     # tournament is running/completed — voting/locked phases have no play yet).
     progress_labels: dict = {}
@@ -743,8 +776,18 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         allmq = select(TournamentMatch).where(TournamentMatch.tournament_id == t.id)
         progress_labels = _compute_progress_labels(t, (await db.execute(allmq)).scalars().all())
 
-    signups = [
-        TournamentSignupEntry(
+    signups = []
+    for r in rows:
+        _title, _tcolor = _main._display_title_sync(
+            _rank_color_table, r.title_sku, r.title_name, r.title_color,
+            r.live_rating,
+            podium_pos=_pmap.get(str(r.player_id)),
+            podium_pos_2v2=_pmap2.get(str(r.player_id)),
+            podium_pos_ffa=_pmapf.get(str(r.player_id)))
+        # Locked elo when seeded (stable beside the seed numbers), live
+        # rating during voting. None when the player has never been rated.
+        _rating = r.cached_elo_at_lock if r.cached_elo_at_lock is not None else r.live_rating
+        signups.append(TournamentSignupEntry(
             signup_id=r.id,
             steam_id=r.steam_id,
             display_name=r.display_name,
@@ -756,8 +799,10 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
             forfeited=r.forfeited,
             placed_rank=r.placed_rank,
             progress_label=progress_labels.get(r.id),
-        ) for r in rows
-    ]
+            rating=int(round(_rating)) if _rating is not None else None,
+            title=_title,
+            title_color=_tcolor,
+        ))
 
     # Matches + opponent names
     mq = text("""
@@ -3367,10 +3412,19 @@ async def _handle_leaving_signup(db: AsyncSession, tournament_id: uuid.UUID, lea
     matches = (await db.execute(matches_q)).scalars().all()
 
     if spec is not None:
-        # Promote: inherit seed and Elo snapshot, flip speculative off.
+        # Promote: inherit the SEED (bracket position), flip speculative off —
+        # but stamp the promoted player's OWN rating as the elo snapshot
+        # (Aug 17 review F7: copying the departed player's snapshot displayed
+        # a 1900 beside a 1200-rated replacement in bracket cells and
+        # permanently in history-detail).
         spec.is_speculative = False
         spec.seed = leaving.seed
-        spec.cached_elo_at_lock = leaving.cached_elo_at_lock
+        _own_elo = (await db.execute(text("""
+            SELECT gr.rating FROM glicko_ratings gr WHERE gr.player_id = :pid
+        """), {"pid": str(spec.player_id)})).scalar()
+        # 1500 default matches lock-time seeding's COALESCE (round-2 f10) —
+        # a NULL here rendered "unknown elo" beside a seeded entrant forever.
+        spec.cached_elo_at_lock = float(_own_elo) if _own_elo is not None else 1500.0
         for m in matches:
             if m.p1_signup_id == leaving_signup_id:
                 m.p1_signup_id = spec.id
@@ -3547,6 +3601,225 @@ async def history(limit: int = 25, offset: int = 0, db: AsyncSession = Depends(g
         "third_place_steam_id": r.third_place_steam,
         "signup_count": r.signup_count,
     } for r in rows]
+
+
+@router.get("/history-detail")
+async def history_detail(limit: int = 8, offset: int = 0,
+                         db: AsyncSession = Depends(get_db)):
+    """Rich completed-tournament history for the Recent Tournaments POPUP
+    (Aug 17): every confirmed participant with locked elo, seed, bracket
+    W-L, final result label, plus the tournament's start->end duration and
+    prize snapshot. /history stays untouched for old clients; this is a
+    separate read so the compact inline list and the popup can never fight
+    over one shape."""
+    limit = max(1, min(int(limit or 8), 12))
+    offset = max(0, int(offset or 0))
+    tq = text("""
+        SELECT t.id, t.kind, t.format, t.started_at, t.ended_at,
+               t.prize_player_count, t.winner_signup_id,
+               t.runner_up_signup_id, t.third_place_signup_id,
+               (SELECT COUNT(*) FROM tournament_signups s
+                 WHERE s.tournament_id = t.id AND NOT s.is_speculative) AS signup_count
+        FROM tournaments t
+        WHERE t.status = 'completed'
+        ORDER BY t.ended_at DESC
+        LIMIT :limit OFFSET :offset
+    """)
+    trows = (await db.execute(tq, {"limit": limit, "offset": offset})).all()
+    if not trows:
+        return {"tournaments": []}
+    tids = [r.id for r in trows]
+
+    pq = text("""
+        SELECT s.tournament_id, s.id AS signup_id, p.steam_id, p.display_name,
+               s.seed, s.cached_elo_at_lock, s.placed_rank, s.forfeited
+        FROM tournament_signups s
+        JOIN players p ON p.id = s.player_id
+        WHERE s.tournament_id = ANY(:tids) AND NOT s.is_speculative
+    """)
+    prows = (await db.execute(pq, {"tids": tids})).all()
+
+    mq = text("""
+        SELECT m.tournament_id, m.round, m.bracket_side, m.status,
+               m.p1_signup_id, m.p2_signup_id, m.winner_signup_id, m.is_bye
+        FROM tournament_matches m
+        WHERE m.tournament_id = ANY(:tids)
+    """)
+    mrows = (await db.execute(mq, {"tids": tids})).all()
+
+    by_t_matches: dict = {}
+    for m in mrows:
+        by_t_matches.setdefault(m.tournament_id, []).append(m)
+
+    # Bracket W-L per signup: any terminal match with a winner and both seats
+    # present counts (forfeit wins advance the bracket, so excluding them
+    # would make a finalist's line disagree with the bracket the player just
+    # looked at). Byes never count.
+    wins: dict = {}
+    losses: dict = {}
+    for m in mrows:
+        if m.is_bye or m.status not in ("completed", "forfeit", "double_forfeit"):
+            continue
+        if m.winner_signup_id is None or m.p1_signup_id is None or m.p2_signup_id is None:
+            continue
+        loser = m.p2_signup_id if m.winner_signup_id == m.p1_signup_id else m.p1_signup_id
+        wins[m.winner_signup_id] = wins.get(m.winner_signup_id, 0) + 1
+        losses[loser] = losses.get(loser, 0) + 1
+
+    out = []
+    for t in trows:
+        # _compute_progress_labels ignores its tournament arg; for a completed
+        # tournament it yields CHAMPION / "eliminated <side> RN" per signup.
+        labels = _compute_progress_labels(None, by_t_matches.get(t.id, []))
+        parts = []
+        for p in (x for x in prows if x.tournament_id == t.id):
+            # MINTED placements are authoritative over the computed label
+            # (round-2 f9: legacy single-elim winners have placed_rank 1/3
+            # but their bracket sides never hit the CHAMPION branch, so the
+            # popup read "#1 ... advanced").
+            _label = labels.get(p.signup_id)
+            if p.placed_rank == 1:
+                _label = "CHAMPION"
+            elif p.placed_rank == 3 and _label == "advanced":
+                _label = "3rd place"
+            parts.append({
+                "steam_id": p.steam_id,
+                "display_name": p.display_name,
+                "seed": p.seed,
+                "elo": int(round(p.cached_elo_at_lock)) if p.cached_elo_at_lock is not None else None,
+                "placed_rank": p.placed_rank,
+                "forfeited": p.forfeited,
+                "wins": wins.get(p.signup_id, 0),
+                "losses": losses.get(p.signup_id, 0),
+                "result_label": _label,
+            })
+        # Podium first, then seed order — the popup renders rows verbatim.
+        parts.sort(key=lambda x: (x["placed_rank"] if x["placed_rank"] is not None else 99,
+                                  x["seed"] if x["seed"] is not None else 99))
+        dur = None
+        if t.started_at is not None and t.ended_at is not None:
+            dur = int((t.ended_at - t.started_at).total_seconds())
+        # Only a REAL locked snapshot may be presented as the historical
+        # payout (review F17: recomputing from signup_count with today's
+        # tiers fabricated prize history for pre-migration-132 tournaments)
+        # — and PER RANK only where that podium spot was actually MINTED
+        # (round-2 f8 / round-3 f6: _pay_prizes grants ranks independently,
+        # so a played final + forfeited third-place pays 1st/2nd but not
+        # 3rd, and vice versa — all-or-nothing misreported both shapes).
+        if t.prize_player_count:
+            _pg_full, _px_full = _prize_amounts(t.prize_player_count)
+            _minted = (t.winner_signup_id, t.runner_up_signup_id, t.third_place_signup_id)
+            _pg = tuple(v if _minted[i] is not None else 0 for i, v in enumerate(_pg_full))
+            _px = tuple(v if _minted[i] is not None else 0 for i, v in enumerate(_px_full))
+        else:
+            _pg, _px = (0, 0, 0), (0, 0, 0)
+        out.append({
+            "tournament_id": t.id, "kind": t.kind, "format": t.format,
+            "started_at": t.started_at, "ended_at": t.ended_at,
+            "duration_seconds": dur,
+            "signup_count": t.signup_count,
+            "prize_gold_1": _pg[0], "prize_gold_2": _pg[1], "prize_gold_3": _pg[2],
+            "prize_xp_1": _px[0], "prize_xp_2": _px[1], "prize_xp_3": _px[2],
+            "participants": parts,
+        })
+    return {"tournaments": out}
+
+
+@router.get("/{tournament_id}/bracket-detail")
+async def bracket_detail(tournament_id: uuid.UUID,
+                         db: AsyncSession = Depends(get_db)):
+    """Per-bracket-match, per-game detail feeding the bracket HOVER tooltips
+    (Aug 17). One fetch per tournament render — hover cannot wait on a
+    request, so the client caches this keyed on (tournament, terminal-match
+    count). Games are oriented to SIGNUP order (p1 = the match row's
+    p1_signup_id) exactly like the /current series-wins mapping, so the
+    tooltip and the cell can never disagree about which side is which.
+    Public read: everything here is already served by the match-history
+    surfaces; this is a re-grouping, not a new disclosure."""
+    lq = text("""
+        SELECT m.id AS match_id, m.series_id,
+               s1.player_id AS s1_pid, s2.player_id AS s2_pid
+        FROM tournament_matches m
+        LEFT JOIN tournament_signups s1 ON s1.id = m.p1_signup_id
+        LEFT JOIN tournament_signups s2 ON s2.id = m.p2_signup_id
+        WHERE m.tournament_id = :tid AND m.series_id IS NOT NULL
+    """)
+    links = (await db.execute(lq, {"tid": tournament_id})).all()
+    if not links:
+        return {"matches": []}
+    sids = [r.series_id for r in links]
+
+    gq = text("""
+        SELECT mt.series_id, mt.id AS game_id, mt.player1_id, mt.player2_id,
+               mt.p1_rounds_won, mt.p2_rounds_won,
+               mt.p1_points_total, mt.p2_points_total,
+               COALESCE(mt.duration_seconds, mt.match_duration) AS dur,
+               mt.p1_fps_avg, mt.p2_fps_avg, mt.p1_ping_avg, mt.p2_ping_avg,
+               mt.p1_bullets_fired, mt.p1_bullets_hit,
+               mt.p2_bullets_fired, mt.p2_bullets_hit,
+               mt.p1_blocks_activated, mt.p1_blocks_successful,
+               mt.p2_blocks_activated, mt.p2_blocks_successful,
+               mt.ended_at
+        FROM matches mt
+        WHERE mt.series_id = ANY(:sids) AND mt.invalidated_at IS NULL
+        ORDER BY mt.series_id, mt.ended_at
+    """)
+    grows = (await db.execute(gq, {"sids": sids})).all()
+    games_by_series: dict = {}
+    for g in grows:
+        games_by_series.setdefault(g.series_id, []).append(g)
+
+    gids = [g.game_id for g in grows]
+    cards_by_game_player: dict = {}
+    if gids:
+        cq = text("""
+            SELECT mc.match_id, mc.player_id, mc.card_name
+            FROM match_cards mc
+            WHERE mc.match_id = ANY(:gids)
+            ORDER BY mc.match_id, mc.pick_order
+        """)
+        for c in (await db.execute(cq, {"gids": gids})).all():
+            cards_by_game_player.setdefault((c.match_id, c.player_id), []).append(c.card_name)
+
+    def _pct(hit, total):
+        return int(round(100.0 * hit / total)) if (total or 0) > 0 and hit is not None else None
+
+    out = []
+    for lk in links:
+        games = []
+        for i, g in enumerate(games_by_series.get(lk.series_id, []), start=1):
+            # Orient to signup order. A backfill-promoted signup can leave a
+            # game whose players match neither seat; serve it un-swapped
+            # rather than dropping the game (names in the tooltip still
+            # identify the sides).
+            swap = (lk.s1_pid is not None and lk.s1_pid == g.player2_id)
+            def _side(p1v, p2v):
+                return (p2v, p1v) if swap else (p1v, p2v)
+            r1, r2 = _side(g.p1_rounds_won, g.p2_rounds_won)
+            pt1, pt2 = _side(g.p1_points_total, g.p2_points_total)
+            f1, f2 = _side(g.p1_fps_avg, g.p2_fps_avg)
+            pi1, pi2 = _side(g.p1_ping_avg, g.p2_ping_avg)
+            bf1, bf2 = _side(g.p1_bullets_fired, g.p2_bullets_fired)
+            bh1, bh2 = _side(g.p1_bullets_hit, g.p2_bullets_hit)
+            ba1, ba2 = _side(g.p1_blocks_activated, g.p2_blocks_activated)
+            bs1, bs2 = _side(g.p1_blocks_successful, g.p2_blocks_successful)
+            pid1 = g.player2_id if swap else g.player1_id
+            pid2 = g.player1_id if swap else g.player2_id
+            games.append({
+                "n": i,
+                "p1_rounds": r1, "p2_rounds": r2,
+                "p1_points": pt1, "p2_points": pt2,
+                "dur": g.dur,
+                "p1_fps": f1, "p2_fps": f2,
+                "p1_ping": pi1, "p2_ping": pi2,
+                "p1_hit_pct": _pct(bh1, bf1), "p2_hit_pct": _pct(bh2, bf2),
+                "p1_blk_pct": _pct(bs1, ba1), "p2_blk_pct": _pct(bs2, ba2),
+                "p1_cards": "|".join(c.replace("|", "/") for c in cards_by_game_player.get((g.game_id, pid1), [])),
+                "p2_cards": "|".join(c.replace("|", "/") for c in cards_by_game_player.get((g.game_id, pid2), [])),
+            })
+        if games:
+            out.append({"match_id": lk.match_id, "games": games})
+    return {"matches": out}
 
 
 @router.get("/internal/watch")

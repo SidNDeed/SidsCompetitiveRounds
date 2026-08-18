@@ -321,6 +321,40 @@ namespace CompetitiveRounds
             pendingFfaCount = 0;
         }
 
+        /// <summary>The ONE list of components every persistent host carries.
+        /// Called from the initial spawn AND CompetitiveRoundsBehaviour's
+        /// OnDestroy respawn (Aug 17 review round-4 finding 3: the respawn
+        /// used to recreate only the main behaviour, so a mid-session
+        /// persistent-object destruction silently stripped the nickname
+        /// repair driver, trail Photon callbacks, both nametag renderers and
+        /// Cr2v2DiagCallbacks — including the reliable room-join reset that
+        /// bugs 232/233 depend on — for the rest of the session). Any future
+        /// persistent companion is added HERE, never at one call site.</summary>
+        internal static void AttachPersistentCompanions(GameObject go)
+        {
+            // Bug 234: retry vanilla's transient Steam-persona nickname repair and
+            // repaint one-shot PlayerName labels when Photon actor key 255 changes.
+            // The driver is ungated and self-throttled; it never touches gameplay.
+            go.AddComponent<PlayerNicknameRepairDriver>();
+            // Sibling component that receives Photon IInRoomCallbacks — used by the cosmetic
+            // trail system to re-attach opponents' trails when their cr_trail_* props arrive
+            // after OnMatchStart has already iterated.
+            go.AddComponent<TrailPhotonCallbacks>();
+            // Local-only nametag renderers. Both poll scene TMP labels every 0.5s. Font
+            // renderer is attached FIRST so its coroutine runs before the glow renderer
+            // each cycle — glow clones its material from the label's current sharedMaterial,
+            // which changes after a font swap, so the glow rebuild needs to see the swapped
+            // material to reapply correctly. Order here is load-bearing.
+            go.AddComponent<NametagFontRenderer>();
+            go.AddComponent<NametagGlowRenderer>();
+            // 2v2 diagnostics — Photon callback target. Logs every
+            // PlayerEntered / PlayerLeft / Disconnect / LeftRoom / etc.
+            // when in (or recently in) a cr_ff room. Also owns the reliable
+            // room-join edge (resumed-score reset + stash consume, bug 232/233;
+            // NetworkReplicaDiagnostics room lifecycle, bug 235).
+            go.AddComponent<Cr2v2DiagCallbacks>();
+        }
+
         private void Awake()
         {
             Log = Logger;
@@ -886,21 +920,7 @@ namespace CompetitiveRounds
                 go.hideFlags = HideFlags.HideAndDontSave;
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 Instance = go.AddComponent<CompetitiveRoundsBehaviour>();
-                // Sibling component that receives Photon IInRoomCallbacks — used by the cosmetic
-                // trail system to re-attach opponents' trails when their cr_trail_* props arrive
-                // after OnMatchStart has already iterated.
-                go.AddComponent<TrailPhotonCallbacks>();
-                // Local-only nametag renderers. Both poll scene TMP labels every 0.5s. Font
-                // renderer is attached FIRST so its coroutine runs before the glow renderer
-                // each cycle — glow clones its material from the label's current sharedMaterial,
-                // which changes after a font swap, so the glow rebuild needs to see the swapped
-                // material to reapply correctly. Order here is load-bearing.
-                go.AddComponent<NametagFontRenderer>();
-                go.AddComponent<NametagGlowRenderer>();
-                // 2v2 diagnostics — Photon callback target. Logs every
-                // PlayerEntered / PlayerLeft / Disconnect / LeftRoom / etc.
-                // when in (or recently in) a cr_ff room.
-                go.AddComponent<Cr2v2DiagCallbacks>();
+                AttachPersistentCompanions(go);
                 spawned = true;
                 Log.LogInfo("Created persistent GameObject with DontDestroyOnLoad");
             }
@@ -909,6 +929,14 @@ namespace CompetitiveRounds
             // (an unreferenced const is folded away and would be unscannable),
             // and it also tells a bug report which variant the player is on.
             Log.LogInfo($"{ModName} v{ModVersion} loaded! [{ApiClient.BuildVariantMarker}]");
+
+            // (AttachPersistentCompanions lives below so BOTH the initial spawn
+            // and the OnDestroy respawn attach the same set — Aug 17 review
+            // round-4 finding 3: the respawn used to recreate only the main
+            // behaviour, silently dropping every companion — the nickname
+            // repair driver, trail callbacks, nametag renderers and the 2v2
+            // Photon callback target (whose OnJoinedRoom owns the resumed-
+            // score reset/consume) — for the rest of the session.)
 
             // Create a separate tiny object for queue auto-join
             var queueObj = new GameObject("CR_QueueJoiner");
@@ -2107,6 +2135,9 @@ namespace CompetitiveRounds
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 var newInstance = go.AddComponent<CompetitiveRoundsBehaviour>();
                 Plugin.Instance = newInstance;
+                // Round-4 finding 3: the respawn must carry the SAME companion
+                // set as the initial spawn, through the one shared helper.
+                Plugin.AttachPersistentCompanions(go);
                 Plugin.Log.LogInfo("[PERSIST] Respawned with DontDestroyOnLoad!");
             }
             catch (Exception ex)
@@ -3039,6 +3070,9 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // Bug 235 diagnostics bind to the reliable Photon room edge so a
+            // fast leave+rejoin cannot merge two sittings' counters/budgets.
+            try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }
             // Join-op settlement bookkeeping BEFORE anything can early-return
             // (broadcast r2 find 1): a room entry terminally resolves the one
             // spectate JoinRoom op that can be in flight. Pure flag clear;
@@ -3558,6 +3592,10 @@ namespace CompetitiveRounds
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+            // Flush the active/aborted game and room totals before role/session
+            // state is cleared. Do not use the InRoom poll here: it turns false
+            // during Leaving, before queued receive work and this callback.
+            try { NetworkReplicaDiagnostics.OnRoomLeft(); } catch { }
             // Esc-menu leave confirm: callback-bound disarm ATTEMPTS to
             // restore the vanilla wiring on the ACTUAL room exit (it catches
             // restore failure; the next successful Arm repairs that button).

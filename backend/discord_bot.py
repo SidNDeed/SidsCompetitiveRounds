@@ -237,9 +237,16 @@ async def api_get(path, timeout=8.0):
     except Exception as e:
         print(f"API GET error: {e}"); return None
 
-async def api_post(path, params=None):
+async def api_post(path, params=None, timeout=None):
+    """timeout: optional per-request seconds — None keeps the session default.
+    Callers inside single-task convergence loops (the stream-post poller)
+    pass a bound so one stalled response cannot suspend the whole loop for
+    aiohttp's ~5-minute default (Aug 17 review r3f4)."""
     try:
-        async with http_session.post(f"{API_BASE_URL}/api/v1{path}", params=params) as r:
+        kw = {"params": params}
+        if timeout is not None:
+            kw["timeout"] = aiohttp.ClientTimeout(total=timeout)
+        async with http_session.post(f"{API_BASE_URL}/api/v1{path}", **kw) as r:
             if r.status == 200: return await r.json()
             return {"error": await r.text(), "status": r.status}
     except Exception as e:
@@ -365,6 +372,7 @@ async def on_ready():
     if not push_rank_role_colors.is_running(): push_rank_role_colors.start()
     if not grant_booster_gold.is_running(): grant_booster_gold.start()
     if not poll_channel_posts.is_running(): poll_channel_posts.start()
+    if not poll_stream_posts.is_running(): poll_stream_posts.start()
     if not publish_lb_loop.is_running(): publish_lb_loop.start()
     if not poll_tournament_notices.is_running(): poll_tournament_notices.start()
     if not publish_tournament_board.is_running(): publish_tournament_board.start()
@@ -6282,6 +6290,126 @@ async def poll_channel_posts():
 
 @poll_channel_posts.before_loop
 async def before_channel_posts():
+    await bot.wait_until_ready()
+
+
+# Sent-but-unacked memory (#167 pattern; Aug 17 review F4): a successful send
+# whose ACK fails must not be re-sent next tick — the id here is consulted
+# before any send so the retry edits instead of duplicating. A crash between
+# send and ack can still duplicate ONCE (correct at-least-once tradeoff).
+_stream_post_msg_ids: dict = {}
+
+
+@tasks.loop(seconds=20)
+async def poll_stream_posts():
+    """Living stream post for #scr-ranked-streaming (Aug 17, migration 226).
+
+    Desired-state delivery, NOT a fire-once queue: each row is one stream
+    session whose Discord message this loop keeps converged — send when no
+    message exists, edit on every revision, finalize edit at stream end.
+    Revision-bound acks (#175); the message id round-trips through the server
+    (#129) AND is remembered in-process (review F4). #140 rules: live relative
+    timestamp stamped at render time; a buried LIVE post is deleted+reposted
+    at the channel bottom — and the server returns every un-finalized row so
+    the bury check runs each tick, not only on content revisions (review F9)."""
+    if http_session is None or not API_SECRET_KEY:
+        return
+    data = await api_get("/internal/stream-posts/pending")
+    if not data or not data.get("posts"):
+        return
+    for p in data["posts"]:
+        try:
+            key = p["post_key"]
+            ch = bot.get_channel(int(p["channel_id"]))
+            if ch is None:
+                ch = await bot.fetch_channel(int(p["channel_id"]))
+            if ch is None:
+                print(f"[STREAM-POST] channel {p['channel_id']} not found — leaving {key} pending")
+                continue
+            finalized = bool(p.get("finalized"))
+            steady = p.get("posted_revision") == p.get("revision")
+            emb = discord.Embed(
+                title="⚫ Stream ended" if finalized else "🔴 LIVE — Sid's Competitive Rounds",
+                description=(p["content"][:3900]
+                             + f"\n\nUpdated <t:{int(datetime.now(timezone.utc).timestamp())}:R>"),
+                color=0x666666 if finalized else 0xE91E2C,
+            )
+            no_ping = discord.AllowedMentions.none()
+            # MEMORY FIRST (round-2 f2): the in-process id is only ever set by
+            # our own sends, so after a re-anchor whose ack failed it is
+            # strictly fresher than the durable id — DB-first re-found the
+            # deleted predecessor and duplicated.
+            mid = _stream_post_msg_ids.get(key) or p.get("message_id")
+            msg = None
+            if mid:
+                try:
+                    msg = await ch.fetch_message(int(mid))
+                except discord.NotFound:
+                    msg = None
+                except discord.Forbidden:
+                    # Round-2 f3: no Read Message History does NOT mean the
+                    # message is gone — concluding absence here re-sent a new
+                    # post every tick forever. Leave pending; a human fixes
+                    # the permission.
+                    print(f"[STREAM-POST] cannot fetch {mid} in {p['channel_id']} (forbidden) — leaving {key} pending")
+                    continue
+                except Exception:
+                    # Transient fetch failure: do NOT fall through to send —
+                    # that duplicates the living message. Retry next tick.
+                    continue
+
+            buried = (not finalized and msg is not None
+                      and getattr(ch, "last_message_id", None) not in (None, msg.id))
+            if steady and msg is not None and not buried:
+                continue   # acked revision, visible at the bottom — nothing to do
+
+            if msg is not None:
+                if buried:
+                    # Single-message guarantee (review F4 second half): only
+                    # repost if the old message is REALLY gone; a failed
+                    # delete degrades to an in-place edit, never two posts.
+                    deleted = False
+                    try:
+                        await msg.delete()
+                        deleted = True
+                    except discord.NotFound:
+                        deleted = True
+                    except Exception as de:
+                        print(f"[STREAM-POST] delete failed for {key}: {de} — editing in place")
+                    if deleted:
+                        msg = await ch.send(embed=emb, allowed_mentions=no_ping)
+                    else:
+                        await msg.edit(embed=emb, allowed_mentions=no_ping)
+                else:
+                    await msg.edit(embed=emb, allowed_mentions=no_ping)
+            else:
+                msg = await ch.send(embed=emb, allowed_mentions=no_ping)
+            _stream_post_msg_ids[key] = msg.id
+
+            ack = await api_post("/internal/stream-posts/ack", params={
+                "post_key": key, "revision": int(p["revision"]),
+                "message_id": str(msg.id),
+            }, timeout=10)
+            if not ack or ack.get("status") != "acked":
+                # Row stays pending; the in-memory id above prevents a
+                # duplicate send on the retry (review F4).
+                print(f"[STREAM-POST] ack failed for {key} rev {p['revision']} — will retry")
+                continue
+            if finalized:
+                # Bounded memory: the terminal ack landed (the server row now
+                # durably carries the id), so the dup guard can go. Dropping
+                # BEFORE a successful ack would reopen the duplicate window
+                # the map exists to close.
+                _stream_post_msg_ids.pop(key, None)
+            print(f"[STREAM-POST] {'finalized' if finalized else 'updated'} {key} rev {p['revision']}")
+        except discord.Forbidden:
+            print(f"[STREAM-POST] forbidden in {p['channel_id']} — leaving {p.get('post_key')} pending")
+        except Exception as e:
+            print(f"[STREAM-POST] {p.get('post_key')} failed: {e} — will retry")
+
+
+@poll_stream_posts.before_loop
+async def before_stream_posts():
     await bot.wait_until_ready()
 
 

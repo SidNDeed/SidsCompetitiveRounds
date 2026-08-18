@@ -5808,6 +5808,18 @@ namespace CompetitiveRounds
             public List<string> names = new List<string>();
             public List<string> steamIds = new List<string>();
             public List<int> values = new List<int>();
+            // Aug 17 match-derived enrichment. Each aligned with names when the
+            // server sent it; EMPTY against an older server — render sites must
+            // check Count == names.Count before indexing.
+            public List<string> dates = new List<string>();
+            public List<string> titles = new List<string>();
+            public List<string> titleColors = new List<string>();
+            public List<int> ratings = new List<int>();
+            public List<string> cards = new List<string>();       // '|'-joined
+            public List<string> names2 = new List<string>();      // opponent / p2
+            public List<string> steamIds2 = new List<string>();   // opponent / p2 (highlighting)
+            public List<string> cards2 = new List<string>();      // game boards only
+            public List<int> ratings2 = new List<int>();          // game boards only
         }
         public class CardTopPickersData
         {
@@ -5938,7 +5950,7 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <param name="board">single_hit | max_health | bounce_kill</param>
+        /// <param name="board">single_hit | max_health | avg_dps | longest_game | shortest_game | luckiest</param>
         public static void FetchRecordsBoard(string board)
         {
             if (string.IsNullOrEmpty(board) || RecordsBoards.ContainsKey(board)) return;
@@ -5953,8 +5965,25 @@ namespace CompetitiveRounds
                     names = JsonStringArrayByKey(resp, "display_names"),
                     steamIds = JsonStringArrayByKey(resp, "steam_ids"),
                     values = JsonIntArrayByKey(resp, "values"),
+                    dates = JsonStringArrayByKey(resp, "dates"),
+                    titles = JsonStringArrayByKey(resp, "titles"),
+                    titleColors = JsonStringArrayByKey(resp, "title_colors"),
+                    ratings = JsonIntArrayByKey(resp, "ratings"),
+                    cards = JsonStringArrayByKey(resp, "cards"),
+                    names2 = JsonStringArrayByKey(resp, "names2"),
+                    steamIds2 = JsonStringArrayByKey(resp, "steam_ids2"),
+                    cards2 = JsonStringArrayByKey(resp, "cards2"),
+                    ratings2 = JsonIntArrayByKey(resp, "ratings2"),
                 };
                 if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.values.Count)) return false;
+                // Enrichment arrays are OPTIONAL (older server / partial body):
+                // a misaligned one is cleared rather than rejecting the whole
+                // board — render sites gate on Count == names.Count.
+                void _norm(List<string> l) { if (l != null && l.Count != d.names.Count) l.Clear(); }
+                void _normI(List<int> l) { if (l != null && l.Count != d.names.Count) l.Clear(); }
+                _norm(d.dates); _norm(d.titles); _norm(d.titleColors);
+                _normI(d.ratings); _norm(d.cards); _norm(d.names2);
+                _norm(d.steamIds2); _norm(d.cards2); _normI(d.ratings2);
                 RecordsBoards[board] = d;
                 return true;
             });
@@ -7272,7 +7301,8 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Read a resumed BO3 tally out of any server response carrying
-        /// the {p1_steam_id, p1_wins, p2_wins} shape, resolved to MY perspective.
+        /// the {p1_steam_id, p2_steam_id, p1_wins, p2_wins} shape, resolved to
+        /// MY perspective.
         ///
         /// Three responses emit that shape deliberately identically: the
         /// /series/preflight "exists" branch, /queue/ready's both_ready, and the
@@ -7283,8 +7313,8 @@ namespace CompetitiveRounds
         /// resumed series rendered 0-0.
         ///
         /// Returns false for a fresh 0-0 series (nothing to adopt) and for an
-        /// old server that omits the fields — an absent p1_steam_id must never
-        /// be treated as "I am not p1", which would invert the score.</summary>
+        /// old server that omits the fields — absent participant ids must never
+        /// be treated as "I am p2", which would invert an unrelated score.</summary>
         public static bool TryResolveResumedScore(string resp, string mySteamId,
                                                   out int myWins, out int oppWins)
         {
@@ -7293,12 +7323,19 @@ namespace CompetitiveRounds
             {
                 int p1w = (int)ExtractJsonFloat(resp, "p1_wins");
                 int p2w = (int)ExtractJsonFloat(resp, "p2_wins");
+                // An active BO3 can only be 0 or 1 on either side. A terminal
+                // or negative payload is stale/malformed and must not become
+                // the room's current-series phase.
+                if (p1w < 0 || p2w < 0 || p1w >= 2 || p2w >= 2) return false;
                 if (p1w <= 0 && p2w <= 0) return false;   // fresh series
                 string sp1 = ExtractJsonString(resp, "p1_steam_id");
+                string sp2 = ExtractJsonString(resp, "p2_steam_id");
                 // Perspective is UNRESOLVABLE without both ids — bail rather
                 // than guess (an old server sends neither).
-                if (string.IsNullOrEmpty(sp1) || string.IsNullOrEmpty(mySteamId)) return false;
+                if (string.IsNullOrEmpty(sp1) || string.IsNullOrEmpty(sp2)
+                    || string.IsNullOrEmpty(mySteamId)) return false;
                 bool meIsP1 = sp1 == mySteamId;
+                if (!meIsP1 && sp2 != mySteamId) return false;
                 myWins = meIsP1 ? p1w : p2w;
                 oppWins = meIsP1 ? p2w : p1w;
                 return true;
@@ -7310,14 +7347,20 @@ namespace CompetitiveRounds
         /// player. Both the preflight path (already in the room) and the
         /// queue-lock path (via GameStateWatcher's stash, applied on room join)
         /// funnel through here so the toast can never drift between them.</summary>
-        public static void ApplyResumedSeriesScore(int myWins, int oppWins)
+        public static void ApplyResumedSeriesScore(int myWins, int oppWins,
+                                                   int expectedRoomSeriesGeneration)
         {
             try
             {
-                GameStateWatcher.AdoptSeriesScore(myWins, oppWins);
-                CompetitiveUI.QueueNotification(
-                    I18n.TrF("Resuming series at {0}-{1}", myWins, oppWins),
-                    new Color(1f, 0.85f, 0.3f), 4f);
+                if (GameStateWatcher.AdoptSeriesScore(
+                        myWins, oppWins, expectedRoomSeriesGeneration))
+                {
+                    CompetitiveUI.QueueNotification(
+                        I18n.TrF("Resuming series at {0}-{1}",
+                            GameStateWatcher.CurrentSeriesGamesWon,
+                            GameStateWatcher.CurrentSeriesGamesLost),
+                        new Color(1f, 0.85f, 0.3f), 4f);
+                }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[SERIES] resumed-score apply failed: {ex.Message}"); }
         }
@@ -7357,6 +7400,7 @@ namespace CompetitiveRounds
             // different opponent) — the incarnation counter, bumped by both
             // Photon room callbacks, is what the name check cannot be.
             int myIncarnation = RoomIncarnation;
+            int roomSeriesGeneration = GameStateWatcher.RoomSeriesGeneration;
             string url = $"{baseUrl}/api/v1/series/preflight?p1_steam_id={Escape(mySteamId)}&p2_steam_id={Escape(oppSteamId)}"
                        + $"&p1_name={Escape(myName)}&p2_name={Escape(oppName)}"
                        + $"&room_id={UnityEngine.Networking.UnityWebRequest.EscapeURL(roomName)}&sig={sig}";
@@ -7478,11 +7522,12 @@ namespace CompetitiveRounds
                             if (status == "exists"
                                 && TryResolveResumedScore(resp, mySteamId, out int myWins, out int oppWins))
                             {
-                                // This path is already IN the room, so adopting
-                                // immediately is safe — nothing resets the tally
-                                // afterwards. The queue-lock path is not, and
-                                // stashes instead (see StashResumedSeriesScore).
-                                ApplyResumedSeriesScore(myWins, oppWins);
+                                // This path is already IN the room. The shared
+                                // helper monotonic-merges any local game-over that
+                                // beat this callback and generation-fences later
+                                // BO3s. The queue-lock path stashes until join.
+                                ApplyResumedSeriesScore(
+                                    myWins, oppWins, roomSeriesGeneration);
                             }
                         }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[PREFLIGHT] score adopt failed: {ex.Message}"); }
@@ -16685,6 +16730,12 @@ namespace CompetitiveRounds
             public bool forfeited;
             public int placed_rank; // 0 if not placed
             public string progress_label;  // "WB R2" / "LB R3" / "eliminated WB R2" / "CHAMPION"
+            // Aug 17 bracket-clarity batch: locked elo (live rating pre-lock),
+            // 0 = never rated; resolved title (dynamic skus pre-resolved
+            // server-side, #111) for the signups list.
+            public int rating;
+            public string title;
+            public string title_color;
         }
 
         [Serializable]
@@ -16805,6 +16856,9 @@ namespace CompetitiveRounds
                 forfeited = ExtractBool(raw, "forfeited"),
                 placed_rank = ExtractInt(raw, "placed_rank", 0),
                 progress_label = ExtractString(raw, "progress_label"),
+                rating = ExtractInt(raw, "rating", 0),
+                title = ExtractString(raw, "title"),
+                title_color = ExtractString(raw, "title_color"),
             });
             t.matches = ExtractObjectArray(json, "matches", raw => new TournamentMatchRow
             {
@@ -16832,12 +16886,50 @@ namespace CompetitiveRounds
 
         // Small, forgiving JSON extractors. NOT a full parser — they handle the
         // shapes we control (API response) and ignore the rest.
+
+        /// <summary>Index of the COLON after a genuine `"key":` occurrence, or
+        /// -1. String-aware (#156 one level down — Aug 17 review F3/F8): a
+        /// plain IndexOf finds the key text inside a user-authored STRING
+        /// VALUE (display names are adversarial), which let a player named
+        /// "placed_rank" forge their row's later numeric fields. A string
+        /// token is a KEY exactly when the next non-whitespace character
+        /// after its closing quote is ':' — a string VALUE is always followed
+        /// by ',' '}' or ']' in valid JSON, never ':'.</summary>
+        private static int FindKeyColon(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return -1;
+            bool inStr = false, esc = false;
+            int tokStart = -1;
+            for (int i = 0; i < json.Length; i++)
+            {
+                char ch = json[i];
+                if (inStr)
+                {
+                    if (esc) { esc = false; continue; }
+                    if (ch == '\\') { esc = true; continue; }
+                    if (ch != '"') continue;
+                    inStr = false;
+                    int len = i - tokStart;
+                    // Escaped content never CompareOrdinal-matches our plain
+                    // ASCII keys — a name crafted to escape into a key shape
+                    // therefore fails the compare rather than forging.
+                    if (len == key.Length && string.CompareOrdinal(json, tokStart, key, 0, len) == 0)
+                    {
+                        int p = i + 1;
+                        while (p < json.Length && (json[p] == ' ' || json[p] == '\t' || json[p] == '\r' || json[p] == '\n')) p++;
+                        if (p < json.Length && json[p] == ':') return p;
+                    }
+                    continue;
+                }
+                if (ch == '"') { inStr = true; tokStart = i + 1; }
+            }
+            return -1;
+        }
+
         private static string ExtractString(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return null;
-            int i = json.IndexOf("\"" + key + "\"");
-            if (i < 0) return null;
-            int c = json.IndexOf(':', i);
+            int c = FindKeyColon(json, key);
             if (c < 0) return null;
             int p = c + 1;
             while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
@@ -16859,9 +16951,7 @@ namespace CompetitiveRounds
         private static int ExtractInt(string json, string key, int def)
         {
             if (string.IsNullOrEmpty(json)) return def;
-            int i = json.IndexOf("\"" + key + "\"");
-            if (i < 0) return def;
-            int c = json.IndexOf(':', i);
+            int c = FindKeyColon(json, key);
             if (c < 0) return def;
             int p = c + 1;
             while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
@@ -16875,9 +16965,7 @@ namespace CompetitiveRounds
         private static float ExtractFloat(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return 0f;
-            int i = json.IndexOf("\"" + key + "\"");
-            if (i < 0) return 0f;
-            int c = json.IndexOf(':', i);
+            int c = FindKeyColon(json, key);
             if (c < 0) return 0f;
             int p = c + 1;
             while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
@@ -16891,9 +16979,7 @@ namespace CompetitiveRounds
         private static bool ExtractBool(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return false;
-            int i = json.IndexOf("\"" + key + "\"");
-            if (i < 0) return false;
-            int c = json.IndexOf(':', i);
+            int c = FindKeyColon(json, key);
             if (c < 0) return false;
             int p = c + 1;
             while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
@@ -16903,9 +16989,9 @@ namespace CompetitiveRounds
         private static string[] ExtractStringArray(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return Array.Empty<string>();
-            int i = json.IndexOf("\"" + key + "\"");
-            if (i < 0) return Array.Empty<string>();
-            int b = json.IndexOf('[', i);
+            int c0 = FindKeyColon(json, key);
+            if (c0 < 0) return Array.Empty<string>();
+            int b = json.IndexOf('[', c0);
             if (b < 0) return Array.Empty<string>();
             int e = json.IndexOf(']', b);
             if (e < 0) return Array.Empty<string>();
@@ -16927,17 +17013,32 @@ namespace CompetitiveRounds
         private static T[] ExtractObjectArray<T>(string json, string key, Func<string, T> parse)
         {
             if (string.IsNullOrEmpty(json)) return Array.Empty<T>();
-            int i = json.IndexOf("\"" + key + "\"");
-            if (i < 0) return Array.Empty<T>();
-            int b = json.IndexOf('[', i);
+            // Key anchor via FindKeyColon (review F8): a signup literally named
+            // "time_slot_tallies" used to redirect this to the wrong array.
+            int c0 = FindKeyColon(json, key);
+            if (c0 < 0) return Array.Empty<T>();
+            int b = json.IndexOf('[', c0);
             if (b < 0) return Array.Empty<T>();
-            // Scan forward, tracking brace depth, collect { ... } segments at depth 1.
+            // Scan forward, tracking brace depth, collect { ... } segments at
+            // depth 1. STRING-AWARE (#156): display names are user-authored and
+            // may contain braces/brackets — a naive depth counter here silently
+            // corrupted the whole array for every client whenever one signup
+            // name carried a '{' or '}'.
             var list = new List<T>();
             int depth = 0;
             int objStart = -1;
+            bool inStr = false, esc = false;
             for (int k = b; k < json.Length; k++)
             {
                 char ch = json[k];
+                if (inStr)
+                {
+                    if (esc) { esc = false; continue; }
+                    if (ch == '\\') { esc = true; continue; }
+                    if (ch == '"') inStr = false;
+                    continue;
+                }
+                if (ch == '"') { inStr = true; continue; }
                 if (ch == '[') { depth++; continue; }
                 if (ch == ']') { depth--; if (depth == 0) break; continue; }
                 if (ch == '{')
@@ -17426,6 +17527,186 @@ namespace CompetitiveRounds
                         NativeUI.MarkDirty();
                     }
                     catch (Exception e) { Plugin.Log.LogWarning($"[TOURNAMENT-SITEHIST] parse: {e.Message}"); }
+                }
+            ));
+        }
+
+        // ── Recent Tournaments popup detail (Aug 17 bracket-clarity batch) ──
+
+        [Serializable]
+        public class TournHistParticipant
+        {
+            public string steam_id;
+            public string display_name;
+            public int seed;          // 0 = unseeded
+            public int elo;           // cached_elo_at_lock; 0 = unknown
+            public int placed_rank;   // 0 = no podium
+            public bool forfeited;
+            public int wins;          // bracket matches won (forfeit wins count — matches the bracket)
+            public int losses;
+            public string result_label;  // "CHAMPION" / "eliminated Losers R2" / ...
+        }
+
+        [Serializable]
+        public class TournHistDetailEntry
+        {
+            public string tournament_id;
+            public string kind;
+            public string format;
+            public string started_at;
+            public string ended_at;
+            public int duration_seconds;  // 0 = unknown (either timestamp missing)
+            public int signup_count;
+            public int prize_gold_1, prize_gold_2, prize_gold_3;
+            public int prize_xp_1, prize_xp_2, prize_xp_3;
+            public TournHistParticipant[] participants;
+        }
+
+        public static TournHistDetailEntry[] CachedTournHistoryDetail;
+        private static float _tournHistDetailAt;
+
+        /// <summary>Feeds the Recent Tournaments POPUP. Fetched when the popup
+        /// opens (explicit user action) with a short throttle so re-opens
+        /// within a minute reuse the cache.</summary>
+        public static void FetchTournamentHistoryDetail(bool force = false)
+        {
+            if (!force && CachedTournHistoryDetail != null
+                && Time.unscaledTime < _tournHistDetailAt) return;
+            _tournHistDetailAt = Time.unscaledTime + 60f;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/tournaments/history-detail?limit=8",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try
+                    {
+                        CachedTournHistoryDetail = ExtractObjectArray(response, "tournaments",
+                            raw => new TournHistDetailEntry
+                            {
+                                tournament_id = ExtractString(raw, "tournament_id"),
+                                kind = ExtractString(raw, "kind"),
+                                format = ExtractString(raw, "format"),
+                                started_at = ExtractString(raw, "started_at"),
+                                ended_at = ExtractString(raw, "ended_at"),
+                                duration_seconds = ExtractInt(raw, "duration_seconds", 0),
+                                signup_count = ExtractInt(raw, "signup_count", 0),
+                                prize_gold_1 = ExtractInt(raw, "prize_gold_1", 0),
+                                prize_gold_2 = ExtractInt(raw, "prize_gold_2", 0),
+                                prize_gold_3 = ExtractInt(raw, "prize_gold_3", 0),
+                                prize_xp_1 = ExtractInt(raw, "prize_xp_1", 0),
+                                prize_xp_2 = ExtractInt(raw, "prize_xp_2", 0),
+                                prize_xp_3 = ExtractInt(raw, "prize_xp_3", 0),
+                                participants = ExtractObjectArray(raw, "participants",
+                                    p => new TournHistParticipant
+                                    {
+                                        steam_id = ExtractString(p, "steam_id"),
+                                        display_name = ExtractString(p, "display_name"),
+                                        seed = ExtractInt(p, "seed", 0),
+                                        elo = ExtractInt(p, "elo", 0),
+                                        placed_rank = ExtractInt(p, "placed_rank", 0),
+                                        forfeited = ExtractBool(p, "forfeited"),
+                                        wins = ExtractInt(p, "wins", 0),
+                                        losses = ExtractInt(p, "losses", 0),
+                                        result_label = ExtractString(p, "result_label"),
+                                    }),
+                            });
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception e) { Plugin.Log.LogWarning($"[TOURN-HISTDETAIL] parse: {e.Message}"); }
+                }
+            ));
+        }
+
+        // ── Bracket hover detail (Aug 17 bracket-clarity batch) ─────────────
+
+        [Serializable]
+        public class BracketGameDetail
+        {
+            public int n;
+            public int p1_rounds, p2_rounds;
+            public int p1_points, p2_points;
+            public int dur;                       // seconds; 0 = unknown
+            public int p1_fps, p2_fps;            // -1 = not recorded
+            public int p1_ping, p2_ping;          // -1 = not recorded
+            public int p1_hit_pct, p2_hit_pct;    // -1 = not recorded
+            public int p1_blk_pct, p2_blk_pct;    // -1 = not recorded
+            public string p1_cards, p2_cards;     // pipe-joined pick-order card names
+        }
+
+        [Serializable]
+        public class BracketMatchDetail
+        {
+            public string match_id;
+            public BracketGameDetail[] games;
+        }
+
+        /// <summary>Keyed by bracket match_id; belongs to CachedBracketDetailTid.
+        /// Hover tooltips read this synchronously, so the fetch runs at bracket
+        /// RENDER time (never at hover time) and re-arms when the tournament or
+        /// its terminal-match count changes.</summary>
+        public static Dictionary<string, BracketMatchDetail> CachedBracketDetail
+            = new Dictionary<string, BracketMatchDetail>();
+        public static string CachedBracketDetailTid;
+        public static int CachedBracketDetailStamp = -1;  // terminal+wins stamp at fetch
+        private static float _bracketDetailAt;
+        private static float _bracketDetailFreshUntil;
+
+        public static void FetchBracketDetail(string tournamentId, int terminalCount)
+        {
+            if (string.IsNullOrEmpty(tournamentId)) return;
+            // The stamp observes completions but NOT admin invalidations
+            // (round-2 f7: a reversal preserves the bracket match's terminal
+            // status and win counters while /bracket-detail drops the games).
+            // The 3-minute TTL is the observability backstop: revoked detail
+            // heals on the next render past it instead of living forever.
+            bool fresh = tournamentId == CachedBracketDetailTid
+                         && terminalCount == CachedBracketDetailStamp
+                         && Time.unscaledTime < _bracketDetailFreshUntil;
+            if (fresh) return;
+            if (Time.unscaledTime < _bracketDetailAt) return;   // in-flight / throttle
+            _bracketDetailAt = Time.unscaledTime + 10f;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/tournaments/{UnityWebRequest.EscapeURL(tournamentId)}/bracket-detail",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try
+                    {
+                        var dict = new Dictionary<string, BracketMatchDetail>();
+                        foreach (var m in ExtractObjectArray(response, "matches",
+                            raw => new BracketMatchDetail
+                            {
+                                match_id = ExtractString(raw, "match_id"),
+                                games = ExtractObjectArray(raw, "games", g => new BracketGameDetail
+                                {
+                                    n = ExtractInt(g, "n", 0),
+                                    p1_rounds = ExtractInt(g, "p1_rounds", 0),
+                                    p2_rounds = ExtractInt(g, "p2_rounds", 0),
+                                    p1_points = ExtractInt(g, "p1_points", 0),
+                                    p2_points = ExtractInt(g, "p2_points", 0),
+                                    dur = ExtractInt(g, "dur", 0),
+                                    p1_fps = ExtractInt(g, "p1_fps", -1),
+                                    p2_fps = ExtractInt(g, "p2_fps", -1),
+                                    p1_ping = ExtractInt(g, "p1_ping", -1),
+                                    p2_ping = ExtractInt(g, "p2_ping", -1),
+                                    p1_hit_pct = ExtractInt(g, "p1_hit_pct", -1),
+                                    p2_hit_pct = ExtractInt(g, "p2_hit_pct", -1),
+                                    p1_blk_pct = ExtractInt(g, "p1_blk_pct", -1),
+                                    p2_blk_pct = ExtractInt(g, "p2_blk_pct", -1),
+                                    p1_cards = ExtractString(g, "p1_cards"),
+                                    p2_cards = ExtractString(g, "p2_cards"),
+                                }),
+                            }))
+                        {
+                            if (!string.IsNullOrEmpty(m.match_id)) dict[m.match_id] = m;
+                        }
+                        CachedBracketDetail = dict;
+                        CachedBracketDetailTid = tournamentId;
+                        CachedBracketDetailStamp = terminalCount;
+                        _bracketDetailFreshUntil = Time.unscaledTime + 180f;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception e) { Plugin.Log.LogWarning($"[TOURN-BRACKETDETAIL] parse: {e.Message}"); }
                 }
             ));
         }
@@ -17982,6 +18263,22 @@ namespace CompetitiveRounds
                 if (acqAge >= 0f)
                     url.Append("&acq_age=").Append(acqAge.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
             }
+            // Living stream post (Aug 17): fold the VM bot's stream-info
+            // advert into the poll. No-op on every seat but the broadcast VM
+            // (the file only exists there, and the endpoint 403s non-service
+            // accounts anyway). The series score is deliberately NOT sent —
+            // the server derives it from its own series row, oriented to the
+            // candidate it composes (review F1: a client-computed aggregate
+            // has neither game identity nor side-order binding).
+            try
+            {
+                if (BroadcastMode.StreamInfoLive && !string.IsNullOrEmpty(BroadcastMode.StreamInfoSession))
+                {
+                    url.Append("&stream_live=1&stream_session=")
+                       .Append(UnityWebRequest.EscapeURL(BroadcastMode.StreamInfoSession));
+                }
+            }
+            catch { }
             Plugin.Instance.StartCoroutine(GetRequest(url.ToString(), (ok, resp) =>
             {
                 if (!ok) { callback?.Invoke(false, null); return; }

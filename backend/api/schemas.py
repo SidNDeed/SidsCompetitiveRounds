@@ -843,6 +843,14 @@ class TournamentSignupEntry(BaseModel):
     forfeited: bool
     placed_rank: int | None
     progress_label: str | None = None  # "WB R2" / "LB R3" / "eliminated R2" / "CHAMPION" etc.
+    # Aug 17 bracket-clarity batch: identity for the signups list + bracket
+    # cells. rating = cached_elo_at_lock once seeded (stable, matches the
+    # seeds), live glicko before lock. Title resolves through
+    # _display_title_sync (#111) with the podium maps wired (round-2 f15),
+    # so dynamic skus — rank AND podium — render their live form.
+    rating: int | None = None
+    title: str | None = None
+    title_color: str | None = None
 
 
 class TournamentMatchEntry(BaseModel):
@@ -1336,11 +1344,26 @@ class FfaLeaderboardResponse(BaseModel):
 # nested arrays (learning #25).
 
 class RecordsBoardResponse(BaseModel):
-    """Mini-leaderboard over one of the players.record_* career columns."""
+    """Mini-leaderboard of per-game records (match-derived, Aug 17). Still
+    parallel arrays (#25). The original three arrays keep their exact
+    meaning so pre-Aug-17 clients parse unchanged; everything below them is
+    additive enrichment: the game's date, the holder's resolved title +
+    rating, their cards that game ('|'-joined), and the opponent. cards2 /
+    ratings2 are populated only by the match-scoped game-length boards
+    (both participants shown)."""
     board: str
     display_names: list[str] = Field(default_factory=list)
     steam_ids: list[str] = Field(default_factory=list)
     values: list[int] = Field(default_factory=list)
+    dates: list[str] = Field(default_factory=list)
+    titles: list[str] = Field(default_factory=list)
+    title_colors: list[str] = Field(default_factory=list)
+    ratings: list[int] = Field(default_factory=list)
+    cards: list[str] = Field(default_factory=list)
+    names2: list[str] = Field(default_factory=list)
+    steam_ids2: list[str] = Field(default_factory=list)
+    cards2: list[str] = Field(default_factory=list)
+    ratings2: list[int] = Field(default_factory=list)
 
 
 class CardTopPickersResponse(BaseModel):

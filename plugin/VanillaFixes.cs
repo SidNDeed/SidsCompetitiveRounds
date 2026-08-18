@@ -114,22 +114,38 @@ namespace CompetitiveRounds
         {
             try
             {
-                bool shouldLog;
-                lock (Sync)
-                {
-                    int count;
-                    DiagnosticCounts.TryGetValue(key, out count);
-                    shouldLog = count < maximum;
-                    if (shouldLog) DiagnosticCounts[key] = count + 1;
-                }
-
-                if (shouldLog)
-                    Plugin.Log.LogInfo("[VANILLA-DIAG] " + message);
+                if (TryReserveDiag(key, maximum)) WriteReservedDiag(message);
             }
             catch
             {
                 // Diagnostics are best effort only.
             }
+        }
+
+        /// <summary>Reserve a bounded diagnostic slot before constructing an
+        /// expensive hot-path message. Callers that cache an exhausted result
+        /// must clear that cache at the same edge that calls ResetDiag.</summary>
+        internal static bool TryReserveDiag(string key, int maximum)
+        {
+            if (string.IsNullOrEmpty(key) || maximum <= 0) return false;
+            try
+            {
+                lock (Sync)
+                {
+                    int count;
+                    DiagnosticCounts.TryGetValue(key, out count);
+                    if (count >= maximum) return false;
+                    DiagnosticCounts[key] = count + 1;
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
+        internal static void WriteReservedDiag(string message)
+        {
+            try { Plugin.Log.LogInfo("[VANILLA-DIAG] " + message); }
+            catch { }
         }
 
         /// <summary>Drop one diagnostic budget entry so a per-sitting diag
@@ -1384,7 +1400,15 @@ namespace CompetitiveRounds
 
         internal static void CountRpcSwallow() { _rpcSwallows++; }
         internal static void CountPoolSwallow() { _poolSwallows++; }
-        internal static void CountOrphanSkip() { _orphanSkips++; }
+        internal static void CountOrphanSerialization() { _orphanSkips++; }
+        // SpectatorPatches' existing mute counts the same PUN missing-view
+        // branch before suppressing its warning. Keep the old name as an alias
+        // so fighter and spectator seats feed one interval counter exactly once.
+        internal static void CountOrphanSkip() { CountOrphanSerialization(); }
+        // Room callbacks rebase the interval counter so a fast leave/rejoin
+        // cannot attribute room A's unsampled orphan tail to room B's first
+        // [NET] line. The monotonic process total remains untouched.
+        internal static void RebaseOrphanCounter() { _lastOrphanSkips = _orphanSkips; }
 
         internal static void Tick()
         {
@@ -2783,6 +2807,334 @@ namespace CompetitiveRounds
         {
             if (original != null) return exception;
             return VanillaFixSupport.Cleanup("EscToggleDiag", exception);
+        }
+    }
+
+    /// <summary>Bug #234: vanilla publishes the literal pre-connect placeholder
+    /// <c>PlayerName</c> before joining, then replaces it with the Steam persona as the
+    /// final statement of <c>NetworkConnectionHandler.OnJoinedRoom</c>. A transient
+    /// persona lookup failure can therefore leave the local actor property at the
+    /// placeholder for the whole room. Always wake the persistent retry driver after
+    /// the callback, including when the original throws; returning the same exception
+    /// preserves vanilla's failure semantics.</summary>
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "OnJoinedRoom")]
+    internal static class PlayerNicknameRepairPatch
+    {
+        [HarmonyFinalizer]
+        private static Exception AfterJoin(Exception __exception)
+        {
+            try { PlayerNicknameRepairDriver.RequestImmediateCheck(); }
+            catch (Exception ex) { VanillaFixSupport.LogError("PlayerNicknameRepair", ex); }
+            return __exception;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("PlayerNicknameRepair", exception);
+        }
+    }
+
+    /// <summary>Companion attach point for bug #234's render repair. Vanilla
+    /// <c>PlayerName.Start</c> copies <c>PhotonView.Owner.NickName</c> into TMP once
+    /// and never revisits it. Reassert the current value after Start; later actor-name
+    /// changes use the same helper from <see cref="PlayerNicknameRepairDriver"/>'s
+    /// Photon property callback.</summary>
+    [HarmonyPatch(typeof(PlayerName), "Start")]
+    internal static class PlayerNicknameLabelRefreshPatch
+    {
+        [HarmonyPostfix]
+        private static void AfterStart(PlayerName __instance)
+        {
+            try
+            {
+                if (__instance == null) return;
+                if (__instance.GetComponent<PlayerNicknameLabelRefresher>() == null)
+                    __instance.gameObject.AddComponent<PlayerNicknameLabelRefresher>();
+                PlayerNicknameRepairDriver.RefreshLabel(__instance);
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("PlayerNicknameLabelRefresh", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("PlayerNicknameLabelRefresh", exception);
+        }
+    }
+
+    /// <summary>Persistent, display-only half of bug #234. A slow tick retries the
+    /// local Steam persona lookup only while an online room actually has a missing or
+    /// placeholder nickname. Photon actor-property callbacks repaint the handful of
+    /// live PlayerName labels only when key 255 (NickName) changes, avoiding a label
+    /// poll and covering both modded and unmodded remote actors that later heal.</summary>
+    internal sealed class PlayerNicknameRepairDriver : MonoBehaviourPunCallbacks
+    {
+        private const string VanillaPlaceholder = "PlayerName";
+        private const int MaxRepairAttemptsPerRoom = 15;
+        private const float CheckIntervalSeconds = 2f;
+
+        private static PlayerNicknameRepairDriver _instance;
+        private static bool _immediateCheckPending;
+
+        private Photon.Realtime.Room _observedRoom;
+        private int _repairAttempts;
+        private bool _exhaustionLogged;
+        private float _nextCheck;
+
+        private void Awake()
+        {
+            _instance = this;
+            _nextCheck = 0f;
+            Plugin.Log?.LogInfo("[VANILLA-FIX] PlayerNicknameRepairDriver attached");
+        }
+
+        private void OnDestroy()
+        {
+            if (ReferenceEquals(_instance, this)) _instance = null;
+        }
+
+        internal static void RequestImmediateCheck()
+        {
+            _immediateCheckPending = true;
+            if (_instance != null) _instance._nextCheck = 0f;
+        }
+
+        private void Update()
+        {
+            if (_immediateCheckPending)
+            {
+                _immediateCheckPending = false;
+                _nextCheck = 0f;
+            }
+
+            float now = Time.unscaledTime;
+            if (now < _nextCheck) return;
+            _nextCheck = now + CheckIntervalSeconds;
+
+            try { CheckLocalNickname(); }
+            catch (Exception ex) { VanillaFixSupport.LogError("PlayerNicknameRepair", ex); }
+        }
+
+        public override void OnJoinedRoom()
+        {
+            BeginRoom(PhotonNetwork.CurrentRoom);
+            RequestImmediateCheck();
+        }
+
+        public override void OnLeftRoom()
+        {
+            BeginRoom(null);
+        }
+
+        public override void OnPlayerPropertiesUpdate(
+            Photon.Realtime.Player targetPlayer,
+            ExitGames.Client.Photon.Hashtable changedProps)
+        {
+            try
+            {
+                // Photon Realtime reserves actor-property key 255 for NickName.
+                // LoadBalancingClient caches the new value before invoking this callback.
+                if (targetPlayer == null || changedProps == null ||
+                    !changedProps.ContainsKey(byte.MaxValue)) return;
+                RefreshActorLabels(targetPlayer);
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("PlayerNicknameLabelRefresh", ex); }
+        }
+
+        private void BeginRoom(Photon.Realtime.Room room)
+        {
+            _observedRoom = room;
+            _repairAttempts = 0;
+            _exhaustionLogged = false;
+            _nextCheck = 0f;
+        }
+
+        private void CheckLocalNickname()
+        {
+            if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode ||
+                PhotonNetwork.CurrentRoom == null)
+            {
+                if (_observedRoom != null) BeginRoom(null);
+                return;
+            }
+
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            if (!ReferenceEquals(_observedRoom, room)) BeginRoom(room);
+
+            Photon.Realtime.Player localPlayer = PhotonNetwork.LocalPlayer;
+            if (localPlayer == null) return;
+
+            string currentNickname = PhotonNetwork.NickName;
+            if (!NeedsRepair(currentNickname)) return;
+
+            if (_repairAttempts >= MaxRepairAttemptsPerRoom)
+            {
+                LogExhaustion();
+                return;
+            }
+
+            // A missing Steam process is an unmet prerequisite, not a failed repair:
+            // do not burn the bounded retry budget until a persona lookup can run (#98).
+            bool steamRunning;
+            try { steamRunning = Steamworks.SteamAPI.IsSteamRunning(); }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("PlayerNicknameRepairPrerequisite", ex);
+                return;
+            }
+            if (!steamRunning) return;
+
+            _repairAttempts++;
+            string persona;
+            try
+            {
+                persona = Steamworks.SteamFriends.GetPersonaName();
+            }
+            catch (InvalidOperationException ex)
+            {
+                // SteamFriends.GetPersonaName's installed wrapper throws this only
+                // when InteropHelp.TestIfAvailableClient cannot initialize its client
+                // context. That is still a missing prerequisite, so refund the attempt.
+                _repairAttempts--;
+                VanillaFixSupport.LogError("PlayerNicknameRepairPrerequisite", ex);
+                return;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("PlayerNicknameRepair", ex);
+                if (_repairAttempts >= MaxRepairAttemptsPerRoom) LogExhaustion();
+                return;
+            }
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(persona))
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "PlayerNicknameRepair-empty-persona",
+                        "PlayerNicknameRepair got an empty Steam persona on attempt " +
+                        _repairAttempts + "/" + MaxRepairAttemptsPerRoom, 3);
+                    if (_repairAttempts >= MaxRepairAttemptsPerRoom) LogExhaustion();
+                    return;
+                }
+
+                // Verified against installed PhotonRealtime.Player.NickName:
+                // for the local actor in an online room this sends property key 255.
+                PhotonNetwork.NickName = persona;
+
+                // If this account has nametag cosmetics, refresh NametagStyler's base
+                // from the healed raw persona and publish the wrapped value next.
+                NametagStyler.PublishToPhoton();
+                RefreshActorLabels(localPlayer);
+
+                if (!NeedsRepair(PhotonNetwork.NickName))
+                {
+                    Plugin.Log?.LogInfo(
+                        "[VANILLA-FIX] PlayerNicknameRepair healed the local actor nickname " +
+                        "on attempt " + _repairAttempts + "/" + MaxRepairAttemptsPerRoom);
+                    return;
+                }
+
+                // Steam can legitimately return the reserved literal as a person's real
+                // display name. It is indistinguishable from vanilla's placeholder, but
+                // the platform lookup succeeded, so preserve it and avoid 14 useless calls.
+                if (string.Equals(NametagStyler.Clean(persona), VanillaPlaceholder,
+                    StringComparison.Ordinal))
+                {
+                    _repairAttempts = MaxRepairAttemptsPerRoom;
+                    _exhaustionLogged = true;
+                    Plugin.Log?.LogWarning(
+                        "[VANILLA-FIX] PlayerNicknameRepair platform persona equals the " +
+                        "reserved vanilla placeholder; preserving the platform value");
+                }
+                else if (_repairAttempts >= MaxRepairAttemptsPerRoom)
+                {
+                    LogExhaustion();
+                }
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("PlayerNicknameRepair", ex);
+                if (_repairAttempts >= MaxRepairAttemptsPerRoom) LogExhaustion();
+            }
+        }
+
+        private void LogExhaustion()
+        {
+            if (_exhaustionLogged) return;
+            _exhaustionLogged = true;
+            Plugin.Log?.LogWarning(
+                "[VANILLA-FIX] PlayerNicknameRepair exhausted " +
+                MaxRepairAttemptsPerRoom + " in-room attempt(s); nickname is still unavailable");
+        }
+
+        private static bool NeedsRepair(string nickname)
+        {
+            if (string.IsNullOrWhiteSpace(nickname)) return true;
+            string clean = NametagStyler.Clean(nickname);
+            return string.IsNullOrWhiteSpace(clean) ||
+                   string.Equals(clean, VanillaPlaceholder, StringComparison.Ordinal);
+        }
+
+        private static void RefreshActorLabels(Photon.Realtime.Player player)
+        {
+            if (player == null) return;
+            foreach (PlayerName playerName in UnityEngine.Object.FindObjectsOfType<PlayerName>())
+            {
+                try
+                {
+                    PhotonView view = playerName.GetComponentInParent<PhotonView>();
+                    if (view == null || view.Owner == null ||
+                        view.Owner.ActorNumber != player.ActorNumber) continue;
+                    RefreshLabel(playerName);
+                }
+                catch (Exception ex)
+                {
+                    VanillaFixSupport.LogError("PlayerNicknameLabelRefresh", ex);
+                }
+            }
+        }
+
+        internal static void RefreshLabel(PlayerName playerName)
+        {
+            if (playerName == null) return;
+
+            PhotonView view = playerName.GetComponentInParent<PhotonView>();
+            Component label = TeamColorIdentity.FindTmpInParents(playerName.transform);
+            if (view == null || view.Owner == null || label == null) return;
+
+            string value = PhotonNetwork.OfflineMode ? string.Empty : view.Owner.NickName;
+            PropertyInfo textProperty = label.GetType().GetProperty(
+                "text", BindingFlags.Public | BindingFlags.Instance);
+            if (textProperty == null || !textProperty.CanWrite ||
+                textProperty.PropertyType != typeof(string)) return;
+
+            string existing = null;
+            try { existing = textProperty.GetValue(label, null) as string; } catch { }
+            if (!string.Equals(existing, value, StringComparison.Ordinal))
+                textProperty.SetValue(label, value ?? string.Empty, null);
+        }
+    }
+
+    /// <summary>No-poll complement to the actor-property callback. Unity excludes
+    /// inactive player roots from FindObjectsOfType, so a nickname can heal while a
+    /// dead player's label is inactive. The same label object is reused on revive and
+    /// PlayerName.Start does not rerun; this OnEnable refresh closes that lifecycle gap.</summary>
+    internal sealed class PlayerNicknameLabelRefresher : MonoBehaviour
+    {
+        private void OnEnable()
+        {
+            try
+            {
+                PlayerNicknameRepairDriver.RefreshLabel(GetComponent<PlayerName>());
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("PlayerNicknameLabelRefresh", ex);
+            }
         }
     }
 }

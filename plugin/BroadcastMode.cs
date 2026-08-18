@@ -1272,6 +1272,63 @@ namespace CompetitiveRounds
             return sb.ToString();
         }
 
+        // ── Stream-info fold-in (Aug 17, living Discord stream post) ─────
+        // The VM bot advertises stream live-ness in a SIBLING file of the
+        // status lease; this seat folds it into the authenticated
+        // /broadcast/target poll so the SERVER can run the #scr-ranked-
+        // streaming living-post state machine. The bot has no credentials by
+        // design — the mod's steam session is the only channel off the VM.
+        private static float _streamInfoReadAt = -999f;
+        private static bool _streamInfoLive;
+        private static string _streamInfoSession = "";
+
+        [Serializable]
+        private class StreamInfoFile
+        {
+            public int schema_version;
+            public bool live;
+            public string session_id;
+            public double updated_wall;
+        }
+
+        internal static bool StreamInfoLive
+        { get { RefreshStreamInfo(); return _streamInfoLive; } }
+        internal static string StreamInfoSession
+        { get { RefreshStreamInfo(); return _streamInfoSession ?? ""; } }
+
+        private static void RefreshStreamInfo()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now - _streamInfoReadAt < 10f) return;
+            _streamInfoReadAt = now;
+            _streamInfoLive = false;
+            _streamInfoSession = "";
+            try
+            {
+                string statusPath = Plugin.BroadcastStatusPath != null ? Plugin.BroadcastStatusPath.Value : null;
+                if (string.IsNullOrEmpty(statusPath)) return;
+                string dir = System.IO.Path.GetDirectoryName(statusPath);
+                if (string.IsNullOrEmpty(dir)) return;
+                string p = System.IO.Path.Combine(dir, "stream-info.json");
+                if (!System.IO.File.Exists(p)) return;
+                var parsed = JsonUtility.FromJson<StreamInfoFile>(System.IO.File.ReadAllText(p));
+                if (parsed == null || !parsed.live) return;
+                // Freshness gate: a dead bot must not pin the Discord post
+                // "live" forever. The bot heartbeat-rewrites every 30s while
+                // live; same machine, so no steady-state skew — but a wall
+                // clock can STEP (NTP correction), and a far-future stamp
+                // would otherwise read "fresh" for the whole step size
+                // (round-2 f11). Reject both directions.
+                double nowWall = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                if (parsed.updated_wall <= 0
+                    || nowWall - parsed.updated_wall > 120
+                    || parsed.updated_wall - nowWall > 120) return;
+                _streamInfoLive = true;
+                _streamInfoSession = parsed.session_id ?? "";
+            }
+            catch { }
+        }
+
         /// <summary>Plain "w1-w2" series tally for the lease, matched against
         /// the live-series feeds the spectator maintenance loop already
         /// refreshes. Empty when no series row matches (normal for casual /

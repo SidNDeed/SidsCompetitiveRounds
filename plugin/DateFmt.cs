@@ -25,6 +25,18 @@ namespace CompetitiveRounds
             catch { return "MDY"; }
         }
 
+        /// <summary>Month+day only, for cells too narrow to carry a year
+        /// (the Records date chip): 8/23 | 23/8 | 08-23.</summary>
+        public static string MonthDay(DateTime d)
+        {
+            switch (Order())
+            {
+                case "DMY": return d.ToString("d/M", Inv);
+                case "YMD": return d.ToString("MM-dd", Inv);
+                default:    return d.ToString("M/d", Inv);
+            }
+        }
+
         /// <summary>Full date, 4-digit year: 8/23/2026 | 23/8/2026 | 2026-08-23.</summary>
         public static string Full(DateTime d)
         {

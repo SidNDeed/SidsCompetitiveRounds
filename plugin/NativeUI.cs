@@ -1115,7 +1115,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){try{HideTournamentBetsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */}
+        private static void TeardownOverlaySurfaces(){try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */}
 
         public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -1596,7 +1596,7 @@ namespace CompetitiveRounds
             shopRows.Clear();shopRowPool.Clear();shopArtistBtns.Clear();shopArtistBtnTexts.Clear();shopArtistBtnNames.Clear();
             teamLBRows.Clear();teamHistRows.Clear();
             tSignupRowPool.Clear();tSignupRowTexts.Clear();tBracketRowPool.Clear();tBracketRowTexts.Clear();_tBracketRowPurposes.Clear();
-            tHistoryRowPool.Clear();tHistoryRowTexts.Clear();tTournBetRowPool.Clear();
+            tTournBetRowPool.Clear();
             tSlotToggles.Clear();tSlotChecked.Clear();tSlotLabels.Clear();
             /* Codex review: tSlotChecked is rebuilt all-false, so the flags that
              * declare "these boxes are a local edit" must reset too — otherwise
@@ -6209,6 +6209,191 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 Plugin.Log.LogWarning($"[TBETS] popup: {ex.Message}");
                 HideTournamentBetsPopup();
+            }
+        }
+
+        // ── Recent Tournaments popup (Aug 17, Sid) ───────────────────────
+        // Replaces the old inline right-column list. Same mechanics as the
+        // Tournament Bets popup above; the content is read-only text, but the
+        // backdrop still dismisses only OUTSIDE the box so a click inside a
+        // scrolled table can never close it under the cursor.
+        private static GameObject recentTournPopupGO, recentTournPopupRows;
+        public static bool RecentTournPopupOpen => recentTournPopupGO != null;
+        // Rebuild only when the detail cache is REPLACED (the fetch swaps the
+        // array reference). The refresh hook runs on every tab dirty-tick and
+        // recreating ~90 texts per tick for unchanged data is waste (#162).
+        // Sentinel, never null (review F16): a null start value made the
+        // first cold render — cache still null — compare EQUAL and skip the
+        // Loading row, leaving the popup blank until (or forever, on a
+        // failed fetch) the cache arrived.
+        private static readonly ApiClient.TournHistDetailEntry[] _recentTournNeverFilled
+            = new ApiClient.TournHistDetailEntry[0];
+        private static ApiClient.TournHistDetailEntry[] recentTournFilledFrom = _recentTournNeverFilled;
+
+        public static void HideRecentTournamentsPopup()
+        {
+            try
+            {
+                recentTournPopupRows = null;
+                recentTournFilledFrom = _recentTournNeverFilled;
+                if (recentTournPopupGO != null)
+                {
+                    // Same rule as the bets popup (Codex r7 find 1): deactivate
+                    // synchronously before the deferred Destroy so no raw-poll
+                    // handler fires later this same frame.
+                    try { recentTournPopupGO.SetActive(false); } catch { }
+                    UnityEngine.Object.Destroy(recentTournPopupGO);
+                }
+                recentTournPopupGO = null;
+            }
+            catch { }
+        }
+
+        public static void ShowRecentTournamentsPopup()
+        {
+            try
+            {
+                HideRecentTournamentsPopup();
+                EnsureOverlayCanvas();
+                ApiClient.FetchTournamentHistoryDetail();
+                recentTournPopupGO = new GameObject("CR_RecentTournPopup");
+                recentTournPopupGO.hideFlags = HideFlags.HideAndDontSave;
+                recentTournPopupGO.transform.SetParent(overlayCanvasGO.transform, false);
+                var rt = recentTournPopupGO.AddComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+
+                var bd = UIFactory.CreatePanel("BD", recentTournPopupGO.transform, new Color(0f, 0f, 0f, 0.55f));
+                var bdRT = bd.GetComponent<RectTransform>();
+                bdRT.anchorMin = Vector2.zero; bdRT.anchorMax = Vector2.one;
+                bdRT.offsetMin = Vector2.zero; bdRT.offsetMax = Vector2.zero;
+                var bdImg = bd.GetComponent(UIFactory.tImage);
+                if (bdImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(bdImg, true);
+
+                var box = UIFactory.CreatePanel("Box", recentTournPopupGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.97f));
+                var boxRT = box.GetComponent<RectTransform>();
+                boxRT.anchorMin = new Vector2(0.5f, 0.5f);
+                boxRT.anchorMax = new Vector2(0.5f, 0.5f);
+                boxRT.pivot = new Vector2(0.5f, 0.5f);
+                float popupH = 760f;   // live-canvas clamp (#199), as the bets popup
+                try
+                {
+                    var canvasRT = overlayCanvasGO.GetComponent<RectTransform>();
+                    if (canvasRT != null && canvasRT.rect.height > 200f)
+                        popupH = Mathf.Min(760f, canvasRT.rect.height - 40f);
+                }
+                catch { }
+                boxRT.sizeDelta = new Vector2(900, popupH);
+                UIFactory.AddVLG(box, spacing: 8, padL: 20, padR: 20, padT: 16, padB: 14);
+
+                UIFactory.CreateText("RTPTitle", box.transform, I18n.Tr("Recent Tournaments"),
+                    28f, C_GOLD, UIFactory.AlignMidCenter, sizeDelta: new Vector2(850, 38));
+
+                var sv = UIFactory.CreateScrollView("RTPScroll", box.transform, spacing: 2);
+                UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: popupH - 130f);
+                recentTournPopupRows = sv.content;
+
+                UIFactory.CreateButton("RTPClose", box.transform, I18n.Tr("Close"),
+                    18f, C_WHITE, C_BTN, () => HideRecentTournamentsPopup(),
+                    sizeDelta: new Vector2(160, 30));
+                var bdClick = bd.AddComponent<ClickHandler>();
+                bdClick.bypassModalBlock = true;
+                bdClick.onClick = () =>
+                {
+                    try { if (PointerInsideRect(boxRT)) return; } catch { }
+                    if (ClickGuard.Claim(bd)) HideRecentTournamentsPopup();
+                };
+
+                RefreshRecentTournamentsPopup();
+                MarkPopupChildrenInteractive(recentTournPopupGO);
+                dirty = true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[TRECENT] popup: {ex.Message}");
+                HideRecentTournamentsPopup();
+            }
+        }
+
+        /// <summary>"finished in ..." span for a completed tournament. Async
+        /// brackets run days-to-weeks, sync ones run hours — pick units that
+        /// keep both honest at a glance.</summary>
+        private static string FormatTournDuration(string kind, int seconds)
+        {
+            if (seconds <= 0) return null;
+            if (kind == "async")
+            {
+                int days = seconds / 86400;
+                if (days >= 14) return I18n.TrF("{0}w {1}d", days / 7, days % 7);
+                if (days >= 1) return I18n.TrF("{0}d {1}h", days, (seconds % 86400) / 3600);
+            }
+            if (seconds >= 3600) return I18n.TrF("{0}h {1}m", seconds / 3600, (seconds % 3600) / 60);
+            return I18n.TrF("{0}m", Math.Max(1, seconds / 60));
+        }
+
+        private static void AddRecentTournRow(string line, float size, int h)
+        {
+            var txt = UIFactory.CreateText("r", recentTournPopupRows.transform, "", size,
+                C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(840, h));
+            // Raw write: rows carry user-authored names (#298c).
+            UIFactory.SetTextRaw(txt, line);
+        }
+
+        private static void RefreshRecentTournamentsPopup()
+        {
+            if (recentTournPopupRows == null) return;
+            var data = ApiClient.CachedTournHistoryDetail;
+            if (ReferenceEquals(data, recentTournFilledFrom)) return;
+            recentTournFilledFrom = data;
+            for (int i = recentTournPopupRows.transform.childCount - 1; i >= 0; i--)
+                UnityEngine.Object.Destroy(recentTournPopupRows.transform.GetChild(i).gameObject);
+            if (data == null) { AddRecentTournRow(I18n.Tr("<i>Loading...</i>"), 16f, 26); return; }
+            if (data.Length == 0) { AddRecentTournRow(I18n.Tr("<i>No completed tournaments yet.</i>"), 16f, 26); return; }
+            foreach (var tt in data)
+            {
+                if (tt == null) continue;
+                string dt = tt.ended_at;
+                try
+                {
+                    if (!string.IsNullOrEmpty(dt))
+                        dt = DateFmt.FullShortYear(TimeZoneInfo.ConvertTimeFromUtc(
+                            DateTime.Parse(tt.ended_at, _INV, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),
+                            _ResolveTz()));
+                }
+                catch { }
+                string kindTag = tt.kind == "async" ? I18n.Tr("Async") : I18n.Tr("Sync");
+                string hdr = $"<b><color=#AABBEE>{dt}</color></b>  <color=#FFD94D>[{kindTag}]</color>  "
+                           + I18n.TrF("<color=#BBB>{0} players</color>", tt.signup_count);
+                string dur = FormatTournDuration(tt.kind, tt.duration_seconds);
+                if (dur != null)
+                    hdr += "  " + I18n.TrF("<color=#8FA3B8>finished in {0}</color>", dur);
+                AddRecentTournRow(hdr, 17f, 30);
+                if (tt.participants != null)
+                {
+                    foreach (var p in tt.participants)
+                    {
+                        if (p == null) continue;
+                        string medal = p.placed_rank == 1 ? "<color=#FFE580>#1</color>"
+                                     : p.placed_rank == 2 ? "<color=#C8C8C8>#2</color>"
+                                     : p.placed_rank == 3 ? "<color=#D4894A>#3</color>"
+                                     : "<color=#555>--</color>";
+                        string nm = FfaSafeRich(Trunc(p.display_name ?? "?", 20));
+                        string elo = p.elo > 0 ? $" <color=#9AA0A6>({p.elo})</color>" : "";
+                        string seed = p.seed > 0 ? $"  <color=#666>s{p.seed}</color>" : "";
+                        string wl = $"  <color=#7CFF7C>{p.wins}</color><color=#888>-</color><color=#FF8888>{p.losses}</color>";
+                        string label = "";
+                        if (!string.IsNullOrEmpty(p.result_label))
+                        {
+                            string lc = p.result_label == "CHAMPION" ? "#FFE580"
+                                      : p.result_label.StartsWith("eliminated") ? "#B08585"
+                                      : "#8FA3B8";
+                            label = $"   <color={lc}>{p.result_label}</color>";
+                        }
+                        string ff = p.forfeited ? "  <color=#FF6666>[FF]</color>" : "";
+                        AddRecentTournRow($"   {medal}  <b>{nm}</b>{elo}{seed}{wl}{label}{ff}", 14f, 22);
+                    }
+                }
+                AddRecentTournRow("", 8f, 10);   // spacer between tournaments
             }
         }
 
@@ -11524,13 +11709,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
         // July 22 item 7: one 2v2 telemetry cell — "Name 142fps 23ms Hit 42% Blk 31%",
         // team-tinted; degrades to fps-only for old-client peers; empty when no data.
-        private static void FillTeleCell(object txt, ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot sl, bool right)
+        private static void FillTeleCell(object txt, ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot sl, bool right, string hexOverride = null)
         {
             string s = "";
             ApiClient.TeamPlayerTele tele = null;
             if (sl != null)
             {
-                string hex = right ? "#FFB086" : "#8CCFFF";
+                // hexOverride = the stamped team-identity hex (readability-floored
+                // upstream); null keeps the positional light-blue/orange defaults.
+                string hex = hexOverride ?? (right ? "#FFB086" : "#8CCFFF");
                 string sid = sl.steam_id ?? "";
                 if (m.telemetry_by_player != null) m.telemetry_by_player.TryGetValue(sid, out tele);
                 int favg = 0;
@@ -13241,6 +13428,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (compareGraphPanel == null) return;
             for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
                 UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
+            CompetitiveUI.ClearCardHoverRegions();   // Records hovers die with the panel (Aug 17)
 
             // Gather each selected player's Elo series from cache. timeAxis
             // (v1.29 "Elo over time") plots x by SNAPSHOT DATE instead of game
@@ -13400,7 +13588,9 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         }
 
         // Helper: a positioned label inside compareGraphPanel (bottom-left anchored coords).
-        private static void MakeGraphLabel(string name, string text, Vector2 anchor, Vector2 pos, Vector2 size, int align, float fontSize = 11f)
+        // Returns the created text object (Aug 17: the Records rows register
+        // hover regions on their labels); existing callers ignore the value.
+        private static object MakeGraphLabel(string name, string text, Vector2 anchor, Vector2 pos, Vector2 size, int align, float fontSize = 11f)
         {
             var lbl = UIFactory.CreateText(name, compareGraphPanel.transform, text, fontSize, C_DIM, align, sizeDelta: size);
             /* Aug-3 item 12 ("chart labels missing / pie has leader lines but no
@@ -13415,12 +13605,13 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
              * otherwise breaks "US 42%" onto a second line and truncates harder. */
             UIFactory.FitOneLine(lbl);
             var go = (lbl as Component)?.gameObject;
-            if (go == null) return;
+            if (go == null) return lbl;
             var rt = go.GetComponent<RectTransform>();
             rt.anchorMin = anchor; rt.anchorMax = anchor; rt.pivot = anchor;
             rt.anchoredPosition = pos; rt.sizeDelta = size;
             var le = go.GetComponent(UIFactory.tLE);
             if (le != null) UnityEngine.Object.Destroy(le as UnityEngine.Object);
+            return lbl;
         }
 
         // Helper: a filled rectangle bar in compareGraphPanel, anchored bottom-left
@@ -13653,6 +13844,12 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (compareGraphPanel == null) return;
             for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
                 UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
+            // Records rows register card-hover regions (Aug 17); every metric
+            // rebuild destroys the panel's children, so the regions must die
+            // with them or they linger as ghost zones over the next chart
+            // (#143 class — dead source rects fall back to their frozen
+            // registration rect). Tab 1 has no other card-hover producer.
+            CompetitiveUI.ClearCardHoverRegions();
 
             // Gather selected players that have cached stats, preserving select order
             // (so bar color matches the picker swatch).
@@ -14638,24 +14835,62 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
          * The server endpoint and column are intentionally kept — they cost
          * nothing and are ready if the telemetry is ever revived; re-adding the
          * string here is then the only client change needed. */
-        private static readonly string[] RECORD_BOARDS = { "single_hit", "max_health" };
+        // Aug 17 (Sid): six match-derived boards. bounce_kill stays available
+        // server-side but un-listed (its telemetry was cut client-side).
+        // longest_game / shortest_game are MATCH boards — both participants
+        // render, "A vs B".
+        private static readonly string[] RECORD_BOARDS =
+            { "single_hit", "max_health", "avg_dps", "luckiest", "longest_game", "shortest_game" };
 
-        /// <summary>"Records" — the GLOBAL career-record mini-leaderboards side
-        /// by side (count comes from RECORD_BOARDS, which lost its third entry
-        /// when bounce-kill telemetry was cut). These
-        /// are not per-selection boards, so the selected players are highlighted
-        /// in their compare colour where they appear rather than filtered to.</summary>
+        private static string RecordBoardHeading(string board)
+        {
+            switch (board)
+            {
+                case "single_hit": return I18n.Tr("Highest Single Hit");
+                case "max_health": return I18n.Tr("Highest Health");
+                case "avg_dps": return I18n.Tr("Highest Avg DPS");
+                case "luckiest": return I18n.Tr("Luckiest (rare picks)");
+                case "longest_game": return I18n.Tr("Longest Game");
+                case "shortest_game": return I18n.Tr("Shortest Game");
+                default: return board;
+            }
+        }
+
+        private static string RecordValueText(string board, int v)
+        {
+            switch (board)
+            {
+                case "avg_dps": return (v / 10f).ToString("0.0", _INV) + "/s";
+                case "luckiest": return v + "%";
+                case "longest_game":
+                case "shortest_game": return $"{v / 60}:{v % 60:00}";
+                default: return FullNum(v);
+            }
+        }
+
+        /// <summary>"Records" — GLOBAL per-game record boards in a 3x2 grid.
+        /// Each row is a concrete game: holder (name + title + elo), value,
+        /// date, with the cards it was set with on HOVER (the row is too
+        /// narrow to print builds inline). Not per-selection boards — the
+        /// selected players are highlighted where they appear.</summary>
         private static void BuildCompareRecordsPanel(List<int> idxs, float W, float H)
         {
             try
             {
-                MakeGraphLabel("CmpRecTitle", $"<color=#CCC><b>{I18n.Tr("Career records (all players)")}</b></color>",
+                MakeGraphLabel("CmpRecTitle", $"<color=#CCC><b>{I18n.Tr("Game records (all players) — hover a row for the cards")}</b></color>",
                     new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
 
-                bool missing = false;
+                // Per-board rendering (review F5): the old all-or-nothing gate
+                // held the WHOLE panel on "Loading..." if any single board
+                // never cached — against a pre-batch server the four new
+                // boards 400 forever and even the two legacy boards vanished.
+                bool anyCached = false;
                 foreach (var b in RECORD_BOARDS)
-                    if (!ApiClient.RecordsBoards.ContainsKey(b)) { ApiClient.FetchRecordsBoard(b); missing = true; }
-                if (missing)
+                {
+                    if (!ApiClient.RecordsBoards.ContainsKey(b)) ApiClient.FetchRecordsBoard(b);
+                    else anyCached = true;
+                }
+                if (!anyCached)
                 {
                     MakeGraphLabel("CmpRecLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
                         new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
@@ -14667,48 +14902,151 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 foreach (int i in idxs)
                     hi[compareSelected[i]] = COMPARE_COLORS[i % COMPARE_COLORS.Length];
 
-                // Divide by the ACTUAL board count, not a hardcoded 3 — with
-                // bounce_kill removed, /3f left a third of the panel blank.
-                float colW = (W - 32f) / Mathf.Max(1, RECORD_BOARDS.Length);
-                float rowH = 21f;
-                int maxRows = Mathf.Max(1, (int)((H - 74f) / rowH));
+                const int COLS = 3;
+                int gridRows = (RECORD_BOARDS.Length + COLS - 1) / COLS;
+                float colW = (W - 32f) / COLS;
+                float secH = (H - 30f) / gridRows;
+                float rowH = 22f;
+                int maxRows = Mathf.Max(3, (int)((secH - 52f) / rowH));
+
                 for (int c = 0; c < RECORD_BOARDS.Length; c++)
                 {
                     string board = RECORD_BOARDS[c];
-                    // The old third arm ("Most Bounces Before A Kill") is gone
-                    // with its board — an unreachable arm is still a live i18n
-                    // key, i.e. a string translators would keep maintaining for
-                    // a column that can never render.
-                    string heading = board == "single_hit" ? I18n.Tr("Highest Single Hit")
-                                                           : I18n.Tr("Highest Health");
-                    float x = 16f + c * colW;
-                    MakeGraphLabel($"CmpRecH{c}", $"<b><color=#DDCC88>{heading}</color></b>",
-                        new Vector2(0, 1), new Vector2(x, -26f), new Vector2(colW - 10f, 16), UIFactory.AlignMidLeft, 14f);
+                    bool isMatchBoard = board == "longest_game" || board == "shortest_game";
+                    float x = 16f + (c % COLS) * colW;
+                    float secY = -26f - (c / COLS) * secH;
+                    MakeGraphLabel($"CmpRecH{c}", $"<b><color=#DDCC88>{RecordBoardHeading(board)}</color></b>",
+                        new Vector2(0, 1), new Vector2(x, secY), new Vector2(colW - 10f, 16), UIFactory.AlignMidLeft, 14f);
 
-                    var d = ApiClient.RecordsBoards[board];
+                    if (!ApiClient.RecordsBoards.TryGetValue(board, out var d))
+                    {
+                        MakeGraphLabel($"CmpRecP{c}", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                            new Vector2(0, 1), new Vector2(x, secY - 22f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 13f);
+                        continue;
+                    }
                     if (d.names.Count == 0)
                     {
                         MakeGraphLabel($"CmpRecNo{c}", $"<color=#888>{I18n.Tr("no data yet")}</color>",
-                            new Vector2(0, 1), new Vector2(x, -48f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 13f);
+                            new Vector2(0, 1), new Vector2(x, secY - 22f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 13f);
                         continue;
                     }
+                    bool rich = d.dates.Count == d.names.Count;   // enrichment present
                     for (int r = 0; r < d.names.Count && r < maxRows; r++)
                     {
-                        float y = -48f - r * rowH;
+                        float y = secY - 22f - r * rowH;
                         string sid = d.steamIds.Count > r ? d.steamIds[r] : "";
                         bool isSel = !string.IsNullOrEmpty(sid) && hi.ContainsKey(sid);
                         string nameHex = isSel ? ColorToHex(hi[sid]) : "CCCCCC";
                         string bold = isSel ? "<b>" : "", boldEnd = isSel ? "</b>" : "";
-                        MakeGraphLabel($"CmpRecN{c}_{r}",
-                            $"<color=#777>{r + 1}.</color> {bold}<color=#{nameHex}>{FfaSafeRich(Trunc(d.names[r], 13))}</color>{boldEnd}",
-                            new Vector2(0, 1), new Vector2(x, y), new Vector2(colW - 84f, rowH), UIFactory.AlignMidLeft, 13f);
+
+                        // Name cell. Wider than the old 13-char cut (Sid:
+                        // "names are being cutoff for no reason") — the value
+                        // column is 64px and the date 44px; everything else is
+                        // the name's. Match boards render "A vs B".
+                        string nameCell;
+                        if (isMatchBoard && rich && d.names2.Count > r && !string.IsNullOrEmpty(d.names2[r]))
+                        {
+                            // Both participants take the highlight (round-2
+                            // f12: only p1 carried a steam id, so a selected
+                            // player sitting in the p2 seat stayed gray).
+                            string sid2 = d.steamIds2.Count > r ? d.steamIds2[r] : "";
+                            bool isSel2 = !string.IsNullOrEmpty(sid2) && hi.ContainsKey(sid2);
+                            string nameHex2 = isSel2 ? ColorToHex(hi[sid2]) : "CCCCCC";
+                            string bold2 = isSel2 ? "<b>" : "", bold2End = isSel2 ? "</b>" : "";
+                            nameCell = $"{bold}<color=#{nameHex}>{FfaSafeRich(Trunc(d.names[r], 12))}</color>{boldEnd}"
+                                     + $" <color=#888>vs</color> {bold2}<color=#{nameHex2}>{FfaSafeRich(Trunc(d.names2[r], 12))}</color>{bold2End}";
+                        }
+                        else
+                        {
+                            nameCell = $"{bold}<color=#{nameHex}>{FfaSafeRich(Trunc(d.names[r], 18))}</color>{boldEnd}";
+                            if (rich && d.titles.Count > r && !string.IsNullOrEmpty(d.titles[r]))
+                            {
+                                string tc = (d.titleColors.Count > r && !string.IsNullOrEmpty(d.titleColors[r]))
+                                    ? d.titleColors[r] : "#FFD94D";
+                                nameCell += $" <size=80%><color={tc}>[{FfaSafeRich(Trunc(d.titles[r], 10))}]</color></size>";
+                            }
+                            if (rich && d.ratings.Count > r && d.ratings[r] > 0)
+                                nameCell += $" <size=80%><color=#8E99A8>{d.ratings[r]}</color></size>";
+                        }
+                        var nameLbl = MakeGraphLabel($"CmpRecN{c}_{r}",
+                            $"<color=#777>{r + 1}.</color> {nameCell}",
+                            new Vector2(0, 1), new Vector2(x, y), new Vector2(colW - 118f, rowH), UIFactory.AlignMidLeft, 13f);
                         MakeGraphLabel($"CmpRecV{c}_{r}",
-                            $"<color=#99CCAA>{FullNum(d.values.Count > r ? d.values[r] : 0)}</color>",
-                            new Vector2(0, 1), new Vector2(x + colW - 84f, y), new Vector2(74, rowH), UIFactory.AlignMidRight, 13f);
+                            $"<color=#99CCAA>{RecordValueText(board, d.values.Count > r ? d.values[r] : 0)}</color>",
+                            new Vector2(0, 1), new Vector2(x + colW - 118f, y), new Vector2(64, rowH), UIFactory.AlignMidRight, 13f);
+                        if (rich && d.dates.Count > r && !string.IsNullOrEmpty(d.dates[r]))
+                            MakeGraphLabel($"CmpRecD{c}_{r}",
+                                $"<size=80%><color=#667>{ShortRecDate(d.dates[r])}</color></size>",
+                                new Vector2(0, 1), new Vector2(x + colW - 50f, y), new Vector2(44, rowH), UIFactory.AlignMidRight, 12f);
+
+                        // Hover: the record game's cards (+ both builds on the
+                        // match boards). Registered only when there is a body
+                        // (#106 — the name cell always renders text).
+                        if (rich && nameLbl != null)
+                        {
+                            string body = BuildRecordHoverBody(d, r, isMatchBoard);
+                            if (!string.IsNullOrEmpty(body))
+                                RegisterHoverRectFor(nameLbl, "", false,
+                                    GameStateWatcher.StripRichText(d.names[r] ?? ""), body);
+                        }
                     }
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] records panel failed: {ex.Message}"); }
+        }
+
+        /// <summary>Month+day from the record game's timestamp — the row's
+        /// 44px date cell cannot fit more, and the full date is not worth a
+        /// hover. Routed through DateFmt (round-2 f13) and converted to the
+        /// VIEWER'S local day (round-3 f5: a UTC date truncation put late-
+        /// evening US records on "tomorrow"). Date-only strings (older
+        /// server) keep the literal calendar day — ToLocalTime on an
+        /// unspecified-kind date would silently treat it as UTC and shift it.</summary>
+        private static string ShortRecDate(string iso)
+        {
+            try
+            {
+                if (iso.IndexOf('T') >= 0)
+                {
+                    var dt = DateTime.Parse(iso, _INV, System.Globalization.DateTimeStyles.RoundtripKind);
+                    return DateFmt.MonthDay(dt.Kind == DateTimeKind.Unspecified ? dt : dt.ToLocalTime());
+                }
+                var parts = iso.Split('-');
+                if (parts.Length == 3)
+                    return DateFmt.MonthDay(new DateTime(
+                        int.Parse(parts[0], _INV), int.Parse(parts[1], _INV),
+                        int.Parse(parts[2], _INV)));
+            }
+            catch { }
+            return iso;
+        }
+
+        private static string BuildRecordHoverBody(ApiClient.RecordsBoardData d, int r, bool isMatchBoard)
+        {
+            var sb = new StringBuilder();
+            string myCards = d.cards.Count > r ? d.cards[r] : "";
+            if (isMatchBoard)
+            {
+                string oppCards = d.cards2.Count > r ? d.cards2[r] : "";
+                // Card names are CLIENT-REPORTED (round-3 f3) — sanitize
+                // before they touch the richText tooltip.
+                sb.Append("<b>").Append(FfaSafeRich(Trunc(d.names[r] ?? "?", 16))).Append("</b>");
+                if (d.ratings.Count > r && d.ratings[r] > 0) sb.Append(" <color=#8E99A8>(").Append(d.ratings[r]).Append(")</color>");
+                sb.Append('\n').Append(string.IsNullOrEmpty(myCards) ? I18n.Tr("  <color=#888>(no cards recorded)</color>") : "  " + FfaSafeRich(myCards).Replace("|", ", "));
+                if (d.names2.Count > r && !string.IsNullOrEmpty(d.names2[r]))
+                {
+                    sb.Append("\n<b>").Append(FfaSafeRich(Trunc(d.names2[r], 16))).Append("</b>");
+                    if (d.ratings2.Count > r && d.ratings2[r] > 0) sb.Append(" <color=#8E99A8>(").Append(d.ratings2[r]).Append(")</color>");
+                    sb.Append('\n').Append(string.IsNullOrEmpty(oppCards) ? I18n.Tr("  <color=#888>(no cards recorded)</color>") : "  " + FfaSafeRich(oppCards).Replace("|", ", "));
+                }
+            }
+            else
+            {
+                if (d.names2.Count > r && !string.IsNullOrEmpty(d.names2[r]))
+                    sb.Append(I18n.TrF("<color=#889>vs {0}</color>", FfaSafeRich(Trunc(d.names2[r], 16)))).Append('\n');
+                sb.Append(string.IsNullOrEmpty(myCards) ? I18n.Tr("<color=#888>(no cards recorded)</color>") : FfaSafeRich(myCards).Replace("|", ", "));
+            }
+            return sb.ToString();
         }
 
         // ── Aug 6 item 2: Cards sub-tab renderers ────────────────────────────
@@ -14720,6 +15058,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (compareGraphPanel == null) return;
             for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
                 UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
+            CompetitiveUI.ClearCardHoverRegions();   // Records hovers die with the panel (Aug 17)
 
             CompareChartSize(out float W, out float H);
             try
@@ -18702,7 +19041,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // The Recent Tournaments header names the ladder it is listing, because
         // the list is now filtered to the active sub-tab and an empty sync list
         // beside a busy async one otherwise reads as a fetch failure.
-        private static object txtTHistHeader;
         // July 26 item 1: instructions + prizes render in the on-demand info
         // popup instead of the column; RefreshTournaments rebuilds these
         // strings, the popup buttons read them at click time. Defaults are the
@@ -18713,7 +19051,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static string _tInfoTitle = "How It Works - Sync (weekly)",
             _tInfoInstructions = _SYNC_INSTRUCTIONS, _tInfoPrizes = "";
         private static GameObject txtTSignupBtn, txtTUnsignupBtn, txtTReadyBtn, txtTForceBtn, txtTTzButton, txtTDateFmtButton, txtTReconnectBtn, tSubTabSyncBtn, tSubTabAsyncBtn;
-        private static GameObject tTimeVoteRow, tSignupList, tBracketList, tMyMatchPanel, tHistoryList, tVoteBoxPanel;
+        private static GameObject tTimeVoteRow, tSignupList, tBracketList, tMyMatchPanel, tVoteBoxPanel;
         // Item 3: mandatory time voting — slots are pickable BEFORE signup (the
         // vote rides the signup request); Save Votes only applies once signed up.
         private static GameObject tVoteSaveBtn;
@@ -18721,8 +19059,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // July 17 round 2: live prize block (scales with signups) + the
         // between-rounds Play Now button.
         private static GameObject tPlayNowBtn;
-        private static List<GameObject> tHistoryRowPool = new List<GameObject>();
-        private static List<object> tHistoryRowTexts = new List<object>();
         // Match IDs we've already set PendingRankedRoom for, so the 10s refresh loop
         // doesn't re-dispatch the same match on every tick.
         private static HashSet<string> _tournamentDispatchedMatches = new HashSet<string>();
@@ -19146,6 +19482,19 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // sees it (#245 — this column has no bounded scroll).
             tTournBetsBox.SetActive(false); // hidden until there's a pre-match tournament series
 
+            // Recent Tournaments button (Aug 17, Sid): the inline right-column
+            // list is retired — the content moved into a POPUP like the bets
+            // popup above, where it can carry every participant (elo, W-L,
+            // result, tournament duration) instead of a podium one-liner.
+            // Directly below Tournament Bets per the owner's placement call.
+            var tRecentBox = UIFactory.CreatePanel("TRecentBox", left.transform, C_PANEL);
+            UIFactory.AddVLG(tRecentBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
+            UIFactory.AddLE(tRecentBox, flexH: 0);
+            UIFactory.CreateButton("TBH_Recent", tRecentBox.transform,
+                "<color=#AABBEE>Recent Tournaments</color>",
+                17f, C_WHITE, C_BTN, () => ShowRecentTournamentsPopup(),
+                sizeDelta: new Vector2(360, 30));
+
             var brkBox = UIFactory.CreatePanel("TBrkBox", right.transform, C_PANEL);
             UIFactory.AddVLG(brkBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
             UIFactory.AddLE(brkBox, flexH: 1);
@@ -19211,32 +19560,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // "My Tournaments" inline summary for the local player (own trophy line).
             txtTMyHistory = UIFactory.CreateText("TMH", right.transform, "", 14f, new Color(1f, 0.87f, 0.52f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 22));
 
-            // Recent (site-wide completed) tournaments.
-            var histBox = UIFactory.CreatePanel("TRH", right.transform, C_PANEL);
-            UIFactory.AddVLG(histBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
-            UIFactory.AddLE(histBox, prefH: 150, flexH: 0);
-            txtTHistHeader = UIFactory.CreateText("TRH_h", histBox.transform, "Recent Tournaments", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(300, 22));
-            UIFactory.FitOneLine(txtTHistHeader);
-            var hSv = UIFactory.CreateScrollView("TRHSV", histBox.transform, spacing: 1);
-            UIFactory.AddLE(hSv.scrollGO, flexH: 1);
-            tHistoryList = hSv.content;
-            for (int i = 0; i < 12; i++)
-            {
-                var row = new GameObject($"TH{i}"); row.transform.SetParent(tHistoryList.transform, false);
-                row.AddComponent<RectTransform>(); UIFactory.AddHLG(row, spacing: 4, forceExpandH: true);
-                UIFactory.AddLE(row, prefH: 20, flexH: 0);
-                // 820 (was 520): the row went from "date + winner + (8p)" to a
-                // full podium plus an unabbreviated entrant count. Worst case
-                // measured on the format below — 3 x Trunc(12) names, the
-                // longest shipped date form and a 2-digit count — is ~92 chars,
-                // ~640px at 13pt, and a locale running 30% long still clears
-                // 820. The right column is ~1400px wide, so this comes out of
-                // slack, not out of a neighbour (#245).
-                var t = UIFactory.CreateText("txt", row.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(820, 20));
-                tHistoryRowPool.Add(row);
-                tHistoryRowTexts.Add(t);
-                row.SetActive(false);
-            }
+            // The inline "Recent Tournaments" box that used to sit here moved
+            // into ShowRecentTournamentsPopup (Aug 17, Sid) — the popup carries
+            // full participant tables the 150px box never could, and the right
+            // column's height goes to the bracket instead.
 
             return panel;
         }
@@ -19536,6 +19863,15 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // non-bye match with prereq_match_ids populated, draw an
             // L-shape from each prereq's right-center to the match's
             // left-center.
+            //
+            // Aug 17 (Sid): WB->LB drop-down edges are SUPPRESSED. An LB
+            // match's "loser of WB Rn" feed drew long vertical lines across
+            // the WB/LB gap that made the bracket read as spaghetti. The two
+            // brackets only visually meet at the finals — GF keeps both its
+            // feeds (WB final + LB final) because that junction is the point.
+            var sideById = new Dictionary<string, string>();
+            foreach (var m in matches)
+                if (!string.IsNullOrEmpty(m.match_id)) sideById[m.match_id] = m.bracket_side;
             foreach (var m in matches)
             {
                 if (m.prereq_match_ids == null) continue;
@@ -19544,17 +19880,27 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 foreach (var pid in m.prereq_match_ids)
                 {
                     if (string.IsNullOrEmpty(pid)) continue;
+                    if (m.bracket_side == "L"
+                        && sideById.TryGetValue(pid, out var _ps) && _ps == "W") continue;
                     if (!pos.TryGetValue(pid, out var from)) continue;
                     Vector2 fromAnchor = new Vector2(from.x + CELL_W, from.y + CELL_H / 2f); // right-center of source
                     DrawBracketConnector(tBracketVisual, fromAnchor, toAnchor);
                 }
             }
 
+            // Locked elo per signup for the cell rows (Sid, Aug 17: elos next
+            // to players ARE wanted in the bracket; buttons are not).
+            var eloBySignup = new Dictionary<string, int>();
+            if (!blankNames && t != null && t.signups != null)
+                foreach (var s in t.signups)
+                    if (!string.IsNullOrEmpty(s.signup_id) && s.rating > 0)
+                        eloBySignup[s.signup_id] = s.rating;
+
             // Cells.
             foreach (var m in matches)
             {
                 if (!pos.TryGetValue(m.match_id, out var p)) continue;
-                CreateBracketCell(tBracketVisual, m, p, blankNames, isAsync);
+                CreateBracketCell(tBracketVisual, m, p, blankNames, isAsync, eloBySignup);
             }
         }
 
@@ -19594,7 +19940,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(img, false);
         }
 
-        private static void CreateBracketCell(GameObject host, ApiClient.TournamentMatchRow m, Vector2 topLeftPx, bool blankNames, bool isAsync)
+        private static void CreateBracketCell(GameObject host, ApiClient.TournamentMatchRow m, Vector2 topLeftPx, bool blankNames, bool isAsync,
+                                              Dictionary<string, int> eloBySignup = null)
         {
             const int CELL_W = 170, CELL_H = 48;
 
@@ -19632,15 +19979,91 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             int winner = 0;
             if (m.status == "completed") winner = m.p1_series_wins > m.p2_series_wins ? 1 : 2;
 
+            int p1Elo = 0, p2Elo = 0;
+            if (eloBySignup != null && !blankNames)
+            {
+                if (!string.IsNullOrEmpty(m.p1_signup_id)) eloBySignup.TryGetValue(m.p1_signup_id, out p1Elo);
+                if (!string.IsNullOrEmpty(m.p2_signup_id)) eloBySignup.TryGetValue(m.p2_signup_id, out p2Elo);
+            }
+
             float rowH = (CELL_H - 2) / 2f;
-            CreateBracketCellRow(cell, p1Name, p1Score, 1, winner, 0, rowH, CELL_W);
-            CreateBracketCellRow(cell, p2Name, p2Score, 2, winner, rowH + 1, rowH, CELL_W);
+            var p1Txt = CreateBracketCellRow(cell, p1Name, p1Score, 1, winner, 0, rowH, CELL_W, p1Elo);
+            var p2Txt = CreateBracketCellRow(cell, p2Name, p2Score, 2, winner, rowH + 1, rowH, CELL_W, p2Elo);
+
+            // Hover detail (Sid, Aug 17: the bracket stays visually minimal —
+            // rich per-player info lives on NAME HOVER only, no buttons).
+            // Registered only when the detail cache holds this match, so a
+            // pre-play or detail-less cell registers nothing (#106 contract:
+            // the name cell always renders text, so the width fraction is
+            // live and honest).
+            if (!blankNames && ApiClient.CachedBracketDetail != null
+                && !string.IsNullOrEmpty(m.match_id)
+                && ApiClient.CachedBracketDetail.TryGetValue(m.match_id, out var det)
+                && det?.games != null && det.games.Length > 0)
+            {
+                // Titles are rendered as IMGUI rich text — strip user-authored
+                // markup or a name like "<size=1>x</size>" distorts the
+                // tooltip's fixed title band (round-2 f14).
+                if (p1Txt != null && !string.IsNullOrEmpty(m.p1_display_name))
+                    RegisterHoverRectFor(p1Txt, "", false,
+                        GameStateWatcher.StripRichText(m.p1_display_name),
+                        BuildBracketHoverBody(det, true));
+                if (p2Txt != null && !string.IsNullOrEmpty(m.p2_display_name))
+                    RegisterHoverRectFor(p2Txt, "", true,
+                        GameStateWatcher.StripRichText(m.p2_display_name),
+                        BuildBracketHoverBody(det, false));
+            }
 
             // Tap-target: clicks on the cell currently no-op (could route
             // to a series detail view in a future pass).
         }
 
-        private static void CreateBracketCellRow(GameObject cell, string playerName, string score, int rowSlot, int winnerSlot, float yTop, float h, float cellW)
+        /// <summary>Per-player tooltip body for a bracket cell name: one block
+        /// per game — score, duration, this player's hit/block/fps/ping, then
+        /// their picks. Reads the ApiClient.CachedBracketDetail entry, which is
+        /// already oriented to signup order (p1 = the cell's top row).</summary>
+        private static string BuildBracketHoverBody(ApiClient.BracketMatchDetail det, bool isP1)
+        {
+            var sb = new StringBuilder();
+            foreach (var g in det.games)
+            {
+                if (g == null) continue;
+                if (sb.Length > 0) sb.Append('\n');
+                int myR = isP1 ? g.p1_rounds : g.p2_rounds;
+                int opR = isP1 ? g.p2_rounds : g.p1_rounds;
+                int myPts = isP1 ? g.p1_points : g.p2_points;
+                int opPts = isP1 ? g.p2_points : g.p1_points;
+                sb.Append("<b>").Append(I18n.TrF("Game {0}", g.n)).Append("</b>  ")
+                  .Append(myR).Append('-').Append(opR)
+                  .Append(" <color=#889>(").Append(myPts).Append('-').Append(opPts).Append(" pts)</color>");
+                if (g.dur > 0)
+                    sb.Append("  <color=#889>").Append(g.dur / 60).Append(':').Append((g.dur % 60).ToString("00")).Append("</color>");
+                int hit = isP1 ? g.p1_hit_pct : g.p2_hit_pct;
+                int blk = isP1 ? g.p1_blk_pct : g.p2_blk_pct;
+                int fps = isP1 ? g.p1_fps : g.p2_fps;
+                int ping = isP1 ? g.p1_ping : g.p2_ping;
+                var tele = new List<string>();
+                if (hit >= 0) tele.Add(I18n.TrF("Hit {0}%", hit));
+                if (blk >= 0) tele.Add(I18n.TrF("Blk {0}%", blk));
+                if (fps > 0) tele.Add(fps + "fps");
+                if (ping > 0) tele.Add(ping + "ms");
+                if (tele.Count > 0)
+                    sb.Append("\n  <color=#8FA3B8>").Append(string.Join(" · ", tele)).Append("</color>");
+                string cards = isP1 ? g.p1_cards : g.p2_cards;
+                if (!string.IsNullOrEmpty(cards))
+                {
+                    // Pipe-joined pick-order names from the server; render
+                    // comma-separated and let the tooltip word-wrap. Names
+                    // are CLIENT-REPORTED (round-3 f3): a modified reporter
+                    // can submit markup-shaped card names, so they must not
+                    // reach the richText tooltip raw.
+                    sb.Append("\n  ").Append(FfaSafeRich(cards).Replace("|", ", "));
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static object CreateBracketCellRow(GameObject cell, string playerName, string score, int rowSlot, int winnerSlot, float yTop, float h, float cellW, int elo = 0)
         {
             var row = new GameObject($"R{rowSlot}");
             row.transform.SetParent(cell.transform, false);
@@ -19660,7 +20083,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // branch is a BARE user-authored name, and CreateText's
             // translation chokepoint would rename a player literally called
             // "Done." to "Hecho.".
-            var nTmp = UIFactory.CreateText("N", row.transform, "", 13f, nameColor, UIFactory.AlignMidLeft, sizeDelta: new Vector2(cellW - 36, h));
+            // Name width yields room to the elo column when one renders
+            // (Sid, Aug 17: elos belong in the bracket); long names clip
+            // under the global Truncate default, same as before.
+            float nameW = elo > 0 ? cellW - 74 : cellW - 36;
+            var nTmp = UIFactory.CreateText("N", row.transform, "", 13f, nameColor, UIFactory.AlignMidLeft, sizeDelta: new Vector2(nameW, h));
             UIFactory.SetTextRaw(nTmp, nameText);
             // Position name with left padding.
             var nGo = row.transform.Find("N");
@@ -19669,6 +20096,19 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 var nrt = nGo.GetComponent<RectTransform>();
                 nrt.anchorMin = new Vector2(0f, 1f); nrt.anchorMax = new Vector2(0f, 1f); nrt.pivot = new Vector2(0f, 1f);
                 nrt.anchoredPosition = new Vector2(8f, 0f);
+            }
+
+            if (elo > 0)
+            {
+                var eTmp = UIFactory.CreateText("E", row.transform, elo.ToString(), 10.5f,
+                    new Color(0.56f, 0.60f, 0.66f), UIFactory.AlignMidRight, sizeDelta: new Vector2(34, h));
+                var eGo = row.transform.Find("E");
+                if (eGo != null)
+                {
+                    var ert = eGo.GetComponent<RectTransform>();
+                    ert.anchorMin = new Vector2(0f, 1f); ert.anchorMax = new Vector2(0f, 1f); ert.pivot = new Vector2(0f, 1f);
+                    ert.anchoredPosition = new Vector2(cellW - 68, 0f);
+                }
             }
 
             if (!string.IsNullOrEmpty(score))
@@ -19683,6 +20123,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     srt.anchoredPosition = new Vector2(cellW - 32, 0f);
                 }
             }
+            return nTmp;
         }
 
         /// <summary>Build a placeholder bracket of the given size (4/8/16)
@@ -19839,6 +20280,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         private static void RefreshTournaments()
         {
+            // Bracket name-hover regions are re-registered by every
+            // RenderVisualBracket pass (the bracket is torn down and rebuilt
+            // per refresh), so clear the shared list here or regions
+            // accumulate per refresh with dead source rects (#143 class).
+            // Safe: this renderer only runs on tab 7, and tab 7 has no other
+            // card-hover producer.
+            CompetitiveUI.ClearCardHoverRegions();
             // Tournament-tab pre-match bet section runs on every tab refresh
             // — pulls from the same CachedActiveSeries that the Leaderboard
             // tab's Live Ranked Games panel uses, so the data is always
@@ -20218,6 +20666,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     string seed = showSeeds && s.seed > 0 ? $"#{s.seed}" : $"{(i + 1)}.";
                     string name = s.display_name ?? "";
                     if (s.is_speculative) name = $"~ {name}";
+                    // Aug 17 (Sid): titles belong in the signups list. Server
+                    // pre-resolves dynamic skus (#111); podium skus arrive
+                    // null here and simply render nothing.
+                    if (!string.IsNullOrEmpty(s.title))
+                    {
+                        string tcol = string.IsNullOrEmpty(s.title_color) ? "#FFD94D" : s.title_color;
+                        name += $" <color={tcol}>[{Trunc(s.title, 12)}]</color>";
+                    }
                     // Priority: placement > bracket progress > ready/forfeit/penalty.
                     string status;
                     if (s.placed_rank == 1) status = "<color=#FFD850>1st</color>";
@@ -20275,6 +20731,25 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             if (haveMatches || blankBracketSize > 0)
             {
+                // Arm the hover-detail cache BEFORE rendering: hover reads it
+                // synchronously, so the fetch keys on (tournament, terminal
+                // match count) and the arriving response MarkDirty()s a
+                // re-render that registers the now-answerable hovers.
+                if (haveMatches && !wantBlankBracket && !string.IsNullOrEmpty(t.tournament_id))
+                {
+                    // Stamp = terminal matches AND live series wins (review
+                    // F13: a BO3's game 2 completing inside a still-active
+                    // series changes no terminal count, and hover detail
+                    // stayed one game stale until the series ended).
+                    int _stamp = 0;
+                    foreach (var m in t.matches)
+                    {
+                        if (m.status == "completed" || m.status == "forfeit"
+                            || m.status == "double_forfeit" || m.status == "bye_auto") _stamp += 10000;
+                        _stamp += m.p1_series_wins + m.p2_series_wins;
+                    }
+                    ApiClient.FetchBracketDetail(t.tournament_id, _stamp);
+                }
                 // Hide all row-pool placeholder rows, render the visual bracket.
                 for (int i = 0; i < tBracketRowPool.Count; i++) tBracketRowPool[i].SetActive(false);
                 if (tBracketVisual != null)
@@ -20453,59 +20928,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 UIFactory.SetText(txtTMyHistory, "Your placements: <color=#888>no completed tournaments yet</color>");
             }
 
-            // Site-wide recent tournaments panel (bottom of right column).
-            //
-            // Aug 13 (owner), three changes: filtered to THIS sub-tab's kind
-            // (the async and sync ladders are separate events and the list
-            // never said which was which); the podium is now 1st/2nd/3rd rather
-            // than the winner alone; and the entrant count says "players"
-            // instead of "8p" — an abbreviation that saved four characters in
-            // a row with room to spare. A row whose kind the server did not
-            // state shows on BOTH tabs, same rule and same reason as the bets
-            // list above.
-            var hist = ApiClient.CachedSiteTournamentHistory;
-            int hIdx = 0;
-            if (hist != null)
-            {
-                for (int i = 0; i < hist.Length && hIdx < tHistoryRowPool.Count; i++)
-                {
-                    var te = hist[i];
-                    if (!string.IsNullOrEmpty(te.kind) && (te.kind == "async") != isAsync) continue;
-                    string dt = te.ended_at;
-                    // Item 9: the local EU/US ternary is retired — DateFmt
-                    // honors the global picker (TournamentDateFormat keeps
-                    // owning only the date+TIME _FmtSlot sites).
-                    try { if (!string.IsNullOrEmpty(dt)) dt = DateFmt.FullShortYear(TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at, _INV, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(), _ResolveTz())); } catch { }
-                    // Names are user-authored: truncated so the row cannot run
-                    // past its 820px cell, and the whole line is written Raw so
-                    // a player literally named "Done." is never translated
-                    // (#298c / find 15).
-                    string winner = string.IsNullOrEmpty(te.winner_display_name) ? "-" : Trunc(te.winner_display_name, 12);
-                    string runnerUp = string.IsNullOrEmpty(te.runner_up_display_name) ? "-" : Trunc(te.runner_up_display_name, 12);
-                    string third = string.IsNullOrEmpty(te.third_place_display_name) ? "" : Trunc(te.third_place_display_name, 12);
-                    // Two WHOLE templates rather than a base plus a "3rd {0}"
-                    // fragment: the fragment has two letters, which is under
-                    // the extractor's 3-letter floor, so it would never have
-                    // become a key and would have rendered English forever
-                    // inside an otherwise translated line (#295c).
-                    string line = third.Length > 0
-                        ? I18n.TrF("<color=#AABBEE>{0}</color>  <color=#FFE580>1st {1}</color>  <color=#C8C8C8>2nd {2}</color>  <color=#D4894A>3rd {3}</color>",
-                              dt, winner, runnerUp, third)
-                        : I18n.TrF("<color=#AABBEE>{0}</color>  <color=#FFE580>1st {1}</color>  <color=#C8C8C8>2nd {2}</color>",
-                              dt, winner, runnerUp);
-                    line += "  " + I18n.TrF("<color=#888>{0} players</color>", te.signup_count);
-                    UIFactory.SetTextRaw(tHistoryRowTexts[hIdx], line);
-                    tHistoryRowPool[hIdx].SetActive(true);
-                    hIdx++;
-                }
-            }
-            for (int i = hIdx; i < tHistoryRowPool.Count; i++) tHistoryRowPool[i].SetActive(false);
-            if (txtTHistHeader != null)
-                UIFactory.SetTextRaw(txtTHistHeader, hIdx == 0
-                    ? (isAsync ? I18n.Tr("Recent Tournaments <color=#888>- async, none yet</color>")
-                               : I18n.Tr("Recent Tournaments <color=#888>- sync, none yet</color>"))
-                    : (isAsync ? I18n.Tr("Recent Tournaments <color=#888>- async</color>")
-                               : I18n.Tr("Recent Tournaments <color=#888>- sync</color>")));
+            // Recent Tournaments moved into a popup (Aug 17, Sid). Keeping the
+            // refresh hook HERE means an open popup repopulates when the
+            // detail fetch lands (MarkDirty -> this renderer) — the fill
+            // itself no-ops unless the cache reference changed.
+            RefreshRecentTournamentsPopup();
         }
 
         private static bool _tVoteLocalEdited = false;
@@ -21686,8 +22113,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     // the registration gate (so the hover exists at all).
                     bool leftHasBuild  = TeamColumnHasBuild(m, leftA,  leftB);
                     bool rightHasBuild = TeamColumnHasBuild(m, rightA, rightB);
-                    string leftCards  = BuildTeamCardsColumnChips(m, leftA, leftB, leftHasBuild);
-                    string rightCards = BuildTeamCardsColumnChips(m, rightA, rightB, rightHasBuild);
+                    string leftCards  = BuildTeamCardsColumnChips(m, leftA, leftB, leftHasBuild, leftHex ?? LEFT_COL);
+                    string rightCards = BuildTeamCardsColumnChips(m, rightA, rightB, rightHasBuild, rightHex ?? RIGHT_COL);
 
                     var row = teamHistRows[rowIdx++];
                     row.isHeader = false;
@@ -21712,10 +22139,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     int teleH = anyTele ? 22 : 0;   // one flat line (20) + VLG spacing
                     if (anyTele)
                     {
-                        FillTeleCell(row.txtTeleLA, m, leftA, false);
-                        FillTeleCell(row.txtTeleLB, m, leftB, false);
-                        FillTeleCell(row.txtTeleRA, m, rightA, true);
-                        FillTeleCell(row.txtTeleRB, m, rightB, true);
+                        // Fallbacks match the header/card columns exactly
+                        // (review F12: an unstamped series otherwise rendered
+                        // one team in two different blues within one row).
+                        FillTeleCell(row.txtTeleLA, m, leftA, false, leftHex ?? LEFT_COL);
+                        FillTeleCell(row.txtTeleLB, m, leftB, false, leftHex ?? LEFT_COL);
+                        FillTeleCell(row.txtTeleRA, m, rightA, true, rightHex ?? RIGHT_COL);
+                        FillTeleCell(row.txtTeleRB, m, rightB, true, rightHex ?? RIGHT_COL);
                     }
                     UIFactory.SetText(row.txtCardsLeft,  string.IsNullOrEmpty(leftCards)  ? "<color=#666>—</color>" : leftCards);
                     UIFactory.SetText(row.txtCardsRight, string.IsNullOrEmpty(rightCards) ? "<color=#666>—</color>" : rightCards);
@@ -21846,7 +22276,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // `hasBuild` is passed in rather than re-derived so the cell and the
         // hover registration can never disagree about whether there is a build
         // to advertise (round-2 HIGH).
-        private static string BuildTeamCardsColumnChips(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b, bool hasBuild)
+        private static string BuildTeamCardsColumnChips(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b, bool hasBuild, string colHex)
         {
             if (m == null || m.cards_by_player == null)
                 return hasBuild ? I18n.Tr("<color=#666><i>no cards</i></color>  <color=#556270>(hover for build)</color>") : "";
@@ -21868,9 +22298,15 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (sb.Length > 0) sb.Append("\n");
                 bool hasCards = m.cards_by_player.TryGetValue(s.steam_id, out var cards) && cards != null && cards.Count > 0;
                 // Larger, bold player-name heading (size=120% over the 13f field).
-                sb.Append("<size=120%><b>").Append(Trunc(s.name ?? "?", 14)).Append("</b></size>");
+                // colHex is the SAME resolved identity hex the series header uses
+                // (stamped t1/t2 color, positional blue/orange fallback) — the
+                // element's fixed default color is positional and contradicts the
+                // header whenever the stamp differs from position (bug: "2v2s
+                // still show blue cards and names in the inner game history").
+                sb.Append("<color=").Append(colHex).Append("><size=120%><b>")
+                  .Append(Trunc(s.name ?? "?", 14)).Append("</b></size></color>");
                 if (!hasCards) { sb.Append("\n  <color=#666>—</color>"); return; }
-                sb.Append("\n  ").Append(CardsToChips(cards));
+                sb.Append("\n  <color=").Append(colHex).Append(">").Append(CardsToChips(cards)).Append("</color>");
             }
             appendFor(a);
             appendFor(b);

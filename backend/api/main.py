@@ -7068,14 +7068,37 @@ async def get_card_stats(
 
 # ── Routes: Compare-tab stat boards (Aug 6 item 1) ─────────────────────────
 
-# Allowlist: request value -> fixed column name. Interpolating anything else
-# into SQL is the #188 injection class — the ONLY thing that may reach the
-# f-string below is a VALUE from this dict, never the request string.
-_RECORDS_BOARD_MAP = {
-    "single_hit": "record_max_single_hit",
-    "max_health": "record_max_health",
-    "bounce_kill": "record_bounce_kill",
+# Allowlist: request value -> fixed per-seat column pair (or a marker for the
+# purpose-built boards below). Interpolating anything else into SQL is the
+# #188 injection class — the ONLY thing that may reach an f-string below is a
+# VALUE from this dict, never the request string.
+#
+# Aug 17 (Sid): records are MATCH-derived now, not career-column-derived —
+# the career GREATEST columns cannot say WHICH game set the record, and the
+# ask is "show the cards it was set with, the date, and the holder's
+# title/elo". The per-match copies (migration 191) carry all of that. The
+# career columns keep feeding My Stats; only this board reads changed.
+_RECORDS_SEAT_BOARDS = {
+    "single_hit": ("p1_max_single_hit", "p2_max_single_hit", True),
+    "max_health": ("p1_max_health", "p2_max_health", True),
+    "bounce_kill": ("p1_best_bounce_kill", "p2_best_bounce_kill", False),
 }
+_RECORDS_OTHER_BOARDS = {"avg_dps", "longest_game", "shortest_game", "luckiest"}
+
+# Shared per-(match, player) card aggregate. has_growth mirrors submit_match's
+# _cmb_qualifies normalization (lower, no spaces) so the board qualification
+# can never drift from the write-path rule.
+_RECORDS_CARDS_CTE = """
+    cards_per AS (
+        SELECT mc.match_id, mc.player_id,
+               COUNT(*) AS n,
+               BOOL_OR(LOWER(REPLACE(mc.card_name, ' ', '')) = 'grow') AS has_growth,
+               COUNT(*) FILTER (WHERE mc.card_rarity = 'Rare') AS rares,
+               STRING_AGG(REPLACE(mc.card_name, '|', '/'), '|' ORDER BY mc.pick_order) AS cards
+        FROM match_cards mc
+        GROUP BY mc.match_id, mc.player_id
+    )
+"""
 
 
 @app.get("/api/v1/records", response_model=RecordsBoardResponse, tags=["Players"])
@@ -7084,27 +7107,209 @@ async def get_records_board(
     limit: int = Query(10, ge=1, le=25),
     db: AsyncSession = Depends(get_db),
 ):
-    """Aug 6 item 1 — career-record mini-leaderboards (biggest single hit,
-    highest max health, longest bounce kill) from the players.record_*
-    columns migration 191 added. NULL = the player never recorded that stat
-    (pre-telemetry clients, #257), so NULL rows are excluded outright.
-    Public read, same exposure as the main leaderboard."""
-    col = _RECORDS_BOARD_MAP.get(board)
-    if col is None:
-        raise HTTPException(400, "board must be single_hit|max_health|bounce_kill")
-    # `col` comes exclusively from the allowlist dict above (#188).
-    rows = (await db.execute(text(f"""
-        SELECT p.display_name, p.steam_id, p.{col} AS val
-          FROM players p
-         WHERE p.{col} IS NOT NULL AND p.deleted_at IS NULL
-         ORDER BY p.{col} DESC NULLS LAST
-         LIMIT :lim
-    """), {"lim": limit})).mappings().all()
+    """Record mini-leaderboards for Leaderboard > Compare > Records.
+
+    Match-derived (Aug 17): every row is a concrete game, so it carries the
+    date, the holder's cards that game, and the opponent. Seat boards
+    (single_hit / max_health / bounce_kill / avg_dps / luckiest) dedupe to
+    each player's best game; the game-length boards are match rows with both
+    participants. Single-hit and health keep the write-path qualification
+    (<= 5 cards, no growth card — Sid's rule, mirrored from submit_match);
+    avg_dps excludes growth builds only (a full build is the normal case for
+    whole-game DPS, but Grow damage is frame-rate-shaped, #320).
+    NULL telemetry = not recorded (#257) — such games simply cannot hold a
+    record. Public read, same exposure as the main leaderboard."""
+    is_seat = board in _RECORDS_SEAT_BOARDS
+    if not is_seat and board not in _RECORDS_OTHER_BOARDS:
+        raise HTTPException(400, "unknown records board")
+
+    params: dict = {"lim": limit}
+    if is_seat:
+        c1, c2, qualified = _RECORDS_SEAT_BOARDS[board]
+        qual_where = ("WHERE COALESCE(cp.n, 0) <= 5 AND NOT COALESCE(cp.has_growth, FALSE)"
+                      if qualified else "")
+        # c1/c2 come exclusively from the allowlist dict above (#188).
+        q = f"""
+            WITH {_RECORDS_CARDS_CTE},
+            seat AS (
+                SELECT m.id AS match_id, m.ended_at, m.player1_id AS pid,
+                       m.player2_id AS opp, m.{c1} AS metric
+                  FROM matches m
+                 WHERE m.invalidated_at IS NULL AND m.{c1} > 0
+                UNION ALL
+                SELECT m.id, m.ended_at, m.player2_id, m.player1_id, m.{c2}
+                  FROM matches m
+                 WHERE m.invalidated_at IS NULL AND m.{c2} > 0
+            ),
+            qual AS (
+                SELECT s.*, cp.cards
+                  FROM seat s
+                  LEFT JOIN cards_per cp
+                    ON cp.match_id = s.match_id AND cp.player_id = s.pid
+                {qual_where}
+            ),
+            best AS (
+                SELECT DISTINCT ON (q.pid) q.*
+                  FROM qual q ORDER BY q.pid, q.metric DESC, q.ended_at ASC
+            )
+            SELECT b.metric AS val, b.ended_at, b.cards,
+                   p.id AS player_id, p.display_name, p.steam_id,
+                   gr.rating, si.name AS title, si.preview_color AS title_color,
+                   si.sku AS title_sku, op.display_name AS opp_name,
+                   op.steam_id AS opp_steam
+              FROM best b
+              JOIN players p ON p.id = b.pid AND p.deleted_at IS NULL
+              LEFT JOIN players op ON op.id = b.opp
+              LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+              LEFT JOIN shop_items si ON si.id = p.active_title_id
+             ORDER BY b.metric DESC LIMIT :lim
+        """
+    elif board == "avg_dps":
+        q = f"""
+            WITH {_RECORDS_CARDS_CTE},
+            seat AS (
+                SELECT m.id AS match_id, m.ended_at, m.player1_id AS pid,
+                       m.player2_id AS opp, m.p1_damage_dealt AS dmg,
+                       COALESCE(m.duration_seconds, m.match_duration) AS dur
+                  FROM matches m
+                 WHERE m.invalidated_at IS NULL AND m.p1_damage_dealt > 0
+                UNION ALL
+                SELECT m.id, m.ended_at, m.player2_id, m.player1_id,
+                       m.p2_damage_dealt,
+                       COALESCE(m.duration_seconds, m.match_duration)
+                  FROM matches m
+                 WHERE m.invalidated_at IS NULL AND m.p2_damage_dealt > 0
+            ),
+            qual AS (
+                SELECT s.*, cp.cards, (s.dmg * 10.0 / s.dur) AS dps10
+                  FROM seat s
+                  LEFT JOIN cards_per cp
+                    ON cp.match_id = s.match_id AND cp.player_id = s.pid
+                 WHERE s.dur >= 120 AND NOT COALESCE(cp.has_growth, FALSE)
+            ),
+            best AS (
+                SELECT DISTINCT ON (q.pid) q.*
+                  FROM qual q ORDER BY q.pid, q.dps10 DESC, q.ended_at ASC
+            )
+            SELECT ROUND(b.dps10)::int AS val, b.ended_at, b.cards,
+                   p.id AS player_id, p.display_name, p.steam_id,
+                   gr.rating, si.name AS title, si.preview_color AS title_color,
+                   si.sku AS title_sku, op.display_name AS opp_name,
+                   op.steam_id AS opp_steam
+              FROM best b
+              JOIN players p ON p.id = b.pid AND p.deleted_at IS NULL
+              LEFT JOIN players op ON op.id = b.opp
+              LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+              LEFT JOIN shop_items si ON si.id = p.active_title_id
+             ORDER BY b.dps10 DESC LIMIT :lim
+        """
+    elif board == "luckiest":
+        q = f"""
+            WITH {_RECORDS_CARDS_CTE},
+            seat AS (
+                SELECT m.id AS match_id, m.ended_at, m.player1_id AS pid, m.player2_id AS opp
+                  FROM matches m WHERE m.invalidated_at IS NULL
+                UNION ALL
+                SELECT m.id, m.ended_at, m.player2_id, m.player1_id
+                  FROM matches m WHERE m.invalidated_at IS NULL
+            ),
+            qual AS (
+                SELECT s.*, cp.cards, cp.n, cp.rares,
+                       (cp.rares * 100.0 / cp.n) AS pct
+                  FROM seat s
+                  JOIN cards_per cp
+                    ON cp.match_id = s.match_id AND cp.player_id = s.pid
+                 WHERE cp.n >= 4 AND cp.rares > 0
+            ),
+            best AS (
+                SELECT DISTINCT ON (q.pid) q.*
+                  FROM qual q ORDER BY q.pid, q.pct DESC, q.n DESC, q.ended_at ASC
+            )
+            SELECT ROUND(b.pct)::int AS val, b.ended_at, b.cards,
+                   p.id AS player_id, p.display_name, p.steam_id,
+                   gr.rating, si.name AS title, si.preview_color AS title_color,
+                   si.sku AS title_sku, op.display_name AS opp_name,
+                   op.steam_id AS opp_steam
+              FROM best b
+              JOIN players p ON p.id = b.pid AND p.deleted_at IS NULL
+              LEFT JOIN players op ON op.id = b.opp
+              LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+              LEFT JOIN shop_items si ON si.id = p.active_title_id
+             ORDER BY b.pct DESC, b.n DESC LIMIT :lim
+        """
+    else:
+        # longest_game / shortest_game — MATCH rows, both participants shown.
+        # "Real/active game" floor (Sid): a decided winner, and >= 30s so
+        # match-abort races cannot hold the shortest-game record (#58 family).
+        order = "DESC" if board == "longest_game" else "ASC"
+        dur_floor = 1 if board == "longest_game" else 30
+        params["floor"] = dur_floor
+        q = f"""
+            WITH {_RECORDS_CARDS_CTE}
+            SELECT COALESCE(m.duration_seconds, m.match_duration) AS val,
+                   m.ended_at,
+                   p1.id AS player_id, p1.display_name, p1.steam_id,
+                   gr.rating, si.name AS title, si.preview_color AS title_color,
+                   si.sku AS title_sku,
+                   p2.display_name AS opp_name,
+                   p2.steam_id AS opp_steam,
+                   cp1.cards AS cards, cp2.cards AS cards2,
+                   gr2.rating AS rating2
+              FROM matches m
+              JOIN players p1 ON p1.id = m.player1_id AND p1.deleted_at IS NULL
+              JOIN players p2 ON p2.id = m.player2_id AND p2.deleted_at IS NULL
+              LEFT JOIN cards_per cp1 ON cp1.match_id = m.id AND cp1.player_id = m.player1_id
+              LEFT JOIN cards_per cp2 ON cp2.match_id = m.id AND cp2.player_id = m.player2_id
+              LEFT JOIN glicko_ratings gr ON gr.player_id = p1.id
+              LEFT JOIN glicko_ratings gr2 ON gr2.player_id = p2.id
+              LEFT JOIN shop_items si ON si.id = p1.active_title_id
+             WHERE m.invalidated_at IS NULL AND m.winner_id IS NOT NULL
+               AND COALESCE(m.duration_seconds, m.match_duration) >= :floor
+             ORDER BY val {order}, m.ended_at ASC LIMIT :lim
+        """
+
+    rows = (await db.execute(text(q), params)).mappings().all()
+
+    _colors = await _rank_colors(db)
+    _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
+    titles, title_colors = [], []
+    for r in rows:
+        # Podium maps key on str(player_id) (review F14: asyncpg hands back a
+        # UUID here, and a UUID key silently misses the string-keyed map,
+        # hiding every equipped podium title from the boards).
+        _pid = str(r["player_id"])
+        _t, _tc = _display_title_sync(
+            _colors, r["title_sku"], r["title"], r["title_color"],
+            float(r["rating"]) if r["rating"] is not None else None,
+            podium_pos=_pmap.get(_pid),
+            podium_pos_2v2=_pmap2.get(_pid),
+            podium_pos_ffa=_pmapf.get(_pid))
+        titles.append(_t or "")
+        title_colors.append(_tc or "")
+
+    def _date(r):
+        # Full ISO timestamp, not a date (round-3 f5): truncating to a UTC
+        # date shifted the displayed day for any viewer west of UTC; the
+        # client converts to local time before rendering month/day.
+        try:
+            return r["ended_at"].isoformat() if r["ended_at"] else ""
+        except Exception:
+            return ""
+
     return RecordsBoardResponse(
         board=board,
         display_names=[r["display_name"] or r["steam_id"] for r in rows],
         steam_ids=[r["steam_id"] for r in rows],
         values=[int(r["val"] or 0) for r in rows],
+        dates=[_date(r) for r in rows],
+        titles=titles,
+        title_colors=title_colors,
+        ratings=[int(r["rating"]) if r["rating"] is not None else 0 for r in rows],
+        cards=[r["cards"] or "" for r in rows],
+        names2=[r["opp_name"] or "" for r in rows],
+        steam_ids2=[r["opp_steam"] or "" for r in rows],
+        cards2=[(r["cards2"] or "") if "cards2" in r else "" for r in rows],
+        ratings2=[(int(r["rating2"]) if r.get("rating2") is not None else 0) if "rating2" in r else 0 for r in rows],
     )
 
 
@@ -19850,6 +20055,71 @@ async def ack_channel_post(
     ), {"pid": post_id})
     await db.commit()
     return {"status": "acked", "id": post_id}
+
+
+@app.get("/api/v1/internal/stream-posts/pending", tags=["Internal"])
+async def internal_stream_posts_pending(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Living stream posts whose rendered state lags the desired state
+    (migration 226). Revision-acked (#175); the Discord message id is stored
+    server-side so a bot restart cannot orphan the living message (#129).
+
+    Delivery drives the janitor: stale un-finalized sessions (no stream_live
+    poll for STREAM_POST_STALE_SECONDS) are finalized HERE, so the "stream
+    ended" edit needs no extra loop."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    await db.execute(text("""
+        UPDATE stream_channel_posts
+           SET finalized = TRUE,
+               content = 'The stream has ended - thanks for watching!',
+               revision = revision + 1, updated_at = NOW()
+         WHERE NOT finalized
+           AND last_live_at < NOW() - make_interval(secs => :stale)
+    """), {"stale": STREAM_POST_STALE_SECONDS})
+    await db.commit()
+    # Un-finalized rows are ALWAYS returned (review F9): a live post with an
+    # acked revision still needs its bottom-anchor check every tick — burial
+    # is a channel event, not a content revision. The bot skips the no-op
+    # case (revision acked AND not buried) without editing.
+    rows = (await db.execute(text("""
+        SELECT post_key, channel_id, content, revision, finalized,
+               message_id, posted_revision
+          FROM stream_channel_posts
+         WHERE posted_revision IS DISTINCT FROM revision
+            OR NOT finalized
+         ORDER BY updated_at
+         LIMIT 5
+    """))).mappings().all()
+    return {"posts": [dict(r) for r in rows]}
+
+
+@app.post("/api/v1/internal/stream-posts/ack", tags=["Internal"])
+async def internal_stream_posts_ack(
+    post_key: str = Query(..., max_length=64),
+    revision: int = Query(..., ge=1),
+    message_id: str | None = Query(None, max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bind the ack to the exact revision rendered (#175): a content change
+    that lands between the bot's fetch and its ack leaves revision >
+    posted_revision, so the row stays pending and the newer content is
+    re-delivered next tick."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    await db.execute(text("""
+        UPDATE stream_channel_posts
+           SET posted_revision = :rev,
+               message_id = COALESCE(:mid, message_id)
+         WHERE post_key = :k
+    """), {"rev": revision, "mid": message_id, "k": post_key})
+    await db.commit()
+    return {"status": "acked", "post_key": post_key, "revision": revision}
 
 
 @app.get("/api/v1/internal/tournament-notices", tags=["Internal"])
@@ -35313,6 +35583,10 @@ async def _broadcast_candidate(db: AsyncSession, game, requester: str) -> dict |
         "names": names,
         "ratings": [round(v, 1) for v in ratings],
         "phase": game["phase"],
+        # INTERNAL (never in _broadcast_public): roster steam ids in the SAME
+        # order as names — the stream post's series-score lookup binds its
+        # side order to this (review F1).
+        "roster_sids": roster,
     }
 
 
@@ -35769,6 +36043,219 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
     return {"games": out}
 
 
+# ── Living stream post (#scr-ranked-streaming, Aug 17) ──────────────────
+# The VM bot has no credentials by design; the MOD's authenticated
+# /broadcast/target poll is the only channel off that machine, so the bot
+# writes a stream-state file, the mod folds it into this poll, and the
+# server runs the post's state machine in stream_channel_posts (migration
+# 226 — revision-acked living post, delivered by the Discord bot).
+RANKED_STREAMING_CHANNEL_ID = os.getenv("RANKED_STREAMING_CHANNEL", "1539051213751062649")
+BROADCAST_TWITCH_URL = os.getenv("BROADCAST_TWITCH_URL", "https://twitch.tv/sidscompetitiverounds")
+BROADCAST_YOUTUBE_URL = os.getenv("BROADCAST_YOUTUBE_URL", "https://youtube.com/@SidsCompetitiveRounds/live")
+# A stream post's session goes stale when no stream_live poll has carried it
+# for this long (mod polls every 10s while the director runs) — the pending
+# GET finalizes it, so delivery drives the janitor and no new loop exists.
+# Honest worst-case "ended" lag (review F18): dead-director-while-ROUNDS-
+# lives = the mod keeps trusting the stream-info file for its 120s freshness
+# window, THEN this interval, THEN up to one 20s bot poll — ~6.5 minutes.
+# The premature-finalize direction is recoverable: a live claim for a
+# finalized session REOPENS it (review F2).
+STREAM_POST_STALE_SECONDS = 240
+_STREAM_SESSION_RE = _re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_STREAM_MODE_LABELS = {"1v1": "Ranked 1v1", "2v2": "2v2", "ovt": "1v2", "ffa": "FFA"}
+
+
+def _stream_md_escape(s: str) -> str:
+    """Names go into a Discord embed body — neutralize markdown metacharacters
+    (embeds never ping, and the bot sends AllowedMentions.none(), so mention
+    tokens are cosmetic-only here). Brackets/parens/angles included (review
+    F10): AllowedMentions suppresses pings, NOT hyperlinks, and a name like
+    "[watch](https://evil)" would otherwise render a clickable link in an
+    official embed. Round-2 finding 5: whitespace/control chars collapse to
+    single spaces (a newline in a name forges whole embed LINES) and bare
+    URLs get a zero-width space after the scheme so Discord's auto-linker
+    never fires on caller-authored text."""
+    collapsed = " ".join((s or "").split())
+    out = []
+    for ch in collapsed:
+        if ch in "*_~`|\\[]()<>":
+            out.append("\\")
+        out.append(ch)
+    escaped = "".join(out)
+    return _re.sub(r"(?i)(https?):(/{1,2})", "\\1:\u200b\\2", escaped)
+
+
+async def _stream_series_score(db: AsyncSession, candidate: dict | None) -> str | None:
+    """SERVER-derived 1v1 series tally oriented to the candidate's own
+    names/roster order (review F1: the mod-computed score carried neither the
+    game's identity nor a side-order contract, so it could render reversed or
+    against the wrong pair entirely). None for non-1v1 modes and when no
+    series matches — the post simply omits the tally.
+
+    Series identity (round-2 finding 4): when the spectate game's source_ref
+    IS a series id, bind to that exact row — a pair can hold TWO active
+    series at once (tournament + queue resume) and pair+recency alone can
+    display the other one's score under the watched match's names.
+    Invalidated rows are excluded in both arms (an admin-reversed series can
+    remain status='active')."""
+    try:
+        if not candidate or candidate.get("mode") != "1v1":
+            return None
+        sids = candidate.get("roster_sids") or []
+        if len(sids) != 2:
+            return None
+        row = None
+        src = candidate.get("source_ref")
+        if src:
+            try:
+                src_uuid = UUID(str(src))
+            except Exception:
+                src_uuid = None
+            if src_uuid is not None:
+                # source_ref is NOT uniformly a series id (round-3 f2): sync
+                # tournament attestation stores tournament_matches.id, whose
+                # series lives one hop away at tm.series_id; queue 1v1 rooms
+                # may store the series id directly; code rooms store nothing.
+                # A RESOLVED source is TERMINAL either way (round-4 f2): when
+                # it resolves to an invalidated series, the honest answer is
+                # "no tally" — falling through to the pair lookup rendered a
+                # DIFFERENT active series' score under the watched match's
+                # names. Only an UNRESOLVED reference may use the fallback.
+                row = (await db.execute(text("""
+                    SELECT rs.p1_series_wins AS w1, rs.p2_series_wins AS w2,
+                           p1.steam_id AS s1, rs.invalidated_at AS inv
+                      FROM ranked_series rs
+                      JOIN players p1 ON p1.id = rs.player1_id
+                      JOIN players p2 ON p2.id = rs.player2_id
+                     WHERE rs.id = :sid
+                        OR rs.id = (SELECT tm.series_id
+                                      FROM tournament_matches tm
+                                     WHERE tm.id = :sid)
+                     LIMIT 1
+                """), {"sid": src_uuid})).mappings().first()
+                if row is not None and row["inv"] is not None:
+                    return None
+        if row is None:
+            row = (await db.execute(text("""
+                SELECT rs.p1_series_wins AS w1, rs.p2_series_wins AS w2,
+                       p1.steam_id AS s1
+                  FROM ranked_series rs
+                  JOIN players p1 ON p1.id = rs.player1_id
+                  JOIN players p2 ON p2.id = rs.player2_id
+                 WHERE rs.status = 'active' AND rs.invalidated_at IS NULL
+                   AND ((p1.steam_id = :a AND p2.steam_id = :b)
+                        OR (p1.steam_id = :b AND p2.steam_id = :a))
+                 ORDER BY GREATEST(rs.created_at,
+                                   COALESCE(rs.last_activity_at, rs.created_at)) DESC
+                 LIMIT 1
+            """), {"a": sids[0], "b": sids[1]})).mappings().first()
+        if row is None:
+            return None
+        w1, w2 = int(row["w1"] or 0), int(row["w2"] or 0)
+        if row["s1"] != sids[0]:
+            w1, w2 = w2, w1
+        return f"{w1}-{w2}"
+    except Exception as ex:
+        print(f"[STREAM-POST] score lookup failed (non-fatal): {ex}")
+        return None
+
+
+def _stream_post_content(candidate: dict | None, score: str | None) -> str:
+    """Compose the post BODY (no timestamp — the Discord bot stamps a live
+    <t:..:R> at render time so edits don't churn revisions)."""
+    if candidate is None:
+        line = "Between matches - watching for the next game..."
+    else:
+        names = candidate.get("names") or []
+        ratings = candidate.get("ratings") or []
+        def _nm(i):
+            n = _stream_md_escape(str(names[i])[:24]) if i < len(names) else "?"
+            r = int(ratings[i]) if i < len(ratings) else 0
+            return f"**{n}** ({r})" if r > 0 else f"**{n}**"
+        mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "", candidate.get("mode") or "?")
+        if len(names) == 2:
+            vs = f"{_nm(0)} vs {_nm(1)}"
+        else:
+            vs = ", ".join(_nm(i) for i in range(len(names))) or "?"
+        line = f"Watching: {vs} - {mode}"
+        if candidate.get("is_tournament"):
+            line = "🏆 " + line
+        if score:
+            line += f"  [{score}]"
+    return (f"{line}\n"
+            f"📺 Twitch: {BROADCAST_TWITCH_URL}\n"
+            f"▶️ YouTube: {BROADCAST_YOUTUBE_URL}")
+
+
+async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
+                              stream_session: str | None,
+                              candidate: dict | None) -> None:
+    """State machine for the living stream post. Commits its own writes —
+    the surrounding poll handler is otherwise read-only. Never raises: the
+    poll's real job (the director) must not fail over a Discord nicety
+    (#187 family)."""
+    if not stream_live or not stream_session:
+        return
+    if not _STREAM_SESSION_RE.match(stream_session):
+        return
+    try:
+        # A live claim for session K SUPERSEDES every other session (round-2
+        # finding 1): the VM runs exactly one stream at a time, so any other
+        # un-finalized row is a leftover whose "ended" edit would otherwise
+        # wait out the stale window while two LIVE posts fight the
+        # bottom-anchor logic in a delete/repost ping-pong.
+        await db.execute(text("""
+            UPDATE stream_channel_posts
+               SET finalized = TRUE,
+                   content = 'The stream has ended - thanks for watching!',
+                   revision = revision + 1, updated_at = NOW()
+             WHERE post_key <> :k AND NOT finalized
+        """), {"k": stream_session})
+        score = await _stream_series_score(db, candidate)
+        content = _stream_post_content(candidate, score)
+        row = (await db.execute(text("""
+            SELECT post_key, content, finalized FROM stream_channel_posts
+             WHERE post_key = :k
+        """), {"k": stream_session})).mappings().first()
+        if row is None:
+            await db.execute(text("""
+                INSERT INTO stream_channel_posts (post_key, channel_id, content)
+                VALUES (:k, :ch, :c)
+                ON CONFLICT (post_key) DO NOTHING
+            """), {"k": stream_session, "ch": RANKED_STREAMING_CHANNEL_ID, "c": content})
+        elif row["finalized"]:
+            # REOPEN (review F2): a transport-only outage longer than the
+            # stale window finalizes a genuinely live session; the fresh live
+            # claim (session id from a heartbeating file, 120s freshness gate)
+            # is stronger evidence than the timeout that fired during the
+            # gap. A genuinely NEW stream still gets a fresh session id.
+            await db.execute(text("""
+                UPDATE stream_channel_posts
+                   SET finalized = FALSE, content = :c, revision = revision + 1,
+                       last_live_at = NOW(), updated_at = NOW()
+                 WHERE post_key = :k AND finalized
+            """), {"k": stream_session, "c": content})
+        elif row["content"] != content:
+            await db.execute(text("""
+                UPDATE stream_channel_posts
+                   SET content = :c, revision = revision + 1,
+                       last_live_at = NOW(), updated_at = NOW()
+                 WHERE post_key = :k AND NOT finalized
+            """), {"k": stream_session, "c": content})
+        else:
+            await db.execute(text("""
+                UPDATE stream_channel_posts SET last_live_at = NOW()
+                 WHERE post_key = :k AND NOT finalized
+            """), {"k": stream_session})
+        await db.commit()
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        print(f"[STREAM-POST] upkeep failed (non-fatal): {ex}")
+
+
 @app.get("/api/v1/broadcast/target", tags=["Spectate"])
 async def broadcast_target(
     request: Request,
@@ -35779,6 +36266,8 @@ async def broadcast_target(
     acq_ticket: str | None = Query(None, max_length=128),
     acq_phase: str | None = Query(None, max_length=32),
     acq_age: float | None = Query(None, ge=0, le=600),
+    stream_live: int | None = Query(None, ge=0, le=1),
+    stream_session: str | None = Query(None, max_length=64),
     db: AsyncSession = Depends(get_db),
 ):
     if not await _strict_steam_session_ok(request, steam_id, db):
@@ -35920,6 +36409,14 @@ async def broadcast_target(
     next_switch = BROADCAST_ROTATE_SECONDS
     if current_ok and activation_age is not None:
         next_switch = max(0, int(BROADCAST_ROTATE_SECONDS - activation_age))
+
+    # Living stream post upkeep (Aug 17). The post describes what the seat is
+    # WATCHING (current), falling back to the director's selection while a
+    # switch is in flight. No-op unless the poll carries stream_live. The
+    # series score is derived server-side from the same candidate (review F1).
+    await _stream_post_upkeep(db, stream_live, stream_session,
+                              current_candidate if current_ok else selected)
+
     return {
         "target": _broadcast_public(selected) if selected else None,
         "current": current_payload,

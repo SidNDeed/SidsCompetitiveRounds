@@ -704,13 +704,43 @@ namespace CompetitiveRounds
             currentSeriesGamesLost = 0;
         }
         /// <summary>Adopt a resumed BO3's tally from the server (preflight
-        /// "exists" response after a DC + reconnect, #33) so the HUD picks up
-        /// at the real score instead of 0-0.</summary>
-        public static void AdoptSeriesScore(int myWins, int oppWins)
+        /// "exists" response after a DC + reconnect, #33) so both the fighter
+        /// HUD and the spectator room ledger pick up at the real score.</summary>
+        public static bool AdoptSeriesScore(int myWins, int oppWins,
+                                            int expectedRoomSeriesGeneration)
         {
-            currentSeriesGamesWon = Mathf.Max(0, myWins);
-            currentSeriesGamesLost = Mathf.Max(0, oppWins);
-            Plugin.Log.LogInfo($"[SESSION] Adopted resumed series score {currentSeriesGamesWon}-{currentSeriesGamesLost}");
+            int roomSeriesGeneration = roomSeriesWinsLocal + roomSeriesLossesLocal;
+            // Only the opening BO3 can carry games played before THIS room.
+            // Later BO3s started here and are already fully represented by the
+            // local room ledger; accepting a server seed there could re-phase a
+            // new series with a delayed score from the one that just completed.
+            if (expectedRoomSeriesGeneration != roomSeriesGeneration
+                || roomSeriesGeneration != 0)
+            {
+                Plugin.Log.LogInfo($"[SESSION] Ignored resumed series score {myWins}-{oppWins} "
+                                   + $"(room series generation sent={expectedRoomSeriesGeneration}, now={roomSeriesGeneration})");
+                return false;
+            }
+
+            int seedWins = Mathf.Max(0, myWins);
+            int seedLosses = Mathf.Max(0, oppWins);
+
+            // INVARIANT: reconcile by REPLACING both current-BO3 projections
+            // with the same component-wise floor; never += the server score.
+            // A preflight callback may land after OnGameOver, so blind replace
+            // would erase a real local result, while addition can double-count
+            // a result the server response already includes. Max is monotonic
+            // and idempotent. The queue-lock path applies before gameplay and
+            // therefore adopts the exact server phase without this ambiguity.
+            int mergedWins = Mathf.Max(roomGamesWonLocal, seedWins);
+            int mergedLosses = Mathf.Max(roomGamesLostLocal, seedLosses);
+            roomGamesWonLocal = mergedWins;
+            roomGamesLostLocal = mergedLosses;
+            currentSeriesGamesWon = mergedWins;
+            currentSeriesGamesLost = mergedLosses;
+            Plugin.Log.LogInfo($"[SESSION] Adopted resumed series score {mergedWins}-{mergedLosses} "
+                               + $"(server {seedWins}-{seedLosses})");
+            return true;
         }
 
         // ── Tournament context (bug 231, contract 1) ─────────────────────
@@ -802,7 +832,8 @@ namespace CompetitiveRounds
             }
             int my = pendingResumedMyWins, opp = pendingResumedOppWins;
             pendingResumedRoom = "";   // one-shot, before the apply
-            if (my > 0 || opp > 0) ApiClient.ApplyResumedSeriesScore(my, opp);
+            if (my > 0 || opp > 0)
+                ApiClient.ApplyResumedSeriesScore(my, opp, RoomSeriesGeneration);
         }
         /// <summary>v1.29 (#42): the server refused a ranked series for this
         /// pairing (one side has ranked explicitly disabled). Flip the match
@@ -1160,14 +1191,24 @@ namespace CompetitiveRounds
         private static bool lastSpectateWasMaster = false;
 
         // Room-scoped 1v1 tally for the spectator snapshot (design-review
-        // find 10). Reset ONLY on actual room join; fed ONLY by the local
-        // game-over outcome path.
+        // find 10). Reset ONLY on actual room join. The opening BO3's
+        // roomGames* phase may be seeded by AdoptSeriesScore when the server
+        // resumes a cross-room series; after that, local game-over outcomes
+        // are the sole writer and the roomSeries* completed tally stays local.
         private static int roomSeriesWinsLocal = 0;
         private static int roomSeriesLossesLocal = 0;
         private static int roomGamesWonLocal = 0;
         private static int roomGamesLostLocal = 0;
+        // The reliable Photon callback owns the score reset. The 10 Hz room
+        // edge checks this marker before running its fallback reset, otherwise
+        // it would wipe a resumed score consumed by the callback moments ago.
+        private static string callbackResetScoreRoom = "";
         public static int RoomSeriesWinsLocal => roomSeriesWinsLocal;
         public static int RoomSeriesLossesLocal => roomSeriesLossesLocal;
+        // Monotonic within a room because the two completed-series counters
+        // reset only on room join. Captured by async score-adoption requests so
+        // a response from the opening BO3 cannot mutate a later one.
+        public static int RoomSeriesGeneration => roomSeriesWinsLocal + roomSeriesLossesLocal;
 
         /// <summary>Room-scoped spectate/attest edge state reset — called
         /// from the ACTUAL Photon room callbacks (Aug 10 r2 find 8: the 10 Hz
@@ -1187,7 +1228,18 @@ namespace CompetitiveRounds
                 roomSeriesLossesLocal = 0;
                 roomGamesWonLocal = 0;
                 roomGamesLostLocal = 0;
+                currentSeriesGamesWon = 0;
+                currentSeriesGamesLost = 0;
+
+                string joinedRoom = "";
+                try { joinedRoom = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+                callbackResetScoreRoom = joinedRoom;
+                // The callback cannot miss a fast leave+join between poll
+                // samples. Consume after every score reset; the poll path
+                // below remains the fallback when no callback marker exists.
+                TryConsumePendingResumedScore(joinedRoom);
             }
+            else callbackResetScoreRoom = "";
         }
         // Armed on a battle rising edge; cleared only when an attest SENDS.
         private static bool spectateAttestEdgePending = false;
@@ -1613,6 +1665,17 @@ namespace CompetitiveRounds
             // its own transitions (#222), vanilla sets it everywhere else.
             bool battleNow = false;
             try { battleNow = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+            // Bug 235: serialization silence is meaningful only during active
+            // combat. Falling edges clear timing baselines so pick/map/death
+            // intervals cannot masquerade as peer stalls. A spectator suppresses
+            // the local GM writers of battleOngoing; its validated reconcile /
+            // observed-round edges drive the same gate from the diagnostics patch.
+            try
+            {
+                if (!RoomActors.LocalIsSpectator)
+                    NetworkReplicaDiagnostics.SetBattleActive(battleNow);
+            }
+            catch { }
             if (battleNow && !_lastBattleForPoisonEdge)
             {
                 try { PoisonSync.NoteBattleResumed(); } catch { }
@@ -2596,10 +2659,15 @@ namespace CompetitiveRounds
                 lastSpectateBattleState = false;
                 spectateAttestEdgePending = false;
                 lastSpectateWasMaster = false;
-                roomSeriesWinsLocal = 0;
-                roomSeriesLossesLocal = 0;
-                roomGamesWonLocal = 0;
-                roomGamesLostLocal = 0;
+                bool scoreResetByCallback = string.Equals(
+                    callbackResetScoreRoom, photonRoomId, StringComparison.Ordinal);
+                if (!scoreResetByCallback)
+                {
+                    roomSeriesWinsLocal = 0;
+                    roomSeriesLossesLocal = 0;
+                    roomGamesWonLocal = 0;
+                    roomGamesLostLocal = 0;
+                }
                 try
                 {
                     string pendingRoom = Plugin.PendingRankedRoom ?? "";
@@ -2769,16 +2837,18 @@ namespace CompetitiveRounds
                 rankedRoomStallHandled = false;
                 rankedRoomStallWarned = false;
                 rankedRoomEverFull = false;
-                // Fresh room = new series. Reset the in-match HUD's BO3 score
-                // counter so it doesn't carry over from the prior room. The
-                // session game / series tallies stay (they're cumulative).
-                currentSeriesGamesWon = 0;
-                currentSeriesGamesLost = 0;
-                // Bug 200: ...unless the queue lock staged a RESUMED series'
-                // tally for THIS room. Must run after the zeroing above, never
-                // before — that ordering is the whole reason the score is
-                // stashed rather than adopted at lock time.
-                TryConsumePendingResumedScore(photonRoomId);
+                // Fresh room = new series. The reliable Photon callback
+                // normally reset both score projections already; this is the
+                // polled fallback when that callback marker is unavailable.
+                // Session game / series tallies stay (they're cumulative).
+                if (!scoreResetByCallback)
+                {
+                    currentSeriesGamesWon = 0;
+                    currentSeriesGamesLost = 0;
+                    // Bug 200: ...unless the queue lock staged a RESUMED
+                    // series' tally for THIS room. Must run after zeroing.
+                    TryConsumePendingResumedScore(photonRoomId);
+                }
                 ovtSoloWins = 0; ovtDuoWins = 0;   // review [4]: 1v2 banner tally
                 // §7.1 (Codex mod-r1 F3 sweep): normally unreachable on the
                 // broadcast seat (a spectator session quiesces this poll
@@ -4136,6 +4206,7 @@ namespace CompetitiveRounds
             // Spectator: never tracks a match (defense in depth — the GM
             // lifecycle that fires this is suppressed on a spectator).
             if (RoomActors.LocalIsSpectator) return;
+            try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             // Freeze the fighter roster at match start (design §3.2, Codex r1
             // find 1): from here, a later actor is a spectator (role prop) or
             // unauthorized — never a new fighter. Competitive rooms only; a
@@ -4439,6 +4510,7 @@ namespace CompetitiveRounds
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
             sessionMatchCount++;
+            try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
 
             // FIRST statement after the one-shot latch: snapshot every seat's
             // BUILD while the live objects still hold it (#171 — finalise from
@@ -4581,9 +4653,10 @@ namespace CompetitiveRounds
                 // Room-scoped tally for the SPECTATOR snapshot (Aug 10 design
                 // review find 10): a self-contained BO3 count on local
                 // outcomes only. currentSeriesGames* below is entangled with
-                // the async report callback's resets and must not be reused;
-                // these four counters are fed ONLY here (both fighters run
-                // this path) and reset ONLY on actual room join. Display-only:
+                // the async report callback's resets and must not be reused.
+                // The opening roomGames* phase can be server-seeded on resume;
+                // all later advancement happens here (both fighters run this
+                // path), and resets happen only on actual room join. Display-only:
                 // never reported, never signed, never near ratings or gold.
                 // STRICT 1v1 writers only (r2 find 10: matchIsRanked is also
                 // true for 2v2 cr_ff games flowing through this path — the
@@ -5378,6 +5451,7 @@ namespace CompetitiveRounds
         public static void OnFfaMatchStarted()
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: no tracking
+            try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             // Roster freeze — same rule as OnMatchStarted (r1 find 1). Re-run
             // per game: FFA leavers shrink the roster between games.
             try
@@ -5568,6 +5642,7 @@ namespace CompetitiveRounds
             gameOverReported = true;
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
             sessionMatchCount++;
+            try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
 
             // Same rule as OnGameOver: build snapshot first, in this frame.
             // FfaMode calls this synchronously from its point resolution, so

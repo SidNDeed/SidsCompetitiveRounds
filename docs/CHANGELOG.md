@@ -2,8 +2,60 @@
 
 ## Unreleased
 
-Schema changes: migration **225** (`spectate_drain_tombstones` table +
-spectator cap default 5; applied 2026-08-16).
+Schema changes: migrations **225** (`spectate_drain_tombstones` table +
+spectator cap default 5; applied 2026-08-16), **226** (`stream_channel_posts`
+living-stream-post table).
+
+**Fixed**
+
+- **Lost identity / "PlayerName" (bug 234).** The base game sets every
+  player's nickname to a literal "PlayerName" placeholder before connecting
+  and repairs it from Steam only once, as the last step of joining a room —
+  if that single attempt fails (a transient Steam hiccup), the placeholder
+  sticks for the whole game and the in-world name label never refreshes. The
+  mod now retries the Steam lookup with a bounded in-room budget and
+  repaints name labels whenever a player's nickname heals, in every online
+  room type.
+- **2v2 game details ignored team colors.** Expanding a Recent 2v2 Series
+  entry showed the per-game card columns and telemetry lines in fixed
+  blue/orange side colors even when the series header showed the stamped
+  team-identity colors — the inner view could contradict the header (and
+  read "blue" for both teams). The expanded columns now use the same
+  resolved team colors as the header.
+- **Tournament signup names could corrupt the whole list.** The shared
+  object-array parser was not string-aware, so one display name containing a
+  brace could silently corrupt every row parsed after it (#156 class).
+
+**Tournaments**
+
+- **Recent Tournaments is now a popup** (button under Tournament Bets):
+  every participant with their locked elo, seed, bracket win-loss, final
+  result, plus the tournament's duration (hours for sync, weeks for async)
+  and prize snapshot. The old one-line right-column list is retired.
+- **Cleaner bracket.** The long winners-to-losers drop-down connector lines
+  are gone — the two brackets now only visibly meet at the grand final.
+  Player elos render beside names in the bracket cells, and titles beside
+  names in the signups list.
+- **Hover a bracket name for the full story**: per-game scores, points,
+  duration, hit/block percentages, fps/ping, and every card that player
+  picked, straight from the recorded games.
+
+**Records (Leaderboard > Compare)**
+
+- Records are now derived from the actual record-setting GAME: each row
+  carries the date, the holder's title and rating, and (on hover) the cards
+  it was set with. Names are no longer truncated to 13 characters.
+- Four new boards: **Highest Avg DPS** (growth builds excluded), **Luckiest**
+  (highest rare-pick share in one game), **Longest Game** and **Shortest
+  Game** (both participants + both builds shown).
+
+**Broadcast**
+
+- **Living stream post in #scr-ranked-streaming**: when the broadcast seat
+  goes live, one rich Discord post appears with the current match (names,
+  ratings, mode, series score) and the Twitch/YouTube links, edits itself on
+  match switches and score changes, and flips to "stream ended" when the
+  broadcast stops.
 
 **Server**
 
