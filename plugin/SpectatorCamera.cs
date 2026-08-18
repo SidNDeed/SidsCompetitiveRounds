@@ -54,7 +54,13 @@ namespace CompetitiveRounds
         private static float _holdStart = -1f;
         private static float _holdMaxNeed;
 
-        private static void ResetState()
+        /// <summary>Also called from SpectatorSession.EndSession — the one
+        /// teardown that runs in EVERY path — so a finished session's
+        /// committed zoom can never leak into the next one (review r-hud
+        /// finding 4: the in-prefix reset only runs if a camera Update
+        /// happens to fire between the role clearing and the next session,
+        /// which room teardown ordering does not guarantee).</summary>
+        internal static void ResetState()
         {
             _committed = -1f;
             _holdStart = -1f;

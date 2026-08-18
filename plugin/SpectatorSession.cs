@@ -271,6 +271,12 @@ namespace CompetitiveRounds
             _pendingPropClear = true;
             TickPendingClear();
             try { RoomActors.Reset(); } catch { }
+            // Spectator camera smoothing state dies with the session (r-hud
+            // finding 4): its opportunistic in-prefix reset depends on a
+            // camera Update firing after the role clears, which teardown
+            // ordering does not guarantee — a leaked committed zoom would
+            // start the next sitting conspicuously zoomed out.
+            try { SpectatorCameraZoomPatch.ResetState(); } catch { }
             // Bug 204: the spectator quiesce skips GameStateWatcher's
             // Left-room branch — the ONLY other caller of FfaMode.OnRoomLeft()
             // — so FFA counters written during a spectate (game/cycle from the
