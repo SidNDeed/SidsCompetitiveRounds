@@ -61,6 +61,9 @@ FILES = [
     "SpectatorHud.cs", "SpectatorJoiner.cs", "SpectatorSync.cs",
     # Esc-menu leave confirm (Aug 12, DC #1).
     "EscMenuLeaveGuard.cs",
+    # Post-session report screens (Aug 19, W7) — ~70 Tr sites; a new file
+    # must be listed HERE or its keys are silently unharvestable (#357).
+    "PostSessionReport.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

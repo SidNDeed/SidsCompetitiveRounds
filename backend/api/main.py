@@ -32179,21 +32179,44 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
 
 
 @app.get("/api/v1/ffa/recent", tags=["FFA Matches"])
-async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1, le=10),
+async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1, le=30),
                      ranked: bool = Query(True),
+                     participant_steam_id: str = Query(None, max_length=32),
                      db: AsyncSession = Depends(get_db)):
     """Recent FFA matches, newest first, with the full per-player stat
     surface (placements, rounds, rating deltas, cards, telemetry) — the
     'Recent Ranked FFAs' panel feed, and with ranked=false the new 'Recent
     Casual FFAs' panel (Sid, Aug 3). Browsable by anyone, like
-    /team/all-series-paged."""
+    /team/all-series-paged.
+
+    participant_steam_id (Aug 19, R1 f15): optional filter to matches that
+    include that player — the broadcast post-session report needs the RICH
+    per-match shape scoped to a watched fighter (the global page hides a
+    sitting behind newer unrelated lobbies; /ffa-history is too thin). The
+    page_size cap rose 10 -> 30 for the same reason (a long FFA sitting);
+    per-row cost is bounded by the same participant filter in practice.
+    Same public read either way — the unfiltered feed already exposes every
+    row this filter can return."""
     # §6: ranked and casual games never mix in one panel. `bool` is genuinely
     # type-validated by FastAPI (unlike Query enum= — learning #188) and bound
     # as a parameter in BOTH queries (a filter drift between COUNT and page
     # desyncs total_pages from the page contents).
+    participant_clause = ""
+    extra_params: dict = {}
+    if participant_steam_id:
+        prow = (await db.execute(text(
+            "SELECT id FROM players WHERE steam_id = :sid"
+        ), {"sid": participant_steam_id})).first()
+        if prow is None:
+            return {"matches": [], "page": page, "page_size": page_size,
+                    "total": 0, "total_pages": 0}
+        participant_clause = (" AND EXISTS (SELECT 1 FROM ffa_match_players fpx"
+                              " WHERE fpx.match_id = m.id AND fpx.player_id = :ppid)")
+        extra_params["ppid"] = prow[0]
     total = (await db.execute(text(
-        "SELECT COUNT(*) FROM ffa_matches WHERE invalidated_at IS NULL AND is_ranked = :rk"
-    ), {"rk": ranked})).scalar() or 0
+        "SELECT COUNT(*) FROM ffa_matches m WHERE m.invalidated_at IS NULL AND m.is_ranked = :rk"
+        + participant_clause
+    ), {"rk": ranked, **extra_params})).scalar() or 0
     matches = (await db.execute(text("""
         SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
                m.ended_at, m.is_ranked, m.timeline, pw.steam_id AS winner_steam,
@@ -32207,10 +32230,10 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
           LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
-         WHERE m.invalidated_at IS NULL AND m.is_ranked = :rk
+         WHERE m.invalidated_at IS NULL AND m.is_ranked = :rk""" + participant_clause + """
          ORDER BY m.ended_at DESC
          LIMIT :lim OFFSET :off
-    """), {"lim": page_size, "off": page * page_size, "rk": ranked})).mappings().all()
+    """), {"lim": page_size, "off": page * page_size, "rk": ranked, **extra_params})).mappings().all()
     match_ids = [r["id"] for r in matches]
     players_by_match: dict = {mid: [] for mid in match_ids}
     cards_by_match_player: dict = {}
@@ -34964,14 +34987,38 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
 async def team_all_series_paged(
     page: int = Query(0, ge=0),
     page_size: int = Query(3, ge=1, le=20),
+    participant_steam_id: str = Query(None, max_length=32),
     db: AsyncSession = Depends(get_db),
 ):
     """Paginated feed of every completed 2v2 series. Drives the F5 'Recent 2v2
     Series' panel. Each series includes per-slot ratings + rating deltas +
     titles + per-slot gold/XP earned in this series, plus the matches array
     with per-player card picks. Replaces the per-player /team-matches feed
-    so non-participants can also browse the global series history."""
-    total_q = await db.execute(text("SELECT COUNT(*) FROM team_series WHERE status='completed'"))
+    so non-participants can also browse the global series history.
+
+    participant_steam_id (Aug 19, R1 f12): optional filter to series that
+    include that player in any slot — the broadcast post-session report needs
+    the RICH per-series shape scoped to a watched fighter (the global page
+    hides a sitting behind newer unrelated series; /team-history is too thin).
+    Same public read either way — the unfiltered feed already exposes every
+    row this filter can return."""
+    # Resolve the participant to a player id first (indexed lookup); an
+    # unknown steam id is an empty page, not an error — the report engine
+    # treats empty-but-200 as genuinely empty.
+    participant_clause = ""
+    count_params: dict = {}
+    if participant_steam_id:
+        prow = (await db.execute(text(
+            "SELECT id FROM players WHERE steam_id = :sid"
+        ), {"sid": participant_steam_id})).first()
+        if prow is None:
+            return {"series": [], "page": page, "page_size": page_size,
+                    "total": 0, "total_pages": 0}
+        participant_clause = " AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)"
+        count_params["pid"] = prow[0]
+    total_q = await db.execute(text(
+        "SELECT COUNT(*) FROM team_series s WHERE s.status='completed'" + participant_clause
+    ), count_params)
     total = total_q.scalar() or 0
 
     series_q = text("""
@@ -35010,11 +35057,13 @@ async def team_all_series_paged(
           LEFT JOIN glicko_ratings v1b ON v1b.player_id = s.t1b_id
           LEFT JOIN glicko_ratings v2a ON v2a.player_id = s.t2a_id
           LEFT JOIN glicko_ratings v2b ON v2b.player_id = s.t2b_id
-         WHERE s.status = 'completed'
+         WHERE s.status = 'completed'""" + participant_clause + """
          ORDER BY s.completed_at DESC
          LIMIT :lim OFFSET :off
     """)
-    rows = (await db.execute(series_q, {"lim": page_size, "off": page * page_size})).mappings().all()
+    page_params = {"lim": page_size, "off": page * page_size}
+    page_params.update(count_params)   # same :pid filter as the COUNT (or nothing)
+    rows = (await db.execute(series_q, page_params)).mappings().all()
 
     # Aug 8 (Sid): the frozen team-colour stamp for the Recent panel's point
     # tinting — batched, savepointed (#235) so the feed survives pre-206.
@@ -36956,6 +37005,91 @@ async def broadcast_target(
         "rotation": {"set_size": len(rotation_set), "next_switch_in": next_switch},
         "candidates": [_broadcast_public(c) for c in eligible[:5]],
     }
+
+
+# ── W7 end authority (D1 f6/f7, Aug 19) ──────────────────────────────────
+# The VM's post-session report engine needs a server-truth answer to "is
+# this watched game OVER, and when": `ended_at != NULL` here is the ONLY
+# terminal proof the report queue accepts. Absence from the games LIST
+# proves nothing — rows age out of the list's attestation-freshness window
+# while still open (#348) — so this is a direct by-id lookup, never a
+# listing (#384a). Read-only, no writes, normal rate-limit gates apply
+# (deliberately NOT on any bypass list, #285).
+@app.get("/api/v1/broadcast/report-status", tags=["Spectate"])
+async def broadcast_report_status(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    # CSV of ≤8 UUIDs (36 chars each + commas); slack for whitespace only.
+    game_ids: str = Query(..., max_length=512),
+    db: AsyncSession = Depends(get_db),
+):
+    # AUTH FIRST, mirroring /broadcast/target verbatim (same seat, same two
+    # helpers, same failure codes): fail-closed session check, then the
+    # broadcast-account allowlist. #388's auth-before-work holds by
+    # construction — a GET carries no body, and the id parsing below runs
+    # only for the already-authenticated broadcast seat.
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    if not _is_broadcast_account(steam_id):
+        raise HTTPException(status_code=403, detail="broadcast_only")
+
+    requested = []
+    for item in game_ids.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            gid = UUID(item)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=400, detail="invalid_game_id")
+        if gid not in requested:  # dedupe, preserving request order
+            requested.append(gid)
+    if not requested:
+        raise HTTPException(status_code=400, detail="no_game_ids")
+    if len(requested) > 8:
+        raise HTTPException(status_code=400, detail="too_many_game_ids")
+
+    games = (await db.execute(text("""
+        SELECT id, mode, started_at, ended_at, roster
+          FROM spectate_games
+         WHERE id = ANY(CAST(:gids AS uuid[]))
+    """), {"gids": requested})).mappings().all()
+    by_id = {g["id"]: g for g in games}
+
+    # Display names for every roster member across all found games, in one
+    # query. The roster steam-id CSV is returned exactly as stored: the
+    # broadcast seat is already trusted with roster ids at grant time
+    # (SpectateGameInfo.roster), so exposing them here to the SAME
+    # authenticated seat adds no new exposure.
+    all_sids = sorted({s for g in games
+                       for s in _spectate_roster_list(g["roster"])})
+    names_by_sid = {}
+    if all_sids:
+        rows = (await db.execute(text("""
+            SELECT steam_id, display_name FROM players
+             WHERE steam_id = ANY(CAST(:sids AS text[]))
+        """), {"sids": all_sids})).mappings().all()
+        names_by_sid = {r["steam_id"]: (r["display_name"] or "?") for r in rows}
+
+    out = []
+    for gid in requested:  # request order; ids with no row are omitted
+        g = by_id.get(gid)
+        if g is None:
+            continue
+        roster = _spectate_roster_list(g["roster"])
+        out.append({
+            "game_id": str(g["id"]),
+            "mode": g["mode"],
+            # TIMESTAMPTZ rows come back tz-aware, so isoformat() carries
+            # the +00:00 offset — ISO 8601 UTC as the report engine expects.
+            "started_at": g["started_at"].isoformat() if g["started_at"] else None,
+            "ended_at": g["ended_at"].isoformat() if g["ended_at"] else None,
+            "roster": g["roster"],
+            # Ordered to match the roster CSV; unknown ids render "?" the
+            # same way _broadcast_candidate does.
+            "names": [names_by_sid.get(s, "?") for s in roster],
+        })
+    return out
 
 
 @app.post("/api/v1/spectate/grant", tags=["Spectate"])

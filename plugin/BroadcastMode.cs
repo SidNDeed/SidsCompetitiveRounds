@@ -177,6 +177,11 @@ namespace CompetitiveRounds
             public int GrantSeq;
             public float StartedAt;
             public float PhaseStartedAt;
+            /// <summary>W7 latch: the activation-edge report note already ran
+            /// for THIS ticket (D1 f8 — once per ticket, at the first Watching
+            /// tick). A rotation back onto the same game is a new ticket and
+            /// gets a fresh note; this arc can never double-note.</summary>
+            public bool ReportNoted;
         }
 
         private static State _state = State.Idle;
@@ -278,6 +283,12 @@ namespace CompetitiveRounds
                     // not strand a half-torn state). No lease writes while
                     // disabled (§3b: "while enabled") — the bot's staleness
                     // ladder owns that signal.
+                    // W7: the report engine's clock (Tick) only runs while
+                    // enabled, so a config flip mid-report would otherwise
+                    // freeze the overlay on screen forever — hide it here.
+                    // The entry stays queued (Interrupt contract) and replays
+                    // when the director is re-enabled.
+                    try { if (PostSessionReport.Active) PostSessionReport.Interrupt(); } catch { }
                     if (_state == State.Idle || _state == State.Faulted) return;
                     if (_state == State.Watching || _state == State.AwaitingActivation)
                         EnterLeaving("director disabled", invokeLeave: true, dueToFailure: false);
@@ -288,6 +299,14 @@ namespace CompetitiveRounds
                 }
 
                 TickDirector();
+                // W7 report engine heartbeat (ai-collab/streaming-design-d1-
+                // deltas.md): ticked between the director and the lease write
+                // so the lease this frame reflects this frame's report state.
+                // directorIdleNoTicket is the engine's ONLY play condition —
+                // reports run over the main menu between sittings, never
+                // beside any acquisition arc. Locally guarded so an engine
+                // throw can never cost this frame's lease write.
+                try { PostSessionReport.Tick(_state == State.Idle && _ticket == null); } catch { }
                 TickLease();
             }
             catch { /* Step must never throw into the persistent Update */ }
@@ -642,6 +661,24 @@ namespace CompetitiveRounds
                 EnterLeaving("session-side leave: " + _lastLeaveReason, invokeLeave: false, dueToFailure: failure);
                 return;
             }
+            // W7 activation-edge feed (D1 f8: a ReportEntry is created ONLY
+            // at the Watching-activation edge, never at BeginAcquisition).
+            // R1 f6: the entry MAY be identity-less — on the autonomous
+            // broadcast seat SpectatorSession.WatchedRoster is ALWAYS empty
+            // (only the F5-fed CachedSpectateGames grant path populates it,
+            // and F5 stays closed), so the note fires regardless and the
+            // report-status poll fills roster/names server-side. This is
+            // the first HEALTHY Watching tick: placed after the death/leave
+            // branches so a dead session is never noted. Latched per ticket
+            // BEFORE the call — safe because NoteActivatedForReport has no
+            // roster gate; its only skip is the deliberate 1v2/ovt
+            // exclusion (D1 f11), and PostSessionReport.NotePairActivated
+            // accepts identity-less entries.
+            if (!t.ReportNoted && SpectatorSync.HasEverActivated)
+            {
+                t.ReportNoted = true;
+                NoteActivatedForReport(t);
+            }
             if (now >= _nextPollAt && !_pollInFlight)
                 SendPoll(currentGameId: t.GameId, activationAge: Mathf.Max(0f, now - _activatedAt), preActivation: false);
         }
@@ -767,6 +804,12 @@ namespace CompetitiveRounds
 
         private static void BeginAcquisition(ApiClient.BroadcastTargetInfo target, float now)
         {
+            // W7: a live sitting always outranks a replayed report — hide any
+            // on-screen report the instant an acquisition starts. The entry
+            // stays queued and replays from the start (Interrupt contract).
+            // FIRST statement, so no acquisition step can ever race a report
+            // still painting over the screen the join needs.
+            try { PostSessionReport.Interrupt(); } catch { }
             _ticket = new SpectateAcquisition
             {
                 TicketId = Guid.NewGuid().ToString("N").Substring(0, 12),
@@ -958,6 +1001,12 @@ namespace CompetitiveRounds
         private static void RetireTicket(string why)
         {
             if (_ticket == null) return;
+            // W7: every ticket retirement — organic sitting end, cancel
+            // verified, leave complete, foreign abandon, pre-activation end —
+            // is the director-side "stopped watching this pair" stamp for the
+            // report queue. Keyed by game id; the engine no-ops for a game it
+            // never noted (a ticket that died before activation).
+            try { PostSessionReport.NoteTargetGone(_ticket.GameId); } catch { }
             // Bumping the generation on retirement is cheap insurance: any
             // straggler callback from the finished arc no-ops instead of
             // acting on the next one. Never reached on non-broadcast installs.
@@ -1072,6 +1121,113 @@ namespace CompetitiveRounds
                 _lastLeaveReason = reason ?? "";
         }
 
+        // ── W7 post-session report feed (ai-collab/streaming-design-d1-deltas.md) ──
+
+        /// <summary>Activation-edge note for the post-session report queue
+        /// (D1 f8: a ReportEntry is created ONLY here — identity is
+        /// game_id + incarnation). ALWAYS calls NotePairActivated for a
+        /// non-1v2 sitting (R1 f6): on the autonomous broadcast seat
+        /// SpectatorSession.WatchedRoster is ALWAYS empty (only the F5-fed
+        /// CachedSpectateGames grant path populates it, and F5 stays closed),
+        /// so roster/names/ratings are best-effort — session watch meta when
+        /// roster-aligned, target-poll meta otherwise, EMPTY arrays when
+        /// unknown. PostSessionReport accepts identity-less entries; the
+        /// report-status poll fills roster/names/mode/started_at server-side
+        /// (the R1 f6+f8 identity-fill contract). Called once per ticket
+        /// from TickWatching (ReportNoted latch — latching before the call
+        /// is safe because the only enqueue skips are the deliberate 1v2/ovt
+        /// exclusion (D1 f11) and PostSessionReport's full-queue refusal when
+        /// all 16 entries are protected — a state that means 16 sittings
+        /// already await reporting, where losing a 17th is acceptable).</summary>
+        private static void NoteActivatedForReport(SpectateAcquisition t)
+        {
+            try
+            {
+                if (t == null) return;
+                var meta = CurrentTargetMeta;
+                bool metaMatches = meta != null
+                                   && string.Equals(meta.game_id, t.GameId, StringComparison.Ordinal);
+                string mode = metaMatches ? (meta.mode ?? "") : "";
+                if (mode.Length == 0)
+                {
+                    try { mode = SpectatorSync.WatchedMode ?? ""; } catch { }
+                }
+                // D1 f11: 1v2 is excluded from reports entirely — skip both
+                // spellings the mode field has carried ("1v2" / "ovt").
+                if (string.Equals(mode, "1v2", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(mode, "ovt", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                // R1 f6: EMPTY is the NORMAL autonomous-seat value — proceed
+                // to the NotePairActivated call regardless; identity is
+                // filled server-side by the report-status poll. Never add a
+                // roster-emptiness return here.
+                string[] roster;
+                try { roster = SpectatorSession.WatchedRoster ?? new string[0]; }
+                catch { roster = new string[0]; }
+
+                // Names: the session's watch meta when roster-ALIGNED, else
+                // the target-poll meta. Alignment is the validity test —
+                // SetWatchedMeta's empty-CSV split yields [""], never a
+                // usable array (same rule WatchedTitleColors already uses).
+                string[] names = null;
+                try
+                {
+                    var wn = SpectatorSession.WatchedNames;
+                    if (wn != null && roster.Length > 0 && wn.Length == roster.Length) names = wn;
+                }
+                catch { }
+                if (names == null)
+                    names = metaMatches && meta.names != null ? meta.names.ToArray() : new string[0];
+
+                float[] ratings = ParseReportRatings(roster.Length, metaMatches ? meta : null);
+
+                PostSessionReport.NotePairActivated(t.GameId, t.Incarnation, mode, roster, names, ratings);
+            }
+            catch (Exception ex)
+            {
+                try { Plugin.Log?.LogWarning($"[BROADCAST] report activation note failed: {ex.Message}"); } catch { }
+            }
+        }
+
+        /// <summary>Ratings for the report note: the session watch-meta CSV
+        /// (display strings, e.g. "1523" — SpectatorHud renders them raw)
+        /// parsed invariant when roster-aligned; the target-poll meta's
+        /// numeric ratings otherwise; empty when neither is usable (the
+        /// engine treats unknown as 0 — A6 contract).</summary>
+        private static float[] ParseReportRatings(int rosterLen, ApiClient.BroadcastTargetInfo metaOrNull)
+        {
+            try
+            {
+                var raw = SpectatorSession.WatchedRatings;
+                if (raw != null && rosterLen > 0 && raw.Length == rosterLen)
+                {
+                    var parsed = new float[raw.Length];
+                    bool any = false;
+                    for (int i = 0; i < raw.Length; i++)
+                    {
+                        float v;
+                        if (float.TryParse((raw[i] ?? "").Trim(),
+                                           System.Globalization.NumberStyles.Float,
+                                           System.Globalization.CultureInfo.InvariantCulture, out v))
+                        {
+                            parsed[i] = v;
+                            any = true;
+                        }
+                    }
+                    if (any) return parsed;
+                }
+                if (metaOrNull != null && metaOrNull.ratings != null && metaOrNull.ratings.Count > 0)
+                {
+                    var fromMeta = new float[metaOrNull.ratings.Count];
+                    for (int i = 0; i < fromMeta.Length; i++) fromMeta[i] = (float)metaOrNull.ratings[i];
+                    return fromMeta;
+                }
+            }
+            catch { }
+            return new float[0];
+        }
+
         // ── target poll (§2a) ────────────────────────────────────────────
 
         private static bool IdentityAndSessionReady()
@@ -1167,6 +1323,11 @@ namespace CompetitiveRounds
                     {
                         // Rotation moved on. Leave; the next IDLE poll
                         // acquires the new target.
+                        // W7: stamp the abandoned pair's sitting-end at the
+                        // rotation decision itself — RetireTicket restamps at
+                        // leave-complete seconds later, which merely refreshes
+                        // the same entry (NoteTargetGone is idempotent per id).
+                        try { PostSessionReport.NoteTargetGone(_ticket.GameId); } catch { }
                         EnterLeaving("rotation switch", invokeLeave: true, dueToFailure: false);
                         return;
                     }
@@ -1287,7 +1448,19 @@ namespace CompetitiveRounds
         {
             switch (_state)
             {
-                case State.Idle: return "idle";
+                case State.Idle:
+                    // D1 CUT (ai-collab/streaming-design-d1-deltas.md,
+                    // f14/f15/f16): NO new lease state for reports. While a
+                    // post-session report is on screen the lease publishes
+                    // plain "watching" so the bot HOLDS the Live scene. The
+                    // director's INTERNAL state machine is untouched (still
+                    // Idle), so the session-lifecycle classifiers (#381/#383)
+                    // see nothing new — they key on real session events, not
+                    // this label. Includes the F5 pause (Active with a null
+                    // screen kind): the scene must not flap while the
+                    // operator pokes the menu.
+                    try { if (PostSessionReport.Active) return "watching"; } catch { }
+                    return "idle";
                 case State.Granting: return "granting";
                 case State.Joining: return "joining";
                 case State.AwaitingActivation: return "awaiting_activation";
@@ -1364,6 +1537,30 @@ namespace CompetitiveRounds
             sb.Append(",\"is_tournament\":").Append(haveGame && meta.is_tournament ? "true" : "false");
             sb.Append(",\"series_score\":\"").Append(LeaseEscape(ComputeSeriesScore())).Append('"');
             sb.Append(",\"phase\":\"").Append(haveGame ? LeaseEscape(meta.phase) : "").Append('"');
+            // W7 report payload (D1 deltas f14/f15/f19): rides ONLY while a
+            // report is VISIBLY on screen — state Idle AND the engine Active
+            // AND a screen actually showing. Idle means no ticket, so haveGame
+            // is false above: game_id/mode stay "" (today's never-fabricate
+            // rule) and names[]/ratings[] stay EMPTY — no title composition
+            // during reports (D1 f16; the bot's compose_title returns None on
+            // empty names and platform titles keep the last live game's
+            // text). The F5 pause nulls CurrentScreenKind (D1 f13): dropping
+            // report_screen resets the bot's 3s-stable capture gate, so all
+            // three fields are omitted together.
+            try
+            {
+                if (_state == State.Idle && PostSessionReport.Active)
+                {
+                    string screen = PostSessionReport.CurrentScreenKind;
+                    if (!string.IsNullOrEmpty(screen))
+                    {
+                        sb.Append(",\"report_screen\":\"").Append(LeaseEscape(screen)).Append('"');
+                        sb.Append(",\"report_total_elo\":").Append(PostSessionReport.CurrentTotalElo);
+                        sb.Append(",\"report_id\":\"").Append(LeaseEscape(PostSessionReport.CurrentReportId)).Append('"');
+                    }
+                }
+            }
+            catch { }
             // NEVER room_name / region (§3b/§7.1).
             sb.Append('}');
         }

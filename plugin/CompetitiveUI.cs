@@ -318,6 +318,10 @@ namespace CompetitiveRounds
             // spectator layer: self-gating (broadcast identity + director +
             // activated session), a no-op everywhere else.
             BroadcastHud.Draw();
+            // Post-session report screens (W7, Aug 19): broadcast seat only,
+            // idle-time only — self-gating no-op everywhere else. Draws under
+            // notifications/chat so operator-facing surfaces stay on top.
+            PostSessionReport.Draw();
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
@@ -1811,8 +1815,32 @@ namespace CompetitiveRounds
             }
             if (hit == null) return;
 
+            // W7 (Aug 19): popup rect near the mouse exactly as before; the
+            // parse+paint core moved to PaintScoreGraph so a fixed-rect caller
+            // can render the same chart.
+            float w = 280f, h = 178f;
+            // IMGUI is top-left origin; mousePosition is bottom-left.
+            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
+            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            PaintScoreGraph(new Rect(gx, gy, w, h), hit.Value.timeline, hit.Value.won);
+        }
+
+        // W7 (Aug 19): fixed-rect paint core of the scoring-history chart. No
+        // NativeUI/tab/Repaint gating in here — callers own that (the hover
+        // wrapper above stays Repaint-gated; a fixed-rect caller gates itself).
+        // `box` is the chart body ((gx,gy,w,h) of the old popup); the black
+        // backdrop paints 4px past it on every side, as the popup always has.
+        // `won` is not consumed by the paint (line colors are fixed green =
+        // subject / red = opponent) — carried so the fixed-rect contract keeps
+        // the row's result alongside its timeline without a second lookup.
+        // `subjectLabel` (PRE-SANITIZED display name, #100/#156 — sanitize at
+        // the caller) selects a named header; null keeps the hover path's
+        // you-vs-opponent template byte-identically.
+        public static void PaintScoreGraph(Rect box, string pointTimeline, bool won, string subjectLabel = null)
+        {
             // Parse "a:b,a:b,..." into two cumulative series (prepend 0:0).
-            var parts = hit.Value.timeline.Split(',');
+            if (string.IsNullOrEmpty(pointTimeline)) return;
+            var parts = pointTimeline.Split(',');
             int n = parts.Length + 1;
             if (n < 3) return;
             var mine = new int[n]; var theirs = new int[n];
@@ -1838,14 +1866,18 @@ namespace CompetitiveRounds
                     clipping = TextClipping.Overflow, wordWrap = false,
                 };
 
-            float w = 280f, h = 178f, pad = 30f;
-            // IMGUI is top-left origin; mousePosition is bottom-left.
-            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
-            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            float w = box.width, h = box.height, pad = 30f;
+            float gx = box.x, gy = box.y;
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
+            // W7: the named branch keeps the opponent legend — this chart is
+            // inherently two-sided, so dropping the red legend (the F13 rule
+            // for single-participant series) would leave a line unexplained.
+            string header = !string.IsNullOrEmpty(subjectLabel)
+                ? I18n.TrF("<color=#CCCCCC>Scoring history</color>  <color=#66DD66>{0}</color> <color=#888>vs</color> <color=#DD7777>opponent</color>", subjectLabel)
+                : I18n.Tr("<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD7777>opponent</color>");
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24),
-                I18n.Tr("<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD7777>opponent</color>"),
+                header,
                 _scoreGraphLbl);
 
             Rect plot = new Rect(gx + pad, gy + 30f, w - pad - 10f, h - 30f - 26f);
@@ -2105,13 +2137,6 @@ namespace CompetitiveRounds
             }
             if (hit == null) return;
 
-            if (_scoreGraphLbl == null)
-                _scoreGraphLbl = new GUIStyle(GUI.skin.label)
-                {
-                    fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft,
-                    clipping = TextClipping.Overflow, wordWrap = false,
-                };
-
             int kind = hit.Value.kind;
             if (kind == 4) { DrawPlayerComboGraph(hit.Value, mp); return; }
             // Only 2/3 are the pair chart — 5 (dps) is a flat series and falls
@@ -2119,13 +2144,43 @@ namespace CompetitiveRounds
             // sent it to the wrong renderer.
             if (kind == 2 || kind == 3) { DrawPairHoverGraph(hit.Value, mp); return; }
 
+            // W7 (Aug 19): popup rect near the mouse exactly as before; the
+            // parse+paint core moved to PaintTeleGraph so a fixed-rect caller
+            // can render the same chart. (The _scoreGraphLbl lazy init that
+            // used to sit above the kind dispatch lives in each painter now —
+            // DrawPlayerComboGraph always had its own.)
+            float w = 360f, h = 230f;
+            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
+            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            PaintTeleGraph(new Rect(gx, gy, w, h), hit.Value.mySeries, hit.Value.oppSeries, kind,
+                           hit.Value.myStep, hit.Value.pointTimes, hit.Value.pointTimeline,
+                           hit.Value.subjectLabel, hit.Value.durationSeconds);
+        }
+
+        // W7 (Aug 19): fixed-rect paint core of the FPS/Ping/DPS chart —
+        // DrawFpsHoverGraph's parse+paint body, with (gx,gy,w,h) taken from
+        // `box`. No NativeUI/tab/Repaint gating in here — callers own that.
+        // The black backdrop paints 4px past the box on every side, as the
+        // hover popup always has. kind: 0 fps / 1 ping / 5 dps (pair kinds 2/3
+        // live in PaintPairGraph; the 2v2 combo stays in DrawPlayerComboGraph).
+        // legendMine/legendOpp (PRE-SANITIZED display names, #100/#156 —
+        // sanitize at the caller) select a two-name header; when null,
+        // subjectLabel / you-vs-opponent render byte-identically to the hover
+        // path.
+        public static void PaintTeleGraph(Rect box, string mySeries, string oppSeries, int kind,
+                                          float myStep, string pointTimes, string pointTimeline,
+                                          string subjectLabel, int durationSeconds,
+                                          string legendMine = null, string legendOpp = null)
+        {
             bool isPing = kind == 1;
             bool isDps = kind == 5;
-            float myStep = hit.Value.myStep;
+            // Hover regions always carry a positive step (registration defaults
+            // it); mirror those defaults so a fixed-rect caller may pass 0.
+            if (myStep <= 0f) myStep = isDps || isPing ? 3f : 5f;
             // DPS keeps its zeros (see ParseIntSeriesKeepZeros); fps/ping drop
             // theirs, where a 0 means "no sample", not "zero frames".
-            var mine = isDps ? ParseIntSeriesKeepZeros(hit.Value.mySeries) : ParseFpsSeries(hit.Value.mySeries);
-            var opp = isDps ? ParseIntSeriesKeepZeros(hit.Value.oppSeries) : ParseFpsSeries(hit.Value.oppSeries);
+            var mine = isDps ? ParseIntSeriesKeepZeros(mySeries) : ParseFpsSeries(mySeries);
+            var opp = isDps ? ParseIntSeriesKeepZeros(oppSeries) : ParseFpsSeries(oppSeries);
             if (mine == null && opp == null) return;
             // Both DPS lines share the emitter cadence; fps/ping opponent
             // samples are always the 3s heartbeat.
@@ -2135,18 +2190,24 @@ namespace CompetitiveRounds
             // series across it (interval = duration/(n-1)) instead of the
             // fixed 3s/5s cadence, exactly like the pair chart already does.
             // Legacy rows (no duration) keep the cadence estimate.
-            int knownDur = hit.Value.durationSeconds;
+            int knownDur = durationSeconds;
             if (knownDur > 0)
             {
                 if (mine != null && mine.Length >= 2) myStep = knownDur / (float)(mine.Length - 1);
                 if (opp != null && opp.Length >= 2) oppStep = knownDur / (float)(opp.Length - 1);
             }
 
+            if (_scoreGraphLbl == null)
+                _scoreGraphLbl = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft,
+                    clipping = TextClipping.Overflow, wordWrap = false,
+                };
+
             // One big chart per hover (July 22): the whole popup is the plot, so
             // a 600-vs-30 FPS gap or a big latency spike still reads clearly.
-            float w = 360f, h = 230f, pad = 44f;
-            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
-            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            float w = box.width, h = box.height, pad = 44f;
+            float gx = box.x, gy = box.y;
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
             // F13: FFA regions carry a subject label — a single participant's
@@ -2161,12 +2222,23 @@ namespace CompetitiveRounds
             // Aug 7: the metric name is baked INTO each sentence, so a new kind
             // needs its own pair of whole templates — there is no hole a caller
             // could fill to stop the fps one saying FPS.
-            string header = !string.IsNullOrEmpty(hit.Value.subjectLabel)
+            // W7 (Aug 19): legendMine/legendOpp name BOTH lines. The name pair
+            // rides the existing named-subject template's single hole — holes
+            // carry DATA, and markup-through-holes is established practice (the
+            // combo header passes a color hex through one) — so the metric
+            // sentences keep their catalogue keys (#289/#357). The gray "vs"
+            // separator is a literal, the one token this composition leaves
+            // untranslated.
+            bool namedPair = !string.IsNullOrEmpty(legendMine) && !string.IsNullOrEmpty(legendOpp);
+            string subjectArg = namedPair
+                ? legendMine + "</color> <color=#888>vs</color> <color=#E69988>" + legendOpp
+                : subjectLabel;
+            string header = namedPair || !string.IsNullOrEmpty(subjectLabel)
                 ? (isDps
-                    ? I18n.TrF("<color=#CCCCCC>Damage per second over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel)
+                    ? I18n.TrF("<color=#CCCCCC>Damage per second over the match</color>  <color=#99B3E6>{0}</color>", subjectArg)
                     : isPing
-                    ? I18n.TrF("<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel)
-                    : I18n.TrF("<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel))
+                    ? I18n.TrF("<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>{0}</color>", subjectArg)
+                    : I18n.TrF("<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>{0}</color>", subjectArg))
                 : (isDps
                     ? I18n.Tr("<color=#CCCCCC>Damage per second over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>")
                     : isPing
@@ -2183,7 +2255,7 @@ namespace CompetitiveRounds
             // Marker times can outrun the series (samples cap earlier) — include
             // them in the axis so late points still land inside the plot.
             Rect plotProbe = default(Rect);
-            float lastMarkT = DrawPointMarkers(plotProbe, 0f, hit.Value.pointTimes, hit.Value.pointTimeline, false);
+            float lastMarkT = DrawPointMarkers(plotProbe, 0f, pointTimes, pointTimeline, false);
             if (lastMarkT > maxT) maxT = lastMarkT;
 
             // Auto-scaled Y so a huge FPS ceiling or a latency spike both fit,
@@ -2214,7 +2286,7 @@ namespace CompetitiveRounds
             }
 
             // Point-scored markers (July 22 item 1) — under the series lines.
-            DrawPointMarkers(plot, maxT, hit.Value.pointTimes, hit.Value.pointTimeline, true);
+            DrawPointMarkers(plot, maxT, pointTimes, pointTimeline, true);
 
             System.Action<int[], float, Color> drawSeries = (vals, step, col) =>
             {
@@ -2249,8 +2321,37 @@ namespace CompetitiveRounds
         // colors"), and the identity line stays grey so neither collides.
         private static void DrawPairHoverGraph(FpsGraphRegion reg, Vector2 mp)
         {
-            bool isBlock = reg.kind == 3;
-            string series = reg.mySeries ?? "";
+            // W7 (Aug 19): popup rect near the mouse exactly as before; the
+            // parse+paint core moved to PaintPairGraph. The popup HEIGHT
+            // depends on whether point markers render (third header line), so
+            // the wrapper runs the same marker probe the painter does.
+            float lastMarkT = DrawPointMarkers(default(Rect), 0f, reg.pointTimes, reg.pointTimeline, false);
+            float headerH = lastMarkT > 0f ? 60f : 42f;   // 2 or 3 18px header lines
+            // Plot area stays ~178px tall; bottom band = 20px mm:ss ticks +
+            // 22px footer. Net h: 262 without markers, 280 with.
+            float w = 360f, h = headerH + 178f + 42f;
+            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
+            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            PaintPairGraph(new Rect(gx, gy, w, h), reg.mySeries, reg.kind == 3,
+                           reg.pointTimes, reg.pointTimeline, reg.subjectLabel,
+                           reg.durationSeconds, reg.subjectIsOpp);
+        }
+
+        // W7 (Aug 19): fixed-rect paint core of the Hit/Block pair chart — the
+        // old DrawPairHoverGraph body with (gx,gy,w,h) taken from `box`. No
+        // NativeUI/tab/Repaint gating in here — callers own that. The black
+        // backdrop paints 4px past the box on every side, as the popup always
+        // has. The v2| block dialect logic is intact (v2 = cumulative
+        // activated:successful on ONE shared axis; legacy = damage-vs-blocks
+        // on dual axes). `subjectIsOpp` is not in the brief's signature but is
+        // required for byte-identical unlabeled titles (it picks Opponent/Your
+        // on tabs 0/8); fixed-rect callers naming their subject never set it.
+        public static void PaintPairGraph(Rect box, string pairSeries, bool isBlock,
+                                          string pointTimes, string pointTimeline,
+                                          string subjectLabel, int durationSeconds,
+                                          bool subjectIsOpp = false)
+        {
+            string series = pairSeries ?? "";
             bool blockV2 = false;
             if (isBlock && series.StartsWith("v2|", StringComparison.Ordinal))
             {
@@ -2279,36 +2380,35 @@ namespace CompetitiveRounds
             int n = a.Length;
             // Bug 181 item 2: scale samples across the row's REAL duration
             // when the registration site knew it; legacy 3s estimate otherwise.
-            float dur = reg.durationSeconds > 0 ? reg.durationSeconds : (n - 1) * 3f;
+            float dur = durationSeconds > 0 ? durationSeconds : (n - 1) * 3f;
             if (dur < 1f) dur = 1f;
             float step = n > 1 ? dur / (n - 1) : dur;
-            float lastMarkT = DrawPointMarkers(default(Rect), 0f, reg.pointTimes, reg.pointTimeline, false);
+            float lastMarkT = DrawPointMarkers(default(Rect), 0f, pointTimes, pointTimeline, false);
             float maxT = Mathf.Max(dur, Mathf.Max(1f, lastMarkT));
             bool hasMarkers = lastMarkT > 0f;
 
             float headerH = hasMarkers ? 60f : 42f;   // 2 or 3 18px header lines
-            // Plot area stays ~178px tall; bottom band = 20px mm:ss ticks +
-            // 22px footer. Net h: 262 without markers, 280 with.
-            float w = 360f, h = headerH + 178f + 42f, pad = 44f, padR = (isBlock && !blockV2) ? 34f : 12f;
-            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
-            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            // The hover wrapper sizes the box so the plot lands at 178px; a
+            // fixed-rect caller's plot flexes with box.height instead.
+            float w = box.width, h = box.height, pad = 44f, padR = (isBlock && !blockV2) ? 34f : 12f;
+            float gx = box.x, gy = box.y;
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
 
             // Line 1 — identity. F13: FFA rows register per-participant series
             // with a subject label; tabs 0/8 take the whole-sentence you/
             // opponent keys (a bare "you" key is uninflectable, #295).
-            bool hasSubject = !string.IsNullOrEmpty(reg.subjectLabel);
+            bool hasSubject = !string.IsNullOrEmpty(subjectLabel);
             string title;
             if (isBlock && !blockV2)
-                title = hasSubject ? I18n.TrF("{0} Blocks", reg.subjectLabel)
-                    : reg.subjectIsOpp ? I18n.Tr("Opponent Blocks") : I18n.Tr("Your Blocks");
+                title = hasSubject ? I18n.TrF("{0} Blocks", subjectLabel)
+                    : subjectIsOpp ? I18n.Tr("Opponent Blocks") : I18n.Tr("Your Blocks");
             else if (isBlock)
-                title = hasSubject ? I18n.TrF("{0} Block Rate", reg.subjectLabel)
-                    : reg.subjectIsOpp ? I18n.Tr("Opponent Block Rate") : I18n.Tr("Your Block Rate");
+                title = hasSubject ? I18n.TrF("{0} Block Rate", subjectLabel)
+                    : subjectIsOpp ? I18n.Tr("Opponent Block Rate") : I18n.Tr("Your Block Rate");
             else
-                title = hasSubject ? I18n.TrF("{0} Hit Rate", reg.subjectLabel)
-                    : reg.subjectIsOpp ? I18n.Tr("Opponent Hit Rate") : I18n.Tr("Your Hit Rate");
+                title = hasSubject ? I18n.TrF("{0} Hit Rate", subjectLabel)
+                    : subjectIsOpp ? I18n.Tr("Opponent Hit Rate") : I18n.Tr("Your Hit Rate");
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 18), $"<color=#DDDDDD>{title}</color>", _scoreGraphLbl);
 
             // Line 2 — series legend, coloured AS the lines.
@@ -2386,7 +2486,7 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(lx, plot.yMax + 4f, tickSz.x, 16f), tickContent, _scoreGraphLbl);
             }
 
-            DrawPointMarkers(plot, maxT, reg.pointTimes, reg.pointTimeline, true);
+            DrawPointMarkers(plot, maxT, pointTimes, pointTimeline, true);
 
             System.Action<int[], int, Color> drawSeries = (vals, maxV, col) =>
             {

@@ -7255,6 +7255,26 @@ namespace CompetitiveRounds
         {
             try { ToastText = name ?? ""; ToastUntil = Time.unscaledTime + 2.5f; } catch { }
         }
+
+        /// <summary>Spectator-session teardown (W6, D1 delta f4). The map-skin
+        /// auto-cycle is spectator-owned state that must not leak into the local
+        /// player's next fighter room (#353 class: state written while spectating
+        /// leaking into the next sitting). Supersedes any sleeping deferred tint
+        /// pass, clears the live sku (the next Map.Start then falls back to the
+        /// player's own equipped sku / vanilla restore), and resets the cycle so a
+        /// new sitting starts fresh at the top of the list. The integrator wires
+        /// the call into SpectatorSession.EndSession — the one teardown that runs
+        /// in EVERY session-end path.</summary>
+        public static void OnSpectatorSessionEnd()
+        {
+            try
+            {
+                MapPhysicalColorPatch.SupersedePendingTints();
+                CurrentSku = null;
+                ArtHandlerNextArtPatch.ResetSpectatorCycle();
+            }
+            catch { }
+        }
     }
 
     [HarmonyPatch(typeof(Map), "Start")]
@@ -8483,10 +8503,114 @@ namespace CompetitiveRounds
         // that list until a NEW non-empty list replaces it.
         private static List<string> _lastEquippedFiltered;
 
+        // ── W6: spectator map-skin cycling ──────────────────────────────────
+        // The 23 budget (<=100g) custom preset skus, in CustomMapColors._presets
+        // declaration order — an EXPLICIT ordered array, never dictionary
+        // enumeration order (D1 delta f5). Excludes the 3 premium sparkle skus
+        // (gilded/platinum/aurora) and every SKU_TO_ART vanilla-styled sku.
+        // Verified entry-by-entry against CustomMapColors._presets.
+        private static readonly string[] SpectatorCycleSkus = new string[]
+        {
+            "mapcolor_soft",        "mapcolor_moss",     "mapcolor_cream",
+            "mapcolor_lavender",    "mapcolor_dusk",     "mapcolor_sand",
+            "mapcolor_mono",        "mapcolor_forest",   "mapcolor_amethyst",
+            "mapcolor_charcoal",    "mapcolor_crimson_map", "mapcolor_slate",
+            "mapcolor_rose",        "mapcolor_mint",     "mapcolor_sunset",
+            "mapcolor_obsidian",    "mapcolor_abyss",    "mapcolor_pine",
+            "mapcolor_iron",        "mapcolor_burgundy", "mapcolor_magma",
+            "mapcolor_velvet",      "mapcolor_blackwood",
+        };
+
+        // Spectator cycle state — deliberately SEPARATE from the fighter-seat
+        // statics (_cycleIndex / _cycleLastListHash / _lastEquippedFiltered) so
+        // spectating never perturbs the player's own equipped rotation.
+        private static int _specCycleIndex = -1;   // -1 = fresh; first advance lands on [0]
+        // LastMapStartTime value latched at the last adopt/advance (the
+        // once-per-map-load debounce — NextArt fires 2-3x per round start).
+        // Sentinel NegativeInfinity = fresh cycle, no stamp adopted yet; it can
+        // never collide with a real value (LastMapStartTime is -999f before the
+        // first map, then Time.time >= 0). R1 f19: the stamp latch is the ONLY
+        // debounce — no wall-clock term (see NextSpectatorCycleSku).
+        private static float _specAdvanceMapStamp = float.NegativeInfinity;
+        private static string _specCycleRoom;
+
+        /// <summary>Resets the spectator cycle to its fresh state. Called on room
+        /// change (a new sitting starts the cycle from the top) and from
+        /// MapColorState.OnSpectatorSessionEnd (session teardown).</summary>
+        public static void ResetSpectatorCycle()
+        {
+            _specCycleIndex = -1;
+            _specAdvanceMapStamp = float.NegativeInfinity;
+            _specCycleRoom = null;
+        }
+
+        /// <summary>Spectator-seat sku selection: one advance per MAP LOAD through
+        /// SpectatorCycleSkus, keeping the skin stable across the 2-3 NextArt calls
+        /// each round start fires. Never returns null/vanilla — every entry is a
+        /// CustomMapColors preset sku.</summary>
+        private static string NextSpectatorCycleSku()
+        {
+            // New room = new sitting → start the cycle fresh.
+            string room = null;
+            try { room = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null; } catch { }
+            if (!string.Equals(room, _specCycleRoom, StringComparison.Ordinal))
+            {
+                ResetSpectatorCycle();
+                _specCycleRoom = room;
+            }
+            // Advance exactly once per DISTINCT LastMapStartTime stamp (one advance
+            // per map load), with ONE exception: the FIRST call after a cycle reset
+            // ADOPTS the current stamp without advancing. R1 f19: the old 6s realtime
+            // floor here violated one-advance-per-map — a distinct Map.Start stamp
+            // arriving within 6s of the last advance was adopted WITHOUT advancing,
+            // so that entire map repeated the previous skin. The floor only existed
+            // to kill the burst-straddle double-advance at cycle start (bug-233:
+            // NextArt can run on EITHER side of Map.Start's stamp within one load —
+            // a pre-stamp call latched the old value, then a post-stamp call in the
+            // same burst saw a fresh one). Adopt-without-advance-first closes that
+            // case with no clock at all: the pre-stamp call adopts the OLD stamp
+            // (rendering [0] via the Max clamp below), and the post-stamp call sees
+            // a distinct stamp and performs the single legitimate advance (-1 -> 0,
+            // still [0] — no flicker). Residual (cosmetic, cycle-start only): if no
+            // pre-stamp call happens, map 1 renders [0] un-advanced and map 2's
+            // advance lands on [0] again.
+            float stamp = MapPhysicalColorPatch.LastMapStartTime;
+            bool advanced = false;
+            if (float.IsNegativeInfinity(_specAdvanceMapStamp))
+            {
+                // Fresh cycle (room change / ResetSpectatorCycle): adopt without
+                // advancing — see the burst-straddle note above.
+                _specAdvanceMapStamp = stamp;
+            }
+            else if (stamp != _specAdvanceMapStamp)
+            {
+                _specCycleIndex = (_specCycleIndex + 1) % SpectatorCycleSkus.Length;
+                _specAdvanceMapStamp = stamp;
+                advanced = true;
+            }
+            string sku = SpectatorCycleSkus[Mathf.Max(_specCycleIndex, 0) % SpectatorCycleSkus.Length];
+            Plugin.Log.LogInfo($"[MAPCOLOR] spectator {(advanced ? "cycle" : "keep")} → {sku} (index {Mathf.Max(_specCycleIndex, 0)}/{SpectatorCycleSkus.Length})");
+            return sku;
+        }
+
         static bool Prefix(ArtHandler __instance)
         {
             try
             {
+                // W6 — broadcast spectator seat: it has no equipped skins of its own,
+                // so cycle the budget-preset catalogue one skin per MAP LOAD for
+                // on-stream variety with zero input. Equipped state (active_color_skus,
+                // _cycleIndex, manual Shift, toast) is fighter-only and never consulted
+                // or touched on this path.
+                bool spectatorSeat = RoomActors.LocalIsSpectator;
+
+                string sku = null;
+                if (spectatorSeat)
+                {
+                    sku = NextSpectatorCycleSku();
+                }
+                else
+                {
                 var s = ApiClient.CachedPlayerStats;
                 // Multi-equip: pick the next sku in the equipped-colors list on each press.
                 // Filter null/empty entries so a corrupted server response doesn't
@@ -8515,7 +8639,6 @@ namespace CompetitiveRounds
                 {
                     _lastEquippedFiltered = equipped;
                 }
-                string sku = null;
                 if (equipped != null && equipped.Count > 0)
                 {
                     int listHash = 0;
@@ -8544,6 +8667,7 @@ namespace CompetitiveRounds
                 // Backward compat: if the new list field is empty, fall back to the
                 // legacy single-value active_color_sku (older clients / transitional state).
                 if (string.IsNullOrEmpty(sku)) sku = s?.active_color_sku;
+                }
                 if (string.IsNullOrEmpty(sku))
                 {
                     Plugin.Log.LogInfo("[MAPCOLOR] No custom sku resolved — falling through to vanilla NextArt");
@@ -8617,7 +8741,16 @@ namespace CompetitiveRounds
                     // cycling. ColorGrading (ApplyPost, above) is volume-only and stays immediate.
                     bool inTransition = Time.time - MapPhysicalColorPatch.LastMapStartTime
                                         < MapPhysicalColorPatch.MapTransitionGuardSec;
-                    if (inTransition)
+                    // Spectator seat: ALWAYS defer (D1 delta f3). bug-233's log proved
+                    // NextArt can run inside MapTransition.Move with this inTransition
+                    // test FALSE (the call landed before Map.Start stamped
+                    // LastMapStartTime), so the synchronous branch is never safe here —
+                    // and there is no manual Shift on this seat to need it. Only the
+                    // index ADVANCE is debounced: ScheduleDeferredTints pushes
+                    // _tintNotBefore on EVERY call, so each duplicate NextArt request
+                    // still pushes the deadline past its own transition window (#365).
+                    bool deferParticles = spectatorSeat || inTransition;
+                    if (deferParticles)
                         MapPhysicalColorPatch.ScheduleDeferredTints(sku);
                     else
                     {
@@ -8626,10 +8759,14 @@ namespace CompetitiveRounds
                         MapPhysicalColorPatch.SupersedePendingTints();
                         MapPhysicalColorPatch.ApplyPhysicalTintsForSku(null, sku);
                     }
-                    Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (deferParticles={inTransition})");
+                    Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (deferParticles={deferParticles})");
                     return false;
                 }
 
+                // Spectator seats never reach the branches below: SpectatorCycleSkus
+                // holds only CustomMapColors preset skus (IsCustomSku is true by
+                // construction), so the SKU_TO_ART / vanilla fallthrough — including
+                // the explicit-"default" restore — stays fighter-only.
                 if (!SKU_TO_ART.TryGetValue(sku, out string artName))
                 {
                     Plugin.Log.LogWarning($"[MAPCOLOR] Unknown sku '{sku}' — not in CustomMapColors presets, not in vanilla SKU_TO_ART. Equipped but not renderable; falling through to vanilla.");

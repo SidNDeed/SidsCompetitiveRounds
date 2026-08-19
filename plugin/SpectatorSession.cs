@@ -271,12 +271,12 @@ namespace CompetitiveRounds
             _pendingPropClear = true;
             TickPendingClear();
             try { RoomActors.Reset(); } catch { }
-            // Spectator camera smoothing state dies with the session (r-hud
-            // finding 4): its opportunistic in-prefix reset depends on a
-            // camera Update firing after the role clears, which teardown
-            // ordering does not guarantee — a leaked committed zoom would
-            // start the next sitting conspicuously zoomed out.
-            try { SpectatorCameraZoomPatch.ResetState(); } catch { }
+            // The dynamic spectator camera (and its session-reset) was deleted
+            // Aug 19 — vanilla static framing, see the SpectatorCamera.cs
+            // tombstone. Map-color cycle state IS session-owned (D1 f4): a
+            // stale spectator sku would otherwise repaint this account's next
+            // FIGHTER session with a skin it never equipped.
+            try { MapColorState.OnSpectatorSessionEnd(); } catch { }
             // Bug 204: the spectator quiesce skips GameStateWatcher's
             // Left-room branch — the ONLY other caller of FfaMode.OnRoomLeft()
             // — so FFA counters written during a spectate (game/cycle from the

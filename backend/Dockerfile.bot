@@ -4,9 +4,11 @@ ENV PYTHONUNBUFFERED=1
 # Writable matplotlib config/cache dir — without it every import warns and
 # retries slow font-cache builds in the read-only home.
 ENV MPLCONFIGDIR=/tmp
-# chat-downloader: YouTube live-chat reader for the stream-chat bridge
-# (Aug 18). The import site degrades to a one-time log if it is ever absent,
-# so a build from a cached pre-bridge image cannot crash-loop the bot.
-RUN pip install --no-cache-dir discord.py aiohttp matplotlib chat-downloader
+# chat-downloader REMOVED (Aug 19): 0.2.8 — its latest release, from 2023 —
+# is parse-broken against current YouTube page variants (reproduced; evidence
+# in ai-collab/streaming-design-addendum-chat.md). The bridge now polls the
+# official YouTube Data API over aiohttp instead; the scraper mechanism is
+# deleted, not bypassed (#310). Do not reintroduce it.
+RUN pip install --no-cache-dir discord.py aiohttp matplotlib
 COPY discord_bot.py .
 CMD ["python", "discord_bot.py"]

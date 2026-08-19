@@ -584,6 +584,11 @@ namespace CompetitiveRounds
 
         private static bool Scale(ref Vector2 feelDirection)
         {
+            // Spectator seats: always Off, whatever the setting says. The
+            // dynamic spectator camera was deleted for a static broadcast
+            // frame (SpectatorCamera.cs tombstone, Aug 19); shake impulses
+            // were the remaining camera motion on that seat (D1 finding 2).
+            try { if (RoomActors.LocalIsSpectator) { PerfGate.Hit("ScreenShakeBlocked"); return false; } } catch { }
             string lvl = Level;
             if (lvl == "Full") return true;
             if (lvl == "Off")

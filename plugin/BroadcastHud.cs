@@ -369,7 +369,11 @@ namespace CompetitiveRounds
         private static float PanelHeight(bool withActions)
         {
             int stats = TabStatsOverlay.BroadcastStatCount;
-            return 26f + stats * 17f + 16f + (withActions ? 46f : 0f) + 10f;
+            // withActions term (W5): 82 = 78 px keyboard cluster (3 rows of
+            // 24 px keys + 2 x 3 px gaps) + 4 px slack — mirrors the retired
+            // 46 = 42 px single row + 4. Only 1v1 passes withActions, so
+            // 2v2/FFA panel heights are unchanged by the cluster.
+            return 26f + stats * 17f + 16f + (withActions ? 82f : 0f) + 10f;
         }
 
         // ── top anchor: measured just under the vanilla card bars ─────────
@@ -595,14 +599,14 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(r.x + 8, y, r.width - 16, 16), _cardsCache.Count > i ? _cardsCache[i] : "", stStatLabel);
             y += 18f;
 
-            if (withActions) DrawActionRow(body, new Rect(r.x + 8, y, r.width - 16, 42));
+            if (withActions) DrawActionRow(body, new Rect(r.x + 8, y, r.width - 16, 78));
         }
 
         // ── action display (§4b) ─────────────────────────────────────────
 
         private static void DrawActionRow(Player body, Rect area)
         {
-            bool left = false, right = false, jump = false, dead = false;
+            bool up = false, down = false, left = false, right = false, jump = false, dead = false;
             float aimX = 0f, aimY = 0f;
             try
             {
@@ -614,6 +618,10 @@ namespace CompetitiveRounds
                     {
                         // Replica-applied owner input (decompiled
                         // SyncPlayerMovement.cs:69-71) — genuine held state.
+                        // direction replicates as a full Vector3, so .y is
+                        // read directly with the same 0.3 dead-zone as .x.
+                        up = input.direction.y > 0.3f;
+                        down = input.direction.y < -0.3f;
                         left = input.direction.x < -0.3f;
                         right = input.direction.x > 0.3f;
                         jump = input.jumpIsPressed;
@@ -632,19 +640,38 @@ namespace CompetitiveRounds
             bool shot = !dead && actor > 0 && _shotFlashUntil.TryGetValue(actor, out until) && until > now;
             bool block = !dead && actor > 0 && _blockFlashUntil.TryGetValue(actor, out until) && until > now;
 
-            // Row budget (r1 F10): 24+3 + 24+3 + 40+3 + 40+3 + 46+3 + 26 =
-            // 215 px, inside the 216 px panel interior (PANEL_W 232 - 2*8) —
-            // the aim box can no longer clip past the panel edge.
-            float keyH = 26f;
-            float x = area.x;
-            DrawKey(new Rect(x, area.y, 24, keyH), "<", left); x += 27;
-            DrawKey(new Rect(x, area.y, 24, keyH), ">", right); x += 27;
-            DrawKey(new Rect(x, area.y, 40, keyH), "JUMP", jump); x += 43;
+            // Keyboard cluster + action column (W5):
+            //    [W]            SHOT  [aim]
+            //  [A][S][D]        BLOCK
+            //  [ SPACE ]
+            // Width budget from PANEL_W: interior = PANEL_W 232 - 2*8 = 216.
+            //   movement (left-aligned):  ASD row = 3*24 + 2*3 = 78 px
+            //   action col (right-aligned): key 46 + gap 3 + aim 24 = 73 px
+            //   separation = 216 - 78 - 73 = 65 px of clear space (Sid's
+            //   ask: movement visually separated from actions). Nothing can
+            //   reach the panel edge — both sides are anchored inside it.
+            // Height: 3 rows * 24 + 2 gaps * 3 = 78 px (= the caller's rect
+            // and PanelHeight's 82f term minus its 4 px slack).
+            const float KEY = 24f, GAP = 3f, ACT_W = 46f, SPACE_W = 76f;
+            float row1 = area.y;
+            float row2 = area.y + KEY + GAP;
+            float row3 = area.y + 2f * (KEY + GAP);
+            float cx = area.x;                        // movement cluster left edge
+            // W sits centered over S (the middle key of the ASD row).
+            DrawKey(new Rect(cx + KEY + GAP, row1, KEY, KEY), "W", up);
+            DrawKey(new Rect(cx, row2, KEY, KEY), "A", left);
+            DrawKey(new Rect(cx + KEY + GAP, row2, KEY, KEY), "S", down);
+            DrawKey(new Rect(cx + 2f * (KEY + GAP), row2, KEY, KEY), "D", right);
+            // SPACE: wide 76 px key centered under the 78 px ASD row.
+            DrawKey(new Rect(cx + (3f * KEY + 2f * GAP - SPACE_W) / 2f, row3, SPACE_W, KEY), "SPACE", jump);
+
+            float aimL = area.x + area.width - KEY;   // aim box top-right (kept — Sid likes it)
+            float colX = aimL - GAP - ACT_W;          // action column left edge
             // SHOT is an ACTIVATION indicator (owner gun attack whatever
             // initiated it — §4b decompile note), not a raw click.
-            DrawKey(new Rect(x, area.y, 40, keyH), "SHOT", shot); x += 43;
-            DrawKey(new Rect(x, area.y, 46, keyH), "BLOCK", block); x += 49;
-            DrawAim(new Rect(x, area.y, keyH, keyH), aimX, aimY, dead);
+            DrawKey(new Rect(colX, row1, ACT_W, KEY), "SHOT", shot);
+            DrawKey(new Rect(colX, row2, ACT_W, KEY), "BLOCK", block);
+            DrawAim(new Rect(aimL, row1, KEY, KEY), aimX, aimY, dead);
         }
 
         /// <summary>Same visual language as CompetitiveUI.DrawKeyBox (pressed

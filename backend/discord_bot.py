@@ -3,7 +3,7 @@ Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
 import os, asyncio, aiohttp, discord, json, io, threading, re
-import random, ssl as ssl_mod, queue as queue_mod
+import random, ssl as ssl_mod
 import urllib.parse
 from typing import Literal
 from discord import app_commands
@@ -3188,12 +3188,14 @@ async def chat_ws_listener():
             backoff = min(backoff * 2, 60)
 
 
-# ── Stream-chat bridge readers (Aug 18) ─────────────────────────────────────
+# ── Stream-chat bridge readers (Aug 18; YouTube reworked Aug 19) ────────────
 # Twitch/YouTube viewer chat -> POST /internal/chat/bridge -> SCR chat. The
-# platform readers live in THIS container deliberately: the core API stays
-# free of scraping dependencies, a wedged reader costs the bridge and nothing
-# else, and the VM broadcast bot stays credential-less (its overlay keeps its
-# own native reads; the server-bridged copies are dropped there by source).
+# platform readers live in THIS container deliberately: a wedged reader costs
+# the bridge and nothing else, and the VM broadcast bot stays credential-less.
+# Twitch: the VM overlay keeps its own native IRC read, so bridged twitch
+# copies are dropped there by source. YouTube: this bridge is the ONLY reader
+# anywhere — the VM overlay renders the bridged copies it receives over the
+# SCR websocket (ai-collab/streaming-design-addendum-chat.md).
 STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
 _TWITCH_PRIVMSG_RE = re.compile(r"@(?P<tags>[^ ]+) :[^ ]+ PRIVMSG #[^ ]+ :(?P<text>.*)")
 # Video id of the live session's YouTube broadcast; maintained by
@@ -3274,85 +3276,399 @@ async def twitch_chat_bridge():
 
 async def youtube_chat_bridge():
     """YouTube live-chat reader, attached to the LIVE session's broadcast
-    (video id via poll_stream_posts). chat_downloader is a blocking sync
-    library, so each attachment runs on a daemon thread pumping an asyncio
-    queue (the VM hub's proven shape). A missing dependency degrades to a
-    one-time log; Twitch is unaffected. Replays after a re-attach are
-    harmless — the server's native-id guard drops them."""
-    try:
-        from chat_downloader import ChatDownloader
-    except Exception as e:
-        print(f"[BRIDGE] youtube chat disabled (chat_downloader unavailable: {e})")
+    (video id via poll_stream_posts). Polls the OFFICIAL YouTube Data API —
+    the previous chat_downloader reader was deleted, not bypassed (#310):
+    0.2.8 (its latest release, 2023) is parse-broken against current YouTube
+    page variants, reproduced in ai-collab/streaming-design-addendum-chat.md.
+    Missing creds degrade to a one-time log; Twitch is unaffected. Replays
+    after a re-attach are harmless — the server's native-id guard drops them.
+
+    Fully async on the event loop, so the #387 producer thread + bounded
+    stdlib queue are gone WITH the mechanism that needed them: there is no
+    cross-thread handoff left to stage messages. The #387 bound itself still
+    holds by construction — at most one liveChatMessages page (maxResults
+    200) is ever in memory, and every line is awaited through _bridge_post
+    before the next page is fetched, so a chat burst backpressures this
+    reader instead of growing any queue."""
+    client_id = os.getenv("YOUTUBE_BRIDGE_CLIENT_ID", "").strip()
+    client_secret = os.getenv("YOUTUBE_BRIDGE_CLIENT_SECRET", "").strip()
+    refresh_token = os.getenv("YOUTUBE_BRIDGE_REFRESH_TOKEN", "").strip()
+    if not (client_id and client_secret and refresh_token):
+        # Same graceful shape as the old chat_downloader import guard: one
+        # log line, bridge stays off, nothing else is affected.
+        print("[BRIDGE] youtube chat disabled (YOUTUBE_BRIDGE_* creds not set)")
         return
-    # Thread-safe stdlib queue, bounded AT PRODUCER-SIDE ADMISSION (review
-    # r1 F2 + r2 F1): the producer thread drops on Full with ZERO event-loop
-    # involvement. The earlier call_soon_threadsafe shape staged one loop
-    # callback per message BEFORE any bound could apply — the loop's ready
-    # queue is unbounded, so a chat_downloader backlog burst still scaled
-    # bot memory/latency with the burst. Lossy by design under pressure:
-    # viewer chat is nice-to-have, boundedness is not negotiable.
-    pending: "queue_mod.Queue" = queue_mod.Queue(maxsize=200)
-    current = None
-    thread = None
-    stop_flag = {"stop": False}
 
-    def _pump(video_id: str, flag: dict):
-        try:
-            chat = ChatDownloader().get_chat(url=f"https://www.youtube.com/watch?v={video_id}")
-            for item in chat:
-                if flag["stop"]:
-                    return
-                author = str(((item.get("author") or {}).get("name")) or "YouTube")
-                text_msg = str(item.get("message") or "")
-                native = str(item.get("message_id") or "")
-                if not text_msg:
-                    continue
-                try:
-                    pending.put_nowait((video_id, author, text_msg, native))
-                except queue_mod.Full:
-                    pass   # bounded admission: drop here, on this thread
-        except Exception as e:
-            print(f"[BRIDGE] youtube chat reader ended for {video_id}: {e}")
+    # Dedicated header-FREE session for ALL Google traffic — the OAuth
+    # token POST and every googleapis GET (R1 f1). The shared http_session
+    # defaults X-Internal-Key: API_SECRET_KEY onto every request, so
+    # routing any external host through it sends the backend's private key
+    # off-box (it was being sent to Google). NEVER use the shared session
+    # for ANY external host. Created lazily on the first Google call;
+    # best-effort closed on bridge exit (the finally at the bottom).
+    # Monotonic stamp of the last quota-costing GET (see _yt_get). A dict
+    # so the nested coroutine can mutate it without a nonlocal decl.
+    #
+    # Seeded to NOW, not to the distant past (R5 f1): the bound has to hold
+    # across RESTARTS, not just within one process. `restart: unless-stopped`
+    # plus a crash loop after the first poll would otherwise let every fresh
+    # process spend discovery + one poll immediately (~5,700 units/day),
+    # which is exactly the lifecycle starvation the pace exists to prevent.
+    # The cost is one 90s wait before the first poll of a run.
+    pace = {"last": _faq_time.monotonic()}
+    google_session = None
 
-    def _attach(video_id: str):
-        nonlocal thread, stop_flag
-        stop_flag = {"stop": False}
-        thread = threading.Thread(target=_pump, args=(video_id, stop_flag),
-                                  name="yt-chat-bridge", daemon=True)
-        thread.start()
+    def _gsession():
+        nonlocal google_session
+        if google_session is None or google_session.closed:
+            google_session = aiohttp.ClientSession()
+        return google_session
 
-    while True:
-        try:
-            live = _bridge_youtube_video
-            if live != current:
-                stop_flag["stop"] = True   # old pump exits at its next item
-                thread = None
-                current = live
-                if current:
-                    _attach(current)
-                    print(f"[BRIDGE] youtube chat attached to video {current}")
-            elif current and thread is not None and not thread.is_alive():
-                # Reader died mid-session (network blip): re-attach after a
-                # pause; the native-id guard makes any replays harmless.
-                await asyncio.sleep(10)
-                if _bridge_youtube_video == current:
-                    _attach(current)
-                    print(f"[BRIDGE] youtube chat re-attached to video {current}")
-                continue
-            # Nonblocking drain of the thread-safe queue; stale-video rows
-            # are discarded by the vid check. Idle poll at 2 Hz — the get
-            # must never block the event loop (stdlib queue, not asyncio).
+    class _AuthError(Exception):
+        """Token endpoint refused the refresh — creds wrong or revoked,
+        i.e. permanent until a human fixes .env. Backed off like quota
+        (10 min) so bad creds can never tight-loop the token endpoint."""
+
+    # Access-token cache: reused until 60s before expiry (brief). Deadline is
+    # loop-monotonic time — wall-clock steps must not invalidate/extend it.
+    tok_cache = {"value": None, "deadline": 0.0}
+
+    async def _access_token(force: bool = False) -> str:
+        now = asyncio.get_running_loop().time()
+        if not force and tok_cache["value"] and now < tok_cache["deadline"]:
+            return tok_cache["value"]
+        async with _gsession().post(
+            "https://oauth2.googleapis.com/token",
+            data={"client_id": client_id, "client_secret": client_secret,
+                  "refresh_token": refresh_token, "grant_type": "refresh_token"},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
             try:
-                vid, author, text_msg, native = pending.get_nowait()
-                if vid == current:
+                body = await resp.json()
+            except Exception:
+                body = {}
+            if resp.status != 200 or not body.get("access_token"):
+                # Error CODE only — never request params or token material
+                # in logs (#371's credential-logging rule).
+                raise _AuthError(f"HTTP {resp.status} {body.get('error', '')}")
+            tok_cache["value"] = body["access_token"]
+            tok_cache["deadline"] = now + max(0, int(body.get("expires_in", 3600)) - 60)
+            return tok_cache["value"]
+
+    async def _yt_get(url: str, params: dict):
+        """One authorized GET. 401 → refresh the token once and retry once
+        (brief); a second 401 falls through to the caller. Returns
+        (status, body, reason) — reason is the API error reason string
+        ('' when none), the quota-vs-terminal discriminator.
+
+        EVERY quota-costing request in this bridge goes through here, so
+        this is where the primary rate bound lives (R4 f2): each attempt —
+        including the forced-401 retry — waits out API_MIN_GAP since the
+        last one. See the QUOTA SAFETY note for the day arithmetic."""
+        for attempt in (0, 1):
+            gap = API_MIN_GAP - (_faq_time.monotonic() - pace["last"])
+            if gap > 0:
+                await asyncio.sleep(gap)
+            pace["last"] = _faq_time.monotonic()
+            token = await _access_token(force=(attempt == 1))
+            async with _gsession().get(
+                url, params=params,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                try:
+                    body = await resp.json()
+                except Exception:
+                    body = {}
+                if resp.status == 401 and attempt == 0:
+                    continue   # stale access token: refresh once, retry once
+                reason = ""
+                try:
+                    errs = ((body.get("error") or {}).get("errors")) or []
+                    if errs and isinstance(errs[0], dict):
+                        reason = str(errs[0].get("reason") or "")
+                except Exception:
+                    pass
+                return resp.status, body, reason
+
+    QUOTA_BACKOFF = 600   # 403 quota/forbidden: log once, 10 min (brief)
+    # Floor under pollingIntervalMillis. 5 -> 15 (R1 f3: at 5 units/poll a
+    # 5s cadence is 3,600 units/hour, a 10,000-unit day in under 3h) -> 45
+    # (R3). This is NOT the quota guarantee — R4 f2 found it bounded only
+    # SUCCESSFUL polls, leaving discovery, error retries and the 401 retry
+    # unbounded — so the real bound moved to API_MIN_GAP in _yt_get, which
+    # paces every quota-costing request. This floor now just keeps the
+    # steady-state poll cadence sane; the pace dominates it.
+    # LATENCY, stated honestly (R6 f1 — this used to claim ~45s, which the
+    # 90s pace dominates): a viewer's message reaches the overlay and
+    # in-game chat up to ~90s late in steady state, and a FRESH attachment
+    # needs two paced GETs (videos.list then the first liveChatMessages
+    # page) so the first relayed message can be ~180s after the stream goes
+    # live. Delays in that range are NORMAL, not a fault. The separate
+    # Google project / streamList follow-ups in the QUOTA SAFETY note are
+    # what buy this back.
+    POLL_FLOOR = 45.0
+    NOT_LIVE_RETRY = 10   # activeLiveChatId absent: the cadence the old
+                          # thread re-attach used
+    current = None        # video id this reader is attached to
+    chat_id = None        # activeLiveChatId once the video reports live chat
+    page_token = None
+    dead_video = None     # video whose chat ENDED — never re-polled; the
+                          # existing attach logic (a video-id change from
+                          # poll_stream_posts) owns the next reader
+
+    # QUOTA SAFETY — two independent bounds (R3 scope cut, corrected at R4).
+    #
+    # This reader shares one Google project with the broadcast VM's
+    # LIFECYCLE calls (create/bind/transition). Viewer chat must never
+    # starve them, and three review rounds proved a durable ledger cannot
+    # be the guarantee (absent mount, corrupt file, concurrent writers all
+    # produced HIGH findings).
+    #
+    # PRIMARY bound — API_MIN_GAP, enforced in _yt_get, the single funnel
+    # every quota-costing GET passes through (discovery, polls, error
+    # retries and the forced-401 retry alike; R4 f2 found a 45s
+    # *successful-poll* floor left all the other paths unbounded, and
+    # nothing enforces a short streaming day on a 24/7 rig). At one
+    # request per 90s a full 24h day is at most 960 requests; at the
+    # worst-case 5 units each that is 4,800 units — so even a totally
+    # broken ledger, a 24-hour stream, and every retry path firing cannot
+    # push the bridge past roughly half the 10,000-unit project. Lifecycle
+    # (~150), titles (~51/switch) and the session thumbnail (50) always
+    # have room. This bound is arithmetic, not state: nothing can corrupt
+    # it, and it survives every restart.
+    #
+    # SECONDARY bound — the PT-day ledger below (5,000 estimated units at
+    # 5/poll + 1/discovery). Best-effort: nice when it survives a restart,
+    # harmless when it does not, deliberately NOT hardened against
+    # concurrent writers (single named container; a deploy overlap lasts
+    # seconds — accepted residual, R3 f3).
+    #
+    # COST: a viewer's message can reach the overlay and in-game chat up
+    # to ~90s late. Sid follow-ups that buy the latency back: a SEPARATE
+    # Google Cloud project for the bridge creds (removes the shared-quota
+    # interference entirely, floor drops to 5-15s), or
+    # liveChatMessages.streamList (push instead of poll).
+    CHAT_QUOTA_PT_DAY = 5000
+    API_MIN_GAP = 90.0
+    def _quota_day_valid(value) -> bool:
+        """A restored ledger date must be a CANONICAL ISO day (R4 f5):
+        "garbage" would otherwise restore cleanly and then silently look
+        like a day rollover on the first charge, resetting to zero without
+        the promised malformed warning. Named (not inlined) so the quota
+        test can exercise THIS predicate rather than reimplement it
+        (R5 f2 — a test that duplicates the rule cannot catch its
+        removal)."""
+        if not isinstance(value, str):
+            return False
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date().isoformat() == value
+        except Exception:
+            return False
+
+    QUOTA_LEDGER_DIR = "/opt/bot-state"
+    QUOTA_LEDGER_PATH = QUOTA_LEDGER_DIR + "/yt-chat-quota.json"
+    qledger = {"day": None, "units": 0, "logged": False}
+    # The directory must ALREADY exist (compose mounts it). Creating it
+    # ourselves would write to the container layer, which a rebuild
+    # deletes — an invisible ephemeral ledger reading as durable (R3 f1).
+    # ismount, not isdir (R4 f4): a plain container-layer directory passes
+    # isdir and would take an EPHEMERAL ledger while reporting as durable.
+    # A bind mount is a mount point inside the container, so this proves
+    # external storage.
+    if not os.path.ismount(QUOTA_LEDGER_DIR):
+        qledger["persist_dead"] = True
+        print(f"[BRIDGE] youtube chat quota ledger not mounted at {QUOTA_LEDGER_DIR} — memory-only this run (secondary cap; the {API_MIN_GAP:.0f}s request pace is the real bound)")
+    else:
+        try:
+            with open(QUOTA_LEDGER_PATH, "r", encoding="utf-8") as _qf:
+                _qsaved = json.load(_qf)
+            # Strict validation (R3 f2): anything unexpected starts the day
+            # at zero LOUDLY rather than silently — with the floor carrying
+            # the real guarantee, a fresh start is safe, not a fail-open.
+            _qday = _qsaved.get("day") if isinstance(_qsaved, dict) else None
+            _qunits = _qsaved.get("units") if isinstance(_qsaved, dict) else None
+            if (_quota_day_valid(_qday)
+                    and isinstance(_qunits, int) and not isinstance(_qunits, bool)
+                    and 0 <= _qunits <= 10_000_000):
+                qledger["day"] = _qday
+                qledger["units"] = _qunits
+                print(f"[BRIDGE] youtube chat quota ledger restored: {_qunits} units on {_qday}")
+            else:
+                print("[BRIDGE] youtube chat quota ledger malformed — starting the day at zero")
+        except FileNotFoundError:
+            pass
+        except Exception as _qerr:
+            print(f"[BRIDGE] youtube chat quota ledger unreadable ({_qerr}); starting the day at zero")
+
+    def _quota_persist():
+        """Write-before-call so a crash between charge and call over-counts
+        (conservative) rather than under-counts. Best-effort by design —
+        see the SCOPE CUT note above; a dead persist never blocks polling."""
+        if qledger.get("persist_dead"):
+            return
+        try:
+            tmp = f"{QUOTA_LEDGER_PATH}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"day": str(qledger["day"]), "units": qledger["units"]}, f)
+            os.replace(tmp, QUOTA_LEDGER_PATH)
+        except Exception as err:
+            qledger["persist_dead"] = True
+            print(f"[BRIDGE] youtube chat quota ledger not persistable ({err}) — memory-only this run")
+
+    def _pt_day():
+        """Calendar date in US Pacific — the quota-reset boundary. Same
+        shape as the broadcast bot's _next_midnight_pt_epoch (titles.py),
+        implemented locally (this is the server bot): zoneinfo when the
+        tz database exists, fixed UTC-8 (PST) otherwise — during PDT the
+        fallback rolls the ledger an hour AFTER the real reset, the
+        conservative (under-spend) direction."""
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("America/Los_Angeles")
+        except Exception:
+            tz = timezone(timedelta(hours=-8))
+        return datetime.now(tz).date()
+
+    def _quota_spend(units):
+        """Charge the PT-day ledger. False = today's chat budget is
+        spent — the caller skips the API call and sleeps; the day-roll
+        check here re-arms polling after midnight PT. The charge is
+        persisted BEFORE the caller's API call (R2 f1)."""
+        day = str(_pt_day())
+        if day != qledger["day"]:
+            qledger["day"] = day
+            qledger["units"] = 0
+            qledger["logged"] = False
+        if qledger["units"] >= CHAT_QUOTA_PT_DAY:
+            if not qledger["logged"]:
+                qledger["logged"] = True
+                print(f"[BRIDGE] youtube chat quota estimate reached {CHAT_QUOTA_PT_DAY} units — chat polling stopped until midnight PT")
+            return False
+        qledger["units"] += units
+        _quota_persist()
+        return True
+
+    try:
+        while True:
+            try:
+                if http_session is None:
+                    await asyncio.sleep(1)
+                    continue
+                live = _bridge_youtube_video
+                if live != current:
+                    current = live
+                    chat_id = None
+                    page_token = None
+                    dead_video = None
+                    if current:
+                        print(f"[BRIDGE] youtube chat attached to video {current}")
+                if not current or current == dead_video:
+                    await asyncio.sleep(5)   # idle: no API traffic, watch for change
+                    continue
+                if chat_id is None:
+                    if not _quota_spend(1):   # videos.list = 1 unit (R1 f3)
+                        await asyncio.sleep(60)
+                        continue
+                    status, body, reason = await _yt_get(
+                        "https://www.googleapis.com/youtube/v3/videos",
+                        {"part": "liveStreamingDetails", "id": current},
+                    )
+                    if status == 403:
+                        # quotaExceeded / rateLimitExceeded / forbidden — one log
+                        # line per backoff episode by construction (no requests
+                        # are issued during the sleep), never a tight loop.
+                        print(f"[BRIDGE] youtube chat 403 {reason or 'forbidden'} — backing off {QUOTA_BACKOFF}s")
+                        await asyncio.sleep(QUOTA_BACKOFF)
+                        continue
+                    if status != 200:
+                        print(f"[BRIDGE] youtube videos.list HTTP {status} {reason} — retrying")
+                        await asyncio.sleep(30)
+                        continue
+                    items = body.get("items") or []
+                    if not items:
+                        # Unknown/deleted video id (videos.list returns 200 with
+                        # empty items): reader ends normally.
+                        print(f"[BRIDGE] youtube chat video {current} not found — reader ended")
+                        dead_video = current
+                        continue
+                    details = items[0].get("liveStreamingDetails") or {}
+                    chat_id = details.get("activeLiveChatId")
+                    if not chat_id:
+                        if details.get("actualEndTime"):
+                            # Stream over: end normally; re-attach owns the next
+                            # video id.
+                            print(f"[BRIDGE] youtube chat ended for video {current} (stream ended)")
+                            dead_video = current
+                        else:
+                            await asyncio.sleep(NOT_LIVE_RETRY)   # not live yet
+                        continue
+                    page_token = None
+                    print(f"[BRIDGE] youtube live chat open for video {current}")
+                if not _quota_spend(5):   # liveChatMessages.list = 5 units (R1 f3)
+                    await asyncio.sleep(60)
+                    continue
+                params = {"liveChatId": chat_id, "part": "snippet,authorDetails",
+                          "maxResults": "200"}
+                if page_token:
+                    params["pageToken"] = page_token
+                status, body, reason = await _yt_get(
+                    "https://www.googleapis.com/youtube/v3/liveChat/messages", params)
+                if status == 404 or (status == 403 and reason == "liveChatEnded"):
+                    # liveChatEnded / liveChatNotFound: chat is over for THIS
+                    # video — end normally, re-attach owns the next one.
+                    print(f"[BRIDGE] youtube chat ended for video {current} ({status} {reason})")
+                    dead_video = current
+                    chat_id = None
+                    continue
+                if status == 403:
+                    # quotaExceeded / forbidden / anything else 403-shaped that
+                    # is NOT the documented terminal reason: back off rather than
+                    # kill a possibly-live reader (log-once-per-episode as above).
+                    print(f"[BRIDGE] youtube chat 403 {reason or 'forbidden'} — backing off {QUOTA_BACKOFF}s")
+                    await asyncio.sleep(QUOTA_BACKOFF)
+                    continue
+                if status != 200:
+                    print(f"[BRIDGE] youtube liveChatMessages HTTP {status} {reason} — retrying")
+                    await asyncio.sleep(30)
+                    continue
+                for item in (body.get("items") or []):
+                    if _bridge_youtube_video != current:
+                        break   # attachment moved mid-page: stop relaying stale rows
+                    snip = item.get("snippet") or {}
+                    native = str(item.get("id") or "")
+                    author = str(((item.get("authorDetails") or {}).get("displayName")) or "YouTube")
+                    text_msg = str(snip.get("displayMessage") or "")
+                    if not text_msg or not native:
+                        continue   # native id is the replay-guard key; no id, no relay
                     await _bridge_post("youtube", author, text_msg, native)
-            except queue_mod.Empty:
-                await asyncio.sleep(0.5)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            print(f"[BRIDGE] youtube bridge loop error: {e}")
-            await asyncio.sleep(5)
+                page_token = body.get("nextPageToken") or page_token
+                if body.get("offlineAt"):
+                    # Documented end-of-stream marker on the list response.
+                    print(f"[BRIDGE] youtube chat ended for video {current} (offlineAt)")
+                    dead_video = current
+                    chat_id = None
+                    continue
+                interval = max(POLL_FLOOR, int(body.get("pollingIntervalMillis") or 5000) / 1000.0)
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except _AuthError as e:
+                print(f"[BRIDGE] youtube chat token refresh failed ({e}) — backing off {QUOTA_BACKOFF}s")
+                await asyncio.sleep(QUOTA_BACKOFF)
+            except Exception as e:
+                print(f"[BRIDGE] youtube bridge loop error: {e}")
+                await asyncio.sleep(30)
+    finally:
+        # Bridge exit — the loop above only ends via cancellation or
+        # teardown. Best-effort close of the dedicated Google session
+        # (R1 f1); a cancellation re-delivered mid-close just abandons
+        # it to process teardown, same as the shared session.
+        if google_session is not None and not google_session.closed:
+            try:
+                await google_session.close()
+            except Exception:
+                pass
 
 
 @bot.event

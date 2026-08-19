@@ -111,6 +111,21 @@ services:
       # find 22: the bot reads this but compose never passed it through —
       # an .env override silently did nothing). Unset = compiled defaults.
       CHAT_CHANNELS: ${CHAT_CHANNELS:-}
+      # YouTube live-chat bridge (Aug 19, official liveChatMessages API —
+      # chat_downloader 0.2.8 is parse-broken against current YouTube, see
+      # the Dockerfile.bot tombstone). Values = the broadcast channel's OAuth
+      # app + refresh token (same trio as the VM's youtube_title.json). Empty
+      # defaults so the container starts pre-population; unset = the bridge
+      # logs once and stays off (Twitch unaffected).
+      YOUTUBE_BRIDGE_CLIENT_ID: ${YOUTUBE_BRIDGE_CLIENT_ID:-}
+      YOUTUBE_BRIDGE_CLIENT_SECRET: ${YOUTUBE_BRIDGE_CLIENT_SECRET:-}
+      YOUTUBE_BRIDGE_REFRESH_TOKEN: ${YOUTUBE_BRIDGE_REFRESH_TOKEN:-}
+    volumes:
+      # R2 f1: the YouTube chat quota ledger must survive container
+      # rebuilds — Google's PT-day quota doesn't reset on redeploy, so an
+      # in-memory ledger zeroed by a same-day `up -d --build` could
+      # double-spend the day and starve the broadcast lifecycle calls.
+      - ./bot-state:/opt/bot-state
 
 volumes:
   pgdata:

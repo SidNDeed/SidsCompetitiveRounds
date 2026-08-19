@@ -5353,8 +5353,12 @@ namespace CompetitiveRounds
         /// Fetch stats for any player by Steam ID, with a callback.
         /// Used when clicking a player in the leaderboard.
         /// Does NOT overwrite CachedPlayerStats (that's the local player's).
+        /// viewerSteamId (broadcast W7): overrides the viewer used for the
+        /// server-side H2H — the spectator seat needs fighter-vs-fighter
+        /// counts, not fighter-vs-broadcast-account. Null = local viewer
+        /// (every pre-existing caller).
         /// </summary>
-        public static void FetchPlayerStatsForView(string steamId, Action<PlayerStatsData> callback)
+        public static void FetchPlayerStatsForView(string steamId, Action<PlayerStatsData> callback, string viewerSteamId = null)
         {
             if (string.IsNullOrEmpty(steamId))
             {
@@ -5362,10 +5366,11 @@ namespace CompetitiveRounds
                 return;
             }
 
-            // Pass the local Steam ID as the viewer so the server can
-            // compute head-to-head counts against us. Falls back to no
-            // viewer (no H2H) when the local ID isn't resolved yet.
-            string viewer = MatchTracker.LocalSteamId;
+            // Pass the viewer so the server can compute head-to-head counts
+            // (h2h_* wins = the VIEWER's wins over the subject — verified
+            // against main.py's :vid FILTER). Falls back to no viewer
+            // (no H2H) when the ID isn't resolved yet.
+            string viewer = !string.IsNullOrEmpty(viewerSteamId) ? viewerSteamId : MatchTracker.LocalSteamId;
             string viewerQ = (!string.IsNullOrEmpty(viewer) && viewer != "unknown" && viewer != steamId)
                 ? $"?viewer_steam_id={Escape(viewer)}"
                 : "";
@@ -5393,6 +5398,81 @@ namespace CompetitiveRounds
                     }
                 }
             ));
+        }
+
+        // ── Head-to-head pair cache (broadcast W7 / spectator HUD) ─────────
+        // Keyed by "min|max" of the two steam ids (ordinal), so either
+        // argument order hits the same entry. The stored PlayerStatsData is
+        // oriented h2h_* wins = the VIEWER param's wins over the subject
+        // (main.py :vid FILTER); subjectId/viewerId ride in the tuple so a
+        // renderer can re-orient to its own on-screen fighter order without
+        // trusting data.steam_id round-trips.
+        private const float H2H_CACHE_TTL = 300f;
+        private const float H2H_REFETCH_FLOOR = 30f;
+        private static readonly Dictionary<string, (float at, string subjectId, string viewerId, PlayerStatsData data)> _h2hCache
+            = new Dictionary<string, (float, string, string, PlayerStatsData)>();
+        // Last fetch ATTEMPT per pair (success or not) — the poll-side floor.
+        // Separate from the cache so a failing pair can't hammer (#98 family:
+        // the budget must not tick per render, only per attempt window).
+        private static readonly Dictionary<string, float> _h2hAttemptAt = new Dictionary<string, float>();
+        private static readonly HashSet<string> _h2hInFlight = new HashSet<string>();
+
+        private static string H2HKeyFor(string a, string b)
+            => string.CompareOrdinal(a, b) <= 0 ? a + "|" + b : b + "|" + a;
+
+        /// <summary>Thin wrapper over FetchPlayerStatsForView(subject, cb,
+        /// viewer) that fills the pair cache. cb receives null on any
+        /// failure. Guards mirror the underlying fetch: both ids resolved,
+        /// distinct.</summary>
+        public static void FetchHeadToHead(string subjectSteamId, string viewerSteamId, Action<PlayerStatsData> cb)
+        {
+            if (string.IsNullOrEmpty(subjectSteamId) || subjectSteamId == "unknown"
+                || string.IsNullOrEmpty(viewerSteamId) || viewerSteamId == "unknown"
+                || subjectSteamId == viewerSteamId || Plugin.Instance == null)
+            { cb?.Invoke(null); return; }
+            string key = H2HKeyFor(subjectSteamId, viewerSteamId);
+            _h2hAttemptAt[key] = Time.realtimeSinceStartup;
+            if (!_h2hInFlight.Add(key)) { cb?.Invoke(null); return; }
+            try
+            {
+                FetchPlayerStatsForView(subjectSteamId, data =>
+                {
+                    _h2hInFlight.Remove(key);
+                    // Failures are NOT cached — the attempt stamp alone floors the
+                    // retry, and a stale-but-good entry keeps rendering meanwhile.
+                    if (data != null)
+                        _h2hCache[key] = (Time.realtimeSinceStartup, subjectSteamId, viewerSteamId, data);
+                    try { cb?.Invoke(data); } catch { }
+                }, viewerSteamId);
+            }
+            catch
+            {
+                // A synchronous throw (coroutine host died between the guard
+                // and the call) must not strand the in-flight latch — the
+                // 30s floor still bounds the retry (#367: latch needs an owner).
+                _h2hInFlight.Remove(key);
+                try { cb?.Invoke(null); } catch { }
+            }
+        }
+
+        /// <summary>Poll-cheap cache read for the spectator HUD: returns the
+        /// pair's stats (oriented wins = the entry's VIEWER id — compare
+        /// against data.steam_id / the stored ids to re-orient) or null when
+        /// absent/stale. A null return self-arms: at most one background
+        /// fetch per pair per 30s, single in-flight guard, so the HUD can
+        /// call this every frame and converge without its own fetch logic.</summary>
+        public static PlayerStatsData TryGetCachedHeadToHead(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || a == "unknown"
+                || string.IsNullOrEmpty(b) || b == "unknown" || a == b) return null;
+            string key = H2HKeyFor(a, b);
+            float now = Time.realtimeSinceStartup;
+            if (_h2hCache.TryGetValue(key, out var e) && now - e.at < H2H_CACHE_TTL)
+                return e.data;
+            if (!_h2hInFlight.Contains(key)
+                && (!_h2hAttemptAt.TryGetValue(key, out float at) || now - at >= H2H_REFETCH_FLOOR))
+                FetchHeadToHead(a, b, null);
+            return null;
         }
 
         private static void ParseTopCards(PlayerStatsData data, string response)
@@ -6739,53 +6819,10 @@ namespace CompetitiveRounds
                     {
                         try
                         {
-                            if (string.IsNullOrEmpty(response) || response.Trim() == "[]")
-                            {
-                                CachedCardStats = new List<CardStatData>();
-                                Plugin.Log.LogInfo("Card stats: no data yet");
-                                return;
-                            }
-
-                            // Manual parse — split by card_name entries
-                            var entries = new List<CardStatData>();
-                            var parts = response.Split(new[] { "\"card_name\"" }, StringSplitOptions.None);
-
-                            for (int i = 1; i < parts.Length; i++)
-                            {
-                                var chunk = parts[i];
-                                var entry = new CardStatData();
-                                entry.card_name = ExtractJsonString(chunk, "");
-                                entry.card_rarity = ExtractJsonString(chunk, "card_rarity");
-                                entry.times_picked = ExtractJsonInt(chunk, "times_picked");
-                                entry.wins_with_card = ExtractJsonInt(chunk, "wins_with_card");
-                                entry.times_offered = ExtractJsonInt(chunk, "times_offered");
-                                entry.pass_rate = ExtractJsonFloat(chunk, "pass_rate");
-
-                                // Parse win_rate as float
-                                try
-                                {
-                                    string wrStr = chunk;
-                                    int wrIdx = wrStr.IndexOf("\"win_rate\":");
-                                    if (wrIdx >= 0)
-                                    {
-                                        wrIdx += "\"win_rate\":".Length;
-                                        while (wrIdx < wrStr.Length && wrStr[wrIdx] == ' ') wrIdx++;
-                                        int wrEnd = wrIdx;
-                                        while (wrEnd < wrStr.Length && (char.IsDigit(wrStr[wrEnd]) || wrStr[wrEnd] == '.' || wrStr[wrEnd] == '-'))
-                                            wrEnd++;
-                                        if (wrEnd > wrIdx)
-                                            entry.win_rate = float.Parse(wrStr.Substring(wrIdx, wrEnd - wrIdx),
-                                                System.Globalization.CultureInfo.InvariantCulture);
-                                    }
-                                }
-                                catch { entry.win_rate = 0f; }
-
-                                if (!string.IsNullOrEmpty(entry.card_name))
-                                    entries.Add(entry);
-                            }
-
-                            CachedCardStats = entries;
-                            Plugin.Log.LogInfo($"Card stats loaded: {CachedCardStats.Count} cards");
+                            CachedCardStats = ParseCardStatsJson(response);
+                            Plugin.Log.LogInfo(CachedCardStats.Count == 0
+                                ? "Card stats: no data yet"
+                                : $"Card stats loaded: {CachedCardStats.Count} cards");
                         }
                         catch (Exception ex)
                         {
@@ -6797,6 +6834,79 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogError($"Failed to fetch card stats: {response}");
                     }
+                }
+            ));
+        }
+
+        /// <summary>Parse a /cards JSON array. Extracted from FetchCardStats
+        /// (broadcast W7) so the view fetch below shares the ONE parser
+        /// (#279) — a field added here reaches both paths.</summary>
+        private static List<CardStatData> ParseCardStatsJson(string response)
+        {
+            var entries = new List<CardStatData>();
+            if (string.IsNullOrEmpty(response) || response.Trim() == "[]") return entries;
+
+            // Manual parse — split by card_name entries
+            var parts = response.Split(new[] { "\"card_name\"" }, StringSplitOptions.None);
+            for (int i = 1; i < parts.Length; i++)
+            {
+                var chunk = parts[i];
+                var entry = new CardStatData();
+                entry.card_name = ExtractJsonString(chunk, "");
+                entry.card_rarity = ExtractJsonString(chunk, "card_rarity");
+                entry.times_picked = ExtractJsonInt(chunk, "times_picked");
+                entry.wins_with_card = ExtractJsonInt(chunk, "wins_with_card");
+                entry.times_offered = ExtractJsonInt(chunk, "times_offered");
+                entry.pass_rate = ExtractJsonFloat(chunk, "pass_rate");
+
+                // Parse win_rate as float
+                try
+                {
+                    string wrStr = chunk;
+                    int wrIdx = wrStr.IndexOf("\"win_rate\":");
+                    if (wrIdx >= 0)
+                    {
+                        wrIdx += "\"win_rate\":".Length;
+                        while (wrIdx < wrStr.Length && wrStr[wrIdx] == ' ') wrIdx++;
+                        int wrEnd = wrIdx;
+                        while (wrEnd < wrStr.Length && (char.IsDigit(wrStr[wrEnd]) || wrStr[wrEnd] == '.' || wrStr[wrEnd] == '-'))
+                            wrEnd++;
+                        if (wrEnd > wrIdx)
+                            entry.win_rate = float.Parse(wrStr.Substring(wrIdx, wrEnd - wrIdx),
+                                System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                }
+                catch { entry.win_rate = 0f; }
+
+                if (!string.IsNullOrEmpty(entry.card_name))
+                    entries.Add(entry);
+            }
+            return entries;
+        }
+
+        /// <summary>Broadcast W7: a fighter's top ranked cards for the report
+        /// engine. Does NOT touch CachedCardStats (that's the Card Stats
+        /// tab's, with its own limit/sort/filter). Callback gets null on
+        /// transport/parse failure, a list (possibly empty) on a server
+        /// answer — the report omits the panel on null, renders "no data"
+        /// on empty.</summary>
+        public static void FetchCardStatsForView(string steamId, Action<List<CardStatData>> cb)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown" || Plugin.Instance == null)
+            { cb?.Invoke(null); return; }
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/cards?steam_id={UnityWebRequest.EscapeURL(steamId)}&is_ranked=true&sort_by=times_picked&order=desc&limit=8&min_picks=3",
+                (success, response) =>
+                {
+                    if (!success) { try { cb?.Invoke(null); } catch { } return; }
+                    List<CardStatData> list;
+                    try { list = ParseCardStatsJson(response); }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[BROADCAST] card stats parse: {ex.Message}");
+                        list = null;
+                    }
+                    try { cb?.Invoke(list); } catch { }
                 }
             ));
         }
@@ -7059,10 +7169,12 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Aug 12 item 1 — the two end-of-game build strings off a
-        /// /matches row. Its own helper, called from BOTH history parsers, for
-        /// the reason spelled out on ParseDamageTelemetry: they read the SAME
-        /// endpoint, and a field wired into only one of them silently reports
-        /// nothing on the other path (#279).
+        /// /matches row. Its own helper for the reason spelled out on
+        /// ParseDamageTelemetry: when a second /matches parser existed, a field
+        /// wired into only one of them silently reported nothing on the other
+        /// path (#279). The lean sibling is retired (broadcast W7) — every
+        /// /matches parse now flows through ParseMatchHistoryChunkEntry; keep
+        /// any future parser calling these helpers.
         ///
         /// ExtractJsonString is the right reader even though the column is
         /// nullable: it searches for `"key":"`, which a JSON null cannot match,
@@ -7077,9 +7189,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Aug 6 item 4 — damage + death telemetry off a /matches row.
-        /// Shared by BOTH history parsers on purpose: they read the SAME endpoint
-        /// and a field added to only one of them silently reports 0 on the other
-        /// path (#279 — fix the sibling in the same pass). ExtractNullableInt
+        /// A shared helper on purpose: when two /matches parsers existed, a field
+        /// added to only one of them silently reported 0 on the other path
+        /// (#279 — fix the sibling in the same pass). The lean parser is retired
+        /// (broadcast W7); ParseMatchHistoryChunkEntry is the single caller —
+        /// any future parser must call this too. ExtractNullableInt
         /// rather than ExtractJsonInt because the server sends JSON null for
         /// every row predating the telemetry clients, and "no data" must render
         /// as a dash, never as "0.0 dps" (#257).</summary>
@@ -7097,70 +7211,113 @@ namespace CompetitiveRounds
             entry.opp_deaths_own_bullet = ExtractNullableInt(chunk, "opp_deaths_own_bullet");
         }
 
-        /// <summary>Parse a /matches JSON array into a MatchHistoryEntry list. Manual parse
-        /// (JsonUtility can't handle the nested cards_picked arrays). Shared helper for the
-        /// leaderboard view fetch below.</summary>
-        private static List<MatchHistoryEntry> ParseMatchHistoryJson(string response)
-        {
-            var entries = new List<MatchHistoryEntry>();
-            if (string.IsNullOrEmpty(response) || response.Trim() == "[]") return entries;
-            var parts = response.Split(new[] { "\"match_id\"" }, StringSplitOptions.None);
-            for (int i = 1; i < parts.Length; i++)
-            {
-                var entry = new MatchHistoryEntry();
-                var chunk = parts[i];
-                entry.match_id = ExtractJsonString(chunk, "");
-                entry.opponent_name = ExtractJsonString(chunk, "opponent_name");
-                entry.opponent_steam_id = ExtractJsonString(chunk, "opponent_steam_id");
-                entry.opponent_title = ExtractJsonString(chunk, "opponent_title");
-                entry.opponent_title_color = ExtractJsonString(chunk, "opponent_title_color");
-                entry.player_rounds_won = ExtractJsonInt(chunk, "player_rounds_won");
-                entry.opponent_rounds_won = ExtractJsonInt(chunk, "opponent_rounds_won");
-                entry.player_points = ExtractJsonInt(chunk, "player_points");
-                entry.opponent_points = ExtractJsonInt(chunk, "opponent_points");
-                entry.won = chunk.Contains("\"won\":true") || chunk.Contains("\"won\": true");
-                entry.is_ranked = chunk.Contains("\"is_ranked\":true") || chunk.Contains("\"is_ranked\": true");
-                entry.ended_at = ExtractJsonString(chunk, "ended_at");
-                entry.cards_display = ExtractCardNames(chunk);
-                entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
-                entry.series_id = ExtractJsonString(chunk, "series_id");
-                entry.series_score = ExtractJsonString(chunk, "series_score");
-                entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
-                entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
-                entry.gold_gained = ExtractJsonInt(chunk, "gold_gained");
-                entry.series_gold_gained = ExtractJsonInt(chunk, "series_gold_gained");
-                entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
-                entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
-                entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
-                // This parser is deliberately lean (the leaderboard detail view
-                // renders no hover telemetry), but the damage fields MUST be read
-                // here too: they default to 0 in C#, and 0 is a legitimate "dealt
-                // no damage" value, so skipping them would print a confident
-                // "0.0 dps" on every row instead of a dash (#257).
-                ParseDamageTelemetry(entry, chunk);
-                // Same sibling rule (#279): the detail view renders builds too.
-                ParseBuildStats(entry, chunk);
-                entries.Add(entry);
-            }
-            return entries;
-        }
-
         /// <summary>Fetch ANY player's match history for the leaderboard detail view. Does NOT
         /// clobber CachedMatchHistory (that's the local player's). Used to render a clicked
-        /// player's ranked history + head-to-head last series. Callback gets the parsed list.</summary>
+        /// player's ranked history + head-to-head last series. Callback gets the parsed list.
+        /// Broadcast W7: parses through the FULL ParseMatchHistoryChunkEntry (the lean
+        /// ParseMatchHistoryJson sibling is retired — one parser, #279), chunked across
+        /// frames like the local-history path, so entries carry every timeline + combat
+        /// scalar the report engine's graph panels need.</summary>
         public static void FetchMatchHistoryForView(string steamId, Action<List<MatchHistoryEntry>> callback, int limit = 400)
         {
-            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(new List<MatchHistoryEntry>()); return; }
+            // Legacy single-callback overload — delegates to the ok-carrying
+            // variant with ok ignored (R1 f10 contract; NativeUI callers keep
+            // their existing shape and semantics).
+            FetchMatchHistoryForView(steamId, (list, ok) => { try { callback?.Invoke(list); } catch { } }, limit);
+        }
+
+        /// <summary>R1 f10: ok-carrying variant for the post-session report.
+        /// transportOk=false means HTTP or parse failure — the consumer renders
+        /// "(partial)" instead of claiming "0 games". (empty list, true) means a
+        /// 200 with a genuinely empty history. The invalid-steamId guard reports
+        /// false too: no successful read happened, so "confirmed empty" would be
+        /// a lie. Result list is REPORT-PRIVATE (R1 f9) — never written to
+        /// CachedMatchHistory or any other shared cache.</summary>
+        public static void FetchMatchHistoryForView(string steamId, Action<List<MatchHistoryEntry>, bool> callback, int limit = 400)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(new List<MatchHistoryEntry>(), false); return; }
+            // Server bound is Query(100, ge=1, le=2000) — out-of-range 422s
+            // rather than clamping, so clamp here.
+            if (limit < 1) limit = 1; else if (limit > 2000) limit = 2000;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/players/{steamId}/matches?limit={limit}",
                 (success, response) =>
                 {
-                    List<MatchHistoryEntry> list;
-                    try { list = success ? ParseMatchHistoryJson(response) : new List<MatchHistoryEntry>(); }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[LBVIEW] match parse failed: {ex.Message}"); list = new List<MatchHistoryEntry>(); }
-                    try { callback?.Invoke(list); } catch { }
+                    if (!success) { try { callback?.Invoke(new List<MatchHistoryEntry>(), false); } catch { } return; }
+                    Plugin.Instance.StartCoroutine(ParseMatchHistoryForViewChunked(response, callback));
                 }
             ));
+        }
+
+        /// <summary>View-path twin of ParseMatchHistoryChunked: same PER_FRAME
+        /// budget, same entry parser, but hands the list to a callback instead
+        /// of writing CachedMatchHistory (that's the local player's).
+        /// Result ordering = server ordering (newest first), preserved.
+        /// R1 f11: entry boundaries come from the string-aware top-level slicer,
+        /// NEVER a token split on "match_id" — a display name ending in
+        /// `"match_id` forges that needle across the escaped quote and the
+        /// string terminator (#156), splitting one real game into two broken
+        /// fragments. The LOCAL-player chunked parser still token-splits
+        /// (pre-existing; follow-up noted in the deltas file).</summary>
+        private static System.Collections.IEnumerator ParseMatchHistoryForViewChunked(string response, Action<List<MatchHistoryEntry>, bool> callback)
+        {
+            var entries = new List<MatchHistoryEntry>();
+            // R2 f3: a SUCCESSFUL response with a null/blank/whitespace body is
+            // a truncated/empty read, NOT a confirmed-empty history — report
+            // ok=false so the consumer renders "(partial)" instead of a clean
+            // "0 games". (empty, true) is reserved for a successfully parsed
+            // empty array below.
+            if (string.IsNullOrWhiteSpace(response))
+            {
+                Plugin.Log.LogWarning("[LBVIEW] match parse failed: blank body on a successful response");
+                try { callback?.Invoke(entries, false); } catch { }
+                yield break;
+            }
+            if (response.Trim() == "[]")
+            {
+                try { callback?.Invoke(entries, true); } catch { }
+                yield break;
+            }
+            List<string> chunks = null;
+            try
+            {
+                int open = response.IndexOf('[');
+                int close = open >= 0 ? FindMatchingBracketStringAware(response, open) : -1;
+                if (open >= 0 && close > open)
+                    chunks = SliceTopLevelObjects(response.Substring(open + 1, close - open - 1));
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[LBVIEW] match parse failed: {ex.Message}");
+            }
+            if (chunks == null)
+            {
+                // Missing/unbalanced top-level array on a non-empty 200 is a
+                // PARSE failure, not an empty history — report false (f10).
+                Plugin.Log.LogWarning("[LBVIEW] match parse failed: top-level array not found");
+                try { callback?.Invoke(entries, false); } catch { }
+                yield break;
+            }
+            const int PER_FRAME = 80;
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                try
+                {
+                    var entry = ParseMatchHistoryChunkEntry(chunks[i]);
+                    // The shared entry parser reads match_id POSITIONALLY (empty-key
+                    // ExtractJsonString) because the local path feeds it fragments
+                    // that start right after the "match_id" token. These chunks are
+                    // whole objects, so re-read match_id by KEY — the `"match_id":"`
+                    // needle cannot be forged inside a JSON string literal (the
+                    // interior quote would have to be escaped). Every other field in
+                    // the shared parser is already key-based and order-independent.
+                    entry.match_id = ExtractJsonString(chunks[i], "match_id");
+                    entries.Add(entry);
+                }
+                catch { }
+                if ((i + 1) % PER_FRAME == 0) yield return null;
+            }
+            try { callback?.Invoke(entries, true); } catch { }
         }
 
         private static string ExtractJsonString(string json, string key)
@@ -10617,21 +10774,35 @@ namespace CompetitiveRounds
 
         private static void ParseAllSeriesPaged(string response, int reqPage, int reqPageSize)
         {
+            var list = ParseTeamSeriesPagedList(response, out bool shapeOk);
+            if (!shapeOk) { CachedTeamSeriesPaged = list; return; }
+            CachedTeamSeriesPaged = list;
+            CachedTeamSeriesTotal = ExtractJsonInt(response, "total");
+            CachedTeamSeriesPage = reqPage;
+            CachedTeamSeriesPageSize = reqPageSize;
+            CachedTeamSeriesTotalPages = ExtractJsonInt(response, "total_pages");
+        }
+
+        /// <summary>Shared rich-series list parser for /team/all-series-paged
+        /// responses — used by the F5 cache path above AND the report-private
+        /// fetch (R1 f12 reconciliation). shapeOk=false means the "series"
+        /// array was absent/unbalanced (a shape failure, not "empty").</summary>
+        private static List<TeamSeriesPagedEntry> ParseTeamSeriesPagedList(string response, out bool shapeOk)
+        {
+            // R1 f13 (#156): every enclosing array/object here wraps regions
+            // carrying user-authored display names and card strings — a name
+            // like "A]" or "}x" derails a plain depth counter, truncating the
+            // series list or yielding hybrid entries. String-aware slicing
+            // throughout; fields extracted are unchanged.
             var list = new List<TeamSeriesPagedEntry>();
-            int sStart = response.IndexOf("\"series\"");
-            if (sStart < 0) { CachedTeamSeriesPaged = list; return; }
-            int arrStart = response.IndexOf('[', sStart);
-            int arrEnd = FindMatchingBracket(response, arrStart);
-            if (arrStart < 0 || arrEnd < 0) { CachedTeamSeriesPaged = list; return; }
+            shapeOk = false;
+            int arrStart = FindJsonArrayStartStringAware(response, "series");
+            int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(response, arrStart) : -1;
+            if (arrStart < 0 || arrEnd < 0) return list;
+            shapeOk = true;
             string slice = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
-            int oIdx = 0;
-            while (oIdx < slice.Length)
+            foreach (string obj in SliceTopLevelObjects(slice))
             {
-                int objStart = slice.IndexOf('{', oIdx);
-                if (objStart < 0) break;
-                int oEnd = FindMatchingBrace(slice, objStart);
-                if (oEnd < 0) break;
-                string obj = slice.Substring(objStart, oEnd - objStart + 1);
                 var e = new TeamSeriesPagedEntry
                 {
                     series_id = ExtractJsonString(obj, "series_id"),
@@ -10651,22 +10822,21 @@ namespace CompetitiveRounds
                     matches = ParseSeriesMatches(obj),
                 };
                 list.Add(e);
-                oIdx = oEnd + 1;
             }
-            CachedTeamSeriesPaged = list;
-            CachedTeamSeriesTotal = ExtractJsonInt(response, "total");
-            CachedTeamSeriesPage = reqPage;
-            CachedTeamSeriesPageSize = reqPageSize;
-            CachedTeamSeriesTotalPages = ExtractJsonInt(response, "total_pages");
+            return list;
         }
 
         private static TeamSeriesSlot ParseSeriesSlot(string seriesObj, string slotKey)
         {
-            // Find "<slotKey>": { ... }  inside the series object.
+            // Find "<slotKey>": { ... }  inside the series object. The key
+            // needle `"t1a":` cannot be forged inside a string literal (its
+            // interior quote would have to be escaped), but the slot object
+            // BODY carries names/titles, so the brace match must be
+            // string-aware (R1 f13, #156).
             int kIdx = seriesObj.IndexOf($"\"{slotKey}\":");
             if (kIdx < 0) return new TeamSeriesSlot();
             int oStart = seriesObj.IndexOf('{', kIdx);
-            int oEnd = FindMatchingBrace(seriesObj, oStart);
+            int oEnd = oStart >= 0 ? FindMatchingBraceStringAware(seriesObj, oStart) : -1;
             if (oStart < 0 || oEnd < 0) return new TeamSeriesSlot();
             string s = seriesObj.Substring(oStart, oEnd - oStart + 1);
             return new TeamSeriesSlot
@@ -10685,20 +10855,16 @@ namespace CompetitiveRounds
         private static List<TeamSeriesMatch> ParseSeriesMatches(string seriesObj)
         {
             var list = new List<TeamSeriesMatch>();
+            // R1 f13 (#156): match objects carry card names + telemetry keyed by
+            // players, so the array and object boundaries must be string-aware.
             int mIdx = seriesObj.IndexOf("\"matches\":");
             if (mIdx < 0) return list;
             int aStart = seriesObj.IndexOf('[', mIdx);
-            int aEnd = FindMatchingBracket(seriesObj, aStart);
+            int aEnd = aStart >= 0 ? FindMatchingBracketStringAware(seriesObj, aStart) : -1;
             if (aStart < 0 || aEnd < 0) return list;
             string slice = seriesObj.Substring(aStart + 1, aEnd - aStart - 1);
-            int cur = 0;
-            while (cur < slice.Length)
+            foreach (string m in SliceTopLevelObjects(slice))
             {
-                int objStart = slice.IndexOf('{', cur);
-                if (objStart < 0) break;
-                int oEnd = FindMatchingBrace(slice, objStart);
-                if (oEnd < 0) break;
-                string m = slice.Substring(objStart, oEnd - objStart + 1);
                 var entry = new TeamSeriesMatch
                 {
                     match_id = ExtractJsonString(m, "match_id"),
@@ -10778,11 +10944,13 @@ namespace CompetitiveRounds
                     }
                 }
                 // cards_by_player parser (same shape as TeamMatchHistoryEntry).
+                // R1 f13: string-aware braces — the map's values are card-name
+                // arrays, i.e. exactly the region a plain counter dies in.
                 int cIdx = m.IndexOf("\"cards_by_player\":");
                 if (cIdx >= 0)
                 {
                     int cbStart = m.IndexOf('{', cIdx);
-                    int cbEnd = FindMatchingBrace(m, cbStart);
+                    int cbEnd = cbStart >= 0 ? FindMatchingBraceStringAware(m, cbStart) : -1;
                     if (cbStart >= 0 && cbEnd > cbStart)
                     {
                         string cbSlice = m.Substring(cbStart + 1, cbEnd - cbStart - 1);
@@ -10795,7 +10963,7 @@ namespace CompetitiveRounds
                             if (kE < 0) break;
                             string sid = cbSlice.Substring(kS + 1, kE - kS - 1);
                             int aS2 = cbSlice.IndexOf('[', kE);
-                            int aE2 = FindMatchingBracket(cbSlice, aS2);
+                            int aE2 = aS2 >= 0 ? FindMatchingBracketStringAware(cbSlice, aS2) : -1;
                             if (aS2 < 0 || aE2 < 0) break;
                             string aSlice = cbSlice.Substring(aS2 + 1, aE2 - aS2 - 1);
                             // Cards are bare strings here (the new endpoint flattens them).
@@ -10821,7 +10989,6 @@ namespace CompetitiveRounds
                 // names, so a plain depth counter is not safe here (#156).
                 entry.end_stats_by_player = ParseSteamStringMap(m, "end_stats_by_player");
                 list.Add(entry);
-                cur = oEnd + 1;
             }
             return list;
         }
@@ -14977,12 +15144,47 @@ namespace CompetitiveRounds
                 if (!ok) return;
                 try
                 {
+                    var matches = ParseFfaRecentList(resp, out _);
+                    // F8: superseded response — a newer request for this mode
+                    // was issued after ours; its data must win. Drop ours.
+                    if (gen != (ranked ? ffaRecentRankedGen : ffaRecentCasualGen))
+                    {
+                        Plugin.Log.LogInfo($"[FFA-RECENT] stale {(ranked ? "ranked" : "casual")} page {page} response dropped (superseded)");
+                        return;
+                    }
+                    if (ranked)
+                    {
+                        CachedFfaRecent = matches;
+                        CachedFfaRecentTotal = ExtractJsonInt(resp, "total");
+                        CachedFfaRecentPages = ExtractJsonInt(resp, "total_pages");
+                    }
+                    else
+                    {
+                        CachedFfaRecentCasual = matches;
+                        CachedFfaRecentCasualTotal = ExtractJsonInt(resp, "total");
+                        CachedFfaRecentCasualPages = ExtractJsonInt(resp, "total_pages");
+                    }
+                    NativeUI.MarkDirty();
+                    Plugin.Log.LogInfo($"[FFA-RECENT] loaded {matches.Count} {(ranked ? "ranked" : "casual")} matches (page {page})");
+                }
+                catch (Exception ex) { Plugin.Log.LogError($"[FFA-RECENT] parse: {ex.Message}"); }
+            }));
+        }
+
+        /// <summary>Shared rich-match list parser for /ffa/recent responses —
+        /// used by the F5 cache path above AND the report-private fetch (R1
+        /// f15 reconciliation). shapeOk=false means the "matches" array was
+        /// absent/unbalanced (a shape failure, not "empty").</summary>
+        private static List<FfaRecentMatch> ParseFfaRecentList(string resp, out bool shapeOk)
+        {
                     var matches = new List<FfaRecentMatch>();
+                    shapeOk = false;
                     int mStart = resp.IndexOf("\"matches\"");
                     int arrStart = mStart >= 0 ? resp.IndexOf('[', mStart) : -1;
                     int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
                     if (arrStart >= 0 && arrEnd > arrStart)
                     {
+                        shapeOk = true;
                         foreach (string mObj in SliceTopLevelObjects(
                             resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
                         {
@@ -15102,30 +15304,7 @@ namespace CompetitiveRounds
                             matches.Add(m);
                         }
                     }
-                    // F8: superseded response — a newer request for this mode
-                    // was issued after ours; its data must win. Drop ours.
-                    if (gen != (ranked ? ffaRecentRankedGen : ffaRecentCasualGen))
-                    {
-                        Plugin.Log.LogInfo($"[FFA-RECENT] stale {(ranked ? "ranked" : "casual")} page {page} response dropped (superseded)");
-                        return;
-                    }
-                    if (ranked)
-                    {
-                        CachedFfaRecent = matches;
-                        CachedFfaRecentTotal = ExtractJsonInt(resp, "total");
-                        CachedFfaRecentPages = ExtractJsonInt(resp, "total_pages");
-                    }
-                    else
-                    {
-                        CachedFfaRecentCasual = matches;
-                        CachedFfaRecentCasualTotal = ExtractJsonInt(resp, "total");
-                        CachedFfaRecentCasualPages = ExtractJsonInt(resp, "total_pages");
-                    }
-                    NativeUI.MarkDirty();
-                    Plugin.Log.LogInfo($"[FFA-RECENT] loaded {matches.Count} {(ranked ? "ranked" : "casual")} matches (page {page})");
-                }
-                catch (Exception ex) { Plugin.Log.LogError($"[FFA-RECENT] parse: {ex.Message}"); }
-            }));
+                    return matches;
         }
 
         private static bool TryExtractNullableJsonFloat(string json, string key, out float value)
@@ -15327,6 +15506,349 @@ namespace CompetitiveRounds
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[LB-MODE-HIST] FFA parse: {ex.Message}"); }
                 }));
+        }
+
+        // ── Report-private mode-history variants (R1 f9/f10/f12/f15) ────────
+        // Twins of FetchPlayerTeamHistory / FetchPlayerFfaHistory for the
+        // post-session report: SAME endpoint, SAME entry type, SAME parse —
+        // but the result list is handed to the callback and NEVER written to
+        // CachedPlayerTeamHistory/CachedPlayerFfaHistory (shared-cache reads
+        // race the F5 tab, R1 f9), and no NativeUI.MarkDirty. transportOk
+        // semantics per f10: false = HTTP or parse failure; (empty, true) = a
+        // 200 whose history is genuinely empty.
+
+        /// <summary>Report-private RICH 2v2 series for one participant —
+        /// /team/all-series-paged?participant_steam_id= (server filter added
+        /// Aug 19 for R1 f12: the global page hides a sitting behind newer
+        /// unrelated series, and /team-history is too thin for the report's
+        /// slots/telemetry/cards). Same TeamSeriesPagedEntry shape the F5
+        /// 2v2 tab renders, parsed into a PRIVATE list — no shared cache,
+        /// no MarkDirty (R1 f9).
+        /// R2 f4: PAGINATED. One page of 20 can hide a watched sitting behind
+        /// newer unrelated series, so pages are fetched SEQUENTIALLY and
+        /// accumulated until (a) the server's total_pages is exhausted,
+        /// (b) the oldest completed_at on a page is already OLDER than
+        /// noOlderThanUtc (server orders newest-first, so nothing beyond that
+        /// page can still be in the report window), or (c) a 5-page safety
+        /// cap. ok=true ONLY when every fetched page was transport+shape ok
+        /// AND the loop ended by (a) or (b); ending by the cap or any failed
+        /// page reports the ACCUMULATED rows with ok=false so the consumer
+        /// labels the section partial rather than printing an exact count.
+        /// Null noOlderThanUtc = only (a)/(c) apply. (empty, true) = genuinely
+        /// no series for that player.
+        /// R3 f4: /team/all-series-paged is a MUTABLE LIMIT/OFFSET query with
+        /// no id tie-breaker, so a series committing (or being invalidated)
+        /// between two page requests shifts the window and can silently DROP a
+        /// boundary row while every page still looks well-formed. ok=true is a
+        /// completeness CLAIM, so it is withheld on any anomaly the loop can
+        /// detect: a cross-page duplicate id (proves the window shifted), an
+        /// empty page the server's own metadata says should have rows, or
+        /// total_pages drifting between pages. Rows are still returned (the
+        /// consumer renders them as a labeled floor). KEYSET pagination
+        /// ordered by (completed_at, id) is the real fix — recorded as a
+        /// follow-up, deliberately NOT attempted here.</summary>
+        public static void FetchTeamHistoryForView(string steamId, DateTime? noOlderThanUtc, Action<List<TeamSeriesPagedEntry>, bool> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(new List<TeamSeriesPagedEntry>(), false); return; }
+            const int PAGE_SIZE = 20;   // server page_size le=20
+            const int MAX_PAGES = 5;    // safety cap (c) — hitting it = ok=false
+            var acc = new List<TeamSeriesPagedEntry>();
+            // A series completing mid-pagination shifts every later page by
+            // one, so a row can straddle a page boundary and arrive twice —
+            // dedupe by series_id or the report double-counts it.
+            var seen = new HashSet<string>();
+            // R3 f4: a detected shift only ever DOWNGRADES the completeness
+            // claim; it never drops rows and never aborts the run early (a
+            // longer floor is strictly better for the report).
+            bool windowShifted = false;
+            int prevTotalPages = 0;     // 0 = unknown/absent, never compared against
+            Action<int> fetchPage = null;
+            fetchPage = page =>
+            {
+                Plugin.Instance.StartCoroutine(GetRequest(
+                    $"{baseUrl}/api/v1/team/all-series-paged?page={page}&page_size={PAGE_SIZE}&participant_steam_id={Escape(steamId)}",
+                    (ok, resp) =>
+                    {
+                        bool shapeOk = false;
+                        List<TeamSeriesPagedEntry> rows = null;
+                        // Blank/whitespace body on a 200 is a failed read, not
+                        // an empty page (R2 f3's rule, applied here too).
+                        if (ok && !string.IsNullOrWhiteSpace(resp))
+                        {
+                            try { rows = ParseTeamSeriesPagedList(resp, out shapeOk); }
+                            catch (Exception ex) { Plugin.Log.LogWarning($"[REPORT-HIST] 2v2 parse (page {page}): {ex.Message}"); shapeOk = false; }
+                        }
+                        if (!shapeOk || rows == null)
+                        {
+                            // Mid-run transport/shape failure: hand back what
+                            // we have, marked partial — never a clean count.
+                            try { callback?.Invoke(acc, false); } catch { }
+                            return;
+                        }
+                        int dupes = 0;
+                        for (int i = 0; i < rows.Count; i++)
+                        {
+                            string k = rows[i].series_id ?? "";
+                            if (k.Length == 0 || seen.Add(k)) acc.Add(rows[i]);
+                            else dupes++;
+                        }
+                        int totalPages = ExtractJsonInt(resp, "total_pages");
+                        // R3 f4 anomaly 1: a row we already have arriving again
+                        // proves the OFFSET window moved between requests — the
+                        // same shift that can drop a DIFFERENT row entirely.
+                        if (dupes > 0)
+                        {
+                            windowShifted = true;
+                            Plugin.Log.LogWarning($"[REPORT-HIST] 2v2 page {page}: {dupes} duplicate series_id(s) — window shifted, completeness withheld");
+                        }
+                        // R3 f4 anomaly 2: total_pages drifting mid-run means
+                        // rows were added or removed under us. (R3's minimal fix
+                        // says "metadata drift"; the fix delta names GROWTH.
+                        // Either direction invalidates the offsets, and a
+                        // shrink is the DELETION case that skips a boundary row
+                        // without ever producing a duplicate, so both count.)
+                        if (page > 0 && prevTotalPages > 0 && totalPages != prevTotalPages)
+                        {
+                            windowShifted = true;
+                            Plugin.Log.LogWarning($"[REPORT-HIST] 2v2 page {page}: total_pages {prevTotalPages} -> {totalPages} mid-run — completeness withheld");
+                        }
+                        // R3 f4 anomaly 3 — THIS TEST RUNS BEFORE THE EXHAUSTION
+                        // TEST ON PURPOSE. An empty page whose own (or the
+                        // previous page's) metadata claims pages exist is a
+                        // window shift, and the (a) test below would otherwise
+                        // certify it as a clean end: total_pages=1 with a page
+                        // that came back empty satisfies (page+1) >= totalPages
+                        // and used to return ok=true with zero rows.
+                        // total_pages is 0 ONLY when the server counted zero
+                        // rows (main.py: `if total else 0`), so the genuinely
+                        // empty history still reports (empty, true), and the
+                        // absent-metadata fallback still treats a short/empty
+                        // page as the end.
+                        if (rows.Count == 0 && (totalPages > 0 || prevTotalPages > 0))
+                        {
+                            Plugin.Log.LogWarning($"[REPORT-HIST] 2v2 page {page} empty while total_pages={totalPages} (prev {prevTotalPages}) — reporting partial");
+                            try { callback?.Invoke(acc, false); } catch { }
+                            return;
+                        }
+                        prevTotalPages = totalPages;
+                        // (a) exhausted: trust total_pages when present; a
+                        // missing/zero total_pages (ExtractJsonInt's absent-key
+                        // 0) falls back to "a short page proves the end".
+                        bool exhausted = totalPages > 0 ? (page + 1) >= totalPages : rows.Count < PAGE_SIZE;
+                        if (exhausted) { try { callback?.Invoke(acc, !windowShifted); } catch { } return; }
+                        // (b) cutoff crossed: oldest stamp on THIS page already
+                        // predates the window — later pages are older still.
+                        if (noOlderThanUtc.HasValue)
+                        {
+                            DateTime? oldest = OldestTeamStampUtc(rows);
+                            if (oldest.HasValue && oldest.Value < noOlderThanUtc.Value)
+                            { try { callback?.Invoke(acc, !windowShifted); } catch { } return; }
+                        }
+                        if (page + 1 >= MAX_PAGES)
+                        {
+                            // (c) safety cap: rows are real but the run is
+                            // provably incomplete — partial by contract.
+                            Plugin.Log.LogWarning($"[REPORT-HIST] 2v2 pagination hit the {MAX_PAGES}-page safety cap — reporting partial");
+                            try { callback?.Invoke(acc, false); } catch { }
+                            return;
+                        }
+                        fetchPage(page + 1);
+                    }));
+            };
+            fetchPage(0);
+        }
+
+        /// <summary>Oldest parseable completed_at across one page of 2v2
+        /// series (UTC). Null when no row on the page carries a parseable
+        /// stamp — the (b) cutoff rule then simply can't fire for that page.</summary>
+        private static DateTime? OldestTeamStampUtc(List<TeamSeriesPagedEntry> rows)
+        {
+            DateTime? oldest = null;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                if (rows[i] == null) continue;
+                if (TryParseServerUtc(rows[i].completed_at, out DateTime t)
+                    && (!oldest.HasValue || t < oldest.Value)) oldest = t;
+            }
+            return oldest;
+        }
+
+        /// <summary>Oldest parseable ended_at across one page of FFA matches
+        /// (UTC). Same contract as OldestTeamStampUtc.</summary>
+        private static DateTime? OldestFfaStampUtc(List<FfaRecentMatch> rows)
+        {
+            DateTime? oldest = null;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                if (rows[i] == null) continue;
+                if (TryParseServerUtc(rows[i].ended_at, out DateTime t)
+                    && (!oldest.HasValue || t < oldest.Value)) oldest = t;
+            }
+            return oldest;
+        }
+
+        /// <summary>Server-UTC ISO stamp parse — the same style every other
+        /// ISO read in this file uses (InvariantCulture, AssumeUniversal +
+        /// AdjustToUniversal; e.g. ParseAlertExpiry), and byte-identical to
+        /// PostSessionReport.TryParseUtc so the fetch cutoff and the report's
+        /// window math can never disagree about one stamp.</summary>
+        private static bool TryParseServerUtc(string iso, out DateTime dt)
+        {
+            dt = default(DateTime);
+            if (string.IsNullOrEmpty(iso)) return false;
+            try
+            {
+                return DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out dt);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Report-private RICH FFA matches for one participant —
+        /// /ffa/recent?participant_steam_id= (server filter added Aug 19 for
+        /// R1 f15; the cap there rose to 30). Ranked and casual are separate
+        /// server feeds (§6), and a watched FFA lobby can be either, so BOTH
+        /// are fetched and merged newest-first into one PRIVATE list of the
+        /// same FfaRecentMatch shape the F5 FFA tab renders — no shared
+        /// cache, no MarkDirty (R1 f9).
+        /// R2 f5: each leg PAGINATES (page_size=30) under the same rules as
+        /// the 2v2 fetch — stop on (a) total_pages exhausted, (b) the page's
+        /// oldest ended_at predating noOlderThanUtc, or (c) a 3-page safety
+        /// cap; a leg is ok only when every page was transport+shape ok and
+        /// it ended by (a)/(b). Null noOlderThanUtc = only (a)/(c).
+        /// R2 f6: the two legs launch CONCURRENTLY (serial legs could each
+        /// satisfy the 20s request timeout yet jointly blow the report's 30s
+        /// deadline); a shared join fires the combined callback EXACTLY once
+        /// after both settle. ok=false when EITHER leg failed so the report
+        /// labels itself partial rather than asserting a clean zero (f10).</summary>
+        public static void FetchFfaHistoryForView(string steamId, DateTime? noOlderThanUtc, Action<List<FfaRecentMatch>, bool> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(new List<FfaRecentMatch>(), false); return; }
+            // Join state shared by the two leg completions. Coroutine
+            // callbacks run on the main thread (see the F8 generation note
+            // above), so plain captured locals suffice — the fired flag
+            // guards against a double-settle logic bug, not a data race.
+            var rankedList = new List<FfaRecentMatch>();
+            var casualList = new List<FfaRecentMatch>();
+            bool rankedOk = false, casualOk = false;
+            int settledLegs = 0;
+            bool fired = false;
+            Action settle = () =>
+            {
+                if (fired || settledLegs < 2) return;
+                fired = true;
+                var merged = new List<FfaRecentMatch>(rankedList.Count + casualList.Count);
+                merged.AddRange(rankedList);
+                merged.AddRange(casualList);
+                // Newest first across both feeds; ended_at is server ISO
+                // 8601 so ordinal string compare orders correctly.
+                try { merged.Sort((a, b) => string.CompareOrdinal(b.ended_at ?? "", a.ended_at ?? "")); } catch { }
+                try { callback?.Invoke(merged, rankedOk && casualOk); } catch { }
+            };
+            FfaHistoryForViewLeg(steamId, true, noOlderThanUtc, rankedList,
+                ok => { rankedOk = ok; settledLegs++; settle(); });
+            FfaHistoryForViewLeg(steamId, false, noOlderThanUtc, casualList,
+                ok => { casualOk = ok; settledLegs++; settle(); });
+        }
+
+        /// <summary>One ranked-or-casual /ffa/recent pagination leg for
+        /// FetchFfaHistoryForView. Appends into the caller-owned acc list
+        /// (main-thread callbacks — no concurrent mutation) and reports leg
+        /// success per the (a)/(b)/(c) contract documented on the caller.
+        /// legDone is invoked exactly once per leg.
+        /// R3 f4: /ffa/recent is the same MUTABLE LIMIT/OFFSET shape as
+        /// /team/all-series-paged, so this leg runs the identical window-shift
+        /// detector (duplicate id / metadata drift / metadata-contradicting
+        /// empty page, the last checked BEFORE the exhaustion test) and
+        /// withholds the leg's ok on any of them. Keyset pagination ordered by
+        /// (ended_at, id) is the real fix — follow-up, not attempted here.</summary>
+        private static void FfaHistoryForViewLeg(string steamId, bool ranked, DateTime? noOlderThanUtc,
+            List<FfaRecentMatch> acc, Action<bool> legDone)
+        {
+            const int PAGE_SIZE = 30;   // server page_size le=30
+            const int MAX_PAGES = 3;    // safety cap (c) — hitting it = leg ok=false
+            string legName = ranked ? "ranked" : "casual";
+            // Page-shift dupe guard (a match reported mid-pagination shifts
+            // later pages) — same rule as the 2v2 fetch, keyed by match_id.
+            var seen = new HashSet<string>();
+            bool windowShifted = false;  // R3 f4 — downgrades ok, never drops rows
+            int prevTotalPages = 0;      // 0 = unknown/absent, never compared against
+            Action<int> fetchPage = null;
+            fetchPage = page =>
+            {
+                // ranked=true is the endpoint default (matches every
+                // pre-existing caller); only the casual leg passes the param.
+                string url = $"{baseUrl}/api/v1/ffa/recent?page={page}&page_size={PAGE_SIZE}&participant_steam_id={Escape(steamId)}";
+                if (!ranked) url += "&ranked=false";
+                Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+                {
+                    bool shapeOk = false;
+                    List<FfaRecentMatch> rows = null;
+                    // Blank/whitespace body on a 200 is a failed read, not an
+                    // empty page (R2 f3's rule, applied here too).
+                    if (ok && !string.IsNullOrWhiteSpace(resp))
+                    {
+                        try { rows = ParseFfaRecentList(resp, out shapeOk); }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[REPORT-HIST] FFA {legName} parse (page {page}): {ex.Message}"); shapeOk = false; }
+                    }
+                    if (!shapeOk || rows == null) { legDone(false); return; }
+                    int dupes = 0;
+                    for (int i = 0; i < rows.Count; i++)
+                    {
+                        string k = rows[i].match_id ?? "";
+                        if (k.Length == 0 || seen.Add(k)) acc.Add(rows[i]);
+                        else dupes++;
+                    }
+                    int totalPages = ExtractJsonInt(resp, "total_pages");
+                    // R3 f4 anomaly 1 — a re-served row proves the window moved.
+                    if (dupes > 0)
+                    {
+                        windowShifted = true;
+                        Plugin.Log.LogWarning($"[REPORT-HIST] FFA {legName} page {page}: {dupes} duplicate match_id(s) — window shifted, completeness withheld");
+                    }
+                    // R3 f4 anomaly 2 — metadata drift in EITHER direction (see
+                    // the 2v2 leg's note: a shrink is the deletion case that
+                    // skips a boundary row without producing a duplicate).
+                    if (page > 0 && prevTotalPages > 0 && totalPages != prevTotalPages)
+                    {
+                        windowShifted = true;
+                        Plugin.Log.LogWarning($"[REPORT-HIST] FFA {legName} page {page}: total_pages {prevTotalPages} -> {totalPages} mid-run — completeness withheld");
+                    }
+                    // R3 f4 anomaly 3 — BEFORE the exhaustion test (an empty
+                    // page that satisfies (page+1) >= totalPages used to be
+                    // certified complete). total_pages is 0 only when the
+                    // server counted zero rows, so a genuinely empty feed still
+                    // settles the leg ok.
+                    if (rows.Count == 0 && (totalPages > 0 || prevTotalPages > 0))
+                    {
+                        Plugin.Log.LogWarning($"[REPORT-HIST] FFA {legName} page {page} empty while total_pages={totalPages} (prev {prevTotalPages}) — reporting partial");
+                        legDone(false);
+                        return;
+                    }
+                    prevTotalPages = totalPages;
+                    // (a) exhausted — same total_pages/short-page fallback as
+                    // the 2v2 fetch.
+                    bool exhausted = totalPages > 0 ? (page + 1) >= totalPages : rows.Count < PAGE_SIZE;
+                    if (exhausted) { legDone(!windowShifted); return; }
+                    // (b) cutoff crossed: oldest ended_at on THIS page already
+                    // predates the window — later pages are older still.
+                    if (noOlderThanUtc.HasValue)
+                    {
+                        DateTime? oldest = OldestFfaStampUtc(rows);
+                        if (oldest.HasValue && oldest.Value < noOlderThanUtc.Value) { legDone(!windowShifted); return; }
+                    }
+                    if (page + 1 >= MAX_PAGES)
+                    {
+                        // (c) safety cap: provably incomplete — partial.
+                        Plugin.Log.LogWarning($"[REPORT-HIST] FFA {legName} pagination hit the {MAX_PAGES}-page safety cap — reporting partial");
+                        legDone(false);
+                        return;
+                    }
+                    fetchPage(page + 1);
+                }));
+            };
+            fetchPage(0);
         }
 
         public static void FetchFfaBettable(string steamId)
@@ -18305,6 +18827,24 @@ namespace CompetitiveRounds
             public int rotationNextSwitchIn;
         }
 
+        /// <summary>One row from GET /broadcast/report-status (W7, D1 f6/f7).
+        /// Field names mirror the wire keys (spectate_games columns via A8's
+        /// endpoint). ended_at == "" means the server sent JSON null — the
+        /// game is still live; a NON-empty ended_at is the ONLY terminal
+        /// proof (absence from the list proves nothing). roster is a
+        /// steam-id CSV (server-generated, bracket-free); names carries
+        /// player display names = hostile input (#156) — sanitize at
+        /// render, never trust for identity (roster is the identity).</summary>
+        public class BroadcastReportStatusEntry
+        {
+            public string game_id = "";
+            public string mode = "";
+            public string started_at = "";
+            public string ended_at = "";
+            public string roster = "";
+            public List<string> names = new List<string>();
+        }
+
         /// <summary>GET /api/v1/broadcast/target (director poll, §2a).
         /// Query params match the AUTHORED server endpoint exactly (verified
         /// against main.py broadcast_target — the design doc's `acq={...}`
@@ -18460,6 +19000,75 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+            return list;
+        }
+
+        /// <summary>GET /api/v1/broadcast/report-status?game_ids=&lt;csv&gt;
+        /// (W7, D1 f6/f7): terminal-state poll for the post-session report
+        /// queue. Auth mirrors FetchBroadcastTarget exactly — steam_id query
+        /// param bound to the session token GetRequest stamps; the server
+        /// 403s non-service accounts. Callback gets NULL on transport/parse
+        /// failure ("unreachable" — feeds the caller's 25-min partial
+        /// fallback) and the parsed list on a server answer; entries the
+        /// server omitted are simply absent, which proves nothing about
+        /// their state.</summary>
+        public static void FetchBroadcastReportStatus(string gameIdsCsv, Action<List<BroadcastReportStatusEntry>> cb)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null
+                || string.IsNullOrEmpty(gameIdsCsv))
+            { cb?.Invoke(null); return; }
+            var url = new StringBuilder(192);
+            url.Append(baseUrl).Append("/api/v1/broadcast/report-status?steam_id=").Append(Escape(sid));
+            url.Append("&game_ids=").Append(UnityWebRequest.EscapeURL(gameIdsCsv));
+            Plugin.Instance.StartCoroutine(GetRequest(url.ToString(), (ok, resp) =>
+            {
+                if (!ok) { cb?.Invoke(null); return; }
+                List<BroadcastReportStatusEntry> list;
+                try { list = ParseBroadcastReportStatus(resp); }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning($"[BROADCAST] report-status parse: {e.Message}");
+                    list = null;
+                }
+                try { cb?.Invoke(list); } catch { }
+            }));
+        }
+
+        /// <summary>Defensive parse of the report-status array. The body's
+        /// FIRST non-whitespace char must be '[' (an error object never
+        /// parses as rows); objects are sliced string-aware because names[]
+        /// carries adversarial display names (#156).</summary>
+        private static List<BroadcastReportStatusEntry> ParseBroadcastReportStatus(string resp)
+        {
+            var list = new List<BroadcastReportStatusEntry>();
+            if (string.IsNullOrEmpty(resp)) return list;
+            int open = -1;
+            for (int i = 0; i < resp.Length; i++)
+            {
+                char c = resp[i];
+                if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+                if (c == '[') open = i;
+                break;
+            }
+            if (open < 0) return list;
+            int close = FindMatchingBracketStringAware(resp, open);
+            if (close <= open) return list;
+            foreach (string obj in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+            {
+                var e = new BroadcastReportStatusEntry
+                {
+                    game_id = ExtractJsonString(obj, "game_id") ?? "",
+                    mode = ExtractJsonString(obj, "mode") ?? "",
+                    started_at = ExtractJsonString(obj, "started_at") ?? "",
+                    // ExtractJsonString needs the `"key":"` needle, which a
+                    // JSON null cannot match — a live game arrives as "".
+                    ended_at = ExtractJsonString(obj, "ended_at") ?? "",
+                    roster = ExtractJsonString(obj, "roster") ?? "",
+                    names = ExtractJsonStringArray(obj, "names"),
+                };
+                if (!string.IsNullOrEmpty(e.game_id)) list.Add(e);
+            }
             return list;
         }
 

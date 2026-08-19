@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 
@@ -219,53 +220,76 @@ namespace CompetitiveRounds
         private static void DrawLiveBar()
         {
             int w = Screen.width;
-            // Slim top-center bar (0.5s composite cache, #162):
-            //   SPECTATING | <orange>A</> 2.5 - 3 <blue>B</> | Series 1-0 | Session 2-1 [| Syncing...]
+            // Slim top-center bar (0.5s composite cache, #162), W4 verbose header:
+            //   SPECTATING | Current Game: <orange>A 2.5</> - <blue>3 B</>
+            //     | Current Series: 1-0 | Session Series: 2-1 | Overall Series: 5-3 [| Syncing...]
             // The colored score segment REPLACES the plain names segment when
-            // a score exists (Aug 10 review find 11 — never both).
+            // a score exists (Aug 10 review find 11 — never both). When the
+            // composed line outgrows the screen it degrades in steps instead
+            // of clipping: title spans first, then elo decor, then the labels
+            // (the compact fallback is the pre-verbose format, whose keys keep
+            // their shipped translations alive — #289), and finally — f20 —
+            // measured name truncation / "first N + M more" until it fits.
             if (Time.unscaledTime - _barCachedAt > 0.5f)
             {
                 _barCachedAt = Time.unscaledTime;
-                // Segments FIRST — NamesLine() clears the shared _sb builder
-                // internally, so it must never run mid-composition.
                 bool live = SpectatorSync.HasEverActivated;
-                string score = TeamScoreInline();
-                string names = score.Length > 0 ? "" : NamesLine();
-                string series = SeriesLine();
-                string session = SessionLine();
-                _sb.Length = 0;
-                _sb.Append(live ? I18n.Tr("SPECTATING") : I18n.Tr("SPECTATOR"));
-                if (score.Length > 0) _sb.Append("  |  ").Append(score);
-                else if (names.Length > 0) _sb.Append("  |  ").Append(names);
-                if (series.Length > 0) _sb.Append("  |  ").Append(series);
-                if (session.Length > 0) _sb.Append("  |  ").Append(session);
+
+                // Segment VALUES once per refresh — only decoration and
+                // labeling vary across degrade levels.
+                RefreshSeriesTally();
+                int sesL, sesR;
+                bool hasSession = TryGetSessionTally(out sesL, out sesR);
+                string overall = OverallSeriesValue();
+                string suffix = "";
                 if (!live)
                 {
                     // Item 8: this is the bar the F5 case shows INSTEAD of the
                     // cover, with the live arena visible behind the menu. It
                     // has to say the same thing the cover says, or the two
                     // states contradict each other and the cover reads as an
-                    // arbitrary blindfold. "Syncing..." did not say it.
-                    _sb.Append("  |  <color=#FFD94D>")
-                       .Append(I18n.Tr("NOT LIVE YET - your view starts at the next round"))
-                       .Append("</color>");
+                    // arbitrary blindfold. "Syncing..." did not say it. Kept
+                    // byte-for-byte at every degrade level — the ladder may
+                    // only shed decoration, never state.
+                    suffix = "  |  <color=#FFD94D>"
+                             + I18n.Tr("NOT LIVE YET - your view starts at the next round")
+                             + "</color>";
                 }
                 else if (SpectatorSync.CurrentStage != SpectatorSync.Stage.Active)
                 {
-                    _sb.Append("  |  ").Append(I18n.Tr("Syncing..."));
+                    suffix = "  |  " + I18n.Tr("Syncing...");
                 }
-                _cachedBarLine = _sb.ToString();
+
                 // Measure, never guess (#237): the line already carries names,
                 // titles and ratings, and the pre-activation note is longer
                 // still — a fixed 960 backdrop leaves text hanging off both
-                // ends. Recomputed only with the line, so CalcSize never runs
-                // per IMGUI event (#162).
-                try
+                // ends. Degrade levels: 0 full, 1 no title spans, 2 no elo
+                // decor either, 3 compact (no labels, no Overall — the
+                // pre-verbose format). Runs only on the 0.5s cadence, so at
+                // most four CalcSize calls per refresh and none per IMGUI
+                // event (#162); the f20 terminal stage below adds a bounded
+                // handful more, and only in sessions where the compact level
+                // already overflowed.
+                float maxW = w - 40f;
+                for (int lvl = 0; lvl <= 3; lvl++)
                 {
-                    float need = _sub.CalcSize(new GUIContent(_cachedBarLine)).x + 48f;
-                    _cachedBarWidth = Mathf.Min(w, Mathf.Max(320f, need));
+                    ComposeBarLine(live, lvl, hasSession, sesL, sesR, overall, suffix);
+                    float need;
+                    try { need = _sub.CalcSize(new GUIContent(_cachedBarLine)).x; }
+                    catch { _cachedBarWidth = Mathf.Min(w, 960f); break; }
+                    _cachedBarWidth = Mathf.Min(w, Mathf.Max(320f, need + 48f));
+                    if (need <= maxW) break;
+                    if (lvl == 3)
+                    {
+                        // f20 (R1 finding 20): level 3 keeps every bare name,
+                        // so a legal 10-player FFA with long display names
+                        // still exceeds the screen and TextClipping.Overflow
+                        // paints it off-screen. Measured terminal stage:
+                        // truncate names, then "first N + M more".
+                        ComposeTerminalBarLine(live, hasSession, sesL, sesR, suffix, maxW, w);
+                        break;
+                    }
                 }
-                catch { _cachedBarWidth = Mathf.Min(w, 960f); }
             }
 
             var rect = new Rect(0, 6, w, 26);
@@ -275,11 +299,311 @@ namespace CompetitiveRounds
             GUI.Label(rect, _cachedBarLine, _sub);
         }
 
+        /// <summary>One composition pass at one degrade level; writes
+        /// _cachedBarLine. Levels: 0 full verbose, 1 drops title spans,
+        /// 2 also drops elo decor, 3 compact (no segment labels, no Overall —
+        /// today's pre-verbose format, keeping the drops accumulated).</summary>
+        private static void ComposeBarLine(bool live, int degrade, bool hasSession,
+                                           int sesL, int sesR, string overall, string suffix)
+        {
+            bool compact = degrade >= 3;
+            // Segments FIRST — NamesLine() clears the shared _sb builder
+            // internally, so it must never run mid-composition.
+            string score = TeamScoreInline(degrade < 2);
+            string names = score.Length > 0 ? "" : NamesLine(degrade > 2 ? 2 : degrade);
+            string game = score.Length > 0 ? score : names;
+            _sb.Length = 0;
+            _sb.Append(live ? I18n.Tr("SPECTATING") : I18n.Tr("SPECTATOR"));
+            if (game.Length > 0)
+            {
+                _sb.Append("  |  ");
+                if (compact) _sb.Append(game);
+                else _sb.Append(I18n.TrF("Current Game: {0}", game));
+            }
+            if (_seriesW1 >= 0 && _seriesW2 >= 0)
+            {
+                _sb.Append("  |  ")
+                   .Append(compact
+                       ? I18n.TrF("Series {0}-{1}", _seriesW1, _seriesW2)
+                       : I18n.TrF("Current Series: {0}", _seriesW1 + "-" + _seriesW2));
+            }
+            if (hasSession)
+            {
+                _sb.Append("  |  ")
+                   .Append(compact
+                       ? I18n.TrF("Session {0}-{1}", sesL, sesR)
+                       : I18n.TrF("Session Series: {0}", sesL + "-" + sesR));
+            }
+            if (!compact && overall.Length > 0)
+                _sb.Append("  |  ").Append(I18n.TrF("Overall Series: {0}", overall));
+            if (suffix.Length > 0) _sb.Append(suffix);
+            _cachedBarLine = _sb.ToString();
+        }
+
+        /// <summary>f20 (R1 finding 20) terminal stage — entered only when the
+        /// compact level-3 line still measures wider than the screen (a legal
+        /// 10-player FFA with long names overflows 1080p; level 3 keeps every
+        /// bare name). Two measured sub-stages, both running ONLY inside the
+        /// 0.5s cache refresh (#162 — worst case 5 + fighterCount-1 CalcSize
+        /// calls, and only in sessions where level 3 already overflowed):
+        ///   A) ellipsis water-fill (#260 spirit): cap every name at a
+        ///      shrinking visible-char budget — the LONGEST names shorten
+        ///      first because names at or under the cap are untouched —
+        ///      floored at 5 visible chars per name;
+        ///   B) collapse: "first N + M more" (I18n'd), N shrinking toward 1;
+        ///   C) (R3 f8/f9) segment shedding, in priority order, when even one
+        ///      name plus the labels overflows — count-only game (score digits
+        ///      kept when scored) -> no game segment -> suffix only -> the bare
+        ///      SPECTATING/SPECTATOR word. Only the LAST candidate is
+        ///      unconditional: a single identity word cannot shrink further and
+        ///      the backdrop is clamped to the screen anyway. So the earlier
+        ///      "score and suffix are never shed" contract holds for every case
+        ///      that FITS, but a narrow window / long locale can now legitimately
+        ///      shed them rather than paint off-screen.
+        /// Stages A/B need names; an EMPTY roster (pre-first-snapshot, where
+        /// the not-live suffix is the whole width) skips straight to C.
+        /// Rich-text safety: level-3 name strings pass through SanitizeStyled,
+        /// which KEEPS b/i/color tags, so they are NOT safe to cut. This stage
+        /// rebuilds every name via PlainName (ALL tags stripped) BEFORE
+        /// truncation and wraps color tags around whole segments afterwards —
+        /// a cut can never land inside a tag.</summary>
+        private static void ComposeTerminalBarLine(bool live, bool hasSession,
+                                                   int sesL, int sesR, string suffix,
+                                                   float maxW, int screenW)
+        {
+            try
+            {
+                var names = SpectatorSync.FighterNames;
+                var teams = SpectatorSync.FighterTeams;
+                int n = names != null ? names.Length : 0;
+                bool grouped = teams != null && n > 0 && teams.Length == n
+                               && SpectatorSync.WatchedMode != "ffa";
+                bool scored = grouped && SpectatorViewState.HasScore;
+
+                // Plain names in render order (team 0 first when grouped),
+                // with the seam index where team 1 begins. Negative-team
+                // entries are dropped exactly as NamesLine's grouped branch
+                // drops them.
+                var plain = new List<string>(n);
+                int split = -1;
+                if (grouped)
+                {
+                    for (int i = 0; i < n; i++)
+                        if (teams[i] == 0) plain.Add(PlainName(names[i]));
+                    split = plain.Count;
+                    for (int i = 0; i < n; i++)
+                        if (teams[i] != 0 && teams[i] >= 0) plain.Add(PlainName(names[i]));
+                }
+                else
+                {
+                    for (int i = 0; i < n; i++) plain.Add(PlainName(names[i]));
+                }
+                // R3 f8: an EMPTY roster (pre-first-snapshot — the overflow is
+                // the labels + not-live suffix themselves) has nothing for
+                // stages A/B to shrink, but Stage C's segment shedding still
+                // applies. Falling through with a guard rather than returning
+                // is the fix; the "0 players" C1 candidate is skipped below.
+                if (plain.Count > 0)
+                {
+                    // Stage A: shrinking per-name caps. Fixed steps keep the
+                    // CalcSize budget bounded while still shortening the longest
+                    // names first.
+                    int[] caps = { 24, 16, 10, 7, 5 };
+                    for (int c = 0; c < caps.Length; c++)
+                    {
+                        string line = BuildTerminalLine(live, hasSession, sesL, sesR, suffix,
+                                                        plain, split, scored, caps[c], plain.Count);
+                        if (MeasureAndStoreBarLine(line, maxW, screenW)) return;
+                    }
+
+                    // Stage B: collapse to "first N + M more" at the floor cap.
+                    for (int keep = plain.Count - 1; keep >= 1; keep--)
+                    {
+                        string line = BuildTerminalLine(live, hasSession, sesL, sesR, suffix,
+                                                        plain, split, scored, 5, keep);
+                        if (MeasureAndStoreBarLine(line, maxW, screenW)) return;
+                    }
+                }
+
+                // Stage C (R2 f8): keep==1 still over — the width now lives in
+                // the SEGMENTS, not the names. Shed decoration in measured
+                // steps; only the last candidate is unconditional, because a
+                // bare identity word cannot be shrunk further and the backdrop
+                // already clamps to the screen. C1 count-only game (score
+                // digits kept when scored) -> C2 no game segment -> C3 suffix
+                // only -> C4 bare SPECTATING/SPECTATOR.
+                string digits = scored
+                    ? SpectatorViewState.TeamScoreText(0) + " - " + SpectatorViewState.TeamScoreText(1) + "  "
+                    : "";
+                // C1 is skipped for an empty roster — "0 players" would be a
+                // lie about a roster we simply have not received yet (R3 f8).
+                if (plain.Count > 0)
+                {
+                    string countGame = digits + I18n.TrF("{0} players", plain.Count);
+                    if (MeasureAndStoreBarLine(ComposeCompact(live, countGame, true, hasSession, sesL, sesR, suffix), maxW, screenW)) return;
+                }
+                if (MeasureAndStoreBarLine(ComposeCompact(live, "", true, hasSession, sesL, sesR, suffix), maxW, screenW)) return;
+                if (MeasureAndStoreBarLine(ComposeCompact(live, "", false, false, 0, 0, suffix), maxW, screenW)) return;
+                MeasureAndStoreBarLine(ComposeCompact(live, "", false, false, 0, 0, ""), maxW, screenW);
+            }
+            catch
+            {
+                // Best-effort: keep whatever line is cached, clamp the
+                // backdrop to the screen.
+                _cachedBarWidth = Mathf.Min(screenW, _cachedBarWidth);
+            }
+        }
+
+        /// <summary>One terminal-stage candidate. keep == plain.Count keeps
+        /// every (truncated) name in the level-3 shape; keep &lt; Count is the
+        /// collapse form — a flat "first N + M more" list, because by that
+        /// point the vs-grouping is decoration while WHO is playing and the
+        /// score remain state.</summary>
+        private static string BuildTerminalLine(bool live, bool hasSession,
+                                                int sesL, int sesR, string suffix,
+                                                List<string> plain, int split,
+                                                bool scored, int cap, int keep)
+        {
+            string game;
+            if (keep < plain.Count)
+            {
+                _terminalSb.Length = 0;
+                for (int i = 0; i < keep; i++)
+                {
+                    if (i > 0) _terminalSb.Append(", ");
+                    _terminalSb.Append(TruncName(plain[i], cap));
+                }
+                game = I18n.TrF("{0} + {1} more", _terminalSb.ToString(), plain.Count - keep);
+                if (scored)
+                    game = SpectatorViewState.TeamScoreText(0) + " - "
+                         + SpectatorViewState.TeamScoreText(1) + "  " + game;
+            }
+            else if (scored)
+            {
+                // Mirror TeamScoreInline's shape with truncated plain names;
+                // the color tags wrap whole segments AFTER truncation.
+                string hex0 = TeamColorIdentity.DisplayHexForTeam(0, ORANGE_HEX);
+                string hex1 = TeamColorIdentity.DisplayHexForTeam(1, BLUE_HEX);
+                _terminalSb.Length = 0;
+                for (int i = 0; i < split; i++)
+                {
+                    if (i > 0) _terminalSb.Append(" + ");
+                    _terminalSb.Append(TruncName(plain[i], cap));
+                }
+                string t0 = _terminalSb.ToString();
+                _terminalSb.Length = 0;
+                for (int i = split; i < plain.Count; i++)
+                {
+                    if (i > split) _terminalSb.Append(" + ");
+                    _terminalSb.Append(TruncName(plain[i], cap));
+                }
+                string t1 = _terminalSb.ToString();
+                game = "<color=" + hex0 + ">" + t0 + "  "
+                       + SpectatorViewState.TeamScoreText(0) + "</color>  -  <color=" + hex1 + ">"
+                       + SpectatorViewState.TeamScoreText(1) + "  " + t1 + "</color>";
+            }
+            else
+            {
+                _terminalSb.Length = 0;
+                for (int i = 0; i < plain.Count; i++)
+                {
+                    if (i > 0)
+                        _terminalSb.Append(split >= 0 && i == split ? " vs "
+                                           : split >= 0 ? " + " : ", ");
+                    _terminalSb.Append(TruncName(plain[i], cap));
+                }
+                game = _terminalSb.ToString();
+            }
+
+            return ComposeCompact(live, game, true, hasSession, sesL, sesR, suffix);
+        }
+
+        /// <summary>Compact segment tail shared by every terminal-stage
+        /// candidate (same keys as ComposeBarLine's level 3 — #289: those
+        /// keys keep their shipped translations alive). Stage C shrinks by
+        /// blanking arguments, never by new string shapes.</summary>
+        private static string ComposeCompact(bool live, string game, bool withSeries,
+                                             bool hasSession, int sesL, int sesR, string suffix)
+        {
+            _sb.Length = 0;
+            _sb.Append(live ? I18n.Tr("SPECTATING") : I18n.Tr("SPECTATOR"));
+            if (game.Length > 0) _sb.Append("  |  ").Append(game);
+            if (withSeries && _seriesW1 >= 0 && _seriesW2 >= 0)
+                _sb.Append("  |  ").Append(I18n.TrF("Series {0}-{1}", _seriesW1, _seriesW2));
+            if (hasSession)
+                _sb.Append("  |  ").Append(I18n.TrF("Session {0}-{1}", sesL, sesR));
+            if (suffix.Length > 0) _sb.Append(suffix);
+            return _sb.ToString();
+        }
+
+        /// <summary>Stores the candidate as the cached bar line + measured
+        /// backdrop width; true when it fits maxW (or measuring failed, which
+        /// accepts the candidate exactly like the main ladder's catch).</summary>
+        private static bool MeasureAndStoreBarLine(string line, float maxW, int screenW)
+        {
+            _cachedBarLine = line;
+            float need;
+            try { need = _sub.CalcSize(new GUIContent(line)).x; }
+            catch { _cachedBarWidth = Mathf.Min(screenW, 960f); return true; }
+            _cachedBarWidth = Mathf.Min(screenW, Mathf.Max(320f, need + 48f));
+            return need <= maxW;
+        }
+
+        /// <summary>Truncate a PLAIN (tag-free) name to at most cap visible
+        /// chars + ".." (ASCII, #47 — never a Unicode ellipsis). Only when it
+        /// actually shortens the string (cutting a cap+2 name to cap+".." is
+        /// the same length). Never splits a surrogate pair.</summary>
+        private static string TruncName(string plain, int cap)
+        {
+            if (plain == null) return "";
+            if (plain.Length <= cap + 2) return plain;
+            int cut = cap;
+            if (char.IsHighSurrogate(plain[cut - 1])) cut--;
+            if (cut < 1) cut = 1;
+            return plain.Substring(0, cut) + "..";
+        }
+        private static readonly StringBuilder _terminalSb = new StringBuilder(96);
+
+        /// <summary>W4: lifetime series head-to-head between the two 1v1
+        /// fighters, "5-3" in on-screen order (team 0 left). Empty until the
+        /// H2H cache holds the pair — TryGetCachedHeadToHead fires its own
+        /// background fetch (per-pair guard, A1 contract), so the segment
+        /// simply appears when data lands. Omitted in 2v2/FFA.</summary>
+        private static string OverallSeriesValue()
+        {
+            try
+            {
+                if (SpectatorSync.WatchedMode != "1v1") return "";
+                var sids = SpectatorSync.FighterSteamIds;
+                var teams = SpectatorSync.FighterTeams;
+                if (sids == null || teams == null || sids.Length != 2 || teams.Length != 2) return "";
+                // On-screen order: team 0 renders left (same rule as the
+                // score segment and the session tally).
+                string left = teams[0] == 0 ? sids[0] : sids[1];
+                string right = teams[0] == 0 ? sids[1] : sids[0];
+                if (string.IsNullOrEmpty(left) || string.IsNullOrEmpty(right) || left == right) return "";
+                var d = ApiClient.TryGetCachedHeadToHead(left, right);
+                if (d == null) return "";
+                // The cache is pair-keyed, so the stored SUBJECT may be either
+                // fighter, and h2h_* wins are the VIEWER's (main.py H2H
+                // orientation — ApiClient's note at its own parse site).
+                // Re-orient via the subject id the entry carries; a subject
+                // matching neither fighter is a contract violation → omit.
+                int lw, rw;
+                if (d.steam_id == right) { lw = d.h2h_series_wins; rw = d.h2h_series_losses; }
+                else if (d.steam_id == left) { lw = d.h2h_series_losses; rw = d.h2h_series_wins; }
+                else return "";
+                return lw + "-" + rw;
+            }
+            catch { return ""; }
+        }
+
         /// <summary>Item 3: the game score with sides attached and half
         /// points — "NameA 2.5 - 3 NameB", each side in its ROUNDS team
         /// color, so who leads is one glance. Empty when no score yet or in
-        /// FFA (which has its own score HUD).</summary>
-        private static string TeamScoreInline()
+        /// FFA (which has its own score HUD). includeElo=false is the degrade
+        /// ladder's "drop elo decor" step (W4).</summary>
+        private static string TeamScoreInline(bool includeElo)
         {
             try
             {
@@ -289,7 +613,7 @@ namespace CompetitiveRounds
                 var teams = SpectatorSync.FighterTeams;
                 if (names == null || teams == null || names.Length != teams.Length || names.Length == 0)
                     return "";
-                string t0 = TeamNamesInline(0), t1 = TeamNamesInline(1);
+                string t0 = TeamNamesInline(0, includeElo), t1 = TeamNamesInline(1, includeElo);
                 if (t0.Length == 0 || t1.Length == 0) return "";
                 // Aug 11 playtest item 3: follow the equipped team-colour
                 // identity (Midnight team must not read as "blue") — the
@@ -310,7 +634,7 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
 
-        private static string TeamNamesInline(int team)
+        private static string TeamNamesInline(int team, bool includeElo)
         {
             var names = SpectatorSync.FighterNames;
             var teams = SpectatorSync.FighterTeams;
@@ -321,7 +645,8 @@ namespace CompetitiveRounds
                 if (sb.Length > 0) sb.Append(" + ");
                 // Plain names inside the colored segment: nested nametag
                 // color styling would fight the team color mid-string.
-                sb.Append(PlainName(names[i])).Append(DecorPlain(i));
+                sb.Append(PlainName(names[i]));
+                if (includeElo) sb.Append(DecorPlain(i));
             }
             return sb.ToString();
         }
@@ -347,23 +672,26 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Item 3: series won per side THIS SITTING (snapshot slots
-        /// 16/17, fighter-array order mapped to team order). Hidden unless a
-        /// well-formed 1v1 tally arrived.</summary>
-        private static string SessionLine()
+        /// 16/17, fighter-array order mapped to team order). False unless a
+        /// well-formed 1v1 tally arrived. Raw ints so the bar can label the
+        /// value per degrade level (W4) — the compact fallback still renders
+        /// the original "Session {0}-{1}" key.</summary>
+        private static bool TryGetSessionTally(out int left, out int right)
         {
+            left = -1; right = -1;
             try
             {
                 int s0 = SpectatorViewState.SessionSeries0;
                 int s1 = SpectatorViewState.SessionSeries1;
-                if (s0 < 0 || s1 < 0) return "";
+                if (s0 < 0 || s1 < 0) return false;
                 var teams = SpectatorSync.FighterTeams;
-                if (teams == null || teams.Length != 2) return "";
+                if (teams == null || teams.Length != 2) return false;
                 // Fighter-array order -> team order (team 0 renders left).
-                int left = teams[0] == 0 ? s0 : s1;
-                int right = teams[0] == 0 ? s1 : s0;
-                return I18n.TrF("Session {0}-{1}", left, right);
+                left = teams[0] == 0 ? s0 : s1;
+                right = teams[0] == 0 ? s1 : s0;
+                return true;
             }
-            catch { return ""; }
+            catch { left = -1; right = -1; return false; }
         }
 
         private static void DrawLeaveMenu()
@@ -391,19 +719,22 @@ namespace CompetitiveRounds
 
         // Series tally from the live-series feeds (playtest #169d), matched
         // by fighter steam ids. 5s cache; the feeds refresh on the
-        // spectator's own maintenance loop.
-        private static string _cachedSeriesLine = "";
+        // spectator's own maintenance loop. Raw ints (-1 = no tally) rather
+        // than a composed string so the bar can label the value per degrade
+        // level (W4) — the compact fallback still renders the original
+        // "Series {0}-{1}" key.
+        private static int _seriesW1 = -1, _seriesW2 = -1;
         private static float _seriesCachedAt = -999f;
 
-        private static string SeriesLine()
+        private static void RefreshSeriesTally()
         {
-            if (Time.unscaledTime - _seriesCachedAt < 5f) return _cachedSeriesLine;
+            if (Time.unscaledTime - _seriesCachedAt < 5f) return;
             _seriesCachedAt = Time.unscaledTime;
-            _cachedSeriesLine = "";
+            _seriesW1 = -1; _seriesW2 = -1;
             try
             {
                 var sids = SpectatorSync.FighterSteamIds;
-                if (sids == null || sids.Length < 2) return "";
+                if (sids == null || sids.Length < 2) return;
                 if (SpectatorSync.WatchedMode == "1v1")
                 {
                     var list = ApiClient.CachedActiveSeries;
@@ -424,9 +755,8 @@ namespace CompetitiveRounds
                                 // either fighter): flip when our first
                                 // fighter is the feed's p2.
                                 bool flipped = sids.Length > 0 && sids[0] == s.p2_steam_id;
-                                int w1 = flipped ? s.p2_wins : s.p1_wins;
-                                int w2 = flipped ? s.p1_wins : s.p2_wins;
-                                _cachedSeriesLine = I18n.TrF("Series {0}-{1}", w1, w2);
+                                _seriesW1 = flipped ? s.p2_wins : s.p1_wins;
+                                _seriesW2 = flipped ? s.p1_wins : s.p2_wins;
                                 break;
                             }
                         }
@@ -446,15 +776,15 @@ namespace CompetitiveRounds
                                     || sid == s.t2a_steam || sid == s.t2b_steam) hits++;
                             if (hits >= 3)
                             {
-                                _cachedSeriesLine = I18n.TrF("Series {0}-{1}", s.t1_wins, s.t2_wins);
+                                _seriesW1 = s.t1_wins;
+                                _seriesW2 = s.t2_wins;
                                 break;
                             }
                         }
                     }
                 }
             }
-            catch { _cachedSeriesLine = ""; }
-            return _cachedSeriesLine;
+            catch { _seriesW1 = -1; _seriesW2 = -1; }
         }
 
         // Playtest #2b: fighter NickNames arrive fully nametag-styled.
@@ -539,8 +869,10 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Title + elo decoration for a fighter, matched through the
-        /// grant-time games-list metadata (roster-aligned arrays).</summary>
-        private static string DecorFor(int fighterIndex)
+        /// grant-time games-list metadata (roster-aligned arrays).
+        /// includeTitle=false is the degrade ladder's first step (W4: shed
+        /// title spans, keep the rating).</summary>
+        private static string DecorFor(int fighterIndex, bool includeTitle)
         {
             try
             {
@@ -558,7 +890,7 @@ namespace CompetitiveRounds
                 string tcol = colors != null && m < colors.Length ? colors[m] : "";
                 string rating = ratings != null && m < ratings.Length ? ratings[m] : "";
                 _decorSb.Length = 0;
-                _decorSb.Append(TitleSpan(title, tcol));
+                if (includeTitle) _decorSb.Append(TitleSpan(title, tcol));
                 if (!string.IsNullOrEmpty(rating))
                     _decorSb.Append(" <color=#999999>(").Append(rating).Append(")</color>");
                 return _decorSb.ToString();
@@ -568,17 +900,28 @@ namespace CompetitiveRounds
         private static readonly StringBuilder _decorSb = new StringBuilder(64);
         private static readonly StringBuilder _connectSb = new StringBuilder(96);
 
-        private static void AppendFighter(int i)
+        private static void AppendFighter(int i, int decorLevel)
         {
             var names = SpectatorSync.FighterNames;
-            _sb.Append(SanitizeStyled(names[i])).Append(DecorFor(i));
+            _sb.Append(SanitizeStyled(names[i]));
+            if (decorLevel < 2) _sb.Append(DecorFor(i, decorLevel < 1));
         }
 
-        private static string NamesLine()
+        // decorLevel the cached line was composed at — a ladder pass landing
+        // on a different level recomposes instead of serving stale decor.
+        private static int _namesCachedLevel = 0;
+
+        private static string NamesLine() { return NamesLine(0); }
+
+        /// <summary>decorLevel: 0 = titles + elo (blackout + full bar),
+        /// 1 = elo only, 2 = bare names (W4 degrade ladder).</summary>
+        private static string NamesLine(int decorLevel)
         {
             // 2s cache — the underlying arrays only change on snapshots.
-            if (Time.unscaledTime - _namesCachedAt < 2f) return _cachedNamesLine;
+            if (decorLevel == _namesCachedLevel && Time.unscaledTime - _namesCachedAt < 2f)
+                return _cachedNamesLine;
             _namesCachedAt = Time.unscaledTime;
+            _namesCachedLevel = decorLevel;
             try
             {
                 var names = SpectatorSync.FighterNames;
@@ -594,7 +937,7 @@ namespace CompetitiveRounds
                         if (teams[i] == 0)
                         {
                             if (!first0) _sb.Append(" + ");
-                            AppendFighter(i); first0 = false;
+                            AppendFighter(i, decorLevel); first0 = false;
                         }
                         else any1 = true;
                     }
@@ -607,7 +950,7 @@ namespace CompetitiveRounds
                             if (teams[i] != 0 && teams[i] >= 0)
                             {
                                 if (!first1) _sb.Append(" + ");
-                                AppendFighter(i); first1 = false;
+                                AppendFighter(i, decorLevel); first1 = false;
                             }
                         }
                     }
@@ -617,7 +960,7 @@ namespace CompetitiveRounds
                     for (int i = 0; i < names.Length; i++)
                     {
                         if (i > 0) _sb.Append(", ");
-                        AppendFighter(i);
+                        AppendFighter(i, decorLevel);
                     }
                 }
                 _cachedNamesLine = _sb.ToString();
