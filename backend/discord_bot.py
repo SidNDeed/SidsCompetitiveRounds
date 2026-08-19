@@ -3399,14 +3399,12 @@ async def youtube_chat_bridge():
     # unbounded — so the real bound moved to API_MIN_GAP in _yt_get, which
     # paces every quota-costing request. This floor now just keeps the
     # steady-state poll cadence sane; the pace dominates it.
-    # LATENCY, stated honestly (R6 f1 — this used to claim ~45s, which the
-    # 90s pace dominates): a viewer's message reaches the overlay and
-    # in-game chat up to ~90s late in steady state, and a FRESH attachment
-    # needs two paced GETs (videos.list then the first liveChatMessages
-    # page) so the first relayed message can be ~180s after the stream goes
-    # live. Delays in that range are NORMAL, not a fault. The separate
-    # Google project / streamList follow-ups in the QUOTA SAFETY note are
-    # what buy this back.
+    # LATENCY, stated honestly (R6 f1): the PACE dominates this floor, so
+    # steady-state latency is API_MIN_GAP (~15s since the bridge got its
+    # own project), and a FRESH attachment needs two paced GETs
+    # (videos.list then the first liveChatMessages page) so the first
+    # relayed message can be ~30s after the stream goes live. Delays in
+    # that range are NORMAL, not a fault.
     POLL_FLOOR = 45.0
     NOT_LIVE_RETRY = 10   # activeLiveChatId absent: the cadence the old
                           # thread re-attach used
@@ -3417,40 +3415,46 @@ async def youtube_chat_bridge():
                           # existing attach logic (a video-id change from
                           # poll_stream_posts) owns the next reader
 
-    # QUOTA SAFETY — two independent bounds (R3 scope cut, corrected at R4).
+    # QUOTA SAFETY — re-derived Aug 19 after the bridge moved to its OWN
+    # Google Cloud project (Sid). That move is what changed the SEVERITY,
+    # and the severity is what sets these constants.
     #
-    # This reader shares one Google project with the broadcast VM's
-    # LIFECYCLE calls (create/bind/transition). Viewer chat must never
-    # starve them, and three review rounds proved a durable ledger cannot
-    # be the guarantee (absent mount, corrupt file, concurrent writers all
-    # produced HIGH findings).
+    # BLAST RADIUS. The bridge no longer shares a project with the
+    # broadcast VM's LIFECYCLE calls (create/bind/transition/title/
+    # thumbnail). Overspending chat quota therefore CANNOT make the stream
+    # invisible on YouTube any more — the worst case is "viewer chat stops
+    # relaying until midnight PT", which is a degraded feature, not a
+    # broken broadcast. Reviews R3/R4 rated this class HIGH purely because
+    # it could starve lifecycle; on a dedicated project the same failure
+    # is LOW. That is the whole reason a ledger-dependent bound is
+    # acceptable here when it was not before.
     #
-    # PRIMARY bound — API_MIN_GAP, enforced in _yt_get, the single funnel
-    # every quota-costing GET passes through (discovery, polls, error
-    # retries and the forced-401 retry alike; R4 f2 found a 45s
-    # *successful-poll* floor left all the other paths unbounded, and
-    # nothing enforces a short streaming day on a 24/7 rig). At one
-    # request per 90s a full 24h day is at most 960 requests; at the
-    # worst-case 5 units each that is 4,800 units — so even a totally
-    # broken ledger, a 24-hour stream, and every retry path firing cannot
-    # push the bridge past roughly half the 10,000-unit project. Lifecycle
-    # (~150), titles (~51/switch) and the session thumbnail (50) always
-    # have room. This bound is arithmetic, not state: nothing can corrupt
-    # it, and it survives every restart.
+    # DAY CAP — CHAT_QUOTA_PT_DAY, the PT-day ledger below, now the real
+    # bound. 8,000 of the project's 10,000 units, leaving 20% headroom for
+    # retries and estimate error. The ledger is durable (compose mounts
+    # ./bot-state; the reader refuses to write to a non-mount, so an
+    # ephemeral ledger cannot masquerade as a durable one).
     #
-    # SECONDARY bound — the PT-day ledger below (5,000 estimated units at
-    # 5/poll + 1/discovery). Best-effort: nice when it survives a restart,
-    # harmless when it does not, deliberately NOT hardened against
-    # concurrent writers (single named container; a deploy overlap lasts
-    # seconds — accepted residual, R3 f3).
+    # PACE — API_MIN_GAP, enforced in _yt_get, the single funnel every
+    # quota-costing GET passes through (discovery, polls, error retries
+    # and the forced-401 retry alike). It is no longer a whole-day bound:
+    # at 15s a 24h day would allow ~28,800 units, well over the project.
+    # Its job now is (a) burst control and (b) making the day cap last a
+    # realistic streaming session. At the pessimistic 5 units/poll the
+    # 8,000-unit cap buys 1,600 polls = ~6.7 HOURS of continuous chat
+    # before relaying stops for the PT day. If the true cost is 1 unit
+    # (most list reads are, but the docs do not state it for
+    # liveChatMessages.list — measure it in the console's Quotas page
+    # after a stream), the same cap covers ~33 hours, i.e. effectively
+    # unlimited, and the pace could drop further.
     #
-    # COST: a viewer's message can reach the overlay and in-game chat up
-    # to ~90s late. Sid follow-ups that buy the latency back: a SEPARATE
-    # Google Cloud project for the bridge creds (removes the shared-quota
-    # interference entirely, floor drops to 5-15s), or
-    # liveChatMessages.streamList (push instead of poll).
-    CHAT_QUOTA_PT_DAY = 5000
-    API_MIN_GAP = 90.0
+    # COST: a viewer's message reaches the overlay and in-game chat up to
+    # ~15s late, ~30s on a fresh attach (two paced GETs). Going below this
+    # should mean liveChatMessages.streamList (push instead of poll) —
+    # Google's own recommendation for this exact use case — not an
+    # ever-tighter poll.
+    CHAT_QUOTA_PT_DAY = 8000
+    API_MIN_GAP = 15.0
     def _quota_day_valid(value) -> bool:
         """A restored ledger date must be a CANONICAL ISO day (R4 f5):
         "garbage" would otherwise restore cleanly and then silently look

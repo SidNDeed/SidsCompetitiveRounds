@@ -134,9 +134,11 @@ assert ledger["units"] == 1, ledger
 assert spend(5) is True
 assert ledger["units"] == 6, ledger
 
-# ── 2. The cap stops polling and stays stopped for the PT day. The expected
-#      value is a LITERAL, so widening the production cap fails here (R5 f2).
-assert cap == 5000, f"chat quota cap changed to {cap} — re-derive the day budget"
+# ── 2. The cap stops polling and stays stopped for the PT day. The bound is
+#      a LITERAL ceiling, so silently widening the production cap past the
+#      project's headroom fails here (R5 f2). 8,000 of a DEDICATED 10,000-unit
+#      project leaves 20% for retries and estimate error.
+assert cap <= 8000, f"chat quota cap {cap} leaves too little project headroom"
 ledger["units"] = cap
 assert spend(5) is False, "cap did not stop polling"
 assert spend(5) is False, "cap is not sticky within the day"
@@ -203,13 +205,24 @@ assert flaky.gets[1] - flaky.gets[0] >= gap - 0.001, (
     f"the 401 retry fired {flaky.gets[1] - flaky.gets[0]}s after the first "
     f"attempt (need {gap}s) — every attempt must pass the pace")
 
-# ── 6. Day arithmetic: the pace alone must bound a 24h day under the cap
-#      even with a completely dead ledger.
-worst_units_per_day = (86400.0 / gap) * 5
-assert worst_units_per_day <= 5000, (
-    f"API_MIN_GAP={gap}s allows ~{worst_units_per_day:.0f} units/day — "
-    "a dead ledger could starve YouTube lifecycle")
+# ── 6. The two constants must stay COUPLED. Since the bridge moved to its
+#      own Google project the pace is no longer a whole-day bound (at 15s a
+#      24h day would allow ~28,800 units); the ledger cap is. So the
+#      invariant that matters is: the day's budget, spent at this pace,
+#      must still cover a realistic streaming session. Tightening the pace
+#      without raising the cap — the change that would silently cut chat
+#      off mid-stream — fails here.
+MIN_COVERED_HOURS = 6.0
+covered_hours = (cap / 5.0) * gap / 3600.0
+assert covered_hours >= MIN_COVERED_HOURS, (
+    f"cap={cap} at gap={gap}s covers only {covered_hours:.1f}h of chat "
+    f"before the PT-day cap stops relaying (need >= {MIN_COVERED_HOURS}h) — "
+    "raise CHAT_QUOTA_PT_DAY or loosen API_MIN_GAP")
+# Blast radius is chat-only ONLY while the bridge has its own project; if
+# these creds ever move back onto the broadcast's project, the pace must
+# again bound the whole day on its own (see the QUOTA SAFETY note).
+assert gap > 0, "API_MIN_GAP must be positive"
 
 print(f"bridge quota path OK (cap={cap}, gap={gap}s, "
-      f"worst-case {worst_units_per_day:.0f} units/day, "
+      f"covers ~{covered_hours:.1f}h of chat/day at 5 units/poll, "
       f"first-GET wait {slept[0]:.0f}s)")
