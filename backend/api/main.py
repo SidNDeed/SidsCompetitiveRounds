@@ -20473,7 +20473,7 @@ async def internal_stream_posts_pending(
     # keeps links — the session's own stored VOD urls when the VM bot
     # resolved them while live, channel archive pages otherwise.
     stale_rows = (await db.execute(text("""
-        SELECT post_key, twitch_vod_url, youtube_vod_url
+        SELECT post_key, twitch_vod_url, youtube_vod_url, matchups
           FROM stream_channel_posts
          WHERE NOT finalized
            AND last_live_at < NOW() - make_interval(secs => :stale)
@@ -20485,7 +20485,8 @@ async def internal_stream_posts_pending(
                    revision = revision + 1, updated_at = NOW()
              WHERE post_key = :k AND NOT finalized
         """), {"k": sr["post_key"],
-               "c": _stream_ended_content(sr["twitch_vod_url"], sr["youtube_vod_url"])})
+               "c": _stream_ended_content(sr["twitch_vod_url"], sr["youtube_vod_url"],
+                                          sr["matchups"])})
     await db.commit()
     # Un-finalized rows are ALWAYS returned (review F9): a live post with an
     # acked revision still needs its bottom-anchor check every tick — burial
@@ -36492,15 +36493,60 @@ BROADCAST_YOUTUBE_VODS_URL = os.getenv(
     "BROADCAST_YOUTUBE_VODS_URL", "https://youtube.com/@SidsCompetitiveRounds/streams")
 
 
-def _stream_ended_content(twitch_vod: str | None, youtube_vod: str | None) -> str:
+def _stream_ended_content(twitch_vod: str | None, youtube_vod: str | None,
+                          matchups: list | None = None) -> str:
     """The finalize body: thanks line + VOD links (direct when the session
-    resolved them, channel archive pages otherwise). Composed in Python at
-    each finalize site so both sites can never drift (#330)."""
+    resolved them, channel archive pages otherwise) + the session's matchup
+    list (Sid, Aug 18: players need to see WHICH matches a VOD covers to
+    find their own games). Composed in Python at each finalize site so the
+    sites can never drift (#330). Matchup lines are stored pre-escaped by
+    the upkeep path; the render budget stays far under the bot's 3900-char
+    embed slice so the links can never be pushed out."""
     t = twitch_vod or BROADCAST_TWITCH_VODS_URL
     y = youtube_vod or BROADCAST_YOUTUBE_VODS_URL
-    return ("The stream has ended - thanks for watching!\n"
+    body = ("The stream has ended - thanks for watching!\n"
             f"🎬 Twitch VOD: {t}\n"
             f"▶️ YouTube VOD: {y}")
+    lines = [str(m) for m in (matchups or []) if str(m).strip()]
+    if lines:
+        shown = []
+        budget = 1500
+        for line in lines:
+            if len(shown) >= 20 or len(line) + 3 > budget:
+                break
+            shown.append(line)
+            budget -= len(line) + 3
+        body += "\n\nMatches this stream:\n" + "\n".join(f"• {ln}" for ln in shown)
+        if len(lines) > len(shown):
+            body += f"\n…and {len(lines) - len(shown)} more"
+    return body
+
+
+def _stream_matchup_line(candidate: dict | None) -> str:
+    """One display line identifying a watched matchup — names + elo + mode,
+    deliberately NO score (a score change must not mint a second entry for
+    the same match). Same escaping as the live line; empty when there is no
+    candidate."""
+    if candidate is None:
+        return ""
+    names = candidate.get("names") or []
+    ratings = candidate.get("ratings") or []
+    def _nm(i):
+        n = _stream_md_escape(str(names[i])[:24]) if i < len(names) else "?"
+        try:
+            r = int(ratings[i]) if i < len(ratings) else 0
+        except Exception:
+            r = 0
+        return f"**{n}** ({r})" if r > 0 else f"**{n}**"
+    mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "", candidate.get("mode") or "?")
+    if len(names) == 2:
+        vs = f"{_nm(0)} vs {_nm(1)}"
+    else:
+        vs = ", ".join(_nm(i) for i in range(len(names))) or "?"
+    line = f"{vs} - {mode}"
+    if candidate.get("is_tournament"):
+        line = "🏆 " + line
+    return line[:200]
 
 
 def _stream_md_escape(s: str) -> str:
@@ -36608,7 +36654,14 @@ def _stream_post_content(candidate: dict | None, score: str | None) -> str:
         ratings = candidate.get("ratings") or []
         def _nm(i):
             n = _stream_md_escape(str(names[i])[:24]) if i < len(names) else "?"
-            r = int(ratings[i]) if i < len(ratings) else 0
+            # Guarded (review F2): a NaN rating (DOUBLE PRECISION permits it)
+            # raised here EVERY poll, rolling back the whole upkeep — the
+            # post then aged into a false janitor finalize while genuinely
+            # live. Malformed rating = render no rating, never throw.
+            try:
+                r = int(ratings[i]) if i < len(ratings) else 0
+            except Exception:
+                r = 0
             return f"**{n}** ({r})" if r > 0 else f"**{n}**"
         mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "", candidate.get("mode") or "?")
         if len(names) == 2:
@@ -36651,7 +36704,7 @@ async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
         # bottom-anchor logic in a delete/repost ping-pong. Finalize content
         # is composed per row so each leftover links ITS OWN stored VODs.
         stale_rows = (await db.execute(text("""
-            SELECT post_key, twitch_vod_url, youtube_vod_url
+            SELECT post_key, twitch_vod_url, youtube_vod_url, matchups
               FROM stream_channel_posts
              WHERE post_key <> :k AND NOT finalized
         """), {"k": stream_session})).mappings().all()
@@ -36662,7 +36715,8 @@ async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
                        revision = revision + 1, updated_at = NOW()
                  WHERE post_key = :sk AND NOT finalized
             """), {"sk": sr["post_key"],
-                   "c": _stream_ended_content(sr["twitch_vod_url"], sr["youtube_vod_url"])})
+                   "c": _stream_ended_content(sr["twitch_vod_url"], sr["youtube_vod_url"],
+                                              sr["matchups"])})
         score = await _stream_series_score(db, candidate)
         content = _stream_post_content(candidate, score)
         row = (await db.execute(text("""
@@ -36708,6 +36762,21 @@ async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
                        youtube_vod_url = COALESCE(:yv, youtube_vod_url)
                  WHERE post_key = :k AND NOT finalized
             """), {"k": stream_session, "tv": tvod, "yv": yvod})
+        # Session matchup accumulation (Sid, Aug 18): each DISTINCT watched
+        # matchup lands once, in order, capped at 25 — the finalize edit
+        # renders the list under the VOD links. No revision bump: the LIVE
+        # body doesn't change. CAST is load-bearing (#275): `matchups ||
+        # :line` types the bare param as TEXT[] and asyncpg then rejects the
+        # scalar, aborting the whole upkeep transaction.
+        mline = _stream_matchup_line(candidate)
+        if mline:
+            await db.execute(text("""
+                UPDATE stream_channel_posts
+                   SET matchups = matchups || CAST(:line AS TEXT)
+                 WHERE post_key = :k AND NOT finalized
+                   AND NOT (:line = ANY(matchups))
+                   AND COALESCE(array_length(matchups, 1), 0) < 25
+            """), {"k": stream_session, "line": mline})
         await db.commit()
     except Exception as ex:
         try:

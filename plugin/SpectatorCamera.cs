@@ -19,16 +19,21 @@ namespace CompetitiveRounds
     /// the frame; the horizontal term divides by the camera aspect so a
     /// wide escape zooms out too.
     ///
-    /// SMOOTHING (Aug 18 stream feedback: "keeps zooming in/out" — the raw
-    /// containment target moves every few seconds as fighters die, respawn
-    /// and teleport, and the first cut followed it both ways at vanilla
-    /// speed, reading as pumping): broadcast-camera asymmetry. Growing is
-    /// adopted immediately (a fighter must never sit off-frame), at
-    /// vanilla's own easing rate. Shrinking only commits after the needed
-    /// size has stayed below the committed target CONTINUOUSLY for
-    /// SHRINK_HOLD_SECONDS — committed to the MAX need seen over that hold,
-    /// so the view never tightens onto a momentary dip — and eases at a
-    /// third of the grow rate. A deadband absorbs sub-unit target wiggle
+    /// SMOOTHING, third model (Aug 18 late stream feedback: the border
+    /// dance still pumped). Model 1 followed the raw containment target
+    /// both ways at vanilla speed — pumping. Model 2 grew instantly and
+    /// shrank after a 2.5s calm hold — but a fighter FLIRTING with the
+    /// border cycles approach/retreat every 3-8s, so the camera still ran
+    /// fast-out / pause / slow-in / fast-out nearly 1:1 with the dance.
+    /// Model 3 (this one) deletes the commit/hold state machine: the zoom
+    /// target IS the rolling MAXIMUM need over a trailing bucket-ring
+    /// window (20 x 0.5s; guaranteed coverage >= 9.5s — see the BUCKETS
+    /// comment). Growth is still effectively immediate (a new spike raises
+    /// the window max the same frame), but repeated approaches inside the
+    /// window hold the target STEADY at the widest recent need — zero
+    /// oscillation by construction — and the view only eases back in,
+    /// slowly, after a full window of genuine calm. A small shrink-side
+    /// deadband stops the asymptotic lerp tail from reading as drift
     /// (screen-shake rides the same rig transform this reads).
     ///
     /// Zoom-only by design: the camera rig transform is never moved — SFSS
@@ -44,27 +49,33 @@ namespace CompetitiveRounds
         private const float MARGIN_Y = 3f;    // world units of headroom above/below a body
         private const float MARGIN_X = 4f;    // world units of headroom left/right
         private const float MAX_SIZE = 26f;   // ±20 kill band + margin; bounds a stray body
-        private const float DEADBAND = 1.25f; // ignore sub-unit need wiggle (shake, idle drift)
-        private const float SHRINK_HOLD_SECONDS = 2.5f;
         private const float GROW_RATE = 5f;   // vanilla's easing constant
-        private const float SHRINK_RATE = 1.5f;
+        private const float SHRINK_RATE = 0.8f;
+        private const float SHRINK_DEADBAND = 0.5f;   // stop the asymptotic ease-in tail
+        // Guaranteed trailing coverage is (BUCKETS-1) x BUCKET_SECONDS — the
+        // current bucket is partial — so 20 buckets guarantee >= 9.5s
+        // (review F3: 16 guaranteed only 7.5s, and a border dance with a
+        // ~7.9s period could still age its spike out and pump ~0.4 units
+        // before the next approach). Any finite window has a beat period;
+        // 9.5s covers the observed 3-8s dance cycles with margin, and the
+        // slow shrink + deadband bound what a marginal age-out can move.
+        private const int BUCKETS = 20;
+        private const float BUCKET_SECONDS = 0.5f;
 
-        // Committed-target state (one spectator camera per process).
-        private static float _committed = -1f;
-        private static float _holdStart = -1f;
-        private static float _holdMaxNeed;
+        // Rolling-max window state (one spectator camera per process).
+        private static readonly float[] _ring = new float[BUCKETS];
+        private static int _ringIdx = -1;             // -1 = unseeded
+        private static float _ringBucketStart;
 
         /// <summary>Also called from SpectatorSession.EndSession — the one
         /// teardown that runs in EVERY path — so a finished session's
-        /// committed zoom can never leak into the next one (review r-hud
-        /// finding 4: the in-prefix reset only runs if a camera Update
-        /// happens to fire between the role clearing and the next session,
-        /// which room teardown ordering does not guarantee).</summary>
+        /// window can never leak into the next one (review r-hud finding 4:
+        /// the in-prefix reset only runs if a camera Update happens to fire
+        /// between the role clearing and the next session, which room
+        /// teardown ordering does not guarantee).</summary>
         internal static void ResetState()
         {
-            _committed = -1f;
-            _holdStart = -1f;
-            _holdMaxNeed = 0f;
+            _ringIdx = -1;
         }
 
         static bool Prefix(CameraZoomHandler __instance)
@@ -73,7 +84,7 @@ namespace CompetitiveRounds
             {
                 if (!RoomActors.LocalIsSpectator)
                 {
-                    if (_committed >= 0f) ResetState();   // stale across sessions
+                    if (_ringIdx >= 0) ResetState();      // stale across sessions
                     return true;                          // vanilla everywhere else
                 }
                 var cams = __instance.cameras;            // publicized private; Start() filled it
@@ -117,51 +128,60 @@ namespace CompetitiveRounds
                 if (needed > MAX_SIZE) needed = MAX_SIZE;
                 if (needed < baseSize) needed = baseSize;
 
+                // Rolling-max window: seed the whole ring on first use (or
+                // after ResetState), advance one 0.5s bucket at a time, and
+                // record this frame's need into the current bucket. The
+                // target is the max over all buckets, so any spike inside
+                // the trailing window (>= 9.5s) pins the view wide and border
+                // approaches cannot oscillate it.
                 float now = Time.unscaledTime;
-                if (_committed < 0f) _committed = needed;
-
-                if (needed > _committed)
+                if (_ringIdx < 0)
                 {
-                    // Grow immediately — someone is leaving the frame.
-                    _committed = needed;
-                    _holdStart = -1f;
+                    _ringIdx = 0;
+                    _ringBucketStart = now;
+                    for (int i = 0; i < BUCKETS; i++) _ring[i] = needed;
                 }
-                else if (needed < _committed - DEADBAND)
+                while (now - _ringBucketStart >= BUCKET_SECONDS)
                 {
-                    // Candidate shrink: commit only to the MAX need seen over
-                    // a full continuous hold, so a momentary dip (a death, a
-                    // teleport frame) never tightens the view.
-                    if (_holdStart < 0f)
+                    _ringIdx = (_ringIdx + 1) % BUCKETS;
+                    _ring[_ringIdx] = needed;
+                    _ringBucketStart += BUCKET_SECONDS;
+                    if (now - _ringBucketStart >= BUCKETS * BUCKET_SECONDS)
                     {
-                        _holdStart = now;
-                        _holdMaxNeed = needed;
-                    }
-                    else
-                    {
-                        if (needed > _holdMaxNeed) _holdMaxNeed = needed;
-                        if (now - _holdStart >= SHRINK_HOLD_SECONDS)
-                        {
-                            _committed = _holdMaxNeed;
-                            _holdStart = now;        // re-arm: continued calm keeps easing in
-                            _holdMaxNeed = needed;
-                        }
+                        // Long stall (loading hitch): the whole window is
+                        // stale — reseed at the current need rather than
+                        // spinning the ring hundreds of steps.
+                        for (int i = 0; i < BUCKETS; i++) _ring[i] = needed;
+                        _ringBucketStart = now;
+                        break;
                     }
                 }
-                else
-                {
-                    // Inside the deadband of the committed size: steady.
-                    _holdStart = -1f;
-                }
+                if (needed > _ring[_ringIdx]) _ring[_ringIdx] = needed;
 
-                float cur = cams[0] != null ? cams[0].orthographicSize : _committed;
-                float rate = _committed > cur ? GROW_RATE : SHRINK_RATE;
-                float t = Time.unscaledDeltaTime * rate;
-                for (int i = 0; i < cams.Length; i++)
+                float target = baseSize;
+                for (int i = 0; i < BUCKETS; i++)
+                    if (_ring[i] > target) target = _ring[i];
+
+                float cur = cams[0] != null ? cams[0].orthographicSize : target;
+                if (target > cur)
                 {
-                    var cam = cams[i];
-                    if (cam == null) continue;
-                    cam.orthographicSize = Mathf.Lerp(cam.orthographicSize, _committed, t);
+                    float t = Time.unscaledDeltaTime * GROW_RATE;
+                    for (int i = 0; i < cams.Length; i++)
+                    {
+                        var cam = cams[i];
+                        if (cam != null) cam.orthographicSize = Mathf.Lerp(cam.orthographicSize, target, t);
+                    }
                 }
+                else if (target < cur - SHRINK_DEADBAND)
+                {
+                    float t = Time.unscaledDeltaTime * SHRINK_RATE;
+                    for (int i = 0; i < cams.Length; i++)
+                    {
+                        var cam = cams[i];
+                        if (cam != null) cam.orthographicSize = Mathf.Lerp(cam.orthographicSize, target, t);
+                    }
+                }
+                // Inside the shrink deadband: hold exactly — no motion.
                 return false;
             }
             catch { return true; }
