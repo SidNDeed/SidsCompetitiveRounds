@@ -2163,7 +2163,7 @@ _RATE_LIMIT_BYPASS = frozenset({
 async def rate_limit_gate(request: Request, call_next):
     path = request.url.path
     # /api/v1/internal/* — AUTH BEFORE PARSE (Codex Aug-18 review; learning
-    # #386). These routes bypass this limiter AND the body-size gate below, and
+    # #388). These routes bypass this limiter AND the body-size gate below, and
     # FastAPI resolves a handler's `payload: dict` / model / `list[...]` body by
     # BUFFERING + JSON-PARSING it BEFORE the handler runs its own key check — so
     # every internal POST was a free parse-DoS lever for any UNAUTHENTICATED
@@ -2246,7 +2246,7 @@ async def version_gate(request: Request, call_next):
     if not path.startswith("/api/v1/") or path in _VERSION_GATE_BYPASS:
         return await call_next(request)
     # /api/v1/internal/* endpoints are X-Internal-Key gated — enforced in
-    # rate_limit_gate BEFORE the body is read (auth-before-parse, #386), and
+    # rate_limit_gate BEFORE the body is read (auth-before-parse, #388), and
     # again inside each handler. Re-gating them on mod version is both redundant
     # and wrong: it would break the wrapper-driven Claude commenting path (curl
     # from the LXC host has no X-Mod-Version header by design). (The old comment
