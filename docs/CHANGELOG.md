@@ -2,14 +2,19 @@
 
 ## Unreleased
 
-Schema changes: migration **229** (`stream_channel_posts` gains
+Schema changes: migrations **229** (`stream_channel_posts` gains
 `twitch_vod_url` / `youtube_vod_url`; retro-fixed 16 finalized posts —
-applied 2026-08-18), **233** (`ffa_match_players.game_points_at_leave`),
+applied 2026-08-18), **230** (`stream_channel_posts.matchups` session
+matchup list; applied 2026-08-18), **233** (`ffa_match_players.game_points_at_leave`),
 **234** (one-off: un-rates ten pre-fix early-leave rows).
 
 Backend data: migration **231** — one-shot 20,000g `admin_grant` to
 NotNic for a community promo video (applied 2026-08-19). Same shape as
 `067`, plus ledger-keyed idempotency so a re-run is a no-op.
+
+**Admin (Aug 20)**
+
+- **Lexia granted admin** (migration **232**).
 
 **FFA early-leave grace (Aug 20)**
 
