@@ -15937,6 +15937,11 @@ namespace CompetitiveRounds
             public int slot, rounds, points, kills, fps;
             public bool leftEarly;
             public bool absent;   // left in an EARLIER game of the sitting
+            // Points the whole field had scored when this leaver left; drives
+            // the server's early-leave grace. -1 = not applicable/not known
+            // (a present player, or a ghost whose leave was an earlier game),
+            // which omits the field so the server keeps pre-grace behaviour.
+            public int gamePointsAtLeave = -1;
             public List<MatchTracker.CardPickData> cards;
             public TeamTelemetry telemetry;
             // Bugs #127/#130. Cumulative CSV ints on the 3s telemetry cadence,
@@ -16018,6 +16023,13 @@ namespace CompetitiveRounds
                           $"\"left_early\":{(p.leftEarly ? "true" : "false")}," +
                           $"\"absent\":{(p.absent ? "true" : "false")},");
                 sb.Append($"\"fps\":{Math.Max(0, p.fps)},");
+                // Early-leave grace input (2026-08-20). Outside the frozen HMAC
+                // canonical, like absent/damage_dealt — the server refutes it
+                // against the SIGNED tally rather than trusting the number.
+                // Omitted when negative so an old server, a present player and
+                // a carried ghost all read identically to before.
+                if (p.leftEarly && p.gamePointsAtLeave >= 0)
+                    sb.Append($"\"game_points_at_leave\":{p.gamePointsAtLeave},");
                 // Damage dealt + kill/damage timelines (#127/#130). Outside the
                 // frozen HMAC canonical; omitted entirely when empty so an FFA
                 // game with no data doesn't ship empty strings.

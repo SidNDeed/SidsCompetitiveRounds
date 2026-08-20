@@ -27788,6 +27788,19 @@ def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
+# Early-leave grace (Sid, 2026-08-20): a player who leaves before the field has
+# scored this many points is NOT rated for the game. Same threshold and the same
+# reasoning as every other "2 points scored" rule in this file (the bet cutoff,
+# the 2v2 dc_leadforfeit gate) and as the client's own bug-#114 fresh-game
+# cancel: below two half-points nothing has been decided, so a placement built
+# out of that game is not evidence about anybody. A game can also simply break
+# and need a restart, and we never auto-penalize for that.
+#
+# This does NOT reopen the leave-to-dodge hole the FFA design closed. The dodge
+# it forbids is "I'm losing, so I quit at zero score" — and by the time you are
+# losing, the field is well past two points. The window here is the opening
+# seconds, before the first round converts.
+FFA_LEAVE_GRACE_POINTS = 2
 # ── FFA betting: odds band + how long a lobby stays bettable ───────────────
 FFA_ODDS_MAX = 5.0          # ceiling, reachable only at 10 players with a low RD
 FFA_ODDS_MIN_LARGE = 2.0    # floor at 5+ players (Sid's ask)
@@ -31615,10 +31628,49 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                   f"(reporter {report.reported_by_steam_id}, room {report.photon_room_id})")
             continue
         ghosts.add(p.steam_id)
+    # EARLY-LEAVE GRACE (Sid, 2026-08-20 — see FFA_LEAVE_GRACE_POINTS): a
+    # leaver who left THIS game before the field reached two points did not
+    # play a game anyone can be rated on. They join the ghosts in `unrated`:
+    # no rating, no XP/gold, out of everyone else's beaten counts and out of
+    # the payout denominator, exactly as a carried roster ghost is — while
+    # the players who stayed play on and are rated among themselves.
+    #
+    # TRUST: `game_points_at_leave` is client-supplied and outside the frozen
+    # HMAC canonical, like `absent` and `damage_dealt`. Putting it inside would
+    # buy nothing — _verify_ffa_hmac's docstring is explicit that a signature
+    # authenticates the reporting BUILD, not gameplay truth, so signed fields
+    # are reporter-attested too. Two things bound the abuse instead:
+    #   (a) the same REFUTATION GUARD the absent claim gets — a non-zero signed
+    #       tally proves they played, and refutes the claim; and
+    #   (b) the claim can only come from a SURVIVOR. The report is built by a
+    #       client still in the room at game over, never by the leaver, and
+    #       voiding a leaver's result is worth nothing to the reporter.
+    # Old clients omit the field entirely -> no grace, pre-fix behaviour.
+    graced = set()
+    for p in report.players:
+        _gp = getattr(p, "game_points_at_leave", None)
+        if not p.left_early or p.steam_id in ghosts or _gp is None:
+            continue
+        if _gp >= FFA_LEAVE_GRACE_POINTS:
+            continue
+        if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
+            print(f"[FFA] early-leave grace REFUTED for {p.steam_id}: signed tally "
+                  f"{p.rounds_won}r/{p.points_total}p/{p.kills}k is non-zero "
+                  f"(claimed {_gp} field point(s) at leave, reporter "
+                  f"{report.reported_by_steam_id}, room {report.photon_room_id})")
+            continue
+        graced.add(p.steam_id)
+        print(f"[FFA] early-leave grace for {p.steam_id}: left at {_gp} field "
+              f"point(s) (< {FFA_LEAVE_GRACE_POINTS}) — unrated for this game "
+              f"(room {report.photon_room_id})")
+    # Everyone excluded from rating/economy for this game. `ghosts` still names
+    # the carried-roster subset on its own; every "did they play THIS game"
+    # question below asks `unrated`.
+    unrated = ghosts | graced
     # Strictly-beaten counts drive XP (a tied pair didn't beat each other).
     beaten_count = {
         p.steam_id: sum(1 for q in report.players
-                        if q.steam_id not in ghosts
+                        if q.steam_id not in unrated
                         and placements[q.steam_id] > placements[p.steam_id])
         for p in report.players
     }
@@ -31630,7 +31682,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # started_at/duration. GREATEST + floor guards the admin-replay case where
     # a re-inserted historical row leaves MAX(ended_at) in the future
     # (monotonic guard — elapsed can never go negative or absurdly small).
-    _n_live_meter = len(report.players) - len(ghosts)
+    _n_live_meter = len(report.players) - len(unrated)
     battles_total = sum(max(0, int(p.points_total)) for p in report.players)
     _max_prior_end = (await db.execute(text(
         "SELECT MAX(ended_at) FROM ffa_matches WHERE lobby_id = :lid"
@@ -31710,12 +31762,12 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # comparisons. Deterministic: sorted by |placement gap| then the
         # canonical steam ordering.
         for p in report.players:
-            if p.steam_id in ghosts:
+            if p.steam_id in unrated:
                 continue   # not in this game — no rating period for them
             my_place = placements[p.steam_id]
             ranked_opps = sorted(
                 (q for q in report.players
-                 if q.steam_id != p.steam_id and q.steam_id not in ghosts),
+                 if q.steam_id != p.steam_id and q.steam_id not in unrated),
                 key=lambda q: (abs(placements[q.steam_id] - my_place),
                                _ffa_sort_key(q.steam_id)))
             opponents = []
@@ -31759,14 +31811,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     by_steam = {p.steam_id: p for p in report.players}
     for pid in sorted(reported_ids, key=str):
         sid_ = next(s for s, i2 in id_by_steam.items() if i2 == pid)
-        if sid_ in ghosts:
+        if sid_ in unrated:
             continue   # no XP/gold for games they never played
         place = placements[sid_]
         beaten = beaten_count.get(sid_, 0)
         # Round-2 review find 10 + §5c correction 5: scale by players actually
         # IN this game — roster ghosts must not inflate the rate OR reach the
         # pace ceiling by roster padding.
-        n_live = len(report.players) - len(ghosts)
+        n_live = len(report.players) - len(unrated)
         # Opponent-tier factor, NORMALISED to the x1.5 calibration field:
         # FFA_G_PER_PLAYER_MIN is calibrated "at tier x1.5" (the default-1500
         # field — learning #258), so the typical ranked lobby takes factor 1.0
@@ -31774,7 +31826,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # populated for ranked games, so an unranked FFA takes tier 1.0 →
         # factor ≈0.67, preserving "casual pays less than ranked".
         opp_ratings = [pre[s][0] for s in pre
-                       if s != sid_ and s not in ghosts]
+                       if s != sid_ and s not in unrated]
         tier_mult = (_tier_mult_for(sum(opp_ratings) / len(opp_ratings))[0]
                      if opp_ratings else 1.0)
         pool = (_ffa_battle_rate(n_live) * paid_battles
@@ -31838,10 +31890,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 xp_gained, gold_gained, fps_avg, ping_avg, bullets_fired, bullets_hit,
                 blocks_activated, blocks_successful, keys_pressed, active_seconds,
                 fps_timeline, ping_timeline, hit_timeline, block_timeline,
-                damage_dealt, damage_dealt_timeline, kill_timeline, absent, end_stats)
+                damage_dealt, damage_dealt_timeline, kill_timeline, absent, end_stats,
+                game_points_at_leave)
             VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
                     :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,
-                    :dmg, :dmgtl, :killtl, :absent, :estats)
+                    :dmg, :dmgtl, :killtl, :absent, :estats, :gpal)
         """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
                "k": int(getattr(p, "kills", 0) or 0),
                # Aug 12 item 1 (migration 216) — this player's end-of-game
@@ -31853,13 +31906,25 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                # no damage) into "not reported" and quietly drop real zeros out of
                # the average. The schema default is already None for old clients.
                "dmg": getattr(p, "damage_dealt", None),
-               # Roster ghost: held the slot but did not play THIS game.
+               # Did not play THIS game: a carried roster ghost, or (since
+               # 2026-08-20) a leaver inside the early-leave grace window.
                # Persist the EFFECTIVE decision (the refutation-filtered
-               # ghosts set), not the raw client claim — a refuted absent
+               # `unrated` set), not the raw client claim — a refuted absent
                # flag stored as true would exclude a real winner's played
                # row from every profile aggregate while their glicko
                # games_played still counted the game (Codex v1.36 find 7).
-               "absent": p.steam_id in ghosts,
+               # It is also the flag every downstream aggregate already reads,
+               # so a graced row drops out of the rating graph, the DPS
+               # averages and the profile counters for free — and
+               # game_points_at_leave below is what tells the two cases apart
+               # after the fact (migration 233).
+               "absent": p.steam_id in unrated,
+               # Stored for EVERY leaver that reports it, not just the graced
+               # ones: a refused claim (0-1 points but a non-zero signed tally)
+               # and a near-miss (left at 2) are both worth being able to see
+               # later, and `absent` already carries the decision itself.
+               "gpal": (getattr(p, "game_points_at_leave", None)
+                        if p.left_early else None),
                "dmgtl": (getattr(p, "damage_dealt_timeline", None) or None),
                "killtl": (getattr(p, "kill_timeline", None) or None),
                "pl": placements[p.steam_id], "le": bool(p.left_early),
@@ -31974,15 +32039,16 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         if rated:
             await db.flush()
             async with db.begin_nested():
-                # Players who ACTUALLY PLAYED this game. `ghosts` is the
-                # refutation-filtered absent set (a signed non-zero tally has
-                # already refuted a false `absent` claim), which is the same
-                # basis the economy meter uses for `_n_live_meter` / `n_live`.
+                # Players who ACTUALLY PLAYED this game. `unrated` is the
+                # refutation-filtered absent set plus the early-leave graces (a
+                # signed non-zero tally has already refuted a false `absent` or
+                # grace claim), which is the same basis the economy meter uses
+                # for `_n_live_meter` / `n_live`.
                 # Recomputed rather than reusing those locals so the rule reads
                 # standalone; a roster ghost must not inflate a shutout's
                 # player-count tier any more than it inflates a payout.
                 _ach_players = sorted(
-                    (p for p in report.players if p.steam_id not in ghosts),
+                    (p for p in report.players if p.steam_id not in unrated),
                     key=lambda q: str(id_by_steam[q.steam_id]))
                 # Codex Aug-7 (HIGH): the shutout TIER must not be decided by
                 # `absent`/`left_early`, which are UNSIGNED client flags. A
@@ -32011,7 +32077,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 _win_entry = next((p for p in report.players
                                    if p.steam_id == report.winner_steam_id), None)
                 if (_win_entry is not None
-                        and report.winner_steam_id not in ghosts
+                        and report.winner_steam_id not in unrated
                         and _win_entry.rounds_won == 5
                         and all(p.rounds_won == 0 for p in report.players
                                 if p.steam_id != report.winner_steam_id)):

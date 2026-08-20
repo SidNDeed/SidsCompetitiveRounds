@@ -5855,6 +5855,14 @@ namespace CompetitiveRounds
                     // game is absent=false and still gets rated — leaving
                     // at 0 score must not dodge the loss.
                     absent = kv.Value.leftGameNumber != FfaMode.GameNumber,
+                    // Field point total when they left — drives the server's
+                    // early-leave grace (under 2 = nothing was decided yet, so
+                    // no rating for them this game). Only meaningful for a
+                    // leave from THIS game: a carried ghost's figure belongs to
+                    // a game that already ended, so send -1 and let the server
+                    // read it as "not reported".
+                    gamePointsAtLeave = (kv.Value.leftGameNumber == FfaMode.GameNumber
+                                         ? kv.Value.gamePointsAtLeave : -1),
                     cards = FfaMode.PickHistoryFor(kv.Value.slot),
                     telemetry = null,
                     // #127/#130: a player who left DURING this game still dealt

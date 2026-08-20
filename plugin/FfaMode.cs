@@ -300,6 +300,13 @@ namespace CompetitiveRounds
             // this game" (rated, even at zero score) from "absent ghost
             // carried for the roster check" (never rated).
             public int leftGameNumber;
+            // Points the WHOLE FIELD had scored when they left. Under the
+            // server's grace threshold (2, same as the bet cutoff and the
+            // bug-#114 fresh-game cancel below) nothing had been decided yet,
+            // so the server does not rate them for this game. Reported by US,
+            // a client still in the room — the leaver cannot vouch for their
+            // own grace.
+            public int gamePointsAtLeave;
         }
 
         private class FfaBaseline
@@ -1083,6 +1090,12 @@ namespace CompetitiveRounds
                 kv.Value.roundsWon = 0;
                 kv.Value.pointsTotal = 0;
                 kv.Value.kills = 0;
+                // Their leave belongs to a game that is over. Carrying the old
+                // field total forward would hand the NEXT game's report a
+                // grace figure for a game they were never in; the report only
+                // sends it for leftGameNumber == GameNumber anyway, and -1
+                // keeps the in-memory record honest if that ever changes.
+                kv.Value.gamePointsAtLeave = -1;
             }
             isTransitioning = false;
             pointLatched = false;
@@ -1192,8 +1205,10 @@ namespace CompetitiveRounds
                 pointsTotal = PointsTotalFor(teamId),
                 kills = KillsFor(teamId),
                 leftGameNumber = gameNumber,
+                gamePointsAtLeave = TotalPointsScored(),
             };
-            Plugin.Log.LogInfo($"[FFA] leaver recorded: {steamId} slot={teamId} r={RoundsFor(teamId)}");
+            Plugin.Log.LogInfo($"[FFA] leaver recorded: {steamId} slot={teamId} r={RoundsFor(teamId)} "
+                               + $"fieldPts={Leavers[steamId].gamePointsAtLeave}");
         }
 
         // ── Death handling / round accounting ──

@@ -4,7 +4,30 @@
 
 Schema changes: migration **229** (`stream_channel_posts` gains
 `twitch_vod_url` / `youtube_vod_url`; retro-fixed 16 finalized posts —
-applied 2026-08-18).
+applied 2026-08-18), **233** (`ffa_match_players.game_points_at_leave`),
+**234** (one-off: un-rates ten pre-fix early-leave rows).
+
+**FFA early-leave grace (Aug 20)**
+
+- **Leaving an FFA before the field has scored two points no longer costs
+  Elo.** Below two half-points nothing has been decided, so the placement
+  the report hands a leaver is not evidence about anyone — the same
+  threshold the bet cutoff, the 2v2 disconnect rule and the client's own
+  fresh-game cancel already use. The leaver is unrated for that game
+  (no rating, no XP or gold, out of everyone else's beaten counts); the
+  players who stayed play on and are rated among themselves.
+- This does not reopen leave-to-dodge. The dodge that rule exists to stop is
+  quitting a game you are losing, and by then the field is well past two
+  points. The grace window is the opening seconds, before the first round
+  converts. The claim is also reported by a *surviving* client, never by the
+  leaver, and is refused outright if the leaver's signed tally shows they
+  actually played.
+- **Ten past games corrected.** Nine players who left with a completely
+  empty stat line — no rounds, no points, no kills, no damage — had that
+  game's rating change reversed. Eight gain (from +22.9 to +180.5); one
+  loses a +69.8 that the same rule says they should not have banked. XP and
+  gold already paid are untouched, and nobody who stayed in those games has
+  their result changed.
 
 **Broadcast stream stability (Aug 18)**
 
