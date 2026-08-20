@@ -2477,8 +2477,9 @@ namespace CompetitiveRounds
             UIFactory.SetOverflowMode(row.txtName,3);
             /* Truncate alone is only half the bound. Word wrap is ON by
              * default, so an over-long "name [title]" WRAPS to a second line
-             * this 22px box cannot show, and Truncate then drops it — the cell
-             * renders EMPTY rather than clipped. Wrap off makes the failure a
+             * this 22px box cannot show, and Truncate then drops that wrapped
+             * remainder. Line 1 still renders, so the cell is not blank --
+             * it silently loses the [title] that wrapped. Wrap off makes the failure a
              * horizontal clip at the cell edge, which preserves at least the
              * prefix that wrapping could show. Deliberately NOT FitOneLine:
              * Overflow would undo the July 29 fix where a long combo painted
@@ -3846,6 +3847,15 @@ namespace CompetitiveRounds
             UIFactory.AddLE(row.root,prefH:31,minH:31,flexH:0);
             row.txtInfo=CreateFfaTextCell("Info",row.root.transform,760,UIFactory.AlignMidLeft,17f,C_WHITE,true,300);
             UIFactory.SetOverflowMode(row.txtInfo,3);
+            /* Wrap off, same treatment as the leaderboard/identity cells.
+             * This cell is the one the member line made MULTI-LINE, and it
+             * is sized for exactly two line boxes. If the FIRST line wraps
+             * (a bet tag plus [PRIVATE] in English, a bet tag alone in
+             * es/ru/uk/sv) it consumes both boxes and Truncate drops the
+             * member line entirely -- the whole point of sizing this cell.
+             * No-wrap also makes the member-line cut deterministic and at
+             * the box edge rather than at a word boundary. */
+            UIFactory.SetWordWrap(row.txtInfo,false);
             row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",16f,C_WHITE,
                 new Color(0.25f,0.42f,0.20f,0.95f),
                 ()=>{
@@ -3962,6 +3972,31 @@ namespace CompetitiveRounds
                         +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
                     // Re-asserted per fill — pooled rows swap shapes (#63).
                     UIFactory.SetPrefH(row.root,memberLine!=null?54f:31f);
+                    /* The ROOT's height was never the binding constraint. txtInfo
+                     * is built by CreateFfaTextCell at a hardcoded sizeDelta
+                     * height of 25, and CreateText bakes that into its
+                     * LayoutElement as prefH AND minH; AddHLG sets
+                     * childControlHeight=true while this row passes
+                     * forceExpandH:false, so the child takes its LayoutElement
+                     * preferred height (priority 1, which outranks TMP's own
+                     * content-based ILayoutElement value at priority 0) and is
+                     * pinned at 25 no matter what it holds. A 17pt first line
+                     * (~20px) plus the <size=13> member line (~15px) needs
+                     * ~35px, and mode-3 Truncate drops the line that does not
+                     * fit — so growing only the root reserved 54px of empty row
+                     * and the member list rendered for NOBODY since it shipped.
+                     * Size the text element too, minH alongside prefH (the
+                     * dynamic-resize rule above SetMinH), and restore 25 on the
+                     * one-line path because these rows are pooled. This changes
+                     * no OUTER height — the row already reserved 54 — so the
+                     * scroll list's height budget is untouched (#63/#199/#245). */
+                    var ffaInfoGO=(row.txtInfo as Component)?.gameObject;
+                    if(ffaInfoGO!=null)
+                    {
+                        float infoH=memberLine!=null?48f:25f;
+                        UIFactory.SetPrefH(ffaInfoGO,infoH);
+                        UIFactory.SetMinH(ffaInfoGO,infoH);
+                    }
                     bool joinable=l.player_count<l.max_players
                         &&ApiClient.FfaQueueStatus!="leaving";
                     row.joinBtn.SetActive(joinable);
@@ -4109,6 +4144,15 @@ namespace CompetitiveRounds
             UIFactory.AddLE(row.root,prefH:29,minH:29,flexH:0);
             row.txtInfo=CreateFfaTextCell("Info",row.root.transform,700,UIFactory.AlignMidLeft,15f,C_WHITE,true,300);
             UIFactory.SetOverflowMode(row.txtInfo,3);
+            /* Wrap off, same treatment as the leaderboard/identity cells.
+             * This cell is the one the member line made MULTI-LINE, and it
+             * is sized for exactly two line boxes. If the FIRST line wraps
+             * (a bet tag plus [PRIVATE] in English, a bet tag alone in
+             * es/ru/uk/sv) it consumes both boxes and Truncate drops the
+             * member line entirely -- the whole point of sizing this cell.
+             * No-wrap also makes the member-line cut deterministic and at
+             * the box edge rather than at a word boundary. */
+            UIFactory.SetWordWrap(row.txtInfo,false);
             row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",14f,C_WHITE,
                 new Color(0.25f,0.42f,0.20f,0.95f),
                 ()=>{JoinHostLobbyRow(row,team);dirty=true;},
@@ -4328,6 +4372,21 @@ namespace CompetitiveRounds
                     // Two-line rows grow; re-asserted every fill because the
                     // pooled row may swap between shapes (#63 prefH rules).
                     UIFactory.SetPrefH(row.root,memberLine!=null?50f:29f);
+                    /* Same defect as the FFA browser row above (see the long
+                     * note there for the mechanism): txtInfo is pinned at its
+                     * build-time 25px by CreateText's baked prefH/minH, so
+                     * growing only the root left the member line undrawn. This
+                     * row's first line is 15pt (~18px) + the <size=13> member
+                     * line (~15px) = ~33px, and the root grows to 50, so 44
+                     * fits with headroom for taller fallback metrics in ru/uk.
+                     * Outer heights unchanged — scroll budget untouched. */
+                    var hostInfoGO=(row.txtInfo as Component)?.gameObject;
+                    if(hostInfoGO!=null)
+                    {
+                        float infoH=memberLine!=null?44f:25f;
+                        UIFactory.SetPrefH(hostInfoGO,infoH);
+                        UIFactory.SetMinH(hostInfoGO,infoH);
+                    }
                     row.joinBtn.SetActive(l.player_count<l.max_players&&!leaving&&!busy);
                     // Review find 2: an OPEN wager stays cancellable even if
                     // the lobby stops being bettable (dropped below two
@@ -21901,7 +21960,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             /* Same as the FFA leaderboard's name cell: this inherits CreateText's
              * Truncate default but NOT no-wrap, so an over-long "name [title]"
              * wraps into a second line the 22px box cannot show and Truncate
-             * drops the whole cell. Wrap off restores a horizontal clip. */
+             * drops that remainder, silently losing the [title]. Wrap off
+             * restores a horizontal clip at the box edge instead. */
             UIFactory.SetWordWrap(row.txtName, false);
             row.txtRating = UIFactory.CreateText("rt", row.root.transform, "", 15f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(TLB_COL_W[2], 22));
             UIFactory.SetBold(row.txtRating, true);
