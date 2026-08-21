@@ -10480,7 +10480,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Map lighting toggled");
                     Plugin.MapLightingEnabled.Value = !Plugin.MapLightingEnabled.Value;
-                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
+                    // Re-tint the live skin too, not just the backdrop: which side carries
+                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
+                    // leaves the wall/art surfaces holding the WRONG correction until the
+                    // next map load — uncorrected after enable, doubly corrected after
+                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
+                    try
+                    {
+                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
+                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
+                        var liveSku = MapColorState.CurrentSku;
+                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
+                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
+                    }
+                    catch { }
                     dirty = true;
                 },
                 "Map lighting: the light and shade the map is drawn with. Off = flat, evenly-lit maps for extra FPS.");
@@ -10490,7 +10503,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Map shadows toggled");
                     Plugin.MapShadowsEnabled.Value = !Plugin.MapShadowsEnabled.Value;
-                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
+                    // Re-tint the live skin too, not just the backdrop: which side carries
+                    // the inverse gain depends on whether SFSS lighting is on, so a toggle
+                    // leaves the wall/art surfaces holding the WRONG correction until the
+                    // next map load — uncorrected after enable, doubly corrected after
+                    // disable (Codex r5 #1). Deferred, so it never lands mid-transition.
+                    try
+                    {
+                        MapPhysicalColorPatch.RenderPerfSettings.Apply();
+                        MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop();
+                        var liveSku = MapColorState.CurrentSku;
+                        if (!string.IsNullOrEmpty(liveSku) && CustomMapColors.IsCustomSku(liveSku))
+                            MapPhysicalColorPatch.ScheduleDeferredTints(liveSku);
+                    }
+                    catch { }
                     dirty = true;
                 },
                 "Soft shadow beams cast by map lighting. Off = no shadows (lighting stays on) for extra FPS.");

@@ -6,6 +6,42 @@ Schema changes: migration **229** (`stream_channel_posts` gains
 `twitch_vod_url` / `youtube_vod_url`; retro-fixed 16 finalized posts —
 applied 2026-08-18).
 
+**Map skin backgrounds fixed (bug 249, Aug 19)**
+
+- Every custom map skin now renders its own designed background. They were
+  all landing on the same pinkish red — most visible on the broadcast seat,
+  which cycles all 23 skins, and easy to miss on a normal seat, which holds
+  one skin for a whole session.
+- The cause: the map background is the background camera's clear colour, and
+  that clear is pure red. Vanilla ROUNDS arts turn it into a sky with a large
+  hue shift; our skins replaced that with a colour *filter*, which multiplies
+  — and multiplying pure red can never produce green or blue. Every skin
+  collapsed onto one hue. Verified in-game: Abyss ("near-black blue") rendered
+  hot magenta before the fix and deep blue after, on the same build.
+- Also fixed in the same pass: the map arts share particle systems, so
+  switching off the unused arts was switching off the live skin's own backdrop
+  a couple of seconds into every round; the screen-filling backdrop layers were
+  being painted with the skin's *wall* colours instead of its background; the
+  per-skin post-process profile was sharing its effects with the base game's
+  art asset, so repeated skin changes were quietly degrading it; and a backdrop
+  pass that never matched a backdrop was recolouring Homing bullets and the
+  card-choice face instead. Retired.
+- The neutral skins read neutral again. Monochrome and Platinum were coming out
+  warm beige because the base game grades everything the main camera draws with
+  a red-weighted gain, and nothing was compensating for it. The correction is
+  measured from the render rather than from the profile numbers, only touches
+  colours the skin actually designed as grey, and scales with brightness — so
+  Magma, Abyss, Mint and Soft measured unchanged.
+- Five older defects in the same subsystem, fixed in the same pass: the
+  automatic per-round art change could still recolour particles in the middle of
+  the map slide (the stall that used to leave players off-screen); the "disable
+  map lighting" backdrop was painted at an unsafe moment and then overwritten a
+  couple of seconds later, so the setting never visually stuck; the premium
+  skins' shimmer ticked faster than the transition guard and reached into the
+  same window; switching from a custom skin back to a vanilla one left the art
+  wearing the old colours; and unequipping your LAST map colour did nothing
+  until you restarted the game.
+
 **Broadcast stream stability (Aug 18)**
 
 - Streams no longer cut in and out: the VM director holds outputs through

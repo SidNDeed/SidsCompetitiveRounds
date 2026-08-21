@@ -149,6 +149,12 @@ namespace CompetitiveRounds
             // Multi-equip map colors — player cycles between these in-game with Left Shift.
             // Empty list → no override, ArtHandler falls through to vanilla random rotation.
             public List<string> active_color_skus;
+            // TRUE only when the response actually carried a parseable active_color_skus
+            // array. The list itself is allocated unconditionally, so "empty" alone
+            // cannot distinguish "you have nothing equipped" from "the field was absent
+            // or the parse threw" — and the map-color cycle needs that distinction to
+            // decide whether an empty list may drop the player's last-known skin.
+            public bool active_color_skus_present;
             // Player BODY color (kind=player_color). Single-equip; overrides team color.
             public string active_player_color_sku;
             public string active_player_color_hex;
@@ -5623,13 +5629,18 @@ namespace CompetitiveRounds
             data.active_color_skus = new List<string>();
             try
             {
-                int csStart = response.IndexOf("\"active_color_skus\"");
+                // String-aware property lookup, not a raw IndexOf: a player whose display
+                // name is literally `active_color_skus` would otherwise be matched as the
+                // property and shadow the real one (Codex r5 #7).
+                int arrStart = FindJsonArrayStartStringAware(response, "active_color_skus");
+                int csStart = arrStart;
                 if (csStart >= 0)
                 {
-                    int arrStart = response.IndexOf("[", csStart);
                     int arrEnd = FindMatchingBracket(response, arrStart);
-                    if (arrStart >= 0 && arrEnd >= 0 && arrEnd > arrStart)
+                    bool ownArray = arrStart >= 0;
+                    if (ownArray && arrStart >= 0 && arrEnd >= 0 && arrEnd > arrStart)
                     {
+                        data.active_color_skus_present = true;   // the server really answered
                         string arr = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
                         int cursor = 0;
                         while (cursor < arr.Length)
