@@ -133,6 +133,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastEnabled;
         internal static ConfigEntry<string> BroadcastStatusPath;   // §3b lease file
         internal static ConfigEntry<bool> BroadcastHideChatPane;   // broadcast seat only
+        internal static ConfigEntry<string> BroadcastTestMapSkin;  // broadcast seat only — map-skin test lever
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
         // anchor in BroadcastHud.TopAnchorY) — orphan cfg entries are inert.
@@ -844,6 +845,12 @@ namespace CompetitiveRounds
             BroadcastHideChatPane = Config.Bind(
                 "Broadcast", "HideChatPane", true,
                 "Hide the floating in-game chat pane on the broadcast seat so stream frames stay clean. Only consulted on the broadcast identity."
+            );
+            BroadcastTestMapSkin = Config.Bind(
+                "Broadcast", "TestMapSkin", "",
+                "Broadcast seat only: render a specific map skin without owning or equipping it, so the broadcast look can be checked outside a live spectate session. "
+                + "Empty = off (normal behaviour). A sku name (e.g. mapcolor_soft) pins that skin. The word 'cycle' runs the spectator auto-cycle on this seat. "
+                + "Ignored entirely unless the local Steam account IS the broadcast identity, so it grants nothing to players."
             );
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
@@ -7271,6 +7278,10 @@ namespace CompetitiveRounds
             {
                 MapPhysicalColorPatch.SupersedePendingTints();
                 CurrentSku = null;
+                // Same leak as the vanilla fallthrough: the spectator's last skin
+                // painted LightCamera's clear, and this seat goes back to the menu
+                // where no Map.Start runs to restore it.
+                MapPhysicalColorPatch.RestoreVanillaBackdrop("spectator session end");
                 ArtHandlerNextArtPatch.ResetSpectatorCycle();
             }
             catch { }
@@ -7290,6 +7301,14 @@ namespace CompetitiveRounds
         // re-reading our own already-multiplied value. Keyed by GetInstanceID — each
         // round's new PS instances populate fresh entries on their first apply.
         private static readonly Dictionary<int, Color> _vanillaPSColorCache = new Dictionary<int, Color>(512);
+        // The FULL authored startColor, kept alongside the flattened colour above.
+        // `startColor.color` samples a gradient down to one Color (and throws to white
+        // on some ROUNDS presets), which is fine for the luminance the tint maths wants
+        // but destroys a gradient-mode system on RESTORE — vanilla would come back as a
+        // flat colour, permanently (Codex r4 #5). Restores read this; tints read the
+        // flattened one.
+        private static readonly Dictionary<int, ParticleSystem.MinMaxGradient> _vanillaPSGradientCache =
+            new Dictionary<int, ParticleSystem.MinMaxGradient>(512);
 
         /// <summary>Returns the vanilla startColor for a particle system, caching on
         /// first encounter. Subsequent calls for the same instance return the cached
@@ -7302,6 +7321,7 @@ namespace CompetitiveRounds
             try { id = ps.GetInstanceID(); }
             catch { return Color.white; }
             if (_vanillaPSColorCache.TryGetValue(id, out var cached)) return cached;
+            try { _vanillaPSGradientCache[id] = ps.main.startColor; } catch { }
             Color current;
             try { current = ps.main.startColor.color; }
             catch { current = Color.white; }
@@ -7315,6 +7335,23 @@ namespace CompetitiveRounds
         // duration after Map.Start, any particle mutation risks the MapTransition NRE
         // (learning #45). NextArt uses this to decide defer-vs-apply-now.
         public static float LastMapStartTime = -999f;
+
+        /// <summary>The authoritative "are we inside MapTransition.Move" test.
+        ///
+        /// `MapTransition.isTransitioning` is a public static that vanilla sets true
+        /// for the whole move and false at the end (decompile: MapTransition.Move).
+        /// Every earlier version of this guard inferred the answer from
+        /// LastMapStartTime instead, and that stamp is the PREVIOUS map's until the
+        /// incoming Map.Start writes it — so every "am I safe to touch particles"
+        /// check in this file has been answering FALSE inside the very window it
+        /// exists to protect. Keep the stamp test as a second condition (it covers
+        /// the tail after isTransitioning clears, which #45 measured at ~0.9s of
+        /// move plus a longer round-won animation), but lead with the real signal.</summary>
+        public static bool InMapTransition()
+        {
+            try { if (MapTransition.isTransitioning) return true; } catch { }
+            return Time.time - LastMapStartTime < MapTransitionGuardSec;
+        }
         // How long after Map.Start we treat the scene as "still transitioning" and must
         // NOT mutate particles. The move itself is ~0.9s; 2.0s is the proven-safe buffer
         // from learning #45 (v1.26.9 cut it to 0.4s and reintroduced the player-freeze /
@@ -7375,6 +7412,190 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        // ── Post_Main gain compensation (bug 249) ─────────────────────────────
+        // Everything MainCamera draws is graded by the 'Default' profile on the
+        // Post_Main volume (layer 8): gain (1.00, 0.644, 0.309), postExposure
+        // +1.50 EV, contrast +45, ACES. That gain is strongly red-weighted, and it
+        // is vanilla — every ROUNDS art absorbs it inside its own HDR grading. Ours
+        // cannot: we force LowDefinitionRange, where postExposure does not exist.
+        // Uncompensated it pulls every background toward orange, which is a defect
+        // and not taste for the skins that are deliberately NEUTRAL — Monochrome
+        // (designed 0.28,0.28,0.30) measured (0.78, 0.68, 0.60) on screen, a warm
+        // beige. Partially invert the gain so a designed grey renders grey; only
+        // partially, because the rest of the scene still carries the warm cast and
+        // a fully-corrected sky would not sit with it.
+        // MEASURED, not modelled. Post_Main's authored gain is (1.00, 0.644, 0.309),
+        // but that is not the transfer the sky actually sees: the correction reaches
+        // the screen through the SFSS lightmap and then an ACES tonemap with contrast
+        // +45, both of which compress it. Inverting the authored numbers overshot into
+        // lavender. These factors were solved from the render instead — Monochrome
+        // measured (0.79,0.69,0.61) with no correction and (0.65,0.67,0.83) with the
+        // authored inverse, giving the per-channel response, and these are the values
+        // that put all three channels on the green channel's level.
+        private static readonly Vector3 NEUTRAL_CORRECTION = new Vector3(0.563f, 1.000f, 1.277f);
+        private const float GAIN_COMP_STRENGTH = 1.00f;
+        // Full correction from this luminance up; proportionally less below it. The
+        // warm cast is proportional to brightness, so a very dark neutral does not need
+        // correcting and must not GET it — Charcoal already measured a 0.034 spread on
+        // its own and a flat correction pushed it to 0.116 blue.
+        private const float NEUTRAL_LUM_FULL = 0.35f;
+
+        /// <summary>Pre-divide a colour by Post_Main's red-weighted gain (normalised
+        /// so overall brightness is unchanged), SCALED BY HOW NEUTRAL THE COLOUR IS.
+        ///
+        /// The rule this encodes: a colour the designer made GREY must render grey; a
+        /// colour they made saturated keeps its own hue and the scene's warm cast with
+        /// it. Monochrome (0.28,0.28,0.30), Charcoal (0.07,0.07,0.08) and Platinum
+        /// (0.24,0.26,0.29) are deliberately neutral and were rendering as warm beige
+        /// — measured (0.77,0.67,0.60) for Mono — purely because Post_Main's
+        /// gain (1.00, 0.644, 0.309) tints everything MainCamera draws. Correcting
+        /// every skin equally would have cooled the 20 coloured ones too, which nobody
+        /// asked for; correcting in proportion to (1 - chroma) fixes exactly the skins
+        /// that are supposed to be grey and leaves Magma/Abyss/Soft within a percent
+        /// of where they were.
+        ///
+        /// chroma = (max-min)/max, so 0 is a perfect grey. Full correction at 0,
+        /// none from 0.4 up (Soft sits at 0.36, Magma at 0.91).</summary>
+        /// APPLIED EXACTLY ONCE PER PIXEL (Codex r3 #4). The scene composites as
+        /// sprite x lightmap, so correcting the surface colour AND the SFSS light
+        /// applied the inverse gain twice and over-shot into blue — Platinum measured
+        /// -0.20 skew. The correction now lives on the two things that each cover a
+        /// path exactly once: the SFSS light/ambient (which multiplies every lit
+        /// sprite) and the LightCamera clear (which the lightmap never touches).
+        /// Surface particle colours are left alone.
+        ///
+        /// HEADROOM RULE. Correcting a neutral for a 0.309 blue gain needs blue at
+        /// 3.2x, and a channel stops at 1.0 — so full correction is only possible for
+        /// colours dark enough to have the room. Rather than clip (which railed
+        /// Monochrome to pure white, neutral only by accident) or cap (which dimmed
+        /// the SFSS light and rendered Mono and Charcoal near-black), back the
+        /// correction off to exactly the strength that FITS: never clip, never
+        /// brighten past 1.0, and take as much neutrality as the headroom allows.
+        /// Dark skins get almost all of it, bright ones get what is physically
+        /// available. One rule, no tuned ceiling.
+        /// <summary>True when the SFSS lighting pass is running. With it OFF the light
+        /// carries no correction (SFRenderer is disabled and the shader globals are
+        /// pinned white), so the SURFACE colours have to carry it instead — otherwise
+        /// "disable map lighting" brings the warm cast straight back (Codex r4 #6).
+        /// Exactly one of the two paths corrects, never both.</summary>
+        internal static bool MapLightingActive()
+        {
+            try { return Plugin.MapLightingEnabled == null || Plugin.MapLightingEnabled.Value; }
+            catch { return true; }
+        }
+
+        /// <summary>Correct a SURFACE colour only when the light is not doing it.</summary>
+        private static Color CompensateSurfaceIfUnlit(Color c)
+        {
+            return MapLightingActive() ? c : CompensatePostMain(c);
+        }
+
+        private static Color CompensatePostMain(Color c)
+        {
+            try
+            {
+                float mx = Mathf.Max(c.r, Mathf.Max(c.g, c.b));
+                float mn = Mathf.Min(c.r, Mathf.Min(c.g, c.b));
+                float chroma = mx > 0.001f ? (mx - mn) / mx : 0f;
+                float lum = 0.299f * c.r + 0.587f * c.g + 0.114f * c.b;
+                float strength = GAIN_COMP_STRENGTH
+                                 * Mathf.Clamp01(1f - chroma * 2.5f)          // only near-neutrals
+                                 * Mathf.Clamp01(lum / NEUTRAL_LUM_FULL);     // only bright enough ones
+                if (strength <= 0.001f) return c;
+
+                float fr = NEUTRAL_CORRECTION.x;
+                float fg = NEUTRAL_CORRECTION.y;
+                float fb = NEUTRAL_CORRECTION.z;
+
+                // Largest strength s for which no channel exceeds 1.0. Each channel is
+                // c * Lerp(1, f, s), linear in s, so solve per channel and take the min.
+                float fit = strength;
+                fit = Mathf.Min(fit, FitStrength(c.r, fr, strength));
+                fit = Mathf.Min(fit, FitStrength(c.g, fg, strength));
+                fit = Mathf.Min(fit, FitStrength(c.b, fb, strength));
+                if (fit <= 0.001f) return c;
+
+                return new Color(c.r * Mathf.Lerp(1f, fr, fit),
+                                 c.g * Mathf.Lerp(1f, fg, fit),
+                                 c.b * Mathf.Lerp(1f, fb, fit), c.a);
+            }
+            catch { return c; }
+        }
+
+        /// <summary>Strength at which `value * Lerp(1, factor, s)` reaches 1.0,
+        /// clamped to [0, want]. Returns `want` when the channel never gets there.</summary>
+        private static float FitStrength(float value, float factor, float want)
+        {
+            if (value <= 0.0001f || factor <= 1f) return want;      // shrinking channels cannot clip
+            float atWant = value * Mathf.Lerp(1f, factor, want);
+            if (atWant <= 1f) return want;
+            float s = ((1f / value) - 1f) / (factor - 1f);
+            return Mathf.Clamp(s, 0f, want);
+        }
+
+        // ── Backdrop vs wall classification (bug 249) ─────────────────────────
+        // BACKDROP = "the background camera draws it", i.e. the system's layer is in
+        // that camera's cullingMask. Nothing else is behind the map: LightCamera's
+        // mask is 512 (layer 9) and MainCamera's 2522423 excludes layer 9, so layer 9
+        // is exactly the set that renders under everything, and every other art part
+        // (Sky, SkyBG, Paint, Samsung, 'Purple pink', NightSky, the Rainbow parts) is
+        // layer 14 and is drawn by MainCamera in FRONT — those are the skin's walls
+        // and keep the designed primary/secondary two-tone.
+        //
+        // An earlier revision classified by renderer bounds ("wider than the ~71-unit
+        // play area = sky"). Codex killed it, correctly, on two grounds: every
+        // observed system measures 91-130 units so the wall branch was DEAD (a silent
+        // removal of the two-tone wall feature), and 'Purple pink' is a layer-14
+        // foreground part that measures 130x109 and would have been mislabelled. The
+        // camera mask is the ground truth the bounds were only a proxy for, and it
+        // does not breathe frame to frame the way a live-particle AABB does — which
+        // also removes the between-round colour flicker risk that failed approaches
+        // #1 and #2 (see the history above) were about.
+        private static int _backdropLayerMask = 0;
+        private static int _backdropMaskThisPass = 0;
+        private static readonly HashSet<int> _loggedClass = new HashSet<int>();
+
+        /// <summary>Records the culling mask of the camera(s) painting the canvas, so
+        /// the backdrop set is read from the scene instead of hardcoded. Accumulated
+        /// WITHIN a pass and then REPLACED, never OR'd across the session (Codex r2
+        /// #7): a camera that exists only in one scene — a menu rig, another mod's —
+        /// would otherwise widen the mask permanently and start labelling layer-14
+        /// walls as backdrop for the rest of the process.</summary>
+        private static void NoteBackdropCamera(Camera cam)
+        {
+            try { if (cam != null) _backdropMaskThisPass |= cam.cullingMask; } catch { }
+        }
+
+        private static void CommitBackdropMask()
+        {
+            if (_backdropMaskThisPass != 0 && _backdropMaskThisPass != _backdropLayerMask)
+            {
+                _backdropLayerMask = _backdropMaskThisPass;
+                _loggedClass.Clear();     // re-log the classification under the new mask
+                Plugin.Log.LogInfo($"[MAPCOLOR-CLASS] backdrop layer mask = {_backdropLayerMask}");
+            }
+            else if (_backdropMaskThisPass != 0)
+            {
+                _backdropLayerMask = _backdropMaskThisPass;
+            }
+        }
+
+        private static bool IsBackdropSystem(ParticleSystem ps)
+        {
+            try
+            {
+                // Fall back to layer 9 only if ApplyCameraBackground has not run yet;
+                // it runs before every tint pass, so this is a first-frame guard.
+                int mask = _backdropLayerMask != 0 ? _backdropLayerMask : (1 << 9);
+                bool verdict = ((1 << ps.gameObject.layer) & mask) != 0;
+                int id = ps.GetInstanceID();
+                if (_loggedClass.Add(id))
+                    Plugin.Log.LogInfo($"[MAPCOLOR-CLASS] '{ps.gameObject.name}' layer={ps.gameObject.layer} → {(verdict ? "BACKDROP" : "wall")}");
+                return verdict;
+            }
+            catch { return false; }
+        }
+
         // Cap a lifted color's brightest channel so bright hues can't blow out
         // into HDR bloom (Sid: platinum/gilded were "blindingly shiny" — silver
         // × 1.6 lift = 1.4+ per channel = nuclear bloom). 1.15 keeps a gentle
@@ -7418,24 +7639,20 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku))
             {
                 // Vanilla/default skin active — un-tint the persistent sky object +
-                // camera clears + backdrop quads so a previous custom skin's
-                // backdrop doesn't linger.
-                RestoreVanillaSky();
-                RestoreCameraBackground();
-                RestoreBackdropQuads();
-                RestoreLighting();
-                _twinkleSystems.Clear();
-                // v1.32 round 2: runs LAST so a lighting-off flat backdrop wins over
-                // the RestoreVanillaSky above (which would otherwise restore the raw
-                // dark sky). No-op when lighting is on and never toggled off.
-                RenderPerfSettings.ApplyBackdrop();
+                // the background camera clear so a previous custom skin's backdrop
+                // doesn't linger. Restoring the clear is what hands the canvas back
+                // to the vanilla art's own grading (which recolours it via hueShift).
+                // Map.Start runs INSIDE MapTransition.Move, so the sky restore must
+                // be deferred — RestoreVanillaBackdrop handles the split and ends
+                // with RenderPerfSettings.ApplyBackdrop so a lighting-off flat
+                // backdrop still wins over the restored raw dark sky.
+                RestoreVanillaBackdrop("map start, vanilla sku");
                 return;
             }
             // Defer past the transition before touching particles (see MapTransitionGuardSec).
             // Hosted on the persistent Plugin object, NOT the Map — the Map can be destroyed
             // mid-transition, which would kill a Map-hosted coroutine before it applies.
-            ScheduleDeferredTints(sku);
-            RenderPerfSettings.ApplyBackdrop();
+            ScheduleDeferredTints(sku);   // its apply ends with ApplyBackdropNow
         }
 
         // Schedule the wall/atmosphere particle tint to run AFTER the MapTransition window.
@@ -7462,7 +7679,7 @@ namespace CompetitiveRounds
         private static string _pendingTintSku;
         private static int _pendingTintGen;
         private static float _tintNotBefore;              // Time.time deadline (scaled, matches the guard convention)
-        private static float _pendingTintClaimedAt = -999f; // realtime, for the dead-host TTL
+        private static int _pendingTintHostId;            // owner of the claim — see ScheduleDeferredTints
 
         /// <summary>An IMMEDIATE tint apply (the mid-round manual-Shift branch)
         /// supersedes whatever deferred pass is pending — review r2 MEDIUM: a
@@ -7481,13 +7698,21 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku)) return;
             float notBefore = Time.time + MapTransitionGuardSec;
             if (notBefore > _tintNotBefore) _tintNotBefore = notBefore;
-            bool samePending = string.Equals(_pendingTintSku, sku, StringComparison.OrdinalIgnoreCase)
-                && Time.realtimeSinceStartup - _pendingTintClaimedAt < 15f;
-            if (samePending) return;   // the pending pass now honors the pushed deadline
             var host = Plugin.Instance;
             if (host == null) return;
+            // Ownership, not a wall-clock TTL (Codex r5 #5). Plugin.Instance is a
+            // HideAndDontSave object ROUNDS' scene changes destroy and we respawn; its
+            // coroutines die with it. A TTL was wrong in both directions — too long
+            // stranded a real request behind a dead claim for up to 15s (the map simply
+            // never got tinted), too short let two coroutines paint at once. The claim
+            // now belongs to the host that made it, so a replacement host is never
+            // blocked and the old host's coroutine bows out on the generation check.
+            int hostId = host.GetInstanceID();
+            bool samePending = string.Equals(_pendingTintSku, sku, StringComparison.OrdinalIgnoreCase)
+                && _pendingTintHostId == hostId;
+            if (samePending) return;   // the pending pass now honors the pushed deadline
             _pendingTintSku = sku;
-            _pendingTintClaimedAt = Time.realtimeSinceStartup;
+            _pendingTintHostId = hostId;
             int gen = ++_pendingTintGen;
             host.StartCoroutine(DelayedApplyTints(sku, gen));
         }
@@ -7606,25 +7831,76 @@ namespace CompetitiveRounds
                             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
                         var profileField = typeof(ArtInstance).GetField("profile",
                             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                        // ⚠ ARTS SHARE PARTICLE SYSTEMS — the reason every skin's background
+                        // went flat two seconds into every round (bug 249). Parsed from
+                        // level0, ArtInstance.parts is:
+                        //   arts[0] RainbowSeq [Clouds*, RainbowSequence]
+                        //   arts[1] Rainbow    [Clouds*, Rainbow, ...]
+                        //   arts[2] Sweden     [Swe, den, Clouds*]
+                        //   arts[3] Gold       [Samsung, NightSky, Clouds*]
+                        //   arts[4] Soviet     [Clouds*, Purple pink]
+                        //   arts[5] Poison     [Clouds*, Poison, PoisonBG]
+                        //   arts[6] Gold       [Clouds*, NightSky, Gold]
+                        //   arts[7] Sky        [FireClouds*, Sky, SkyBG]
+                        //   arts[8] Poison     [Paint, PoisonBG, FireClouds*]
+                        // (* = layer 9, the ONLY layer the background camera renders; every
+                        // other part is layer 14 and is drawn by MainCamera in front.)
+                        // `Clouds` belongs to seven arts and `FireClouds` to two, so calling
+                        // TogglePart(false) on a non-base art SetActive(false)'d the base
+                        // art's own layer-9 renderer. Nothing ever switched it back on, so
+                        // after this pass the background camera had NO renderer at all and
+                        // the canvas was left bare — log-proven by the same system reporting
+                        // size=106x85 on one pass and size=0x0 on the next.
+                        //
+                        // Also: arts[] has duplicate profile names (arts[3]/arts[6] 'Gold',
+                        // arts[5]/arts[8] 'Poison') and ROUNDS' SetSpecificArt(string) BREAKS
+                        // on the first match, so only the first same-named art is ever live.
+                        // Claim that one as base; disable the others' EXCLUSIVE systems only.
+                        var baseSystems = new HashSet<int>();
+                        ArtInstance baseArtInstance = null;
                         foreach (var art in ah.arts)
                         {
                             if (art == null) continue;
+                            try
+                            {
+                                var prof = profileField?.GetValue(art) as UnityEngine.Object;
+                                if (prof == null || string.IsNullOrEmpty(baseArt)
+                                    || !string.Equals(prof.name, baseArt, StringComparison.OrdinalIgnoreCase)) continue;
+                            }
+                            catch { continue; }
+                            baseArtInstance = art;
+                            var bp = partsField?.GetValue(art) as ParticleSystem[];
+                            if (bp != null)
+                                foreach (var ps in bp) if (ps != null) baseSystems.Add(ps.GetInstanceID());
+                            break;   // first match only — that is the one SetSpecificArt lit
+                        }
+
+                        // If the base art could not be resolved (reflection failure, a
+                        // renamed profile), DO NOT run the disable pass: with no protected
+                        // set every system would be switched off and the background would
+                        // go black. Leaving the arts as ROUNDS left them is the safe miss.
+                        bool canDisable = baseArtInstance != null && baseSystems.Count > 0;
+                        if (!canDisable)
+                            Plugin.Log.LogWarning($"[MAPCOLOR] base art '{baseArt}' unresolved or empty for {sku} — skipping the art-disable pass (never blank the background on a lookup miss)");
+                        foreach (var art in ah.arts)
+                        {
+                            if (art == null || !canDisable) continue;
                             var partsArr = partsField?.GetValue(art) as ParticleSystem[];
                             if (partsArr == null) continue;
                             // Only the SKU's base art should paint the sky. Any other art left
                             // playing (e.g. the Rainbow arts) bleeds purple/pink into the
-                            // background — Magma's "sky is purple and pink". Turn the others off.
-                            bool isBase = false;
-                            try
-                            {
-                                var prof = profileField?.GetValue(art) as UnityEngine.Object;
-                                isBase = prof != null && !string.IsNullOrEmpty(baseArt)
-                                         && string.Equals(prof.name, baseArt, StringComparison.OrdinalIgnoreCase);
-                            }
-                            catch { }
+                            // background — Magma's "sky is purple and pink". Turn the others
+                            // off, but NEVER a system the base art also owns.
+                            bool isBase = ReferenceEquals(art, baseArtInstance);
                             if (!isBase)
                             {
-                                try { art.TogglePart(false); } catch { }
+                                foreach (var ps in partsArr)
+                                {
+                                    if (ps == null) continue;
+                                    if (baseSystems.Contains(ps.GetInstanceID())) continue;  // shared with the live art
+                                    try { ps.gameObject.SetActive(false); }
+                                    catch (Exception tx) { Plugin.Log.LogWarning($"[MAPCOLOR] art off failed: {tx.Message}"); }
+                                }
                                 continue;
                             }
                             // Premium sparkle skins: the atmosphere particles ARE the visible
@@ -7640,7 +7916,7 @@ namespace CompetitiveRounds
                                     Color vanilla = GetCachedVanillaColor(ps);
                                     float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
                                     var main = ps.main;
-                                    if (atmoSparkle.HasValue)
+                                    if (atmoSparkle.HasValue && !IsBackdropSystem(ps))
                                     {
                                         // Premium: primary-colored slabs at SUB-BLOOM brightness
                                         // (Sid: "way too flashy") + a subtle glint. The visible
@@ -7648,12 +7924,56 @@ namespace CompetitiveRounds
                                         // particles are glinted a few times a second.
                                         Color baseHue = SaturateColor(c, 1.15f);
                                         float gLift = 0.62f + 0.28f * Mathf.Clamp01(lum);
-                                        Color gA = CapBrightness(new Color(baseHue.r * gLift, baseHue.g * gLift, baseHue.b * gLift, vanilla.a), 0.85f);
+                                        // Both endpoints take the unlit correction, once, AFTER
+                                        // they are final — the twinkle loop re-applies these exact
+                                        // colours every 1.6s, so an uncorrected pair would keep
+                                        // repainting the warm cast back in with lighting off
+                                        // (Codex r5 #2).
+                                        Color gA = CompensateSurfaceIfUnlit(CapBrightness(
+                                            new Color(baseHue.r * gLift, baseHue.g * gLift, baseHue.b * gLift, vanilla.a), 0.85f));
                                         Color glintHue = Color.Lerp(gA, SaturateColor(atmoSparkle.Value, 1.0f), 0.5f);
-                                        Color gB = CapBrightness(new Color(glintHue.r * 1.15f, glintHue.g * 1.15f, glintHue.b * 1.15f, vanilla.a), 0.95f);
+                                        Color gB = CompensateSurfaceIfUnlit(CapBrightness(
+                                            new Color(glintHue.r * 1.15f, glintHue.g * 1.15f, glintHue.b * 1.15f, vanilla.a), 0.95f));
                                         main.startColor = new ParticleSystem.MinMaxGradient(gA, gB);
                                         RetintLiveParticles(ps, gA, gB);
                                         _twinkleSystems.Add(new TwinkleEntry { ps = ps, baseColor = gA, glintColor = gB });
+                                    }
+                                    else if (IsBackdropSystem(ps))
+                                    {
+                                        // BACKDROP SLAB (bug 249). These systems are 91-130
+                                        // world units across against a ~71-unit play area
+                                        // (OutOfBoundsHandler x span [-35.56, 35.56]) — they
+                                        // ARE the sky, not walls, and painting them with the
+                                        // wall pair is what "spectators see a different map
+                                        // skin background than the map skin has set" actually
+                                        // was. Measured: skin Soft put its SECONDARY (peach
+                                        // 0.92,0.66,0.48) on the 115x95 'Sky' slab, saturated
+                                        // x1.30 and lifted to 0.89 -> #DF925D, a salmon
+                                        // covering the whole screen. 17 of the 23 skins in the
+                                        // spectator cycle have a warm primary or secondary,
+                                        // which is the reported "8 out of 10 are pinkish".
+                                        // Now they carry the skin's DESIGNED background, at
+                                        // the same exposure as the canvas behind them so the
+                                        // two agree, two-toned toward the accent so the
+                                        // layered depth Sid asked for survives.
+                                        Color bgBase = CustomMapColors.GetBackgroundColor(sku) ?? c;
+                                        Color layer = (i % 2 == 0)
+                                            ? bgBase
+                                            : Color.Lerp(bgBase, secondary, 0.40f);
+                                        Color hue = SaturateColor(layer, 1.10f);
+                                        // Backdrop brightness, measured on this seat, not guessed.
+                                        // Everything these slabs draw is graded by Post_Main
+                                        // (layer 14): postExposure +1.50 EV = x2.83, contrast
+                                        // +45, ACES. At the old 0.45-0.80 band a designed
+                                        // (0.62,0.50,0.40) came out of the tonemapper at
+                                        // (0.87,0.73,0.58) — a washed cream. The 0.19-0.34 band
+                                        // lands it on the authored value after that x2.83.
+                                        float lift = (0.19f + 0.15f * Mathf.Clamp01(lum))
+                                                     * CustomMapColors.GetBackgroundExposureMultiplier(sku);
+                                        Color tinted = CapBrightness(CompensateSurfaceIfUnlit(
+                                            new Color(hue.r * lift, hue.g * lift, hue.b * lift, vanilla.a)), 1.0f);
+                                        main.startColor = new ParticleSystem.MinMaxGradient(tinted);
+                                        RetintLiveParticles(ps, tinted);
                                     }
                                     else
                                     {
@@ -7665,7 +7985,8 @@ namespace CompetitiveRounds
                                         Color layer = (i % 2 == 0) ? c : secondary;
                                         Color hue = SaturateColor(layer, 1.30f);
                                         float lift = 0.70f + 0.30f * Mathf.Clamp01(lum);
-                                        Color tinted = CapBrightness(new Color(hue.r * lift, hue.g * lift, hue.b * lift, vanilla.a), 1.0f);
+                                        Color tinted = CapBrightness(CompensateSurfaceIfUnlit(
+                                            new Color(hue.r * lift, hue.g * lift, hue.b * lift, vanilla.a)), 1.0f);
                                         main.startColor = new ParticleSystem.MinMaxGradient(tinted);
                                         RetintLiveParticles(ps, tinted);
                                     }
@@ -7699,35 +8020,144 @@ namespace CompetitiveRounds
                 // backdrop quads (learning #116 v2 — MainCam clears Depth only, so
                 // whatever is under it paints the sky).
                 ApplyCameraBackground(sku);
-                int quadParts = TintBackdropQuads(sku);
-                if (quadParts > 0) Plugin.Log.LogInfo($"[MAPCOLOR] tinted {quadParts} backdrop quad(s) for {sku}");
                 // The strongest lever: SFSS light + ambient carry the sky and the
                 // shadow beams (learning #116 v3).
                 ApplyLighting(sku);
 
                 EnsureTwinkleLoop();
                 Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: {artParts} two-tone wall slab system(s) + {skyParts} sky renderer(s) + lighting; OOB player-warning effects untouched (vanilla)");
+                LogBackgroundLayerState(sku);
+                LogLiveColorGrading(sku, "settled");
+                // LAST, always: a lighting-off flat backdrop must win over the tint
+                // we just applied, and this is the only pass guaranteed to be the
+                // settled one (Codex r2 #2).
+                RenderPerfSettings.ApplyBackdropNow();
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Map tint failed: {ex.Message}"); }
         }
 
         private static bool _loggedScenePaths;
 
-        // ── Camera clear color = THE background (v1.29 final, learning #116) ──
-        // The big flat backdrop is MainCam's clear color — an editor constant
-        // (blue-ish) that vanilla never changes per-art (arts repaint it with
-        // strong colorFilters instead). Setting it directly gives each skin an
-        // exact background with ZERO effect on walls/geometry, and it swaps
-        // instantly on Shift. Vignette + postExposure still shape it into the
-        // soft gradient look.
-        // v2 (learning #116 correction): MainCam clears DEPTH ONLY (proven in
-        // Sid's log: "flags=Depth"), so its backgroundColor is ignored — the
-        // backdrop is rendered by something UNDER it: a lower-depth camera
-        // and/or a per-map full-screen quad. Tint every color-clearing camera
-        // AND every huge backdrop renderer, and dump a one-time [MAPCOLOR-CAMS]
-        // inventory so the real painter is identified from a single test log.
+        // ── Background-layer proof line (bug 249 diagnostic) ──────────────────
+        // `size=0x0` on a ParticleSystemRenderer is ambiguous (an emitter with no
+        // live particles reads the same as a disabled one), and that ambiguity is
+        // exactly what hid the shared-particle-system bug for four releases. Log
+        // activeInHierarchy + particleCount instead, for the seven children of
+        // ArtHandler.m_background — the only renderers the background camera can
+        // draw. If every one reads active=False, the canvas is bare and whatever
+        // colour is on screen came from the camera clear plus the grading.
+        // Emitted once per sku so a spectator session's log stays readable.
+        private static readonly HashSet<string> _loggedL9Skus = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private static void LogBackgroundLayerState(string sku)
+        {
+            try
+            {
+                if (!_loggedL9Skus.Add(sku)) return;
+                var ah = ArtHandler.instance;
+                var bgGO = ah != null ? ah.m_background : null;
+                if (bgGO == null) { Plugin.Log.LogInfo($"[MAPCOLOR-L9] {sku}: m_background is null"); return; }
+                var sb = new System.Text.StringBuilder();
+                int live = 0;
+                foreach (var ps in bgGO.GetComponentsInChildren<ParticleSystem>(true))
+                {
+                    if (ps == null) continue;
+                    bool act = false; int n = 0; Color c = Color.white;
+                    try { act = ps.gameObject.activeInHierarchy; n = ps.particleCount; c = ps.main.startColor.color; } catch { }
+                    if (act && n > 0) live++;
+                    sb.Append($" {ps.gameObject.name}(active={act},n={n},#{(int)(Mathf.Clamp01(c.r)*255):X2}{(int)(Mathf.Clamp01(c.g)*255):X2}{(int)(Mathf.Clamp01(c.b)*255):X2})");
+                }
+                Plugin.Log.LogInfo($"[MAPCOLOR-L9] {sku}: {live} live background system(s) —{sb}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR-L9] failed: {ex.Message}"); }
+        }
+
+        // ── Live ColorGrading bundle dump (bug 249 diagnostic) ────────────────
+        // Reads the values off the LAYER's bundle, not off our own settings object.
+        // Unity never resets a bundle whose base setting is disabled (see the note
+        // in CustomMapColors.BuildOrGetClone), so the bundle is the only place the
+        // residue is visible — a non-zero hueShift here means a previous profile's
+        // grading is still rotating our background. Reflection because
+        // PostProcessLayer.GetBundle is internal.
+        private static readonly HashSet<string> _loggedCgKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        internal static void LogLiveColorGrading(string sku, string phase)
+        {
+            try
+            {
+                if (!_loggedCgKeys.Add(sku + "|" + phase)) return;
+                foreach (var layer in UnityEngine.Object.FindObjectsOfType<PostProcessLayer>())
+                {
+                    if (layer == null) continue;
+                    var mi = typeof(PostProcessLayer).GetMethod("GetBundle",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public
+                        | System.Reflection.BindingFlags.NonPublic,
+                        null, new Type[] { typeof(Type) }, null);
+                    if (mi == null) { Plugin.Log.LogInfo("[MAPCOLOR-CG] GetBundle not found"); return; }
+                    var bundle = mi.Invoke(layer, new object[] { typeof(ColorGrading) });
+                    if (bundle == null) continue;
+                    var settings = bundle.GetType().GetProperty("settings")?.GetValue(bundle) as ColorGrading;
+                    if (settings == null) continue;
+                    Plugin.Log.LogInfo($"[MAPCOLOR-CG] {sku} ({phase}) on '{layer.gameObject.name}': mode={settings.gradingMode.value} "
+                        + $"filter={settings.colorFilter.value} hue={settings.hueShift.value:F1} sat={settings.saturation.value:F1} "
+                        + $"temp={settings.temperature.value:F1} tint={settings.tint.value:F1} con={settings.contrast.value:F1} "
+                        + $"postExp={settings.postExposure.value:F2} bright={settings.brightness.value:F1} "
+                        + $"lift={settings.lift.value} gain={settings.gain.value} lut={(settings.ldrLut.value != null ? settings.ldrLut.value.name : "none")}");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR-CG] failed: {ex.Message}"); }
+        }
+
+        // ── Camera clear color = THE background (bug 249, v4) ─────────────────
+        // THE BACKGROUND CANVAS IS 'LightCamera' AND ITS VANILLA CLEAR IS PURE RED.
+        //
+        // Scene facts, read straight out of Rounds_Data/level0 (not inferred):
+        //   MainCamera   depth +1, clearFlags=Depth,      cullingMask 2522423 (bit 9 CLEAR)
+        //   LightCamera  depth -1, clearFlags=SolidColor, backgroundColor RGBA(1,0,0,0),
+        //                cullingMask 512 (= layer 9 "Lighting"), targetTexture NULL
+        // Layer 9 holds the whole backdrop: the SFLight, ArtHandler.m_background
+        // ("BackgroudParticles" and its 7 children — the same 7 renderers
+        // TintArtBackground walks), and "Game/Visual/Post/Post_Background", which
+        // is the GameObject carrying ArtHandler AND the PostProcessVolume that
+        // ArtHandler.volume points at. LightCamera's PostProcessLayer.volumeLayer
+        // is 0x200 (layer 9) and MainCamera's is 0x100 (layer 8 = Post_Main).
+        //
+        // So: LightCamera clears the screen to RED, draws the layer-9 backdrop on
+        // top, and grades the result with whatever profile ArtHandler.volume holds
+        // — i.e. with OUR clone. The red is not a buffer artifact; it is the canvas
+        // the art profile is REQUIRED to recolour. Every vanilla art does exactly
+        // that with a big hueShift (Sky -61, Gold -52, Poison -95, Soviet -48,
+        // Sweden -65, Rainbow -80 degrees) plus -2.2..-5.0 EV in HDR/ACES; none of
+        // them overrides colorFilter at all.
+        //
+        // Bug 249: our clone throws the vanilla ColorGrading away and installs one
+        // that only drives saturation/temperature/colorFilter. colorFilter is a
+        // per-channel MULTIPLY, and the canvas is (1,0,0) — so the green and blue
+        // halves of every designed background colour are multiplied by zero and the
+        // backdrop can only ever be red. All 23 skins collapse to colorFilter.r in
+        // [0.46, 0.68]: one hue, a few percent of brightness apart. That is the
+        // "8 out of 10 map skins have a pinkish background, and it never changes".
+        //
+        // Fix: paint the canvas itself. Tinting LightCamera.backgroundColor gives
+        // every skin its designed background with hueShift left at 0, so the RGB
+        // tints we put on the wall/atmosphere particles still read true.
+        //
+        // Learning #119 forbade this ("LightCamera renders the SFSS light TEXTURE
+        // and RGBA(1,0,0,0) is the buffer's required init value"). That premise is
+        // WRONG and is corrected in this pass: the decompiled SFRenderer never
+        // reads Camera.backgroundColor — it allocates its lightmap/shadowmap via
+        // RenderTexture.GetTemporary in OnPreRender and clears them itself with
+        // GL.Clear(_ambientLight) — and LightCamera has no targetTexture, so it
+        // renders to the backbuffer. What round 4..7 actually got wrong was writing
+        // the clear at ALPHA 1; vanilla's is alpha 0 and MainCamera composites over
+        // it, so an opaque clear changes the composite. We preserve the camera's own
+        // vanilla alpha and only ever touch its RGB.
         private static readonly Dictionary<int, Color> _vanillaCamClears = new Dictionary<int, Color>();
+        private static readonly Dictionary<int, CameraClearFlags> _vanillaCamFlags = new Dictionary<int, CameraClearFlags>();
         private static bool _loggedCams;
+        // sku the clear currently carries, per camera — so the [MAPCOLOR-CAMS]
+        // write line is emitted once per (camera, sku) instead of every apply.
+        private static readonly Dictionary<int, string> _camClearSku = new Dictionary<int, string>();
 
         public static void ApplyCameraBackground(string sku)
         {
@@ -7736,21 +8166,19 @@ namespace CompetitiveRounds
                 Color? bgN = CustomMapColors.GetBackgroundColor(sku) ?? CustomMapColors.GetMapBlockColor(sku);
                 if (!bgN.HasValue) return;
                 Color bg = bgN.Value;
+                _backdropMaskThisPass = 0;
                 var cams = UnityEngine.Object.FindObjectsOfType<Camera>();
                 foreach (var cam in cams)
                 {
                     if (cam == null) continue;
                     if (!_loggedCams)
                         Plugin.Log.LogInfo($"[MAPCOLOR-CAMS] '{cam.gameObject.name}' depth={cam.depth} flags={cam.clearFlags} bg={cam.backgroundColor} rt={(cam.targetTexture != null)} mask={cam.cullingMask}");
-                    // ROUND 8 FIX (the universal green cast, learning #119): only
-                    // SCREEN cameras may be tinted. 'LightCamera' renders the SFSS
-                    // light/shadow TEXTURE and its SolidColor clear RGBA(1,0,0,0) is
-                    // the buffer's required init value — round 4..7 overwrote it with
-                    // skin colors at alpha 1, corrupting the lighting buffer on every
-                    // skin (the "so much green"). Off-screen cameras are restored if
-                    // we ever touched them, then left strictly alone.
-                    bool offscreen = cam.targetTexture != null
-                                  || cam.gameObject.name.IndexOf("Light", StringComparison.OrdinalIgnoreCase) >= 0;
+                    // Only genuinely OFF-SCREEN cameras are off limits — the ones
+                    // rendering into a RenderTexture (our own card/cosmetic preview
+                    // rigs, CardSnapshot / NativeUI, which both set targetTexture).
+                    // The name-based "Light" test that used to live here is gone: it
+                    // excluded the one camera that actually paints the background.
+                    bool offscreen = cam.targetTexture != null;
                     int id = cam.GetInstanceID();
                     if (offscreen)
                     {
@@ -7758,21 +8186,57 @@ namespace CompetitiveRounds
                         {
                             cam.backgroundColor = v;
                             _vanillaCamClears.Remove(id);
+                            _camClearSku.Remove(id);
                             Plugin.Log.LogInfo($"[MAPCOLOR-CAMS] restored off-screen camera '{cam.gameObject.name}' clear to {v}");
                         }
                         continue;
                     }
                     // Only cameras that actually CLEAR to a color paint backdrop.
+                    // MainCamera clears Depth only and is correctly skipped here.
                     if (cam.clearFlags != CameraClearFlags.SolidColor && cam.clearFlags != CameraClearFlags.Skybox)
                         continue;
-                    if (!_vanillaCamClears.ContainsKey(id)) _vanillaCamClears[id] = cam.backgroundColor;
+                    if (!_vanillaCamClears.ContainsKey(id))
+                    {
+                        _vanillaCamClears[id] = cam.backgroundColor;
+                        _vanillaCamFlags[id] = cam.clearFlags;   // Skybox->SolidColor below must be reversible
+                    }
+                    // ALPHA IS LOAD-BEARING: keep the camera's own vanilla alpha
+                    // (LightCamera's is 0). Writing alpha 1 here is what the v1.29
+                    // round-4..7 cast actually was.
+                    float a = _vanillaCamClears[id].a;
+                    // Brightness, measured rather than guessed. The canvas passes
+                    // through our colorFilter (~0.55) and then through Post_Main's
+                    // 'Default' grade on MainCamera (postExposure +1.50 EV = x2.83,
+                    // contrast +45, gain (1.00, 0.64, 0.31), ACES) — all vanilla, all
+                    // outside our control. Painting the clear with the raw designed
+                    // colour was measured on this seat at (0.925, 0.811, 0.658) for a
+                    // designed (0.62, 0.50, 0.40): a net gain of ~1.59. CLEAR_GAIN_COMP
+                    // cancels that so the screen lands on the authored value, and the
+                    // per-skin exposure multiplier restores the design's -0.30..-0.72 EV
+                    // "background mood" band, which has been inert since v1.29 because
+                    // LDR grading never reads postExposure.
+                    const float CLEAR_GAIN_COMP = 0.48f;
+                    float lift = CLEAR_GAIN_COMP * CustomMapColors.GetBackgroundExposureMultiplier(sku);
+                    Color canvas = CompensatePostMain(new Color(bg.r * lift, bg.g * lift, bg.b * lift, 1f));
                     cam.backgroundColor = new Color(
-                        Mathf.Clamp01(bg.r * 1.15f), Mathf.Clamp01(bg.g * 1.15f),
-                        Mathf.Clamp01(bg.b * 1.15f), 1f);
+                        Mathf.Clamp01(canvas.r), Mathf.Clamp01(canvas.g), Mathf.Clamp01(canvas.b), a);
                     if (cam.clearFlags == CameraClearFlags.Skybox)
                         cam.clearFlags = CameraClearFlags.SolidColor;
+                    // This camera paints the canvas, so its cullingMask IS the
+                    // backdrop set — see IsBackdropSystem.
+                    NoteBackdropCamera(cam);
+                    // One line per (camera, sku): proves from a single session log
+                    // that the canvas is actually being repainted per skin, which is
+                    // the whole claim of this fix.
+                    string had;
+                    if (!_camClearSku.TryGetValue(id, out had) || !string.Equals(had, sku, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _camClearSku[id] = sku;
+                        Plugin.Log.LogInfo($"[MAPCOLOR-CAMS] painted '{cam.gameObject.name}' clear for {sku}: {cam.backgroundColor} (vanilla was {_vanillaCamClears[id]})");
+                    }
                 }
                 _loggedCams = true;
+                CommitBackdropMask();
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] camera bg failed: {ex.Message}"); }
         }
@@ -7784,8 +8248,13 @@ namespace CompetitiveRounds
                 foreach (var cam in UnityEngine.Object.FindObjectsOfType<Camera>())
                 {
                     if (cam == null) continue;
-                    if (_vanillaCamClears.TryGetValue(cam.GetInstanceID(), out var v))
+                    int id = cam.GetInstanceID();
+                    if (_vanillaCamClears.TryGetValue(id, out var v))
+                    {
                         cam.backgroundColor = v;
+                        if (_vanillaCamFlags.TryGetValue(id, out var vf)) cam.clearFlags = vf;
+                        _camClearSku.Remove(id);
+                    }
                 }
             }
             catch { }
@@ -7799,16 +8268,25 @@ namespace CompetitiveRounds
         internal struct TwinkleEntry { public ParticleSystem ps; public Color baseColor; public Color glintColor; }
         internal static readonly List<TwinkleEntry> _twinkleSystems = new List<TwinkleEntry>();
         private static bool _twinkleLoopRunning;
+        private static int _twinkleHostId;
         private static uint _twinkleTick;
 
         internal static void EnsureTwinkleLoop()
         {
-            if (_twinkleLoopRunning || Plugin.Instance == null) return;
+            var host = Plugin.Instance;
+            if (host == null) return;
+            // Keyed on the HOST, not a bare bool: the persistent object is destroyed and
+            // respawned across ROUNDS' scene changes, which kills the coroutine while
+            // leaving the flag true — after which every later call returned and premium
+            // shimmer was gone for the rest of the process (Codex r5 #9).
+            int hostId = host.GetInstanceID();
+            if (_twinkleLoopRunning && _twinkleHostId == hostId) return;
             _twinkleLoopRunning = true;
-            Plugin.Instance.StartCoroutine(TwinkleLoop());
+            _twinkleHostId = hostId;
+            host.StartCoroutine(TwinkleLoop(hostId));
         }
 
-        private static System.Collections.IEnumerator TwinkleLoop()
+        private static System.Collections.IEnumerator TwinkleLoop(int hostId)
         {
             // 1.6s between re-rolls (was 0.45s — Sid: "premium colors are
             // shifting too fast"). A slow drift of which particles glint reads
@@ -7817,7 +8295,24 @@ namespace CompetitiveRounds
             while (true)
             {
                 yield return wait;
+                if (_twinkleHostId != hostId) yield break;   // a newer host owns the loop
                 if (_twinkleSystems.Count == 0) continue;
+                // NEVER inside the MapTransition window. This loop calls SetParticles
+                // (via RetintLiveParticles) every 1.6s — SHORTER than the 2.0s guard —
+                // so on a premium skin it was reaching into MapTransition.Move on every
+                // single round change: the #45/#85 move-stall, from a path nobody had
+                // connected to it because the list survives the transition intact.
+                // Also require a live battle, so it cannot tick over the menu.
+                if (MapPhysicalColorPatch.InMapTransition()) continue;
+                // isPlaying, NOT battleOngoing: spectators suppress the participant
+                // writes to battleOngoing, so gating on it silently killed premium
+                // shimmer on the broadcast seat — the one seat whose whole job is
+                // looking good (Codex r3 #8). isPlaying is forced true on the
+                // spectator join path and is false in the menus, which is the only
+                // thing this guard is actually for.
+                bool playing = false;
+                try { playing = GameManager.instance != null && GameManager.instance.isPlaying; } catch { }
+                if (!playing) continue;
                 // v1.32 item 8: static-cosmetics mode — stop re-rolling the glint.
                 // The tick=0 emission gradient already gives a stable two-tone
                 // pattern, so skipping here freezes the shimmer in place. Gate the
@@ -7869,11 +8364,12 @@ namespace CompetitiveRounds
                 // near-black value reads as pitch-black smoke instead of fog.
                 float bgLum = 0.299f * bg.r + 0.587f * bg.g + 0.114f * bg.b;
                 float skyFloor = Mathf.Lerp(0.04f, 0.22f, Mathf.InverseLerp(0.04f, 0.25f, bgLum));
-                Color lit = CapBrightness(new Color(
-                    skyFloor + bg.r * 0.95f, skyFloor + bg.g * 0.95f, skyFloor + bg.b * 0.95f, 1f), 1.0f);
+                Color lit = CapBrightness(CompensatePostMain(new Color(
+                    skyFloor + bg.r * 0.95f, skyFloor + bg.g * 0.95f, skyFloor + bg.b * 0.95f, 1f)), 1.0f);
                 // Alpha 0.85 matches the vanilla ambient's alpha (its meaning is
                 // internal to the SFSS shader — keep the semantics identical).
-                Color amb = new Color(bg.r * 0.45f, bg.g * 0.45f, bg.b * 0.45f, 0.85f);
+                Color amb = CompensatePostMain(new Color(bg.r * 0.45f, bg.g * 0.45f, bg.b * 0.45f, 0.85f));
+                amb.a = 0.85f;   // alpha carries SFSS meaning — never let the compensation touch it
 
                 foreach (var rend in UnityEngine.Object.FindObjectsOfType<SFRenderer>())
                 {
@@ -7992,9 +8488,25 @@ namespace CompetitiveRounds
                 catch (Exception ex) { Plugin.Log.LogWarning($"[RENDERPERF] apply failed: {ex.Message}"); }
             }
 
-            // Backdrop paint/restore. Runs LAST in the Map.Start postfix (after the
-            // default-map RestoreVanillaSky) and on a mid-match settings toggle.
+            /// <summary>Public entry point. MUTATES PARTICLES, so it can never run
+            /// straight out of Map.Start: that postfix executes inside
+            /// MapTransition.Move and SetParticles there is the #45/#85 move-stall.
+            /// It also has to run AFTER whichever tint/restore wins the deferred slot,
+            /// or the 2s-later pass silently overwrites the flat backdrop and the
+            /// "disable map lighting" setting stops visually working. Both problems
+            /// have the same answer: hand it to the deferred slot, whose winners call
+            /// ApplyBackdropNow() as their last act.</summary>
             internal static void ApplyBackdrop()
+            {
+                // ALWAYS deferred. Testing `inTransition` here repeats the mistake this
+                // whole batch is about: LastMapStartTime is the PREVIOUS map stamp until
+                // the incoming Map.Start writes it, so toggling Map Lighting in the F5
+                // menu during a move reads "not in transition" and mutates particles
+                // mid-move. A settings toggle is never urgent.
+                ScheduleDeferredBackdrop();
+            }
+
+            internal static void ApplyBackdropNow()
             {
                 try
                 {
@@ -8009,6 +8521,8 @@ namespace CompetitiveRounds
                         // Lighting came back on — bring the real sky back. Restore the
                         // vanilla backdrop, then re-tint if a custom map skin is active
                         // (its sky is a direct sprite tint, independent of lighting).
+                        // Particle mutation, but ApplyBackdropNow is only ever reached
+                        // from a settled deferred pass or from outside the guard window.
                         RestoreVanillaSky();
                         var sku = MapColorState.CurrentSku;
                         if (!string.IsNullOrEmpty(sku) && CustomMapColors.IsCustomSku(sku))
@@ -8037,13 +8551,15 @@ namespace CompetitiveRounds
                         vanilla = sr.color;
                         _vanillaSkyColors[id] = vanilla;
                     }
-                    sr.color = new Color(FLAT_BACKDROP.r, FLAT_BACKDROP.g, FLAT_BACKDROP.b, vanilla.a);
+                    var flatSr = CompensateSurfaceIfUnlit(FLAT_BACKDROP);
+                    sr.color = new Color(flatSr.r, flatSr.g, flatSr.b, vanilla.a);
                 }
                 foreach (var ps in bgGO.GetComponentsInChildren<ParticleSystem>(true))
                 {
                     if (ps == null) continue;
                     Color vanilla = GetCachedVanillaColor(ps);
-                    Color flat = new Color(FLAT_BACKDROP.r, FLAT_BACKDROP.g, FLAT_BACKDROP.b, vanilla.a);
+                    Color flatC = CompensateSurfaceIfUnlit(FLAT_BACKDROP);
+                    Color flat = new Color(flatC.r, flatC.g, flatC.b, vanilla.a);
                     var main = ps.main;
                     main.startColor = new ParticleSystem.MinMaxGradient(flat);
                     RetintLiveParticles(ps, flat);
@@ -8289,64 +8805,19 @@ namespace CompetitiveRounds
             }
         }
 
-        // Per-map backdrop quads: any renderer wide enough to cover the play
-        // area (x span [-35.56, 35.56] per OutOfBoundsHandler) that isn't a
-        // particle. Cached vanilla colors per instance; logged once per object
-        // so a wrong-looking map's log names its backdrop immediately.
-        private static readonly Dictionary<int, Color> _vanillaQuadColors = new Dictionary<int, Color>();
-        private static readonly HashSet<int> _loggedQuads = new HashSet<int>();
-
-        private static int TintBackdropQuads(string sku)
-        {
-            int touched = 0;
-            try
-            {
-                Color? bgN = CustomMapColors.GetBackgroundColor(sku) ?? CustomMapColors.GetMapBlockColor(sku);
-                if (!bgN.HasValue) return 0;
-                Color bg = SaturateColor(bgN.Value, 1.10f);
-                foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
-                {
-                    if (r == null || r is ParticleSystemRenderer) continue;
-                    // SpriteRenderers only (round 8): the sole MeshRenderer ever
-                    // matched was 'CLEAR_STENCIL_BUFFER' — a sprite-masking utility
-                    // quad, not scenery. Tinting utility materials corrupts render
-                    // plumbing (same lesson as the LightCamera, learning #119).
-                    var sr = r as SpriteRenderer;
-                    if (sr == null) continue;
-                    if (r.gameObject.name.IndexOf("STENCIL", StringComparison.OrdinalIgnoreCase) >= 0) continue;
-                    var size = r.bounds.size;
-                    if (size.x < 60f || size.y < 25f) continue;   // not backdrop-sized
-                    int id = r.GetInstanceID();
-                    if (_loggedQuads.Add(id))
-                        Plugin.Log.LogInfo($"[MAPCOLOR-BG] backdrop candidate: '{GetTransformPath(r.transform)}' type={r.GetType().Name} size={size.x:F0}x{size.y:F0}");
-                    if (!_vanillaQuadColors.TryGetValue(id, out var vanilla))
-                    { vanilla = sr.color; _vanillaQuadColors[id] = vanilla; }
-                    float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
-                    float lift = 0.50f + 0.60f * Mathf.Clamp01(lum);
-                    sr.color = new Color(Mathf.Clamp01(bg.r * lift), Mathf.Clamp01(bg.g * lift),
-                                         Mathf.Clamp01(bg.b * lift), vanilla.a);
-                    touched++;
-                }
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] backdrop quad tint failed: {ex.Message}"); }
-            return touched;
-        }
-
-        private static void RestoreBackdropQuads()
-        {
-            try
-            {
-                foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
-                {
-                    if (r == null) continue;
-                    if (!_vanillaQuadColors.TryGetValue(r.GetInstanceID(), out var v)) continue;
-                    var sr = r as SpriteRenderer;
-                    if (sr != null) sr.color = v;
-                    else if (r.material != null && r.material.HasProperty("_Color")) r.material.color = v;
-                }
-            }
-            catch { }
-        }
+        // ── TOMBSTONE: the "backdrop quad" pass is RETIRED (bug 249) ──────────
+        // It hunted a NON-particle SpriteRenderer at least 60x25 world units and
+        // tinted it, on the theory that a per-map full-screen quad painted the
+        // backdrop. ROUNDS has no such object: the backdrop is LightCamera's clear
+        // (now painted by ApplyCameraBackground), ArtHandler.m_background's seven
+        // layer-9 particle systems (TintArtBackground), the active art's own
+        // particles, and the SFSS light (ApplyLighting). Every [MAPCOLOR-BG] line
+        // this pass ever emitted named something else entirely — 'Bullet_Base
+        // (Clone)/A_Homing(Clone)/Anim/SpritePivot/Hard' and
+        // 'UI_CardChoice/CardChoiceVisuals/Card Choice Face/Face/...' — i.e. its
+        // only real effect was recolouring Homing bullets and the card-choice face
+        // to the map skin. Zero coverage lost, one gameplay-visual bug removed.
+        // Do not resurrect it without an object that is actually the backdrop.
 
         // ── Sky (ArtHandler.m_background) tint, v1.29 ─────────────────────────
         // The real backdrop is a dedicated GameObject on ArtHandler, separate
@@ -8414,12 +8885,23 @@ namespace CompetitiveRounds
 
         /// <summary>Restore the sky renderers to their cached vanilla colors —
         /// called when a vanilla/default skin becomes active so a previous custom
-        /// skin's sky tint doesn't linger (the background object persists).</summary>
+        /// skin's sky tint doesn't linger (the background object persists).
+        ///
+        /// ⚠ MUTATES PARTICLES (SetParticles) — never call this directly from
+        /// Map.Start or the NextArt prefix; go through RestoreVanillaBackdrop, which
+        /// defers it past the MapTransition window (#45/#85).
+        ///
+        /// The old `_vanillaSkyColors.Count == 0` gate was wrong and silently made the
+        /// whole restore a no-op: m_background's seven children are ParticleSystems,
+        /// whose vanilla colours live in _vanillaPSColorCache, while _vanillaSkyColors
+        /// only ever holds SpriteRenderers — of which this object has none. Restore
+        /// per object from whichever cache actually owns it, and touch a particle ONLY
+        /// if its true vanilla colour was captured before we ever tinted it (otherwise
+        /// GetCachedVanillaColor would latch our own tint as "vanilla").</summary>
         public static void RestoreVanillaSky()
         {
             try
             {
-                if (_vanillaSkyColors.Count == 0) return;
                 var ah = ArtHandler.instance;
                 var bgGO = ah != null ? ah.m_background : null;
                 if (bgGO == null) return;
@@ -8436,15 +8918,168 @@ namespace CompetitiveRounds
                 foreach (var ps in bgGO.GetComponentsInChildren<ParticleSystem>(true))
                 {
                     if (ps == null) continue;
-                    Color vanilla = GetCachedVanillaColor(ps);
+                    // Only systems whose PRE-TINT state we actually captured.
+                    int sid = ps.GetInstanceID();
+                    if (!_vanillaPSColorCache.TryGetValue(sid, out var vanilla)) continue;
                     var main = ps.main;
-                    main.startColor = new ParticleSystem.MinMaxGradient(vanilla);
-                    RetintLiveParticles(ps, vanilla);
+                    bool haveGradient = _vanillaPSGradientCache.TryGetValue(sid, out var vg);
+                    main.startColor = haveGradient ? vg : new ParticleSystem.MinMaxGradient(vanilla);
+                    // Only repaint the LIVE particles when the authored startColor was a
+                    // single colour. Painting a gradient-mode system's live particles with
+                    // one sampled colour is not a restore, it is a different kind of damage
+                    // (Codex r5 #3) — those particles age out on their own within a round.
+                    if (!haveGradient || vg.mode == ParticleSystemGradientMode.Color)
+                        RetintLiveParticles(ps, vanilla);
                     restored++;
                 }
                 if (restored > 0) Plugin.Log.LogInfo($"[MAPCOLOR] restored vanilla sky ({restored} renderer(s))");
             }
             catch { }
+        }
+
+        /// <summary>Un-tint the ART particles — the other half of what a skin repaints,
+        /// which nothing ever put back, so switching from a custom skin to a vanilla one
+        /// left Sky/SkyBG/Paint and friends wearing the old colours until the next map
+        /// load happened to re-tint them (Codex r2 #4). Restores only systems whose TRUE
+        /// pre-tint colour we captured, deduplicated because the arts share systems
+        /// (Clouds belongs to seven of them).
+        ///
+        /// SEPARATE from RestoreVanillaSky on purpose (Codex r3 #3): the "map lighting
+        /// came back on" path wants ONLY the m_background restore, because it re-tints
+        /// only m_background afterwards — restoring the art parts there would strand the
+        /// walls on vanilla while the sky went back to the skin.
+        ///
+        /// MUTATES PARTICLES — deferred callers only.</summary>
+        public static void RestoreVanillaArtParts()
+        {
+            try
+            {
+                var ah = ArtHandler.instance;
+                if (ah == null || ah.arts == null) return;
+                var partsField = typeof(ArtInstance).GetField("parts",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                var seen = new HashSet<int>();
+                int restored = 0;
+                foreach (var art in ah.arts)
+                {
+                    if (art == null) continue;
+                    var partsArr = partsField?.GetValue(art) as ParticleSystem[];
+                    if (partsArr == null) continue;
+                    foreach (var ps in partsArr)
+                    {
+                        if (ps == null) continue;
+                        int pid = ps.GetInstanceID();
+                        if (!seen.Add(pid)) continue;
+                        if (!_vanillaPSColorCache.TryGetValue(pid, out var pv)) continue;
+                        try
+                        {
+                            var pm = ps.main;
+                            bool havePg = _vanillaPSGradientCache.TryGetValue(pid, out var pg);
+                            pm.startColor = havePg ? pg : new ParticleSystem.MinMaxGradient(pv);
+                            if (!havePg || pg.mode == ParticleSystemGradientMode.Color)
+                                RetintLiveParticles(ps, pv);
+                            restored++;
+                        }
+                        catch { }
+                    }
+                }
+                if (restored > 0) Plugin.Log.LogInfo($"[MAPCOLOR] restored vanilla art parts ({restored} system(s))");
+            }
+            catch { }
+        }
+
+        /// <summary>THE single "hand the backdrop back to vanilla" entry point
+        /// (Codex review of bug 249, findings 4/5/6). Every path that makes a
+        /// non-custom art live must call this, or the last skin's canvas, lighting
+        /// and sky particles sit under a vanilla art that expects the untouched
+        /// pure-red clear it grades with its own hueShift.
+        ///
+        /// Split by safety: the camera clear and the SFSS light/ambient are field
+        /// writes and are safe anywhere, including inside MapTransition.Move. The
+        /// sky restore calls SetParticles and is NOT — it goes through the same
+        /// deferred slot (and the same generation counter) as the tint passes, so a
+        /// skin selected while the restore is asleep supersedes it instead of racing
+        /// it (#45/#85).</summary>
+        public static void RestoreVanillaBackdrop(string why)
+        {
+            try
+            {
+                RestoreCameraBackground();
+                RestoreLighting();
+                _twinkleSystems.Clear();
+                // ALWAYS deferred, never conditional on inTransition (Codex r2 #1).
+                // `LastMapStartTime` is stale whenever NextArt lands BEFORE the new
+                // Map.Start stamps it, so `inTransition` reads false while we are in
+                // fact inside MapTransition.Move — the exact window whose particle
+                // mutation stalls the move and strands players off-screen (#45/#85).
+                // Nothing about a restore is urgent, so the safe branch is the only
+                // branch.
+                ScheduleDeferredVanillaSky(why);   // ends with ApplyBackdropNow
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] vanilla restore ({why}) failed: {ex.Message}"); }
+        }
+
+        /// <summary>Backdrop-only deferred pass, for a settings toggle that lands
+        /// inside the transition window with no tint or restore of its own to ride.
+        /// Deliberately does NOT take the generation slot: it neither tints nor
+        /// restores, so it must not be able to cancel a pass that does.</summary>
+        private static bool _backdropPassPending;
+        private static int _backdropPassHostId;
+
+        internal static void ScheduleDeferredBackdrop()
+        {
+            var host = Plugin.Instance;
+            if (host == null) return;
+            // PUSH THE DEADLINE FIRST, ALWAYS — before any coalescing return. This is
+            // the same rule the tint scheduler already carries: a request arriving
+            // during a LATER transition must move the shared deadline past ITS OWN
+            // window, or the already-sleeping coroutine wakes inside that move and
+            // mutates particles (Codex r4 #1).
+            float notBefore = Time.time + MapTransitionGuardSec;
+            if (notBefore > _tintNotBefore) _tintNotBefore = notBefore;
+
+            // Claim ownership by HOST INSTANCE, not by a wall-clock TTL. Plugin.Instance
+            // is a HideAndDontSave object that ROUNDS' scene changes destroy and we
+            // respawn; its coroutines die with it. A TTL either strands a real request
+            // (too long) or lets two coroutines paint at once (too short) — binding the
+            // claim to the host that owns it does neither (Codex r4 #7).
+            int hostId = host.GetInstanceID();
+            if (_backdropPassPending && _backdropPassHostId == hostId) return;
+            _backdropPassPending = true;
+            _backdropPassHostId = hostId;
+            host.StartCoroutine(DelayedBackdrop(hostId));
+        }
+
+        private static System.Collections.IEnumerator DelayedBackdrop(int hostId)
+        {
+            while (Time.time < _tintNotBefore) yield return null;
+            // A newer host claimed the slot while we slept — it owns the apply.
+            if (_backdropPassHostId != hostId) yield break;
+            _backdropPassPending = false;
+            RenderPerfSettings.ApplyBackdropNow();
+        }
+
+        private static void ScheduleDeferredVanillaSky(string why)
+        {
+            var host = Plugin.Instance;
+            if (host == null) return;
+            float notBefore = Time.time + MapTransitionGuardSec;
+            if (notBefore > _tintNotBefore) _tintNotBefore = notBefore;
+            _pendingTintSku = null;
+            int gen = ++_pendingTintGen;
+            host.StartCoroutine(DelayedRestoreVanillaSky(gen, why));
+        }
+
+        private static System.Collections.IEnumerator DelayedRestoreVanillaSky(int gen, string why)
+        {
+            while (Time.time < _tintNotBefore) yield return null;
+            if (gen != _pendingTintGen) yield break;          // a skin claimed the slot
+            var live = MapColorState.CurrentSku;
+            if (!string.IsNullOrEmpty(live) && CustomMapColors.IsCustomSku(live)) yield break;
+            Plugin.Log.LogInfo($"[MAPCOLOR] deferred vanilla restore ({why})");
+            RestoreVanillaSky();
+            RestoreVanillaArtParts();
+            RenderPerfSettings.ApplyBackdropNow();   // runs last — see ApplyBackdrop
         }
 
         // Deterministic 0/1 bucket for a transform path, used to two-tone the wall
@@ -8534,6 +9169,10 @@ namespace CompetitiveRounds
         private static float _specAdvanceMapStamp = float.NegativeInfinity;
         private static string _specCycleRoom;
 
+        // Last value seen from Broadcast.TestMapSkin, so a set→unset edge can release
+        // the pinned skin instead of leaving MapColorState.CurrentSku pointing at it.
+        private static string _lastTestSkin;
+
         /// <summary>Resets the spectator cycle to its fresh state. Called on room
         /// change (a new sitting starts the cycle from the top) and from
         /// MapColorState.OnSpectatorSessionEnd (session teardown).</summary>
@@ -8603,9 +9242,53 @@ namespace CompetitiveRounds
                 // _cycleIndex, manual Shift, toast) is fighter-only and never consulted
                 // or touched on this path.
                 bool spectatorSeat = RoomActors.LocalIsSpectator;
+                // Set only by the fighter branch, and only for a REAL Shift keypress.
+                // The synchronous particle path is gated on it — see the defer decision.
+                bool manualShiftNow = false;
+
+                // Broadcast-seat map-skin test lever (bug 249). The broadcast account owns
+                // no map colours, and the spectator cycle only runs inside a live spectate
+                // session, so before this there was NO way to look at a skin on the seat
+                // that renders the stream — every background theory had to be argued from
+                // logs. Gated on the broadcast identity, so it is not a free-cosmetics
+                // switch for players; the skin is a purely local render either way.
+                string testSkin = null;
+                try
+                {
+                    if (BroadcastMode.IsBroadcastIdentity && Plugin.BroadcastTestMapSkin != null)
+                        testSkin = (Plugin.BroadcastTestMapSkin.Value ?? "").Trim();
+                }
+                catch { }
+                if (!string.IsNullOrEmpty(testSkin))
+                {
+                    if (string.Equals(testSkin, "cycle", StringComparison.OrdinalIgnoreCase))
+                        spectatorSeat = true;          // exercise the real spectator path
+                    else if (!CustomMapColors.IsCustomSku(testSkin))
+                    {
+                        Plugin.Log.LogWarning($"[MAPCOLOR] Broadcast.TestMapSkin='{testSkin}' is not a known sku — ignoring");
+                        testSkin = null;
+                    }
+                }
+                // Turning the lever OFF has to actually let go: MapColorState.CurrentSku
+                // still holds the test sku, so the next Map.Start would re-apply it and
+                // the seat would look "stuck" on a skin nobody selected (Codex finding 6).
+                if (string.IsNullOrEmpty(testSkin) && !string.IsNullOrEmpty(_lastTestSkin))
+                {
+                    Plugin.Log.LogInfo($"[MAPCOLOR] Broadcast.TestMapSkin cleared (was '{_lastTestSkin}') — releasing the pinned skin");
+                    MapColorState.CurrentSku = null;
+                    MapPhysicalColorPatch.SupersedePendingTints();
+                    ResetSpectatorCycle();
+                    MapPhysicalColorPatch.RestoreVanillaBackdrop("test skin cleared");
+                }
+                _lastTestSkin = testSkin;
 
                 string sku = null;
-                if (spectatorSeat)
+                if (!string.IsNullOrEmpty(testSkin) && !string.Equals(testSkin, "cycle", StringComparison.OrdinalIgnoreCase))
+                {
+                    sku = testSkin;
+                    Plugin.Log.LogInfo($"[MAPCOLOR] Broadcast.TestMapSkin pinned → {sku}");
+                }
+                else if (spectatorSeat)
                 {
                     sku = NextSpectatorCycleSku();
                 }
@@ -8626,16 +9309,53 @@ namespace CompetitiveRounds
                         if (!string.IsNullOrEmpty(e)) equipped.Add(e);
                     }
                 }
-                // If the live list is empty but we cached a last-known-good one this
-                // session, use that. Prevents the "after a bit of time vanilla colors
-                // appear" bug — once the user has equipped customs, the rotation stays
-                // on customs regardless of mid-session stats churn.
-                if ((equipped == null || equipped.Count == 0) && _lastEquippedFiltered != null)
+                // The last-known-good list exists to survive mid-session stats CHURN —
+                // CachedPlayerStats briefly going null during a refresh or a consent
+                // flip — so a Shift in that window doesn't leak a vanilla random art
+                // into the rotation.
+                //
+                // It must NOT survive the user UNEQUIPPING their last map colour. The
+                // old test treated "no stats" and "stats say you have none equipped"
+                // identically, so taking the final skin off in the shop left it
+                // rendering until the game restarted, and there was no way to get back
+                // to vanilla at all. Distinguish the two: a PRESENT list is
+                // authoritative even when it is empty; only an ABSENT snapshot (or an
+                // absent list field, which an older server shape could produce) falls
+                // back to the cache.
+                // NOT `rawEquipped != null`: ApiClient allocates active_color_skus
+                // unconditionally (ApiClient.cs, "Parse active_color_skus"), so the list
+                // is never null and that test would call EVERY response authoritative —
+                // including one where the field was absent or the parse threw, which
+                // would drop the player's skin mid-session and reintroduce the exact bug
+                // the last-known-good cache exists to prevent. Use the parser's own
+                // "the array was there and I read it" flag instead.
+                bool snapshotAuthoritative = s != null && s.active_color_skus_present;
+                if (equipped == null || equipped.Count == 0)
                 {
-                    equipped = _lastEquippedFiltered;
-                    Plugin.Log.LogInfo($"[MAPCOLOR] Live equipped empty/null, reusing last-known list ({equipped.Count} skus)");
+                    if (snapshotAuthoritative)
+                    {
+                        if (_lastEquippedFiltered != null)
+                            Plugin.Log.LogInfo("[MAPCOLOR] equipped list is authoritatively EMPTY — dropping the cached list and returning to vanilla");
+                        _lastEquippedFiltered = null;
+                        _cycleLastListHash = 0;
+                        _cycleIndex = 0;
+                        equipped = null;
+                        // Retire the LIVE selection too, or nothing actually changes:
+                        // the deferred vanilla restore bails when MapColorState.CurrentSku
+                        // still names a custom skin, and the next Map.Start reads that same
+                        // sku and re-applies it — so unequipping your last colour looked
+                        // like it did nothing (Codex r3 #2). A non-custom SENTINEL rather
+                        // than null, because null makes Map.Start fall back to the legacy
+                        // active_color_sku scalar, which can still be the custom sku.
+                        MapColorState.CurrentSku = "mapcolor_default";
+                    }
+                    else if (_lastEquippedFiltered != null)
+                    {
+                        equipped = _lastEquippedFiltered;
+                        Plugin.Log.LogInfo($"[MAPCOLOR] stats snapshot unavailable, reusing last-known list ({equipped.Count} skus)");
+                    }
                 }
-                else if (equipped != null && equipped.Count > 0)
+                else
                 {
                     _lastEquippedFiltered = equipped;
                 }
@@ -8656,6 +9376,7 @@ namespace CompetitiveRounds
                     // chosen skin STABLE per round; the player deliberately cycles with Shift.
                     bool manualShift = false;
                     try { manualShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift); } catch { }
+                    manualShiftNow = manualShift;   // consumed by the defer decision below
                     if (manualShift)
                         _cycleIndex = (_cycleIndex + 1) % equipped.Count;
                     sku = equipped[_cycleIndex % equipped.Count];
@@ -8664,12 +9385,26 @@ namespace CompetitiveRounds
                     // specific skin (e.g. Magma) by sight.
                     if (manualShift) MapColorState.ShowToast(CustomMapColors.FriendlyName(sku));
                 }
-                // Backward compat: if the new list field is empty, fall back to the
-                // legacy single-value active_color_sku (older clients / transitional state).
-                if (string.IsNullOrEmpty(sku)) sku = s?.active_color_sku;
+                // Backward compat: fall back to the legacy single-value active_color_sku
+                // ONLY when the list field was absent from the response (an older server
+                // shape). If the server sent the list and it was empty, that is the
+                // authoritative answer and the scalar must not resurrect a skin the
+                // player just unequipped (Codex r3 #6).
+                if (string.IsNullOrEmpty(sku) && !snapshotAuthoritative) sku = s?.active_color_sku;
                 }
                 if (string.IsNullOrEmpty(sku))
                 {
+                    // A vanilla art is about to become live and it grades the canvas
+                    // itself (hueShift on the red clear). Hand the clear back, or the
+                    // last skin's canvas stays under it — a NEW leak introduced by
+                    // painting the clear at all, and the only path that reaches the
+                    // menu, where no Map.Start ever fires to restore it.
+                    // Retire the live selection first, or the restore we are about to
+                    // schedule sees a custom CurrentSku and cancels itself, and the next
+                    // Map.Start re-applies the skin (Codex r5 #8 — same shape as r3 #2,
+                    // reachable here through the older no-list/no-scalar response).
+                    MapColorState.CurrentSku = "mapcolor_default";
+                    MapPhysicalColorPatch.RestoreVanillaBackdrop("no sku resolved");
                     Plugin.Log.LogInfo("[MAPCOLOR] No custom sku resolved — falling through to vanilla NextArt");
                     return true;
                 }
@@ -8694,12 +9429,19 @@ namespace CompetitiveRounds
                     // second source of texture-flicker, confirmed by decompiling ArtHandler).
                     // Replicate TurnArtsOff via the public ArtInstance.TogglePart so only our
                     // chosen art stays active.
-                    try
-                    {
-                        if (__instance.arts != null)
-                            foreach (var a in __instance.arts) a?.TogglePart(false);
-                    }
-                    catch { }
+                    // Per-art try/catch, NOT one around the loop: ArtInstance.TogglePart
+                    // dereferences every entry of its own parts[] array, so one null or
+                    // destroyed part in ANY art used to abort the whole sweep and leave
+                    // every later art still playing — including the two Rainbow arts,
+                    // which is the exact "purple/pink bleeding into the background" this
+                    // loop exists to prevent. The deferred pass below already isolates
+                    // per art; match it here.
+                    if (__instance.arts != null)
+                        foreach (var a in __instance.arts)
+                        {
+                            try { a?.TogglePart(false); }
+                            catch (Exception tx) { Plugin.Log.LogWarning($"[MAPCOLOR] TogglePart(false) failed on an art: {tx.Message}"); }
+                        }
                     __instance.SetSpecificArt(baseArt);
                     var basePr = __instance.volume != null ? __instance.volume.profile : null;
                     if (basePr == null)
@@ -8719,6 +9461,8 @@ namespace CompetitiveRounds
                     // makes Shift visibly swap the background on the same frame.
                     MapPhysicalColorPatch.ApplyCameraBackground(sku);
                     MapPhysicalColorPatch.ApplyLighting(sku);
+                    // Proof line for the grading state actually in effect (residue check).
+                    MapPhysicalColorPatch.LogLiveColorGrading(sku, "at-apply");
                     // v1.32 item 7: lighting/shadow disable settings re-assert after
                     // the skin's own lighting pass touched the renderers.
                     MapPhysicalColorPatch.RenderPerfSettings.Apply();
@@ -8749,7 +9493,35 @@ namespace CompetitiveRounds
                     // index ADVANCE is debounced: ScheduleDeferredTints pushes
                     // _tintNotBefore on EVERY call, so each duplicate NextArt request
                     // still pushes the deadline past its own transition window (#365).
-                    bool deferParticles = spectatorSeat || inTransition;
+                    // WHO MAY MUTATE PARTICLES SYNCHRONOUSLY: only a real, mid-battle
+                    // Shift press. Everything else defers.
+                    //
+                    // `inTransition` alone was never a sufficient test and this is the
+                    // bug it hid: ROUNDS fires NextArt from MapTransition's switchMapEvent,
+                    // which can land BEFORE the incoming Map.Start stamps LastMapStartTime,
+                    // so the stamp is the PREVIOUS map's and `inTransition` reads FALSE
+                    // while we are squarely inside MapTransition.Move. The synchronous
+                    // branch then calls SetParticles mid-move — the #45/#85 stall that
+                    // leaves players unmoved, then off-screen the next round.
+                    // bug-235.txt:594-603 catches a fighter doing exactly this today.
+                    //
+                    // The original intent was always "immediate ONLY for a genuine
+                    // mid-round manual Shift" (see the note below); this makes the code
+                    // say that, instead of inferring it from a timestamp that lies.
+                    bool testPinned = !string.IsNullOrEmpty(testSkin);
+                    bool battleOngoing = false;
+                    try { battleOngoing = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+                    // `Input.GetKey` reports key STATE, not call ORIGIN: a player holding
+                    // Shift while ROUNDS fires its own transition-owned NextArt looks
+                    // identical to a deliberate press. That is only safe because the
+                    // authoritative transition test below rejects the automatic call —
+                    // the stale-stamp `inTransition` alone did not (Codex r4 #3, which
+                    // reproduces on the FFA start path where battleOngoing is already
+                    // true before the move finishes).
+                    bool immediateOk = manualShiftNow && battleOngoing && !inTransition
+                                       && !MapPhysicalColorPatch.InMapTransition()
+                                       && !spectatorSeat && !testPinned;
+                    bool deferParticles = !immediateOk;
                     if (deferParticles)
                         MapPhysicalColorPatch.ScheduleDeferredTints(sku);
                     else
@@ -8767,6 +9539,20 @@ namespace CompetitiveRounds
                 // holds only CustomMapColors preset skus (IsCustomSku is true by
                 // construction), so the SKU_TO_ART / vanilla fallthrough — including
                 // the explicit-"default" restore — stays fighter-only.
+                // Every branch below hands the scene to a VANILLA art, which grades the
+                // untouched red clear with its own hueShift. Whatever the previous
+                // custom skin painted — canvas, SFSS light/ambient, sky particles —
+                // has to go back first, or a fighter who Shifts from Abyss to Sky sees
+                // Abyss's canvas under Sky's grading (Codex finding 5).
+                MapPhysicalColorPatch.RestoreVanillaBackdrop($"vanilla-styled sku {sku}");
+                // Record the SELECTED sku rather than nulling (Codex r2 #5): a null
+                // makes Map.Start fall back to the legacy active_color_sku, which can
+                // be a CUSTOM skin — that schedules a tint generation which cancels
+                // this restore and then skips itself on the CurrentSku check, so
+                // neither lands and the previous skin's background survives. Every
+                // consumer already gates on IsCustomSku, and no vanilla-styled sku is
+                // in the preset table, so storing it reads as "vanilla" everywhere.
+                MapColorState.CurrentSku = sku;
                 if (!SKU_TO_ART.TryGetValue(sku, out string artName))
                 {
                     Plugin.Log.LogWarning($"[MAPCOLOR] Unknown sku '{sku}' — not in CustomMapColors presets, not in vanilla SKU_TO_ART. Equipped but not renderable; falling through to vanilla.");
@@ -8796,6 +9582,18 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning($"[MAPCOLOR] sku={sku} mapped to art='{artName}' but no matching art on this ArtHandler — falling through to vanilla random");
                     return true;
                 }
+                // ROUNDS' SetSpecificArt reaches ApplyArt, which does NOT turn the
+                // other arts off (only NextArt/SetMenuArt do). Without this, picking a
+                // vanilla-styled skin layers it on top of whatever art the previous
+                // skin lit — the same overlap the custom branch above already guards
+                // against (Codex r2 #4). SetActive/Play only, no particle mutation, so
+                // this is safe in the synchronous path exactly as it is up there.
+                if (__instance.arts != null)
+                    foreach (var a in __instance.arts)
+                    {
+                        try { a?.TogglePart(false); }
+                        catch (Exception tx) { Plugin.Log.LogWarning($"[MAPCOLOR] TogglePart(false) failed on an art: {tx.Message}"); }
+                    }
                 __instance.SetSpecificArt(artName);
                 return false;
             }

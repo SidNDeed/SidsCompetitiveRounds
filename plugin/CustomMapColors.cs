@@ -18,9 +18,10 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, PostProcessProfile> _profileCache =
             new Dictionary<string, PostProcessProfile>(StringComparer.OrdinalIgnoreCase);
 
-        // Clones deep-copy each art's ChromaticAberration settings object, so the
-        // CA toggle (ChromaticAberrationSetting.Apply) must sweep them too — a
-        // clone built before a toggle flip would otherwise keep the old state.
+        // Each clone owns a COPY of every settings object (see BuildOrGetClone — the
+        // profile-level Instantiate is shallow and used to share them with the vanilla
+        // art asset). The CA toggle (ChromaticAberrationSetting.Apply) must therefore
+        // sweep the clones too: a clone built before a toggle flip keeps the old state.
         internal static IEnumerable<PostProcessProfile> CachedClones => _profileCache.Values;
 
         // SKU → preset. Each preset has:
@@ -417,7 +418,20 @@ namespace CompetitiveRounds
                 }},
             };
 
+        /// <summary>The skins that are DESIGNED neutral, and must render neutral rather
+        /// than picking up the base game's warm grade. Add a sku here when its palette is
+        /// intentionally grey; do not try to detect it from the colour values.</summary>
+        private static readonly HashSet<string> NEUTRAL_SKUS = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "mapcolor_mono", "mapcolor_charcoal", "mapcolor_platinum",
+        };
+
         public static bool IsCustomSku(string sku) => sku != null && _presets.ContainsKey(sku);
+
+        /// <summary>True for the deliberately-grey skins (see NEUTRAL_SKUS). Public so a
+        /// future caller outside the grading path can ask the same question without
+        /// re-deriving it from colour values, which is how this got wrong twice.</summary>
+        public static bool IsNeutralSku(string sku) => sku != null && NEUTRAL_SKUS.Contains(sku);
 
         /// <summary>True for skins that ARE a vanilla ROUNDS art (Sky, Poison, Gold,
         /// ...) rather than a custom-designed palette — the preset's display name
@@ -543,6 +557,41 @@ namespace CompetitiveRounds
             return null;
         }
 
+        // sku → linear brightness multiplier for the background canvas, derived from
+        // the preset's own postExposure (EV) value. See BuildOrGetClone: postExposure
+        // is inert under LowDefinitionRange grading, so the per-skin "background mood"
+        // band (-0.30 light .. -0.72 dark) never reached a pixel. Baking it into the
+        // LightCamera clear instead (Plugin.ApplyCameraBackground) makes the band real
+        // for the first time WITHOUT switching grading modes — the values are the ones
+        // already authored per preset, so no skin's intent changes.
+        private static readonly Dictionary<string, float> _bgExposureCache =
+            new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Linear multiplier (2^EV) for this skin's designed background
+        /// brightness. 1.0 for unknown skus.</summary>
+        public static float GetBackgroundExposureMultiplier(string sku)
+        {
+            if (string.IsNullOrEmpty(sku)) return 1f;
+            float m;
+            if (_bgExposureCache.TryGetValue(sku, out m)) return m;
+            m = 1f;
+            try
+            {
+                if (_presets.TryGetValue(sku, out var preset) && preset.Configure != null)
+                {
+                    var probe = ScriptableObject.CreateInstance<ColorGrading>();
+                    probe.hideFlags = HideFlags.HideAndDontSave;
+                    preset.Configure(probe);
+                    m = Mathf.Pow(2f, probe.postExposure.value);
+                    UnityEngine.Object.DestroyImmediate(probe);
+                }
+            }
+            catch { m = 1f; }
+            m = Mathf.Clamp(m, 0.25f, 2f);
+            _bgExposureCache[sku] = m;
+            return m;
+        }
+
         /// <summary>Premium sparkle endpoint — wall particles emit random-between
         /// (layer color, this) when set. Null for standard skins.</summary>
         public static Color? GetSparkleColor(string sku)
@@ -566,21 +615,58 @@ namespace CompetitiveRounds
 
             try
             {
-                // ScriptableObject.Instantiate deep-copies the profile including its settings list.
-                // Each cloned PostProcessEffectSettings is a fresh ScriptableObject we can mutate.
-                var clone = UnityEngine.Object.Instantiate(baseProfile);
+                // `Instantiate(profile)` is a SHALLOW copy: it makes a new settings LIST
+                // but the elements stay the SAME ScriptableObjects as the vanilla art
+                // asset's (Unity's own PostProcessVolume.profile getter proves it — it
+                // deep-copies element by element precisely because the profile-level
+                // Instantiate does not). Every clone built off the same base art was
+                // therefore sharing one Bloom / Vignette / ChromaticAberration object
+                // WITH the on-disk art, so BloomStrengthSetting's 0.6x cut compounded
+                // through it: the session log shows four independent geometric ladders,
+                // one per base art (Sky 2.0 -> 0.7 -> 0.4 -> 0.3 -> 0.2 -> 0.1 -> 0.1 -> 0.0
+                // across its 12 skus, and the same curve for Gold/Poison/Soviet). Copy
+                // each settings object the way Unity does, so a write through a clone can
+                // never reach the shared art again.
+                var clone = ScriptableObject.CreateInstance<PostProcessProfile>();
                 clone.name = $"CR_MapColor_{sku}";
                 clone.hideFlags = HideFlags.HideAndDontSave;
-
-                // Remove any pre-existing ColorGrading from the clone so ours replaces it cleanly.
-                if (clone.HasSettings<ColorGrading>())
-                    clone.RemoveSettings<ColorGrading>();
+                if (baseProfile.settings != null)
+                {
+                    foreach (var s in baseProfile.settings)
+                    {
+                        // Our own ColorGrading replaces the base's, so don't copy that one.
+                        if (s == null || s is ColorGrading) continue;
+                        var copy = UnityEngine.Object.Instantiate(s);
+                        copy.hideFlags = HideFlags.HideAndDontSave;
+                        clone.settings.Add(copy);
+                    }
+                }
 
                 var cg = ScriptableObject.CreateInstance<ColorGrading>();
                 cg.hideFlags = HideFlags.HideAndDontSave;
                 cg.enabled.Override(true);
                 cg.gradingMode.Override(GradingMode.LowDefinitionRange);
                 preset.Configure(cg);
+                // ⚠ `postExposure` in every preset above is INERT and always has been.
+                // We force LowDefinitionRange, and Unity's ColorGradingRenderer.Render
+                // dispatches that to RenderLDRPipeline2D, which sets ColorBalance,
+                // ColorFilter, HueSatCon, ChannelMixer*, Lift/InvGamma/Gain, Brightness
+                // and Curves — and never ShaderIDs.PostExposure (only the External and
+                // the two HDR paths do). The per-skin -0.30..-0.72 "background mood"
+                // band therefore reaches no pixel. Background brightness is carried by
+                // the LightCamera clear instead (Plugin.ApplyCameraBackground); the
+                // values are kept because they still document each skin's intent, and
+                // because switching to HighDefinitionRange would also re-enable the
+                // vanilla ACES tonemapper and change every skin at once — a look
+                // change for Sid to call, not a bug fix.
+                //
+                // ⚠ Also note: Unity NEVER resets a bundle whose base setting is
+                // disabled (PostProcessManager.ReplaceData skips every effect whose
+                // `enabled` value is false, and PostProcessEffectSettings.enabled
+                // defaults to false), so any ColorGrading parameter no live volume
+                // overrides keeps whatever profile last wrote it — forever. Everything
+                // this grading depends on must be overridden explicitly below; do not
+                // assume an un-overridden parameter is at its neutral default.
                 // OVERRIDE the colorFilter to LEAN toward the skin's PRIMARY color. The
                 // per-preset filters were near-neutral grey so the whole scene read as
                 // grey/samey no matter the skin (Sid: "no change noticed" — the small wall
@@ -611,10 +697,53 @@ namespace CompetitiveRounds
                     // r≈g≈b) keep THEIR preset saturation (e.g. -100) untouched.
                     float mx = Mathf.Max(prim.r, Mathf.Max(prim.g, prim.b));
                     float mn = Mathf.Min(prim.r, Mathf.Min(prim.g, prim.b));
-                    bool greySkin = (mx - mn) < 0.08f;
+                    // ENUMERATED, not inferred. Two rounds of threshold-guessing got it
+                    // wrong in both directions: a primary-only test called Blackwood grey
+                    // (walls 0.50/0.50/0.54, spread 0.04) and flattened the authored -26
+                    // its charred-ember backdrop depends on (Codex r4 #8); tightening it to
+                    // require a neutral background then EXCLUDED Platinum, whose spreads are
+                    // 0.10 and exactly 0.05, losing its cold-metal -55 (Codex r5 #6). Which
+                    // skins are deliberately neutral is a fact about the palette, not
+                    // something to re-derive from thresholds — so name them.
+                    bool greySkin = NEUTRAL_SKUS.Contains(sku);
                     if (!greySkin) cg.saturation.Override(12f);
+                    // A GREY skin must not keep its preset's -100 saturation. On a grey
+                    // source that override does nothing useful — the colour is already
+                    // neutral — but it is applied on the LightCamera volume, i.e. AFTER
+                    // the canvas has been deliberately pushed blue to survive Post_Main's
+                    // red-weighted gain. It flattens that correction back to equal
+                    // channels, Post_Main then re-warms it, and Monochrome comes out
+                    // beige no matter what the correction does upstream (Codex r3 #5).
+                    // Neutral instead of negative: same look on a grey, correction intact.
+                    else cg.saturation.Override(0f);
                 }
                 catch { }
+                // CLOSE THE RESIDUE HOLE (bug 249, second half). Unity's per-frame
+                // "reset to base state" is dead code: PostProcessManager.ReplaceData
+                // only resets a bundle when its base setting's `enabled` VALUE is
+                // true, and PostProcessEffectSettings.enabled defaults to false for
+                // every effect, so the reset never fires for any of them. A
+                // ColorGrading parameter that no live volume overrides therefore
+                // keeps whatever the last profile to override it wrote — for the rest
+                // of the process. Our grading only ever overrode 6 of ~45 parameters,
+                // so hueShift, tint, contrast, brightness, the channel mixer, lift/
+                // gamma/gain, the curves and the LDR LUT were all inherited residue.
+                // That residue is stamped by different profiles on different seats —
+                // a fighter re-stamps it every round through CardChoice.StartPick
+                // (`SetSpecificArt(cardPickArt)` mounts a full vanilla profile for the
+                // whole pick phase), while a spectator suppresses the entire pick path
+                // and so keeps whatever was live when it joined. Same skin, two seats,
+                // two different gradings — which is literally what bug 249 reported.
+                // Every vanilla art profile also overrides a large hueShift (Sky -61,
+                // Gold -52, Poison -95, Soviet -48, Sweden -65, Rainbow -80), so a
+                // leaked hueShift would rotate the freshly-painted background clear
+                // straight back off its designed hue.
+                // `cg` is a fresh CreateInstance, so every parameter we did NOT set
+                // still holds its neutral default; asserting the override state on all
+                // of them makes the grading fully self-contained and identical on
+                // every seat.
+                try { cg.SetAllOverridesTo(true, excludeEnabled: false); }
+                catch (Exception sx) { Plugin.Log.LogWarning($"[MAPCOLOR] {sku}: SetAllOverridesTo failed: {sx.Message}"); }
                 clone.AddSettings(cg);
 
                 // Bloom pass (v1.29 round 7, Sid: "I like the effect but it needs
