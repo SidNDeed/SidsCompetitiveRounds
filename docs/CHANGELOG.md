@@ -12,6 +12,22 @@ Backend data: migration **231** — one-shot 20,000g `admin_grant` to
 NotNic for a community promo video (applied 2026-08-19). Same shape as
 `067`, plus ledger-keyed idempotency so a re-run is a no-op.
 
+**Lobby and text-cell fixes (Aug 20)**
+
+- **The lobby browser now shows the whole roster.** The "who is inside"
+  line under each open lobby shared one fixed-height cell with the lobby
+  header, and a cell can only carry one wrapping mode -- so a full lobby's
+  roster clipped at the cell edge and the trailing "+N more" counter never
+  appeared, in exactly the case that counter exists for. The roster is now
+  its own element that sizes itself to its content and takes as many lines
+  as it needs. Rows are usually SHORTER than before, not taller.
+- **Four text cells no longer drop their text instead of clipping it.** The
+  FFA and 2v2 leaderboard name cells, the FFA recent-games identity cell and
+  the 2v2 series line all left word wrap on inside fixed-height boxes, so an
+  over-long "name [title]" wrapped onto a line the box could not show and the
+  wrapped part was discarded rather than clipped. Most visible on the
+  translated "(left)" disconnect marker, which could vanish entirely.
+
 **Admin (Aug 20)**
 
 - **Lexia granted admin** (migration **232**).
