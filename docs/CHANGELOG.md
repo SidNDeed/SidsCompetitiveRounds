@@ -7,6 +7,10 @@ Schema changes: migration **229** (`stream_channel_posts` gains
 applied 2026-08-18), **233** (`ffa_match_players.game_points_at_leave`),
 **234** (one-off: un-rates ten pre-fix early-leave rows).
 
+Backend data: migration **231** — one-shot 20,000g `admin_grant` to
+NotNic for a community promo video (applied 2026-08-19). Same shape as
+`067`, plus ledger-keyed idempotency so a re-run is a no-op.
+
 **FFA early-leave grace (Aug 20)**
 
 - **Leaving an FFA before the field has scored two points no longer costs
