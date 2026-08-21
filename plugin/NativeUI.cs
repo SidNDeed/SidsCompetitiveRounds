@@ -1934,6 +1934,11 @@ namespace CompetitiveRounds
         {
             public GameObject root, joinBtn, betBtn;
             public object txtInfo;
+            // Member summary is its OWN element, not a second line inside
+            // txtInfo -- see CreateFfaBrowserRow for why. membersGO is cached
+            // so the per-fill toggle never re-walks the hierarchy (#265).
+            public object txtMembers;
+            public GameObject membersGO;
             public string lobbyId;
             public bool hasPassword;   // v1.37: routes Join through the password prompt
             // Aug 9 lobby-phase betting: bound at FILL time and read at CLICK
@@ -1950,6 +1955,9 @@ namespace CompetitiveRounds
         {
             public GameObject root, joinBtn, betBtn;
             public object txtInfo;
+            // Own element, same shape as FfaBrowserRow.
+            public object txtMembers;
+            public GameObject membersGO;
             public string lobbyId;
             public bool hasPassword;
             // Aug 9 lobby-phase betting (2v2 only). Bound at FILL, read at
@@ -3844,18 +3852,74 @@ namespace CompetitiveRounds
             row.root.transform.SetParent(parent,false);
             row.root.AddComponent<RectTransform>();
             UIFactory.AddHLG(row.root,spacing:8,padL:6,padR:6,forceExpandH:false);
-            UIFactory.AddLE(row.root,prefH:31,minH:31,flexH:0);
-            row.txtInfo=CreateFfaTextCell("Info",row.root.transform,760,UIFactory.AlignMidLeft,17f,C_WHITE,true,300);
+            /* minH ONLY, deliberately no prefH. The row height is now DERIVED
+             * from content: the member summary sizes itself (below), the info
+             * column sums to it, and the HLG reports that upward. A prefH here
+             * would be a LayoutElement value at priority 1 and would override
+             * the group-derived height, pinning every row to one size again.
+             * AddLE only writes values >= 0, so preferredHeight stays at
+             * LayoutElement's -1 default and LayoutUtility skips it; minH
+             * remains a pure floor, so an empty pooled row is still 31px. */
+            UIFactory.AddLE(row.root,minH:31,flexH:0);
+            /* The header and the member summary are SEPARATE elements in a
+             * column, not one element holding a "\n"-joined two-line string.
+             * The reason is WRAPPING, and wrapping is per-element: the roster
+             * must wrap to show a full lobby (~200 visible chars against a
+             * ~1612px cell), while the header must NOT wrap or a long one would
+             * push the roster out of a fixed box. One element cannot be both,
+             * so the old shared cell had to pick -- it picked no-wrap, which is
+             * why the roster clipped at the cell edge and lost its trailing
+             * "+N more" in exactly the full-lobby case that counter exists for.
+             * (Note for anyone reading the history: an earlier draft justified
+             * this split by the HEADER wrapping and eating the roster's line.
+             * That was wrong -- wrap was already off on the shared cell, so the
+             * header could not wrap. The roster's clipping is the real defect.) */
+            var infoCol=new GameObject("InfoCol");infoCol.transform.SetParent(row.root.transform,false);
+            infoCol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(infoCol,spacing:1);
+            /* prefW is LOAD-BEARING, not decoration. SetTextAutoHeight below
+             * sets preferredWidth to -1, so the member element reports its
+             * UNWRAPPED width (~1600px for a full roster) upward, and a layout
+             * group derives its own preferred/flexible width from max(children)
+             * (#132). This pin, at LayoutElement priority 1, overrides that.
+             * flexW:1 + minW:300 reproduce what txtInfo itself used to carry,
+             * so the column still stretches exactly as the cell did. */
+            UIFactory.AddLE(infoCol,prefW:760,minW:300,flexW:1);
+            row.txtInfo=UIFactory.CreateText("Info",infoCol.transform,"",17f,C_WHITE,
+                UIFactory.AlignMidLeft,sizeDelta:new Vector2(760,28));
             UIFactory.SetOverflowMode(row.txtInfo,3);
-            /* Wrap off, same treatment as the leaderboard/identity cells.
-             * This cell is the one the member line made MULTI-LINE, and it
-             * is sized for exactly two line boxes. If the FIRST line wraps
-             * (a bet tag plus [PRIVATE] in English, a bet tag alone in
-             * es/ru/uk/sv) it consumes both boxes and Truncate drops the
-             * member line entirely -- the whole point of sizing this cell.
-             * No-wrap also makes the member-line cut deterministic and at
-             * the box edge rather than at a word boundary. */
+            /* Wrap off: this cell holds ONLY the header now, and it must stay
+             * one line so a long header cannot push the roster below it down.
+             * The box is 28px at 17pt = 1.65x, deliberately roomier than the
+             * 25px it used to carry: 25/17 = 1.47 sits just above the 1.41
+             * this same file calls "exactly the #297 edge", and the old
+             * shared cell was resized to 48px whenever a roster was present,
+             * so the header had slack here that the split takes away.
+             * Truncate rather than FitOneLine, because Overflow would let a
+             * tall translated header paint over the roster underneath. */
             UIFactory.SetWordWrap(row.txtInfo,false);
+            /* The roster element. sizeDelta X of 0 is deliberate: CreateText
+             * only bakes a LayoutElement when BOTH dimensions are > 0, so this
+             * skips the baked prefH/minH that pinned the old shared cell, and
+             * SetTextAutoHeight then installs a clean one with prefH/prefW -1.
+             * TMP therefore reports its own WRAPPED height and the row grows to
+             * fit the real roster -- one line for most lobbies, more only when
+             * the text genuinely needs it. Exactly the shape already shipping on
+             * CreateFfaRecentPlayerRow's txtCards. The whole tab is inside
+             * FfaScroll, so a taller row is absorbed by the scroll (#199).
+             * minH 22 is the anti-collapse floor. TMP can report 0 for one
+             * frame before layout has run (#143) and the floor is what it
+             * falls back to -- so the floor must fit a real line of the WIDEST
+             * metrics this element can receive, not a Latin one. 22 is this
+             * file's house value for 13pt (1.69x -- the 48x22 and 90x22 cells);
+             * 16 would have been 1.23x and a Cyrillic roster would have been
+             * hidden for that frame. */
+            row.txtMembers=UIFactory.CreateText("Members",infoCol.transform,"",13f,C_WHITE,
+                UIFactory.AlignTopLeft,sizeDelta:new Vector2(0,16));
+            UIFactory.SetWordWrap(row.txtMembers,true);
+            UIFactory.SetTextAutoHeight(row.txtMembers,22);
+            row.membersGO=(row.txtMembers as Component)?.gameObject;
+            if(row.membersGO!=null)row.membersGO.SetActive(false);
             row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",16f,C_WHITE,
                 new Color(0.25f,0.42f,0.20f,0.95f),
                 ()=>{
@@ -3968,35 +4032,16 @@ namespace CompetitiveRounds
                     UIFactory.SetTextRaw(row.txtInfo,
                         privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
                             FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age)
-                        +betTag
-                        +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
-                    // Re-asserted per fill — pooled rows swap shapes (#63).
-                    UIFactory.SetPrefH(row.root,memberLine!=null?54f:31f);
-                    /* The ROOT's height was never the binding constraint. txtInfo
-                     * is built by CreateFfaTextCell at a hardcoded sizeDelta
-                     * height of 25, and CreateText bakes that into its
-                     * LayoutElement as prefH AND minH; AddHLG sets
-                     * childControlHeight=true while this row passes
-                     * forceExpandH:false, so the child takes its LayoutElement
-                     * preferred height (priority 1, which outranks TMP's own
-                     * content-based ILayoutElement value at priority 0) and is
-                     * pinned at 25 no matter what it holds. A 17pt first line
-                     * (~20px) plus the <size=13> member line (~15px) needs
-                     * ~35px, and mode-3 Truncate drops the line that does not
-                     * fit — so growing only the root reserved 54px of empty row
-                     * and the member list rendered for NOBODY since it shipped.
-                     * Size the text element too, minH alongside prefH (the
-                     * dynamic-resize rule above SetMinH), and restore 25 on the
-                     * one-line path because these rows are pooled. This changes
-                     * no OUTER height — the row already reserved 54 — so the
-                     * scroll list's height budget is untouched (#63/#199/#245). */
-                    var ffaInfoGO=(row.txtInfo as Component)?.gameObject;
-                    if(ffaInfoGO!=null)
-                    {
-                        float infoH=memberLine!=null?48f:25f;
-                        UIFactory.SetPrefH(ffaInfoGO,infoH);
-                        UIFactory.SetMinH(ffaInfoGO,infoH);
-                    }
+                        +betTag);
+                    /* The roster goes to its OWN element now, so the header can
+                     * never crowd it out. Written unconditionally on BOTH
+                     * branches because these rows are pooled: a row that showed
+                     * a roster last refresh must hide it when rebound to a lobby
+                     * with none. Deactivating removes it from layout entirely
+                     * (a layout group skips inactive children), so a memberless
+                     * row collapses back to the 31px floor. No heights are set
+                     * per fill any more -- content drives them. */
+                    SetLobbyRosterText(row.txtMembers,row.membersGO,memberLine);
                     bool joinable=l.player_count<l.max_players
                         &&ApiClient.FfaQueueStatus!="leaving";
                     row.joinBtn.SetActive(joinable);
@@ -4071,6 +4116,23 @@ namespace CompetitiveRounds
             return s;
         }
 
+        /// <summary>Bind one browser row's roster element. Shared by the FFA
+        /// and hosted-lobby browsers so the two can never drift (#330). Writes
+        /// on every fill: these rows are pooled, so a row that carried a roster
+        /// last refresh must drop it when rebound to a lobby without one. The
+        /// empty case only toggles active state -- it deliberately does NOT
+        /// clear the text, because an inactive element renders nothing and the
+        /// stale string is overwritten before it can ever be shown again.
+        /// SetActive(false) takes the element out of layout entirely, which is
+        /// what lets the row collapse back to its floor.</summary>
+        private static void SetLobbyRosterText(object txt,GameObject go,string line)
+        {
+            if(go==null)return;
+            bool has=!string.IsNullOrEmpty(line);
+            if(has)UIFactory.SetTextRaw(txt,line);
+            go.SetActive(has);
+        }
+
         /// <summary>Aug 8 (Sid): browser second line — who's inside a lobby
         /// before joining: "Name Title (1234)". Names AND titles are
         /// user-authored -> FfaSafeRich; per-member Trunc; first 5 members +
@@ -4141,18 +4203,29 @@ namespace CompetitiveRounds
             row.root.transform.SetParent(parent,false);
             row.root.AddComponent<RectTransform>();
             UIFactory.AddHLG(row.root,spacing:8,padL:6,padR:6,forceExpandH:false);
-            UIFactory.AddLE(row.root,prefH:29,minH:29,flexH:0);
-            row.txtInfo=CreateFfaTextCell("Info",row.root.transform,700,UIFactory.AlignMidLeft,15f,C_WHITE,true,300);
+            /* minH only, no prefH -- see CreateFfaBrowserRow for the full
+             * reasoning; the row height is derived from the info column. */
+            UIFactory.AddLE(row.root,minH:29,flexH:0);
+            var infoCol=new GameObject("InfoCol");infoCol.transform.SetParent(row.root.transform,false);
+            infoCol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(infoCol,spacing:1);
+            UIFactory.AddLE(infoCol,prefW:700,minW:300,flexW:1);
+            row.txtInfo=UIFactory.CreateText("Info",infoCol.transform,"",15f,C_WHITE,
+                UIFactory.AlignMidLeft,sizeDelta:new Vector2(700,25));
             UIFactory.SetOverflowMode(row.txtInfo,3);
-            /* Wrap off, same treatment as the leaderboard/identity cells.
-             * This cell is the one the member line made MULTI-LINE, and it
-             * is sized for exactly two line boxes. If the FIRST line wraps
-             * (a bet tag plus [PRIVATE] in English, a bet tag alone in
-             * es/ru/uk/sv) it consumes both boxes and Truncate drops the
-             * member line entirely -- the whole point of sizing this cell.
-             * No-wrap also makes the member-line cut deterministic and at
-             * the box edge rather than at a word boundary. */
+            /* Wrap off: this cell holds ONLY the header now and must stay one
+             * line. Left at 25px because 25/15pt = 1.67x is already clear of
+             * the #297 edge -- the FFA row needed 28 only because its header
+             * is 17pt. Truncate rather than FitOneLine: Overflow would let a
+             * tall translated header paint over the roster underneath. */
             UIFactory.SetWordWrap(row.txtInfo,false);
+            /* Roster element -- same construction as the FFA browser row. */
+            row.txtMembers=UIFactory.CreateText("Members",infoCol.transform,"",13f,C_WHITE,
+                UIFactory.AlignTopLeft,sizeDelta:new Vector2(0,16));
+            UIFactory.SetWordWrap(row.txtMembers,true);
+            UIFactory.SetTextAutoHeight(row.txtMembers,22);
+            row.membersGO=(row.txtMembers as Component)?.gameObject;
+            if(row.membersGO!=null)row.membersGO.SetActive(false);
             row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",14f,C_WHITE,
                 new Color(0.25f,0.42f,0.20f,0.95f),
                 ()=>{JoinHostLobbyRow(row,team);dirty=true;},
@@ -4367,26 +4440,9 @@ namespace CompetitiveRounds
                     UIFactory.SetTextRaw(row.txtInfo,
                         privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
                             FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age)
-                        +betTag
-                        +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
-                    // Two-line rows grow; re-asserted every fill because the
-                    // pooled row may swap between shapes (#63 prefH rules).
-                    UIFactory.SetPrefH(row.root,memberLine!=null?50f:29f);
-                    /* Same defect as the FFA browser row above (see the long
-                     * note there for the mechanism): txtInfo is pinned at its
-                     * build-time 25px by CreateText's baked prefH/minH, so
-                     * growing only the root left the member line undrawn. This
-                     * row's first line is 15pt (~18px) + the <size=13> member
-                     * line (~15px) = ~33px, and the root grows to 50, so 44
-                     * fits with headroom for taller fallback metrics in ru/uk.
-                     * Outer heights unchanged — scroll budget untouched. */
-                    var hostInfoGO=(row.txtInfo as Component)?.gameObject;
-                    if(hostInfoGO!=null)
-                    {
-                        float infoH=memberLine!=null?44f:25f;
-                        UIFactory.SetPrefH(hostInfoGO,infoH);
-                        UIFactory.SetMinH(hostInfoGO,infoH);
-                    }
+                        +betTag);
+                    /* Roster to its own element -- see the FFA browser fill. */
+                    SetLobbyRosterText(row.txtMembers,row.membersGO,memberLine);
                     row.joinBtn.SetActive(l.player_count<l.max_players&&!leaving&&!busy);
                     // Review find 2: an OPEN wager stays cancellable even if
                     // the lobby stops being bettable (dropped below two
