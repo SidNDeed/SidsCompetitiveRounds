@@ -54,6 +54,11 @@
   [YouTube].
 - **Compare tab** (bug 252): "Top Cards" renamed "Most Used Cards" in all
   languages.
+- **Game audio mutes while tabbed out in online play** (bug 210, per Sid):
+  deterministic instead of the OS's intermittent ducking; restores your
+  exact volume on refocus. Menu/queue audio untouched (the match-found
+  sound still reaches you), broadcast seat exempt. Config:
+  `MuteAudioInBackground`, default on.
 - **Black YouTube VOD thumbnails** (bug 255, VM bot): the thumbnail engine
   had no content check and uploaded provably uniform-black captures (5 of
   its first 6). Every capture is now probed with a tiny pixel decode and
