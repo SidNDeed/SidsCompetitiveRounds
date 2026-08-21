@@ -52,6 +52,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowNotifications;
         internal static ConfigEntry<bool> ShowFps;
         internal static ConfigEntry<bool> CapFpsUnfocused;
+        internal static ConfigEntry<bool> MuteAudioInBackground;
         internal static ConfigEntry<bool> DeepIdleUnfocused;
         internal static ConfigEntry<bool> BroadcastIdleFpsCap;
         internal static ConfigEntry<bool> BroadcastWindowed1080;
@@ -520,6 +521,12 @@ namespace CompetitiveRounds
                 "Performance", "CapFpsUnfocused",
                 true,
                 "Cap the frame rate at 120 FPS while the game window is not focused (Aug 6 item 8). Saves GPU/CPU for alt-tabbed players without affecting gameplay; the cap is lifted the moment focus returns."
+            );
+
+            MuteAudioInBackground = Config.Bind(
+                "Performance", "MuteAudioInBackground",
+                true,
+                "Mute game audio while the window is unfocused in an online Photon room. Audio stays on at the menu, and the broadcast seat always ignores this setting."
             );
 
             // Aug 7 item 2: a NEW key, not a repurposed CapFpsUnfocused — that

@@ -2523,7 +2523,7 @@ namespace CompetitiveRounds
         // Suspected root cause: Unity's input system silently dropping events
         // when the window isn't focused (Application.runInBackground=false).
         //
-        // Fix: while in any Photon room, force runInBackground=true so Unity
+        // Fix: while in any online Photon room, force runInBackground=true so Unity
         // keeps processing input/network events even when the player tabbed
         // away. Restored to whatever vanilla had set on room leave.
         //
@@ -2533,6 +2533,8 @@ namespace CompetitiveRounds
         // never needs alt+F4 to recover.
         private static bool _runInBackgroundOverridden = false;
         private static bool _origRunInBackground = false;
+        private static bool _audioMutedForFocus = false;
+        private static float _preMuteAudioVolume = 1f;
         private static DateTime _stuckOverlayDismissedAt = DateTime.MinValue;
         public static bool ShouldShowMatchFoundStuckOverlay { get; private set; }
         public static int SecondsInUnstartedRoom { get; private set; }
@@ -2553,8 +2555,8 @@ namespace CompetitiveRounds
         /// Idempotent and cheap: both arms are one-shot on a flag.</summary>
         private static void TickRunInBackground()
         {
-            bool inRoom = PhotonNetwork.InRoom;
-            if (inRoom && !_runInBackgroundOverridden)
+            bool inOnlineRoom = IsInOnlinePhotonRoomNow();
+            if (inOnlineRoom && !_runInBackgroundOverridden)
             {
                 try
                 {
@@ -2565,7 +2567,7 @@ namespace CompetitiveRounds
                 }
                 catch { }
             }
-            else if (!inRoom && _runInBackgroundOverridden)
+            else if (!inOnlineRoom && _runInBackgroundOverridden)
             {
                 try
                 {
@@ -2579,6 +2581,99 @@ namespace CompetitiveRounds
                 // InRoom==false here — the authoritative reset lives in
                 // Plugin.OnLeftRoom, the callback that cannot miss).
                 try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
+            }
+
+            TickBackgroundAudio(inOnlineRoom);
+        }
+
+        /// <summary>Live Photon state for focus-driven engine overrides. This
+        /// deliberately rejects OfflineMode: Sandbox leaves a simulated Photon
+        /// room alive at the main menu, where audio must remain untouched so a
+        /// tabbed-out player can still hear the match-found sound (#122).</summary>
+        private static bool IsInOnlinePhotonRoomNow()
+        {
+            try { return PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; }
+            catch { return false; }
+        }
+
+        /// <summary>Mutes only while unfocused in online play, then restores the
+        /// exact listener volume cached at the mute transition. Idempotent and
+        /// re-asserted while held because game code may rewrite the listener.</summary>
+        private static void TickBackgroundAudio(bool inOnlineRoom)
+        {
+            bool enabled = false;
+            try
+            {
+                enabled = Plugin.MuteAudioInBackground != null
+                    && Plugin.MuteAudioInBackground.Value;
+            }
+            catch { }
+
+            bool unfocused = false;
+            try { unfocused = !UnityEngine.Application.isFocused; }
+            catch { }
+
+            // ABSOLUTE BROADCAST EXEMPTION: OBS captures ROUNDS' game audio,
+            // and that window is almost never focused. Muting either the
+            // broadcast identity or its owned spectator session is silent
+            // dead-air on stream. An unresolved identity and any check failure
+            // are exempt too; audio may mute only after proving this is not it.
+            bool broadcastExempt = true;
+            try
+            {
+                bool identityKnown = !string.IsNullOrEmpty(localSteamId)
+                    && !string.Equals(localSteamId, "unknown", StringComparison.Ordinal);
+                broadcastExempt = !identityKnown
+                    || BroadcastMode.IsBroadcastIdentity
+                    || SpectatorSession.BroadcastOwned;
+            }
+            catch { }
+
+            bool shouldMute = enabled && unfocused && inOnlineRoom && !broadcastExempt;
+            if (shouldMute)
+            {
+                if (!_audioMutedForFocus)
+                {
+                    bool muted = false;
+                    try
+                    {
+                        _preMuteAudioVolume = UnityEngine.AudioListener.volume;
+                        UnityEngine.AudioListener.volume = 0f;
+                        muted = true;
+                    }
+                    catch { }
+
+                    if (muted)
+                    {
+                        _audioMutedForFocus = true;
+                        try { Plugin.Log.LogInfo("[FOCUS] game audio muted (unfocused, in room)"); } catch { }
+                    }
+                }
+                else
+                {
+                    // Cheap held-state assertion only. Never write while focused.
+                    try { UnityEngine.AudioListener.volume = 0f; } catch { }
+                }
+                return;
+            }
+
+            if (_audioMutedForFocus)
+            {
+                bool restored = false;
+                try
+                {
+                    UnityEngine.AudioListener.volume = _preMuteAudioVolume;
+                    restored = true;
+                }
+                catch { }
+
+                // A failed Unity write keeps the latch armed so the next poll
+                // retries instead of forgetting a listener stranded at zero.
+                if (restored)
+                {
+                    _audioMutedForFocus = false;
+                    try { Plugin.Log.LogInfo("[FOCUS] game audio restored"); } catch { }
+                }
             }
         }
 
