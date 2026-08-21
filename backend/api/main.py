@@ -935,6 +935,7 @@ async def team_queue_cleanup_loop():
                 if _in_match_evidence_trustworthy():
                     husks = (await db.execute(text("""
                         SELECT ts.id, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id
+                          FROM team_series ts
                          WHERE ts.status = 'active'
                            AND COALESCE(ts.room_issued_at, ts.created_at)
                                < NOW() - INTERVAL '60 minutes'
