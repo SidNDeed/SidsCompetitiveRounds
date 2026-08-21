@@ -27820,6 +27820,21 @@ def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
+# Bug 195 (Stan's report, Sid-approved Aug 21): UPSET INCLUSION. Adjacency
+# alone let a 300+-gap inverted result escape rating entirely (a 1000-rated
+# player beating a 2000-rated one four placements away — neither entered the
+# other's comparison set). A replay of all 158 ranked FFA games showed the
+# escape is real but rare (once ever; selection only activates at 6+ rated
+# players, 10 games ever) and that full impact-based selection would bias
+# toward high-RD provisional opponents — so the fix is surgical: any
+# opponent OUTSIDE the adjacency picks whose rating gap is >= this AND whose
+# result INVERTED expectation (the lower-rated player placed strictly above)
+# is added to the comparison set, bounded at ONE extra slot (largest gap
+# first, steam-key tiebreak). The predicate is symmetric, so both members of
+# an upset pair include each other — reciprocity holds except in the
+# multi-upset corner the +1 bound can truncate (documented, accepted:
+# bounded movement is the design constraint, #213).
+FFA_UPSET_INCLUDE_GAP = 250.0
 # Early-leave grace (Sid, 2026-08-20): a player who leaves before the field has
 # scored this many points is NOT rated for the game. Same threshold and the same
 # reasoning as every other "2 points scored" rule in this file (the bet cutoff,
@@ -31802,8 +31817,29 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                  if q.steam_id != p.steam_id and q.steam_id not in unrated),
                 key=lambda q: (abs(placements[q.steam_id] - my_place),
                                _ffa_sort_key(q.steam_id)))
+            picks = list(ranked_opps[:FFA_MAX_RATED_OPPONENTS])
+            # Bug 195: upset inclusion — see FFA_UPSET_INCLUDE_GAP. Scans only
+            # opponents the adjacency picks EXCLUDED (a no-op in games of <=5
+            # rated players, i.e. ~94% of history).
+            if len(ranked_opps) > FFA_MAX_RATED_OPPONENTS:
+                my_r = pre[p.steam_id][0]
+                upsets = []
+                for q in ranked_opps[FFA_MAX_RATED_OPPONENTS:]:
+                    q_r = pre[q.steam_id][0]
+                    gap = abs(my_r - q_r)
+                    if gap < FFA_UPSET_INCLUDE_GAP:
+                        continue
+                    q_place = placements[q.steam_id]
+                    lower_rated_placed_above = (
+                        (my_r < q_r and my_place < q_place)
+                        or (q_r < my_r and q_place < my_place))
+                    if lower_rated_placed_above:
+                        upsets.append((gap, _ffa_sort_key(q.steam_id), q))
+                if upsets:
+                    upsets.sort(key=lambda t: (-t[0], t[1]))
+                    picks.append(upsets[0][2])
             opponents = []
-            for q in ranked_opps[:FFA_MAX_RATED_OPPONENTS]:
+            for q in picks:
                 score = (1.0 if my_place < placements[q.steam_id]
                          else 0.0 if my_place > placements[q.steam_id] else 0.5)
                 opponents.append((pre[q.steam_id][0], pre[q.steam_id][1], score))
