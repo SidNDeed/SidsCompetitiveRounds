@@ -1042,6 +1042,35 @@ namespace CompetitiveRounds
                             }
                         }
                         catch { }
+                        // Bug 241: also render the attacker's REFRESH (block
+                        // back when dealing damage). Same class as the
+                        // lifesteal above: on fighter seats the
+                        // DoDamage->DealtDamage chain fires the card's
+                        // DealtDamageTrigger -> ResetBlock.Go() ->
+                        // Block.ResetCD, so the holder's block came back on
+                        // every DOT tick everywhere EXCEPT this seat — with
+                        // Poison builds virtually ALL damage rides the DOT
+                        // path, so spectators watched a block that never
+                        // recharged (Spirit's report). Deliberately OUTSIDE
+                        // the lifesteal's attacker!=victim guard (client
+                        // review find 3): vanilla's DealtDamageTrigger fires
+                        // on SELF-damage too (only lifesteal gates on
+                        // !selfDamage), so a reflected self-DOT resets block
+                        // on fighter seats and must here as well. ResetCD is
+                        // pure local cooldown-display state: spawns nothing,
+                        // damages nothing (#338 untouched), and keeps the
+                        // full-chain rejection above intact.
+                        try
+                        {
+                            if (attacker != null && attacker.data != null)
+                            {
+                                var blk = attacker.data.block;
+                                if (blk != null)
+                                    foreach (var rb in attacker.GetComponentsInChildren<ResetBlock>())
+                                        if (rb != null) { blk.ResetCD(false); break; }
+                            }
+                        }
+                        catch { }
                     }
                 }
                 catch { }

@@ -17274,6 +17274,21 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
     return {"series": series}
 
 
+# r1 finding 10 (bug 245 family, #345's class for 2v2): a RESUMED series can
+# be hours past created_at while its games are happening NOW. Liveness is
+# therefore three arms — recent creation, recent room issuance (the resume
+# re-issues), or a recent valid game — and the SAME fragment feeds both the
+# live listing and the /team-bets POST (#159/#328: a displayed lock and an
+# enforced lock must be one predicate). Alias contract: `ts` = team_series.
+_TEAM_SERIES_LIVE_ARMS_SQL = """(
+       ts.created_at > NOW() - INTERVAL '2 hours'
+    OR ts.room_issued_at > NOW() - INTERVAL '2 hours'
+    OR EXISTS (SELECT 1 FROM team_matches _lm
+                WHERE _lm.series_id = ts.id
+                  AND _lm.invalidated_at IS NULL
+                  AND _lm.ended_at > NOW() - INTERVAL '2 hours'))"""
+
+
 async def _team_odds_inputs(db: AsyncSession, pids):
     """(rating, rd) per player for 2v2 ODDS — THE single source for both the
     live listing and the /team-bets POST.
@@ -17359,8 +17374,14 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
         JOIN players p2a ON p2a.id = ts.t2a_id
         JOIN players p2b ON p2b.id = ts.t2b_id
         WHERE ts.status IN ('active', 'dc_paused')
-          AND ts.created_at > NOW() - INTERVAL '2 hours'
-        ORDER BY ts.created_at DESC
+          AND """ + _TEAM_SERIES_LIVE_ARMS_SQL + """
+        ORDER BY GREATEST(ts.created_at,
+                          COALESCE(ts.room_issued_at, ts.created_at),
+                          COALESCE((SELECT MAX(_om.ended_at)
+                                      FROM team_matches _om
+                                     WHERE _om.series_id = ts.id
+                                       AND _om.invalidated_at IS NULL),
+                                   ts.created_at)) DESC
         LIMIT 20
     """), {"trust": TEAM_TRUST_2V2_RATING_AFTER})).mappings().all()
 
@@ -18240,10 +18261,15 @@ async def place_team_bet(
     # FOR NO KEY UPDATE above (find 6, #202) makes
     # every check here read post-lock truth against a concurrent report's
     # FOR UPDATE instead of a stale snapshot.
-    if series["created_at"] is not None:
-        _age = (datetime.now(timezone.utc) - series["created_at"]).total_seconds()
-        if _age > 2 * 3600:
-            raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
+    # r1 finding 10: liveness is the SAME three-arm predicate the listing
+    # renders (#328) — a resumed series hours past created_at whose games
+    # are happening now stays bettable exactly as long as it stays listed.
+    _live = (await db.execute(text(
+        "SELECT " + _TEAM_SERIES_LIVE_ARMS_SQL
+        + " FROM team_series ts WHERE ts.id = :sid"
+    ), {"sid": sid})).scalar()
+    if not _live:
+        raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
     # THE cutoff (Sid): 2 points scored in game 1. Same predicate the listing
     # renders, so the two can never disagree (#159).
     if ((series["live_t1_points"] or 0) + (series["live_t2_points"] or 0)) >= 2:
@@ -23945,7 +23971,12 @@ async def team_queue_poll(steam_id: str, request: Request,
             SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
                    tq.completed_series, tq.fallback_rating, tq.region, tq.status, tq.series_id,
                    tq.team_assigned, tq.room_name, tq.room_region, tq.ready,
-                   tq.joined_at, tq.matched_at, tq.queue_type
+                   tq.joined_at, tq.matched_at, tq.queue_type,
+                   -- r1 follow-up (pre-existing): these two were never
+                   -- selected, so the CALLER's manual-queue team choice fell
+                   -- to None and filled arbitrarily while the other three
+                   -- honored theirs.
+                   tq.preferred_team, tq.manual_pick_enabled
             FROM team_queue tq
             JOIN players p ON tq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -24299,33 +24330,57 @@ async def team_queue_poll(steam_id: str, request: Request,
     others = list(cands.mappings().all())
 
     # ── Sticky-team requeue resume ──────────────────────────────────
-    # If this caller belongs to a `dc_paused` series whose grace deadline
-    # hasn't expired, and the other 3 original players are ALSO in queue,
-    # resume the existing series with the SAME teams instead of creating
-    # a fresh one. Falls through to the normal balancer path otherwise.
-    dc_resume_series = await db.execute(
+    # If this caller belongs to a live-but-interrupted series (legacy
+    # `dc_paused` inside its grace window, or a recent `dc_incomplete` —
+    # the status report-dc actually writes) and the other 3 original
+    # players are ALSO in queue, resume the existing series with the SAME
+    # teams instead of creating a fresh one. Falls through to the normal
+    # balancer path otherwise.
+    #
+    # Bug 245: this resume was DEAD for every modern DC — it matched only
+    # `dc_paused` + a grace deadline, while report-dc has written
+    # `dc_incomplete` with NO grace since the manual-control policy landed.
+    # So a DC'd four re-queuing always minted a brand-new series (visible
+    # as duplicate live series in the 2v2 tab / Leaderboard). The
+    # dc_incomplete arm uses a 30-minute activity window (created_at covers
+    # a game-1 DC before any report; newest recorded game covers the rest)
+    # because report-dc stamps no grace, and only auto-resumes rows the DC
+    # path flagged (`dc_manual_pending`) — an admin resolution in flight
+    # holds the row lock, and SKIP LOCKED defers to it.
+    # TRIGGER read only (plain, unlocked): the family resolver re-reads and
+    # locks authoritatively under the quartet lock. This just answers "does
+    # the caller belong to a plausibly-resumable series?" cheaply per poll.
+    dc_row = (await db.execute(
         text("""
-            SELECT id, t1a_id, t1b_id, t2a_id, t2b_id, dc_grace_until
-              FROM team_series
-             WHERE status = 'dc_paused'
-               AND dc_grace_until > NOW()
-               AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)
-             ORDER BY dc_grace_until DESC
+            SELECT id, t1a_id, t1b_id, t2a_id, t2b_id
+              FROM team_series ts
+             WHERE :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)
+               AND ((status = 'dc_paused' AND dc_grace_until > NOW())
+                 OR (status = 'dc_incomplete'
+                     AND invalidation_reason = 'dc_manual_pending'
+                     AND (created_at > NOW() - INTERVAL '30 minutes'
+                          OR EXISTS (SELECT 1 FROM team_matches tm
+                                      WHERE tm.series_id = ts.id
+                                        AND tm.ended_at > NOW() - INTERVAL '30 minutes'))))
+             ORDER BY created_at DESC
              LIMIT 1
-             FOR UPDATE SKIP LOCKED
         """),
         {"pid": my_pid},
-    )
-    dc_row = dc_resume_series.mappings().first()
+    )).mappings().first()
     if dc_row is not None:
         original_pids = [dc_row["t1a_id"], dc_row["t1b_id"], dc_row["t2a_id"], dc_row["t2b_id"]]
-        # Are the OTHER 3 original players currently in queue (any status)?
+        # Are the OTHER 3 originals here? Requeue CONSENT (r1 finding 2) is
+        # a fresh 'searching' row with no series binding, or a row already
+        # bound to THIS series (idempotent re-poll) — a matched/ready member
+        # of a DIFFERENT live series must never be stolen out of it.
         rs = await db.execute(
             text("""
-                SELECT player_id, steam_id, display_name, rating, region
+                SELECT player_id, steam_id, display_name, rating, region,
+                       preferred_team
                   FROM team_queue
                  WHERE player_id = ANY(:pids)
-                   AND status IN ('searching', 'matched', 'ready')
+                   AND ((status = 'searching' AND series_id IS NULL)
+                        OR series_id = :sid)
                    AND player_id != :me
                    -- Freshness (review find): don't resume a series onto a
                    -- crashed teammate's ghost row.
@@ -24335,59 +24390,55 @@ async def team_queue_poll(steam_id: str, request: Request,
                                       AND pb.unbanned_at IS NULL)
                 FOR UPDATE SKIP LOCKED
             """),
-            {"pids": original_pids, "me": my_pid},
+            {"pids": original_pids, "me": my_pid, "sid": dc_row["id"]},
         )
         present = list(rs.mappings().all())
-        if len(present) == 3:
-            await _assert_no_service_subject(db, affected_player_ids=original_pids)
-            # All 4 originals are here. Re-lock them with the EXISTING series.
-            print(f"[TEAM-QUEUE-LOCK] sticky-team resume: series={dc_row['id']} caller={steam_id}")
-            # Map original team to t1/t2 — keep the original assignments so the
-            # balancer-time slot order remains canonical for HMAC matching.
-            t1a, t1b = dc_row["t1a_id"], dc_row["t1b_id"]
-            t2a, t2b = dc_row["t2a_id"], dc_row["t2b_id"]
-            for pid in [my_pid] + [p["player_id"] for p in present]:
-                t = 1 if pid in (t1a, t1b) else 2
-                await db.execute(
-                    text("""
-                        UPDATE team_queue
-                           SET status = 'matched',
-                               series_id = :sid,
-                               team_assigned = :t,
-                               matched_at = NOW()
-                         WHERE player_id = :pid
-                    """),
-                    {"sid": dc_row["id"], "t": t, "pid": pid},
-                )
-            await _lease_acquire_many(
-                db, [my_pid] + [p["player_id"] for p in present],
-                "team", dc_row["id"], LEASE_TTL_ASSEMBLY)
-            # Flip the series back to active and clear DC fields so the next
-            # match plays through normally.
-            await db.execute(
-                text("""
-                    UPDATE team_series
-                       SET status = 'active',
-                           dc_grace_until = NULL,
-                           dc_team_remaining = NULL,
-                           dc_player_id = NULL
-                     WHERE id = :sid
-                """),
-                {"sid": dc_row["id"]},
-            )
-            await db.commit()
-            # The poll responder reads the queue rows again on its next pass —
-            # return matched here so the caller sees the resume and surfaces
-            # the ready-up button.
-            my_team = 1 if my_pid in (t1a, t1b) else 2
-            return TeamQueuePollResponse(
-                status="matched",
-                series_id=str(dc_row["id"]),
-                team_assigned=my_team,
-                teammates=[],   # filled by next poll tick from the queue rows
-                opponents=[],
-                match_age_seconds=0,
-            )
+        if len(present) < 3:
+            # r1 finding 7: distinguish ABSENT from CONTENDED. If an
+            # unlocked read finds all 3 consenting originals, one of their
+            # rows is merely locked by a concurrent poll — defer instead of
+            # falling through and locking the four into a series with a
+            # stranger while every original is actually present.
+            free_cnt = (await db.execute(text("""
+                SELECT COUNT(*) FROM team_queue
+                 WHERE player_id = ANY(:pids)
+                   AND ((status = 'searching' AND series_id IS NULL)
+                        OR series_id = :sid)
+                   AND player_id != :me
+                   AND last_polled > NOW() - INTERVAL '10 seconds'
+                   AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                                    WHERE pb.steam_id = team_queue.steam_id
+                                      AND pb.unbanned_at IS NULL)
+            """), {"pids": original_pids, "me": my_pid,
+                   "sid": dc_row["id"]})).scalar() or 0
+            if free_cnt >= 3:
+                await db.commit()
+                return TeamQueuePollResponse(status="searching", queue_count=4,
+                                             elo_range=elo_range)
+        else:
+            # Manual-queue partition intent (r1 finding 11): resume gates on
+            # the REQUESTED split only when all four expressed a preference
+            # (a fully-determined request). Partial preferences leave the
+            # request underdetermined — no gate; documented residual.
+            req1 = req2 = None
+            if my_qtype == "manual":
+                prefs = {my_pid: me.get("preferred_team")}
+                for p in present:
+                    prefs[p["player_id"]] = p["preferred_team"]
+                if all(v in (1, 2) for v in prefs.values()):
+                    req1 = [pid for pid, v in prefs.items() if v == 1]
+                    req2 = [pid for pid, v in prefs.items() if v == 2]
+                    if len(req1) != 2 or len(req2) != 2:
+                        req1 = req2 = None
+            outcome, resp = await _team_resolve_live_family(
+                db, original_pids, my_pid, steam_id, my_qtype, req1, req2)
+            if outcome == "relocked":
+                return resp
+            if outcome == "defer":
+                await db.commit()
+                return TeamQueuePollResponse(status="searching", queue_count=4,
+                                             elo_range=elo_range)
+            # 'fresh': nothing resumable — fall through to normal matching.
 
     if len(others) < 3:
         # Not enough — count searching, return. Freshness-filtered so the
@@ -24409,6 +24460,10 @@ async def team_queue_poll(steam_id: str, request: Request,
 
     # 4 candidates total (caller + others). Run balancer (or honor manual picks).
     print(f"[TEAM-QUEUE-LOCK] caller={steam_id} locking 4-player series with {[o['steam_id'] for o in others]}")
+
+    # (Bug 245's same-four dedupe moved BELOW the team-split computation so
+    # the manual-queue partition request is known - see the family-resolve
+    # call right before the INSERT.)
     pool = [
         {"player_id": me["player_id"], "balance_rating": my_balance,
          "rating": me["rating"], "rd": me["rating_deviation"],
@@ -24459,6 +24514,27 @@ async def team_queue_poll(steam_id: str, request: Request,
     pid_to_steam = {p["player_id"]: p["steam_id"] for p in pool}
     team1_ids_sorted = sorted(team1_ids, key=lambda pid: pid_to_steam[pid])
     team2_ids_sorted = sorted(team2_ids, key=lambda pid: pid_to_steam[pid])
+
+    # ── Bug 245: same-four live-series family resolve ────────────────────
+    # Four players who already share a LIVE series must never get a second
+    # one minted (the DC-rejoin flow produced up to three concurrent live
+    # rows for one sitting). Runs AFTER the split computation so a manual
+    # queue's requested partition gates resume (r1 finding 11); the resolver
+    # serializes under the quartet advisory lock (finding 4), enumerates the
+    # whole family (finding 5), applies the shared eligibility windows
+    # (finding 8), supersedes zero-game husks, and defers while any family
+    # row is locked elsewhere.
+    _fam_req1 = list(team1_ids_sorted) if my_qtype == "manual" else None
+    _fam_req2 = list(team2_ids_sorted) if my_qtype == "manual" else None
+    _fam_outcome, _fam_resp = await _team_resolve_live_family(
+        db, team1_ids_sorted + team2_ids_sorted, me["player_id"], steam_id,
+        my_qtype, _fam_req1, _fam_req2)
+    if _fam_outcome == "relocked":
+        return _fam_resp
+    if _fam_outcome == "defer":
+        await db.commit()
+        return TeamQueuePollResponse(status="searching", queue_count=4,
+                                     elo_range=elo_range)
 
     # Create the team_series row.
     series_id = uuid_mod.uuid4()
@@ -25299,6 +25375,13 @@ async def admin_resolve_team_series(
     # status guard too, but bail early for a clean response.
     if srow["status"] in ("completed", "cancelled", "canceled"):
         return {"status": "noop", "reason": f"already {srow['status']}"}
+    # ACCEPTED RESIDUAL (bug 245 review r1 finding 12): an admin who loaded a
+    # dc_incomplete series can fire this action AFTER the four resumed it to
+    # 'active' — the signed target carries no expected-status, so the stale
+    # decision resolves a live sitting. Deliberate: this endpoint's purpose
+    # includes force-resolving ACTIVE series, admin actions are human+rare,
+    # and admin_reverse tools recover the outcome. Binding the observed
+    # status into the HMAC would need a coordinated client change.
     await _assert_no_service_subject(
         db,
         affected_player_ids=[srow["t1a_id"], srow["t1b_id"],
@@ -25744,6 +25827,270 @@ def _verify_team_dc_hmac(steam_id: str, series_id: str, dc_player_steam_id: str,
     return hmac.compare_digest(expected, signature or "")
 
 
+_TEAM_RESUME_WINDOW_MINUTES = 30
+
+
+def _team_quartet_key(pids) -> str:
+    """Canonical identity of a four-player group for advisory locking —
+    sorted str(uuid) join, the same canonical ordering every other lock pass
+    uses (#197). Value-keyed because the rows being serialized (a same-four
+    team_series) may not exist yet (#207)."""
+    return ",".join(sorted(str(p) for p in pids))
+
+
+async def _team_quartet_lock(db: AsyncSession, pids) -> None:
+    """Serialize every same-four series CREATION/RESUME funnel (r1 finding
+    4): the queue matcher and the signed continuation endpoint could both
+    read "no live same-four series" and insert disjoint rows. Both funnels
+    take this xact-scoped advisory lock BEFORE their live recheck.
+    Ordering note: the queue poll holds team_queue tuples when it takes
+    this; the continuation holds per-steam advisory locks. Neither ever
+    acquires the other's first resource, and two polls over one quartet
+    cannot both hold the same queue rows, so no cycle exists."""
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"
+    ), {"k": _team_quartet_key(pids)})
+
+
+def _team_series_resumable(row, now=None) -> bool:
+    """ONE resume-eligibility predicate for every path (r1 finding 8 — the
+    dedupe backstop bypassing the sticky path's age/reason/grace rules is
+    how a two-hour-old husk got reactivated with a stale score). `row` must
+    carry status, dc_grace_until, invalidation_reason, created_at,
+    room_issued_at, last_game_at (newest valid team_matches.ended_at, may
+    be None), games, t1/t2_series_wins."""
+    now = now or datetime.now(timezone.utc)
+    if (row["games"] or 0) <= 0 and \
+            (row["t1_series_wins"] or 0) <= 0 and (row["t2_series_wins"] or 0) <= 0:
+        return False   # zero-game rows are superseded, never resumed
+    window = timedelta(minutes=_TEAM_RESUME_WINDOW_MINUTES)
+    fresh = False
+    for ts_col in ("created_at", "room_issued_at", "last_game_at"):
+        v = row.get(ts_col) if hasattr(row, "get") else row[ts_col]
+        if v is not None and (now - v) < window:
+            fresh = True
+            break
+    st = row["status"]
+    if st == "active":
+        return fresh
+    if st == "dc_paused":
+        return row["dc_grace_until"] is not None and row["dc_grace_until"] > now
+    if st == "dc_incomplete":
+        return row["invalidation_reason"] == "dc_manual_pending" and fresh
+    return False
+
+
+async def _team_lock_family_pick(db: AsyncSession, four_pids,
+                                 req_t1=None, req_t2=None,
+                                 caller_steam: str = ""):
+    """Core of the same-four family resolution (r1 finding 5; r2 HIGH 2/3
+    made it a SHARED primitive — the queue matcher, the hosted-lobby Start
+    and the continuation endpoint are all same-four creation funnels and
+    each must resolve the WHOLE family, never a newest-row probe).
+
+    CONTRACT: the caller already holds _team_quartet_lock for these four.
+    Enumerates every live same-four row, locks each (SKIP LOCKED),
+    supersedes zero-game husks (cancel + bet reconcile), and picks the
+    authoritative resumable row per _team_series_resumable.
+
+    Returns ('picked', row) with the authoritative row LOCKED; ('fresh',
+    None) when nothing is resumable and an insert may proceed; ('defer',
+    None) when a family row is visible but locked elsewhere (admin resolve,
+    DC report, janitor) — never mint a duplicate while the authoritative
+    row is in motion.
+
+    Partition intent (r1 finding 11): when req_t1/req_t2 are given, a
+    played series whose stored split differs from the REQUESTED split (side
+    swap tolerated) is not resumable — a deliberate re-split starts a fresh
+    series; the old row is left for the janitor/admin rather than cancelled
+    (it has real results and bets). Zero-game husks are superseded
+    regardless of partition."""
+    fam = (await db.execute(text("""
+        SELECT ts.id FROM team_series ts
+         WHERE ts.status IN ('active', 'dc_paused', 'dc_incomplete')
+           AND ts.t1a_id = ANY(:ids) AND ts.t1b_id = ANY(:ids)
+           AND ts.t2a_id = ANY(:ids) AND ts.t2b_id = ANY(:ids)
+         ORDER BY ts.created_at DESC
+    """), {"ids": list(four_pids)})).scalars().all()
+    if not fam:
+        return ("fresh", None)
+    locked_rows = []
+    for fid in fam:
+        r = (await db.execute(text("""
+            SELECT ts.id, ts.status, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id,
+                   ts.t1_series_wins, ts.t2_series_wins, ts.dc_grace_until,
+                   ts.invalidation_reason, ts.created_at, ts.room_issued_at,
+                   (SELECT COUNT(*) FROM team_matches tm
+                     WHERE tm.series_id = ts.id
+                       AND tm.invalidated_at IS NULL) AS games,
+                   (SELECT MAX(tm.ended_at) FROM team_matches tm
+                     WHERE tm.series_id = ts.id
+                       AND tm.invalidated_at IS NULL) AS last_game_at
+              FROM team_series ts
+             WHERE ts.id = :sid
+               AND ts.status IN ('active', 'dc_paused', 'dc_incomplete')
+             FOR UPDATE OF ts SKIP LOCKED
+        """), {"sid": fid})).mappings().first()
+        if r is None:
+            # Visible a moment ago, now locked elsewhere or terminal. If it
+            # merely went terminal, the next poll's family read won't see it;
+            # deferring costs one 3s cycle either way.
+            return ("defer", None)
+        locked_rows.append(r)
+    candidates = []
+    for r in locked_rows:
+        if not _team_series_resumable(r):
+            continue
+        if req_t1 is not None and req_t2 is not None:
+            stored_t1 = {r["t1a_id"], r["t1b_id"]}
+            stored_t2 = {r["t2a_id"], r["t2b_id"]}
+            if not ((stored_t1 == set(req_t1) and stored_t2 == set(req_t2))
+                    or (stored_t1 == set(req_t2) and stored_t2 == set(req_t1))):
+                continue
+        candidates.append(r)
+    authoritative = None
+    if candidates:
+        candidates.sort(key=lambda r: (
+            (r["games"] or 0) + (r["t1_series_wins"] or 0) + (r["t2_series_wins"] or 0),
+            r["created_at"]), reverse=True)
+        authoritative = candidates[0]
+    for r in locked_rows:
+        if authoritative is not None and r["id"] == authoritative["id"]:
+            continue
+        if (r["games"] or 0) > 0 or (r["t1_series_wins"] or 0) > 0 \
+                or (r["t2_series_wins"] or 0) > 0:
+            # Played but not authoritative/eligible: leave it — it carries
+            # real results and possibly bets (#242: never move money from a
+            # dedupe pass). The janitor sweeps and the 2h listing arms age
+            # it out of every live surface.
+            continue
+        await db.execute(text("""
+            UPDATE team_series
+               SET status = 'cancelled', completed_at = NOW(),
+                   invalidation_reason = 'superseded_requeue'
+             WHERE id = :sid
+        """), {"sid": r["id"]})
+        await _reconcile_team_series_bets(db, r["id"], "superseded_requeue")
+        print(f"[TEAM-QUEUE-LOCK] superseded zero-game husk {r['id']} "
+              f"(family resolve, caller={caller_steam})")
+    if authoritative is None:
+        return ("fresh", None)
+    return ("picked", authoritative)
+
+
+async def _team_resolve_live_family(db: AsyncSession, four_pids, caller_pid,
+                                    caller_steam: str, my_qtype: str,
+                                    req_t1=None, req_t2=None):
+    """Queue-matcher wrapper over _team_lock_family_pick: takes the quartet
+    lock, resolves the family, and re-locks the four QUEUE rows onto the
+    authoritative series. Returns ('relocked', TeamQueuePollResponse) /
+    ('fresh', None) / ('defer', None)."""
+    await _team_quartet_lock(db, four_pids)
+    outcome, authoritative = await _team_lock_family_pick(
+        db, four_pids, req_t1, req_t2, caller_steam)
+    if outcome != "picked":
+        return (outcome, None)
+    await _assert_no_service_subject(db, affected_player_ids=list(four_pids))
+    resp = await _team_relock_existing_series(
+        db, authoritative, list(four_pids), caller_pid, caller_steam,
+        "family_resolve")
+    return ("relocked", resp)
+
+
+async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
+                                       caller_pid, caller_steam: str,
+                                       reason: str):
+    """Bug 245: re-lock four queued players onto an EXISTING live series
+    instead of minting a duplicate. Shared by the sticky DC-resume path and
+    the same-four dedupe backstop in the 2v2 queue matcher.
+
+    Contract: the CALLER holds FOR UPDATE (obtained via SKIP LOCKED) on the
+    series row `srow` and has verified all four members are present + fresh
+    in team_queue (searching, or already bound to THIS series), eligible per
+    _team_series_resumable, and not service subjects. Team assignment keeps
+    the series' ORIGINAL partition — scores only make sense under it, and
+    the balancer-time slot order stays canonical for HMAC matching.
+
+    Review r1 findings, each load-bearing:
+      * live_t1/t2_points are PRESERVED (finding 1): they are the bet
+        cutoff's monotonic latch — resetting them reopened a betting window
+        that game 1's progress had already closed. The next game's live
+        POSTs overwrite them.
+      * photon_room_id / room_issued_at are CLEARED (finding 3): the old
+        room is dead, and a deferred DC report naming it must not match the
+        resumed series (report-dc ignores a room-carrying report against a
+        room-less row). Re-issuance stores the new room before play.
+      * spawn_confirmations / spawn_confirmed_by RESET (finding 6): stale
+        4/4 evidence from the dead room disabled the 180s assembly cancel
+        and the stale-series janitor for the new room.
+    The dc_manual_pending flag clears because play resumed — nothing is
+    pending an admin call any more."""
+    t1a, t1b = srow["t1a_id"], srow["t1b_id"]
+    for pid in member_pids:
+        t = 1 if pid in (t1a, t1b) else 2
+        await db.execute(
+            text("""
+                UPDATE team_queue
+                   SET status = 'matched',
+                       series_id = :sid,
+                       team_assigned = :t,
+                       matched_at = NOW()
+                 WHERE player_id = :pid
+            """),
+            {"sid": srow["id"], "t": t, "pid": pid},
+        )
+    await _lease_acquire_many(db, list(member_pids), "team", srow["id"],
+                              LEASE_TTL_ASSEMBLY)
+    # Flip the series back to active and clear DC fields so the next match
+    # plays through normally. Status guard is belt-and-suspenders — the
+    # caller's row lock already pins it.
+    await db.execute(
+        text("""
+            UPDATE team_series
+               SET status = 'active',
+                   dc_grace_until = NULL,
+                   dc_team_remaining = NULL,
+                   dc_player_id = NULL,
+                   photon_room_id = NULL,
+                   room_issued_at = NULL,
+                   spawn_confirmations = 0,
+                   spawn_confirmed_by = '[]'::jsonb,
+                   invalidation_reason = CASE
+                       WHEN invalidation_reason = 'dc_manual_pending' THEN NULL
+                       ELSE invalidation_reason END
+             WHERE id = :sid
+               AND status IN ('active', 'dc_paused', 'dc_incomplete')
+        """),
+        {"sid": srow["id"]},
+    )
+    # r2 HIGH 1: stamp the relock so report-dc can fence ROOMLESS (old
+    # client) reports arriving in the post-resume window — the room fence
+    # alone cannot see them. Savepointed (#235): pre-migration-235 the
+    # stamp is skipped and the fence simply stays inactive.
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "UPDATE team_series SET relocked_at = NOW() WHERE id = :sid"
+            ), {"sid": srow["id"]})
+    except Exception:
+        pass
+    await db.commit()
+    print(f"[TEAM-QUEUE-LOCK] relock onto existing series={srow['id']} "
+          f"caller={caller_steam} reason={reason}")
+    # The poll responder reads the queue rows again on its next pass —
+    # return matched here so the caller sees the resume and surfaces the
+    # ready-up button.
+    my_team = 1 if caller_pid in (t1a, t1b) else 2
+    return TeamQueuePollResponse(
+        status="matched",
+        series_id=str(srow["id"]),
+        team_assigned=my_team,
+        teammates=[],   # filled by next poll tick from the queue rows
+        opponents=[],
+        match_age_seconds=0,
+    )
+
+
 @app.post("/api/v1/team/series/{series_id}/report-dc", tags=["Team Matches"])
 async def team_series_report_dc(
     series_id: str,
@@ -25751,16 +26098,20 @@ async def team_series_report_dc(
     dc_player_steam_id: str = Query(...),
     t1_points_total: int = Query(0, ge=0),
     t2_points_total: int = Query(0, ge=0),
+    photon_room_id: str = Query(None),
     hmac_sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Mid-series disconnect report. The 2v2 DC rule: if the abandoned match
-    had >=2 total points scored across both teams, award the match win to the
-    non-DC team (different from 1v1 which usually cancels). Series stays
-    active but flips to status='dc_paused' for 5 minutes — if the same 4
-    re-queue within that window the matchmaker resumes the existing series;
-    otherwise the team that was still around takes the series by forfeit
-    (handled by the state-poll endpoint when the deadline expires)."""
+    """Mid-series disconnect report. Two outcomes: (1) lead-forfeit — if the
+    non-DC team was already up a game AND the abandoned game had >=2 total
+    points, the whole series completes to them with full ratings/economy;
+    (2) otherwise the series flips to status='dc_incomplete'
+    (invalidation_reason='dc_manual_pending') for manual admin resolution —
+    UNLESS the same four re-queue within ~30 minutes, in which case the
+    matcher's sticky resume / same-four dedupe re-locks them onto THIS series
+    (original partition, scores kept) and clears the pending flag (bug 245).
+    The old dc_paused-with-grace flow is legacy; only the state-poll's
+    expiry sweep still reads it."""
     if not _verify_team_dc_hmac(reporter_steam_id, series_id, dc_player_steam_id, hmac_sig):
         raise HTTPException(403, "Invalid DC report signature")
     try:
@@ -25774,11 +26125,19 @@ async def team_series_report_dc(
     if dc_pid is None:
         raise HTTPException(404, "DC'd player unknown")
 
+    # Locked read (r1 finding 3): the room validation below and every write
+    # in this endpoint must act on pinned state — an UNLOCKED read could
+    # validate the old room, lose the race to a concurrent resume's room
+    # rewrite, and still flip the resumed sitting. FOR NO KEY UPDATE (#202):
+    # the synthetic-forfeit team_matches INSERT below takes FK KEY SHARE on
+    # this row, and later writes are non-key UPDATEs; it still serializes
+    # against the family resolver's FOR UPDATE and the admin endpoint.
     s_row = await db.execute(
         text("""
             SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id,
-                   t1_series_wins, t2_series_wins
+                   t1_series_wins, t2_series_wins, photon_room_id
               FROM team_series WHERE id = :sid
+               FOR NO KEY UPDATE
         """),
         {"sid": sid_uuid},
     )
@@ -25787,6 +26146,50 @@ async def team_series_report_dc(
         raise HTTPException(404, "Series not found")
     if s["status"] not in ("active", "dc_paused"):
         return {"status": s["status"], "ignored": True}
+    # Bug 245 companion: a DEFERRED DC report (clients can hold one through an
+    # assembly phase and fire it minutes later) must not decide a series the
+    # four have since RESUMED. Two arms, both against the LOCKED row:
+    #  * stored room non-empty and mismatched -> the report names a room this
+    #    series does not own (its dead predecessor) -> ignore.
+    #  * report CARRIES a room while the stored room is EMPTY -> the resume
+    #    cleared the dead room and the new one is not issued yet (r1 finding
+    #    3's gap): any room-carrying report in that window is by definition
+    #    about the abandoned sitting -> ignore. A modern client always plays
+    #    in an issued room, which is stored before play begins.
+    # Unsigned hint: an empty/absent room (old clients) keeps today's
+    # behavior, and a forged "current" room buys nothing beyond omitting the
+    # param. Suffix tolerance mirrors the report-room grammar.
+    _claimed_room = (photon_room_id or "").strip()
+    _stored_room = (s["photon_room_id"] or "").strip()
+    if _claimed_room and (
+            (_stored_room
+             and _claimed_room != _stored_room
+             and not _claimed_room.startswith(_stored_room + "_"))
+            or not _stored_room):
+        return {"status": s["status"], "ignored": True,
+                "reason": "dc_room_mismatch"}
+    # r2 HIGH 1: an OLD client's report carries no room at all, so the fence
+    # above cannot see a delayed pre-resume report. Discriminator: the
+    # relock stamp. A ROOMLESS report inside the post-relock window is by
+    # construction about the abandoned sitting (a live report about the
+    # resumed play names the re-issued room). Residual, documented: an
+    # old-client LEGIT repeat-DC within 10 minutes of a resume is also
+    # ignored and falls to the admin/janitor path — the safe direction, and
+    # shrinking as clients update. Savepointed (#235) for pre-migration-235.
+    if not _claimed_room:
+        _recent_relock = False
+        try:
+            async with db.begin_nested():
+                _recent_relock = bool((await db.execute(text(
+                    "SELECT 1 FROM team_series WHERE id = :sid"
+                    "  AND relocked_at IS NOT NULL"
+                    "  AND relocked_at > NOW() - INTERVAL '10 minutes'"
+                ), {"sid": sid_uuid})).scalar())
+        except Exception:
+            _recent_relock = False
+        if _recent_relock:
+            return {"status": s["status"], "ignored": True,
+                    "reason": "dc_after_resume"}
     await _assert_no_service_subject(
         db,
         affected_player_ids=[s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]],
@@ -25935,15 +26338,48 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
         raise HTTPException(404, "One or more players not registered")
     ids = list(id_by_steam.values())
 
+    # r1 finding 4: BOTH same-four creation funnels (this endpoint and the
+    # queue matcher's family resolve) serialize on the quartet advisory lock
+    # before their live recheck — without it, a delayed signed continuation
+    # racing the four players' queue poll could double-insert. Taken after
+    # the per-steam advisory locks above; the queue poll never takes those,
+    # so no cross-funnel cycle exists.
+    await _team_quartet_lock(db, ids)
+
     # A live series for this exact four already exists → return it (idempotent: covers
     # series 1 still in progress, and a double-fire from client retries).
-    live = (await db.execute(text("""
-        SELECT id, photon_room_id FROM team_series
-         WHERE status IN ('active', 'dc_paused', 'dc_incomplete')
-           AND t1a_id = ANY(:ids) AND t1b_id = ANY(:ids)
-           AND t2a_id = ANY(:ids) AND t2b_id = ANY(:ids)
-         ORDER BY created_at DESC LIMIT 1
-    """), {"ids": ids})).mappings().first()
+    # r2 HIGH 3: newest-first alone could hand back a zero-game NULL-room
+    # husk while the PLAYED sitting stayed live (its NULL room then bypassed
+    # the room-continuity bar and split the sitting's results across two
+    # rows). Authoritative selection: played evidence first (games + wins,
+    # newest), then — among zero-game rows only — the one whose stored room
+    # matches the caller's (the fresh-series retry-echo case), then newest.
+    # Deliberately NO superseding here: a zero-game row on this path can be
+    # this endpoint's own just-created series; husk cleanup belongs to the
+    # queue/lobby funnels, which hold row locks.
+    _live_rows = (await db.execute(text("""
+        SELECT ts.id, ts.photon_room_id, ts.t1_series_wins, ts.t2_series_wins,
+               ts.created_at,
+               (SELECT COUNT(*) FROM team_matches tm
+                 WHERE tm.series_id = ts.id
+                   AND tm.invalidated_at IS NULL) AS games
+          FROM team_series ts
+         WHERE ts.status IN ('active', 'dc_paused', 'dc_incomplete')
+           AND ts.t1a_id = ANY(:ids) AND ts.t1b_id = ANY(:ids)
+           AND ts.t2a_id = ANY(:ids) AND ts.t2b_id = ANY(:ids)
+         ORDER BY ts.created_at DESC
+    """), {"ids": ids})).mappings().all()
+    live = None
+    if _live_rows:
+        _req_room = (req.room_id or "").strip()
+        def _live_key(r):
+            progress = (r["games"] or 0) + (r["t1_series_wins"] or 0) + (r["t2_series_wins"] or 0)
+            room_echo = 1 if (_req_room and (r["photon_room_id"] or "").strip() == _req_room) else 0
+            # room_echo outranks raw progress WITHIN a class: the caller is
+            # in a specific sitting, and the room bar below 409s a
+            # mismatched pick anyway.
+            return (1 if progress > 0 else 0, room_echo, progress, r["created_at"])
+        live = max(_live_rows, key=_live_key)
     if live is not None:
         # Round-20 find 4: the idempotent return must honor the same room-
         # continuity bar as the prior-series branch below — a caller naming
@@ -29353,21 +29789,73 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
     pid_to_steam = {m["player_id"]: m["steam_id"] for m in live}
     team1_ids = sorted(team1_ids, key=lambda pid: pid_to_steam[pid])
     team2_ids = sorted(team2_ids, key=lambda pid: pid_to_steam[pid])
-    # NOTE: module-level `uuid`, never `uuid_mod` — that alias exists only as a
-    # function-local import inside the queue endpoints, and referencing it from
-    # a different function is a NameError at runtime (learning #135, bug #70).
-    series_id = uuid.uuid4()
     await _assert_no_service_subject(
         db, affected_player_ids=team1_ids + team2_ids)
-    await db.execute(text("""
-        INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
-                                 status, was_auto_balanced, created_at)
-        VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, NOW())
-    """), {"sid": series_id,
-           "t1a": team1_ids[0], "t1b": team1_ids[1],
-           "t2a": team2_ids[0], "t2b": team2_ids[1]})
-    # Aug 8 (Sid): body-colour team identity, decided once and persisted here.
-    await _stamp_team_series_colors(db, series_id, team1_ids, team2_ids)
+    # r2 HIGH 2: hosted Start is a same-four CREATION funnel and joins the
+    # quartet protocol — without this, four players re-forming their DC'd
+    # sitting through a hosted lobby minted a second live series while the
+    # played original stayed live. Under the lock, resolve the family: adopt
+    # the authoritative resumable row when its stored partition equals the
+    # lobby's frozen split (side-swap tolerated — the pick helper's req gate
+    # enforces exactly that); a locked family row means "try again in a
+    # moment"; otherwise insert fresh (played-but-ineligible rows are left
+    # for the janitor/listing arms).
+    await _team_quartet_lock(db, team1_ids + team2_ids)
+    _pick_outcome, _adopt = await _team_lock_family_pick(
+        db, team1_ids + team2_ids, list(team1_ids), list(team2_ids),
+        req.steam_id)
+    if _pick_outcome == "defer":
+        raise HTTPException(409, "A previous series for these four players is "
+                                 "being updated - press Start again in a moment")
+    if _pick_outcome == "picked":
+        # ADOPT: the sitting continues with its score. Use the STORED slot
+        # orientation (the lobby split may be the side-swap of it) so
+        # team_assigned / HMAC slot canonicalization match the series row.
+        series_id = _adopt["id"]
+        team1_ids = [_adopt["t1a_id"], _adopt["t1b_id"]]
+        team2_ids = [_adopt["t2a_id"], _adopt["t2b_id"]]
+        await db.execute(text("""
+            UPDATE team_series
+               SET status = 'active',
+                   dc_grace_until = NULL,
+                   dc_team_remaining = NULL,
+                   dc_player_id = NULL,
+                   photon_room_id = NULL,
+                   room_issued_at = NULL,
+                   spawn_confirmations = 0,
+                   spawn_confirmed_by = '[]'::jsonb,
+                   invalidation_reason = CASE
+                       WHEN invalidation_reason = 'dc_manual_pending' THEN NULL
+                       ELSE invalidation_reason END
+             WHERE id = :sid
+               AND status IN ('active', 'dc_paused', 'dc_incomplete')
+        """), {"sid": series_id})
+        try:
+            async with db.begin_nested():
+                await db.execute(text(
+                    "UPDATE team_series SET relocked_at = NOW() WHERE id = :sid"
+                ), {"sid": series_id})
+        except Exception:
+            pass
+        # Colour identity stays frozen from the series' own creation — no
+        # re-stamp (it would re-decide a decided identity).
+        print(f"[2v2-LOBBY] host {req.steam_id} ADOPTED resumable series "
+              f"{series_id} (score {_adopt['t1_series_wins']}-{_adopt['t2_series_wins']})")
+    else:
+        # NOTE: module-level `uuid`, never `uuid_mod` — that alias exists only
+        # as a function-local import inside the queue endpoints, and
+        # referencing it from a different function is a NameError at runtime
+        # (learning #135, bug #70).
+        series_id = uuid.uuid4()
+        await db.execute(text("""
+            INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
+                                     status, was_auto_balanced, created_at)
+            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, NOW())
+        """), {"sid": series_id,
+               "t1a": team1_ids[0], "t1b": team1_ids[1],
+               "t2a": team2_ids[0], "t2b": team2_ids[1]})
+        # Aug 8 (Sid): body-colour team identity, decided once, persisted here.
+        await _stamp_team_series_colors(db, series_id, team1_ids, team2_ids)
     all4 = team1_ids + team2_ids
     await db.execute(text("""
         UPDATE team_queue
@@ -32276,8 +32764,13 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
         if prow is None:
             return {"matches": [], "page": page, "page_size": page_size,
                     "total": 0, "total_pages": 0}
+        # Bug 254 follow-up: the anchor must have ACTUALLY PLAYED — an
+        # absent frozen-roster ghost row (#227) is roster bookkeeping, not
+        # participation, and matching on it let the report fetch return
+        # games its anchor never played.
         participant_clause = (" AND EXISTS (SELECT 1 FROM ffa_match_players fpx"
-                              " WHERE fpx.match_id = m.id AND fpx.player_id = :ppid)")
+                              " WHERE fpx.match_id = m.id AND fpx.player_id = :ppid"
+                              " AND NOT fpx.absent)")
         extra_params["ppid"] = prow[0]
     total = (await db.execute(text(
         "SELECT COUNT(*) FROM ffa_matches m WHERE m.invalidated_at IS NULL AND m.is_ranked = :rk"
@@ -32285,7 +32778,8 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
     ), {"rk": ranked, **extra_params})).scalar() or 0
     matches = (await db.execute(text("""
         SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
-               m.ended_at, m.is_ranked, m.timeline, pw.steam_id AS winner_steam,
+               m.ended_at, m.started_at, m.is_ranked, m.timeline,
+               pw.steam_id AS winner_steam,
                -- Sid, Aug 3: show the lobby's settings beside each game. The
                -- config is immutable once a lobby leaves 'open' (settings are
                -- host-only AND status-gated), so this row still describes
@@ -32346,6 +32840,12 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 "points_total": int(r["points_total"] or 0),
                 "kills": int(r["kills"] or 0),
                 "left_early": bool(r["left_early"]),
+                # Bug 254 follow-up: the authoritative frozen-roster-ghost
+                # bit (#227/#239) — TRUE means this row was carried for
+                # report continuity but the player was NOT in this game.
+                # Consumers must never render, count, or overlap-match an
+                # absent row. `.get` so a pre-column row degrades to false.
+                "absent": bool(r.get("absent")),
                 "rating_change": float(r["rating_change"]) if r["rating_change"] is not None else None,
                 # Bug 178 (Stan): absolute before/after — stamped at match
                 # time in the fmp row, so history stays true after later games.
@@ -32388,6 +32888,11 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
              "player_count": int(m["player_count"] or 0),
              "duration_seconds": m["duration_seconds"],
              "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
+             # Bug 254 follow-up: the stored REAL start time — the report
+             # window filter preferred deriving ended_at - duration, which
+             # drifts with report-delivery delay. Null-tolerant for legacy
+             # rows; clients fall back to the derivation.
+             "started_at": m["started_at"].isoformat() if m["started_at"] else None,
              "is_ranked": bool(m["is_ranked"]),
              "winner_steam_id": m["winner_steam"],
              "timeline": m["timeline"] or "",
@@ -36068,6 +36573,73 @@ def _broadcast_exclusions(raw: str | None) -> set[str]:
     return out
 
 
+async def _broadcast_tournament_display(db: AsyncSession, mode: str,
+                                        source_ref, roster: list) -> bool:
+    """DISPLAY-ONLY tournament classification for a broadcast candidate
+    (bug 250). `_spectate_mandatory_class` is an AUTHORIZATION predicate
+    (opt-out bypass) and is deliberately narrow — sync + sct- room +
+    ready/scheduled only — so active, async, and code-room tournament games
+    all rendered as plain "Ranked 1v1" in the stream posts and titles. This
+    resolver answers the weaker display question "is this game part of a
+    tournament series?" and must NEVER feed an authorization decision.
+
+    Resolution ladder (mirrors _stream_series_score's identity rules — keep
+    the two consistent, #330): (1) a resolvable source_ref is TERMINAL —
+    direct series id, or one hop via tournament_matches.id; resolving to a
+    non-tournament series answers False, never falls through. (2) Only an
+    UNRESOLVED reference may use the pair fallback: an active, non-
+    invalidated tournament series between the exact pair — async tournament
+    reports bind by player pair (any room), so a code-room game between a
+    pair holding an open tournament match is that tournament's game by the
+    server's own binding semantics."""
+    if mode != "1v1":
+        return False
+    if source_ref:
+        try:
+            src_uuid = UUID(str(source_ref))
+        except Exception:
+            src_uuid = None
+        if src_uuid is not None:
+            row = (await db.execute(text("""
+                SELECT rs.is_tournament AS it
+                  FROM ranked_series rs
+                 WHERE rs.id = :sid
+                    OR rs.id = (SELECT tm.series_id
+                                  FROM tournament_matches tm
+                                 WHERE tm.id = :sid)
+                 LIMIT 1
+            """), {"sid": src_uuid})).mappings().first()
+            if row is not None:
+                return bool(row["it"])
+    if len(roster) != 2:
+        return False
+    # Pair fallback, ASYNC-scoped (r1 finding 9): async tournament reports
+    # bind by player pair in any room, so a code-room game between a pair
+    # holding an OPEN async match is that tournament's game by the server's
+    # own binding semantics. Sync tournaments bind by sct- room (the
+    # source_ref/mandatory paths above) — a sync pair playing an ordinary
+    # code-room game during a break must NOT get tournament treatment, and
+    # a forfeited match whose series row lingers 'active' must not either
+    # (#350's terminal-status arm).
+    hit = (await db.execute(text("""
+        SELECT 1
+          FROM ranked_series rs
+          JOIN players p1 ON p1.id = rs.player1_id
+          JOIN players p2 ON p2.id = rs.player2_id
+          JOIN tournament_matches tm ON tm.series_id = rs.id
+          JOIN tournaments t ON t.id = tm.tournament_id
+         WHERE rs.status = 'active' AND rs.invalidated_at IS NULL
+           AND rs.is_tournament
+           AND t.kind = 'async' AND t.status = 'running'
+           AND tm.status NOT IN ('completed', 'forfeit',
+                                 'double_forfeit', 'bye_auto')
+           AND ((p1.steam_id = :a AND p2.steam_id = :b)
+             OR (p1.steam_id = :b AND p2.steam_id = :a))
+         LIMIT 1
+    """), {"a": roster[0], "b": roster[1]})).scalar()
+    return bool(hit)
+
+
 async def _broadcast_candidate(db: AsyncSession, game, requester: str) -> dict | None:
     ready, _reason = await _spectate_game_ready(db, game)
     if not ready or game["mode"] not in _SPECTATE_WATCHABLE_MODES:
@@ -36097,12 +36669,18 @@ async def _broadcast_candidate(db: AsyncSession, game, requester: str) -> dict |
     ratings = [float(by_sid[s]["rating"]) if s in by_sid else 1500.0 for s in roster]
     names = [(by_sid[s]["display_name"] or "?") if s in by_sid else "?" for s in roster]
     mandatory = await _spectate_mandatory_class(db, game)
+    # Bug 250: is_tournament is a DISPLAY field (stream post lines, titles,
+    # the 🏆 prefix) — resolve it for every tournament game, not only the
+    # mandatory-class ones. `tier` stays driven by the strict authorization
+    # classifier: display accuracy must not widen the opt-out bypass.
+    is_tourn = bool(mandatory) or await _broadcast_tournament_display(
+        db, game["mode"], game["source_ref"], roster)
     return {
         "game_id": str(game["id"]),
         "incarnation": _broadcast_incarnation(game),
         "mode": game["mode"],
         "source_ref": game["source_ref"],
-        "is_tournament": bool(mandatory),
+        "is_tournament": is_tourn,
         "tier": 1 if mandatory else 2,
         "score": float(sum(ratings)),
         "names": names,
@@ -36637,6 +37215,18 @@ def _stream_ended_content(twitch_vod: str | None, youtube_vod: str | None,
     return body
 
 
+def _stream_mode_label(candidate: dict) -> str:
+    """Bug 250: THE mode label for stream surfaces — one helper for both the
+    live body and the stored matchup line (#330). A tournament 1v1 says so
+    in the text itself; the 🏆 prefix alone left the line reading
+    "Ranked 1v1" for every tournament game."""
+    mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "",
+                                   candidate.get("mode") or "?")
+    if candidate.get("is_tournament") and (candidate.get("mode") or "") == "1v1":
+        return "Tournament 1v1"
+    return mode
+
+
 def _stream_matchup_line(candidate: dict | None) -> str:
     """One display line identifying a watched matchup — names + elo + mode,
     deliberately NO score (a score change must not mint a second entry for
@@ -36653,7 +37243,7 @@ def _stream_matchup_line(candidate: dict | None) -> str:
         except Exception:
             r = 0
         return f"**{n}** ({r})" if r > 0 else f"**{n}**"
-    mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "", candidate.get("mode") or "?")
+    mode = _stream_mode_label(candidate)
     if len(names) == 2:
         vs = f"{_nm(0)} vs {_nm(1)}"
     else:
@@ -36778,7 +37368,7 @@ def _stream_post_content(candidate: dict | None, score: str | None) -> str:
             except Exception:
                 r = 0
             return f"**{n}** ({r})" if r > 0 else f"**{n}**"
-        mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "", candidate.get("mode") or "?")
+        mode = _stream_mode_label(candidate)
         if len(names) == 2:
             vs = f"{_nm(0)} vs {_nm(1)}"
         else:
@@ -37019,7 +37609,17 @@ async def broadcast_target(
                       and activation_age >= BROADCAST_ROTATE_SECONDS)
 
     choose_new = selected is None or acq_stalled or acq_over
-    if dwell_done and len(rotation_set) > 1:
+    # Bug 244: the dwell rotation must also fire when the pinned current
+    # selection is NOT a member of the rotation set — a strictly better
+    # class of game exists (a lone 2v2 outscoring the watched 1v1 past the
+    # 0.85 floor, or a lone tier-1 tournament game) and `len > 1` alone can
+    # never see it, so the seat stayed on the lesser game forever. The
+    # dwell gate still applies: no switch inside BROADCAST_ROTATE_SECONDS.
+    selected_in_rotation = bool(
+        selected is not None
+        and any(c["incarnation"] == selected["incarnation"]
+                for c in rotation_set))
+    if dwell_done and (len(rotation_set) > 1 or not selected_in_rotation):
         choose_new = True
     if current_payload is not None and not current_payload["still_eligible"]:
         choose_new = True

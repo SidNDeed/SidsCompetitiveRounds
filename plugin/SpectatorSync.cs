@@ -1357,6 +1357,21 @@ namespace CompetitiveRounds
             }
             catch { }
 
+            // Bug 251: vanilla GameCrownHandler keeps currentCrownHolder
+            // across the rematch and its LateUpdate then dereferences BOTH
+            // fighters' CrownPos every frame; the body reset below can sever
+            // a replica's CrownPos child, which produced a per-frame
+            // "NO CROWN POS!?" error storm (574 lines in one game) running
+            // until the room died. Reset the holder here — the next
+            // PointOver re-crowns through vanilla's own PlayIn branch (this
+            // file already re-fires PointOver on score sync).
+            try
+            {
+                var gch = UnityEngine.Object.FindObjectOfType<GameCrownHandler>();
+                if (gch != null) gch.currentCrownHolder = -1;
+            }
+            catch { }
+
             // Zero-character invariant (design §3.3): a spectator creates no
             // local player, so every entry here is a fighter replica.
             int reset = 0;

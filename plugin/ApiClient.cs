@@ -8151,10 +8151,21 @@ namespace CompetitiveRounds
 
                 IsTeamQueuePolling = false;
                 ActiveTeamSeriesId = null;
+                // Bug 247: the escape hatch cleared the FFA slot but left the
+                // 2v2/1v2 pending slots and the team queue STATE armed — both
+                // are SpectateCommitmentBlocked predicates, so a mid-series
+                // DC'd player who pressed "Leave All Queues" (the documented
+                // remedy) still could not spectate: the client kept believing
+                // it was in the 2v2. Mirror the not_in_queue handler's full
+                // clear set.
+                CurrentTeamQueueState = TeamQueueState.Idle;
+                LastTeamPollData = null;
+                try { Plugin.ClearPending2v2Slot(); } catch { }
 
                 IsOvtQueuePolling = false;
                 OvtQueueStatus = "";
                 ActiveOvt1v2SeriesId = null;
+                try { Plugin.ClearPendingOvtSlot(); } catch { }
 
                 IsFfaQueuePolling = false;
                 FfaQueueStatus = "";
@@ -8209,9 +8220,54 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     EscapePending = false;
-                    TearDownAllQueueBeliefs();
+                    // Client review find 1: a RETRIED escape can succeed AFTER
+                    // the player re-enrolled in a new queue/lobby — its
+                    // unconditional teardown then nuked the NEW lifecycle
+                    // (vanishing ready_join, stranded teammates). The eager
+                    // teardown at click time already cleared everything and
+                    // bumped the lifecycle gens, so gen-fenced stale callbacks
+                    // CANNOT re-arm these — any armed state now is a genuine
+                    // re-enrollment, which supersedes the old escape intent.
+                    bool reEngaged = false;
+                    try
+                    {
+                        // Verify round: the predicate must cover EVERY
+                        // enrollment surface — hosted 2v2/1v2 lobby seats
+                        // live in TeamLobby/OvtLobby (their enroll DISABLES
+                        // the queue-polling flags), a 1v1 ready_join parks
+                        // only PendingRankedRoom, and a join REQUEST in
+                        // flight is visible via the queue action marker.
+                        // Residual (documented): a lobby-join round-trip
+                        // that sets no marker can still be invisible for
+                        // one HTTP RTT — a >=15s-delayed escape landing in
+                        // exactly that window is accepted as negligible.
+                        string _pendRoom = Plugin.PendingRankedRoom ?? "";
+                        reEngaged = IsQueuePolling || IsTeamQueuePolling
+                            || IsOvtQueuePolling || IsFfaQueuePolling
+                            || CurrentTeamQueueState != TeamQueueState.Idle
+                            || !string.IsNullOrEmpty(ActiveFfaLobbyId)
+                            || Plugin.Pending2v2Slot >= 0
+                            || Plugin.PendingOvtSlot >= 0
+                            || Plugin.PendingFfaSlot >= 0
+                            || TeamLobby.Polling || OvtLobby.Polling
+                            || !string.IsNullOrEmpty(TeamLobby.OpenLobbyId)
+                            || !string.IsNullOrEmpty(OvtLobby.OpenLobbyId)
+                            || Time.realtimeSinceStartup < queueRequestInFlightUntil
+                            || _pendRoom.StartsWith("ranked_")
+                            || _pendRoom.StartsWith("team_")
+                            || _pendRoom.StartsWith("ovt_")
+                            || _pendRoom.StartsWith("ffa_")
+                            || _pendRoom.StartsWith("sct-");
+                    }
+                    catch { }
+                    if (!reEngaged)
+                    {
+                        TearDownAllQueueBeliefs();
+                        CompetitiveUI.ShowNotification("Left all queues", Color.green, 4f);
+                    }
+                    else
+                        Plugin.Log.LogInfo("[ESCAPE] released server-side; local lifecycle re-armed since click - teardown skipped");
                     Plugin.Log.LogInfo($"[ESCAPE] released from all queues: {resp}");
-                    CompetitiveUI.ShowNotification("Left all queues", Color.green, 4f);
                 }
                 else
                 {
@@ -8234,6 +8290,38 @@ namespace CompetitiveRounds
         private static void TickEscapeRetry()
         {
             if (!EscapePending) return;
+            // Client review find 1 companion: a successful re-enrollment
+            // PROVES the server accepted the player — nothing is left to
+            // escape, and firing the old intent later would tear down the
+            // new lifecycle. An explicit join is the explicit opposite
+            // intent (#252e's "later signals bend toward OUT" applies to
+            // ambiguity, not to a server-accepted re-join).
+            try
+            {
+                // Same enrollment-surface set as the success-callback guard
+                // (verify round: hosted lobby seats + 1v1 ready_join were
+                // missing here too, so the retry could fire a fresh escape
+                // against a hosted seat).
+                string _pendRoom = Plugin.PendingRankedRoom ?? "";
+                if (IsQueuePolling || IsTeamQueuePolling || IsOvtQueuePolling
+                    || IsFfaQueuePolling
+                    || CurrentTeamQueueState != TeamQueueState.Idle
+                    || !string.IsNullOrEmpty(ActiveFfaLobbyId)
+                    || TeamLobby.Polling || OvtLobby.Polling
+                    || !string.IsNullOrEmpty(TeamLobby.OpenLobbyId)
+                    || !string.IsNullOrEmpty(OvtLobby.OpenLobbyId)
+                    || _pendRoom.StartsWith("ranked_")
+                    || _pendRoom.StartsWith("team_")
+                    || _pendRoom.StartsWith("ovt_")
+                    || _pendRoom.StartsWith("ffa_")
+                    || _pendRoom.StartsWith("sct-"))
+                {
+                    EscapePending = false;
+                    Plugin.Log.LogInfo("[ESCAPE] pending intent superseded by a successful re-enrollment - dropped");
+                    return;
+                }
+            }
+            catch { }
             if (Time.unscaledTime - _escapeRetryAt < 15f) return;
             SendEscapeRequest(null);
         }
@@ -10400,11 +10488,21 @@ namespace CompetitiveRounds
             if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId)) return;
             string sig = ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc");
+            // Bug 245 companion: name the room this DC was OBSERVED in (raw,
+            // unsuffixed). The server ignores a report whose room no longer
+            // matches the series' CURRENT room — a requeue-resume re-issues
+            // the room, so a deferred report about the abandoned old room
+            // must not lead-forfeit the resumed sitting mid-play. Unsigned
+            // hint by design (the DC canonical is frozen); empty when the
+            // room is already gone, which keeps legacy behavior.
+            string dcRoom = "";
+            try { dcRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
                          $"?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}" +
                          $"&dc_player_steam_id={UnityWebRequest.EscapeURL(dcPlayerSteamId)}" +
                          $"&t1_points_total={t1PointsTotal}" +
                          $"&t2_points_total={t2PointsTotal}" +
+                         $"&photon_room_id={UnityWebRequest.EscapeURL(dcRoom)}" +
                          $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
@@ -12161,6 +12259,13 @@ namespace CompetitiveRounds
             // result; never re-derive positional labels here.
             public string end_stats;
             public bool left_early;
+            // Bug 254: the server's authoritative frozen-roster-ghost bit
+            // (ffa_match_players.absent, #227/#239). TRUE means this player
+            // was carried on the report for roster continuity but was NOT in
+            // this game — never render, count, or overlap-match such a row.
+            // Missing key (older server) parses false = "participated",
+            // today's behavior.
+            public bool absent;
             public float rating_change;
             public bool has_rating_change;
             // Aug 8 (Sid): match-time body-colour stamp ("" = pre-stamp row,
@@ -12176,6 +12281,10 @@ namespace CompetitiveRounds
         public class FfaRecentMatch
         {
             public string match_id, photon_room_id, ended_at, winner_steam_id, timeline;
+            // Bug 254: the stored real start time (ffa_matches.started_at) —
+            // "" / null on older servers, in which case consumers derive
+            // ended_at - duration_seconds instead.
+            public string started_at;
             public int player_count, duration_seconds;
             public bool is_ranked;
             // Lobby settings this game was played under. has_settings is FALSE
@@ -15204,6 +15313,7 @@ namespace CompetitiveRounds
                                 match_id = ExtractJsonString(mObj, "match_id"),
                                 photon_room_id = ExtractJsonString(mObj, "photon_room_id"),
                                 ended_at = ExtractJsonString(mObj, "ended_at"),
+                                started_at = ExtractJsonString(mObj, "started_at"),
                                 winner_steam_id = ExtractJsonString(mObj, "winner_steam_id"),
                                 player_count = ExtractJsonInt(mObj, "player_count"),
                                 duration_seconds = ExtractJsonInt(mObj, "duration_seconds"),
@@ -15272,6 +15382,7 @@ namespace CompetitiveRounds
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
                                         left_early = ExtractJsonBool(pObj, "left_early"),
+                                        absent = ExtractJsonBool(pObj, "absent"),
                                         color_name = ExtractJsonString(pObj, "color_name") ?? "",
                                         color_hex = ExtractJsonString(pObj, "color_hex") ?? "",
                                     };
