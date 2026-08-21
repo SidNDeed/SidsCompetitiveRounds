@@ -4,16 +4,19 @@
 
 **Bug-report sweep (Aug 21)**
 
-- **2v2 DC-rejoin no longer creates duplicate series** (bug 245). The
-  disconnect report has marked a series "incomplete, admin decides" since
-  the manual-control policy, but the queue's resume path still only looked
-  for the legacy paused state — so four players re-queuing after a DC always
-  got a brand-new series, leaving up to three live rows for one sitting in
-  the 2v2 tab. Re-queuing within 30 minutes now re-locks the four onto their
-  original series (same teams, score kept); the queue lock also refuses to
-  mint a second series for four players who already share a live one, and a
-  disconnect report that arrives late — after the sitting has already
-  resumed in a new room — can no longer forfeit the resumed series mid-play.
+- **2v2 duplicate-series groundwork** (bug 245, partial — the resume
+  machinery itself is HELD for a dedicated pass after three adversarial
+  review rounds kept finding money-integrity edges in it; the reviewed
+  draft is preserved on the work branch). What landed now: the 2v2 live
+  listing and the team-bet gate share one three-arm liveness predicate
+  (creation, room issuance, or a recent valid game — a continuation-resumed
+  series hours past creation stays visible and bettable exactly while its
+  games are happening, the 2v2 sibling of the bug-199 fix), and a
+  pre-existing manual-queue defect found on the way: the queue never read
+  the CALLER's own preferred team, so the host of a manual four-stack was
+  assigned arbitrarily while the other three got their picks. The client
+  also now names the room a disconnect was observed in (inert until the
+  resume pass lands server-side).
 - **The broadcaster switches to the better game** (bug 244). The rotation
   rule could only fire when the rotation set held two games, so a lone
   higher-priority game (a 2v2 outscoring the watched 1v1, or a lone

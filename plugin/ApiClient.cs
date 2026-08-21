@@ -10488,13 +10488,14 @@ namespace CompetitiveRounds
             if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId)) return;
             string sig = ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc");
-            // Bug 245 companion: name the room this DC was OBSERVED in (raw,
-            // unsuffixed). The server ignores a report whose room no longer
-            // matches the series' CURRENT room — a requeue-resume re-issues
-            // the room, so a deferred report about the abandoned old room
-            // must not lead-forfeit the resumed sitting mid-play. Unsigned
-            // hint by design (the DC canonical is frozen); empty when the
-            // room is already gone, which keeps legacy behavior.
+            // Bug 245 companion (FORWARD-LOOKING): name the room this DC was
+            // OBSERVED in (raw, unsuffixed). The CURRENT server ignores this
+            // param — the resume machinery it fences was held out of the Aug
+            // 21 deploy after three review rounds (see the dedicated-pass
+            // plan) — but shipping the param NOW means clients already carry
+            // it when that pass lands, closing the old-client roomless-report
+            // hole from day one. Unsigned hint by design (the DC canonical is
+            // frozen); empty when the room is already gone.
             string dcRoom = "";
             try { dcRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
