@@ -17274,6 +17274,22 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
     return {"series": series}
 
 
+# Aug 21 (bug 245 review r1 finding 10, #345's class for 2v2): a series
+# resumed by the continuation flow can be hours past created_at while its
+# games are happening NOW. Liveness is therefore three arms — recent
+# creation, recent room issuance, or a recent valid game — and the SAME
+# fragment feeds both the live listing and the /team-bets POST (#159/#328:
+# a displayed lock and an enforced lock must be one predicate). Alias
+# contract: `ts` = team_series.
+_TEAM_SERIES_LIVE_ARMS_SQL = """(
+       ts.created_at > NOW() - INTERVAL '2 hours'
+    OR ts.room_issued_at > NOW() - INTERVAL '2 hours'
+    OR EXISTS (SELECT 1 FROM team_matches _lm
+                WHERE _lm.series_id = ts.id
+                  AND _lm.invalidated_at IS NULL
+                  AND _lm.ended_at > NOW() - INTERVAL '2 hours'))"""
+
+
 async def _team_odds_inputs(db: AsyncSession, pids):
     """(rating, rd) per player for 2v2 ODDS — THE single source for both the
     live listing and the /team-bets POST.
@@ -17359,8 +17375,14 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
         JOIN players p2a ON p2a.id = ts.t2a_id
         JOIN players p2b ON p2b.id = ts.t2b_id
         WHERE ts.status IN ('active', 'dc_paused')
-          AND ts.created_at > NOW() - INTERVAL '2 hours'
-        ORDER BY ts.created_at DESC
+          AND """ + _TEAM_SERIES_LIVE_ARMS_SQL + """
+        ORDER BY GREATEST(ts.created_at,
+                          COALESCE(ts.room_issued_at, ts.created_at),
+                          COALESCE((SELECT MAX(_om.ended_at)
+                                      FROM team_matches _om
+                                     WHERE _om.series_id = ts.id
+                                       AND _om.invalidated_at IS NULL),
+                                   ts.created_at)) DESC
         LIMIT 20
     """), {"trust": TEAM_TRUST_2V2_RATING_AFTER})).mappings().all()
 
@@ -18240,10 +18262,15 @@ async def place_team_bet(
     # FOR NO KEY UPDATE above (find 6, #202) makes
     # every check here read post-lock truth against a concurrent report's
     # FOR UPDATE instead of a stale snapshot.
-    if series["created_at"] is not None:
-        _age = (datetime.now(timezone.utc) - series["created_at"]).total_seconds()
-        if _age > 2 * 3600:
-            raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
+    # Aug 21 (r1 finding 10): liveness is the SAME three-arm predicate the
+    # listing renders (#328) — a resumed series hours past created_at whose
+    # games are happening now stays bettable exactly as long as it is listed.
+    _live = (await db.execute(text(
+        "SELECT " + _TEAM_SERIES_LIVE_ARMS_SQL
+        + " FROM team_series ts WHERE ts.id = :sid"
+    ), {"sid": sid})).scalar()
+    if not _live:
+        raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
     # THE cutoff (Sid): 2 points scored in game 1. Same predicate the listing
     # renders, so the two can never disagree (#159).
     if ((series["live_t1_points"] or 0) + (series["live_t2_points"] or 0)) >= 2:
@@ -23945,7 +23972,12 @@ async def team_queue_poll(steam_id: str, request: Request,
             SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
                    tq.completed_series, tq.fallback_rating, tq.region, tq.status, tq.series_id,
                    tq.team_assigned, tq.room_name, tq.room_region, tq.ready,
-                   tq.joined_at, tq.matched_at, tq.queue_type
+                   tq.joined_at, tq.matched_at, tq.queue_type,
+                   -- Aug 21 (pre-existing, found by review): these two were
+                   -- never selected, so the CALLER's manual-queue team
+                   -- choice fell to None and filled arbitrarily while the
+                   -- other three honored theirs.
+                   tq.preferred_team, tq.manual_pick_enabled
             FROM team_queue tq
             JOIN players p ON tq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -32276,8 +32308,13 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
         if prow is None:
             return {"matches": [], "page": page, "page_size": page_size,
                     "total": 0, "total_pages": 0}
+        # Bug 254 follow-up: the anchor must have ACTUALLY PLAYED — an
+        # absent frozen-roster ghost row (#227) is roster bookkeeping, not
+        # participation, and matching on it let the report fetch return
+        # games its anchor never played.
         participant_clause = (" AND EXISTS (SELECT 1 FROM ffa_match_players fpx"
-                              " WHERE fpx.match_id = m.id AND fpx.player_id = :ppid)")
+                              " WHERE fpx.match_id = m.id AND fpx.player_id = :ppid"
+                              " AND NOT fpx.absent)")
         extra_params["ppid"] = prow[0]
     total = (await db.execute(text(
         "SELECT COUNT(*) FROM ffa_matches m WHERE m.invalidated_at IS NULL AND m.is_ranked = :rk"
@@ -32285,7 +32322,8 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
     ), {"rk": ranked, **extra_params})).scalar() or 0
     matches = (await db.execute(text("""
         SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
-               m.ended_at, m.is_ranked, m.timeline, pw.steam_id AS winner_steam,
+               m.ended_at, m.started_at, m.is_ranked, m.timeline,
+               pw.steam_id AS winner_steam,
                -- Sid, Aug 3: show the lobby's settings beside each game. The
                -- config is immutable once a lobby leaves 'open' (settings are
                -- host-only AND status-gated), so this row still describes
@@ -32346,6 +32384,12 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 "points_total": int(r["points_total"] or 0),
                 "kills": int(r["kills"] or 0),
                 "left_early": bool(r["left_early"]),
+                # Bug 254 follow-up: the authoritative frozen-roster-ghost
+                # bit (#227/#239) — TRUE means this row was carried for
+                # report continuity but the player was NOT in this game.
+                # Consumers must never render, count, or overlap-match an
+                # absent row. `.get` so a pre-column row degrades to false.
+                "absent": bool(r.get("absent")),
                 "rating_change": float(r["rating_change"]) if r["rating_change"] is not None else None,
                 # Bug 178 (Stan): absolute before/after — stamped at match
                 # time in the fmp row, so history stays true after later games.
@@ -32388,6 +32432,12 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
              "player_count": int(m["player_count"] or 0),
              "duration_seconds": m["duration_seconds"],
              "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
+             # Bug 254 follow-up: the stored REAL start time — the report
+             # window filter preferred deriving ended_at - duration, which
+             # drifts with report-delivery delay. Null-tolerant (nothing
+             # writes ffa_matches.started_at today — 0 of 163 rows — so this
+             # is future-proofing); clients fall back to the derivation.
+             "started_at": m["started_at"].isoformat() if m["started_at"] else None,
              "is_ranked": bool(m["is_ranked"]),
              "winner_steam_id": m["winner_steam"],
              "timeline": m["timeline"] or "",
@@ -36068,6 +36118,67 @@ def _broadcast_exclusions(raw: str | None) -> set[str]:
     return out
 
 
+async def _broadcast_tournament_display(db: AsyncSession, mode: str,
+                                        source_ref, roster: list) -> bool:
+    """DISPLAY-ONLY tournament classification for a broadcast candidate
+    (bug 250). `_spectate_mandatory_class` is an AUTHORIZATION predicate
+    (opt-out bypass) and is deliberately narrow — sync + sct- room +
+    ready/scheduled only — so active, async, and code-room tournament games
+    all rendered as plain "Ranked 1v1" in the stream posts and titles. This
+    resolver answers the weaker display question "is this game part of a
+    tournament series?" and must NEVER feed an authorization decision.
+
+    Resolution ladder (mirrors _stream_series_score's identity rules — keep
+    the two consistent, #330): (1) a resolvable source_ref is TERMINAL —
+    direct series id, or one hop via tournament_matches.id; resolving to a
+    non-tournament series answers False, never falls through. (2) Only an
+    UNRESOLVED reference may use the pair fallback, and it is ASYNC-scoped
+    (review r1 finding 9): async tournament reports bind by player pair in
+    any room, so a code-room game between a pair holding an OPEN async
+    match is that tournament's game by the server's own binding semantics —
+    while a sync pair playing an ordinary code-room game during a break, or
+    a forfeited match whose series row lingers 'active' (#350), must NOT
+    get tournament treatment."""
+    if mode != "1v1":
+        return False
+    if source_ref:
+        try:
+            src_uuid = UUID(str(source_ref))
+        except Exception:
+            src_uuid = None
+        if src_uuid is not None:
+            row = (await db.execute(text("""
+                SELECT rs.is_tournament AS it
+                  FROM ranked_series rs
+                 WHERE rs.id = :sid
+                    OR rs.id = (SELECT tm.series_id
+                                  FROM tournament_matches tm
+                                 WHERE tm.id = :sid)
+                 LIMIT 1
+            """), {"sid": src_uuid})).mappings().first()
+            if row is not None:
+                return bool(row["it"])
+    if len(roster) != 2:
+        return False
+    hit = (await db.execute(text("""
+        SELECT 1
+          FROM ranked_series rs
+          JOIN players p1 ON p1.id = rs.player1_id
+          JOIN players p2 ON p2.id = rs.player2_id
+          JOIN tournament_matches tm ON tm.series_id = rs.id
+          JOIN tournaments t ON t.id = tm.tournament_id
+         WHERE rs.status = 'active' AND rs.invalidated_at IS NULL
+           AND rs.is_tournament
+           AND t.kind = 'async' AND t.status = 'running'
+           AND tm.status NOT IN ('completed', 'forfeit',
+                                 'double_forfeit', 'bye_auto')
+           AND ((p1.steam_id = :a AND p2.steam_id = :b)
+             OR (p1.steam_id = :b AND p2.steam_id = :a))
+         LIMIT 1
+    """), {"a": roster[0], "b": roster[1]})).scalar()
+    return bool(hit)
+
+
 async def _broadcast_candidate(db: AsyncSession, game, requester: str) -> dict | None:
     ready, _reason = await _spectate_game_ready(db, game)
     if not ready or game["mode"] not in _SPECTATE_WATCHABLE_MODES:
@@ -36097,12 +36208,18 @@ async def _broadcast_candidate(db: AsyncSession, game, requester: str) -> dict |
     ratings = [float(by_sid[s]["rating"]) if s in by_sid else 1500.0 for s in roster]
     names = [(by_sid[s]["display_name"] or "?") if s in by_sid else "?" for s in roster]
     mandatory = await _spectate_mandatory_class(db, game)
+    # Bug 250: is_tournament is a DISPLAY field (stream post lines, titles,
+    # the 🏆 prefix) — resolve it for every tournament game, not only the
+    # mandatory-class ones. `tier` stays driven by the strict authorization
+    # classifier: display accuracy must not widen the opt-out bypass.
+    is_tourn = bool(mandatory) or await _broadcast_tournament_display(
+        db, game["mode"], game["source_ref"], roster)
     return {
         "game_id": str(game["id"]),
         "incarnation": _broadcast_incarnation(game),
         "mode": game["mode"],
         "source_ref": game["source_ref"],
-        "is_tournament": bool(mandatory),
+        "is_tournament": is_tourn,
         "tier": 1 if mandatory else 2,
         "score": float(sum(ratings)),
         "names": names,
@@ -36637,6 +36754,18 @@ def _stream_ended_content(twitch_vod: str | None, youtube_vod: str | None,
     return body
 
 
+def _stream_mode_label(candidate: dict) -> str:
+    """Bug 250: THE mode label for stream surfaces — one helper for both the
+    live body and the stored matchup line (#330). A tournament 1v1 says so
+    in the text itself; the 🏆 prefix alone left the line reading
+    "Ranked 1v1" for every tournament game."""
+    mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "",
+                                   candidate.get("mode") or "?")
+    if candidate.get("is_tournament") and (candidate.get("mode") or "") == "1v1":
+        return "Tournament 1v1"
+    return mode
+
+
 def _stream_matchup_line(candidate: dict | None) -> str:
     """One display line identifying a watched matchup — names + elo + mode,
     deliberately NO score (a score change must not mint a second entry for
@@ -36653,7 +36782,7 @@ def _stream_matchup_line(candidate: dict | None) -> str:
         except Exception:
             r = 0
         return f"**{n}** ({r})" if r > 0 else f"**{n}**"
-    mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "", candidate.get("mode") or "?")
+    mode = _stream_mode_label(candidate)
     if len(names) == 2:
         vs = f"{_nm(0)} vs {_nm(1)}"
     else:
@@ -36778,7 +36907,7 @@ def _stream_post_content(candidate: dict | None, score: str | None) -> str:
             except Exception:
                 r = 0
             return f"**{n}** ({r})" if r > 0 else f"**{n}**"
-        mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "", candidate.get("mode") or "?")
+        mode = _stream_mode_label(candidate)
         if len(names) == 2:
             vs = f"{_nm(0)} vs {_nm(1)}"
         else:
@@ -37019,7 +37148,17 @@ async def broadcast_target(
                       and activation_age >= BROADCAST_ROTATE_SECONDS)
 
     choose_new = selected is None or acq_stalled or acq_over
-    if dwell_done and len(rotation_set) > 1:
+    # Bug 244: the dwell rotation must also fire when the pinned current
+    # selection is NOT a member of the rotation set — a strictly better
+    # class of game exists (a lone 2v2 outscoring the watched 1v1 past the
+    # 0.85 floor, or a lone tier-1 tournament game) and `len > 1` alone can
+    # never see it, so the seat stayed on the lesser game forever. The
+    # dwell gate still applies: no switch inside BROADCAST_ROTATE_SECONDS.
+    selected_in_rotation = bool(
+        selected is not None
+        and any(c["incarnation"] == selected["incarnation"]
+                for c in rotation_set))
+    if dwell_done and (len(rotation_set) > 1 or not selected_in_rotation):
         choose_new = True
     if current_payload is not None and not current_payload["still_eligible"]:
         choose_new = True

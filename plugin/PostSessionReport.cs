@@ -62,8 +62,9 @@ namespace CompetitiveRounds
     ///         zero-series fallback is a FLAT name list, never fabricated
     ///         team pairings.
     ///  f14    2v2 match rows/graphs filter by each match's OWN ended_at.
-    ///  f15    FFA from the player-scoped history variant with FULL roster
-    ///         set equality (never half overlap).
+    ///  f15    FFA from the player-scoped history variant. Bug 254 replaces
+    ///         frozen-roster equality with windowed, thresholded overlap so
+    ///         one fluid sitting survives legitimate joins/leaves.
     ///  f16    win_rate wire fractions x100 at every render site; compact
     ///         panels use ranked /cards, else label "Top cards (all modes)".
     ///  f17    every capped list renders "showing N of M" when truncated.
@@ -892,8 +893,8 @@ namespace CompetitiveRounds
         /// report-private.
         /// CONTRACT (R1 delta, verbatim): "same entry type as the FFA tab" =
         /// FfaRecentMatch. The thin PlayerFfaHistoryEntry shape cannot satisfy
-        /// f15 (participants are display NAMES — steam-id roster set equality
-        /// is impossible) nor the placement rows/graphs — the server response
+        /// f15 (participants are display NAMES — steam-id roster overlap is
+        /// impossible) nor the placement rows/graphs — the server response
         /// must carry the rich per-player shape.
         /// R2 f5: PAGINATED variant — one page-0/30-row fetch under-reported
         /// a legal 40-game lobby (FFA_MAX_GAMES_PER_LOBBY) and 31 newer
@@ -901,7 +902,12 @@ namespace CompetitiveRounds
         /// zero. Cutoff semantics identical to FetchTeamSlot (R2 f4): window
         /// start = started_at - WINDOW_PRE_START_SECONDS, null in the
         /// "(partial)" fallback window; ok=false covers both transport
-        /// failure and unproven completeness.</summary>
+        /// failure and unproven completeness.
+        /// Bug 254 deliberately keeps one anchor fetch: it is the simplest
+        /// bounded request shape and normally follows the sitting, but a game
+        /// with no persisted player row for rosterIds[0] is not discoverable
+        /// from this participant-scoped feed. That coverage residual does NOT change
+        /// ffaOk, which remains pagination-completeness only.</summary>
         private static void FetchFfaSlot(int gen, Entry e, int attempt)
         {
             var f = _fetch;
@@ -2097,6 +2103,7 @@ namespace CompetitiveRounds
             DateTime lo, hi;
             GetWindow(e, out lo, out hi);
             var matches = FfaSessionMatches(e, f, lo, hi);
+            var roster = new HashSet<string>(e.rosterIds, StringComparer.Ordinal);
 
             // Header: roster names, budgeted (a 10-name line cannot hold full
             // names at title size — #237: measure, do not hope).
@@ -2143,13 +2150,16 @@ namespace CompetitiveRounds
                 // R3 f5: `total` is the FETCHED match count — a newest-30-of-31
                 // snapshot would number these 30..1 instead of 31..2, so the
                 // ordinal is only asserted when ffaOk proved the fetch whole.
+                int otherPlayers;
+                var byPlace = FfaRosterPlayers(m, roster, out otherPlayers);
+                string otherSuffix = otherPlayers > 0
+                    ? "  " + I18n.TrF("<color=#888>+{0} more</color>", otherPlayers)
+                    : "";
                 AddLabel(rp, 64, y, 1068, 22,
-                    I18n.TrF("Game {0}   {1} players", GameNoArg(f.ffaOk, gameNo), m.player_count)
-                    + tag + durChip + dt, ST_BODY);
+                    I18n.TrF("Game {0}   {1} players", GameNoArg(f.ffaOk, gameNo), byPlace.Count)
+                    + otherSuffix + tag + durChip + dt, ST_BODY);
                 y += 26f;
                 gamesDrawn++;
-                var byPlace = new List<ApiClient.FfaRecentPlayer>(m.players ?? new List<ApiClient.FfaRecentPlayer>());
-                byPlace.Sort((a, b) => (a != null ? a.placement : 99).CompareTo(b != null ? b.placement : 99));
                 int pDrawn = 0;
                 for (int p = 0; p < byPlace.Count; p++)
                 {
@@ -2186,7 +2196,10 @@ namespace CompetitiveRounds
             if (!f.ffaOk && matches.Count > 0) secHead += " " + PartialInline();
             AddLabel(rp, 64, 170, 1068, 28, secHead, ST_SECTION);
 
-            // Per-player FFA mini panels: 2-column grid on the right.
+            // Per-player FFA mini panels: 2-column grid on the right. These
+            // are career figures from PlayerStatsData, not session aggregates;
+            // a roster member absent from one included game therefore enters
+            // no client-side sum or divisor (bug 254 / #257).
             for (int i = 0; i < e.rosterIds.Length && i < 10; i++)
             {
                 float px = (i % 2 == 0) ? 1172f : 1534f;
@@ -2197,14 +2210,16 @@ namespace CompetitiveRounds
                     f.stats != null && i < f.stats.Length ? f.stats[i] : null, NameAt(e, i), -1f);
             }
 
-            // Graph cells: per game newest first, kind-major over participants
-            // in placement order (hit, block, fps, ping, dps).
+            // Graph cells: per game newest first, kind-major over ticket-roster
+            // player rows carried by that game (hit, block, fps, ping, dps).
+            // Outsider rows are summarized on the game line, not given graph
+            // panels. See FfaRosterPlayers for the wire's absent-row limit.
             for (int i = 0; i < matches.Count; i++)
             {
                 var m = matches[i];
                 int gameNo = total - i;
-                var byPlace = new List<ApiClient.FfaRecentPlayer>(m.players ?? new List<ApiClient.FfaRecentPlayer>());
-                byPlace.Sort((a, b) => (a != null ? a.placement : 99).CompareTo(b != null ? b.placement : 99));
+                int ignoredOthers;
+                var byPlace = FfaRosterPlayers(m, roster, out ignoredOthers);
                 // R3 f5: same unknown-ordinal rule on the graph captions.
                 BuildCellsFfaGame(cells, m, byPlace, I18n.TrF("Game {0}", GameNoArg(f.ffaOk, gameNo)));
             }
@@ -2336,14 +2351,15 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>R1 f9/f15: session games come from the report-private
-        /// player-scoped FFA history (ranked + casual, as the tab shows),
-        /// qualifying by FULL roster set equality with the watched roster plus
-        /// the window — the old half-overlap admitted a concurrent lobby
-        /// holding two of the four watched fighters. Residual (recorded, R1
-        /// f15): two sittings of the IDENTICAL roster inside one window merge
-        /// into one report — indistinguishable without server-side
-        /// session/lobby identity on the wire.
+        /// <summary>R1 f9/f15 + bug 254: session games come from the
+        /// report-private player-scoped FFA history (ranked + casual, as the
+        /// tab shows). A game qualifies when its derived start is inside the
+        /// ticket window and it carries at least max(2, floor(roster/2)) unique
+        /// ticket-roster player rows. The two-player floor rejects
+        /// single-anchor history noise; the half-roster threshold preserves a
+        /// fluid sitting across legitimate joins/leaves. Without a shared
+        /// lobby/session id, a concurrent lobby meeting that same predicate is
+        /// indistinguishable and can still merge into this report.
         /// R1 f9 tombstone: the CachedFfaRecent/CachedFfaRecentCasual
         /// reference-sniffing path is deleted (#310).</summary>
         private static List<ApiClient.FfaRecentMatch> FfaSessionMatches(Entry e, FetchBox f, DateTime lo, DateTime hi)
@@ -2360,8 +2376,23 @@ namespace CompetitiveRounds
                 if (m == null || m.players == null) continue;
                 if (string.IsNullOrEmpty(m.match_id) || !seen.Add(m.match_id)) continue;
                 DateTime end;
-                if (!TryParseUtc(m.ended_at, out end) || end < lo || end > hi) continue;
-                if (!FfaRosterSetEqual(m, roster)) continue;
+                if (!TryParseUtc(m.ended_at, out end) || end > hi) continue;
+                // Bug 254 follow-up: the wire now carries the stored real
+                // started_at — prefer it. Older servers omit it; derive
+                // ended_at - duration_seconds instead, and fail closed when
+                // neither is available: end alone cannot prove condition (a).
+                DateTime start;
+                if (!TryParseUtc(m.started_at, out start))
+                {
+                    if (m.duration_seconds <= 0) continue;
+                    try
+                    {
+                        start = end.AddSeconds(-(double)m.duration_seconds);
+                    }
+                    catch { continue; }
+                }
+                if (start < lo) continue;
+                if (!FfaRosterOverlapEnough(m, roster)) continue;
                 keyed.Add(new KeyValuePair<DateTime, ApiClient.FfaRecentMatch>(end, m));
             }
             keyed.Sort((a, b) => b.Key.CompareTo(a.Key));   // newest first
@@ -2369,18 +2400,74 @@ namespace CompetitiveRounds
             return res;
         }
 
-        /// <summary>FULL set equality (R1 f15): same player COUNT and every
-        /// game participant inside the watched roster — per-game steam ids
-        /// are unique, so count + subset = set equality.</summary>
-        private static bool FfaRosterSetEqual(ApiClient.FfaRecentMatch m, HashSet<string> roster)
+        /// <summary>Bug 254's fluid-roster predicate over the rich-history
+        /// player rows. Count unique ids so malformed duplicates cannot
+        /// manufacture the required overlap. The endpoint currently omits the
+        /// persisted `absent` bit, so a carried frozen-roster ghost is not
+        /// distinguishable here from a real participant; the server wire must
+        /// expose that bit before overlap can mean actual participation.</summary>
+        private static bool FfaRosterOverlapEnough(ApiClient.FfaRecentMatch m, HashSet<string> roster)
         {
-            if (m.players == null || m.players.Count != roster.Count) return false;
+            if (m == null || m.players == null || roster == null) return false;
+            int required = Math.Max(2, roster.Count / 2);
+            var shared = new HashSet<string>(StringComparer.Ordinal);
             for (int p = 0; p < m.players.Count; p++)
             {
                 var pl = m.players[p];
-                if (pl == null || string.IsNullOrEmpty(pl.steam_id) || !roster.Contains(pl.steam_id)) return false;
+                if (pl == null || string.IsNullOrEmpty(pl.steam_id)) continue;
+                // Bug 254 follow-up: the wire now carries the authoritative
+                // frozen-roster-ghost bit — a carried absent row was NOT in
+                // this game and must not manufacture overlap (#227). Older
+                // servers omit the key; it parses false = today's behavior.
+                if (pl.absent) continue;
+                if (roster.Contains(pl.steam_id)) shared.Add(pl.steam_id);
             }
-            return true;
+            return shared.Count >= required;
+        }
+
+        /// <summary>Unique rich-history rows from the ticket roster, sorted by
+        /// placement for rows/graphs. Rows outside the ticket remain only as a
+        /// counted suffix. The endpoint does not yet expose its authoritative
+        /// `absent` flag, so this helper deliberately does NOT guess from
+        /// left_early or zero tallies (#227): an absent frozen-roster ghost can
+        /// still appear until the wire carries that bit.</summary>
+        private static List<ApiClient.FfaRecentPlayer> FfaRosterPlayers(
+            ApiClient.FfaRecentMatch m, HashSet<string> roster, out int otherPlayers)
+        {
+            var res = new List<ApiClient.FfaRecentPlayer>();
+            otherPlayers = 0;
+            int absentRows = 0;
+            if (m == null || m.players == null || roster == null) return res;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int p = 0; p < m.players.Count; p++)
+            {
+                var pl = m.players[p];
+                if (pl == null) continue;
+                // Bug 254 follow-up: absent = frozen-roster ghost, carried
+                // for report continuity but NOT in this game (#227). Never a
+                // row, never an "other" — and remembered, because
+                // player_count INCLUDES ghosts (verified in prod: a 7-row
+                // game with 3 ghosts stores player_count=7).
+                if (pl.absent) { absentRows++; continue; }
+                string sid = pl.steam_id ?? "";
+                if (sid.Length == 0)
+                {
+                    otherPlayers++;
+                    continue;
+                }
+                if (!seen.Add(sid)) continue;
+                if (roster.Contains(sid)) res.Add(pl);
+                else otherPlayers++;
+            }
+            // player_count is the server's declared total INCLUDING ghosts.
+            // If a malformed or legacy row omitted a player object, keep that
+            // participant in the summary rather than pretending the smaller
+            // parsed list is whole — but never resurrect the ghosts we just
+            // filtered.
+            int declaredOthers = m.player_count - absentRows - res.Count;
+            if (declaredOthers > otherPlayers) otherPlayers = declaredOthers;
+            res.Sort((a, b) => a.placement.CompareTo(b.placement));
+            return res;
         }
 
         private static string JoinNamesBudget(Entry e, int budgetChars)

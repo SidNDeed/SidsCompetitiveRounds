@@ -3253,6 +3253,19 @@ namespace CompetitiveRounds
                 if (SpectatorSession.IsLocalSpectator)
                 {
                     SpectatorSync.OnJoinedSpectatorRoom();
+                    // Bug 243 (client review find 2): this early return sits
+                    // BEFORE the fighter-side coroutine launcher, so the
+                    // spectator card-bar extension was structurally
+                    // unreachable — start it here. The coroutine's own gates
+                    // handle everything else (FFA yields break, 1v2 targets 3
+                    // bars, non-team rooms exit via Diag2v2.IsActive-shaped
+                    // mode reads which are room-identity-based, #149).
+                    try
+                    {
+                        if (Diag2v2.IsActive() && Plugin.Instance != null)
+                            Plugin.Instance.StartCoroutine(Setup4PlayerCardBarsWhenReady());
+                    }
+                    catch (Exception cex) { Plugin.Log.LogWarning($"[SPECTATE] card-bar setup start: {cex.Message}"); }
                     return;
                 }
             }
@@ -3506,7 +3519,14 @@ namespace CompetitiveRounds
                 // 1v2 needs this too: pid 2 (duo_b) overflows the vanilla
                 // 2-slot cardBars array exactly like 2v2's pids 2/3. Extending
                 // to 4 covers both modes (the 4th bar just stays unused in ovt).
-                if (Diag2v2.PendingSlot() < 0) yield break;
+                // Bug 243: SPECTATOR seats have no pending slot but render the
+                // same PlayerID-indexed bars — without the extension, pids 2/3
+                // (team 2) index out of range and every spectator saw only one
+                // team's cards. The mode checks above/below all read in-room
+                // identity (#149), so they work on a spectator seat.
+                bool spectatorSeat = false;
+                try { spectatorSeat = RoomActors.LocalIsSpectator; } catch { }
+                if (Diag2v2.PendingSlot() < 0 && !spectatorSeat) yield break;
                 if (!PhotonNetwork.InRoom) yield break;
                 var cbh = CardBarHandler.instance;
                 if (cbh == null || cbh.cardBars == null || cbh.cardBars.Length < 2)
@@ -4598,6 +4618,35 @@ namespace CompetitiveRounds
 
         static bool Prefix(GameCrownHandler __instance)
         {
+            // Bug 251 (spectator seats, ALL modes — own seat gate per #352):
+            // vanilla's LateUpdate dereferences BOTH players[0]/players[1]
+            // CrownPos every frame once a holder is latched. On a spectator
+            // seat a replica's CrownPos child can be severed by the
+            // between-games body reset (Unity fake-null), which turned into
+            // a per-frame "NO CROWN POS!?" error storm running until room
+            // death. Severed or undersized roster: freeze the crown this
+            // frame instead (no error, no teleport to up*1000). Healthy
+            // state falls through to the normal paths below.
+            try
+            {
+                // FFA exempt (client review find 4): the FFA branch below
+                // never Lerps players[0]/players[1] — it has its own leader
+                // logic — and an FFA observer legitimately carries fake-null
+                // entries at low slots after a departure (the spectator leave
+                // patch defers the purge), so this guard would freeze the FFA
+                // crown permanently. Non-FFA spectate is exactly where the
+                // vanilla Lerp dereferences both anchors every frame.
+                if (RoomActors.LocalIsSpectator && !Diag2v2.IsFfa())
+                {
+                    var ps = PlayerManager.instance != null ? PlayerManager.instance.players : null;
+                    if (ps == null || ps.Count < 2) return false;
+                    var d0 = ps[0] != null ? ps[0].data : null;
+                    var d1 = ps[1] != null ? ps[1].data : null;
+                    if (d0 == null || d1 == null || d0.crownPos == null || d1.crownPos == null)
+                        return false;
+                }
+            }
+            catch { }
             if (!Diag2v2.IsActive()) return true;
             try
             {
@@ -4615,7 +4664,16 @@ namespace CompetitiveRounds
                     if (ffaCrown == null) return false;
                     var leader = FfaMode.CurrentLeader();
                     if (mateCrown != null && mateCrown.activeSelf) mateCrown.SetActive(false);
-                    if (leader == null || !leader.gameObject.activeInHierarchy)
+                    // Bug 251 verify round: the leader's own crown ANCHOR can
+                    // be severed (spectator between-games FullReset) while the
+                    // player object stays live — CurrentLeader() checks
+                    // player/gameObject/data, never data.crownPos, and the
+                    // spectator guard at the top of this prefix deliberately
+                    // exempts FFA. Validate the anchor HERE, on the one player
+                    // this branch dereferences, and hide the crown instead of
+                    // erroring every frame.
+                    if (leader == null || !leader.gameObject.activeInHierarchy
+                        || leader.data == null || leader.data.crownPos == null)
                     {
                         if (ffaCrown.activeSelf) ffaCrown.SetActive(false);
                         _ffaCrownAnimatedIn = false;   // re-arm for the next leader

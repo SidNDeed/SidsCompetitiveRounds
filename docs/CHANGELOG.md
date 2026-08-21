@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+**Bug-report sweep (Aug 21)**
+
+- **2v2 duplicate-series groundwork** (bug 245, partial — the resume
+  machinery itself is HELD for a dedicated pass after three adversarial
+  review rounds kept finding money-integrity edges in it; the reviewed
+  draft is preserved on the work branch). What landed now: the 2v2 live
+  listing and the team-bet gate share one three-arm liveness predicate
+  (creation, room issuance, or a recent valid game — a continuation-resumed
+  series hours past creation stays visible and bettable exactly while its
+  games are happening, the 2v2 sibling of the bug-199 fix), and a
+  pre-existing manual-queue defect found on the way: the queue never read
+  the CALLER's own preferred team, so the host of a manual four-stack was
+  assigned arbitrarily while the other three got their picks. The client
+  also now names the room a disconnect was observed in (inert until the
+  resume pass lands server-side).
+- **The broadcaster switches to the better game** (bug 244). The rotation
+  rule could only fire when the rotation set held two games, so a lone
+  higher-priority game (a 2v2 outscoring the watched 1v1, or a lone
+  tournament game) could never preempt — the seat stayed on the lesser game
+  indefinitely. The dwell window (no switching inside 3 minutes) is
+  unchanged.
+- **Tournament games are labeled in the stream posts** (bug 250). The
+  matchup lines said "Ranked 1v1" for tournament games because the label
+  consulted the narrow mandatory-spectate classifier; a display-only
+  resolver now follows the game to its series and labels "Tournament 1v1"
+  (with the trophy) for sync, async, and code-room tournament games alike.
+- **Spectators see both teams' cards in 2v2** (bug 243). Spectator seats
+  never extended the card-bar array past vanilla's two, so team 2's cards
+  threw index errors and both visible bars carried team 1 — every spectator
+  saw one team's cards. Spectator seats now get the same four-bar layout as
+  fighters.
+- **Spectators see Refresh block resets** (bug 241). The spectator poison
+  path rendered only lifesteal; the block-cooldown reset from "block back
+  when you deal damage" now renders too, so a Poison+Refresh fighter's
+  block no longer reads as permanently down on spectator seats.
+- **Spectator crown error storm fixed** (bug 251). A rematch could leave the
+  crown pointing at a severed body anchor on spectator seats, erroring every
+  frame until the room died; the between-games flush now resets the crown
+  and the update skips severed states.
+- **"Leave All Queues" actually clears 2v2/1v2 beliefs** (bug 247). The
+  escape hatch missed the 2v2/1v2 pending slots and the team queue state, so
+  a DC'd player stayed "in a match" to the spectate gate with no way out.
+- **Leaderboard profile stat lines reorganized** (bug 218, Stan's format):
+  1v1 now matches the 2v2/FFA line shape with its board rank, 1v2 groups
+  with the modes, and a blank line separates the block from the match
+  summary.
+- **Async tournament wording** (bugs 219/220): "Once you win a BO3 (first to
+  2 games)..." — two players read "2 BO3 wins" as two series.
+- **Chat source tags** (bug 248): now [Discord], [Game], [Twitch],
+  [YouTube].
+- **Compare tab** (bug 252): "Top Cards" renamed "Most Used Cards" in all
+  languages.
+- **Black YouTube VOD thumbnails** (bug 255, VM bot): the thumbnail engine
+  had no content check and uploaded provably uniform-black captures (5 of
+  its first 6). Every capture is now probed with a tiny pixel decode and
+  rejected below live-measured luminance thresholds; a rejected report
+  retries while still on screen, and a session that ends with only black
+  frames says so in the bot log. Pre-engine VODs keep YouTube's auto
+  thumbnail (the stream goes live on a near-black card) unless backfilled.
+
 Schema changes: migrations **229** (`stream_channel_posts` gains
 `twitch_vod_url` / `youtube_vod_url`; retro-fixed 16 finalized posts —
 applied 2026-08-18), **230** (`stream_channel_posts.matchups` session
