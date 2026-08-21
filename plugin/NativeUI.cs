@@ -2475,6 +2475,18 @@ namespace CompetitiveRounds
             // column (galaxy ice report, July 29). Not Ellipsis — Gravity
             // has no '…' glyph (#47) and would render a square.
             UIFactory.SetOverflowMode(row.txtName,3);
+            /* Truncate alone is only half the bound. Word wrap is ON by
+             * default, so an over-long "name [title]" WRAPS to a second line
+             * this 22px box cannot show, and Truncate then drops that wrapped
+             * remainder. Line 1 still renders, so the cell is not blank --
+             * it silently loses the [title] that wrapped. Wrap off makes the failure a
+             * horizontal clip at the cell edge, which preserves at least the
+             * prefix that wrapping could show. Deliberately NOT FitOneLine:
+             * Overflow would undo the July 29 fix where a long combo painted
+             * into the Rating column. 15pt in 22px is 1.47x, above the #297
+             * tight-cell threshold, so the fallback-metrics risk that justifies
+             * Overflow elsewhere does not apply here. */
+            UIFactory.SetWordWrap(row.txtName,false);
             row.txtRating=UIFactory.CreateText("rt",row.root.transform,"",15f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[2],22));
             UIFactory.SetBold(row.txtRating,true);
             row.txtGames =UIFactory.CreateText("g", row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[3],22));
@@ -2635,6 +2647,13 @@ namespace CompetitiveRounds
             // Truncate long name+title combos at the cell edge instead of
             // painting over the score dots (same fix as the FFA leaderboard).
             UIFactory.SetOverflowMode(row.txtIdentity,3);
+            /* Wrap off for the same reason as the leaderboard name cell: a long
+             * name + title + the translated " (left)" marker can exceed this
+             * flexed cell, and wrapping puts the marker on a second line the
+             * box drops entirely — so the disconnect marker would silently
+             * disappear in exactly the locales whose words are longest.
+             * Clipping keeps it visible up to the cell edge. */
+            UIFactory.SetWordWrap(row.txtIdentity,false);
 
             row.fullDotsGO=new GameObject("PointDots");
             row.fullDotsGO.transform.SetParent(line.transform,false);
@@ -3828,6 +3847,15 @@ namespace CompetitiveRounds
             UIFactory.AddLE(row.root,prefH:31,minH:31,flexH:0);
             row.txtInfo=CreateFfaTextCell("Info",row.root.transform,760,UIFactory.AlignMidLeft,17f,C_WHITE,true,300);
             UIFactory.SetOverflowMode(row.txtInfo,3);
+            /* Wrap off, same treatment as the leaderboard/identity cells.
+             * This cell is the one the member line made MULTI-LINE, and it
+             * is sized for exactly two line boxes. If the FIRST line wraps
+             * (a bet tag plus [PRIVATE] in English, a bet tag alone in
+             * es/ru/uk/sv) it consumes both boxes and Truncate drops the
+             * member line entirely -- the whole point of sizing this cell.
+             * No-wrap also makes the member-line cut deterministic and at
+             * the box edge rather than at a word boundary. */
+            UIFactory.SetWordWrap(row.txtInfo,false);
             row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",16f,C_WHITE,
                 new Color(0.25f,0.42f,0.20f,0.95f),
                 ()=>{
@@ -3944,6 +3972,31 @@ namespace CompetitiveRounds
                         +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
                     // Re-asserted per fill — pooled rows swap shapes (#63).
                     UIFactory.SetPrefH(row.root,memberLine!=null?54f:31f);
+                    /* The ROOT's height was never the binding constraint. txtInfo
+                     * is built by CreateFfaTextCell at a hardcoded sizeDelta
+                     * height of 25, and CreateText bakes that into its
+                     * LayoutElement as prefH AND minH; AddHLG sets
+                     * childControlHeight=true while this row passes
+                     * forceExpandH:false, so the child takes its LayoutElement
+                     * preferred height (priority 1, which outranks TMP's own
+                     * content-based ILayoutElement value at priority 0) and is
+                     * pinned at 25 no matter what it holds. A 17pt first line
+                     * (~20px) plus the <size=13> member line (~15px) needs
+                     * ~35px, and mode-3 Truncate drops the line that does not
+                     * fit — so growing only the root reserved 54px of empty row
+                     * and the member list rendered for NOBODY since it shipped.
+                     * Size the text element too, minH alongside prefH (the
+                     * dynamic-resize rule above SetMinH), and restore 25 on the
+                     * one-line path because these rows are pooled. This changes
+                     * no OUTER height — the row already reserved 54 — so the
+                     * scroll list's height budget is untouched (#63/#199/#245). */
+                    var ffaInfoGO=(row.txtInfo as Component)?.gameObject;
+                    if(ffaInfoGO!=null)
+                    {
+                        float infoH=memberLine!=null?48f:25f;
+                        UIFactory.SetPrefH(ffaInfoGO,infoH);
+                        UIFactory.SetMinH(ffaInfoGO,infoH);
+                    }
                     bool joinable=l.player_count<l.max_players
                         &&ApiClient.FfaQueueStatus!="leaving";
                     row.joinBtn.SetActive(joinable);
@@ -4091,6 +4144,15 @@ namespace CompetitiveRounds
             UIFactory.AddLE(row.root,prefH:29,minH:29,flexH:0);
             row.txtInfo=CreateFfaTextCell("Info",row.root.transform,700,UIFactory.AlignMidLeft,15f,C_WHITE,true,300);
             UIFactory.SetOverflowMode(row.txtInfo,3);
+            /* Wrap off, same treatment as the leaderboard/identity cells.
+             * This cell is the one the member line made MULTI-LINE, and it
+             * is sized for exactly two line boxes. If the FIRST line wraps
+             * (a bet tag plus [PRIVATE] in English, a bet tag alone in
+             * es/ru/uk/sv) it consumes both boxes and Truncate drops the
+             * member line entirely -- the whole point of sizing this cell.
+             * No-wrap also makes the member-line cut deterministic and at
+             * the box edge rather than at a word boundary. */
+            UIFactory.SetWordWrap(row.txtInfo,false);
             row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",14f,C_WHITE,
                 new Color(0.25f,0.42f,0.20f,0.95f),
                 ()=>{JoinHostLobbyRow(row,team);dirty=true;},
@@ -4310,6 +4372,21 @@ namespace CompetitiveRounds
                     // Two-line rows grow; re-asserted every fill because the
                     // pooled row may swap between shapes (#63 prefH rules).
                     UIFactory.SetPrefH(row.root,memberLine!=null?50f:29f);
+                    /* Same defect as the FFA browser row above (see the long
+                     * note there for the mechanism): txtInfo is pinned at its
+                     * build-time 25px by CreateText's baked prefH/minH, so
+                     * growing only the root left the member line undrawn. This
+                     * row's first line is 15pt (~18px) + the <size=13> member
+                     * line (~15px) = ~33px, and the root grows to 50, so 44
+                     * fits with headroom for taller fallback metrics in ru/uk.
+                     * Outer heights unchanged — scroll budget untouched. */
+                    var hostInfoGO=(row.txtInfo as Component)?.gameObject;
+                    if(hostInfoGO!=null)
+                    {
+                        float infoH=memberLine!=null?44f:25f;
+                        UIFactory.SetPrefH(hostInfoGO,infoH);
+                        UIFactory.SetMinH(hostInfoGO,infoH);
+                    }
                     row.joinBtn.SetActive(l.player_count<l.max_players&&!leaving&&!busy);
                     // Review find 2: an OPEN wager stays cancellable even if
                     // the lobby stops being bettable (dropped below two
@@ -21777,6 +21854,16 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Line 2 holds the "Team A vs Team B" header text on series rows.
             // Hidden when the row renders a per-match cards block instead.
             row.txtLine2 = UIFactory.CreateText("l2", row.root.transform, "", 14f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(1000, 24));
+            /* Wrap off. A packed vs-line (four names, four titles, four elo
+             * spans, "vs", "(you)") can exceed this 1000px box; wrapping puts
+             * the overflow on a second line the 24px box cannot show, so the
+             * last player vanishes outright. Clipping bounds it to a cut tail.
+             * NOTE this does not make the line safe to lengthen: a player who
+             * never gets to START on the line is still hidden entirely, which
+             * is why the per-player title cap stays at 10 (see
+             * FormatPlayerToken). Fitting a longer title needs a budget shared
+             * across BOTH sides, computed at the FormatTeamSide call site. */
+            UIFactory.SetWordWrap(row.txtLine2, false);
 
             // July 22 item 7 (rebuilt after playtest): ONE flat HLG line with a
             // hover cell per player — the earlier nested two-line block laid out
@@ -21870,6 +21957,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             AddRowBackground(row.root);
             row.txtRank   = UIFactory.CreateText("r",  row.root.transform, "", 15f, C_GOLD,  UIFactory.AlignMidLeft,   sizeDelta: new Vector2(TLB_COL_W[0], 22));
             row.txtName   = UIFactory.CreateText("n",  row.root.transform, "", 15f, C_WHITE, UIFactory.AlignMidLeft,   sizeDelta: new Vector2(TLB_COL_W[1], 22));
+            /* Same as the FFA leaderboard's name cell: this inherits CreateText's
+             * Truncate default but NOT no-wrap, so an over-long "name [title]"
+             * wraps into a second line the 22px box cannot show and Truncate
+             * drops that remainder, silently losing the [title]. Wrap off
+             * restores a horizontal clip at the box edge instead. */
+            UIFactory.SetWordWrap(row.txtName, false);
             row.txtRating = UIFactory.CreateText("rt", row.root.transform, "", 15f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(TLB_COL_W[2], 22));
             UIFactory.SetBold(row.txtRating, true);
             row.txtWL   = UIFactory.CreateText("wl",   row.root.transform, "", 14f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(TLB_COL_W[3], 22));
@@ -22269,7 +22362,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 // Team sides: caller's team rendered LEFT when a participant;
                 // otherwise raw t1 first. Coloring is by SIDE, not by win/loss —
                 // left team = blue (#6FB7FF), right team = orange (#FFA864). The
-                // old code wrapped an OUTER team <color> around FormatTitleName,
+                // old code wrapped an OUTER team <color> around the whole
+                // name+[title] span (a since-deleted helper),
                 // whose inner [title] <color>…</color> popped the stack back to
                 // the DEFAULT color (not the team color) for everything after it,
                 // so most of the vs-line rendered in the row's base color (read as
@@ -22474,15 +22568,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // periodic 10s refetch and expand clicks don't yank the user to top.
             if (_savedTeamScrollY >= 0f && Plugin.Instance != null)
                 Plugin.Instance.StartCoroutine(RestoreTeamHistScroll(_savedTeamScrollY));
-        }
-
-        private static string FormatTitleName(ApiClient.TeamSeriesSlot s)
-        {
-            if (s == null) return "?";
-            string nm = Trunc(s.name ?? "?", 12);
-            if (string.IsNullOrEmpty(s.title)) return nm;
-            string col = string.IsNullOrEmpty(s.title_color) ? "#FFD94D" : s.title_color;
-            return $"{nm} <color={col}>[{Trunc(s.title, 10)}]</color>";
         }
 
         // Render one team side of the vs-line in a single side color, with each
