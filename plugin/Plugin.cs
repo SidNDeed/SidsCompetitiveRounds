@@ -4625,25 +4625,29 @@ namespace CompetitiveRounds
 
         static bool Prefix(GameCrownHandler __instance)
         {
-            // Bug 251 (spectator seats, ALL modes — own seat gate per #352):
-            // vanilla's LateUpdate dereferences BOTH players[0]/players[1]
-            // CrownPos every frame once a holder is latched. On a spectator
-            // seat a replica's CrownPos child can be severed by the
-            // between-games body reset (Unity fake-null), which turned into
-            // a per-frame "NO CROWN POS!?" error storm running until room
-            // death. Severed or undersized roster: freeze the crown this
-            // frame instead (no error, no teleport to up*1000). Healthy
-            // state falls through to the normal paths below.
+            // Bug 251 + bug 257 (ALL seats, non-FFA): vanilla's LateUpdate
+            // dereferences BOTH players[0]/players[1] CrownPos every frame
+            // once a holder is latched. A severed anchor (spectator body
+            // reset, OR a departed opponent's destroyed player lingering in
+            // the list during v1.39.0's longer post-game windows) turned
+            // into a per-frame "NO CROWN POS!?" error storm — 6,007 lines
+            // in one bug-257 bundle, on FIGHTER seats, eating the capture
+            // budget. Originally spectator-gated; bug 257's version
+            // correlation (0 in every 1.38.5 bundle, storms in every
+            // 1.39.0 one) proved fighter seats hit the identical state.
+            // Severed or undersized roster: freeze the crown this frame
+            // instead (no error, no teleport to up*1000; an undersized
+            // list would even index-crash vanilla's Lerp). Healthy state
+            // falls through to the normal paths below.
             try
             {
                 // FFA exempt (client review find 4): the FFA branch below
                 // never Lerps players[0]/players[1] — it has its own leader
-                // logic — and an FFA observer legitimately carries fake-null
-                // entries at low slots after a departure (the spectator leave
-                // patch defers the purge), so this guard would freeze the FFA
-                // crown permanently. Non-FFA spectate is exactly where the
-                // vanilla Lerp dereferences both anchors every frame.
-                if (RoomActors.LocalIsSpectator && !Diag2v2.IsFfa())
+                // logic with its own anchor guard — and an FFA seat
+                // legitimately carries fake-null entries at low slots after
+                // a departure, so this guard would freeze the FFA crown
+                // permanently.
+                if (!Diag2v2.IsFfa())
                 {
                     var ps = PlayerManager.instance != null ? PlayerManager.instance.players : null;
                     if (ps == null || ps.Count < 2) return false;
