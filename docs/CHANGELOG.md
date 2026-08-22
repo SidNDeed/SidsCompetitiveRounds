@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.39.1 — 2026-08-22
 
 **Tournaments: deadline check-ins and tidier histories (Aug 22)**
 

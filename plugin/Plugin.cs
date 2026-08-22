@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.39.0";   // Aug 18: records v2 (Rarest Hand + Luckiest + admin removal + reporter-seat-only), tournaments popup/bracket corrections, 14pt floor, chat overlay, PlayerName repair, resumed-series score, broadcast seat pin/idle
+        public const string ModVersion = "1.39.1";   // Aug 22: tournament deadline check-ins + extension, kind-scoped histories, FFA early-leave grace goes live, map skin backgrounds, background audio mute, Aug 21 bug sweep, 2 new cosmetics, 44 new translations x4
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
