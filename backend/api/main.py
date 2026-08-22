@@ -859,19 +859,969 @@ async def _supervised(name: str, coro_factory):
             await asyncio.sleep(5)
 
 
+# ── Janitor query self-test ────────────────────────────────────
+#
+# On Aug 16 a broadcast-infra edit dropped the FROM clause of the rowless-husk
+# sweep and team_queue_cleanup_loop threw UndefinedTableError every 60s for
+# FIVE DAYS before anyone looked (restored in c199d57). The per-arm try/except
+# blocks — correct for isolation — are exactly what made that silent. So at
+# every boot we EXPLAIN every SQL statement the janitor loops can reach and
+# scream if one no longer plans.
+
+_JANITOR_SELFTEST_ROOTS = (
+    ("main", "queue_cleanup_loop"),
+    ("main", "team_queue_cleanup_loop"),
+    ("tournaments", "tournament_tick"),
+)
+
+# Strong ref: asyncio.create_task keeps only a weak reference, and a GC'd
+# task vanishes without a word. Held here, cancelled in lifespan shutdown.
+_janitor_selftest_task = None
+_janitor_selftest_report: dict = {"status": "pending"}
+
+
+def _janitor_sql_from_sources(sources: dict, roots) -> dict:
+    """Pure AST walk: every text(<SQL literal>) reachable from the given root
+    functions through the call graph of the given module sources.
+
+    The inventory is derived from the LIVE call graph at boot, never from a
+    hand-copied registry — a registry keeps passing through the very edit
+    that breaks a sweep (the Aug 16 FROM drop shipped in a commit that
+    touched the query it broke).
+
+    Walking a function traverses its whole subtree including nested defs
+    (tournament_tick drives its workers through `_lock`/`_run` closures
+    handed to `_safe`). Edges follow every bare NAME REFERENCE to a known
+    function, not just direct calls — tournament_tick hands workers to
+    `_safe` by value (`_safe("ensure-next", _ensure_next_tournament)`), and
+    a call-only walk silently drops that whole subtree (found the hard way:
+    it hid _queue_availability_notices' SQL). Names resolve against the
+    module's own top-level defs, then its `from X import y [as z]` names —
+    mapped back to the DEFINING name, because resolving the local alias in
+    the source module silently drops the edge (Codex r1 find 2); `X.y`
+    resolves through `import X [as Y]` aliases. Over-approximation is the
+    safe direction here: a reference that never runs merely EXPLAINs extra
+    real SQL. Only modules present in `sources` are followed; class methods
+    are not indexed (no janitor SQL lives on a class). Import collection is
+    module-wide on purpose: the loops import at function level
+    (`from database import async_session`).
+
+    Non-constant text() arguments are PARTIALLY EVALUATED into their full
+    set of possible strings when every input is statically known: f-strings
+    and `+` concatenations over constants, names bound by an enclosing
+    `for` over constant rows (tuples/lists, or a constant dict's `.items()`
+    — the `{_qt}`/`{_lt}` lobby sweeps and the service-audit checks dict),
+    and single-assignment locals holding a constant. Each variant becomes
+    its own statement. Anything still unresolvable lands in `dynamic`, and
+    the RUNNER TREATS THOSE AS FAILURES: an unverifiable janitor SQL site
+    is precisely the coverage rot this test exists to prevent (Codex r1
+    find 3).
+
+    The evaluator must never INVENT a value the runtime would not use — a
+    wrong expansion EXPLAINs made-up SQL over a broken live query, which is
+    worse than no self-test (Codex r2 finds 1-5, r3 finds 1-8). It is NOT
+    an abstract interpreter; it accepts a deliberately small, provable
+    subset and refuses everything else into `dynamic`:
+      - a name participates only when NOTHING in the function subtree can
+        rebind, shadow, or mutate it: parameter names (own def or nested),
+        nested def names, import and except-clause aliases, global/nonlocal
+        declarations, a second store of any kind, deletions, non-whitelisted
+        method calls (`d.update(...)` — items/keys/values/get/copy are the
+        read-only whitelist), and attribute/subscript stores all block;
+      - a whole function's expansion is disabled outright if its subtree
+        contains `match` or a class definition (binding forms outside the
+        modelled subset);
+      - single-assignment locals resolve only at sites in the binding's own
+        scope or a nested closure scope AND lexically AFTER the assignment
+        (use-before-assign is a live UnboundLocalError, not a value);
+      - a const whose value is a MUTABLE literal (dict/list/set) qualifies
+        only if every load of the name is the receiver of a whitelisted
+        read-only method — `alias = checks` or `helper(checks)` is an
+        escape that could mutate what `.items()` will see;
+      - loop rows come only from a synchronous `for` whose targets are
+        bound by NOTHING but for-loops, with no nested for rebinding the
+        same name (`async for` over a constant is a live TypeError and
+        never expands); duplicate dict keys keep only the last value,
+        exactly like Python;
+      - `+` concatenation requires every operand to be str; f-string
+        placeholders str() their value exactly like Python;
+      - a conditional expression expands ONLY when its test is statically
+        known (literal, or a name resolving to exactly one constant), and
+        then only its live arm is inventoried. RUNTIME-conditional SQL is
+        refused outright — proving a live test cannot itself raise is
+        definite-assignment analysis this evaluator deliberately does not
+        attempt (four review rounds each broke a smarter attempt: r3
+        find 8, r6 find 1, r7 finds 1-4). Two-armed janitor SQL must be
+        written as two explicit statements, as _refund_ffa_lobby_bets
+        now is;
+      - loop rows never cross ANY scope boundary — explicit def/lambda or
+        implicit comprehension/generator alike: closures and generator
+        bodies late-bind the loop cell, so a loop-var reference inside one
+        is refused — the definition-time row is not what a deferred
+        evaluation would see (r8 find 1, r9 find 1). Eager comprehensions
+        are refused with them: uniformly conservative, false-loud only.
+    Codex r4 hardening (finds 1-6):
+      - a const's assignment must not sit in a CONDITIONAL context the use
+        site is outside of (if/while/loop/try/except/match tokens must be
+        a prefix of the use site's) — `if False: sql = ...` is not a value,
+        it is an UnboundLocalError; and its value expression must not
+        reference any loop-bound name (`sql = q` inside a loop resolves
+        against whichever `q` is live at the USE, which is provenance the
+        evaluator refuses to model);
+      - text() SITES can never be invisible: bare `text`, any
+        `from sqlalchemy import text as X` alias, any `<obj>.text(...)`
+        attribute call, and the keyword form `text(text=...)` are all
+        recognized, and a recognized site whose SQL argument cannot be
+        located is `dynamic`, never skipped;
+      - a scalar loop target binds the ELEMENT ITSELF — a one-element
+        tuple element under a scalar target is refused, not unpacked;
+      - PEP 695 type-parameter names and `type` alias statements block
+        like any other binding;
+      - an IfExp with a CONSTANT test resolves to its one live arm (the
+        dead arm is never inventoried), and `disabled` refuses every
+        non-Constant argument outright.
+    Everything outside this subset degrades to `dynamic`, i.e. a loud
+    failure — never a guess.
+
+    Returns {"statements": [{module, func, line, sql, roots}],
+             "dynamic":    [{module, func, line}],
+             "root_counts": {root_fn: n statements reachable}}.
+    """
+    import ast as _ast
+
+    trees = {m: _ast.parse(src, filename=f"{m}.py") for m, src in sources.items()}
+    funcs: dict = {}          # module -> {top-level function name: node}
+    from_imports: dict = {}   # module -> {local name: {(module, defining name)}}
+    mod_aliases: dict = {}    # module -> {local alias: {module name}}
+    text_names: dict = {}     # module -> local names that are sqlalchemy text
+    for m, tree in trees.items():
+        funcs[m] = {
+            n.name: n for n in tree.body
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        }
+        # Multi-valued on purpose: two same-alias imports (a try/except
+        # import fallback) both stay candidates — runtime may bind either,
+        # and following only the later traversal hit could follow the safe
+        # one while the broken one runs live (Codex r3 find 1).
+        from_imports[m] = {}
+        mod_aliases[m] = {}
+        # Local names that construct sqlalchemy text clauses in this module
+        # — a text() SITE must never be invisible (Codex r4 find 2).
+        text_names[m] = {"text"}
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom) and node.module in sources:
+                for a in node.names:
+                    from_imports[m].setdefault(a.asname or a.name, set()).add(
+                        (node.module, a.name))
+            elif isinstance(node, _ast.ImportFrom) and node.module == "sqlalchemy":
+                for a in node.names:
+                    if a.name == "text":
+                        text_names[m].add(a.asname or a.name)
+            elif isinstance(node, _ast.Import):
+                for a in node.names:
+                    if a.name in sources:
+                        mod_aliases[m].setdefault(a.asname or a.name, set()).add(a.name)
+
+    _MAX_VARIANTS = 20
+    _SCOPES = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)
+
+    def _arg_names(defn):
+        a = defn.args
+        return [x.arg for x in (a.posonlyargs + a.args + a.kwonlyargs)
+                ] + [x.arg for x in (a.vararg, a.kwarg) if x is not None]
+
+    _READONLY_METHODS = ("items", "keys", "values", "get", "copy")
+    # Branching statements and the FIELDS whose children run conditionally.
+    # Each (node, field) pair is its own context token: an assignment is a
+    # value only for uses whose token stack extends the assignment's, so an
+    # assign in an if-body is never trusted by a use in the else arm, a
+    # handler, a finally, or a loop-else (Codex r4 find 4 + r5 find 1).
+    # With/AsyncWith bodies get tokens too: a suppressing context manager
+    # can swallow the exception that skipped the assign, so only uses
+    # INSIDE the same body may trust it (r5 find 2). Non-listed fields
+    # (test, iter, items) run unconditionally and keep the parent stack.
+    _BRANCH_FIELDS = {
+        _ast.If: ("body", "orelse"),
+        _ast.While: ("body", "orelse"),
+        _ast.For: ("body", "orelse"),
+        _ast.AsyncFor: ("body", "orelse"),
+        _ast.Try: ("body", "handlers", "orelse", "finalbody"),
+        _ast.With: ("body",),
+        _ast.AsyncWith: ("body",),
+        _ast.ExceptHandler: ("body",),   # each handler is its own context
+    }
+    if hasattr(_ast, "TryStar"):
+        _BRANCH_FIELDS[_ast.TryStar] = ("body", "handlers", "orelse", "finalbody")
+    _TYPE_ALIAS = getattr(_ast, "TypeAlias", None)
+
+    def _analyze_bindings(fn_node):
+        """Scope-aware binding census of the function subtree. Returns
+        (consts, loop_ok, disabled):
+          consts:  name -> (scope_path, value_node, lineno) for names bound
+                   EXACTLY ONCE anywhere in the subtree, by a plain
+                   single-target assignment, and never blocked;
+          loop_ok: names whose ONLY bindings anywhere are synchronous For
+                   targets (any number of loops);
+          disabled: True when the subtree contains a binding form outside
+                   the modelled subset (`match`, class definitions) — the
+                   caller then refuses ALL non-constant expansion.
+        BLOCKED (disqualified everywhere, Codex r2 finds 2-4 and r3 find 2):
+        parameter names of the function or any nested def/lambda, nested def
+        NAMES themselves, import and except-clause aliases, global/nonlocal
+        declarations, augmented/annotated/walrus/with-as/comprehension/del
+        bindings, tuple-assign leaves, `async for` targets, attribute or
+        subscript stores through the name, and non-whitelisted method calls
+        (`d.update(...)` mutates what a `.items()` loop will see). A const
+        whose value is a MUTABLE literal additionally requires every load
+        of the name to be a whitelisted-method receiver — `alias = checks`
+        or `helper(checks)` is an escape that can mutate it (r3 find 5).
+        Conservative by construction: over-blocking degrades a site to
+        `dynamic` — a loud failure — never to a wrong expansion."""
+        info: dict = {}
+        loads: dict = {}          # name -> [Name nodes in Load ctx]
+        safe_loads: set = set()   # id(Name node) used as read-only receiver
+        disabled = [False]
+
+        def _d(name):
+            return info.setdefault(name, {"assigns": [], "for_n": 0, "blocked": False})
+
+        def _block_leaves(t):
+            for leaf in _ast.walk(t):
+                if isinstance(leaf, _ast.Name):
+                    _d(leaf.id)["blocked"] = True
+
+        def _rec(node, scope, cond):
+            if isinstance(node, _SCOPES) and node is not fn_node:
+                if not isinstance(node, _ast.Lambda):
+                    _d(node.name)["blocked"] = True   # the def name is a binding too
+                for a in _arg_names(node):
+                    _d(a)["blocked"] = True
+                for tp in getattr(node, "type_params", ()):
+                    # PEP 695 generic parameters shadow like params (r4 find 5)
+                    _d(tp.name)["blocked"] = True
+                new_scope = scope + (id(node),)
+                for child in _ast.iter_child_nodes(node):
+                    _rec(child, new_scope, cond)
+                return
+            if isinstance(node, _ast.ClassDef) or (
+                    hasattr(_ast, "Match") and isinstance(node, _ast.Match)):
+                disabled[0] = True   # binding forms we refuse to model
+            elif _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
+                if isinstance(node.name, _ast.Name):
+                    _d(node.name.id)["blocked"] = True   # `type sql = ...` binds too
+            elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
+                for n in node.names:
+                    _d(n)["blocked"] = True
+            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for a in node.names:
+                    _d(a.asname or a.name.split(".")[0])["blocked"] = True
+            elif isinstance(node, _ast.ExceptHandler) and node.name:
+                _d(node.name)["blocked"] = True
+            elif isinstance(node, _ast.Assign):
+                if len(node.targets) == 1 and isinstance(node.targets[0], _ast.Name):
+                    _d(node.targets[0].id)["assigns"].append(
+                        (scope, cond, node.value, node.lineno))
+                else:
+                    for t in node.targets:
+                        _block_leaves(t)
+            elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign, _ast.NamedExpr)):
+                _block_leaves(node.target)
+            elif isinstance(node, _ast.For):
+                tgt = node.target
+                elts = tgt.elts if isinstance(tgt, _ast.Tuple) else [tgt]
+                if all(isinstance(e, _ast.Name) for e in elts):
+                    for e in elts:
+                        _d(e.id)["for_n"] += 1
+                else:
+                    _block_leaves(tgt)
+            elif isinstance(node, _ast.AsyncFor):
+                # `async for x in <constant>` is a live TypeError; never a
+                # source of rows, and its targets are unusable (r3 find 4).
+                _block_leaves(node.target)
+            elif isinstance(node, _ast.withitem) and node.optional_vars:
+                _block_leaves(node.optional_vars)
+            elif isinstance(node, _ast.Delete):
+                for t in node.targets:
+                    _block_leaves(t)
+            elif isinstance(node, _ast.comprehension):
+                _block_leaves(node.target)
+            elif (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and isinstance(node.func.value, _ast.Name)):
+                if node.func.attr in _READONLY_METHODS:
+                    safe_loads.add(id(node.func.value))
+                else:
+                    _d(node.func.value.id)["blocked"] = True
+            elif isinstance(node, (_ast.Attribute, _ast.Subscript)) \
+                    and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and isinstance(node.value, _ast.Name):
+                _d(node.value.id)["blocked"] = True
+            if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
+                loads.setdefault(node.id, []).append(node)
+            bf = _BRANCH_FIELDS.get(type(node))
+            if bf:
+                for field, value in _ast.iter_fields(node):
+                    child_cond = cond + ((id(node), field),) if field in bf else cond
+                    for child in (value if isinstance(value, list) else [value]):
+                        if isinstance(child, _ast.AST):
+                            _rec(child, scope, child_cond)
+            else:
+                for child in _ast.iter_child_nodes(node):
+                    _rec(child, scope, cond)
+
+        for a in _arg_names(fn_node):
+            _d(a)["blocked"] = True
+        for tp in getattr(fn_node, "type_params", ()):
+            _d(tp.name)["blocked"] = True
+        for child in _ast.iter_child_nodes(fn_node):
+            _rec(child, (), ())
+
+        consts = {}
+        for n, d in info.items():
+            if len(d["assigns"]) != 1 or d["for_n"] != 0 or d["blocked"]:
+                continue
+            scope, cond, value, lineno = d["assigns"][0]
+            if isinstance(value, (_ast.Dict, _ast.List, _ast.Set)) and any(
+                    id(x) not in safe_loads for x in loads.get(n, [])):
+                continue   # mutable literal escapes somewhere — unsafe
+            if any(isinstance(x, _ast.Name) and info.get(x.id, {}).get("for_n", 0)
+                   for x in _ast.walk(value)):
+                # The RHS reads a loop-bound name: which iteration's value
+                # it holds is provenance we refuse to model (r4 find 1).
+                continue
+            consts[n] = (scope, cond, value, lineno)
+        loop_ok = {n for n, d in info.items()
+                   if d["for_n"] >= 1 and not d["assigns"] and not d["blocked"]}
+        return consts, loop_ok, disabled[0]
+
+    def _string_variants(node, env, consts, site_scope, site_cond, site_line,
+                         depth=0):
+        """Every RAW value this expression can statically evaluate to under
+        `env` (one merged row of the enclosing constant loops) plus the
+        single-assignment consts — or None if unresolvable. Names resolve
+        through consts only when the binding's scope is the site's scope or
+        an ancestor of it (a closure read, never a sibling scope — Codex r2
+        find 2), the binding's conditional-context stack is a prefix of the
+        site's (r4 find 4, r5 find 1) AND the binding is lexically BEFORE
+        the use (use-before-assign is a live UnboundLocalError, not a value
+        — r3 find 3). Non-str values survive here so f-string placeholders
+        can str() them exactly like Python, while `+` REQUIRES str operands
+        (r2 find 5).
+
+        A conditional expression expands ONLY when its test is statically
+        known — a literal, or a Name resolving through consts to exactly
+        one value — and then only its live arm is inventoried (r4 find 6,
+        r5 find 3). Every RUNTIME-conditional construction is refused
+        outright: proving that a live test cannot itself raise
+        (UnboundLocalError/NameError) is definite-assignment analysis this
+        evaluator deliberately does not attempt — four Codex rounds (r3
+        find 8, r6 find 1, r7 finds 1-4) each found a fresh hole in
+        successively smarter attempts. Two-armed janitor SQL must instead
+        be written as two explicit statements, as _refund_ffa_lobby_bets
+        now is. Callers filter final non-str results."""
+        if depth > 8:
+            return None
+        if isinstance(node, _ast.Constant):
+            return [node.value]
+        if isinstance(node, _ast.Name):
+            if node.id in env:
+                return [env[node.id]]
+            if node.id in consts:
+                bind_scope, bind_cond, value, bind_line = consts[node.id]
+                if bind_scope == site_scope[:len(bind_scope)] \
+                        and bind_cond == site_cond[:len(bind_cond)] \
+                        and bind_line < site_line:
+                    return _string_variants(value, env, consts, bind_scope,
+                                            bind_cond, bind_line, depth + 1)
+            return None
+        if isinstance(node, _ast.IfExp):
+            tv = None
+            if isinstance(node.test, _ast.Constant):
+                tv = [node.test.value]
+            elif isinstance(node.test, _ast.Name):
+                tv = _string_variants(node.test, env, consts, site_scope,
+                                      site_cond, site_line, depth + 1)
+            if tv is not None and len(tv) == 1:
+                arm = node.body if tv[0] else node.orelse
+                return _string_variants(arm, env, consts, site_scope,
+                                        site_cond, site_line, depth + 1)
+            return None
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+            lv = _string_variants(node.left, env, consts, site_scope,
+                                  site_cond, site_line, depth + 1)
+            rv = _string_variants(node.right, env, consts, site_scope,
+                                  site_cond, site_line, depth + 1)
+            if lv is None or rv is None or len(lv) * len(rv) > _MAX_VARIANTS:
+                return None
+            if not all(isinstance(v, str) for v in lv + rv):
+                return None
+            return [a + b for a in lv for b in rv]
+        if isinstance(node, _ast.JoinedStr):
+            outs = [""]
+            for v in node.values:
+                if isinstance(v, _ast.FormattedValue):
+                    if v.conversion != -1 or v.format_spec is not None:
+                        return None
+                    part = _string_variants(v.value, env, consts, site_scope,
+                                            site_cond, site_line, depth + 1)
+                    if part is not None:
+                        part = [str(p) for p in part]
+                elif isinstance(v, _ast.Constant) and isinstance(v.value, str):
+                    part = [v.value]
+                else:
+                    return None
+                if part is None or len(outs) * len(part) > _MAX_VARIANTS:
+                    return None
+                outs = [o + p for o in outs for p in part]
+            return outs
+        return None
+
+    def _const_loop_rows(node, consts, loop_ok, site_scope, site_cond):
+        """Rows of an enclosing constant-driven loop:
+        `for a, b in (("x", "y"), ...)` with all-constant elements, or
+        `for a, b in d.items()` where d is a constant dict literal (inline
+        or via an unblocked single-assignment local, bound lexically before
+        the loop). Returns [{name: value}, ...] or None. Every target name
+        must be in `loop_ok` (r2 find 3), the loop must be synchronous
+        (r3 find 4), no nested for may rebind the same name (Python leaves
+        the inner loop's LAST value bound afterwards — r3 find 4), and
+        duplicate dict keys keep only the last value, exactly like the dict
+        Python builds (r3 find 7)."""
+        if isinstance(node, _ast.AsyncFor):
+            return None
+        tgt, it = node.target, node.iter
+        if isinstance(tgt, _ast.Name):
+            names = [tgt.id]
+        elif isinstance(tgt, _ast.Tuple) and all(isinstance(e, _ast.Name) for e in tgt.elts):
+            names = [e.id for e in tgt.elts]
+        else:
+            return None
+        if not all(n in loop_ok for n in names):
+            return None
+        for sub in _ast.walk(node):
+            if sub is not node and isinstance(sub, (_ast.For, _ast.AsyncFor)):
+                st = sub.target
+                selts = st.elts if isinstance(st, _ast.Tuple) else [st]
+                if any(isinstance(e, _ast.Name) and e.id in names for e in selts):
+                    return None
+        if (isinstance(it, _ast.Call) and not it.args and not it.keywords
+                and isinstance(it.func, _ast.Attribute) and it.func.attr == "items"):
+            d = it.func.value
+            if isinstance(d, _ast.Name):
+                if d.id not in consts:
+                    return None
+                bind_scope, bind_cond, value, bind_line = consts[d.id]
+                if bind_scope != site_scope[:len(bind_scope)] \
+                        or bind_cond != site_cond[:len(bind_cond)] \
+                        or bind_line >= node.lineno:
+                    return None
+                d = value
+            if not isinstance(d, _ast.Dict) or len(names) != 2:
+                return None
+            if not all(k is not None and isinstance(k, _ast.Constant) for k in d.keys) \
+                    or not all(isinstance(v, _ast.Constant) for v in d.values):
+                return None
+            merged = {}
+            for k, v in zip(d.keys, d.values):   # duplicate keys: last wins
+                merged[k.value] = v.value
+            return [{names[0]: k, names[1]: v} for k, v in merged.items()] or None
+        if not isinstance(it, (_ast.Tuple, _ast.List)):
+            return None
+        rows = []
+        for el in it.elts:
+            if isinstance(tgt, _ast.Name):
+                # A scalar target binds the ELEMENT ITSELF: a one-element
+                # tuple here would runtime-bind the tuple, so unpacking it
+                # would invent a value (Codex r4 find 3). Constant-or-refuse.
+                vals = [el]
+            else:
+                vals = el.elts if isinstance(el, (_ast.Tuple, _ast.List)) else [el]
+            if len(vals) != len(names) or not all(
+                    isinstance(v, _ast.Constant) for v in vals):
+                return None
+            rows.append(dict(zip(names, (v.value for v in vals))))
+        return rows or None
+
+    def _collect_literals(mod, fn_node):
+        """All text() SQL strings in one function: [(line, sql)] plus
+        dynamic (statically unresolvable) call sites [line]."""
+        found, dyn = [], []
+        consts, loop_ok, expansion_disabled = _analyze_bindings(fn_node)
+        if expansion_disabled:
+            consts, loop_ok = {}, set()
+        mod_text_names = text_names[mod]
+
+        def _text_sql_arg(node):
+            """The SQL-argument AST node of a call that constructs (or could
+            construct) a sqlalchemy text clause, else None. Recognizes the
+            bare/aliased name, any `<obj>.text(...)` attribute call, and the
+            keyword form `text(text=...)` — a text SITE must become a
+            statement or `dynamic`, never silently vanish (Codex r4
+            find 2). Ellipsis marks a recognized site whose argument we
+            cannot locate."""
+            f = node.func
+            if isinstance(f, _ast.Name):
+                if f.id not in mod_text_names:
+                    return None
+            elif not (isinstance(f, _ast.Attribute) and f.attr == "text"):
+                return None
+            # Only the two forms sqlalchemy actually accepts are wellformed;
+            # extra positionals/keywords are a live TypeError, and a splat
+            # is unresolvable — all land in dynamic (r5 find 4).
+            if len(node.args) == 1 and not node.keywords \
+                    and not isinstance(node.args[0], _ast.Starred):
+                return node.args[0]
+            if not node.args and len(node.keywords) == 1 \
+                    and node.keywords[0].arg == "text":
+                return node.keywords[0].value
+            return Ellipsis
+
+        def _expand(arg, loop_stack, scope, cond, line):
+            if expansion_disabled and not isinstance(arg, _ast.Constant):
+                return None
+            envs = [{}]
+            for rows in loop_stack:
+                envs = [{**e, **r} for e in envs for r in rows]
+                if len(envs) > _MAX_VARIANTS:
+                    return None
+            out = []
+            for env in envs:
+                vs = _string_variants(arg, env, consts, scope, cond, line)
+                if vs is None or not all(isinstance(v, str) for v in vs):
+                    return None
+                for s in vs:
+                    if s not in out:
+                        out.append(s)
+                if len(out) > _MAX_VARIANTS:
+                    return None
+            return out or None
+
+        def _walk(node, loop_stack, scope, cond):
+            if isinstance(node, _SCOPES) and node is not fn_node:
+                # Loop rows are EXECUTION-TIME snapshots and must not cross
+                # a def boundary: a closure late-binds the loop cell, whose
+                # value when the closure actually runs can come from a later
+                # iteration or a sibling loop reusing the target — expanding
+                # its literals with the definition-time row inventories SQL
+                # runtime never executes (Codex r8 find 1). A loop-var
+                # reference inside a nested def is therefore refused.
+                inner_scope = scope + (id(node),)
+                for child in _ast.iter_child_nodes(node):
+                    _walk(child, [], inner_scope, cond)
+                return
+            if isinstance(node, (_ast.ListComp, _ast.SetComp, _ast.DictComp,
+                                 _ast.GeneratorExp)):
+                # Comprehensions are implicit function scopes; a GENERATOR
+                # body in particular runs deferred and late-binds enclosing
+                # loop cells exactly like a closure (Codex r9 find 1 — the
+                # r8 leak through its implicit-scope side door). Uniform
+                # rule, eager comprehensions included: loop rows cross no
+                # scope boundary of any kind.
+                for child in _ast.iter_child_nodes(node):
+                    _walk(child, [], scope, cond)
+                return
+            if isinstance(node, (_ast.For, _ast.AsyncFor)):
+                rows = _const_loop_rows(node, consts, loop_ok, scope, cond)
+                inner = loop_stack + [rows] if rows else loop_stack
+                for child in node.body:
+                    _walk(child, inner, scope, cond + ((id(node), "body"),))
+                for child in node.orelse:
+                    _walk(child, loop_stack, scope, cond + ((id(node), "orelse"),))
+                _walk(node.iter, loop_stack, scope, cond)
+                return
+            if isinstance(node, _ast.Call):
+                arg = _text_sql_arg(node)
+                if arg is Ellipsis:
+                    dyn.append(node.lineno)
+                elif arg is not None:
+                    variants = _expand(arg, loop_stack, scope, cond, node.lineno)
+                    if variants:
+                        found.extend((arg.lineno, s) for s in variants)
+                    else:
+                        dyn.append(node.lineno)
+            bf = _BRANCH_FIELDS.get(type(node))
+            if bf:
+                for field, value in _ast.iter_fields(node):
+                    child_cond = cond + ((id(node), field),) if field in bf else cond
+                    for child in (value if isinstance(value, list) else [value]):
+                        if isinstance(child, _ast.AST):
+                            _walk(child, loop_stack, scope, child_cond)
+            else:
+                for child in _ast.iter_child_nodes(node):
+                    _walk(child, loop_stack, scope, cond)
+
+        for child in _ast.iter_child_nodes(fn_node):
+            _walk(child, [], (), ())
+        return found, dyn
+
+    def _callees(mod, fn_node):
+        """Edges from one function. Function-local imports are resolved per
+        function AND every plausible resolution of a name is followed —
+        a local `from tournaments import x as y` must not lose to a
+        same-named top-level def, one function's alias must never shadow
+        another's (Codex r2 find 1), and two same-alias imports (try/except
+        fallbacks) both stay candidates (r3 find 1). Following extra edges
+        only EXPLAINs more real SQL; picking one candidate could follow the
+        wrong body and go green over the live one."""
+        local_from: dict = {}
+        local_alias: dict = {}
+        for node in _ast.walk(fn_node):
+            if isinstance(node, _ast.ImportFrom) and node.module in sources:
+                for a in node.names:
+                    local_from.setdefault(a.asname or a.name, set()).add(
+                        (node.module, a.name))
+            elif isinstance(node, _ast.Import):
+                for a in node.names:
+                    if a.name in sources:
+                        local_alias.setdefault(a.asname or a.name, set()).add(a.name)
+        edges = set()
+        for node in _ast.walk(fn_node):
+            if isinstance(node, _ast.Name):
+                edges.update(local_from.get(node.id, ()))
+                if node.id in funcs[mod]:
+                    edges.add((mod, node.id))
+                edges.update(from_imports[mod].get(node.id, ()))
+            elif isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
+                for amap in (local_alias, mod_aliases[mod]):
+                    for target in amap.get(node.value.id, ()):
+                        if node.attr in funcs.get(target, {}):
+                            edges.add((target, node.attr))
+        return {(m, f) for m, f in edges if f in funcs.get(m, {})}
+
+    statements: dict = {}    # (module, line, sql) -> entry
+    dynamic: dict = {}       # (module, line) -> entry
+    root_counts: dict = {}
+    lit_cache: dict = {}
+    edge_cache: dict = {}
+
+    for root_mod, root_fn in roots:
+        if root_fn not in funcs.get(root_mod, {}):
+            # A renamed/moved root would otherwise turn the self-test into a
+            # silent no-op — the exact failure mode this feature exists to
+            # prevent. Scream instead (the runner turns this into a loud
+            # banner, never a crash).
+            raise ValueError(
+                f"janitor selftest root {root_mod}.{root_fn} not found — "
+                f"the self-test is no longer watching that loop")
+        seen, touched = set(), set()
+        queue = [(root_mod, root_fn)]
+        while queue:
+            mod, fn = queue.pop()
+            if (mod, fn) in seen:
+                continue
+            seen.add((mod, fn))
+            if (mod, fn) not in lit_cache:
+                lit_cache[(mod, fn)] = _collect_literals(mod, funcs[mod][fn])
+                edge_cache[(mod, fn)] = _callees(mod, funcs[mod][fn])
+            found, dyn = lit_cache[(mod, fn)]
+            for line, sql in found:
+                key = (mod, line, sql)
+                touched.add(key)
+                e = statements.setdefault(key, {
+                    "module": mod, "func": fn, "line": line,
+                    "sql": sql, "roots": []})
+                if root_fn not in e["roots"]:
+                    e["roots"].append(root_fn)
+            for line in dyn:
+                dynamic.setdefault((mod, line), {
+                    "module": mod, "func": fn, "line": line})
+            queue.extend(edge_cache[(mod, fn)])
+        root_counts[root_fn] = len(touched)
+
+    return {
+        "statements": sorted(statements.values(),
+                             key=lambda s: (s["module"], s["line"], s["sql"])),
+        "dynamic": sorted(dynamic.values(),
+                          key=lambda s: (s["module"], s["line"])),
+        "root_counts": root_counts,
+    }
+
+
+def _janitor_print(msg: str) -> None:
+    """print() that cannot take the self-test down with it: stdout may be a
+    closed or broken pipe under some supervisors, and a raising print in an
+    except path would either escape the detached task or replace an
+    in-flight CancelledError (Codex r1 find 6)."""
+    try:
+        print(msg)
+    except Exception:
+        pass
+
+
+def _janitor_sql_inventory() -> dict:
+    """Extract the janitor SQL inventory from the sources of this module and
+    tournaments (the only two modules the janitor call graph touches)."""
+    import tournaments as _tournaments
+    sources = {}
+    for name, path in (("main", __file__), ("tournaments", _tournaments.__file__)):
+        with open(path, "r", encoding="utf-8") as fh:
+            sources[name] = fh.read()
+    return _janitor_sql_from_sources(sources, _JANITOR_SELFTEST_ROOTS)
+
+
+def _janitor_explain_error_kind(e) -> tuple:
+    """Classify an EXPLAIN failure into ('infra'|'timeout'|'failed', detail).
+    'infra' is connection-level (DB down/dropped — aborts the run as
+    db_unreachable); 'timeout' is our own SET LOCAL statement_timeout firing
+    (the statement is UNVERIFIED, not proven broken — likely blocked behind
+    DDL); everything else is 'failed' — the loud case. Unknown shapes
+    deliberately land in 'failed': the one thing this test must never do is
+    stay quiet by default. There is NO NULL-bind-artifact bucket: parameter
+    type analysis happens at Parse, before Bind values exist, so a 42P18
+    here would hit the real janitor execution identically — it is a real
+    failure (Codex r1 find 4)."""
+    detail = f"{type(e).__name__}: {e}"
+    if getattr(e, "connection_invalidated", False):
+        return "infra", detail
+    sqlstate = None
+    cur, seen = e, set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (OSError, ConnectionError, asyncio.TimeoutError)):
+            return "infra", detail
+        sqlstate = getattr(cur, "sqlstate", None) or getattr(cur, "pgcode", None)
+        if sqlstate:
+            break
+        cur = getattr(cur, "orig", None) or cur.__cause__
+    if sqlstate:
+        s = str(sqlstate)
+        if s == "57014":   # query_canceled — our own statement_timeout
+            return "timeout", detail
+        # 08=connection, 53=resources, 57=operator intervention, 58=system
+        if s.startswith(("08", "53", "57", "58")):
+            return "infra", detail
+        return "failed", f"[{s}] {detail}"
+    # No sqlstate at all: SQLAlchemy's Operational/InterfaceError without a
+    # PG code is a connect-path failure, not a planner verdict.
+    if type(e).__name__ in ("OperationalError", "InterfaceError", "TimeoutError"):
+        return "infra", detail
+    return "failed", detail
+
+
+async def _run_janitor_query_selftest():
+    """Boot-time EXPLAIN sweep of every janitor SQL statement.
+
+    Runs as a DETACHED lifespan task (off the boot path — Sid's call): not
+    awaited at startup and NOT under _supervised, whose while-True wrapper
+    would rerun a returning one-shot forever. Deliberately never raises
+    (except CancelledError, which must propagate for shutdown): an outage
+    is worse than a delayed sweep, so every failure mode degrades to a
+    loud banner plus the report served from /api/v1/internal/janitor-selftest.
+    """
+    global _janitor_selftest_report
+    t0 = time.monotonic()
+    report = {"status": "running",
+              "started_at": datetime.now(timezone.utc).isoformat()}
+    _janitor_selftest_report = report
+    try:
+        inv = _janitor_sql_inventory()
+        stmts = inv["statements"]
+        failures, timed_out = [], []
+        n_ok = unchecked = 0
+        db_error = None
+
+        def _loc(s):
+            return {"module": s["module"], "func": s["func"],
+                    "line": s["line"], "roots": s["roots"]}
+
+        # A root that reaches zero statements means the call-graph walk broke
+        # — a self-test that tests nothing must scream, not pass.
+        for root_fn, n in inv["root_counts"].items():
+            if n == 0:
+                failures.append({
+                    "module": "-", "func": root_fn, "line": 0, "roots": [root_fn],
+                    "error": "root reaches zero SQL statements — extractor or "
+                             "call-graph walk broke", "sql": ""})
+
+        # A dynamic site is janitor SQL this test CANNOT see — the same
+        # coverage rot as a stale registry. Fail the run rather than print
+        # a clean banner over an unverified sweep (Codex r1 find 3).
+        for d in inv["dynamic"]:
+            failures.append({
+                "module": d["module"], "func": d["func"], "line": d["line"],
+                "roots": [],
+                "error": "dynamic SQL construction the extractor cannot "
+                         "statically resolve — restructure the SQL or teach "
+                         "_janitor_sql_from_sources the new shape",
+                "sql": ""})
+
+        # The DB block gets ITS OWN except: an exception escaping a detached
+        # task is invisible until GC mutters "exception was never retrieved".
+        n_prior_failures = len(failures)   # non-statement failures so far
+        try:
+            from database import async_session
+            async with async_session() as db:
+                for i, s in enumerate(stmts):
+                    try:
+                        # Txn-local timeout: planning takes AccessShareLock
+                        # and can wait forever behind a migration's
+                        # AccessExclusiveLock, wedging the report at
+                        # 'running' and pinning a pool connection (Codex r1
+                        # find 5). statement_timeout covers lock waits, and
+                        # SET LOCAL dies with our rollback, so nothing leaks
+                        # to the pooled connection (a session-level SET
+                        # would follow it back into the pool).
+                        await db.execute(text("SET LOCAL statement_timeout = '5s'"))
+                        # VERBATIM: prefixing EXPLAIN is the only edit ever
+                        # made to the SQL. Collapsing whitespace would let a
+                        # `--` comment swallow the rest of the line and
+                        # EXPLAIN a truncated statement (that silently ate a
+                        # GROUP BY in tournaments.py during the Aug 20
+                        # validation of this feature).
+                        stmt = text("EXPLAIN " + s["sql"])
+                        # _bindparams: SQLAlchemy's own parse of the binds —
+                        # a private attr, but the one source that can never
+                        # disagree with how execute() will read the SQL. If
+                        # it ever vanishes in an upgrade, bind-carrying
+                        # statements fail loudly here; nothing passes silently.
+                        params = {k: None for k in getattr(stmt, "_bindparams", {})}
+                        await db.execute(stmt, params)
+                        n_ok += 1
+                    except Exception as e:
+                        kind, detail = _janitor_explain_error_kind(e)
+                        if kind == "infra":
+                            db_error = detail
+                            unchecked = len(stmts) - i
+                            break
+                        if kind == "timeout":
+                            timed_out.append({**_loc(s), "error": detail})
+                        else:
+                            failures.append({**_loc(s), "error": detail,
+                                             "sql": s["sql"]})
+                    finally:
+                        # Reset even after an aborted txn; guarded because a
+                        # dead connection makes rollback itself raise. (An
+                        # in-flight CancelledError still propagates — it is
+                        # not an Exception.)
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            t = asyncio.current_task()
+            if t is not None and t.cancelling():
+                # A shutdown cancel arrived and the session teardown's own
+                # close error REPLACED the in-flight CancelledError (the
+                # AsyncSession __aexit__ path — Codex r2 find 6). Absorbing
+                # it here would complete a cancelled task normally; restore
+                # the cancellation instead.
+                raise asyncio.CancelledError() from e
+            db_error = f"{type(e).__name__}: {e}"
+            # Session setup/teardown died outside the per-statement loop;
+            # count only STATEMENTS that genuinely went unchecked — the
+            # pre-loop synthetic failures (root-zero, dynamic sites) are
+            # not statements and must not offset this (Codex r2 find 7).
+            n_stmt_failures = len(failures) - n_prior_failures
+            unchecked = max(0, len(stmts) - n_ok - n_stmt_failures - len(timed_out))
+
+        if failures:
+            status = "failed"
+        elif db_error is not None:
+            status = "db_unreachable"
+        elif timed_out:
+            status = "partial"   # nothing broken, but not everything verified
+        else:
+            status = "ok"
+        _janitor_selftest_report = {
+            "status": status,
+            "started_at": report["started_at"],
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+            "counts": {"statements": len(stmts), "explained_ok": n_ok,
+                       "failed": len(failures), "timed_out": len(timed_out),
+                       "dynamic": len(inv["dynamic"]), "unchecked": unchecked},
+            "root_counts": inv["root_counts"],
+            "failures": failures,
+            "timed_out": timed_out,
+            "dynamic": inv["dynamic"],
+            "db_error": db_error,
+        }
+
+        bar = "=" * 72
+        lines = [bar,
+                 f"[JANITOR-SELFTEST] EXPLAINed {n_ok}/{len(stmts)} janitor "
+                 f"statements in {time.monotonic() - t0:.1f}s "
+                 f"({len(failures)} failed, {len(timed_out)} timed out)",
+                 "[JANITOR-SELFTEST] roots: " + "  ".join(
+                     f"{k}={v}" for k, v in inv["root_counts"].items())]
+        if status == "failed":
+            lines.append(f"[JANITOR-SELFTEST] !!! {len(failures)} JANITOR "
+                         "QUERIES FAIL TO PLAN — those sweeps are dead EVERY "
+                         "cycle until fixed !!!")
+            for f in failures:
+                lines.append(f"[JANITOR-SELFTEST]   {f['module']}.py:{f['line']}"
+                             f" ({f['func']}): {f['error'].splitlines()[0]}")
+            if db_error is not None:
+                # Failures win the status, but the outage must not hide that
+                # the rest was never attempted (Codex r2 find 7).
+                lines.append(f"[JANITOR-SELFTEST] additionally: DB became "
+                             f"unreachable — {unchecked} statements NOT "
+                             f"attempted: {db_error}")
+        elif status == "db_unreachable":
+            lines.append(f"[JANITOR-SELFTEST] DB unreachable — {unchecked} "
+                         f"statements NOT verified: {db_error}")
+        elif status == "partial":
+            lines.append(f"[JANITOR-SELFTEST] {len(timed_out)} statements timed "
+                         "out UNVERIFIED (blocked behind DDL?): " + ", ".join(
+                             f"{t['module']}.py:{t['line']}" for t in timed_out))
+        else:
+            lines.append("[JANITOR-SELFTEST] all janitor queries plan clean")
+        lines.append(bar)
+        _janitor_print("\n".join(lines))
+    except asyncio.CancelledError:
+        _janitor_print("[JANITOR-SELFTEST] cancelled (shutdown)")
+        raise
+    except Exception:
+        t = asyncio.current_task()
+        if t is not None and t.cancelling():
+            # Same masking as the DB block: an ordinary error raised while
+            # our cancellation is pending must not demote a cancelled task
+            # to a normal "error" completion (Codex r2 find 6).
+            _janitor_print("[JANITOR-SELFTEST] cancelled (shutdown)")
+            raise asyncio.CancelledError()
+        import traceback
+        tb = traceback.format_exc()
+        _janitor_selftest_report = {
+            "status": "error",
+            "started_at": report.get("started_at"),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error": tb.strip().splitlines()[-1],
+        }
+        bar = "=" * 72
+        _janitor_print(f"{bar}\n[JANITOR-SELFTEST] !!! SELF-TEST ITSELF CRASHED "
+                       f"— janitor queries are UNVERIFIED this boot !!!\n{tb}{bar}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    global _janitor_selftest_task
     print("Competitive ROUNDS API starting up")
     from tournaments import tournament_tick
     task   = asyncio.create_task(_supervised("queue_cleanup",      queue_cleanup_loop))
     task_t2 = asyncio.create_task(_supervised("team_queue_cleanup", team_queue_cleanup_loop))
     task_t  = asyncio.create_task(_supervised("tournament_tick",   tournament_tick))
+    # Detached one-shot, deliberately NOT under _supervised (its while-True
+    # would rerun a returning task forever) and not awaited (off the boot
+    # path). The module global is the strong ref that keeps it alive.
+    _janitor_selftest_task = asyncio.create_task(_run_janitor_query_selftest())
     await _run_service_policy_audit(force=True)
     yield
     task.cancel()
     task_t.cancel()
     task_t2.cancel()
+    if _janitor_selftest_task is not None:
+        _janitor_selftest_task.cancel()
+        # cancel() only requests; await so the session context actually
+        # unwinds and its connection is released before the loop closes
+        # (Codex r1 find 7). Done for the one-shot only — the three loop
+        # tasks keep their long-standing fire-and-forget teardown.
+        try:
+            await _janitor_selftest_task
+        except (asyncio.CancelledError, Exception):
+            pass
     print("Competitive ROUNDS API shutting down")
 
 
@@ -2705,6 +3655,21 @@ async def get_mod_version():
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────
+
+@app.get("/api/v1/internal/janitor-selftest", tags=["Internal"])
+async def get_janitor_selftest(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """This boot's janitor SQL self-test report (_run_janitor_query_selftest).
+    Key-gated twice like every /internal/ route: rate_limit_gate rejects a
+    missing/wrong key BEFORE anything is parsed (learning #388) and the
+    handler re-checks. No DB dependency — serves the in-memory report, so it
+    answers even when the verdict is db_unreachable."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    return _janitor_selftest_report
+
 
 @app.get("/api/v1/internal/recent-flags", tags=["Internal"])
 async def get_recent_flags(
@@ -33452,16 +34417,23 @@ async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_n
     leave/cancel)."""
     try:
         async with db.begin_nested():
-            game_filter = " AND game_number = :g" if game_number is not None else ""
-            params = {"lid": lobby_id}
+            # Two explicit statements, not a spliced filter fragment: the
+            # janitor boot self-test EXPLAINs every reachable SQL literal
+            # and refuses runtime-conditional SQL construction outright, so
+            # both arms are written out verbatim (Codex selftest r7).
             if game_number is not None:
-                params["g"] = int(game_number)
-            rows = (await db.execute(text(
-                "SELECT id, player_id, amount FROM ffa_bets"
-                " WHERE lobby_id = :lid AND settled_at IS NULL"
-                + game_filter +
-                " ORDER BY player_id::text, id LIMIT 200"
-            ), params)).mappings().all()
+                rows = (await db.execute(text(
+                    "SELECT id, player_id, amount FROM ffa_bets"
+                    " WHERE lobby_id = :lid AND settled_at IS NULL"
+                    " AND game_number = :g"
+                    " ORDER BY player_id::text, id LIMIT 200"
+                ), {"lid": lobby_id, "g": int(game_number)})).mappings().all()
+            else:
+                rows = (await db.execute(text(
+                    "SELECT id, player_id, amount FROM ffa_bets"
+                    " WHERE lobby_id = :lid AND settled_at IS NULL"
+                    " ORDER BY player_id::text, id LIMIT 200"
+                ), {"lid": lobby_id})).mappings().all()
             await _assert_no_service_subject(
                 db, affected_player_ids=[b["player_id"] for b in rows])
             n = 0
