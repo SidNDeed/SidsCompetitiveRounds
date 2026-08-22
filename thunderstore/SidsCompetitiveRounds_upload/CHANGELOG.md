@@ -1,3 +1,228 @@
+## v1.39.1 — 2026-08-22
+
+**Tournaments: deadline check-ins and tidier histories (Aug 22)**
+
+- **Async deadline check-in DMs.** On the last day of an async match's
+  7-day window, the bot DMs both players asking whether they've made
+  contact and plan to play today - three buttons: yes (extends the deadline
+  24 hours - once per opponent per tournament, each player has their own
+  extension), "I reached out - no response / they quit", "not yet - still
+  coordinating". The buttons survive bot restarts and verify the clicker
+  owns the linked account.
+- **One player wanting to play is no longer punished for the other's
+  silence.** When an async match times out with neither side ready, a
+  player who had answered the check-in now wins a
+  normal forfeit instead of both players being eliminated - the exact
+  losers-bracket double-DQ that hit this week is impossible now. (That
+  match was also repaired by hand: the willing player advances with a
+  fresh 7-day deadline.)
+- **The tournament Forfeit button is deliberately held for a dedicated
+  lifecycle pass.** Forfeited finals still need correct podium minting,
+  terminal series need wager settlement, and late reports need isolation
+  from already-resolved matches.
+- **Sync and async tournament histories are separate now.** The Recent
+  Tournaments popup shows only the sub-tab's own kind, and your
+  placements line lives in that popup instead of the page bottom.
+- **The FFA match-point banner no longer renders styled names HUGE.** A
+  nametag size tag reaching the banner made the name enormous; names keep
+  their color/bold styling but geometry tags are stripped.
+- **FFA game-over freeze fixed** (bug 261): once a player in slot 0/1 had
+  left, every other seat froze on the VICTORY screen because the rematch
+  popup crashed looking up an empty team's color.
+- **Muted-players header fixed** (bug 259): a styled nametag no longer
+  renders as "(color=#55CCFF" - styling tags are stripped before
+  truncation, and real angle brackets in names still show as parens.
+- **Invisible Toxic Cloud** (bug 260): two fix designs were refuted in
+  review (the second disproved the diagnosis itself); the report stays
+  open with a field diagnostic riding this release to catch the real
+  mechanism in production logs.
+- **New cosmetics**: Seasonal Spring (animated, 8 frames) and Nuclear
+  glasses, both by the community artist behind the Poison set.
+- **FFA early-leave grace goes LIVE with this release** - the client now
+  reports the leave-time score the server rule has been waiting for. A
+  second one-off correction (migration 236) repaired the one affected
+  game played since the first backfill. The async losers-bracket repair
+  is migration 237.
+
+Schema changes: migrations **238** (tournament check-ins + deadline
+extensions), **239** (machine-translation seeds for 44 new strings x 4
+languages), **240** (cosmetic release flips).
+
+**Bug-report sweep (Aug 21)**
+
+- **2v2 DC-rejoin no longer creates duplicate series** (bug 245, dedicated
+  hardening pass after four review rounds). The disconnect report has marked
+  a series "incomplete, admin decides" since the manual-control policy, but
+  the queue's resume path still only looked for the legacy paused state — so
+  four players re-queuing after a DC always got a brand-new series, leaving
+  up to three live rows for one sitting in the 2v2 tab. Re-queuing within 30
+  minutes (queue OR hosted lobby) now re-locks the four onto their original
+  series (same teams, score kept, spawn/room state reset); every same-four
+  creation path shares one serialization and resolves the WHOLE family
+  (zero-game husks superseded with bets reconciled); a late disconnect
+  report about the abandoned room can no longer forfeit the resumed sitting
+  (room fence + wall-clock relock stamp); lobby wagers staged against a
+  fresh series are refunded rather than bound when the Start adopts a
+  series with a decided game; and the continuation self-heal picks the row
+  the caller can actually use, never a husk.
+- **The broadcaster switches to the better game** (bug 244). The rotation
+  rule could only fire when the rotation set held two games, so a lone
+  higher-priority game (a 2v2 outscoring the watched 1v1, or a lone
+  tournament game) could never preempt — the seat stayed on the lesser game
+  indefinitely. The dwell window (no switching inside 3 minutes) is
+  unchanged.
+- **Tournament games are labeled in the stream posts** (bug 250). The
+  matchup lines said "Ranked 1v1" for tournament games because the label
+  consulted the narrow mandatory-spectate classifier; a display-only
+  resolver now follows the game to its series and labels "Tournament 1v1"
+  (with the trophy) for sync, async, and code-room tournament games alike.
+- **Spectators see both teams' cards in 2v2** (bug 243). Spectator seats
+  never extended the card-bar array past vanilla's two, so team 2's cards
+  threw index errors and both visible bars carried team 1 — every spectator
+  saw one team's cards. Spectator seats now get the same four-bar layout as
+  fighters.
+- **Spectators see Refresh block resets** (bug 241). The spectator poison
+  path rendered only lifesteal; the block-cooldown reset from "block back
+  when you deal damage" now renders too, so a Poison+Refresh fighter's
+  block no longer reads as permanently down on spectator seats.
+- **Spectator crown error storm fixed** (bug 251). A rematch could leave the
+  crown pointing at a severed body anchor on spectator seats, erroring every
+  frame until the room died; the between-games flush now resets the crown
+  and the update skips severed states.
+- **"Leave All Queues" actually clears 2v2/1v2 beliefs** (bug 247). The
+  escape hatch missed the 2v2/1v2 pending slots and the team queue state, so
+  a DC'd player stayed "in a match" to the spectate gate with no way out.
+- **Leaderboard profile stat lines reorganized** (bug 218, Stan's format):
+  1v1 now matches the 2v2/FFA line shape with its board rank, 1v2 groups
+  with the modes, and a blank line separates the block from the match
+  summary.
+- **Async tournament wording** (bugs 219/220): "Once you win a BO3 (first to
+  2 games)..." — two players read "2 BO3 wins" as two series.
+- **Chat source tags** (bug 248): now [Discord], [Game], [Twitch],
+  [YouTube].
+- **Compare tab** (bug 252): "Top Cards" renamed "Most Used Cards" in all
+  languages.
+- **Game audio mutes while tabbed out in online play** (bug 210, per Sid):
+  deterministic instead of the OS's intermittent ducking; restores your
+  exact volume on refocus. Menu/queue audio untouched (the match-found
+  sound still reaches you), broadcast seat exempt. Config:
+  `MuteAudioInBackground`, default on.
+- **Black YouTube VOD thumbnails** (bug 255, VM bot): the thumbnail engine
+  had no content check and uploaded provably uniform-black captures (5 of
+  its first 6). Every capture is now probed with a tiny pixel decode and
+  rejected below live-measured luminance thresholds; a rejected report
+  retries while still on screen, and a session that ends with only black
+  frames says so in the bot log. Pre-engine VODs keep YouTube's auto
+  thumbnail (the stream goes live on a near-black card) unless backfilled.
+
+Schema changes: migrations **229** (`stream_channel_posts` gains
+`twitch_vod_url` / `youtube_vod_url`; retro-fixed 16 finalized posts —
+applied 2026-08-18), **230** (`stream_channel_posts.matchups` session
+matchup list; applied 2026-08-18), **233** (`ffa_match_players.game_points_at_leave`),
+**234** (one-off: un-rates ten pre-fix early-leave rows).
+
+Backend data: migration **231** — one-shot 20,000g `admin_grant` to
+NotNic for a community promo video (applied 2026-08-19). Same shape as
+`067`, plus ledger-keyed idempotency so a re-run is a no-op.
+
+**Lobby and text-cell fixes (Aug 20)**
+
+- **The lobby browser now shows the whole roster.** The "who is inside"
+  line under each open lobby shared one fixed-height cell with the lobby
+  header, and a cell can only carry one wrapping mode -- so a full lobby's
+  roster clipped at the cell edge and the trailing "+N more" counter never
+  appeared, in exactly the case that counter exists for. The roster is now
+  its own element that sizes itself to its content and takes as many lines
+  as it needs. Rows are usually SHORTER than before, not taller.
+- **Four text cells no longer drop their text instead of clipping it.** The
+  FFA and 2v2 leaderboard name cells, the FFA recent-games identity cell and
+  the 2v2 series line all left word wrap on inside fixed-height boxes, so an
+  over-long "name [title]" wrapped onto a line the box could not show and the
+  wrapped part was discarded rather than clipped. Most visible on the
+  translated "(left)" disconnect marker, which could vanish entirely.
+
+**Admin (Aug 20)**
+
+- **Lexia granted admin** (migration **232**).
+
+**FFA early-leave grace (Aug 20)**
+
+- **Leaving an FFA before the field has scored two points no longer costs
+  Elo.** Below two half-points nothing has been decided, so the placement
+  the report hands a leaver is not evidence about anyone — the same
+  threshold the bet cutoff, the 2v2 disconnect rule and the client's own
+  fresh-game cancel already use. The leaver is unrated for that game
+  (no rating, no XP or gold, out of everyone else's beaten counts); the
+  players who stayed play on and are rated among themselves.
+- This does not reopen leave-to-dodge. The dodge that rule exists to stop is
+  quitting a game you are losing, and by then the field is well past two
+  points. The grace window is the opening seconds, before the first round
+  converts. The claim is also reported by a *surviving* client, never by the
+  leaver, and is refused outright if the leaver's signed tally shows they
+  actually played.
+- **Ten past games corrected.** Nine players who left with a completely
+  empty stat line — no rounds, no points, no kills, no damage — had that
+  game's rating change reversed. Eight gain (from +22.9 to +180.5); one
+  loses a +69.8 that the same rule says they should not have banked. XP and
+  gold already paid are untouched, and nobody who stayed in those games has
+  their result changed.
+
+**Map skin backgrounds fixed (bug 249, Aug 19)**
+
+- Every custom map skin now renders its own designed background. They were
+  all landing on the same pinkish red — most visible on the broadcast seat,
+  which cycles all 23 skins, and easy to miss on a normal seat, which holds
+  one skin for a whole session.
+- The cause: the map background is the background camera's clear colour, and
+  that clear is pure red. Vanilla ROUNDS arts turn it into a sky with a large
+  hue shift; our skins replaced that with a colour *filter*, which multiplies
+  — and multiplying pure red can never produce green or blue. Every skin
+  collapsed onto one hue. Verified in-game: Abyss ("near-black blue") rendered
+  hot magenta before the fix and deep blue after, on the same build.
+- Also fixed in the same pass: the map arts share particle systems, so
+  switching off the unused arts was switching off the live skin's own backdrop
+  a couple of seconds into every round; the screen-filling backdrop layers were
+  being painted with the skin's *wall* colours instead of its background; the
+  per-skin post-process profile was sharing its effects with the base game's
+  art asset, so repeated skin changes were quietly degrading it; and a backdrop
+  pass that never matched a backdrop was recolouring Homing bullets and the
+  card-choice face instead. Retired.
+- The neutral skins read neutral again. Monochrome and Platinum were coming out
+  warm beige because the base game grades everything the main camera draws with
+  a red-weighted gain, and nothing was compensating for it. The correction is
+  measured from the render rather than from the profile numbers, only touches
+  colours the skin actually designed as grey, and scales with brightness — so
+  Magma, Abyss, Mint and Soft measured unchanged.
+- Five older defects in the same subsystem, fixed in the same pass: the
+  automatic per-round art change could still recolour particles in the middle of
+  the map slide (the stall that used to leave players off-screen); the "disable
+  map lighting" backdrop was painted at an unsafe moment and then overwritten a
+  couple of seconds later, so the setting never visually stuck; the premium
+  skins' shimmer ticked faster than the transition guard and reached into the
+  same window; switching from a custom skin back to a vanilla one left the art
+  wearing the old colours; and unequipping your LAST map colour did nothing
+  until you restarted the game.
+
+**Broadcast stream stability (Aug 18)**
+
+- Streams no longer cut in and out: the VM director holds outputs through
+  transient status blips and sitting hops (the teardown/restart cycle was
+  exhausting the push legs' restart budget into up-to-10-minute dead-air
+  windows), organic sitting ends are no longer misread as seat failures
+  (fighter-departure evidence), and the broadcast seat no longer self-
+  updates out from under its supervisor.
+- YouTube title updates fixed (the API rejects two listing filters at once)
+  — the channel side was already healthy.
+- Spectator view: fighter info panels moved to the top corners under the
+  card bars; the camera now zooms out to keep every live fighter in frame
+  (vertical and horizontal), instead of losing airborne players above the
+  fixed vanilla framing.
+- The stream-ended Discord post keeps its links and now points at the VODs
+  — the exact Twitch/YouTube VOD of that session when resolvable while
+  live, the channel archive pages otherwise.
+- Ops: a maintenance pause flag idles the broadcast bot's supervisors for
+  up to 8 hours so builds and tests on the VM aren't fought by it.
+
 ## v1.39.0 Ã¢â‚¬â€ 2026-08-18
 
 Schema changes: migrations **225** (`spectate_drain_tombstones` table +
@@ -1065,164 +1290,5 @@ item may show as not-yet-on-sale until they do.
   without the cause being known. Schema/data: migration **173** frees any player still
   stranded (2 freed on apply, plus 1 who escaped the moment the fix went live).
 
-## v1.35.4 Ã¢â‚¬â€ 2026-07-30 Ã¢â‚¬â€ rope objects, poison desync, block grace, FFA casual-wait
 
-Everything previously accumulated as "Unreleased" ships in this version: bug reports
-**#125-#140** across two waves plus the July 30 lifecycle-audit closeout. Backend changes
-were deployed progressively through the day; the client half lands with this release.
-Schema changes: migrations **167** (FFA damage/kill telemetry), **168** (recover two wiped
-FFA games), **169** (match-report quarantine), **170** (`team_series.room_issued_at`),
-**171** (free a dispersed FFA sitting), **172** (publish Tattered Cape placement rev 2).
-
-> **Version note:** 1.35.3 was cut and its Thunderstore package uploaded, then two more
-> fixes landed from the #140 session analysis (the room-wide rope-scale gate and the 3-4
-> player FFA teleport guard). Thunderstore versions are immutable, so the corrected build
-> ships as 1.35.4 and supersedes it. 1.35.3 exists only as that superseded Thunderstore
-> package Ã¢â‚¬â€ there is no 1.35.3 GitHub release.
-
-Cosmetics: **Tattered Cape** ships an approved placement revision Ã¢â‚¬â€ it renders noticeably
-larger (scale 1.70 -> 2.15). The art itself is unchanged.
-
-### Found in Sid's 4-hour session log (#140)
-
-- **3- and 4-player FFA rounds could leave a player un-teleported after someone left.**
-  The guard that skips a departed player during the round-start teleport was tied to the
-  map-growth feature, and map growth only starts at 5 players Ã¢â‚¬â€ so in smaller lobbies the
-  base game's own loop ran, hit the departed player, and stopped, leaving everyone after
-  them standing wherever they were while the map changed underneath. The guard now covers
-  every FFA lobby size. The session log caught this race one step short of failing.
-
-### Bug reports #131-#138 + lifecycle audit closeout (July 30, second wave)
-
-### Client
-
-- **Rope-hung map objects no longer fall at round start on scaled FFA maps (#133/#134).**
-  Vanilla replaces every physics piece with a networked copy after the map enters, and the
-  re-parent preserved the copy's world SCALE Ã¢â‚¬â€ on a scaled FFA map the copy came out ~6%
-  smaller than the map around it, and a rope endpoint authored near the piece's edge missed
-  its attach probe (one missed endpoint is enough: the saw case keeps the rope but drops the
-  saw). The master's jointless piece then free-falls, synced to everyone. Proven from the
-  serialized map data: the two reported cases cross the miss threshold exactly between the
-  3% scaling of 1.35.0 and the 6% of 1.35.2. The networked copies now inherit the map's
-  scale factor, which restores both the attach geometry and the pieces' visual size.
-  **Capability-gated on the whole room**: these pieces are simulated by the room's host and
-  streamed to everyone, so a client applying the fix under a host that lacks it fights the
-  streamed positions with its larger colliders (Sid's live "boxes are vibrating" report from
-  the first mixed lobby). The rescale therefore applies only when every player in the room
-  is on this build Ã¢â‚¬â€ checking only the host was not enough, because the host can change
-  mid-map and silently invalidate that decision. A mixed room behaves exactly as before
-  (no vibration; ropes still break there until everyone updates).
-- **Poison desync root-caused and closed (#135).** The previous fix exempted victims whose
-  stats route damage through the damage-over-time path (Decay holders) Ã¢â‚¬â€ and every tick on
-  such a victim, plain poison included, kept vanilla's per-replica block behavior. Proven
-  from the reported lobby: all four clients ran the fix, two of the four held Decay. The
-  exemption is removed: DoT ticks now always apply on every replica. Blocking the direct
-  hit still prevents a Decay spread entirely; only the unsyncable "block mid-spread"
-  niche is gone Ã¢â‚¬â€ flagged as a deliberate balance call, easy to revert if Sid disagrees.
-- **The FFA spawn grace now covers block as well as fire (#136).** Suppressed at the input
-  layer (the only place that replicates), so every client agrees a grace-window block
-  never happened; the banner says fire AND block unlock together.
-- **Waiting in a casual game while sitting in an open FFA lobby is now allowed (#132).**
-  The lobby seat is only torn down when entering a COMPETITIVE room. When the host presses
-  Start, members get a 5-second on-screen countdown; anyone in a casual game is pulled out
-  immediately (marked as a deliberate exit, never a DC) and auto-joins with everyone else Ã¢â‚¬â€
-  if the casual exit interrupts the join, it re-arms and retries within seconds.
-- **FFA score HUD restyled (#138, Stan's suggestion).** The translucent black backing box
-  is gone; names carry a drop shadow instead, and every unscored point renders as a tiny
-  grey dot so the first-to-5 target is legible at a glance.
-
-### Server & bot
-
-- **2v2 match reports rejected for lifecycle reasons are quarantined, not destroyed (audit
-  item 1).** A report landing on a cancelled series is captured whole in the same admin
-  quarantine the FFA path got on July 30 Ã¢â‚¬â€ previously the entire game was lost. Capture is
-  trust-bound: the four reported players must be exactly the series' recorded members with
-  the reporter among them, so the DLL secret cannot be used to spam the admin queue. The
-  quarantine list/accept surface now understands team reports (score rendering + a
-  mode-scoped "later rated results" eligibility check).
-- **A leave during a live game no longer cancels the group (audit item 2, all three
-  modes) Ã¢â‚¬â€ once the heartbeat-carrying client is the room's floor.** 2v2's leave cascade
-  only fires when the series has zero recorded games AND no verified in-game heartbeat;
-  1v2 and FFA zero-game dissolutions take the same rule, with FFA falling through to the
-  played-lobby departure path. A mid-game leaver is simply marked; the match pipeline owns
-  the outcome. On 1.35.2 clients (no heartbeat sender) leaves behave as before. FFA
-  survivors' queue rows are no longer deleted the moment someone leaves (the janitor's
-  own windows still bound their lifetime), later leavers are recorded even after their
-  row is pruned, and a lobby with a verifiably live game is never closed by the
-  all-but-one arithmetic.
-- **The in-game heartbeat is verified and means gameplay, not room occupancy.** The
-  presence ping's `in_match` claim only counts when the session token checks out and the
-  pinger is a recorded member of the named group, and the client only sends it while a
-  battle is actually ongoing. The ping fires as the game starts (with transport-failure
-  retry), shrinking the unprotected head of game 1 to seconds. Verification inherits the
-  Steam-auth enforcement ladder Ã¢â‚¬â€ accounts the ladder still treats leniently are verified
-  to the same (lesser) degree everywhere else is.
-- **Veto semantics split by caller shape.** Janitor closers (which re-fire and carry
-  ceilings) keep the conservative "young process = veto" rule; one-shot actors (leave
-  dissolutions, the assembly cancel) act only on trusted positive evidence Ã¢â‚¬â€ vetoing those
-  on ignorance converted failed assemblies into permanent husks. A new janitor arm cancels
-  rowless active 2v2 husks (60+ min quiet, no rows, no live evidence) as the last resort.
-- **Two blind FFA closers deleted (audit item 3):** the janitor's second 3-hour rule and
-  the 2-hour sweep that ran inside every leave request. The janitor's veto-aware dispersed
-  close is the single lifecycle authority now.
-- **2v2 assembly timeout measures from room issue, not match time (audit item 4).**
-  New `room_issued_at` stamp (migration 170); 180s deadline; the heartbeat covers a live
-  game whose spawn-confirm POST was lost. The janitor's 2v2 stale-series sweep takes the
-  conservative veto.
-- **Discord "How FFA works" FAQ updated for host lobbies and forced picks (#137).**
-
-### Bug reports #125-#130 (July 30, first wave)
-
-Backend + bot were deployed 2026-07-30; the client half ships here.
-Schema changes: migration **167** (`ffa_match_players.damage_dealt`, `damage_dealt_timeline`,
-`kill_timeline`, `absent`; applied).
-
-- **T chat works during combat again (#128).** It now opens any time the game is running; the
-  only thing that suppresses it is ROUNDS' own Enter chat actually being open. While the box has
-  focus the mod holds the game's own two input flags, so typing can't move you, shoot, ready you
-  up, or confirm a card pick. Also stops our Enter from toggling the vanilla chat open behind it.
-- **1v2 rewards are visible and scale with difficulty (#129).** 1v2 always paid, but nothing
-  displayed it and the every-5-levels bonus never fired for it. Added the display in three
-  places, granted the level bonus, and scaled rewards by seat, extra-pick handicap, opponent elo
-  and 1v2-leaderboard standing.
-- **Recent Series no longer eats teammate names (#126).** Two-name side labels shared one
-  character budget, so the second name could render as just "..".
-- **My Stats Ã¢â€ â€™ Record covers 1v2 and FFA (#130).** 1v2 split by seat; FFA win rate, top-3 rate,
-  kills/game, average placement, and damage/game once games carry the new telemetry.
-- **Discord mentions resolve to names in the in-game chat (#125)**, and the bot can no longer be
-  used to ping the server via relayed in-game text.
-- **`/game` for FFA (#127):** discarded cards shown separately, real M:SS time axis, damage and
-  blocks split apart, plus new kills and damage-dealt graphs.
-
-### Lifecycle sweep + match-report quarantine (July 30 incident)
-
-Two completed FFA games were destroyed: a timer closed the lobby mid-sitting and the report then
-came back `409 "Lobby is not active"`. The root cause is structural Ã¢â‚¬â€ the server only learns a
-game happened when the REPORT lands, at game END, so every timeout was blind for the whole
-duration of a live game. A 40-minute FFA is normal.
-
-- **Rejected reports are no longer thrown away.** A report rejected for a lifecycle reason is
-  captured whole in `match_report_quarantine` with an admin list / discard / accept surface.
-  Integrity failures (bad signature, unknown players, impossible scores) are still rejected
-  outright and never stored. **Accept records approval only Ã¢â‚¬â€ it never re-applies rating**,
-  because Glicko is order dependent.
-- **Timers now need positive evidence.** The presence ping carries `in_match=<group id>`; the
-  dispersed, quiet and sitting-over rules veto when a game is live rather than inferring "nothing
-  is happening" from silence. Bounded by a 3h ceiling, and it will not answer until the process
-  has outlived its TTL so a restart cannot make every group look idle.
-- **Windows retuned:** dispersed close scales with lobby size (60 min floor, 70 at 10 players),
-  husk sweeps 30 Ã¢â€ â€™ 60 min, sitting-over 5 Ã¢â€ â€™ 15 min in both the FFA and 1v2 copies.
-- **The client stopped deleting recoverable reports** Ã¢â‚¬â€ 429 (rate limited) and 401 (session
-  lapsed) were being treated as permanent outbox failures.
-- **Migration 168** restores the two destroyed games for all six affected players: ratings from a
-  full chronological replay of every recorded FFA match plus those two, validated by reproducing
-  the live ladder to within 0.1 elo when the two are excluded.
-
-Remaining audit items (2v2's worse variant, Leave invalidating a live game 1, two more blind FFA
-closers, 2v2's assembly clock) are listed in `docs/TODO.md` and detailed in
-`ai-collab/codex-lifecycle-sweep.md`.
-
----
-
-Older versions are listed in the full changelog on GitHub:
-https://github.com/SidNDeed/SidsCompetitiveRounds/blob/main/docs/CHANGELOG.md
+_(older entries trimmed - full history on GitHub)_
