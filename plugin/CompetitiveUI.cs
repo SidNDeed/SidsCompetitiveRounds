@@ -3834,9 +3834,17 @@ namespace CompetitiveRounds
                     if (props == null || !props.TryGetValue(CHAT_MUTE_PROP, out v)) continue;
                     if (!(v is int) || (int)v != 1) continue;
                     if (shown >= 4) { extra++; continue; }
-                    // NickName is user-authored: sanitise BEFORE it reaches
-                    // the richText overlay style, then truncate.
-                    string n = SanitizeForImgui(p.NickName ?? "");
+                    // NickName is user-authored: STRIP the styling tags first
+                    // (a styled nametag publishes markup into NickName — bug
+                    // 259: "<color=#55CCFF>" is 15 chars, so the 14-char
+                    // truncation below sliced mid-tag and the header read
+                    // "chat muted: (color=#55CCFF" with the name gone).
+                    // KNOWN tags only (review r1 find 3): the blanket
+                    // StripRichText would also eat legitimate raw angle
+                    // brackets in names ("AC<DC>Fan" -> "ACFan"), which the
+                    // paren-sanitiser below has always rendered as
+                    // "AC(DC)Fan". Strip, then sanitise, then truncate.
+                    string n = SanitizeForImgui(GameStateWatcher.StripKnownRichTags(p.NickName ?? ""));
                     if (n.Length == 0) n = "?";
                     if (n.Length > 14) n = n.Substring(0, 14);
                     names = shown == 0 ? n : names + ", " + n;

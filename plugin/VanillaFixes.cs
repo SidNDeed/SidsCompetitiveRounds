@@ -3137,4 +3137,105 @@ namespace CompetitiveRounds
             }
         }
     }
+
+    /// <summary>Bug 261 (the FFA second-rematch freeze). Vanilla
+    /// GM_ArmsRace.GameOverRematch colors the "REMATCH?" text by HARDCODED
+    /// team online — master reads GetColorFromTeam(0), every other seat
+    /// GetColorFromTeam(1) — and GetColorFromTeam does
+    /// GetPlayersInTeam(teamID)[0], which throws IndexOutOfRange on an
+    /// EMPTY team. FFA's leave-tolerant design purges departed fighters
+    /// (#222), so once the player occupying slot 0 or 1 left, every seat
+    /// on the other side of the master check threw WHILE EVALUATING the
+    /// DisplayScreenTextLoop argument — killing GameOverTransition before
+    /// the rematch popup existed, so the auto-confirm never engaged and
+    /// the room froze on the VICTORY screen (proven in bug 261's log:
+    /// slot 1 = Sid left during game 2; every non-master seat froze at
+    /// game 2's end). PURE COLOR LOOKUP, zero gameplay semantics —
+    /// deliberately UNGATED (#286's ungated bucket): empty team falls back
+    /// to the first live player's skin, else a clamped modulo, so the
+    /// rematch text merely renders in a fallback color.</summary>
+    [HarmonyPatch(typeof(PlayerManager), "GetColorFromTeam")]
+    class GetColorFromTeamEmptyTeamPatch
+    {
+        static bool Prefix(PlayerManager __instance, int teamID, ref PlayerSkin __result)
+        {
+            try
+            {
+                var team = __instance.GetPlayersInTeam(teamID);
+                if (team != null)
+                {
+                    if (team.Length > 0 && team[0] != null)
+                        return true;   // vanilla path is safe (and the FFA skin
+                                       // clamp already guards the id lookup)
+                    // Review r1 find 5: a destroyed-but-not-yet-purged member
+                    // can occupy slot 0 while a LIVE teammate sits later in
+                    // the array — prefer the requested team's live member
+                    // over any cross-team fallback.
+                    for (int i = 1; i < team.Length; i++)
+                        if (team[i] != null)
+                        {
+                            __result = PlayerSkinBank.GetPlayerSkinColors(team[i].PlayerID);
+                            return false;
+                        }
+                }
+                var ps = __instance.players;
+                if (ps != null)
+                    for (int i = 0; i < ps.Count; i++)
+                        if (ps[i] != null)
+                        {
+                            __result = PlayerSkinBank.GetPlayerSkinColors(ps[i].PlayerID);
+                            return false;
+                        }
+                __result = PlayerSkinBank.GetPlayerSkinColors(((teamID % 4) + 4) % 4);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("GetColorFromTeamEmptyTeam", ex);
+                try { __result = PlayerSkinBank.GetPlayerSkinColors(((teamID % 4) + 4) % 4); }
+                catch { }
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Sibling of the above (same vanilla `[0]`, same window):
+    /// GetFirstPlayerInTeam is called by GameOverRematch with the winner's
+    /// team, and the 2-second VICTORY wait inside GameOverTransition means
+    /// even the WINNER's team can empty out before it runs — a window the
+    /// once-only winner re-anchor in FfaMode.HandleNextRound cannot cover.
+    /// Empty team: return any live player (callers use it for positioning/
+    /// identity, never for scoring), null only when nobody is left.</summary>
+    [HarmonyPatch(typeof(PlayerManager), "GetFirstPlayerInTeam")]
+    class GetFirstPlayerInTeamEmptyTeamPatch
+    {
+        static bool Prefix(PlayerManager __instance, int teamID, ref Player __result)
+        {
+            try
+            {
+                var team = __instance.GetPlayersInTeam(teamID);
+                if (team != null)
+                {
+                    if (team.Length > 0 && team[0] != null)
+                        return true;
+                    // Review r1 find 5: prefer a live member of the
+                    // REQUESTED team before any cross-team fallback.
+                    for (int i = 1; i < team.Length; i++)
+                        if (team[i] != null) { __result = team[i]; return false; }
+                }
+                var ps = __instance.players;
+                if (ps != null)
+                    for (int i = 0; i < ps.Count; i++)
+                        if (ps[i] != null) { __result = ps[i]; return false; }
+                __result = null;
+                return false;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("GetFirstPlayerInTeamEmptyTeam", ex);
+                __result = null;
+                return false;
+            }
+        }
+    }
 }

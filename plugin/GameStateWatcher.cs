@@ -7015,6 +7015,36 @@ namespace CompetitiveRounds
             return Regex.Replace(input, "<.*?>", "").Trim();
         }
 
+        /* Bug 259 review r1 find 3 + r2 find 2: StripRichText's blanket
+         * <.*?> also eats legitimate name characters ("AC<DC>Fan" ->
+         * "ACFan"; a "<3" inside a styled wrapper -> ""). This variant
+         * strips EXACTLY the tag set NametagStyler publishes — derived from
+         * its _tagsBySku table plus the rainbow/gradient per-char builders
+         * (plugin/NametagStyler.cs): bare <b>/<i>/<u>/<s>/<allcaps>/
+         * <smallcaps> pairs, <color=#RRGGBB> (6-hex only — that is the only
+         * color shape any styler path emits, per-char runs included),
+         * <size=NN%>, and the em-valued <cspace>/<voffset> floats. Value
+         * shapes are deliberately TIGHT (r2 find 3): a literal name like
+         * "Shader<material=7>Fan" or "<color=team lead>" matches nothing
+         * here and survives to the caller's own paren-sanitiser, exactly as
+         * it always rendered. ASCII digits only ([0-9], never \d — r3 find:
+         * .NET \d matches full-width Unicode digits, which only a literal
+         * name can contain). Lowercase only — the producer emits lowercase
+         * constants, and TMP-tag-shaped UPPERCASE literals in a raw Steam
+         * name are not ours to delete. If NametagStyler ever gains a new
+         * tag family, extend this regex in the same commit (#279). Existing
+         * StripRichText callers are shipped behaviour and deliberately
+         * unchanged. */
+        private static readonly Regex KnownRichTags = new Regex(
+            @"</?(?:b|i|u|s|allcaps|smallcaps)>|<color=#[0-9A-Fa-f]{6}>|</color>|<size=[0-9]{1,3}%>|</size>|<cspace=[0-9]*\.?[0-9]+em>|</cspace>|<voffset=[0-9]*\.?[0-9]+em>|</voffset>",
+            RegexOptions.Compiled);
+
+        internal static string StripKnownRichTags(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return input;
+            return KnownRichTags.Replace(input, "").Trim();
+        }
+
         /* Aug 7 item 2 — INVARIANT casing. Twin of CardRarityLookup.ToTitleCase
          * in Plugin.cs; see the long note there. Short version: `ToLower()` on a
          * tr-TR client turns every capital I into U+0131 DOTLESS I, so this
