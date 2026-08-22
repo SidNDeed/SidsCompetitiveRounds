@@ -2581,6 +2581,7 @@ namespace CompetitiveRounds
                 // InRoom==false here — the authoritative reset lives in
                 // Plugin.OnLeftRoom, the callback that cannot miss).
                 try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
+                try { SpawnOnImpactFieldDiagPatch.ResetBudgets(); } catch { }
             }
 
             TickBackgroundAudio(inOnlineRoom);
