@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
-from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry
+from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -708,12 +708,13 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
     """The pair's CURRENT in-progress series, shared by every find-or-create
     site (match report, queue ready/poll, preflight) so they can't diverge.
 
-    room_id (when known) gates SYNC tournament series to their designated
+    room_id (when known) gates OPEN SYNC tournament series to their designated
     sct- room: the between-rounds break (July 17 round 2) gives the pair a
     designed idle window, and without the gate a queue or casual game they
     play to pass it would bind to the tournament series and advance the
-    bracket off warmup games. Async tournament series bind in any room —
-    playing anywhere IS their design.
+    bracket off warmup games. Open async tournament series bind in any room —
+    playing anywhere IS their design. Terminal bracket rows are excluded even
+    when their forfeit-decided RankedSeries intentionally remains active.
 
     'Current' means status='active' AND any of:
       - created within SERIES_REUSE_WINDOW_MIN (fresh series), or
@@ -725,9 +726,9 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
         days, which let leavers wait out the window and bank the elo). Pairs
         with the prune change that keeps stalled mid-BO3 series 'active'
         forever (bets refunded at 60 min, row never expiry-abandoned), or
-      - is a tournament series (created at lock/activation, potentially days
-        before the players actually meet — must always be reused, never
-        shadowed by a fresh auto-created row).
+      - is an OPEN tournament series (created at lock/activation, potentially
+        days before the players actually meet — must be reused while its
+        owning bracket match is ready/scheduled, never after that row closes).
 
     Newest-first so a recent normal series still wins over an old tournament
     row when both exist (learning #52: newest = current match context)."""
@@ -744,6 +745,14 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
         .where(Match.series_id == RankedSeries.id)
         .exists()
     )
+    has_open_tournament_match = (
+        select(TournamentMatch.id)
+        .where(
+            TournamentMatch.series_id == RankedSeries.id,
+            TournamentMatch.status.in_(("ready", "scheduled")),
+        )
+        .exists()
+    )
     q = (
         select(RankedSeries)
         .where(
@@ -753,6 +762,10 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
             # by a fresh preflight (the listing + POST already exclude it).
             RankedSeries.invalidated_at.is_(None),
             _series_pair_filter(pid_a, pid_b),
+            # Apply this before LIMIT: terminal tournament series deliberately
+            # remain active, and three such rows must not hide a fourth valid
+            # resumable series for the same pair.
+            or_(RankedSeries.is_tournament.is_(False), has_open_tournament_match),
             or_(
                 RankedSeries.created_at >= cutoff,
                 RankedSeries.is_tournament == True,  # noqa: E712
@@ -769,14 +782,61 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
     )
     candidates = (await db.execute(q)).scalars().all()
     for s in candidates:
-        if s.is_tournament and s.tournament_id is not None and room_id:
-            kind = (await db.execute(
-                text("SELECT kind FROM tournaments WHERE id = :tid"),
-                {"tid": s.tournament_id})).scalar_one_or_none()
-            if kind == "sync" and not str(room_id).startswith("sct-"):
+        if s.is_tournament:
+            # Forfeit/double-forfeit terminals deliberately leave their
+            # RankedSeries active: bracket status, not series status, owns
+            # that outcome. Never bind a later game between the same pair to
+            # the orphaned active row (async series otherwise match forever).
+            match_status = (await db.execute(text(
+                "SELECT status FROM tournament_matches "
+                "WHERE series_id = :sid LIMIT 1"
+            ), {"sid": s.id})).scalar_one_or_none()
+            if match_status not in ("ready", "scheduled"):
                 continue
+            if s.tournament_id is not None and room_id:
+                kind = (await db.execute(
+                    text("SELECT kind FROM tournaments WHERE id = :tid"),
+                    {"tid": s.tournament_id})).scalar_one_or_none()
+                if kind == "sync" and not str(room_id).startswith("sct-"):
+                    continue
         return s
     return None
+
+
+async def _acquire_tournament_report_action_gate(
+    db: AsyncSession,
+    series: RankedSeries,
+):
+    """Gate a tournament report against deadline-check-in actions."""
+    if not series.is_tournament:
+        return None
+    match_id = (await db.execute(text(
+        "SELECT id FROM tournament_matches WHERE series_id = :sid LIMIT 1"
+    ), {"sid": series.id})).scalar_one_or_none()
+    if match_id is None:
+        # A tournament series without its owning bracket row is not safe to
+        # reinterpret as an ordinary series. Fail closed and leave it for
+        # reconciliation instead of writing rewards with no bracket authority.
+        raise HTTPException(status_code=409, detail="Tournament match is closed")
+    from tournaments import _acquire_tournament_match_action_lock
+    await _acquire_tournament_match_action_lock(db, match_id)
+    return match_id
+
+
+async def _assert_tournament_report_match_open(
+    db: AsyncSession,
+    match_id,
+) -> None:
+    if match_id is None:
+        return
+    status = (await db.execute(text(
+        # Hold the bracket row through the report's series commit. The overdue
+        # sweep uses this same row lock, so whichever path waits observes the
+        # other's terminal authority before it can write.
+        "SELECT status FROM tournament_matches WHERE id = :mid FOR UPDATE"
+    ), {"mid": match_id})).scalar_one_or_none()
+    if status not in ("ready", "scheduled"):
+        raise HTTPException(status_code=409, detail="Tournament match is closed")
 
 
 # ── Application setup ──────────────────────────────────────────
@@ -3542,15 +3602,32 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # existing current series for this pair is harmless when the report really
     # is casual (the row is simply left alone).
     if True:
+        _pre_series = None
         try:
             _pre_series = await _find_current_active_series(
                 db, p1.id, p2.id, room_id=report.photon_room_id)
             if _pre_series is not None:
+                # Shared with deadline-check-in actions. Deliberately
+                # acquired before the RankedSeries row lock so neither path
+                # can form series<->match ABBA.
+                _pre_tournament_match_id = (
+                    await _acquire_tournament_report_action_gate(db, _pre_series))
                 await db.execute(
                     text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
                     {"sid": _pre_series.id},
                 )
+                # The bracket row may have closed while this report waited on
+                # the action gate. Never award/rate a closed bracket row.
+                await _assert_tournament_report_match_open(
+                    db, _pre_tournament_match_id)
+        except HTTPException:
+            raise
         except Exception as _ple:
+            # Tournament reports must never bypass the cross-path gate: that
+            # would reopen the report-vs-action state race. Preserve
+            # the historical best-effort behavior only for ordinary series.
+            if _pre_series is not None and _pre_series.is_tournament:
+                raise
             print(f"[SERIES-LOCK] early lock skipped: {_ple}")
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
     # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
@@ -4143,11 +4220,19 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # and NO KEY UPDATE is the weakest mode that still conflicts with the
         # bet path's own lock (#202).
         if series is not None:
+            # The authoritative lookup can discover a tournament series that
+            # did not exist during the early lock pass. Gate it here BEFORE
+            # taking its series row lock, then recheck the bracket row after
+            # every wait, so activation cannot reopen report-vs-action races.
+            _series_tournament_match_id = (
+                await _acquire_tournament_report_action_gate(db, series))
             await db.execute(
                 text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
                 {"sid": series.id},
             )
             await db.refresh(series)
+            await _assert_tournament_report_match_open(
+                db, _series_tournament_match_id)
             # r2 find 4: the row can have gone terminal while we waited (a
             # prune abandoned it, an admin reversed it). Advancing an
             # invalidated/non-active series would credit a voided result —
@@ -17065,9 +17150,9 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
                -- record, the gap from activation to first game was 131h, 163h
                -- and 1139h. So the 2-hour arm has NEVER once covered real
                -- tournament play, and betting closed on a 0-0 match nobody had
-               -- touched yet. Sid's rule: a tournament match stays bettable the
-               -- whole time, and closes only through the NORMAL condition (a
-               -- decided game / 2 points scored), which the guards below own.
+               -- touched yet. The long wait stays bettable until either normal
+               -- score progression closes it or the bracket row becomes
+               -- terminal, which the global exclusion below owns.
                -- BOUNDED BY THE MATCH, NOT JUST THE TOURNAMENT. The first cut
                -- gated only on the parent tournament's status, and review
                -- caught that as a money bug: a no-show writes ONLY
@@ -17082,15 +17167,18 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
                -- observed, not theoretical.
                -- Fail-closed twice over: tournament_id is ON DELETE SET NULL,
                -- so an orphaned series has a NULL t.status and falls back to
-               -- the three recency arms above.
+               -- the three recency arms above. This arm admits a long-waiting
+               -- open bracket match; the global terminal-row exclusion below
+               -- closes it regardless of which liveness arm otherwise matched.
                OR (rs.is_tournament = TRUE
                    AND t.status IS NOT NULL
-                   AND t.status NOT IN ('completed', 'cancelled')
-                   AND NOT EXISTS (
-                       SELECT 1 FROM tournament_matches tm
-                        WHERE tm.series_id = rs.id
-                          AND tm.status IN ('completed', 'forfeit',
-                                            'double_forfeit', 'bye_auto'))))
+                   AND t.status NOT IN ('completed', 'cancelled')))
+          AND NOT EXISTS (
+              SELECT 1 FROM tournament_matches tm
+               WHERE tm.series_id = rs.id
+                 AND tm.status IN ('completed', 'forfeit',
+                                   'double_forfeit', 'bye_auto')
+          )
           -- Reject phantom 1v1 series whose only matches were 2v2 misroutes.
           AND NOT EXISTS (
               SELECT 1 FROM matches m
@@ -18080,13 +18168,13 @@ async def place_bet(
     #          by the guards immediately below; or
     #      (b) the bracket match reaching a terminal state without being
     #          played (forfeit / double_forfeit / bye_auto / completed), which
-    #          the NOT EXISTS in the liveness arm owns. An earlier version had
-    #          only (a) and left a forfeited match bettable for the rest of the
+    #          the global NOT EXISTS below owns. An earlier version had only
+    #          (a) and left a forfeited match bettable for the rest of the
     #          tournament with no settle and no refund path.
-    # The LEFT JOIN exists solely to carry the tournament arm — it must match
-    # the listing's join exactly (same-predicate rule). LEFT, not INNER: a
-    # non-tournament series has a NULL tournament_id and must still be matched
-    # by the three recency arms.
+    # The LEFT JOIN exists solely to carry the tournament admission arm. It
+    # must match the listing's join exactly (same-predicate rule). LEFT, not
+    # INNER: a non-tournament series has a NULL tournament_id and must still be
+    # matched by the three recency arms.
     _live = (await db.execute(text("""
         SELECT 1 FROM ranked_series rs
           LEFT JOIN tournaments t ON t.id = rs.tournament_id
@@ -18097,12 +18185,13 @@ async def place_bet(
                            AND m2.ended_at > NOW() - INTERVAL '2 hours')
                 OR (rs.is_tournament = TRUE
                     AND t.status IS NOT NULL
-                    AND t.status NOT IN ('completed', 'cancelled')
-                    AND NOT EXISTS (
-                        SELECT 1 FROM tournament_matches tm
-                         WHERE tm.series_id = rs.id
-                           AND tm.status IN ('completed', 'forfeit',
-                                             'double_forfeit', 'bye_auto'))))
+                    AND t.status NOT IN ('completed', 'cancelled')))
+          AND NOT EXISTS (
+              SELECT 1 FROM tournament_matches tm
+               WHERE tm.series_id = rs.id
+                 AND tm.status IN ('completed', 'forfeit',
+                                   'double_forfeit', 'bye_auto')
+          )
     """), {"sid": sid})).first()
     if _live is None:
         raise HTTPException(status_code=409, detail="Betting closed — series is no longer live")
@@ -20559,15 +20648,39 @@ async def internal_stream_posts_ack(
     return {"status": "acked", "post_key": post_key, "revision": revision}
 
 
+class _TournamentCheckinResponseBody(BaseModel):
+    match_id: UUID
+    steam_id: str
+    answer: str
+
+
+@app.post("/api/v1/internal/tournaments/checkin-response", tags=["Internal"])
+async def internal_tournament_checkin_response(
+    body: _TournamentCheckinResponseBody,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Record a restart-surviving deadline-checkin button response."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    from tournaments import handle_tournament_checkin_response
+    result = await handle_tournament_checkin_response(
+        db, body.match_id, body.steam_id, body.answer)
+    await db.commit()
+    return result
+
+
 @app.get("/api/v1/internal/tournament-notices", tags=["Internal"])
 async def internal_tournament_notices(
     unnotified: bool = Query(True),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bot-poll endpoint (v1.32): tournament DM notices (availability checks
-    24-96h before a viable tournament's start/lock). Joined to the player +
-    tournament so the bot needs zero extra lookups. Durable ack pattern
+    """Bot-poll endpoint (v1.32): tournament DM notices, including deadline
+    check-ins and availability checks 24-96h before a viable tournament's
+    start/lock. Joined to the player + tournament so the bot needs zero extra
+    lookups. Durable ack pattern
     (learning #105) — ack via POST /internal/tournament-notices/ack after the
     DM lands (or is permanently undeliverable); transient failures don't ack
     so the next tick retries. Rows are queued by tournament_tick."""
@@ -20575,6 +20688,10 @@ async def internal_tournament_notices(
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     where = "tn.notified_at IS NULL" if unnotified else "TRUE"
+    # A deadline row can sit between enqueue and poll while its match finishes
+    # or gets extended. Revalidate the live match/deadline here so the delivery
+    # boundary never emits the now-stale prompt; hidden rows remain available
+    # for the tick to re-arm when a new deadline reaches its final 24h window.
     rows = (await db.execute(text(f"""
         SELECT tn.id                  AS notice_id,
                tn.tournament_id::text AS tournament_id,
@@ -20594,6 +20711,33 @@ async def internal_tournament_notices(
           JOIN players p ON p.id = tn.player_id
           JOIN tournaments t ON t.id = tn.tournament_id
          WHERE {where}
+           AND (
+               tn.notice_type <> 'deadline_checkin'
+               OR (
+                   t.kind = 'async'
+                   AND t.status = 'running'
+                   AND EXISTS (
+                       SELECT 1
+                         FROM tournament_matches tm
+                        WHERE tm.id::text = COALESCE(
+                                  tn.payload::jsonb ->> 'match_id', '')
+                          AND tm.tournament_id = tn.tournament_id
+                          AND tm.status = 'ready'
+                          AND tm.deadline_at > clock_timestamp()
+                          AND tm.deadline_at <= clock_timestamp() + INTERVAL '24 hours'
+                          AND FLOOR(EXTRACT(EPOCH FROM tm.deadline_at))::bigint::text =
+                              COALESCE(tn.payload::jsonb ->> 'deadline_epoch', '')
+                          AND NOT EXISTS (
+                              SELECT 1
+                                FROM ranked_series rs
+                               WHERE rs.id = tm.series_id
+                                 AND rs.status = 'completed'
+                                 AND rs.winner_id IS NOT NULL
+                                 AND rs.invalidated_at IS NULL
+                          )
+                   )
+               )
+           )
       ORDER BY tn.created_at ASC
          LIMIT 20"""))).mappings().all()
     return {

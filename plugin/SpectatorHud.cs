@@ -801,7 +801,7 @@ namespace CompetitiveRounds
             new System.Text.RegularExpressions.Regex("<[^>]*>",
                 System.Text.RegularExpressions.RegexOptions.Compiled);
 
-        private static string SanitizeStyled(string s)
+        internal static string SanitizeStyled(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
             try

@@ -18293,23 +18293,33 @@ namespace CompetitiveRounds
 
         public static TournHistDetailEntry[] CachedTournHistoryDetail;
         private static float _tournHistDetailAt;
+        private static int _tournHistDetailRequestGeneration;
 
         /// <summary>Feeds the Recent Tournaments POPUP. Fetched when the popup
         /// opens (explicit user action) with a short throttle so re-opens
         /// within a minute reuse the cache.</summary>
-        public static void FetchTournamentHistoryDetail(bool force = false)
+        // Which kind the cached detail list was fetched for ("" = unscoped
+        // legacy fetch). A kind-scoped popup must never render the OTHER
+        // kind's cache, so a kind change bypasses the 60s throttle.
+        internal static string CachedTournHistoryDetailKind = "";
+
+        public static void FetchTournamentHistoryDetail(bool force = false, string kind = null)
         {
+            int requestGeneration = ++_tournHistDetailRequestGeneration;
+            string wantKind = kind ?? "";
             if (!force && CachedTournHistoryDetail != null
+                && CachedTournHistoryDetailKind == wantKind
                 && Time.unscaledTime < _tournHistDetailAt) return;
-            _tournHistDetailAt = Time.unscaledTime + 60f;
+            string kindQ = string.IsNullOrEmpty(wantKind) ? "" : "&kind=" + wantKind;
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/tournaments/history-detail?limit=8",
+                $"{baseUrl}/api/v1/tournaments/history-detail?limit=8{kindQ}",
                 (success, response) =>
                 {
+                    if (requestGeneration != _tournHistDetailRequestGeneration) return;
                     if (!success || string.IsNullOrEmpty(response)) return;
                     try
                     {
-                        CachedTournHistoryDetail = ExtractObjectArray(response, "tournaments",
+                        var parsed = ExtractObjectArray(response, "tournaments",
                             raw => new TournHistDetailEntry
                             {
                                 tournament_id = ExtractString(raw, "tournament_id"),
@@ -18339,6 +18349,9 @@ namespace CompetitiveRounds
                                         result_label = ExtractString(p, "result_label"),
                                     }),
                             });
+                        CachedTournHistoryDetailKind = wantKind;
+                        CachedTournHistoryDetail = parsed;
+                        _tournHistDetailAt = Time.unscaledTime + 60f;
                         NativeUI.MarkDirty();
                     }
                     catch (Exception e) { Plugin.Log.LogWarning($"[TOURN-HISTDETAIL] parse: {e.Message}"); }

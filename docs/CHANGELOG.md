@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+**Tournaments: deadline check-ins and tidier histories (Aug 22)**
+
+- **Async deadline check-in DMs.** On the last day of an async match's
+  7-day window, the bot DMs both players asking whether they've made
+  contact and plan to play today - three buttons: yes (extends the deadline
+  24 hours - once per opponent per tournament, each player has their own
+  extension), "I reached out - no response / they quit", "not yet - still
+  coordinating". The buttons survive bot restarts and verify the clicker
+  owns the linked account.
+- **One player wanting to play is no longer punished for the other's
+  silence.** When an async match times out with neither side ready, a
+  player who had answered the check-in now wins a
+  normal forfeit instead of both players being eliminated - the exact
+  losers-bracket double-DQ that hit this week is impossible now. (That
+  match was also repaired by hand: the willing player advances with a
+  fresh 7-day deadline.)
+- **The tournament Forfeit button is deliberately held for a dedicated
+  lifecycle pass.** Forfeited finals still need correct podium minting,
+  terminal series need wager settlement, and late reports need isolation
+  from already-resolved matches.
+- **Sync and async tournament histories are separate now.** The Recent
+  Tournaments popup shows only the sub-tab's own kind, and your
+  placements line lives in that popup instead of the page bottom.
+- **The FFA match-point banner no longer renders styled names HUGE.** A
+  nametag size tag reaching the banner made the name enormous; names keep
+  their color/bold styling but geometry tags are stripped.
+- **FFA game-over freeze fixed** (bug 261): once a player in slot 0/1 had
+  left, every other seat froze on the VICTORY screen because the rematch
+  popup crashed looking up an empty team's color.
+- **Muted-players header fixed** (bug 259): a styled nametag no longer
+  renders as "(color=#55CCFF" - styling tags are stripped before
+  truncation, and real angle brackets in names still show as parens.
+- **Invisible Toxic Cloud** (bug 260): two fix designs were refuted in
+  review (the second disproved the diagnosis itself); the report stays
+  open with a field diagnostic riding this release to catch the real
+  mechanism in production logs.
+- **New cosmetics**: Seasonal Spring (animated, 8 frames) and Nuclear
+  glasses, both by the community artist behind the Poison set.
+- **FFA early-leave grace goes LIVE with this release** - the client now
+  reports the leave-time score the server rule has been waiting for. A
+  second one-off correction (migration 236) repaired the one affected
+  game played since the first backfill. The async losers-bracket repair
+  is migration 237.
+
+Schema changes: migrations **238** (tournament check-ins + deadline
+extensions), **239** (machine-translation seeds for 44 new strings x 4
+languages), **240** (cosmetic release flips).
+
 **Bug-report sweep (Aug 21)**
 
 - **2v2 DC-rejoin no longer creates duplicate series** (bug 245, dedicated
@@ -178,6 +226,51 @@ NotNic for a community promo video (applied 2026-08-19). Same shape as
   up to 8 hours so builds and tests on the VM aren't fought by it.
 
 ## v1.39.0 — 2026-08-18
+
+- **Radiance now hits everyone its wave sweeps over in FFA.** It only ever
+  damaged the single nearest player and then went inert, so in a 5-10 player
+  free-for-all the ring visibly swept through up to nine people it could not
+  touch. It now strikes every opponent it crosses, once each — which also
+  means lifesteal builds heal per hit instead of once per wave. Walls still
+  block it. Other modes are unchanged.
+
+- **The esc menu works properly in queue rooms again, and MAIN MENU asks
+  before it drops you out of a live match.** Since queues shipped, the mod
+  hid the main menu in a way that also killed the menu's selection system —
+  so opening the esc menu mid-match gave you no highlight bar and no hover
+  feedback at all. On top of that, MAIN MENU is the one button in the game
+  wired straight to "disconnect now", so a stray click during a match ended
+  it instantly. The menu now behaves normally, and in ranked/2v2/1v2/FFA
+  rooms MAIN MENU asks for a second click before leaving. Click it twice if
+  you mean it — and if anything ever goes wrong with the confirm, a second
+  click still leaves, so the button can never get stuck.
+- Instructions you have to act on — an opponent disconnecting, a failed
+  join, a match that could not start — can no longer be wiped off screen by
+  an ordinary notification landing a second later.
+
+First FFA-with-spectator playtest fixes (bug reports 202-207, all root-caused
+from both seats' logs):
+
+- **Spectating an FFA no longer corrupts the watcher's view or the next
+  lobby.** The FFA participant engine (round accounting, game-start flow,
+  pick machinery, leave handling) was running on spectator seats alongside
+  the spectator's own observer — double-counting the score until a false
+  game-over fired a "Rematch?" popup that could never be dismissed (bug 203),
+  and writing pick-protocol counters that survived the spectate and made the
+  player invisible to the pick system in their NEXT lobby — cards picked but
+  never applied, "no cards" on the Tab board (bug 204). Both paths are now
+  spectator-gated, the game-over UI is unreachable on observer seats, and
+  spectator teardown resets FFA room state.
+- **Spectators now see lifesteal heals.** Poison/DOT damage rendered on the
+  spectator's health bars but the attacker's heals (Leech, Parasite) never
+  did, so a lifesteal build read as pinned at 1 HP all game (bug 202). The
+  spectator seat now renders the same lifesteal heals fighter seats see
+  (heal-only by design — an observer must never originate anything else).
+- **Opponent picks in FFA are announced.** Card applies for other players
+  were silent, so a freshly-picked card could read as a "residual" from a
+  previous game (bug 206 — the card was legitimately held). Every non-local
+  pick now shows a toast, and the 1v1-shaped opponent-pick poller (which
+  misattributed picks in FFA) is disabled there.
 
 Schema changes: migrations **225** (`spectate_drain_tombstones` table +
 spectator cap default 5; applied 2026-08-16), **226** (`stream_channel_posts`
@@ -503,53 +596,6 @@ seeds for the new shop/vocab keys; applied).
 
 - Uploaded cosmetic images are now fully validated and re-encoded server-side, so
   nothing can ride along inside an image file.
-
-## Unreleased
-
-- **Radiance now hits everyone its wave sweeps over in FFA.** It only ever
-  damaged the single nearest player and then went inert, so in a 5-10 player
-  free-for-all the ring visibly swept through up to nine people it could not
-  touch. It now strikes every opponent it crosses, once each — which also
-  means lifesteal builds heal per hit instead of once per wave. Walls still
-  block it. Other modes are unchanged.
-
-- **The esc menu works properly in queue rooms again, and MAIN MENU asks
-  before it drops you out of a live match.** Since queues shipped, the mod
-  hid the main menu in a way that also killed the menu's selection system —
-  so opening the esc menu mid-match gave you no highlight bar and no hover
-  feedback at all. On top of that, MAIN MENU is the one button in the game
-  wired straight to "disconnect now", so a stray click during a match ended
-  it instantly. The menu now behaves normally, and in ranked/2v2/1v2/FFA
-  rooms MAIN MENU asks for a second click before leaving. Click it twice if
-  you mean it — and if anything ever goes wrong with the confirm, a second
-  click still leaves, so the button can never get stuck.
-- Instructions you have to act on — an opponent disconnecting, a failed
-  join, a match that could not start — can no longer be wiped off screen by
-  an ordinary notification landing a second later.
-
-First FFA-with-spectator playtest fixes (bug reports 202-207, all root-caused
-from both seats' logs):
-
-- **Spectating an FFA no longer corrupts the watcher's view or the next
-  lobby.** The FFA participant engine (round accounting, game-start flow,
-  pick machinery, leave handling) was running on spectator seats alongside
-  the spectator's own observer — double-counting the score until a false
-  game-over fired a "Rematch?" popup that could never be dismissed (bug 203),
-  and writing pick-protocol counters that survived the spectate and made the
-  player invisible to the pick system in their NEXT lobby — cards picked but
-  never applied, "no cards" on the Tab board (bug 204). Both paths are now
-  spectator-gated, the game-over UI is unreachable on observer seats, and
-  spectator teardown resets FFA room state.
-- **Spectators now see lifesteal heals.** Poison/DOT damage rendered on the
-  spectator's health bars but the attacker's heals (Leech, Parasite) never
-  did, so a lifesteal build read as pinned at 1 HP all game (bug 202). The
-  spectator seat now renders the same lifesteal heals fighter seats see
-  (heal-only by design — an observer must never originate anything else).
-- **Opponent picks in FFA are announced.** Card applies for other players
-  were silent, so a freshly-picked card could read as a "residual" from a
-  previous game (bug 206 — the card was legitimately held). Every non-local
-  pick now shows a toast, and the 1v1-shaped opponent-pick poller (which
-  misattributed picks in FFA) is disabled there.
 
 ## v1.38.4 (2026-08-11) — Translator titles and portal progress
 

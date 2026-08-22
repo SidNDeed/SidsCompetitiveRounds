@@ -6352,6 +6352,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // backdrop still dismisses only OUTSIDE the box so a click inside a
         // scrolled table can never close it under the cursor.
         private static GameObject recentTournPopupGO, recentTournPopupRows;
+        private static object recentTournPopupPlacements;
+        private static string recentTournPopupKind;
         public static bool RecentTournPopupOpen => recentTournPopupGO != null;
         // Rebuild only when the detail cache is REPLACED (the fetch swaps the
         // array reference). The refresh hook runs on every tab dirty-tick and
@@ -6369,6 +6371,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             try
             {
                 recentTournPopupRows = null;
+                recentTournPopupPlacements = null;
+                recentTournPopupKind = null;
                 recentTournFilledFrom = _recentTournNeverFilled;
                 if (recentTournPopupGO != null)
                 {
@@ -6389,7 +6393,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 HideRecentTournamentsPopup();
                 EnsureOverlayCanvas();
-                ApiClient.FetchTournamentHistoryDetail();
+                recentTournPopupKind = ApiClient.TournamentKind == "async" ? "async" : "sync";
+                ApiClient.FetchTournamentHistoryDetail(kind: recentTournPopupKind);
+                string localSid = MatchTracker.LocalSteamId;
+                if (!string.IsNullOrEmpty(localSid) && localSid != "unknown")
+                    ApiClient.FetchPlayerTournaments(localSid);
                 recentTournPopupGO = new GameObject("CR_RecentTournPopup");
                 recentTournPopupGO.hideFlags = HideFlags.HideAndDontSave;
                 recentTournPopupGO.transform.SetParent(overlayCanvasGO.transform, false);
@@ -6420,11 +6428,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 boxRT.sizeDelta = new Vector2(900, popupH);
                 UIFactory.AddVLG(box, spacing: 8, padL: 20, padR: 20, padT: 16, padB: 14);
 
-                UIFactory.CreateText("RTPTitle", box.transform, I18n.Tr("Recent Tournaments"),
+                string popupTitle = recentTournPopupKind == "async"
+                    ? I18n.Tr("Recent Async Tournaments")
+                    : I18n.Tr("Recent Sync Tournaments");
+                UIFactory.CreateText("RTPTitle", box.transform, popupTitle,
                     28f, C_GOLD, UIFactory.AlignMidCenter, sizeDelta: new Vector2(850, 38));
 
+                recentTournPopupPlacements = UIFactory.CreateText("RTPPlacements", box.transform, "",
+                    14f, new Color(1f, 0.87f, 0.52f), UIFactory.AlignMidCenter,
+                    sizeDelta: new Vector2(850, 24));
+
                 var sv = UIFactory.CreateScrollView("RTPScroll", box.transform, spacing: 2);
-                UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: popupH - 130f);
+                UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: popupH - 164f);
                 recentTournPopupRows = sv.content;
 
                 UIFactory.CreateButton("RTPClose", box.transform, I18n.Tr("Close"),
@@ -6473,31 +6488,56 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetTextRaw(txt, line);
         }
 
+        private static void RefreshRecentTournamentPlacements()
+        {
+            if (recentTournPopupPlacements == null) return;
+            string mySid = MatchTracker.LocalSteamId;
+            if (!string.IsNullOrEmpty(mySid) && mySid != "unknown"
+                && ApiClient.CachedPlayerTournaments.TryGetValue(mySid, out var myH) && myH != null
+                && myH.participant_count > 0)
+            {
+                UIFactory.SetTextRaw(recentTournPopupPlacements,
+                    I18n.TrF("Your placements:  <color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <color=#888>(played {3})</color>",
+                        myH.winner_count, myH.runner_up_count, myH.third_place_count, myH.participant_count));
+            }
+            else
+            {
+                UIFactory.SetTextRaw(recentTournPopupPlacements,
+                    I18n.Tr("Your placements: <color=#888>no completed tournaments yet</color>"));
+            }
+        }
+
         private static void RefreshRecentTournamentsPopup()
         {
             if (recentTournPopupRows == null) return;
-            var data = ApiClient.CachedTournHistoryDetail;
+            // The placements request has its own cache and can finish after the
+            // detail request, so update this header before the detail-reference
+            // fast path returns.
+            RefreshRecentTournamentPlacements();
+            var data = string.Equals(
+                ApiClient.CachedTournHistoryDetailKind,
+                recentTournPopupKind,
+                StringComparison.OrdinalIgnoreCase)
+                ? ApiClient.CachedTournHistoryDetail
+                : null;
             if (ReferenceEquals(data, recentTournFilledFrom)) return;
             recentTournFilledFrom = data;
             for (int i = recentTournPopupRows.transform.childCount - 1; i >= 0; i--)
                 UnityEngine.Object.Destroy(recentTournPopupRows.transform.GetChild(i).gameObject);
             if (data == null) { AddRecentTournRow(I18n.Tr("<i>Loading...</i>"), 16f, 26); return; }
-            if (data.Length == 0) { AddRecentTournRow(I18n.Tr("<i>No completed tournaments yet.</i>"), 16f, 26); return; }
-            // TWO SECTIONS, sync then async (Sid, Aug 18: the old inline box
-            // kept them separated and the first popup cut silently merged
-            // them into one chronological list — a regression on an explicit
-            // instruction, not a style choice).
-            for (int sec = 0; sec < 2; sec++)
+            // Aug 18's merge-regression rule remains: sync and async histories
+            // stay separated. Separation now comes from sub-tab scoping — this
+            // popup renders exactly the kind that was active when it opened.
+            bool wantAsync = recentTournPopupKind == "async";
+            AddRecentTournRow(wantAsync
+                ? $"<color=#C9A6FF><b>{I18n.Tr("Async (6-week)")}</b></color>"
+                : $"<color=#7FD4FF><b>{I18n.Tr("Sync (weekly)")}</b></color>", 16f, 28);
+            bool anyInSection = false;
+            foreach (var tt in data)
             {
-                bool wantAsync = sec == 1;
-                AddRecentTournRow(wantAsync
-                    ? $"<color=#C9A6FF><b>{I18n.Tr("Async (6-week)")}</b></color>"
-                    : $"<color=#7FD4FF><b>{I18n.Tr("Sync (weekly)")}</b></color>", 16f, 28);
-                bool anyInSection = false;
-                foreach (var tt in data)
-                {
-                    if (tt == null || (tt.kind == "async") != wantAsync) continue;
-                    anyInSection = true;
+                if (tt == null || !string.Equals(tt.kind, recentTournPopupKind,
+                    StringComparison.OrdinalIgnoreCase)) continue;
+                anyInSection = true;
                 string dt = tt.ended_at;
                 try
                 {
@@ -6539,11 +6579,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     }
                 }
                 AddRecentTournRow("", 8f, 10);   // spacer between tournaments
-                }
-                if (!anyInSection)
-                    AddRecentTournRow($"   <color=#888>{I18n.Tr("none yet")}</color>", 14f, 22);
-                AddRecentTournRow("", 8f, 12);   // spacer between sections
             }
+            if (!anyInSection)
+                AddRecentTournRow(data.Length == 0
+                    ? I18n.Tr("<i>No completed tournaments yet.</i>")
+                    : $"   <color=#888>{I18n.Tr("none yet")}</color>",
+                    data.Length == 0 ? 16f : 14f, data.Length == 0 ? 26 : 22);
         }
 
         /// <summary>Screen-space hit test for a ScreenSpaceCamera canvas rect.
@@ -19445,7 +19486,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // while the local player has a ready match and the local ready state
         // is stale >45s.
 
-        private static object txtTState, txtTWhen, txtTPenalty, txtTForceCount, txtTMyMatch, txtTDiscordGate, txtTMyHistory, txtTRoomCode, txtTTzNow;
+        private static object txtTState, txtTWhen, txtTPenalty, txtTForceCount, txtTMyMatch, txtTDiscordGate, txtTRoomCode, txtTTzNow;
         // The Recent Tournaments header names the ladder it is listing, because
         // the list is now filtered to the active sub-tab and an empty sync list
         // beside a busy async one otherwise reads as a fetch failure.
@@ -19964,9 +20005,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             tbvRT.sizeDelta = new Vector2(900, 600);
             UIFactory.AddLE(tBracketVisual, prefH: 600, minH: 600, prefW: 900, minW: 900, flexH: 0, flexW: 0);
             tBracketVisual.SetActive(false);
-
-            // "My Tournaments" inline summary for the local player (own trophy line).
-            txtTMyHistory = UIFactory.CreateText("TMH", right.transform, "", 14f, new Color(1f, 0.87f, 0.52f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 22));
 
             // The inline "Recent Tournaments" box that used to sit here moved
             // into ShowRecentTournamentsPopup (Aug 17, Sid) — the popup carries
@@ -20703,6 +20741,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // tab's Live Ranked Games panel uses, so the data is always
             // fresh as long as ApiClient.FetchActiveSeries is being polled.
             RefreshTournamentBets();
+            // History uses independent endpoints and must keep filling even if
+            // the current-tournament request is unavailable.
+            RefreshRecentTournamentsPopup();
 
             var t = ApiClient.CachedTournament;
             if (t == null)
@@ -21338,25 +21379,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             }
             for (int i = brkIdx; i < tBracketRowPool.Count; i++) tBracketRowPool[i].SetActive(false);
 
-            // My own tournament summary line (local player's placements).
-            var mySid = MatchTracker.LocalSteamId;
-            if (!string.IsNullOrEmpty(mySid) && mySid != "unknown"
-                && ApiClient.CachedPlayerTournaments.TryGetValue(mySid, out var myH) && myH != null
-                && myH.participant_count > 0)
-            {
-                UIFactory.SetTextRaw(txtTMyHistory,
-                    I18n.TrF("Your placements:  <color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <color=#888>(played {3})</color>", myH.winner_count, myH.runner_up_count, myH.third_place_count, myH.participant_count));
-            }
-            else
-            {
-                UIFactory.SetText(txtTMyHistory, "Your placements: <color=#888>no completed tournaments yet</color>");
-            }
-
-            // Recent Tournaments moved into a popup (Aug 17, Sid). Keeping the
-            // refresh hook HERE means an open popup repopulates when the
-            // detail fetch lands (MarkDirty -> this renderer) — the fill
-            // itself no-ops unless the cache reference changed.
-            RefreshRecentTournamentsPopup();
         }
 
         private static bool _tVoteLocalEdited = false;

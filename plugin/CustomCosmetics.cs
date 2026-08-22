@@ -215,6 +215,12 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_eyes_poison_s_eyes",      DisplayName = "Poison's eyes",    Slot = CharacterItemType.Eyes,   PngFile = "eyes_poison_s_eyes.png",      Scale = 1.3f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_mouth_poison_s_mouth",    DisplayName = "Poison's mouth",   Slot = CharacterItemType.Mouth,  PngFile = "mouth_poison_s_mouth.png",    Scale = 1.3f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_detail_poison_s_weeping", DisplayName = "Poison's weeping", Slot = CharacterItemType.Detail, PngFile = "detail_poison_s_weeping.png", Scale = 1.7f, Offset = Vector2.zero },
+            // v1.39.1 (ship step 3b): approved placement values copied VERBATIM
+            // from cosmetic_submissions.approved_* (seasonal_spring rev 2,
+            // nuclear_glasses rev 1); Fps is the stored source rate (#317 —
+            // 8 frames @ 2.5fps = the artist's 3.2s loop, never re-derived).
+            new CosmeticDef { Sku = "face_detail_seasonal_spring",  DisplayName = "Seasonal Spring",  Slot = CharacterItemType.Detail, PngFile = "detail_seasonal_spring.png",  Scale = 2.0f, Offset = Vector2.zero, Fps = 2.5f },
+            new CosmeticDef { Sku = "face_eyes_nuclear_glasses",    DisplayName = "Nuclear glasses",  Slot = CharacterItemType.Eyes,   PngFile = "eyes_nuclear_glasses.png",    Scale = 1.4f, Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

@@ -7404,7 +7404,6 @@ _tournament_state = {}          # tournament_id -> last seen status
 # durable 'match_ready' notice queue; see the comment at its old send site.)
 _notified_match_scheduled = set()  # match_ids we've already DM'd the break/next-opponent notice for
 _notified_completed = set()     # tournament_ids we've already paid trophies for
-_notified_deadline_warn = set() # match_ids we've already DM'd a 24h-deadline warning for (async only)
 _notified_prestart = set()      # tournament_ids we've sent the T-15min "get in ROUNDS" reminder for (item 3)
 _match_nag_at = {}              # match_id -> monotonic ts of the last sync last-call/stall nag (item 3)
 _notified_nag_date = {}         # match_id -> YYYY-MM-DD last day we sent a "still pending" nag
@@ -7731,8 +7730,6 @@ async def poll_tournaments():
                     continue
                 mid = m["match_id"]
                 p1d = m.get("p1_discord_id"); p2d = m.get("p2_discord_id")
-                p1n = m.get("p1_name") or "opponent"
-                p2n = m.get("p2_name") or "opponent"
                 # The initial match-ready DM that lived here is GONE (Codex
                 # tournament r2 find 4): this loop added the match to an
                 # in-memory notified-set BEFORE awaiting either DM, so one
@@ -7741,9 +7738,8 @@ async def poll_tournaments():
                 # enqueues a durable 'match_ready' notice per (match,
                 # recipient) at every ready transition and the acked notices
                 # poller delivers it with retries — do NOT reintroduce a DM
-                # here; that would double-message every activation. The nag /
-                # deadline-warning blocks below stay legacy (best-effort
-                # reminders, promised by nothing).
+                # here; that would double-message every activation. The sync
+                # nag below stays legacy (best-effort, promised by nothing).
                 # Sync last-call + stall nag (item 3): if a ready match is
                 # about to hit its no-show deadline (<90s) — or sat past it
                 # for 5+ minutes because both players heartbeat but neither
@@ -7769,18 +7765,6 @@ async def poll_tournaments():
                             await _dm_user(p2d, msg)
                     except Exception as e:
                         print(f"[TOURNAMENT-POLL] nag parse: {e}")
-                # Async 24h deadline warning (once per match).
-                if kind == "async" and mid not in _notified_deadline_warn and m.get("deadline_at"):
-                    try:
-                        from datetime import datetime as _dt
-                        dl = _dt.fromisoformat(m["deadline_at"].replace("Z", "+00:00"))
-                        remaining = (dl - _dt.now(dl.tzinfo)).total_seconds()
-                        if 0 < remaining <= 24 * 3600:
-                            _notified_deadline_warn.add(mid)
-                            await _dm_user(p1d, f"**24h deadline reminder**: your async match vs **{p2n}** must be played within {int(remaining/3600)}h or you forfeit.")
-                            await _dm_user(p2d, f"**24h deadline reminder**: your async match vs **{p1n}** must be played within {int(remaining/3600)}h or you forfeit.")
-                    except Exception as e:
-                        print(f"[TOURNAMENT-POLL] deadline parse: {e}")
         # Completion: grant trophies + announce
         if status == "completed" and tid not in _notified_completed:
             _notified_completed.add(tid)
@@ -7986,6 +7970,63 @@ def _tavail_view(tournament_id, steam_id):
     view.add_item(discord.ui.Button(style=discord.ButtonStyle.danger, label="No, remove me",
                                     custom_id=f"tavail:{tournament_id}:{steam_id}:no"))
     return view
+
+
+_TDLC_ANSWERS = {"yes", "nores", "notyet"}
+_TDLC_RESULTS = {"extended", "recorded", "extension_used", "match_closed"}
+
+
+def _tdlc_view(match_id, steam_id):
+    """Restart-safe async deadline check-in buttons. The raw listener owns
+    every callback; all routing state lives in the custom_id."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        style=discord.ButtonStyle.success,
+        label="Yes — we plan to play today",
+        custom_id=f"tdlc:{match_id}:{steam_id}:yes",
+        row=0,
+    ))
+    view.add_item(discord.ui.Button(
+        style=discord.ButtonStyle.primary,
+        label="I reached out — no response / they quit",
+        custom_id=f"tdlc:{match_id}:{steam_id}:nores",
+        row=1,
+    ))
+    view.add_item(discord.ui.Button(
+        style=discord.ButtonStyle.secondary,
+        label="Not yet — still coordinating",
+        custom_id=f"tdlc:{match_id}:{steam_id}:notyet",
+        row=2,
+    ))
+    return view
+
+
+def _tdlc_message(opponent_name, deadline_unix, extension_available):
+    """Render one deadline-day prompt. opponent_name is player-authored, so
+    escape markdown here and keep AllowedMentions.none() on the send."""
+    opponent = discord.utils.escape_markdown(str(opponent_name or "opponent").strip())
+    opponent = opponent or "opponent"
+    if deadline_unix:
+        deadline = f"Deadline: <t:{deadline_unix}:F> (<t:{deadline_unix}:R>)."
+    else:
+        deadline = "Check F5 → Tournaments for the current deadline."
+    if extension_available:
+        extension = (
+            "Choosing **Yes** records your plan and extends the current deadline "
+            "by 24 hours. Each player can use this once per opponent per tournament."
+        )
+    else:
+        extension = (
+            "You've already used your 24-hour extension against this opponent. "
+            "**Yes** still records that you plan to play today, but it won't move "
+            "the deadline again."
+        )
+    return (
+        "⏰ **Async tournament deadline check-in**\n"
+        f"Have you made contact with **{opponent}**, and do you plan to play today?\n"
+        f"{deadline}\n\n{extension}\n\n"
+        "Choose the answer that best describes the match right now."
+    )
 
 
 def _tavail_embed(kind, start_unix, lock_unix):
@@ -8338,9 +8379,10 @@ async def _ack_tournament_notices(entries):
 @tasks.loop(seconds=30)
 async def poll_tournament_notices():
     """Own fully-guarded loop (learning #129 — never chained onto
-    poll_tournaments' tail). Delivers availability_check prompts AND the four
-    match-result kinds (_TMATCH_NOTICE_KINDS); unknown kinds are logged and
-    ack-skipped so a newer server can never wedge or crash this loop."""
+    poll_tournaments' tail). Delivers availability_check prompts,
+    deadline_checkin prompts, AND the match-result kinds
+    (_TMATCH_NOTICE_KINDS); unknown kinds are logged and ack-skipped so a newer
+    server can never wedge or crash this loop."""
     try:
         data = await api_get("/internal/tournament-notices?unnotified=true")
         if not data or not data.get("notices"):
@@ -8379,6 +8421,7 @@ async def poll_tournament_notices():
                 # (Codex tournament r3 find 6).
                 payload = {}
             _is_match_kind = ntype in _TMATCH_NOTICE_KINDS
+            _is_deadline_checkin = ntype == "deadline_checkin"
             # EVERY ack carries the revision (payload match_id, '' when the
             # payload has none — the server's CAS compares COALESCE'd '', so
             # availability rows still ack). Codex r2 find 3: the server now
@@ -8389,13 +8432,20 @@ async def poll_tournament_notices():
             # (an unknown FUTURE kind acked bare-id would be refused forever
             # and starve the LIMIT-20 feed page).
             rev = str(payload.get("match_id") or "")
-            skey = f"{nid}:{rev}"
+            # A deadline extension creates a new final-24h window for the SAME
+            # match. Include its deadline in the process guard so a re-armed
+            # row is not mistaken for the prompt sent for the old deadline.
+            _seen_rev = rev
+            if _is_deadline_checkin:
+                _seen_rev = f"{rev}:{payload.get('deadline_epoch') or ''}"
+            skey = f"{nid}:{_seen_rev}"
             if skey in _tavail_seen_notice_ids:
                 # Handled this process-lifetime — earlier ack must have failed;
                 # re-ack (same revision), don't re-DM.
                 to_ack.append((nid, rev))
                 continue
-            if ntype != "availability_check" and not _is_match_kind:
+            if (ntype != "availability_check" and not _is_match_kind
+                    and not _is_deadline_checkin):
                 # Unknown notice kind — nothing this bot build can send.
                 # Contract: skip-and-log (never crash the loop), and ack so it
                 # doesn't come back every 30s forever.
@@ -8403,12 +8453,27 @@ async def poll_tournament_notices():
                 _tavail_seen_notice_ids.add(skey)
                 to_ack.append((nid, rev))
                 continue
-            did = n.get("discord_id")
-            tid = n.get("tournament_id")
-            steam = n.get("steam_id")
+            # deadline_checkin also carries these in its payload, but the
+            # notice endpoint's top-level fields come from a LIVE player /
+            # tournament join. Key presence (including a current null
+            # discord_id after unlink) is authoritative; payload is only the
+            # compatibility fallback for a payload-only endpoint shape.
+            did = (n.get("discord_id") if "discord_id" in n
+                   else payload.get("discord_id"))
+            tid = (n.get("tournament_id") if "tournament_id" in n
+                   else payload.get("tournament_id"))
+            steam = (n.get("steam_id") if "steam_id" in n
+                     else payload.get("steam_id"))
+            match_id = payload.get("match_id") or n.get("match_id")
             # availability_check needs tid+steam for its Yes/No custom_ids;
+            # deadline_checkin needs match+steam for its response custom_ids;
             # the match-result kinds only need somewhere to deliver the DM.
-            _deliverable = (did and tid and steam) if ntype == "availability_check" else bool(did)
+            if ntype == "availability_check":
+                _deliverable = bool(did and tid and steam)
+            elif _is_deadline_checkin:
+                _deliverable = bool(did and match_id and steam)
+            else:
+                _deliverable = bool(did)
             if not _deliverable:
                 # Unlinked player / malformed row — permanently undeliverable.
                 _tavail_seen_notice_ids.add(skey)
@@ -8427,6 +8492,23 @@ async def poll_tournament_notices():
                     content = "Are you still available to play in the **Synchronized tournament**?"
                 embed = _tavail_embed(kind, start_unix, lock_unix)
                 view = _tavail_view(tid, steam)
+            elif _is_deadline_checkin:
+                deadline_unix = _unix_ts(payload.get("deadline_epoch")
+                                         or n.get("deadline_epoch"))
+                ext_raw = payload.get("extension_available")
+                extension_available = (
+                    ext_raw is True
+                    or (isinstance(ext_raw, (int, float)) and ext_raw == 1)
+                    or (isinstance(ext_raw, str)
+                        and ext_raw.strip().lower() in ("true", "1", "yes"))
+                )
+                content = _tdlc_message(
+                    payload.get("opponent_name") or n.get("opponent_name"),
+                    deadline_unix,
+                    extension_available,
+                )
+                embed = None
+                view = _tdlc_view(match_id, steam)
             else:
                 # Match-result notice (contract item 3) — DM only, no buttons.
                 content, embed = _tmatch_notice_message(ntype, n, payload)
@@ -8449,6 +8531,8 @@ async def poll_tournament_notices():
                                 allowed_mentions=discord.AllowedMentions.none())
                 if ntype == "availability_check":
                     print(f"[TAVAIL] availability check ({kind}) → {user} for tournament {str(tid)[:8]}")
+                elif _is_deadline_checkin:
+                    print(f"[TDLC] deadline check-in → {user} for match {str(match_id)[:8]}")
                 else:
                     print(f"[TNOTICE] {ntype} → {user} for tournament {str(tid)[:8]}")
                 _tavail_seen_notice_ids.add(skey)
@@ -8727,17 +8811,148 @@ async def _tournament_unsignup(tournament_id, steam_id):
         return False, f"request failed: {ex}"
 
 
+async def _tournament_checkin_response(match_id, steam_id, answer):
+    """Submit one deadline-checkin answer through the bot-only endpoint.
+    Returns (ok, result, new_deadline_epoch, detail)."""
+    if http_session is None or not API_SECRET_KEY:
+        return False, None, None, "backend unreachable"
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/tournaments/checkin-response",
+            json={
+                "match_id": str(match_id),
+                "steam_id": str(steam_id),
+                "answer": str(answer),
+            },
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            txt = await resp.text()
+            try:
+                data = json.loads(txt)
+            except Exception:
+                data = {}
+            if resp.status != 200:
+                detail = data.get("detail") if isinstance(data, dict) else None
+                return False, None, None, str(detail or txt or f"HTTP {resp.status}")[:300]
+            if not isinstance(data, dict) or data.get("ok") is not True:
+                return False, None, None, "backend returned an invalid response"
+            result = str(data.get("result") or "")
+            if result not in _TDLC_RESULTS:
+                return False, None, None, f"backend returned unknown result '{result}'"
+            return True, result, _unix_ts(data.get("new_deadline_epoch")), ""
+    except Exception as ex:
+        return False, None, None, f"request failed: {ex}"
+
+
+async def _tdlc_verify_clicker(discord_id, expected_steam_id):
+    """A delivered DM can outlive a Discord unlink/relink. Re-resolve the
+    clicker's current link before letting an old button alter match state."""
+    if http_session is None or not API_SECRET_KEY:
+        return False, "couldn't verify your linked account right now"
+    try:
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/players/by-discord/{int(discord_id)}",
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status == 404:
+                return False, "your Discord account is no longer linked in SCR"
+            if resp.status != 200:
+                return False, "couldn't verify your linked account right now"
+            try:
+                data = await resp.json()
+            except Exception:
+                return False, "couldn't verify your linked account right now"
+            current_steam = data.get("steam_id") if isinstance(data, dict) else None
+            if str(current_steam or "") != str(expected_steam_id):
+                return False, "this prompt no longer belongs to your linked SCR account"
+            return True, ""
+    except Exception as ex:
+        print(f"[TDLC] link verification failed for discord {discord_id}: {ex}")
+        return False, "couldn't verify your linked account right now"
+
+
+def _tdlc_result_sentence(result, answer, new_deadline_epoch):
+    """Human copy for every checkin-response result in the wire contract."""
+    if result == "extended":
+        if new_deadline_epoch:
+            return ("✅ Your plan to play today was recorded. The deadline was "
+                    f"extended 24 hours to <t:{new_deadline_epoch}:F> "
+                    f"(<t:{new_deadline_epoch}:R>).")
+        return ("✅ Your plan to play today was recorded, and the deadline was "
+                "extended by 24 hours.")
+    if result == "extension_used":
+        return ("✅ Your plan to play today was recorded. You've already used "
+                "your 24-hour extension against this opponent, so the deadline "
+                "did not change.")
+    if result == "match_closed":
+        return "ℹ️ This match is already closed, so no change was made."
+    if answer == "yes":
+        return "✅ Recorded: you and your opponent plan to play today."
+    if answer == "nores":
+        return "✅ Recorded: you reached out but got no response, or they quit."
+    if answer == "notyet":
+        return "✅ Recorded: you're still coordinating with your opponent."
+    return "✅ Your response was recorded."
+
+
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    """Raw component listener for the availability-check Yes/No buttons.
-    Deliberately NOT a View callback: the DM can be answered days later,
-    across any number of bot restarts — only the custom_id persists. All
-    other component interactions (live bets, paginator) are handled by their
-    own Views and fall through the prefix check untouched."""
+    """Raw component listener for tournament availability and deadline-checkin
+    buttons. Deliberately NOT a View callback: each DM can be answered days
+    later, across any number of bot restarts — only the custom_id persists.
+    All other component interactions are handled by their own Views and fall
+    through the prefix checks untouched."""
     try:
         if interaction.type != discord.InteractionType.component:
             return
         cid = (interaction.data or {}).get("custom_id", "")
+        if cid.startswith("tdlc:"):
+            parts = cid.split(":")
+            if len(parts) != 4:
+                await interaction.response.send_message("⚠️ Unrecognized button.", ephemeral=True)
+                return
+            _, match_id, steam_id, answer = parts
+            if not match_id or not steam_id or answer not in _TDLC_ANSWERS:
+                await interaction.response.send_message("⚠️ Unrecognized button.", ephemeral=True)
+                return
+            # The internal POST can take longer than Discord's 3-second
+            # interaction window, so acknowledge first and leave the buttons
+            # intact until the server accepts the answer.
+            await interaction.response.defer()
+            identity_ok, identity_detail = await _tdlc_verify_clicker(
+                interaction.user.id, steam_id,
+            )
+            if not identity_ok:
+                await interaction.followup.send(
+                    f"❌ Couldn't use this button: {identity_detail}.",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            ok, result, new_deadline, detail = await _tournament_checkin_response(
+                match_id, steam_id, answer,
+            )
+            if not ok:
+                await interaction.followup.send(
+                    f"❌ Couldn't record that response: {detail}",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            sentence = _tdlc_result_sentence(result, answer, new_deadline)
+            try:
+                await interaction.message.edit(content=sentence, embed=None, view=None)
+            except Exception:
+                await interaction.followup.send(
+                    sentence,
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            print(f"[TDLC] {interaction.user} answered {answer} for match "
+                  f"{match_id[:8]} → {result}")
+            return
         if not cid.startswith("tavail:"):
             return
         parts = cid.split(":")
@@ -8765,7 +8980,7 @@ async def on_interaction(interaction: discord.Interaction):
             # see the prompt; surface the server's reason.
             await interaction.followup.send(f"❌ Couldn't remove you: {detail}")
     except Exception as ex:
-        print(f"[TAVAIL] interaction error: {ex}")
+        print(f"[TOURNAMENT-INTERACTION] error: {ex}")
 
 
 # ── Tournament board in #scr-tournaments (v1.32) ──────────────────────────

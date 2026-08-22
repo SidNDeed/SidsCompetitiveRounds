@@ -942,9 +942,10 @@ namespace CompetitiveRounds
         // match point at once (they each need one more half point), so the plural
         // case is first-class rather than an afterthought.
         //
-        // Names keep their rich-text styling (same choice as the leaver banner) —
-        // this is the one FFA surface that does NOT strip tags, because "who do I
-        // shoot" is exactly the moment a player's nametag should be recognisable.
+        // Names keep the b/i/color subset accepted by SpectatorHud. Unlike the
+        // leaver banner, which strips player-supplied tags before adding its own
+        // emphasis, this surface retains those basic styles so a match-point
+        // player remains recognisable.
         private const int FfaMpMaxNames = 4;
         private static string ffaMpBannerText = "";
         private static string ffaMpSignature;
@@ -1031,7 +1032,12 @@ namespace CompetitiveRounds
                     // Control characters are hostile input for a GUI label (#100).
                     var sb = new System.Text.StringBuilder(raw.Length);
                     foreach (char c in raw) sb.Append(c < ' ' ? ' ' : c);
-                    string safe = sb.ToString();
+                    string safe = SpectatorHud.SanitizeStyled(sb.ToString());
+                    if (string.IsNullOrWhiteSpace(safe))
+                    {
+                        safe = NametagStyler.Clean(raw) ?? "";
+                        if (string.IsNullOrWhiteSpace(safe)) return "?";
+                    }
                     if (safe.Length <= 64) return safe;
                     string clean = NametagStyler.Clean(safe) ?? "";
                     if (clean.Length > 16) clean = clean.Substring(0, 16);

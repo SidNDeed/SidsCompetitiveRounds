@@ -33,8 +33,10 @@ from models import (
     PlayerTournamentPenalty,
     RankedSeries,
     Tournament,
+    TournamentDeadlineExtension,
     TournamentForceVote,
     TournamentMatch,
+    TournamentMatchCheckin,
     TournamentSignup,
     TournamentTimeVote,
 )
@@ -148,6 +150,17 @@ ASYNC_CADENCE_DAYS = 42  # legacy — kept for any external reference; supersede
 # the cron spawns the next one. 2 days = bracket recap window so players
 # can review results before the new signup wave starts.
 ASYNC_POST_COMPLETION_DAYS = 2
+
+_CHECKIN_ANSWER_MAP = {
+    "yes": "yes_playing",
+    "nores": "contacted_no_response",
+    "notyet": "not_yet",
+}
+_CHECKIN_INTENT_ANSWERS = frozenset({
+    "yes_playing",
+    "contacted_no_response",
+    "not_yet",
+})
 
 # ── Discord feed (v1.32) ──────────────────────────────────────────
 # Signup / leave / quorum / pushback / vote-moved-start events post to the
@@ -2669,6 +2682,94 @@ async def _queue_availability_notices(db: AsyncSession) -> None:
         ), {"payload": payload, "tid": t.id})
 
 
+async def _enqueue_deadline_checkin_notices(db: AsyncSession, t: Tournament) -> None:
+    """Queue each async seat once per match deadline's final 24-hour window.
+
+    The existing notice replay key only has one ``deadline_checkin`` row per
+    player and tournament. A changed match/deadline therefore re-arms that row
+    with a fresh UUID; an in-flight ack for its predecessor cannot mark the new
+    deadline delivered.
+    """
+    if t.kind != "async" or t.status != "running":
+        return
+    try:
+        async with db.begin_nested():
+            matches = (await db.execute(
+                select(TournamentMatch).where(and_(
+                    TournamentMatch.tournament_id == t.id,
+                    TournamentMatch.status == "ready",
+                    TournamentMatch.deadline_at.is_not(None),
+                )).with_for_update(of=TournamentMatch, skip_locked=True)
+                .execution_options(populate_existing=True)
+            )).scalars().all()
+            now = (await db.execute(select(func.clock_timestamp()))).scalar_one()
+            for m in matches:
+                if (m.deadline_at is None or m.deadline_at <= now
+                        or m.deadline_at > now + timedelta(hours=24)
+                        or m.p1_signup_id is None or m.p2_signup_id is None):
+                    continue
+                if await _decided_series_takes_precedence(db, m):
+                    continue
+
+                rows = (await db.execute(
+                    select(
+                        TournamentSignup.id.label("signup_id"),
+                        TournamentSignup.player_id,
+                        Player.steam_id,
+                        Player.discord_id,
+                        Player.display_name,
+                    )
+                    .join(Player, Player.id == TournamentSignup.player_id)
+                    .where(TournamentSignup.id.in_([m.p1_signup_id, m.p2_signup_id]))
+                )).mappings().all()
+                by_signup_id = {r["signup_id"]: r for r in rows}
+                p1 = by_signup_id.get(m.p1_signup_id)
+                p2 = by_signup_id.get(m.p2_signup_id)
+                if p1 is None or p2 is None:
+                    continue
+
+                deadline_epoch = int(m.deadline_at.timestamp())
+                for recipient, opponent in ((p1, p2), (p2, p1)):
+                    extension_exists = (await db.execute(
+                        select(TournamentDeadlineExtension.id).where(and_(
+                            TournamentDeadlineExtension.tournament_id == t.id,
+                            TournamentDeadlineExtension.player_id == recipient["player_id"],
+                            TournamentDeadlineExtension.opponent_player_id == opponent["player_id"],
+                        )).limit(1)
+                    )).scalar_one_or_none() is not None
+                    payload = json.dumps({
+                        "steam_id": recipient["steam_id"],
+                        "discord_id": recipient["discord_id"],
+                        "match_id": str(m.id),
+                        "tournament_id": str(t.id),
+                        "opponent_name": opponent["display_name"] or "TBD",
+                        "deadline_epoch": deadline_epoch,
+                        "extension_available": not extension_exists,
+                    })
+                    await db.execute(text("""
+                        INSERT INTO tournament_notices
+                                    (tournament_id, player_id, notice_type, payload)
+                             VALUES (:tid, :pid, 'deadline_checkin', :payload)
+                        ON CONFLICT (tournament_id, player_id, notice_type) DO UPDATE
+                              SET id = gen_random_uuid(),
+                                  payload = EXCLUDED.payload,
+                                  created_at = clock_timestamp(),
+                                  notified_at = NULL
+                            WHERE COALESCE(tournament_notices.payload::jsonb ->> 'match_id', '')
+                                  IS DISTINCT FROM
+                                  COALESCE(EXCLUDED.payload::jsonb ->> 'match_id', '')
+                               OR COALESCE(tournament_notices.payload::jsonb ->> 'deadline_epoch', '')
+                                  IS DISTINCT FROM
+                                  COALESCE(EXCLUDED.payload::jsonb ->> 'deadline_epoch', '')
+                    """), {
+                        "tid": t.id,
+                        "pid": recipient["player_id"],
+                        "payload": payload,
+                    })
+    except Exception as ex:
+        print(f"[TOURNAMENT] deadline check-in notices for {t.id} failed (non-fatal): {ex}")
+
+
 async def tournament_tick() -> None:
     """Background driver. Runs every 30s from main.py lifespan. Handles:
       - Auto-create the next weekly tournament if none is queued
@@ -2743,6 +2844,8 @@ async def tournament_tick() -> None:
                         return
                     await _apply_no_show_forfeits(db, _tid)
                     await _activate_ready_matches(db, _tid)
+                    if t.kind == "async":
+                        await _enqueue_deadline_checkin_notices(db, t)
                     # match_ready reconciliation (Codex tournament r3 find 4):
                     # the transition hooks alone cannot cover a match that
                     # went 'ready' under the PREVIOUS API build (deploy gap)
@@ -2790,6 +2893,194 @@ async def _decided_series_takes_precedence(db: AsyncSession, m: TournamentMatch)
         "AND invalidated_at IS NULL LIMIT 1"),
         {"sid": str(m.series_id)})).first()
     return row is not None
+
+
+async def _acquire_tournament_match_action_lock(
+    db: AsyncSession,
+    match_id: uuid.UUID,
+) -> None:
+    """Serialize reports and player actions for one bracket match.
+
+    A match report owns the RankedSeries row before it eventually locks the
+    TournamentMatch row, so taking those two row locks in the opposite order
+    here would create an ABBA deadlock.  This transaction-scoped advisory
+    gate is acquired before either row-lock plane by the report path and by
+    deadline-check-in actions. Hash collisions only add harmless contention.
+    """
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock("
+        "hashtext('tournament-match:' || CAST(:mid AS text)))"
+    ), {"mid": str(match_id)})
+
+
+async def _lock_tournament_match_for_action(
+    db: AsyncSession,
+    match_id: uuid.UUID,
+    tournament_id: Optional[uuid.UUID] = None,
+) -> Optional[TournamentMatch]:
+    """Find a match, acquire its cross-path gate, then row-lock and re-read."""
+    predicates = [TournamentMatch.id == match_id]
+    if tournament_id is not None:
+        predicates.append(TournamentMatch.tournament_id == tournament_id)
+
+    found_id = (await db.execute(
+        select(TournamentMatch.id).where(and_(*predicates))
+    )).scalar_one_or_none()
+    if found_id is None:
+        return None
+
+    await _acquire_tournament_match_action_lock(db, found_id)
+    return (await db.execute(
+        select(TournamentMatch)
+        .where(and_(*predicates))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+
+
+async def _record_tournament_match_checkin(
+    db: AsyncSession,
+    m: TournamentMatch,
+    player_id: uuid.UUID,
+    stored_answer: str,
+) -> bool:
+    """Upsert one check-in without poisoning the caller during migration gaps."""
+    try:
+        async with db.begin_nested():
+            checkin_stmt = pg_insert(TournamentMatchCheckin).values(
+                match_id=m.id,
+                player_id=player_id,
+                answer=stored_answer,
+                answered_at=func.clock_timestamp(),
+            ).on_conflict_do_update(
+                index_elements=[
+                    TournamentMatchCheckin.match_id,
+                    TournamentMatchCheckin.player_id,
+                ],
+                set_={
+                    "answer": stored_answer,
+                    "answered_at": func.clock_timestamp(),
+                },
+            )
+            await db.execute(checkin_stmt)
+        return True
+    except Exception as ex:
+        print(f"[TOURNAMENT] check-in write for {m.id} failed "
+              f"(non-fatal migration gap): {ex}")
+        return False
+
+async def handle_tournament_checkin_response(
+    db: AsyncSession,
+    match_id: uuid.UUID,
+    steam_id: str,
+    answer: str,
+) -> dict:
+    """Record one bot deadline-check response and apply its match action."""
+    stored_answer = _CHECKIN_ANSWER_MAP.get(answer)
+    if stored_answer is None:
+        raise HTTPException(status_code=400, detail="Invalid check-in answer")
+
+    m = await _lock_tournament_match_for_action(db, match_id)
+    if m is None:
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+
+    t = (await db.execute(
+        select(Tournament)
+        .where(Tournament.id == m.tournament_id)
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if (t is None or t.kind != "async" or t.status != "running"
+            or m.status != "ready"):
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+    if await _decided_series_takes_precedence(db, m):
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+
+    signup_ids = [sid for sid in (m.p1_signup_id, m.p2_signup_id) if sid is not None]
+    if len(signup_ids) != 2:
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+    signups = (await db.execute(select(TournamentSignup).where(
+        TournamentSignup.id.in_(signup_ids)
+    ))).scalars().all()
+    by_signup_id = {s.id: s for s in signups}
+    p1 = by_signup_id.get(m.p1_signup_id)
+    p2 = by_signup_id.get(m.p2_signup_id)
+    player = (await db.execute(select(Player).where(
+        Player.steam_id == steam_id
+    ))).scalar_one_or_none()
+    if p1 is None or p2 is None or player is None:
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+    if player.id == p1.player_id:
+        caller_signup, opponent_signup = p1, p2
+    elif player.id == p2.player_id:
+        caller_signup, opponent_signup = p2, p1
+    else:
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+
+    await _assert_tournament_service_policy(
+        db,
+        player_ids=[caller_signup.player_id, opponent_signup.player_id],
+        steam_ids=[steam_id],
+    )
+    if await _player_id_banned(db, caller_signup.player_id):
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+    if answer == "yes" and m.deadline_at is None:
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+
+    if not await _record_tournament_match_checkin(
+            db, m, caller_signup.player_id, stored_answer):
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+
+    if answer in ("nores", "notyet"):
+        return {"ok": True, "result": "recorded", "new_deadline_epoch": None}
+
+    extension_stmt = pg_insert(TournamentDeadlineExtension).values(
+        tournament_id=t.id,
+        player_id=caller_signup.player_id,
+        opponent_player_id=opponent_signup.player_id,
+        extended_at=func.clock_timestamp(),
+    ).on_conflict_do_nothing(
+        index_elements=[
+            TournamentDeadlineExtension.tournament_id,
+            TournamentDeadlineExtension.player_id,
+            TournamentDeadlineExtension.opponent_player_id,
+        ]
+    ).returning(TournamentDeadlineExtension.id)
+    extension_id = (await db.execute(extension_stmt)).scalar_one_or_none()
+    if extension_id is None:
+        return {"ok": True, "result": "extension_used", "new_deadline_epoch": None}
+
+    new_deadline = m.deadline_at + timedelta(hours=24)
+    m.deadline_at = new_deadline
+    m.ready_deadline_at = new_deadline
+    return {
+        "ok": True,
+        "result": "extended",
+        "new_deadline_epoch": int(new_deadline.timestamp()),
+    }
+
+
+async def _match_checkin_answers(
+    db: AsyncSession,
+    m: TournamentMatch,
+    player_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, str]:
+    """Latest seat answers, fail-soft during a migration deploy gap."""
+    if not player_ids:
+        return {}
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(select(
+                TournamentMatchCheckin.player_id,
+                TournamentMatchCheckin.answer,
+            ).where(and_(
+                TournamentMatchCheckin.match_id == m.id,
+                TournamentMatchCheckin.player_id.in_(player_ids),
+            )))).all()
+        return {row.player_id: row.answer for row in rows}
+    except Exception as ex:
+        print(f"[TOURNAMENT] check-in lookup for {m.id} failed "
+              f"(legacy behavior): {ex}")
+        return {}
 
 
 async def _match_is_async(db: AsyncSession, m: TournamentMatch) -> bool:
@@ -2878,6 +3169,7 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
         # Defensive: no opposing seat to award — fall through; the
         # banned seat still reads as not-ready below.
     series_started = False
+    checkin_answers: dict[uuid.UUID, str] = {}
     if p1_banned and p2_banned:
         # Both banned: no in-play grace (their games no longer record);
         # straight to the mutual branch's deterministic carrier.
@@ -2916,6 +3208,13 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
             .execution_options(populate_existing=True))).scalar_one_or_none()
         p1_ready = bool(p1 and p1.ready_at and (now - p1.ready_at).total_seconds() <= READY_STALE_SECONDS) and not p1_banned
         p2_ready = bool(p2 and p2.ready_at and (now - p2.ready_at).total_seconds() <= READY_STALE_SECONDS) and not p2_banned
+        # Check-in evidence is deliberately below the decided-series and
+        # in-play-grace returns above. It can resolve a genuinely idle match,
+        # but it cannot erase a result that committed or a live game whose
+        # report is still arriving.
+        if not p1_banned and not p2_banned and p1 is not None and p2 is not None:
+            checkin_answers = await _match_checkin_answers(
+                db, m, [p1.player_id, p2.player_id])
     if p1_ready and p2_ready and not await _match_is_async(db, m):
         return  # both ready, client will start match
     # ASYNC IS DEADLINE-ONLY (Codex round 3, HIGH). For a SYNC match "both
@@ -2941,22 +3240,19 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
               f"{m.series_id} present but unadvanced (crashed hook?) — "
               f"leaving it strictly alone; admin follow-up if it stays wedged")
         return
-    # Flag forfeit AND refresh the cached penalty inline so the UI sees
-    # the updated pct immediately next refresh, not next time the player
-    # signs up for something.
-    if not p1_ready and p1:
-        p1.forfeited = True
-        await _recompute_player_penalty(db, p1.player_id)
-    if not p2_ready and p2:
-        p2.forfeited = True
-        await _recompute_player_penalty(db, p2.player_id)
     if p1_ready and not p2_ready:
+        if p2:
+            p2.forfeited = True
+            await _recompute_player_penalty(db, p2.player_id)
         m.winner_signup_id = m.p1_signup_id
         m.status = "forfeit"
         m.ended_at = now
         await _apply_terminal_transitions(db, m, m.winner_signup_id)
         await _enqueue_match_completion_notices(db, m)
     elif p2_ready and not p1_ready:
+        if p1:
+            p1.forfeited = True
+            await _recompute_player_penalty(db, p1.player_id)
         m.winner_signup_id = m.p2_signup_id
         m.status = "forfeit"
         m.ended_at = now
@@ -2985,6 +3281,34 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
                     winner_id = m.p1_signup_id
                 elif p2.player_id == leader_pid:
                     winner_id = m.p2_signup_id
+        # Check-in evidence sits immediately before the legacy penalty/UUID
+        # tiebreak. A real partial-series lead remains the stronger existing
+        # authority; otherwise exactly one intent-bearing seat wins a normal
+        # single forfeit and the silent seat receives the no-show mark.
+        if (winner_id is None and not p1_banned and not p2_banned
+                and p1 is not None and p2 is not None):
+            p1_intent = checkin_answers.get(p1.player_id) in _CHECKIN_INTENT_ANSWERS
+            p2_intent = checkin_answers.get(p2.player_id) in _CHECKIN_INTENT_ANSWERS
+            if p1_intent != p2_intent:
+                winner_id = m.p1_signup_id if p1_intent else m.p2_signup_id
+                silent = p2 if p1_intent else p1
+                silent.forfeited = True
+                await _recompute_player_penalty(db, silent.player_id)
+                m.winner_signup_id = winner_id
+                m.status = "forfeit"
+                m.ended_at = (await db.execute(select(func.clock_timestamp()))).scalar_one()
+                await _apply_terminal_transitions(db, m, winner_id)
+                await _enqueue_match_completion_notices(db, m)
+                return
+
+        # Both-or-neither intent preserves the existing mutual-no-show writes:
+        # every non-ready seat is marked and the carrier stays double_forfeit.
+        if not p1_ready and p1:
+            p1.forfeited = True
+            await _recompute_player_penalty(db, p1.player_id)
+        if not p2_ready and p2:
+            p2.forfeited = True
+            await _recompute_player_penalty(db, p2.player_id)
         if winner_id is None:
             winner_id = m.p1_signup_id
             if p1 and p2:
@@ -3605,6 +3929,7 @@ async def history(limit: int = 25, offset: int = 0, db: AsyncSession = Depends(g
 
 @router.get("/history-detail")
 async def history_detail(limit: int = 8, offset: int = 0,
+                         kind: str | None = None,
                          db: AsyncSession = Depends(get_db)):
     """Rich completed-tournament history for the Recent Tournaments POPUP
     (Aug 17): every confirmed participant with locked elo, seed, bracket
@@ -3622,10 +3947,19 @@ async def history_detail(limit: int = 8, offset: int = 0,
                  WHERE s.tournament_id = t.id AND NOT s.is_speculative) AS signup_count
         FROM tournaments t
         WHERE t.status = 'completed'
+          AND (CAST(:kind AS VARCHAR) IS NULL OR t.kind = :kind)
         ORDER BY t.ended_at DESC
         LIMIT :limit OFFSET :offset
     """)
-    trows = (await db.execute(tq, {"limit": limit, "offset": offset})).all()
+    # Kind-scoped popups (Aug 22): without this filter the newest-8 window
+    # is global, so a kind whose entries are older than 8 opposite-kind
+    # rows renders an empty popup. Validated against a closed set, never
+    # interpolated (#188); an unknown value is a 400, not a silent
+    # all-kinds.
+    if kind is not None and kind not in ("sync", "async"):
+        raise HTTPException(status_code=400, detail="kind must be sync or async")
+    trows = (await db.execute(tq, {"limit": limit, "offset": offset,
+                                   "kind": kind})).all()
     if not trows:
         return {"tournaments": []}
     tids = [r.id for r in trows]

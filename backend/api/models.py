@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
+    BigInteger, Boolean, CheckConstraint, Column, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
     SmallInteger, String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -791,6 +791,45 @@ class TournamentMatch(Base):
     photon_region = Column(String(16), nullable=True)
 
     __table_args__ = (UniqueConstraint("tournament_id", "round", "bracket_side", "slot_idx"),)
+
+
+class TournamentMatchCheckin(Base):
+    __tablename__ = "tournament_match_checkins"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    match_id = Column(UUID(as_uuid=True), ForeignKey("tournament_matches.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    answer = Column(String(32), nullable=False)
+    answered_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("match_id", "player_id", name="uq_tournament_match_checkins_match_player"),
+        CheckConstraint(
+            "answer IN ('yes_playing', 'contacted_no_response', 'not_yet')",
+            name="ck_tournament_match_checkins_answer",
+        ),
+    )
+
+
+class TournamentDeadlineExtension(Base):
+    __tablename__ = "tournament_deadline_extensions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    opponent_player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    extended_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tournament_id", "player_id", "opponent_player_id",
+            name="uq_tournament_deadline_extensions_pair",
+        ),
+        CheckConstraint(
+            "player_id <> opponent_player_id",
+            name="ck_tournament_deadline_extensions_distinct_players",
+        ),
+    )
 
 
 class TournamentTimeVote(Base):
