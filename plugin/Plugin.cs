@@ -3756,6 +3756,7 @@ namespace CompetitiveRounds
             // leave+rejoin that lands between samples; this callback cannot).
             // The poll's Left-room branch keeps a lossy backup copy.
             try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
+            try { SpawnOnImpactFieldDiagPatch.ResetBudgets(); } catch { }
             // Tournament banner dies with the room on the reliable edge too
             // (Codex tournament r1 find 5 — the polled exit is the lossy
             // backup), and the incarnation bump retires every in-flight

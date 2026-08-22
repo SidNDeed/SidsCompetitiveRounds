@@ -3107,6 +3107,64 @@ namespace CompetitiveRounds
             ApplyCardTo(player, prefab);
             deck.Add(prefab);
 
+            // Bug 260 field audit (log-only): one line per apply naming the
+            // spawn-on-impact state of the gun BULLETS ACTUALLY INIT FROM on
+            // this seat — data.weaponHandler.gun, the object every
+            // ProjectileInit.RPCA_Init* variant reads (review find 2: the
+            // first draft read Holding.holdable's gun, which is the object
+            // ApplyStats MUTATES; if the two ever differ that difference is
+            // itself a mechanism candidate, so it is logged, not hidden).
+            // An entry whose effect reference is Unity-dead spawns nothing,
+            // silently (decompile ObjectsToSpawn.cs:72). Explicit null
+            // checks, no `?.`: Unity fake-null passes `?.` and would throw
+            // on member access (review find 4).
+            try
+            {
+                Gun gunW = null;
+                if (player.data != null && player.data.weaponHandler != null)
+                    gunW = player.data.weaponHandler.gun;
+                Gun gunH = null;
+                try
+                {
+                    var holding = player.data == null ? null : player.data.GetComponent<Holding>();
+                    if (holding != null && holding.holdable != null)
+                        gunH = holding.holdable.GetComponent<Gun>();
+                }
+                catch { }
+                bool gunMismatch = gunW != null && gunH != null && !ReferenceEquals(gunW, gunH);
+                var gunA = gunW != null ? gunW : gunH;
+                var otsA = gunA == null ? null : gunA.objectsToSpawn;
+                var sbA = new System.Text.StringBuilder();
+                if (otsA != null)
+                    for (int i = 0; i < otsA.Length; i++)
+                    {
+                        if (i > 0) sbA.Append('|');
+                        var e = otsA[i];
+                        // Unity fake-null: (object)ref != null but ref == null
+                        // means the referenced object was DESTROYED — exactly
+                        // the state ObjectsToSpawn.SpawnObject silently skips.
+                        sbA.Append(e == null ? "null-entry"
+                            : e.effect != null ? e.effect.name
+                            : (object)e.effect != null ? "EFFECT-DESTROYED"
+                            : e.AddToProjectile != null ? "atp:" + e.AddToProjectile.name
+                            : "no-effect");
+                    }
+                Plugin.Log.LogInfo($"[FFA-GUNAUDIT] pid={pid} card={cardName} rebuilt={rebuiltDeck} " +
+                    $"src={(gunW != null ? "weaponHandler" : gunH != null ? "holdable" : "none")} " +
+                    $"gunMismatch={gunMismatch} " +
+                    $"ots={(otsA == null ? -1 : otsA.Length)} [{sbA}] slow={(gunA == null ? -1f : gunA.slow):0.###} " +
+                    $"projs={(gunA == null ? -1 : gunA.numberOfProjectiles)}");
+            }
+            catch (Exception ex)
+            {
+                // Bounded failure line (review find 4); budget resets with
+                // the SpawnDiag keys at the room-leave edges.
+                VanillaFixSupport.DiagLimited(
+                    SpawnOnImpactFieldDiagPatch.FfaAuditFailKey,
+                    $"[FFA-GUNAUDIT] failed for pid={pid}: {ex.GetType().Name} {ex.Message}",
+                    10);
+            }
+
             // Bug 206 (#250 legibility): manifest applies for OTHER players are
             // silent by design (OFFLINE_Pick skips the "Picking Card:" log), so
             // opponents' picks were invisible — Spirit watched Stan produce

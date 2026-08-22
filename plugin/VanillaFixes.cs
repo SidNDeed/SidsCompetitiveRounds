@@ -1381,6 +1381,198 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Bug 260 field diagnostic (LOG-ONLY, changes no behaviour):
+    /// "invisible Toxic Cloud" — the victim seat shows no cloud while the
+    /// owner-authoritative slow/damage (Explosion.cs:102-143, owner-seat
+    /// RPCs) still land. Two prior fix designs were refuted in review, so
+    /// this patch only MEASURES the surviving mechanism candidates at the
+    /// ENTRY of ProjectileHit.RPCA_DoHit (before any vanilla processing; no
+    /// explicit Harmony ordering vs the other prefixes on this method is
+    /// declared or needed — none of them mutates what is measured here):
+    ///
+    ///  1. TARGET-VIEW-GONE: viewID != -1 but PhotonNetwork.GetPhotonView
+    ///     returns null. If THIS invocation reaches vanilla, it NREs at the
+    ///     target dereference (decompile ProjectileHit.cs:211-212) and the
+    ///     dispatch guard swallows it — the hit body, spawn loop at :303
+    ///     included, is lost on this seat only. The line does NOT prove
+    ///     vanilla ran: the Drill prefix can defer the same invocation
+    ///     (returns false, replays next frame — the replay re-enters this
+    ///     prefix, so a deferred hit can print twice with different frame
+    ///     stamps). The bug-260 bundle carries 3 swallowed RPCA_DoHit NREs
+    ///     inside the reported 85-second window; this counter ties (or
+    ///     fails to tie) that class to hits, with the spawn-list length.
+    ///  2. REPLICA-EMPTY-SPAWNLIST: a remote copy whose Owner is ASSIGNED
+    ///     processing a hit with an empty objectsToSpawn while that owner's
+    ///     gun ON THIS SEAT currently has entries. NOT proof of divergence
+    ///     on its own — a bullet fired before the owner's last card change
+    ///     legitimately matches (round-tail bullets, rebuild boundaries);
+    ///     the [FFA-GUNAUDIT] apply stamps are what dates the gun state
+    ///     during analysis. Owner-null hits are counted under a SEPARATE
+    ///     key/budget (review find 1: most Owner-null empty-list hits are
+    ///     ordinary pre-init bullets that may carry no spawn cards at all,
+    ///     and must not drain this key).
+    ///
+    /// This prefix is void — it never asks Harmony to skip the original
+    /// (another prefix on the same method still can, see above). Budgets are
+    /// PER SITTING: all keys reset on the room-leave edges alongside the
+    /// sweep key (review find 1's exhaustion arm — a process-lifetime budget
+    /// spent on game 1 noise would blind every later game). UNGATED like the
+    /// other log-only diagnostics (#151).</summary>
+    [HarmonyPatch]
+    internal static class SpawnOnImpactFieldDiagPatch
+    {
+        internal const string FfaAuditFailKey = "FfaGunAudit-failed";
+
+        // Reset together at the room-leave edges (both the reliable callback
+        // and the lossy poll backup), exactly like the sweep key.
+        internal static readonly string[] DiagKeys = new[]
+        {
+            "SpawnDiag-target-view-gone",
+            "SpawnDiag-preinit-empty",
+            "SpawnDiag-replica-empty-spawnlist",
+            "SpawnDiag-dead-effect",
+            "SpawnDiag-not-allowed",
+            FfaAuditFailKey,
+        };
+
+        internal static void ResetBudgets()
+        {
+            for (int i = 0; i < DiagKeys.Length; i++)
+            {
+                try { VanillaFixSupport.ResetDiag(DiagKeys[i]); } catch { }
+            }
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(
+            typeof(ProjectileHit),
+            "RPCA_DoHit",
+            new Type[]
+            {
+                typeof(Vector2), typeof(Vector2), typeof(Vector2),
+                typeof(int), typeof(int), typeof(bool)
+            })]
+        private static void ObserveHit(
+            ProjectileHit __instance, int viewID, int colliderID, bool wasBlocked)
+        {
+            try
+            {
+                if (__instance == null) return;
+                PhotonView view = __instance.GetComponent<PhotonView>();
+                var ots = __instance.objectsToSpawn;
+                int otsLen = ots == null ? 0 : ots.Length;
+
+                // Candidate 1: the hit target's view is unresolved on this
+                // seat at hit entry (vanilla NREs at :212 if it runs — see
+                // the class comment for the deferred-invocation caveat).
+                if (viewID != -1 && PhotonNetwork.GetPhotonView(viewID) == null)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "SpawnDiag-target-view-gone",
+                        "SpawnDiag hit target view " +
+                        viewID.ToString(CultureInfo.InvariantCulture) +
+                        " unresolved at hit entry" +
+                        " bulletView=" + (view == null ? "null" : view.ViewID.ToString(CultureInfo.InvariantCulture)) +
+                        " mine=" + (view != null && view.IsMine) +
+                        " spawnEntries=" + otsLen.ToString(CultureInfo.InvariantCulture) +
+                        " blocked=" + wasBlocked +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        30);
+                }
+
+                if (view == null || view.IsMine) return;
+
+                if (otsLen == 0)
+                {
+                    var init = __instance.GetComponent<ProjectileInit>();
+                    Player owner = init == null ? null : init.Owner;
+                    if (owner == null)
+                    {
+                        // Init-race family tally only: with no owner there is
+                        // no way to know whether spawn entries were due, so
+                        // this key must never be read as bug-260 evidence by
+                        // itself (review find 1).
+                        VanillaFixSupport.DiagLimited(
+                            "SpawnDiag-preinit-empty",
+                            "SpawnDiag remote copy hit pre-init (Owner null, empty spawn list)" +
+                            " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
+                            " target=" + viewID.ToString(CultureInfo.InvariantCulture) +
+                            "/" + colliderID.ToString(CultureInfo.InvariantCulture) +
+                            " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                            20);
+                        return;
+                    }
+                    int ownerGunLen = -1;
+                    try
+                    {
+                        var gun = owner.data != null && owner.data.weaponHandler != null
+                            ? owner.data.weaponHandler.gun : null;
+                        if (gun != null && gun.objectsToSpawn != null)
+                            ownerGunLen = gun.objectsToSpawn.Length;
+                    }
+                    catch { }
+                    if (ownerGunLen > 0)
+                    {
+                        VanillaFixSupport.DiagLimited(
+                            "SpawnDiag-replica-empty-spawnlist",
+                            "SpawnDiag remote copy hit with EMPTY objectsToSpawn while owner's CURRENT gun has " +
+                            ownerGunLen.ToString(CultureInfo.InvariantCulture) +
+                            " entr(ies) on this seat (bullet may predate the last card change — date via FFA-GUNAUDIT)" +
+                            " ownerPid=" + owner.PlayerID.ToString(CultureInfo.InvariantCulture) +
+                            " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
+                            " target=" + viewID.ToString(CultureInfo.InvariantCulture) +
+                            "/" + colliderID.ToString(CultureInfo.InvariantCulture) +
+                            " blocked=" + wasBlocked +
+                            " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                            30);
+                    }
+                    return;
+                }
+
+                // Dead-reference sweep: an entry whose effect AND
+                // AddToProjectile are both null spawns nothing, silently
+                // (decompile ObjectsToSpawn.cs:72 gates on the effect).
+                int dead = 0;
+                for (int i = 0; i < ots.Length; i++)
+                    if (ots[i] != null && ots[i].effect == null && ots[i].AddToProjectile == null)
+                        dead++;
+                if (dead > 0)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "SpawnDiag-dead-effect",
+                        "SpawnDiag remote copy carries " +
+                        dead.ToString(CultureInfo.InvariantCulture) +
+                        " spawn entr(ies) with null effect" +
+                        " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        20);
+                }
+
+                if (!__instance.isAllowedToSpawnObjects)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "SpawnDiag-not-allowed",
+                        "SpawnDiag remote copy has isAllowedToSpawnObjects=false with " +
+                        otsLen.ToString(CultureInfo.InvariantCulture) + " spawn entr(ies)" +
+                        " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        10);
+                }
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("SpawnOnImpactFieldDiag", ex);
+            }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("SpawnOnImpactFieldDiag", exception);
+        }
+    }
+
     /// <summary>Bug #217's biggest diagnostic gap (both sweep agents, verdict
     /// A6): the log carries no rtt/fps/dispatch-health timeline at all, so
     /// "mild-moderate latency" could not be quantified from a bundle — the
