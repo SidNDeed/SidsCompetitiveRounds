@@ -1763,9 +1763,40 @@ async def _apply_terminal_transitions(db: AsyncSession, m: TournamentMatch, winn
     created GF_RESET is bracket bookkeeping: its seats carry persistent
     forfeited flags, so activation resolves it by forfeit — it is never
     played and never mints (and a PLAYED reset's mint revalidates its GF
-    provenance, round-35 find 1)."""
+    provenance, round-35 find 1).
+
+    Aug 22 lifecycle pass: the ROUND-34 CUT above still holds at THIS site —
+    forfeit terminals mint nothing HERE. The forfeited-finals podium gap it
+    left (r2 find 3: a forfeited GF completed the tournament with a NULL
+    podium) is closed at the other end, inside the completion CAS
+    transaction — see _mint_forfeit_decided_podium."""
     await _assert_signup_service_policy(
         db, [m.p1_signup_id, m.p2_signup_id])
+    # Terminal-series wager settlement (Aug 22 lifecycle pass, tournament
+    # r1 find 4 / r2 find 4): a forfeit/double_forfeit row deliberately
+    # leaves its RankedSeries 'active' (bracket status owns the outcome),
+    # which stranded every unsettled stake — tournament series are exempt
+    # from _prune_stale_series' abandon/stall modes and _settle_series_bets
+    # fires only on series completion (mode 3 there is the deploy-gap
+    # reconciliation for THIS hook, not a general tournament prune). REFUND, never settle (#241): these
+    # statuses are only written when _decided_series_takes_precedence found
+    # no valid completed result — the wagered SERIES OUTCOME never
+    # materialized (the partial BO3 may have progressed past the bet's 0-0
+    # admission point, but no series winner exists to settle against);
+    # paying a side here would also let a concession mint house gold for a
+    # colluding bettor (#283). Runs in the
+    # SAME transaction as the terminal write and BEFORE the winner-signup
+    # early-return below, and is deliberately NOT savepointed: if the
+    # refund fails, the terminal transition rolls back with it and the
+    # sweep retries next tick — a visible conservative wedge beats a
+    # silent re-strand.
+    if m.status in ("forfeit", "double_forfeit") and m.series_id is not None:
+        from main import _refund_series_bets
+        _n_refunded = await _refund_series_bets(
+            db, m.series_id, "refund_tournament_forfeit")
+        if _n_refunded:
+            print(f"[TOURNAMENT] refunded {_n_refunded} unsettled bet(s) on "
+                  f"series {m.series_id} (match {m.id} -> {m.status})")
     winner_sig = (await db.execute(select(TournamentSignup).where(
         TournamentSignup.id == winner_signup_id))).scalar_one_or_none()
     if winner_sig is None:
@@ -2172,9 +2203,13 @@ async def _enqueue_completion_notices_inner(db: AsyncSession, m: TournamentMatch
     # WINNER. No onward match = champion / TP winner — a terminal-win DM
     # (Codex tournament-batch r1 find 4: the completion watcher grants roles
     # and posts publicly but never DMs the winner, so "both participants get
-    # a completion notice" was false exactly at the podium). Ordering makes
-    # placed_rank answerable: _maybe_complete_tournament runs before this
-    # hook, so the champion's rank 1 / TP winner's rank 3 exist in sig_map.
+    # a completion notice" was false exactly at the podium). placed_rank is
+    # answerable here only on the REPORT-HOOK path, where
+    # _maybe_complete_tournament runs before this hook. SWEEP/activation
+    # forfeit callers enqueue BEFORE completion exists, so a forfeit-decided
+    # final/TP writes final_placement None here — the completion filler
+    # repairs every still-undelivered row when it later mints (lifecycle r1
+    # find 11); an already-delivered generic DM stays generic.
     if w_next is not None:
         if w_opp is not None:
             await _ins(winner_id, "match_won_next_ready", _next_extra(w_next, w_opp, None))
@@ -2201,6 +2236,19 @@ async def _enqueue_completion_notices_inner(db: AsyncSession, m: TournamentMatch
             "final_placement": (int(lrow["placed_rank"])
                                 if (lrow and lrow["placed_rank"] is not None) else None),
         })
+
+
+class _FillerProvenanceReversed(Exception):
+    """Module-private: raised inside _maybe_complete_tournament's completion
+    SAVEPOINT when the post-award whole-bracket recheck finds a series
+    reversed mid-completion (lifecycle r1 find 9's lesson: raising OUT of
+    _maybe_complete_tournament rolled back the report-hook caller's whole
+    advance savepoint, wedging a decided-but-unadvanced sibling match
+    forever — the completion gate then never re-fired. Caught INSIDE
+    _maybe_complete_tournament instead: only the completion claim, filler
+    podium, notice repair, and prizes retract; the caller's own advance
+    survives, and the next completer's pre-mint veto sees the committed
+    reversal and completes with a null podium)."""
 
 
 class _ResetProvenanceReversed(Exception):
@@ -2367,6 +2415,211 @@ def _total_rounds_for(t: Tournament) -> int:
     return r
 
 
+async def _mint_forfeit_decided_podium(db: AsyncSession, t: Tournament) -> list:
+    """Fill ABSENT podium fields from forfeit-decided finals. Called ONLY by
+    _maybe_complete_tournament, inside its completion SAVEPOINT, AFTER the
+    CAS and authoritative re-read, in the SAME transaction that pays prizes
+    (Aug 22 lifecycle pass, tournament r2 find 3: a forfeited Grand Final —
+    reachable today through the no-show sweep — completed the tournament
+    with NULL podium fields: no prize, no trophy, no history count for the
+    present winner).
+
+    Why minting is safe HERE and nowhere earlier: rounds 33-35 abandoned
+    forfeit minting at MATCH-TERMINAL time because an ancestor reversal
+    landing between the mint and the completion payment turned the stamped
+    podium into a candidate-only wrong payout. At this site the window does
+    not exist — exactly one transaction wins the completion CAS, and
+    mint -> pay -> commit is one atomic step. A reversal committing AFTER
+    completion has exactly HEAD's shape for played finals (admin follow-up),
+    not new authority.
+
+    Rules, each deliberate:
+      * Fill only ABSENT fields — a played LB final's already-minted third
+        place is never touched.
+      * Mint only from rows whose status is exactly 'forfeit'. Never from
+        'completed' (that authority belongs to the report hook alone — a
+        null under a completed reset is the round-35 provenance VETO, and
+        filling it here would restore exactly what the veto withheld).
+        Never from 'double_forfeit' (its winner_signup_id is a bookkeeping
+        carrier, not a present winner).
+      * WHOLE-BRACKET provenance veto (lifecycle r1 find 2 + r2 find 4): a
+        forfeit winner proved nothing in the deciding match itself — their
+        seat authority rests ENTIRELY on upstream results — so ANY
+        invalidated series bound to ANY match of this tournament vetoes
+        the filler wholesale. The check is a LOCKING read (FOR SHARE on
+        every bound series, held to commit), which is what makes it an
+        authority and not a snapshot: an in-flight reversal must either
+        commit before it (visible -> veto) or wait behind the completion
+        (post-completion reversal, HEAD's accepted shape). Deliberately
+        coarse: an old repaired round-1 reversal keeps this podium null
+        forever (status quo, admin follow-up) — that costs a log line,
+        while a per-path check that misses one ancestor pays a broken
+        chain.
+      * Winner-seat ranks always mint (subject to the veto above).
+        Loser-seat ranks (2nd, LB-final 3rd, TP 4th) mint only while that
+        signup is NOT flagged forfeited: the flag marks no-show/ban
+        (fail-closed policy — those seats never gain from the sweep),
+        while a match-scoped voluntary concession leaves the flag clear
+        and keeps the placement a played loss would have earned.
+
+    Returns the list of (player_id, rank) pairs actually minted — the
+    caller uses it to repair undelivered terminal notices (r1 find 11) and
+    to decide whether the post-award recheck must run. Empty when nothing
+    was minted.
+    """
+    minted: list = []
+
+    _veto_checked = False
+    _veto_present = False
+
+    async def _bracket_veto() -> bool:
+        # Lifecycle r2 find 4: this is a LOCKING read — FOR SHARE on every
+        # series bound to this bracket is the shared serialization
+        # authority the plain SELECT lacked. Every live tournament-series
+        # invalidated_at writer takes a conflicting row lock (r3 audit):
+        # the admin reverse endpoint locks the series FOR UPDATE, and the
+        # anti-cheat retro-invalidation's ORM UPDATE takes the row
+        # exclusively at flush; prune's mode-1 abandon is is_tournament =
+        # FALSE only. So an in-flight reversal either committed before
+        # this statement (visible here -> veto) or waits behind these
+        # locks until the completion commits, becoming an ordinary
+        # post-completion reversal (HEAD's accepted shape). A reversal
+        # that already holds its series row while waiting for a player
+        # row our prize writes hold is the round-36 outcome (c): Postgres
+        # aborts one transaction and no unauthorized podium commits
+        # either way — the completion-side abort is CONTAINED by the
+        # caller's broad except (r3 find 2) so the report-hook advance
+        # survives it. Locks are transaction-scoped and ordered (ORDER BY
+        # rs.id) so two multi-row lockers cannot ABBA.
+        nonlocal _veto_checked, _veto_present
+        if not _veto_checked:
+            _veto_checked = True
+            _rows = (await db.execute(text(
+                "SELECT rs.invalidated_at IS NOT NULL AS rev "
+                "FROM ranked_series rs "
+                "JOIN tournament_matches tm ON tm.series_id = rs.id "
+                "WHERE tm.tournament_id = :tid "
+                "ORDER BY rs.id "
+                "FOR SHARE OF rs"),
+                {"tid": str(t.id)})).all()
+            _veto_present = any(r.rev for r in _rows)
+            if _veto_present:
+                print(f"[TOURNAMENT] completion filler: an invalidated "
+                      f"series exists in {t.id}'s bracket — forfeit-decided "
+                      f"podium NOT minted (completes with nulls); admin "
+                      f"follow-up required")
+        return _veto_present
+
+    # Every read below uses populate_existing: the tick unit commits per-match
+    # sweep work earlier in this same session, and with expire_on_commit=False
+    # a plain re-select would hand back identity-mapped objects with STALE
+    # attributes (round-23 find 4's exact trap) — a stale forfeited=False
+    # could mint a loser-seat rank the flag policy withholds, and a stale
+    # match status could mint from a row another transaction already moved.
+    async def _signup_row(signup_id):
+        if signup_id is None:
+            return None
+        return (await db.execute(select(TournamentSignup).where(
+            TournamentSignup.id == signup_id)
+            .execution_options(populate_existing=True))).scalar_one_or_none()
+
+    def _loser_seat_of(m: TournamentMatch):
+        return (m.p1_signup_id if m.winner_signup_id == m.p2_signup_id
+                else m.p2_signup_id)
+
+    async def _mint_top_two(deciding: TournamentMatch) -> None:
+        winner_sig = await _signup_row(deciding.winner_signup_id)
+        if winner_sig is None:
+            print(f"[TOURNAMENT] completion filler: winner signup "
+                  f"{deciding.winner_signup_id} missing for match "
+                  f"{deciding.id} — podium stays unminted")
+            return
+        t.winner_signup_id = winner_sig.id
+        winner_sig.placed_rank = 1
+        minted.append((winner_sig.player_id, 1))
+        loser_sig = await _signup_row(_loser_seat_of(deciding))
+        if loser_sig is not None and not loser_sig.forfeited:
+            t.runner_up_signup_id = loser_sig.id
+            loser_sig.placed_rank = 2
+            minted.append((loser_sig.player_id, 2))
+        _second = ("minted" if t.runner_up_signup_id is not None
+                   else ("withheld (loser seat flagged forfeited)"
+                         if loser_sig is not None
+                         else "withheld (loser seat missing)"))
+        print(f"[TOURNAMENT] completion filler: minted 1st from "
+              f"forfeit-decided match {deciding.id}; 2nd {_second}")
+
+    if t.format == "double_elim_bo3":
+        reset_m = (await db.execute(select(TournamentMatch).where(and_(
+            TournamentMatch.tournament_id == t.id,
+            TournamentMatch.bracket_side == "GF_RESET",
+        )).execution_options(populate_existing=True))).scalar_one_or_none()
+        gf_m = (await db.execute(select(TournamentMatch).where(and_(
+            TournamentMatch.tournament_id == t.id,
+            TournamentMatch.bracket_side == "GF",
+        )).execution_options(populate_existing=True))).scalar_one_or_none()
+        deciding = reset_m if reset_m is not None else gf_m
+        if (t.winner_signup_id is None and deciding is not None
+                and deciding.status == "forfeit"
+                and deciding.winner_signup_id is not None
+                and not await _bracket_veto()):
+            await _mint_top_two(deciding)
+        # Third place: only the LOSER of the LB final earns a rank from that
+        # row (its winner advances to the GF and places there), so a
+        # forfeit-decided LB final mints third only for an unflagged —
+        # i.e. voluntarily conceding — loser.
+        if t.third_place_signup_id is None and gf_m is not None:
+            _lb_final = None
+            _gf_pre = list(gf_m.prereq_match_ids or [])
+            if _gf_pre:
+                _lb_final = (await db.execute(select(TournamentMatch).where(and_(
+                    TournamentMatch.id.in_(_gf_pre),
+                    TournamentMatch.bracket_side == "L",
+                )).execution_options(populate_existing=True))).scalars().first()
+            if (_lb_final is not None and _lb_final.status == "forfeit"
+                    and _lb_final.winner_signup_id is not None
+                    and not await _bracket_veto()):
+                loser_sig = await _signup_row(_loser_seat_of(_lb_final))
+                if loser_sig is not None and not loser_sig.forfeited:
+                    t.third_place_signup_id = loser_sig.id
+                    loser_sig.placed_rank = 3
+                    minted.append((loser_sig.player_id, 3))
+                    print(f"[TOURNAMENT] completion filler: minted 3rd from "
+                          f"forfeit-decided LB final {_lb_final.id}")
+    else:
+        total_rounds = _total_rounds_for(t)
+        final_m = (await db.execute(select(TournamentMatch).where(and_(
+            TournamentMatch.tournament_id == t.id,
+            TournamentMatch.round == total_rounds,
+            TournamentMatch.bracket_side == "W",
+        )).execution_options(populate_existing=True))).scalar_one_or_none()
+        tp_m = (await db.execute(select(TournamentMatch).where(and_(
+            TournamentMatch.tournament_id == t.id,
+            TournamentMatch.bracket_side == "TP",
+        )).execution_options(populate_existing=True))).scalar_one_or_none()
+        if (t.winner_signup_id is None and final_m is not None
+                and final_m.status == "forfeit"
+                and final_m.winner_signup_id is not None
+                and not await _bracket_veto()):
+            await _mint_top_two(final_m)
+        if (t.third_place_signup_id is None and tp_m is not None
+                and tp_m.status == "forfeit"
+                and tp_m.winner_signup_id is not None
+                and not await _bracket_veto()):
+            winner_sig = await _signup_row(tp_m.winner_signup_id)
+            if winner_sig is not None:
+                t.third_place_signup_id = winner_sig.id
+                winner_sig.placed_rank = 3
+                minted.append((winner_sig.player_id, 3))
+                loser_sig = await _signup_row(_loser_seat_of(tp_m))
+                if loser_sig is not None and not loser_sig.forfeited:
+                    loser_sig.placed_rank = 4
+                    minted.append((loser_sig.player_id, 4))
+                print(f"[TOURNAMENT] completion filler: minted 3rd from "
+                      f"forfeit-decided TP match {tp_m.id}")
+    return minted
+
+
 async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
     """Complete tournament when the appropriate terminal matches are done.
     Sync (single-elim): final + TP.
@@ -2414,11 +2667,16 @@ async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
         if tp_m and tp_m.status not in finished_states:
             return
 
-    # Round-34 NOTE: no authority scan here, by design. Podium fields are
-    # minted ONLY by the report hook's atomic series-decided advance (see
-    # _apply_terminal_transitions), so every payable podium and its
-    # reversal windows have exactly HEAD's shape — forfeit-decided gates
-    # complete with a null podium and pay nothing, which is logged below.
+    # Round-34 NOTE, amended Aug 22: match-terminal minting is still the
+    # report hook's alone (see _apply_terminal_transitions), so every
+    # series-decided podium and its reversal windows keep exactly HEAD's
+    # shape. Forfeit-decided FINALS no longer complete with a null podium,
+    # though: after the CAS claim below, _mint_forfeit_decided_podium
+    # fills absent fields inside this same pay transaction — the
+    # mint-to-pay window that made rounds 33-35 abandon forfeit minting
+    # does not exist at this site. Double-forfeit gates, flagged-loser
+    # seats, and provenance-vetoed resets still complete null and pay
+    # nothing, which is logged below.
     # Round-29 find 1: EXACTLY-ONCE completion claim as a compare-and-set.
     # The tick's _run unit loads its Tournament object BEFORE the per-match
     # sweep's internal commits; with expire_on_commit=False that resident
@@ -2435,52 +2693,172 @@ async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
     )).scalars().all()
     await _assert_tournament_service_policy(
         db, player_ids=tournament_player_ids)
-    _claim = await db.execute(text(
-        "UPDATE tournaments SET status = 'completed', ended_at = NOW() "
-        "WHERE id = :tid AND status = 'running'"), {"tid": t.id})
-    if (_claim.rowcount or 0) != 1:
-        return  # someone else completed it (or state moved) — do NOT pay
-    # Round-30 find 1: the claimant must pay from an AUTHORITATIVE
-    # post-placement podium view, not the resident object — another
-    # transaction (the report hook) may have committed winner/runner while
-    # this session's resident Tournament still holds pre-placement NULLs,
-    # and _pay_prizes silently skips null signup ids, stranding those
-    # awards forever (no later completer can pass the CAS). The safety
-    # chain here: autoflush first pushes THIS transaction's own pending
-    # placement mutations (e.g. a just-resolved TP's third place) down to
-    # the row; stale-but-CLEAN attributes are NOT dirty and never flush,
-    # so resident NULLs cannot clobber committed values; populate_existing
-    # then overwrites the resident identity with the merged current row —
-    # our CAS'd status, our flushed placements, and every other
-    # transaction's committed placements together.
-    t = (await db.execute(select(Tournament).where(Tournament.id == t.id)
-         .execution_options(populate_existing=True))).scalar_one()
-    _absent = [n for n, v in (("1st", t.winner_signup_id),
-                              ("2nd", t.runner_up_signup_id),
-                              ("3rd", t.third_place_signup_id)) if v is None]
-    if _absent:
-        # Round-35 find 2: name EXACTLY which placements are absent, and
-        # claim "no prizes" only when all three are — a valid partial
-        # podium (e.g. a played TP under a forfeit-decided final) still
-        # pays its non-null ranks below, and an operator told "no prizes
-        # paid" could double-award them manually.
-        # Round-36 find 2: this log cannot INFER why a placement is null —
-        # forfeit-decided gates and the reset provenance veto both produce
-        # nulls, and telling an operator "award manually" after a veto
-        # would restore exactly what the veto withheld. Point at the
-        # authoritative earlier [TOURNAMENT] lines instead.
-        if len(_absent) == 3:
-            print(f"[TOURNAMENT] {t.id} completed WITHOUT a podium — no "
-                  f"prizes paid, by design (unminted placements: forfeit-"
-                  f"decided gates or a provenance veto — check earlier "
-                  f"[TOURNAMENT] lines for the cause BEFORE any manual award)")
-        else:
-            print(f"[TOURNAMENT] {t.id} completed with a PARTIAL podium — "
-                  f"missing: {', '.join(_absent)} (unminted: forfeit-decided "
-                  f"gate(s) or a provenance veto — see earlier [TOURNAMENT] "
-                  f"lines). Present placements ARE paid normally below — do "
-                  f"NOT manually re-award those.")
-    await _pay_prizes(db, t)
+    # Lifecycle r1 find 9: the whole claim -> mint -> pay -> recheck saga
+    # runs in its OWN savepoint, and the provenance raise is caught HERE —
+    # never propagated to callers. Raising outward rolled back the report
+    # hook's entire advance savepoint: the sibling match's SERIES had
+    # already committed (submit_match commits before the hook runs), so
+    # retracting its bracket completion manufactured a permanent
+    # decided-but-unadvanced wedge the sweep then skips forever. With the
+    # savepoint local, a mid-completion reversal retracts exactly the
+    # completion claim + filler podium + notice repair + prizes; the
+    # caller's advance survives, the tournament stays 'running', and the
+    # next completer (any later report or tick) re-enters the CAS — its
+    # pre-mint whole-bracket veto sees the now-committed reversal and
+    # completes with a null podium.
+    # Pre-capture the id for the except path: the savepoint rollback expires
+    # every identity dirtied inside it, and a synchronous attribute access on
+    # an expired AsyncSession object raises (the _ResetProvenanceReversed
+    # handler pre-captures _m_id for exactly this reason).
+    _t_id = str(t.id)
+    try:
+        async with db.begin_nested():
+            _claim = await db.execute(text(
+                "UPDATE tournaments SET status = 'completed', ended_at = NOW() "
+                "WHERE id = :tid AND status = 'running'"), {"tid": t.id})
+            if (_claim.rowcount or 0) != 1:
+                return  # someone else completed it (or state moved) — do NOT pay
+            # Round-30 find 1: the claimant must pay from an AUTHORITATIVE
+            # post-placement podium view, not the resident object — another
+            # transaction (the report hook) may have committed winner/runner
+            # while this session's resident Tournament still holds
+            # pre-placement NULLs, and _pay_prizes silently skips null signup
+            # ids, stranding those awards forever (no later completer can
+            # pass the CAS). The safety chain here: autoflush first pushes
+            # THIS transaction's own pending placement mutations (e.g. a
+            # just-resolved TP's third place) down to the row;
+            # stale-but-CLEAN attributes are NOT dirty and never flush, so
+            # resident NULLs cannot clobber committed values;
+            # populate_existing then overwrites the resident identity with
+            # the merged current row — our CAS'd status, our flushed
+            # placements, and every other transaction's committed placements
+            # together.
+            t = (await db.execute(select(Tournament).where(Tournament.id == t.id)
+                 .execution_options(populate_existing=True))).scalar_one()
+            # Aug 22 lifecycle pass (r2 find 3): fill absent podium fields
+            # from forfeit-decided finals INSIDE this pay transaction — see
+            # the helper's docstring for the full authority argument.
+            _ff_minted = await _mint_forfeit_decided_podium(db, t)
+            _absent = [n for n, v in (("1st", t.winner_signup_id),
+                                      ("2nd", t.runner_up_signup_id),
+                                      ("3rd", t.third_place_signup_id)) if v is None]
+            if _absent:
+                # Round-35 find 2: name EXACTLY which placements are absent,
+                # and claim "no prizes" only when all three are — a valid
+                # partial podium (e.g. a played TP under a forfeit-decided
+                # final) still pays its non-null ranks below, and an operator
+                # told "no prizes paid" could double-award them manually.
+                # Round-36 find 2: this log cannot INFER why a placement is
+                # null — double-forfeit gates, flagged/missing loser seats,
+                # and provenance vetoes all produce nulls, and telling an
+                # operator "award manually" after a veto would restore
+                # exactly what the veto withheld. Point at the authoritative
+                # earlier [TOURNAMENT] lines instead.
+                if len(_absent) == 3:
+                    print(f"[TOURNAMENT] {t.id} completed WITHOUT a podium — "
+                          f"no prizes paid, by design (unminted placements: "
+                          f"double-forfeit gates, flagged or missing loser "
+                          f"seats, or a provenance veto — check earlier "
+                          f"[TOURNAMENT] lines for the cause BEFORE any "
+                          f"manual award)")
+                else:
+                    print(f"[TOURNAMENT] {t.id} completed with a PARTIAL "
+                          f"podium — missing: {', '.join(_absent)} (unminted: "
+                          f"double-forfeit gate(s), flagged or missing loser "
+                          f"seat(s), or a provenance veto — see earlier "
+                          f"[TOURNAMENT] lines). Present placements ARE paid "
+                          f"normally below — do NOT manually re-award those.")
+            await _pay_prizes(db, t)
+            if _ff_minted:
+                # Lifecycle r1 find 11: terminal notices for a forfeit-decided
+                # final/TP were enqueued by the SWEEP with final_placement
+                # None — the podium did not exist yet. Repair every still-
+                # undelivered one now, in this same transaction; an
+                # already-delivered generic DM stays generic (cosmetic,
+                # accepted — rewriting delivered messages is not possible).
+                for _mint_pid, _mint_rank in _ff_minted:
+                    await db.execute(text(
+                        "UPDATE tournament_notices "
+                        # CAST(:rank AS integer), never :rank::int — asyncpg
+                        # cannot parse a bind adjacent to the :: cast
+                        # operator (portal r3 find 5's documented lesson;
+                        # lifecycle r2 find 2 caught this exact statement
+                        # re-introducing it, where the parse error would
+                        # have rolled back every filler completion forever).
+                        "   SET payload = jsonb_set(payload::jsonb, "
+                        "       '{final_placement}', "
+                        "       to_jsonb(CAST(:rank AS integer)))::text "
+                        " WHERE tournament_id = :tid AND player_id = :pid "
+                        "   AND notice_type IN ('tournament_won', 'match_lost_out') "
+                        "   AND notified_at IS NULL"),
+                        {"rank": int(_mint_rank), "tid": str(t.id),
+                         "pid": str(_mint_pid)})
+                # Round-36-shape FINAL recheck, whole-bracket. With the
+                # pre-mint veto now HOLDING FOR SHARE on every bound series
+                # through commit (r2 find 4), no reversal can commit
+                # mid-transaction and this recheck cannot fire — it stays
+                # as belt-and-suspenders for the validation-after-every-
+                # wait doctrine, and as the backstop if a future
+                # invalidated_at writer ever appears that does not take
+                # the series row lock.
+                if (await db.execute(text(
+                        "SELECT 1 FROM ranked_series rs "
+                        "JOIN tournament_matches tm ON tm.series_id = rs.id "
+                        "WHERE tm.tournament_id = :tid "
+                        "AND rs.invalidated_at IS NOT NULL LIMIT 1"),
+                        {"tid": str(t.id)})).first():
+                    raise _FillerProvenanceReversed()
+    except _FillerProvenanceReversed:
+        print(f"[TOURNAMENT] {_t_id} completion ROLLED BACK: a bracket series "
+              f"was reversed mid-completion — the completion claim, filler "
+              f"podium, notice repair, and prizes are all retracted; the "
+              f"tournament stays running and the next completer's pre-mint "
+              f"veto completes it with a null podium; admin follow-up "
+              f"required")
+        return
+    except Exception as _ce:
+        # Lifecycle r3 find 2: completion must not take down the advance
+        # that triggered it. The proven reachable case is a deadlock
+        # (SQLSTATE 40P01): the FOR SHARE veto's series->player lock edges
+        # can cycle against a player->series writer (the admin reversal,
+        # the anti-cheat retro-invalidation), Postgres picks this
+        # transaction as victim, and before this catch the error escaped
+        # through the report hook's advance savepoint — the deciding
+        # series was already durably committed by submit_match, so the
+        # rolled-back advance became a PERMANENT decided-but-unadvanced
+        # wedge behind an HTTP 200 (the client clears its outbox and never
+        # retries). SCOPE, stated honestly (r4 find 2): this containment
+        # holds for SAVEPOINT-RECOVERABLE failures — deadlocks and other
+        # statement errors, where the savepoint's __aexit__ ROLLBACK TO
+        # SAVEPOINT succeeded before this except runs, retracting the
+        # claim, mint, notice repair, and prizes while the caller's
+        # advance survives and the next tick retries. A DEAD CONNECTION
+        # (Postgres restart, TCP drop) is NOT recovered here: the
+        # savepoint rollback itself fails, every later statement fails,
+        # and the whole root transaction dies — the pre-existing exposure
+        # of any mid-transaction connection loss. No partial payout can
+        # commit either way, and what the loss costs depends on the
+        # CALLER (r5 find 2, wording per r6 find 1): the TICK path loses
+        # all work since its last per-match commit — sweep forfeits commit
+        # per match, but an activation-driven forfeit of a downstream
+        # match runs in the CURRENT root transaction and dies with it —
+        # and the next healthy tick reconstructs any lost activation/
+        # terminalization and retries completion; the REPORT-HOOK path
+        # loses the advance too (its deciding series was committed by
+        # submit_match beforehand), and that decided-but-unadvanced match
+        # surfaces via the sweep's SKIP log for admin follow-up. Broad on purpose: any savepoint-recoverable
+        # error reproduces the wedge shape, and a completion that keeps
+        # failing prints on every 30s tick retry while a wedged bracket is
+        # silent.
+        print(f"[TOURNAMENT] {_t_id} completion caught an error (savepoint "
+              f"rolled back if the session allowed): {_ce!r} — on a live "
+              f"session the caller's advance is preserved and the next "
+              f"tick retries completion; on a dead connection this whole "
+              f"transaction is lost (pre-existing exposure): a tick-driven "
+              f"completion just retries next tick, a report-hook one also "
+              f"loses its advance and the sweep's SKIP log flags that "
+              f"match for admin follow-up")
+        return
 
 
 async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:

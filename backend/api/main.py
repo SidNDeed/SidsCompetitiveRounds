@@ -731,8 +731,57 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
         owning bracket match is ready/scheduled, never after that row closes).
 
     Newest-first so a recent normal series still wins over an old tournament
-    row when both exist (learning #52: newest = current match context)."""
+    row when both exist (learning #52: newest = current match context) —
+    EXCEPT when the room IS a bracket match's own room, resolved first
+    below."""
     await _assert_no_service_subject(db, affected_player_ids=[pid_a, pid_b])
+    # ROOM-FIRST (lifecycle r2 find 1): when the room is a bracket match's
+    # own server-issued room, that match's series IS the answer — before
+    # the generic newest-first query. The old shape reached the tournament
+    # candidate only through the generic ordering, so a newer ordinary
+    # series (a warm-up played during the break) preempted the pair's
+    # genuine tournament game in its designated room, and LIMIT 3 could
+    # drop the tournament row from the candidate set entirely: the real
+    # bracket game then recorded as ordinary ranked while the sweep later
+    # forfeited the match. Pair-checked so a foreign pair in someone
+    # else's room falls through to the generic path.
+    _room_ambiguous = False
+    if room_id:
+        # STATUS-BLIND, LIMIT 3 (r4 find 1 + r5 find 1): ambiguity must be
+        # judged across EVERY row claiming this room, not just open ones —
+        # a terminal GF sharing an effective name with an open reset would
+        # otherwise leave exactly one open row and bind it, while /matches
+        # correctly 409s the same room as ambiguous. More than one match =
+        # the room's identity is unusable: no room-first binding, AND the
+        # flag below keeps the generic loop's exact-room gate from binding
+        # a sync candidate through the same ambiguous name (r5 find 1's
+        # second half — the suppressed result must stay suppressed).
+        # Creation fall-throughs stay safe without extra work: preflight's
+        # closed-room probe refuses when any terminal row claims the room,
+        # and an all-open ambiguous room's ordinary series can never
+        # receive a match (the report lock pass 409s) so mode-1 pruning
+        # abandons it.
+        _rf_rows = (await db.execute(text(
+            "SELECT tm.series_id, tm.status FROM tournament_matches tm "
+            f"WHERE {_TM_ROOM_MATCH_SQL} "
+            "LIMIT 3"), {"room": str(room_id)})).all()
+        _room_ambiguous = len(_rf_rows) > 1
+        _rf_sid = None
+        if (not _room_ambiguous and len(_rf_rows) == 1
+                and _rf_rows[0].status in ("ready", "scheduled")
+                and _rf_rows[0].series_id is not None):
+            _rf_sid = _rf_rows[0].series_id
+        if _rf_sid is not None:
+            _rf = (await db.execute(
+                select(RankedSeries).where(
+                    RankedSeries.id == _rf_sid,
+                    RankedSeries.status == "active",
+                    RankedSeries.invalidated_at.is_(None),
+                    _series_pair_filter(pid_a, pid_b),
+                )
+            )).scalar_one_or_none()
+            if _rf is not None:
+                return _rf
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
     recent_match_exists = (
         select(Match.id)
@@ -787,20 +836,172 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
             # RankedSeries active: bracket status, not series status, owns
             # that outcome. Never bind a later game between the same pair to
             # the orphaned active row (async series otherwise match forever).
-            match_status = (await db.execute(text(
-                "SELECT status FROM tournament_matches "
-                "WHERE series_id = :sid LIMIT 1"
-            ), {"sid": s.id})).scalar_one_or_none()
+            _tm_row = (await db.execute(text(
+                "SELECT tm.status, "
+                "       COALESCE(NULLIF(tm.photon_room_name, ''), "
+                "         'sct-' || left(replace(CAST(tm.id AS text), '-', ''), 12)) "
+                "         AS eff_room "
+                "FROM tournament_matches tm "
+                "WHERE tm.series_id = :sid LIMIT 1"
+            ), {"sid": s.id})).first()
+            match_status = _tm_row.status if _tm_row is not None else None
             if match_status not in ("ready", "scheduled"):
                 continue
             if s.tournament_id is not None and room_id:
                 kind = (await db.execute(
                     text("SELECT kind FROM tournaments WHERE id = :tid"),
                     {"tid": s.tournament_id})).scalar_one_or_none()
-                if kind == "sync" and not str(room_id).startswith("sct-"):
-                    continue
+                if kind == "sync":
+                    # Lifecycle r1 find 1: bind a sync candidate to ITS OWN
+                    # server-issued room, not to "any sct- room" — with the
+                    # prefix-only test, a delayed report from a CLOSED
+                    # match's room attached to the pair's NEXT open bracket
+                    # match (e.g. a GF-reset pairing) and advanced the
+                    # wrong row. Report room ids carry per-game suffixes
+                    # ("{room}_{token}_r{n}"), so match exact-or-'_'-
+                    # suffixed against the same stored-or-derived effective
+                    # name the closed-room guard uses (r2 find 6: pre-072
+                    # rows store no name; clients derive it from the match
+                    # id, so the SQL above derives the identical value).
+                    _rn = _tm_row.eff_room if _tm_row is not None else None
+                    if _rn:
+                        if not (str(room_id) == _rn
+                                or str(room_id).startswith(_rn + "_")):
+                            continue
+                        if _room_ambiguous:
+                            # r5 find 1: this candidate's room matched, but
+                            # more than one bracket row claims the name —
+                            # the suppressed room-first ambiguity must stay
+                            # suppressed here too, or the generic loop
+                            # re-binds through the same unusable identity.
+                            continue
         return s
     return None
+
+
+# Room-to-bracket-match binding predicate, shared by the closed-room guard,
+# the report path's lock pass, and _find_current_active_series' room-first
+# lookup — one copy so the three cannot drift (#159/#328 discipline applied
+# to room identity). Two facts it encodes:
+#  * Clients report PER-GAME room ids "{room}_{token}_r{n}"
+#    (GameStateWatcher), so the server-issued name matches exact-or-
+#    '_'-suffixed (lifecycle r1 find 5). sct- names are "sct-" + 12 hex with
+#    no underscore, so the separator test cannot false-match another room.
+#  * Pre-072 rows have no stored photon_room_name; the client derives
+#    "sct-" + first 12 hex of the match id, so the SQL derives the same
+#    when the stored name is NULL/empty (lifecycle r2 find 6).
+_TM_ROOM_MATCH_SQL = (
+    "(:room = COALESCE(NULLIF(tm.photon_room_name, ''), "
+    "         'sct-' || left(replace(CAST(tm.id AS text), '-', ''), 12)) "
+    " OR strpos(:room, COALESCE(NULLIF(tm.photon_room_name, ''), "
+    "         'sct-' || left(replace(CAST(tm.id AS text), '-', ''), 12)) "
+    "         || '_') = 1)"
+)
+
+# Winnerless terminal states plus completed: everything played in a CLOSED
+# bracket match's room belongs to the bracket — including post-completion
+# hangout games; nothing may record from that room again.
+_TM_CLOSED_STATES = ("completed", "forfeit", "double_forfeit", "bye_auto")
+
+
+async def _closed_tournament_match_guard(db, room_id):
+    """UNLOCKED probe: does this room belong to a CLOSED bracket match?
+    (Aug 22 lifecycle pass, tournament r1 find 2 / r2 find 2.) After a
+    bracket row goes terminal, _find_current_active_series correctly
+    refuses to return its series — but the record paths then treated the
+    absence as permission to record the game anyway: a phantom ordinary
+    RankedSeries on the ranked path, a casual result on the downgrade
+    paths — either way double-counting a physical game the bracket already
+    resolved. Returns the closed match id (truthy => refuse), else None.
+
+    This probe is for /series/preflight, where the cost of the residual
+    race is bounded: a row that closes between this check and the
+    preflight's series INSERT leaves an ordinary series that can never
+    receive a match (every report from that room is refused by the LOCKED
+    report-path pass below) and mode-1 pruning abandons it in 30 minutes.
+    The REPORT path must NOT use this probe — it uses
+    _lock_room_bracket_match, which serializes with the terminal writers
+    (lifecycle r2 find 5).
+
+    SCOPE, stated honestly (lifecycle r1 finds 7/8, r2 find 9): this
+    covers every case where the report's room IS the bracket room —
+    stored or legacy-derived. A CURRENT async pair playing in an arbitrary
+    private lobby has no durable bracket-bound room marker, so their
+    delayed report can still mint a phantom ordinary series after their
+    row goes terminal — pre-existing HEAD behavior, NOT closed by this
+    pass (a durable report-to-match binding is the named follow-up). The
+    disconnect endpoint likewise binds by pair without a room and is a
+    declared adjacent residual (r2 find 7)."""
+    if not room_id:
+        return None
+    return (await db.execute(text(
+        "SELECT tm.id FROM tournament_matches tm "
+        f"WHERE {_TM_ROOM_MATCH_SQL} "
+        "  AND tm.status IN ('completed', 'forfeit', "
+        "                    'double_forfeit', 'bye_auto') "
+        "LIMIT 1"), {"room": str(room_id)})).scalar_one_or_none()
+
+
+async def _lock_room_bracket_match(db, room_id):
+    """Room -> bracket-match LOCK pass for the report path (lifecycle r2
+    find 5): resolve the room to its bracket match regardless of status,
+    then serialize with every terminal writer BEFORE judging, in the
+    established order — match action advisory (the report/check-in plane),
+    series row FOR NO KEY UPDATE when one is bound (the bets/report plane;
+    series before match row, the order POST /bets and the advance hook
+    already use), then the match row FOR UPDATE (the no-show sweep's only
+    lock plane; FOR UPDATE and not a weaker mode so the advance hook's
+    later lock on the same row is a self-held no-op, never an upgrade).
+
+    Returns the POST-LOCK match status, or None when the room maps to no
+    bracket match (the overwhelmingly common case — one SELECT and out;
+    honestly a sequential scan, the room predicate is an expression over a
+    table that grows ~31 rows per tournament, so add an expression index
+    only if that ever changes). A room matching MORE than one bracket row
+    is ambiguous identity and raises the closed-match 409 itself (r4
+    find 1). A terminal return means the caller must refuse the report; an
+    open return means the caller proceeds WHILE HOLDING these locks, so the
+    sweep cannot terminalize this match mid-report — an in-flight report of
+    a real game now beats the sweep by construction instead of by luck.
+
+    Callers must have completed the sorted players advisory pass first:
+    that pass is what serializes two concurrent same-pair reports, so no
+    two transactions ever hold this row's locks concurrently from this
+    path (deadlock audit: sweep takes the match row as its FIRST lock and
+    holds nothing else we need; check-in/extension take the same advisory
+    first; POST /bets takes series then match FOR SHARE — same order)."""
+    if not room_id:
+        return None
+    # Colliding effective names (r3 find 4 / r4 find 1: 48-bit derived
+    # prefixes could theoretically collide, and nothing constrains stored
+    # names unique) are AMBIGUITY, not a tie to break — an open-first pick
+    # would bind a delayed terminal-room game to the open row (a GF/reset
+    # sharing a prefix would advance the wrong bracket row). More than one
+    # matching row fails the whole report closed; a collision is
+    # astronomically rare and an unrecorded game beats a corrupted bracket.
+    rows = (await db.execute(text(
+        "SELECT tm.id, tm.series_id FROM tournament_matches tm "
+        f"WHERE {_TM_ROOM_MATCH_SQL} "
+        "LIMIT 2"),
+        {"room": str(room_id)})).all()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        print(f"[MATCH] room {room_id} matches MORE THAN ONE bracket match "
+              f"({rows[0].id}, {rows[1].id}) — ambiguous room identity, "
+              f"failing the report closed; admin follow-up required")
+        raise HTTPException(status_code=409,
+                            detail="Tournament match is closed")
+    row = rows[0]
+    from tournaments import _acquire_tournament_match_action_lock
+    await _acquire_tournament_match_action_lock(db, row.id)
+    if row.series_id is not None:
+        await db.execute(text(
+            "SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
+            {"sid": str(row.series_id)})
+    return (await db.execute(text(
+        "SELECT status FROM tournament_matches WHERE id = :mid FOR UPDATE"),
+        {"mid": str(row.id)})).scalar_one_or_none()
 
 
 async def _acquire_tournament_report_action_gate(
@@ -4488,6 +4689,23 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         print(f"[MATCH] rejected misrouted 2v2 match: room={report.photon_room_id} reporter={report.reported_by_steam_id}")
         raise HTTPException(status_code=400, detail="2v2 matches must use /team/matches endpoint")
 
+    # Lifecycle r3 find 1 (CRITICAL): a blank room id would skip EVERY
+    # room-based authority check below — the closed-room lock pass, the
+    # room-first series binding, and the sync own-room gate — letting a
+    # crafted or replayed roomless report bind to whatever series the
+    # generic newest-first lookup returns (including a fresh GF-reset
+    # series, deciding a tournament off a replayed game). No legitimate
+    # client can hit this: GameStateWatcher's report room id is always
+    # non-empty (its per-game "{room}_{token}_r{n}" composition), and
+    # vanilla quickplay rooms carry Photon-issued names. Fail closed. The
+    # frozen 7-field HMAC canonical string is untouched — this is input
+    # validation, not signature shape.
+    if not report.photon_room_id or not report.photon_room_id.strip():
+        print(f"[MATCH] rejected report with blank photon_room_id "
+              f"(reporter={report.reported_by_steam_id})")
+        raise HTTPException(status_code=400,
+                            detail="photon_room_id is required")
+
     # Get or create both players.
     # Lock protocol — 1v1 counterpart of the 2v2 submit fix (learning #197):
     # canonical sorted players pass BEFORE resolving/dirtying either Player.
@@ -4552,6 +4770,31 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     p1 = await get_or_create_player(db, report.player1.steam_id, report.player1.display_name)
     p2 = await get_or_create_player(db, report.player2.steam_id, report.player2.display_name)
     await _assert_no_service_subject(db, affected_player_ids=[p1.id, p2.id])
+    # Aug 22 lifecycle pass (tournament r1 finds 2/5/6, r2 finds 2/5): a
+    # report whose room belongs to a bracket match SERIALIZES with the
+    # terminal writers before anything else records — the unlocked probe
+    # this replaced could pass while the sweep terminalized the row
+    # mid-report, after which every downgrade path (ban downgrade,
+    # opted-out pair, auto-invalidated early commit) was free to commit the
+    # same physical game as CASUAL, and the ranked path minted a phantom
+    # ordinary series (r2 find 5's TOCTOU). Post-lock terminal => 409, and
+    # the raise rolls this whole transaction back (no partial state). An
+    # OPEN row's locks are HELD through the report, so the sweep waits and
+    # a real in-flight game beats the deadline by construction. Placed
+    # AFTER the sorted players advisory pass (which serializes same-pair
+    # reports) and BEFORE the series/glicko planes, keeping the
+    # players -> series -> match global order.
+    if report.photon_room_id:
+        _room_tm_status = await _lock_room_bracket_match(
+            db, report.photon_room_id)
+        if _room_tm_status in _TM_CLOSED_STATES:
+            print(f"[MATCH] rejected report from a closed bracket match's "
+                  f"room (room={report.photon_room_id}, status="
+                  f"{_room_tm_status}, reporter="
+                  f"{report.reported_by_steam_id}) — the bracket already "
+                  f"resolved this match; nothing records from its room")
+            raise HTTPException(status_code=409,
+                                detail="Tournament match is closed")
     # Aug 9 bet audit r2 find 4: take the SERIES lock here — the moment both
     # players are known — rather than at the identification site far below.
     # Everything between (match insert, telemetry, xp, gold, achievements) is
@@ -5209,6 +5452,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
 
         series_was_new = False
         if not series:
+            # Aug 22 lifecycle pass: "no active series" for a game played
+            # in a bracket match's own room can no longer reach this mint —
+            # the report-level lock pass refused it before any write. (A
+            # CURRENT async pair playing in an arbitrary private lobby has
+            # no durable bracket-bound room marker — the report carries a
+            # room id, but not one the server can bind to the bracket — so
+            # their delayed report can still mint here: pre-existing HEAD
+            # behavior, stated in the guard's docstring; a durable
+            # report-to-match binding is the named follow-up.)
             # Create new series — p1/p2 order matches first match's order
             series = RankedSeries(
                 player1_id=p1.id,
@@ -8791,7 +9043,8 @@ async def get_gold_sources(
     award paths actually write (grepped from every GoldTransaction insert
     site — none invented): artist_royalty; bet_win/team_bet_payout/
     ffa_bet_win (winnings only — stake-return refunds refund_abandoned/
-    team_bet_refund/ffa_bet_refund are EXCLUDED entirely: returned stakes are
+    team_bet_refund/ffa_bet_refund/admin_reverse/lobby_bet_refund/
+    refund_tournament_forfeit are EXCLUDED entirely: returned stakes are
     not income); series_win/series_loss + ranked-match xp; casual-match xp;
     level_reward (own bucket — the every-5-levels ding is the game's
     3rd-largest gold source, #251/#259, and folding it into a mode bucket
@@ -8828,8 +9081,11 @@ async def get_gold_sources(
            AND gt.amount > 0
            -- 'admin_reverse' added Aug 9 (bet audit r1 find 10): the 1v1
            -- reversal refund returns PRINCIPAL, same as its siblings here.
+           -- 'refund_tournament_forfeit' added Aug 22 (lifecycle r1 find
+           -- 12): the terminal-bracket-row refund is principal too.
            AND gt.reason NOT IN ('refund_abandoned', 'team_bet_refund', 'ffa_bet_refund',
-                                 'admin_reverse', 'lobby_bet_refund')
+                                 'admin_reverse', 'lobby_bet_refund',
+                                 'refund_tournament_forfeit')
          GROUP BY 1
          ORDER BY SUM(gt.amount) DESC
     """), {"pid": pid})).mappings().all()
@@ -17932,32 +18188,58 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
 async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_abandoned") -> int:
     """Refund every UNSETTLED bet on a series. Stake was charged via gold_spent
     at place-time; back it out and add a gold_transactions entry per bet.
-    Idempotent — already-settled bets (won/lost/refunded) are untouched."""
-    bets = (await db.execute(
-        select(Bet).where(Bet.series_id == sid, Bet.settled_at.is_(None))
-    )).scalars().all()
+    Idempotent — already-settled bets (won/lost/refunded) are untouched.
+
+    Lifecycle r1 find 3: idempotence used to be SEQUENTIAL only — the old
+    read-then-mark shape let two concurrent refunders (no-show sweep vs
+    admin reversal vs the stale-series janitor) both read a bet as
+    unsettled and both hand the stake back, minting gold. The claim is now
+    ONE conditional UPDATE ... RETURNING: under READ COMMITTED the second
+    claimant blocks on the bet row, re-evaluates settled_at on the
+    committed version, matches zero rows, and pays nothing. Only claimed
+    rows are paid, in the same transaction as the claim. No new lock-order
+    edge: the only rows locked are this series' bet rows plus each claimed
+    bettor's player row (below).
+
+    Lifecycle r1 find 10: bettor player rows are paid in sorted player_id
+    order so two concurrent REFUNDS over overlapping bettor sets cannot
+    ABBA each other. Cross-path cycles against writers with different
+    deliberate orders (prize grants are podium-ordered by design, rounds
+    26-27) remain possible and resolve as ordinary Postgres deadlock
+    aborts — the losing sweep retries next tick, a losing admin request
+    surfaces its error; money moves at most once either way because the
+    claim above already settled the rows."""
+    claimed = (await db.execute(text("""
+        UPDATE bets
+           SET settled_at = NOW(),
+               payout = amount,          -- full stake returned
+               settlement_kind = 'refunded'
+         WHERE series_id = :sid AND settled_at IS NULL
+        RETURNING id, player_id, amount
+    """), {"sid": str(sid)})).all()
+    if not claimed:
+        return 0
+    # Raising here (service hold) rolls the claim back with the caller's
+    # transaction — same all-or-nothing contract the old shape had.
     await _assert_no_service_subject(
-        db, affected_player_ids=[b.player_id for b in bets])
-    for b in bets:
+        db, affected_player_ids=[r.player_id for r in claimed])
+    for r in sorted(claimed, key=lambda x: str(x.player_id)):
         # Aug 9 bet audit r1 find 3: atomic delta (an absolute write here
         # could clobber a concurrent stake debit and hand back gold twice).
         await db.execute(text("""
             UPDATE players
                SET gold_spent = GREATEST(0, COALESCE(gold_spent, 0) - :amt)
              WHERE id = :pid
-        """), {"amt": b.amount, "pid": b.player_id})
+        """), {"amt": r.amount, "pid": r.player_id})
         db.add(GoldTransaction(
-            player_id=b.player_id, amount=b.amount,
+            player_id=r.player_id, amount=r.amount,
             reason=reason, reference_id=str(sid),
         ))
-        b.settled_at = datetime.now(timezone.utc)
-        b.payout = b.amount  # full stake returned
-        b.settlement_kind = "refunded"
-    return len(bets)
+    return len(claimed)
 
 
 async def _prune_stale_series(db: AsyncSession) -> int:
-    """Clean up stale series. Two modes:
+    """Clean up stale series. Three modes:
       1. **No match reported within 30 min of creation** — players never
          actually played anything (preflight created the series row but the
          room died before round 1). Series abandoned + bets refunded.
@@ -17971,9 +18253,24 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     mid-BO3 stays 'active' forever so it reattaches whenever the pair next
     plays — a 7-day expiry let leavers wait out the window and bank the elo.
 
-    Tournament series are exempt from ALL paths — async tournament matches
-    have a 7-day match deadline and the series row is created at lock time
-    (potentially days before the players actually meet up).
+    Tournament series are exempt from modes 1 and 2 — async tournament
+    matches have a 7-day match deadline and the series row is created at
+    lock time (potentially days before the players actually meet up).
+      3. **Tournament series under a WINNERLESS terminal bracket row
+         (forfeit/double_forfeit/bye_auto — 'completed' rows settle by
+         play) with unsettled bets** (Aug 22 lifecycle pass, r1 find 4) —
+         refund the bets, touch NOTHING else (the row deliberately stays
+         'active'; bracket status owns the outcome). The live refund
+         happens inside the terminal transaction itself
+         (_apply_terminal_transitions), so this mode is the reconciliation
+         for deploy-order gaps: a match terminalized by OLD code between
+         migration and API cutover self-heals on the next /series/active
+         call instead of stranding stakes forever (it also cleared the
+         pre-existing stock — bet 201's 500g was the live case). A hook
+         TRANSACTION rollback is NOT this mode's case: the rollback
+         retracts the terminal status too, so nothing matches here — the
+         next tournament sweep retry re-runs the terminal write and its
+         refund together (lifecycle r2 find 8).
     Returns the number of series changed across all modes."""
     cutoff_min = 30
     stalled_min = 60
@@ -17998,12 +18295,73 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         "  AND COALESCE(("
         "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
         "      ), rs.created_at) < NOW() - (:stalled_min || ' minutes')::interval "
+        # ORDER BY: modes 2/3 now LOCK each series before refunding, and two
+        # concurrent prune passes iterating in different orders would ABBA.
+        "ORDER BY rs.id "
         "LIMIT 50"
     ), {"stalled_min": str(stalled_min)})).all()
+    # Mode 3: stranded stakes under a terminal bracket row (see docstring).
+    # No time window — a stranded stake is wrong at any age; the unsettled-
+    # bets EXISTS keeps this a no-op for every already-reconciled series,
+    # and the atomic claim inside _refund_series_bets makes a race with the
+    # live hook or an admin reversal pay at most once.
+    stale_rows_c = (await db.execute(text(
+        "SELECT rs.id, rs.player1_id, rs.player2_id FROM ranked_series rs "
+        "WHERE rs.status = 'active' "
+        "  AND rs.is_tournament = TRUE "
+        "  AND EXISTS (SELECT 1 FROM bets b WHERE b.series_id = rs.id "
+        "              AND b.settled_at IS NULL) "
+        "  AND EXISTS (SELECT 1 FROM tournament_matches tm "
+        "              WHERE tm.series_id = rs.id "
+        "                AND tm.status IN ('forfeit', 'double_forfeit', "
+        "                                  'bye_auto')) "
+        "ORDER BY rs.id "
+        "LIMIT 50"
+    ))).all()
     changed = 0
+    for sid, player1_id, player2_id in stale_rows_c:
+        await _assert_no_service_subject(
+            db, affected_player_ids=[player1_id, player2_id])
+        # Same lock-then-recheck shape as mode 2 below (lifecycle r2 find
+        # 3) — for symmetry more than necessity here: a terminal-row
+        # tournament series has no settlement path (reports from its room
+        # are refused; roomless async binding excludes terminal rows), and
+        # the claim inside _refund_series_bets already makes any racer pay
+        # at most once. The lock still serializes cleanly with an admin
+        # reversal's FOR UPDATE.
+        _still_c = (await db.execute(text(
+            "SELECT 1 FROM ranked_series WHERE id = :sid "
+            "  AND status = 'active' AND invalidated_at IS NULL "
+            "FOR NO KEY UPDATE"), {"sid": str(sid)})).first()
+        if _still_c is None:
+            continue
+        n = await _refund_series_bets(db, sid, "refund_tournament_forfeit")
+        if n:
+            changed += 1
+            print(f"[SERIES] refunded {n} stranded tournament bet(s) on "
+                  f"{sid} (terminal bracket row; series stays as the "
+                  f"terminal writer left it)")
     for sid, player1_id, player2_id in stale_rows_b:
         await _assert_no_service_subject(
             db, affected_player_ids=[player1_id, player2_id])
+        # Lifecycle r2 find 3: LOCK the series and re-verify it is still an
+        # undecided stall UNDER the lock before refunding. The unlocked
+        # snapshot above could race a resumed report completing this very
+        # series: settlement then flushed its own (stale, unlocked) Bet
+        # objects over the refund's claim and paid the same stake twice —
+        # refund plus full winning payout. The series row lock is the FIRST
+        # lock the report path takes (FOR NO KEY UPDATE conflicts with FOR
+        # NO KEY UPDATE), so either the report committed first — this
+        # fresh recheck sees 2 wins / non-active and skips — or the report
+        # waits for this refund's commit, after which its settlement
+        # SELECT reads the claimed rows as settled and skips them.
+        _still_b = (await db.execute(text(
+            "SELECT 1 FROM ranked_series WHERE id = :sid "
+            "  AND status = 'active' AND invalidated_at IS NULL "
+            "  AND p1_series_wins < 2 AND p2_series_wins < 2 "
+            "FOR NO KEY UPDATE"), {"sid": str(sid)})).first()
+        if _still_b is None:
+            continue
         n = await _refund_series_bets(db, sid, "refund_abandoned")
         if n:
             changed += 1
@@ -18731,6 +19089,20 @@ async def series_preflight(
     # re-preflights at each series start, and the room context tells us it's
     # still a queue pairing. Rooms without context (older clients) stay private.
     rl = (room_id or "").lower()
+    # Aug 22 lifecycle pass (tournament r2 find 2, preflight half): a room
+    # that IS a closed bracket match's server-issued room must never mint an
+    # ordinary series — post-forfeit (or post-completion) games in the dead
+    # tournament room would otherwise count as ordinary ranked. Room-exact
+    # binding only: a preflight is by construction the START of a sitting in
+    # a specific room, so any other room means genuinely new play.
+    _closed_tm = await _closed_tournament_match_guard(db, room_id)
+    if _closed_tm is not None:
+        print(f"[PREFLIGHT-DIAG] not_ranked: room {room_id} belongs to "
+              f"closed bracket match {_closed_tm}")
+        await db.commit()
+        return {"status": "not_ranked", "series_id": "",
+                "p1_steam_id": p1_steam_id, "p2_steam_id": p2_steam_id,
+                "p1_wins": 0, "p2_wins": 0}
     is_priv = not (rl.startswith("ranked_") or rl.startswith("sct-"))
     series = RankedSeries(
         player1_id=p1.id, player2_id=p2.id,
@@ -19112,6 +19484,35 @@ async def place_bet(
     # Aug 9 bet audit find 1: an admin-reversed series keeps status='active'.
     if getattr(series, "invalidated_at", None) is not None:
         raise HTTPException(status_code=409, detail="Series was invalidated")
+    # Aug 22 lifecycle pass (tournament r2 find 4, second bullet): this
+    # endpoint held only the SERIES row, but the no-show sweep terminalizes
+    # the BRACKET row and never touches the series — the two transactions
+    # shared no lock, so the NOT EXISTS arm below could read the match as
+    # still-open from a pre-terminal snapshot while the sweep committed
+    # forfeit + its same-transaction bet refunds, and the debit then landed
+    # AFTER settlement with no settle path left. FOR SHARE on the bracket
+    # row conflicts with the sweep's UPDATE row lock: either the sweep
+    # already committed (this fresh read sees terminal -> 409, before any
+    # debit) or the sweep waits for our commit, after which its refund pass
+    # settles this very bet. Lock order stays series -> match, the report
+    # path's order, and the sweep never takes a SERIES row lock — so no
+    # series/match ABBA. (The sweep's refund pass does touch BETTOR player
+    # rows; cross-series player-row cycles against other multi-player
+    # writers resolve as ordinary Postgres deadlock aborts and the refund's
+    # atomic claim keeps money exactly-once — see _refund_series_bets.)
+    # A missing bracket row deliberately falls through — the
+    # shared predicate below treats it identically (same-predicate rule
+    # #159/#328: this is post-lock serialization ON TOP of the predicate,
+    # not a predicate edit).
+    if bool(getattr(series, "is_tournament", False)):
+        _tm_status = (await db.execute(text(
+            "SELECT status FROM tournament_matches "
+            "WHERE series_id = :sid LIMIT 1 FOR SHARE"
+        ), {"sid": str(sid)})).scalar_one_or_none()
+        if _tm_status in ("completed", "forfeit", "double_forfeit", "bye_auto"):
+            raise HTTPException(
+                status_code=409,
+                detail="Betting closed — series is no longer live")
     # Aug 9 bet audit find 4: the listing windows liveness at 2h but the POST
     # accepted any 'active' row forever — mirror the listing's exact predicate
     # (same-predicate rule #159) so a crafted request can't stake a husk.
