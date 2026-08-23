@@ -27,9 +27,11 @@ namespace CompetitiveRounds
     /// own particle renderers so it blends and grades exactly like the backdrop
     /// particles on that camera; unlit fallback if none is found.</para>
     ///
-    /// <para>Timing: Apply is only ever called from the END of the deferred tint
-    /// pass (already past MapTransitionGuardSec, learnings #45/#85) and Clear only
-    /// touches this object — neither reaches into a Map-owned particle system.
+    /// <para>Timing: Apply is called from the END of the deferred tint pass
+    /// (already past MapTransitionGuardSec, learnings #45/#85) and from the
+    /// Animated Cosmetics settings toggle; both Apply and Clear touch ONLY this
+    /// object — neither reaches into a Map-owned particle system, so neither can
+    /// stall a transition.
     /// Player preference: the Animated Cosmetics toggle (#162) also freezes this
     /// layer — a player who turned animation off for performance gets no new
     /// emitter.</para></summary>
@@ -47,7 +49,8 @@ namespace CompetitiveRounds
 
         /// <summary>Configure (or switch off) the effect for the skin being applied.
         /// Idempotent per (sku, kind): a repeat apply for the same skin on the next
-        /// map just re-centres and keeps emitting.</summary>
+        /// map re-centres and keeps emitting unless the view extents drifted
+        /// (>5%), in which case the emitter is rebuilt for the new view.</summary>
         internal static void Apply(string sku)
         {
             try
@@ -115,8 +118,8 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>Stop emitting (live particles age out) — vanilla backdrop restore,
-        /// a skin without an effect, or the test lever clearing.</summary>
+        /// <summary>Stop and clear the emitter — vanilla backdrop restore, a skin
+        /// without an effect, the animation toggle, or the test lever clearing.</summary>
         internal static void Clear(string why)
         {
             try
@@ -124,7 +127,10 @@ namespace CompetitiveRounds
                 if (_go == null) { _appliedSku = null; _appliedKind = CustomMapColors.SkinEffect.None; return; }
                 if (_appliedKind != CustomMapColors.SkinEffect.None)
                     Plugin.Log.LogInfo($"[MAPFX] cleared ({why})");
-                if (_ps != null) _ps.Stop(true, ParticleSystemStopBehavior.StopEmitting);
+                // Clear live particles too (review r4 find 2): a skin switch at a
+                // map boundary must not carry the outgoing skin's embers/stars
+                // over the incoming one for their remaining lifetime.
+                if (_ps != null) _ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
                 _appliedSku = null;
                 _appliedKind = CustomMapColors.SkinEffect.None;
             }

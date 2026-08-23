@@ -1889,8 +1889,16 @@ namespace CompetitiveRounds
                 // is pure GPU heat. Manual VM use (director disabled) is
                 // untouched. ──
                 int seatCap = (!Plugin.modDisabled && Plugin.BroadcastFpsCap != null) ? Plugin.BroadcastFpsCap.Value : 0;
-                bool seatActive = false;
-                if (seatCap > 0) { try { seatActive = BroadcastMode.DirectorActive; } catch { } }
+                // broadcastSeat = the director is active on THIS seat (nobody
+                // plays here then); seatActive = that AND a render cap is
+                // configured. The re-assert / no-stand-down exemptions key on
+                // the SEAT, not the cap value (review r4 find 1: with
+                // BroadcastFpsCap=0 the independent 16-min idle throttle was
+                // stranded behind the player-wins latch after a scene reload
+                // restored vSync).
+                bool broadcastSeat = false;
+                try { broadcastSeat = BroadcastMode.DirectorActive; } catch { }
+                bool seatActive = seatCap > 0 && broadcastSeat;
 
                 int desired = 0;
                 string why = null;
@@ -1967,7 +1975,7 @@ namespace CompetitiveRounds
                     // A player override stands until the wanted cap CHANGES
                     // (a different stage engaging) — never overridden on the
                     // broadcast seat, where nobody plays with the director on.
-                    if (fpsExternalOverride && !seatActive && desired == fpsDesiredLast) return;
+                    if (fpsExternalOverride && !broadcastSeat && desired == fpsDesiredLast) return;
                     fpsBaseTarget = curTarget;
                     fpsBaseVsync = curVsync;
                     fpsOwning = true;
@@ -1980,7 +1988,7 @@ namespace CompetitiveRounds
 
                 if (external)
                 {
-                    if (seatActive)
+                    if (broadcastSeat)
                     {
                         // Re-assert (review r1 find 8): a vanilla vSync change
                         // while the director is active would otherwise defeat
