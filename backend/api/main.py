@@ -14717,10 +14717,11 @@ async def _i18n_role(db: AsyncSession, steam_id: str, language: str, scope: str)
 def _portal_auth_reject(reason: str, steam_id: str, bound_ip: str, client_ip: str) -> HTTPException:
     """Every portal 401 raised by the auth gate or the refresh endpoint leaves
     ONE diagnostic line (never the token): which identity, which reason, and
-    both addresses. The first report of this class
-    (Aug 23) was undiagnosable from logs because nothing recorded the reason —
-    the SPA collapses every 401 into "Session expired" and the access log is
-    off. Prints are unbuffered (docker-compose PYTHONUNBUFFERED, #271)."""
+    both addresses. The first report of this class (Aug 23) was undiagnosable
+    from logs because nothing recorded the reason and the access log is off
+    (the SPA of that day also collapsed every 401 into "Session expired"; it
+    now keeps expired / maximum-lifetime / address-mismatch apart). Prints are
+    unbuffered (docker-compose PYTHONUNBUFFERED, #271)."""
     print(f"[PORTAL-AUTH] reject reason={reason} steam={steam_id or '-'} "
           f"bound={bound_ip or '-'} client={client_ip or '-'}")
     return HTTPException(401, reason)
@@ -14773,9 +14774,14 @@ async def _portal_auth(request: Request, db: AsyncSession) -> str:
             fresh = (await db.execute(text(
                 "SELECT bound_ip FROM i18n_portal_sessions WHERE token = :t"
             ), {"t": token})).scalar()
+            if fresh is None:
+                # The row vanished between the read and the UPDATE (a deletion
+                # or ban purge racing this request) — that is an expired
+                # session, not an address problem (review r6 find 2).
+                raise _portal_auth_reject("portal session expired", row["steam_id"], row["bound_ip"], client_ip)
             if fresh != client_ip:
                 raise _portal_auth_reject("portal session address mismatch",
-                                          row["steam_id"], fresh or row["bound_ip"], client_ip)
+                                          row["steam_id"], fresh, client_ip)
     elif row["bound_ip"] != client_ip:
         raise _portal_auth_reject("portal session address mismatch",
                                   row["steam_id"], row["bound_ip"], client_ip)
@@ -37849,9 +37855,12 @@ BROADCAST_BATTLE_DEFER_SECONDS = 300
 # path — two candidates alternating across the floor still ping-ponged every
 # dwell, because forced eviction is a must-switch the damper has to exempt.
 # The selector and its last_shown history below are therefore HEAD's: forced
-# eviction is margin-free (out of the set = evicted at the first dwell poll
-# that is not battle-deferred — i.e. between 300s and the 600s deferral
-# ceiling after activation), and peer rotation is least-recently-shown. A future pass wanting to damp the
+# eviction is margin-free — an ELIGIBLE current that is out of the rotation
+# set is evicted at the first dwell poll (age >= 300s) that is not
+# battle-deferred, the deferral itself ending by age 600s; a current that
+# drops out of the set later is evicted on that poll; an INELIGIBLE current
+# (game ended / unready / excluded) is evicted immediately, dwell or not.
+# Peer rotation is least-recently-shown. A future pass wanting to damp the
 # forced A<->B case has to change the ELIGIBILITY (e.g. hysteresis on the
 # floor), not the selector — that is the review's conclusion, recorded so
 # the next attempt does not rebuild the same two levers.
