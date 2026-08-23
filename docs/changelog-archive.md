@@ -153,3 +153,80 @@ codes, stats help page, graph redesign + whole-game timelines).
   pipeline brought to first light on dedicated infrastructure. Reserved
   broadcast spectator seat, service-account isolation policy, and stream
   lifecycle automation. Twitch/YouTube channels: SidsCompetitiveRounds.
+
+## Archived 2026-08-23 (from TODO.md — previous “Completed This Session” sections, moved at the v1.39.2 handoff)
+
+## ✅ Completed This Session (2026-08-11b) — bugs 199 + 200
+
+* **Bug 199 root-caused and fixed** (server-only): resumed-series liveness.
+  `ranked_series.last_activity_at` + migration 215, stamped at all three
+  resume sites and the live-points POST, third liveness arm on **both**
+  `/series/active` and `POST /bets`, activity-based `ORDER BY`. Verified
+  against prod: 1432 rows backfill, 0 of 31 active series falsely surface.
+* **Bug 200 root-caused and fixed** (server + client): queue-lock payloads now
+  carry the resumed BO3 tally; client stashes it keyed on room name and
+  consumes it one-shot inside the room-join reset (adopting at lock time is
+  clobbered by the reset).
+* **Adjacent finding fixed**: `spectate_games.ended_at` was written by nothing
+  (0/34 rows) — `POST /spectate/close` on room leave + a 10-minute janitor
+  sweep. This was the cause of Sid's `Game does not exist` rejoin failures.
+* **Two adversarial review rounds.** Round 1 caught a REAL defect in the fix
+  (three ORM assignments to an unmapped column = silent no-ops, Fix A 3/4
+  inert while five comments claimed otherwise). Round 2: zero code defects,
+  five comment corrections. Learnings **#345–#349** added.
+* Bug reports **199** and **200** commented twice each (diagnosis, then fix).
+* Ruled out and answered explicitly: spectators-disabled was NOT the cause;
+  the @Gambler ping silence is CORRECT and stays; Spirit's "other issues" was
+  bug 200 itself.
+
+## ✅ Completed This Session (2026-07-29)
+
+**Bug reports #111, #115–#123** — all root-caused, implemented, Codex-reviewed, comments posted.
+- #116/#117 **the big one**: `SpawnPoint.localStartPos` is a pre-scale LOCAL coord consumed as a
+  WORLD coord, so every 5+ player FFA round put everyone off their marker and into crates that deal
+  damage + knockback. Live since v1.35.0. Map growth 3%→6%/player landed with it.
+- #115 bug-report log in its own non-rich-text chunked pane with measured heights.
+- #118 10-colour FFA graph palette (the vanilla skin bank is 4 wide, so slot 4 wrapped onto slot 0's
+  exact colour).
+- #119 1s FFA no-fire spawn grace, armed on the real combat-start edge.
+- #120 FFA ID button → shared 12-char game code; `/matches/by-code` FFA branch; bot `/game` renders
+  FFA.
+- #121 economy rebalance + **migration 164 back-paid 1020g across 7 players**.
+- #122 dedicated "How FFA works" / "How 1v2 works" FAQ entries.
+- #123 per-opponent session W/L is pairwise by placement (was one `localWon` flag applied to the
+  whole roster).
+- #111 Hold-Start built, then **deleted** on Sid's call once item 5 superseded it.
+
+**Wave 5 items 2, 3, 4(server), 6, 7** — odds band, `/rank-tiers` live role colours + FFA history
+wrapping, bettable liveness/window, `/series/recent-multimode`, display-name fixes.
+
+**LIVE INCIDENT resolved** — 4 players freed from a `ready_join` lockout (migration 165), root cause
+found, server backstop deployed, client half committed. **Corrected learning #233, which was
+built on a false premise and was dead code.**
+
+**Pre-existing bug found in the incident logs:** `get_ranked_streak` was nested inside
+`get_recent_series` but called from `submit_match`, so **streak achievements have never granted
+since v1.30.0**. Fixed.
+
+**Migrations applied: 163** (FFA shortcode index), **164** (gold back-pay), **165** (free stuck
+ready_join rows + close abandoned lobbies + heal 2 display names from chat).
+
+## ✅ Completed This Session (2026-07-14) — v1.32.0
+
+- **11-item feature batch** (items 1–11): podium highlights + dynamic title + 3× XP; slayer 1000g + mig-123 backfill + God Build rename; bigger tournament text; tournament Discord feed + mig-124 availability DMs; screen-shake/lighting/shadows/animated-cosmetics settings; shop reorder; Block/Hit% analysis (list delivered in-chat); Discord bot expansion (/rank + /stats rework, /mystats, /cards, /graph, head-to-head /compare, /lb 50/page, live tournament board).
+- **Two same-day feedback rounds fixed:** podium alpha/bracket-color/outline, /lb 50-per-page + server rank double-offset fix, /compare→head-to-head + /graph split, tournament board "How it works". Lighting purple = documented known issue.
+- **Adversarial review** (27 agents / 6 dimensions): 18 confirmed findings (7 distinct) fixed pre-ship — availability-DM key mismatch, podium filter mismatch, wrong-time posts, pushback re-ask gap, board budget overflow, matplotlib thread race, slayer-gold HMAC hole.
+- Learnings **#151–#155**.
+
+## ✅ Completed This Session (2026-06-09) — v1.28.1 (bug-report validation + block fix)
+
+**Shipped v1.28.1** (backend live, GitHub release + DLL, Thunderstore bundle built, clients auto-update).
+
+- **#15 block in ranked/matchmade games** — block activated but absorbed nothing in competitive rooms. `GMArmsRaceStartGameBlockResetPatch` rebuilt block delegates every round even when nothing was destroyed (the rebuild strips the working chain). Gated on `if (r > 0)`. Validated by logs: 0/70 successful blocks (old) → 8/91 (fixed). (learning #89)
+- **#20 phantom HUD series score ("4-0")** — per-series counter only reset on the reporter's client; now self-corrects off the BO3 score. Server confirmed clean.
+- **#22 My Stats card-hover blocked the refresh button** — hover region was the full 900px text box; sized to rendered text via TMP `preferredWidth`. (learning #90)
+- **#17 streak cap 20** — removed `LIMIT 20` in `get_ranked_streak()` + `LIMIT 50` in the 2v2 path.
+- **#18 Discord "0 elo"** — display rounding `:.0f`→`:.1f` (data was correct; 1v1 + 2v2 embeds).
+- **Bug reports/day 3 → 10.**
+- **DC tracer widened to 1v1** — first NetworkRestart→LeaveRoom stack captured (turned out to be a normal end-of-series leave).
+- Posted `bug-comment` audit notes on #15/#17/#18/#20/#22.
