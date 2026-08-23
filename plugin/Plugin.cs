@@ -531,9 +531,26 @@ namespace CompetitiveRounds
 
             MuteAudioInBackground = Config.Bind(
                 "Performance", "MuteAudioInBackground",
-                true,
-                "Mute game audio while the window is unfocused in an online Photon room. Audio stays on at the menu, and the broadcast seat always ignores this setting."
+                false,
+                "Mute game audio while the window is unfocused in an online Photon room. Audio stays on at the menu, and the broadcast seat always ignores this setting. Also togglable in the F5 Settings tab."
             );
+            // Aug 23 (Stan, Discord): default flipped true -> false — most
+            // players want their audio while tabbed out. #190: a changed
+            // default migrates nobody, and the feature is ONE day old
+            // (v1.39.1), so the `true` sitting in every cfg is the old
+            // default, not a choice. One-shot flip, gated so a player who
+            // re-enables afterwards keeps it; the new Settings toggle makes
+            // re-enabling one click.
+            var muteFlip = Config.Bind(
+                "Performance", "MuteAudioInBackgroundDefaultMigrated",
+                false,
+                "Internal one-time marker for the Aug 23 default change (true -> false). Do not edit."
+            );
+            if (!muteFlip.Value)
+            {
+                if (MuteAudioInBackground.Value) MuteAudioInBackground.Value = false;
+                muteFlip.Value = true;
+            }
 
             // Aug 7 item 2: a NEW key, not a repurposed CapFpsUnfocused — that
             // key's on-disk description promises "no gameplay effect" and #190

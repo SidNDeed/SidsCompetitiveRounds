@@ -10133,7 +10133,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Bug #159: heavier menu text (the game's own font at a higher SDF weight).
         private static GameObject heavyFontBtn;
         private static object heavyFontTxt;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt, chatTtlTxt;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, muteBgToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt, chatTtlTxt;
+        private static GameObject muteBgToggleBtn;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
         private static GameObject perfMasterBtn, perfStunBtn, perfBulletsBtn, perfHitSndBtn, perfColorGhBtn, perfEdgeBnBtn, perfTagBtn, perfMenuBtn;
@@ -10454,6 +10455,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.");
             deepIdleToggleTxt = UIFactory.GetButtonText(deepIdleToggleBtn);
+            muteBgToggleBtn = SettingsToggle(intBox.transform, "SMuteBg", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Background mute toggled");
+                    Plugin.MuteAudioInBackground.Value = !Plugin.MuteAudioInBackground.Value;
+                    dirty = true;
+                },
+                "Mutes game audio while the window is unfocused during online play. The menu stays audible; sound returns the moment you tab back in.");
+            muteBgToggleTxt = UIFactory.GetButtonText(muteBgToggleBtn);
             pingToggleBtn = SettingsToggle(intBox.transform, "SPing", new Vector2(260, 28),
                 () =>
                 {
@@ -10975,6 +10985,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.DeepIdleUnfocused.Value
                         ? "Unfocused deep idle (60s): <color=#88FF88>ON</color>"
                         : "Unfocused deep idle (60s): <color=#FF9966>OFF</color>");
+            if (muteBgToggleTxt != null && Plugin.MuteAudioInBackground != null)
+                UIFactory.SetText(muteBgToggleTxt,
+                    Plugin.MuteAudioInBackground.Value
+                        ? "Mute audio when tabbed out: <color=#88FF88>ON</color>"
+                        : "Mute audio when tabbed out: <color=#FF9966>OFF</color>");
             if (appearOfflineTxt != null)
             {
                 var stAo = ApiClient.CachedPlayerStats;
