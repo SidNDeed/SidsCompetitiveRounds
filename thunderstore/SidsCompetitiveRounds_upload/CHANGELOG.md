@@ -1,3 +1,80 @@
+## v1.39.2 — 2026-08-23
+
+**Map skins: the Night pack (9 new) + an ambient-effect layer**
+
+- **Forest Fire** (embers), **Moonlit** (stars), **Eclipse**, **Underworld**
+  (embers), **Night City** (city-light twinkle), **Night Park**, **Rainy Day**
+  (rain), **Midnight**, **Blood Moon** (red stars). All in the Blackwood
+  family: pitch-black, dark-brown and deep-red skies with walls kept darker
+  than the rest of the catalogue. 75g; the six with an effect 150g.
+- New backdrop-layer effect emitter (`MapSkinEffects`): embers, rain and
+  stars drawn behind the map on the background camera's layer. It never
+  touches the map's own particles, never sits in front of gameplay, obeys
+  the Animated Cosmetics toggle, and engages only after the deferred tint
+  pass. Tour-verified in game on the broadcast seat.
+- Broadcast-seat verification levers: `TestOpenTab` opens the F5 overlay on a
+  tab (optionally scrolling the Shop) from the cfg, re-read every 2s on that
+  seat only; `TestMapSkin` accepts a comma list,
+  `TestMapSkinSandbox` enters LOCAL > SANDBOX by itself, and
+  `TestMapSkinTourSeconds` advances the list — a whole pack screenshots
+  itself in three minutes.
+
+**Name styles: 10 new gradients (1500g)**
+
+- Fade, Earth, Orchid, Sapphire, Emerald, Steel, Ash, Royal, Blood,
+  Twilight — one table line each; dark endpoints stay legible over the
+  darkest skins.
+
+**Community cosmetics**
+
+- Five new face items: Shock Shades, Cat Mouth, Cat Eyes, The Challenger,
+  Goober (approved placements compiled verbatim). Seasonal Spring's
+  re-approved placement (scale 1.4) is published.
+
+**Translation portal**
+
+- "Session expired" on every open for players whose game and browser reach
+  the server from different addresses (Cloudflare WARP, privacy relays,
+  split-tunnel VPNs): the session now binds to the first browser that uses
+  it; an address mismatch is reported as such; every gate 401 logs a
+  `[PORTAL-AUTH]` line.
+- 53 new client keys synced with machine translations seeded in es/ru/uk/sv
+  (also bundled in the client).
+
+**Ranked / economy (server)**
+
+- Glicko-2 tau 0.5 → 0.6 in every mode (FFA previously fell back to a
+  different value); hardcoded, with a startup log of the effective value.
+- Heavy-favourite bet wins (stored odds ≤ 1.5×) redirect 20% of the PROFIT —
+  never the stake — to the fighter/team you backed, in all three modes;
+  quotes already reflect it; reversals claw it back. (Community idea.)
+- Match history is searchable by opponent name (server filter, paged).
+
+**Fixes**
+
+- Rating-change displays show decimals for small changes consistently on
+  every surface (Stan, #262).
+- My Stats history gains a name search box (Stan, #263).
+- Custom player colour missing on the card-pick body in room-code games
+  (the gate matched only mod-issued rooms); also re-asserted on rematch.
+- Looping map sounds (saws, Abyssal Countdown) carrying past their round:
+  a round-boundary sweep stops orphaned loops, with a trailing pass relative
+  to the latest boundary.
+- Presence `last_seen` stamps had been failing silently since the
+  MIN_MOD_VERSION auto-raise deploy (an untyped CASE parameter) — hotfixed.
+- Broadcast seat: engine render cap while the director is active (GPU heat)
+  and one FPS governor for the cap / unfocused cap / deep idle so a player's
+  real frame-rate setting can no longer be lost; rotation dwell 5 min with a
+  non-battle-moment deferral (up to +5 min).
+- Broadcast bot (VM): idle-quit dormancy machinery ships INERT
+  (`dormant_after_seconds` = 0, operator flag) after review; the games-only
+  probe, global recovery floor and permanent safety halt are live.
+
+**Schema changes:** 244 (`fighter_tax` on the three bet tables), 245
+(`i18n_portal_sessions.first_use_at`), 246 (night-pack + gradient shop
+rows), 247 (cosmetic release + Spring rev 3), 248 (53 i18n keys), 249
+(212 translation seeds), 250 (release notes, five locales).
+
 ## v1.39.1 — 2026-08-22
 
 **Tournaments: deadline check-ins and tidier histories (Aug 22)**
@@ -1201,94 +1278,6 @@ Only your own view is affected Ã¢â‚¬â€ the message is still delivered
 else, and nothing about matches, ratings, gold, or the queue is involved. Restarting
 ROUNDS clears it. If you see this, check that Windows "Set time automatically" is on.
 
-
-## v1.35.5 Ã¢â‚¬â€ 2026-07-31 Ã¢â‚¬â€ queue strand root cause, Leave All Queues, shield charge, display toggles
-
-Backend deployed to production on 2026-07-31. Schema: migrations **173** (free
-stranded FFA seats) and **174** (`queue_leases`). The **Leave All Queues** button
-now reaches players with this client build.
-
-### Added
-
-- **"Leave all queues" button, in Settings.** Removes you from every queue and lobby
-  in every mode at once. Use it if the game thinks you're still in a match you've
-  already left, or if joining a queue keeps saying you're busy. It doesn't affect a
-  game you're actually playing and never touches stats, gold or rating. It's in
-  Settings rather than on the queue tabs on purpose Ã¢â‚¬â€ the player who needs it is the
-  one whose queue tab is misbehaving. If the server can't be reached it keeps retrying
-  in the background, including after a restart.
-
-### Changed
-
-- **Being "in a queue" now expires on its own.** Previously the server considered you
-  busy because a row existed, and you only became free again if one of about fifteen
-  different cleanup routines remembered to remove it Ã¢â‚¬â€ several of which needed your
-  game to still be running and cooperating. If none of them fired, you stayed blocked
-  with no time limit, which is why this kept needing manual intervention. Your slot is
-  now a lease with an expiry that a live game continuously renews; when the games stop,
-  it lapses by itself. Nothing has to remember to clean up, so there is nothing left to
-  forget. Getting it wrong now frees you slightly early Ã¢â‚¬â€ you just requeue Ã¢â‚¬â€ instead of
-  locking you out indefinitely. This also fixed 2v2 specifically, where a stuck slot
-  previously had no time limit at all.
-
-
-> **Minimum version raised to 1.35.4.** Older clients are asked to update before
-> they can play. The mod updates itself on launch; Thunderstore users update
-> through their mod manager.
-
-### Cosmetics
-
-Five new community face items ship with this release Ã¢â‚¬â€ **Brain Cane**, **Casi's
-mouth**, **Casicorn's Eyes**, **Little Pink Buddy** and **Sniper Medal**. Schema:
-migration **175**. Each artist opens their own sales from the Artist tab, so an
-item may show as not-yet-on-sale until they do.
-
-### Fixed (client)
-
-- **Shield Charge Ã¢â‚¬â€ and other block-attached card effects Ã¢â‚¬â€ could do nothing for
-  an entire game (#142/#144).** After a rematch, a leftover registration from the
-  previous game made the card's setup fail one step before it hooked into the
-  block system. Normal blocking kept working, so the card looked equipped and
-  simply had no effect. The cleanup that was meant to prevent this ran one frame
-  too early Ã¢â‚¬â€ before the game had actually finished destroying the old cards Ã¢â‚¬â€
-  so it inspected them while they were still alive and cleaned up nothing.
-- **The chromatic aberration toggle did nothing (#141).** It was switching the
-  setting on a rendering layer that isn't the one being displayed. If you had it
-  off, you were still seeing the aberration Ã¢â‚¬â€ including the screen-wide pulse on
-  every hit, which reads as camera shake. Screen shake itself was never the
-  problem; that toggle was working correctly all along.
-
-### Changed (client)
-
-- **Screen shake is now Full / Reduced / Off** instead of on/off, matching the
-  glow setting. Reduced keeps the hit feedback at about a third strength. If you
-  already had shake turned off, that carries over automatically.
-
-### Known issue
-
-- **Blocking still does not cancel poison ticks (#143).** The rebuild that
-  restores it is written but deliberately not switched on: the mechanism that
-  tells everyone in a room to use it doesn't yet guarantee they all switch at
-  the same moment, and a room that's half-switched would show players different
-  health values Ã¢â‚¬â€ worse than the current behaviour, which is at least consistent
-  for everyone. Blocking the initial poison shot still avoids poison entirely.
-
-### Fixed (server)
-
-- **"Perma stuck in the FFA queue", and locked out of every other queue with it
-  (#124/#139).** Leaving a locked FFA lobby has never once worked: the endpoint marks the
-  departure by concatenating the player's id onto the lobby's `departed_ids` array, and with
-  a plain bind parameter PostgreSQL types that parameter as an *array* rather than a single
-  id. The driver rejected it, the whole transaction rolled back, and the statement that
-  actually removes the player from the queue Ã¢â‚¬â€ the last line of the endpoint Ã¢â‚¬â€ never ran.
-  Every leave returned an error; 34 of 34 leave requests in one production log window
-  failed, with none succeeding. Because the leftover row reads as "this player is mid-match",
-  it also blocked them from joining 1v1, 2v2 and 1v2, and the game client's retry loop kept
-  the row looking permanently fresh so no automatic cleanup could ever reach it Ã¢â‚¬â€ hence the
-  repeating "the server will clear you shortly" message that never came true. Broken since
-  FFA shipped in v1.35.0; migrations 165 and 171 had been hand-clearing individual lobbies
-  without the cause being known. Schema/data: migration **173** frees any player still
-  stranded (2 freed on apply, plus 1 who escaped the moment the fix went live).
 
 
 _(older entries trimmed - full history on GitHub)_
