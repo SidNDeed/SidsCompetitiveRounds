@@ -6,8 +6,8 @@
 -- ten new per-letter gradient name styles.
 --
 -- Pricing follows precedent and is SID'S BALANCE KNOB (#331): dark skins at
--- 75g common (migration 095's tier); the three skins that carry an ambient
--- particle effect (embers/rain) or a star glint at 150g rare; gradients at
+-- 75g common (migration 095's tier); the six skins that carry an ambient
+-- particle effect (embers / rain / stars) at 150g rare; gradients at
 -- 1500g epic (migration 096's tier). rotation_pool is deliberately omitted
 -- (NULL) — list_shop_items hides any row with a pool. catalog_ready keeps its
 -- TRUE default (non-face kinds need no bundled art). Idempotent via

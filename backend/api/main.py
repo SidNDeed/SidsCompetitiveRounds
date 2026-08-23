@@ -14715,8 +14715,9 @@ async def _i18n_role(db: AsyncSession, steam_id: str, language: str, scope: str)
 
 
 def _portal_auth_reject(reason: str, steam_id: str, bound_ip: str, client_ip: str) -> HTTPException:
-    """Every portal 401 leaves ONE diagnostic line (never the token): which
-    identity, which reason, and both addresses. The first report of this class
+    """Every portal 401 raised by the auth gate or the refresh endpoint leaves
+    ONE diagnostic line (never the token): which identity, which reason, and
+    both addresses. The first report of this class
     (Aug 23) was undiagnosable from logs because nothing recorded the reason —
     the SPA collapses every 401 into "Session expired" and the access log is
     off. Prints are unbuffered (docker-compose PYTHONUNBUFFERED, #271)."""
@@ -14729,43 +14730,52 @@ async def _portal_auth(request: Request, db: AsyncSession) -> str:
     """Validate X-Portal-Token → steam_id. Token is address-bound (first-use,
     see I18N_PORTAL_FIRST_USE_SECONDS) and short-TTL."""
     token = request.headers.get("X-Portal-Token") or ""
+    client_ip = request.client.host if request.client else ""
     if not token or len(token) > 64:
-        raise HTTPException(401, "portal session required")
+        raise _portal_auth_reject("portal session required", "", "", client_ip)
     row = (await db.execute(text(
         "SELECT steam_id, bound_ip, expires_at, first_use_at, created_at"
         "  FROM i18n_portal_sessions WHERE token = :t"
     ), {"t": token})).mappings().first()
-    client_ip = request.client.host if request.client else ""
     if row is None or row["expires_at"] < datetime.now(timezone.utc):
         raise _portal_auth_reject("portal session expired", row["steam_id"] if row else "",
                                   row["bound_ip"] if row else "", client_ip)
     if row["first_use_at"] is None:
         # First portal request for this token. Bind it to THIS address — the
         # mint bound it to the game's, which is provisional (Aug 23, relay /
-        # split-tunnel egress). Own short transaction (async_session): the
-        # request session's transaction belongs to the handler, and a GET
-        # handler never commits, so a binding written there would vanish and
-        # re-open the window on every call. Conditional on first_use_at still
-        # NULL and the window still open — whichever concurrent first request
-        # wins the UPDATE owns the binding; a loser from a different address
-        # then fails the mismatch check below on its re-read.
-        from database import async_session as _portal_sessions   # own txn (#135: local import, used here only)
-        async with _portal_sessions() as _s2:
-            bound = (await _s2.execute(text(
-                "UPDATE i18n_portal_sessions"
-                "   SET bound_ip = :ip, first_use_at = clock_timestamp()"
-                " WHERE token = :t AND first_use_at IS NULL"
-                "   AND created_at + (:win || ' seconds')::interval > clock_timestamp()"
-                " RETURNING 1"
-            ), {"ip": client_ip, "t": token,
-                "win": str(I18N_PORTAL_FIRST_USE_SECONDS)})).scalar()
-            await _s2.commit()
-        if bound is None and row["bound_ip"] != client_ip:
-            # Window closed without a first use (the browser never opened, or
-            # opened late) and the addresses differ — the mint's provisional
-            # binding is all that is left, and it is not this address.
-            raise _portal_auth_reject("portal session address mismatch",
-                                      row["steam_id"], row["bound_ip"], client_ip)
+        # split-tunnel egress). Written on the request session and COMMITTED
+        # right here: a GET handler never commits, so an uncommitted binding
+        # would vanish and re-open the window on every call. Conditional on
+        # first_use_at still NULL and the window still open — whichever
+        # concurrent first request wins the UPDATE owns the binding; a loser
+        # from a different address fails the fresh-row comparison below.
+        # Review r5 find 3: NOT a second session — that needs a second pool
+        # connection while this request already holds one, and a burst of
+        # fresh tokens could then starve the pool against itself. Nothing has
+        # been written on this session yet and the advisory lock is taken only
+        # below, so committing here just ends an empty read transaction and
+        # makes the binding durable before the handler's own work begins.
+        bound = (await db.execute(text(
+            "UPDATE i18n_portal_sessions"
+            "   SET bound_ip = :ip, first_use_at = clock_timestamp()"
+            " WHERE token = :t AND first_use_at IS NULL"
+            "   AND created_at + (:win || ' seconds')::interval > clock_timestamp()"
+            " RETURNING 1"
+        ), {"ip": client_ip, "t": token,
+            "win": str(I18N_PORTAL_FIRST_USE_SECONDS)})).scalar()
+        await db.commit()
+        if bound is None:
+            # Either the window closed unused, or a CONCURRENT first request
+            # won the UPDATE. Compare against the FRESH row, never the
+            # pre-UPDATE snapshot (review r5 find 1: two same-address
+            # requests racing — an SPA boot fires several — made the loser
+            # compare the stale game address and 401 its own valid token).
+            fresh = (await db.execute(text(
+                "SELECT bound_ip FROM i18n_portal_sessions WHERE token = :t"
+            ), {"t": token})).scalar()
+            if fresh != client_ip:
+                raise _portal_auth_reject("portal session address mismatch",
+                                          row["steam_id"], fresh or row["bound_ip"], client_ip)
     elif row["bound_ip"] != client_ip:
         raise _portal_auth_reject("portal session address mismatch",
                                   row["steam_id"], row["bound_ip"], client_ip)
@@ -14906,8 +14916,9 @@ async def i18n_portal_session_refresh(request: Request,
         # _portal_auth passed, so the token is live — the only way to be here
         # is the absolute cap. Say that plainly instead of "expired": the
         # difference decides whether re-opening from the game will help.
-        raise HTTPException(401, "portal session reached its maximum lifetime "
-                                 "- reopen it from the in-game Settings tab")
+        raise _portal_auth_reject("portal session reached its maximum lifetime "
+                                  "- reopen it from the in-game Settings tab",
+                                  steam_id, "", request.client.host if request.client else "")
     await db.commit()
     # Near the cap the granted window is the REMAINING life, which is the bound
     # doing its job; the SPA shows whatever it gets back.
@@ -16507,7 +16518,9 @@ async function boot(){
   }catch(e){
     // Only a real 401 sends him back to the game (see errText).
     if(e.status===401){forgetSession();
-      a.textContent="Session invalid or expired — reopen the portal from the in-game Settings tab.";}
+      // errText keeps the three 401 reasons apart (expired / max lifetime /
+      // address mismatch) — review r5 find 5: this path hardcoded "expired".
+      a.textContent=errText(e);}
     else{a.textContent="Signed-in check failed — the session may still be fine. Reload to retry.";
       setStatus(errText(e),true);}
   }
@@ -37836,8 +37849,9 @@ BROADCAST_BATTLE_DEFER_SECONDS = 300
 # path — two candidates alternating across the floor still ping-ponged every
 # dwell, because forced eviction is a must-switch the damper has to exempt.
 # The selector and its last_shown history below are therefore HEAD's: forced
-# eviction is margin-free (out of the set = evicted at the next dwell), and
-# peer rotation is least-recently-shown. A future pass wanting to damp the
+# eviction is margin-free (out of the set = evicted at the first dwell poll
+# that is not battle-deferred — i.e. between 300s and the 600s deferral
+# ceiling after activation), and peer rotation is least-recently-shown. A future pass wanting to damp the
 # forced A<->B case has to change the ELIGIBILITY (e.g. hysteresis on the
 # floor), not the selector — that is the review's conclusion, recorded so
 # the next attempt does not rebuild the same two levers.
