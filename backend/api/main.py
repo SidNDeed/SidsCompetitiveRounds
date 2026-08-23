@@ -669,33 +669,6 @@ def _presence_is_online(steam_id: str | None) -> bool:
     return at is not None and (time.monotonic() - at) <= PRESENCE_TTL_SEC
 
 
-# Throttle for persisting presence to players.last_seen: the ping arrives every
-# ~60s per client, but a DB write every 5 min per player is plenty for the
-# Home tab's "recently online" list. steam_id -> monotonic seconds of last stamp.
-# Swept periodically — the endpoint is unauthenticated, so without a prune a
-# unique-steam_id flood grows this dict for the life of the process.
-_presence_db_stamped: dict[str, float] = {}
-PRESENCE_DB_STAMP_SEC = 300
-_presence_db_swept_at = 0.0
-
-
-def _presence_db_stamp_ok(steam_id: str) -> bool:
-    """Check + stamp the last_seen write throttle; sweeps stale entries at most
-    once a minute. An active client re-stamps every 5 min, so its entry never
-    ages past the 2x cutoff; flood entries fall out within ~10 minutes."""
-    global _presence_db_swept_at
-    now = time.monotonic()
-    if now - _presence_db_swept_at > 60:
-        _presence_db_swept_at = now
-        cutoff = now - 2 * PRESENCE_DB_STAMP_SEC
-        for sid in [s for s, at in _presence_db_stamped.items() if at < cutoff]:
-            _presence_db_stamped.pop(sid, None)
-    if now - _presence_db_stamped.get(steam_id, 0.0) <= PRESENCE_DB_STAMP_SEC:
-        return False
-    _presence_db_stamped[steam_id] = now
-    return True
-
-
 def _series_pair_filter(pid_a, pid_b):
     """Order-independent ranked_series player-pair predicate."""
     return or_(
@@ -874,9 +847,6 @@ _JANITOR_SELFTEST_ROOTS = (
     ("tournaments", "tournament_tick"),
 )
 
-# Strong ref: asyncio.create_task keeps only a weak reference, and a GC'd
-# task vanishes without a word. Held here, cancelled in lifespan shutdown.
-_janitor_selftest_task = None
 _janitor_selftest_report: dict = {"status": "pending"}
 
 
@@ -1794,35 +1764,206 @@ async def _run_janitor_query_selftest():
                        f"— janitor queries are UNVERIFIED this boot !!!\n{tb}{bar}")
 
 
+def _parse_pure_dotted_version(value: object) -> tuple[int, ...] | None:
+    """Parse only non-empty ASCII integer components separated by dots."""
+    raw = str(value)
+    if not _re.fullmatch(r"[0-9]+(?:[.][0-9]+)*", raw):
+        return None
+    try:
+        return tuple(int(part) for part in raw.split("."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _player_mod_version_stamp_value(value: str | None) -> str | None:
+    """A player-row version stamp, bounded to the latest shipped release."""
+    if value is None:
+        return None
+    parsed = _parse_pure_dotted_version(value)
+    latest = _parse_pure_dotted_version(LATEST_MOD_VERSION)
+    if parsed is None or latest is None or parsed > latest:
+        return None
+    return value
+
+
+async def _min_version_autoraise_restore():
+    """Merge the durable floor into the compiled-to-latest safe range.
+
+    Called at boot and as the first database action of every sweep so a
+    missing migration or transient boot-time read failure heals on a later
+    pass. Returning False makes that pass skip the raise rather than decide
+    from stale process state (#235, #337).
+    """
+    global MIN_MOD_VERSION_EFFECTIVE
+    from database import async_session
+    try:
+        async with async_session() as db:
+            row = (await db.execute(text(
+                "SELECT value FROM runtime_settings WHERE key = 'min_mod_version'"
+            ))).scalar()
+    except Exception as ex:
+        print(f"[MINVER] restore skipped ({type(ex).__name__}: {ex})")
+        return False
+
+    compiled = _parse_pure_dotted_version(MIN_MOD_VERSION)
+    latest = _parse_pure_dotted_version(LATEST_MOD_VERSION)
+    if compiled is None or latest is None:
+        print("[MINVER] restore skipped (compiled version constant is invalid)")
+        return False
+
+    stored = None if row is None else _parse_pure_dotted_version(row)
+    if row is not None and stored is None:
+        print(f"[MINVER] stored floor rejected by dotted-int validation: "
+              f"{str(row)[:64]!r}")
+    elif stored is not None and stored > latest:
+        print(f"[MINVER] stored floor capped at LATEST_MOD_VERSION: "
+              f"{str(row)[:64]!r} > {LATEST_MOD_VERSION}")
+    elif stored is not None and stored < compiled:
+        print(f"[MINVER] stored floor below compiled constant; using "
+              f"{MIN_MOD_VERSION} instead of {str(row)[:64]!r}")
+
+    valid_stored = stored if stored is not None else compiled
+    effective = min(max(valid_stored, compiled), latest)
+    effective_text = ".".join(str(part) for part in effective)
+    if effective_text != MIN_MOD_VERSION_EFFECTIVE:
+        MIN_MOD_VERSION_EFFECTIVE = effective_text
+        print(f"[MINVER] restored effective floor {MIN_MOD_VERSION_EFFECTIVE} "
+              "from runtime_settings")
+    return True
+
+
+async def min_version_autoraise_loop():
+    """Sid's auto-raise rule (Aug 22): once 10+ UNIQUE players have been
+    seen on LATEST_MOD_VERSION and NO player on an older version has been
+    online for 10 minutes, raise the live floor to LATEST and persist it.
+    Fresh non-null values other than exact LATEST are conservative holdouts,
+    including malformed or future claims. Unstamped rows never block: they
+    carry no version to compare and the HTTP header gate already covers their
+    requests. Once effective reaches LATEST, later passes keep restoring the
+    durable setting inside the compiled-to-latest safe range.
+
+    ACCEPTED-RESIDUAL REGISTER (falsifiable; worst cases stated exactly):
+    - Post-boot window: until this loop FIRST merges the stored floor
+      (immediately on a healthy DB now that work precedes the sleep; +60s
+      per transient failure), the API serves at the compiled floor and can
+      ADMIT below-durable-floor clients. It never locks out current
+      clients and never lowers the stored value.
+    - Check/commit race: an older-version request whose last_seen commit
+      lands between the final holdout re-check and the raise commit is a
+      straggler; its next request gets the designed 426 -> auto-update.
+    - One account running two client versions concurrently resolves
+      last-write-wins on mod_version; an active old copy re-stamps its
+      true version via authenticated presence within ~60s, restoring
+      holdout status well inside the 10-minute quiet requirement.
+    - Unauthenticated pings refresh last_seen only; an old row kept fresh
+      that way DELAYS the raise (conservative), never enables one.
+    - HMAC-action stamp sites (toggle-ranked, match report) sign with the
+      client-shipped secret; promoting an ACTIVE victim to LATEST is
+      undone by the victim own authenticated presence stamp within ~60s.
+    """
+    global MIN_MOD_VERSION_EFFECTIVE
+    from database import async_session
+    ADOPTERS_REQUIRED = 10
+    QUIET_MINUTES = 10
+    holdout_query = text(
+        "SELECT 1 FROM players"
+        " WHERE mod_version IS NOT NULL"
+        "   AND mod_version <> :latest"
+        "   AND last_seen > NOW() - (:mins || ' minutes')::interval"
+        " LIMIT 1"
+    )
+    holdout_params = {"latest": LATEST_MOD_VERSION,
+                      "mins": str(QUIET_MINUTES)}
+    while True:
+        try:
+            # This must precede every other DB action and the in-memory
+            # no-op check: a transient boot read heals within one sweep.
+            if not await _min_version_autoraise_restore():
+                continue
+            if _parse_version(MIN_MOD_VERSION_EFFECTIVE) >= _parse_version(LATEST_MOD_VERSION):
+                continue
+            async with async_session() as db:
+                adopters = (await db.execute(text(
+                    "SELECT COUNT(*) FROM players WHERE mod_version = :latest"
+                ), {"latest": LATEST_MOD_VERSION})).scalar() or 0
+                if adopters < ADOPTERS_REQUIRED:
+                    continue
+                if (await db.execute(holdout_query, holdout_params)).scalar() is not None:
+                    continue
+                raised_to = (await db.execute(text(
+                    "INSERT INTO runtime_settings AS rs (key, value)"
+                    " VALUES ('min_mod_version', :v)"
+                    " ON CONFLICT (key) DO UPDATE"
+                    "   SET value = EXCLUDED.value, updated_at = NOW()"
+                    " WHERE CASE"
+                    "   WHEN rs.value ~ '^[0-9]+([.][0-9]+)*$'"
+                    "   THEN string_to_array(EXCLUDED.value, '.')::numeric[]"
+                    "        > string_to_array(rs.value, '.')::numeric[]"
+                    "   ELSE TRUE"
+                    " END"
+                    " RETURNING value"
+                ), {"v": LATEST_MOD_VERSION})).scalar_one_or_none()
+                if raised_to is None:
+                    # Another feature-aware process already stored an equal
+                    # or newer floor. Do not emit a raise notification; the
+                    # next pass restores the bounded effective floor from it.
+                    await db.rollback()
+                    continue
+                await db.execute(text(
+                    "INSERT INTO pending_dms (steam_id, content) VALUES (:sid, :c)"
+                ), {"sid": "76561198040410653",
+                    "c": (f"MIN_MOD_VERSION auto-raised to {LATEST_MOD_VERSION}: "
+                          f"{adopters} players adopted and no older-version player "
+                          f"was online for {QUIET_MINUTES} minutes.")})
+
+                if (await db.execute(holdout_query, holdout_params)).scalar() is not None:
+                    await db.rollback()
+                    continue
+                # ACCEPTED-RESIDUAL REGISTER (#315; wording constrained by #351):
+                # - The check/commit race window is milliseconds after the final re-check;
+                #   its worst case is one straggler's next request getting the designed
+                #   426 -> auto-update path.
+                # - Already-open chat sockets survive a raise until their next reconnect.
+                # - One account running two client versions concurrently resolves
+                #   last-write-wins.
+                await db.commit()
+            MIN_MOD_VERSION_EFFECTIVE = str(raised_to)
+            print(f"[MINVER] AUTO-RAISED floor to {LATEST_MOD_VERSION} "
+                  f"(adopters={adopters}, quiet={QUIET_MINUTES}m)")
+        except Exception as ex:
+            print(f"[MINVER] sweep error ({type(ex).__name__}: {ex})")
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global _janitor_selftest_task
     print("Competitive ROUNDS API starting up")
-    from tournaments import tournament_tick
-    task   = asyncio.create_task(_supervised("queue_cleanup",      queue_cleanup_loop))
-    task_t2 = asyncio.create_task(_supervised("team_queue_cleanup", team_queue_cleanup_loop))
-    task_t  = asyncio.create_task(_supervised("tournament_tick",   tournament_tick))
-    # Detached one-shot, deliberately NOT under _supervised (its while-True
-    # would rerun a returning task forever) and not awaited (off the boot
-    # path). The module global is the strong ref that keeps it alive.
-    _janitor_selftest_task = asyncio.create_task(_run_janitor_query_selftest())
-    await _run_service_policy_audit(force=True)
-    yield
-    task.cancel()
-    task_t.cancel()
-    task_t2.cancel()
-    if _janitor_selftest_task is not None:
-        _janitor_selftest_task.cancel()
-        # cancel() only requests; await so the session context actually
-        # unwinds and its connection is released before the loop closes
-        # (Codex r1 find 7). Done for the one-shot only — the three loop
-        # tasks keep their long-standing fire-and-forget teardown.
-        try:
-            await _janitor_selftest_task
-        except (asyncio.CancelledError, Exception):
-            pass
-    print("Competitive ROUNDS API shutting down")
+    tasks: list[asyncio.Task] = []
+    try:
+        from tournaments import tournament_tick
+        await _min_version_autoraise_restore()
+        tasks.append(asyncio.create_task(
+            _supervised("queue_cleanup", queue_cleanup_loop)))
+        tasks.append(asyncio.create_task(
+            _supervised("team_queue_cleanup", team_queue_cleanup_loop)))
+        tasks.append(asyncio.create_task(
+            _supervised("tournament_tick", tournament_tick)))
+        tasks.append(asyncio.create_task(
+            _supervised("min_version_autoraise", min_version_autoraise_loop)))
+        # Detached one-shot, deliberately NOT under _supervised (its while-True
+        # would rerun a returning task forever) and not awaited on the boot path.
+        tasks.append(asyncio.create_task(_run_janitor_query_selftest()))
+        await _run_service_policy_audit(force=True)
+        yield
+    finally:
+        for background_task in tasks:
+            background_task.cancel()
+        if tasks:
+            # Every task is awaited so cancellation can unwind any open
+            # database session before the event loop closes.
+            await asyncio.gather(*tasks, return_exceptions=True)
+        print("Competitive ROUNDS API shutting down")
 
 
 async def team_queue_cleanup_loop():
@@ -2895,8 +3036,8 @@ app.include_router(tournaments_router)
 
 # ── Version gate ───────────────────────────────────────────────
 # Clients send X-Mod-Version on every request. If the version is below
-# MIN_MOD_VERSION, the request is rejected with 426 so the mod can prompt
-# the user to update before showing any data.
+# MIN_MOD_VERSION_EFFECTIVE, the request is rejected with 426 so the mod can
+# prompt the user to update before showing any data.
 #
 # Initial deploy grandfathers requests with no header (older clients in the
 # wild). Once adoption of the header is universal, set REQUIRE_MOD_VERSION
@@ -2913,6 +3054,14 @@ app.include_router(tournaments_router)
 # sct- spectate attestation, and the queue home_region field. Old clients
 # get 426 → auto-update on next launch.
 MIN_MOD_VERSION = "1.38.7"
+# The LIVE floor. Starts at the compiled constant; the auto-raise loop can
+# move it UP to LATEST_MOD_VERSION and persist the raise in runtime_settings.
+# Restarts and feature-aware redeploys restore
+# min(max(valid stored, compiled constant), LATEST_MOD_VERSION) (#337).
+# DEPLOYMENT INVARIANT: never roll back to a pre-feature binary after a raise;
+# it cannot read runtime_settings and therefore enforces only its compiled
+# constant. Single worker (#125), so the module global is process truth.
+MIN_MOD_VERSION_EFFECTIVE = MIN_MOD_VERSION
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # First client build with the fixed hit/block counting semantics (July 21:
@@ -2924,9 +3073,8 @@ REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should b
 STATS_CLEAN_MIN_VERSION = "1.34.0"
 
 # Per-request mod version captured from the X-Mod-Version header by the
-# version-gate middleware. Read by _mark_mod_seen so we can stamp
-# players.mod_version without threading the request object through every
-# endpoint that calls the helper.
+# version-gate middleware. Identity-bound _mark_mod_seen callers may use it
+# to stamp players.mod_version without threading the request object through.
 _current_mod_version: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_mod_version", default=None
 )
@@ -3271,23 +3419,22 @@ async def version_gate(request: Request, call_next):
     if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
         return await call_next(request)
     sent = request.headers.get("X-Mod-Version")
-    if sent is None:
+    if not sent:
         if REQUIRE_MOD_VERSION:
             return JSONResponse(
                 status_code=426,
-                content={"error": "outdated", "required": MIN_MOD_VERSION, "current": None},
+                content={"error": "outdated", "required": MIN_MOD_VERSION_EFFECTIVE, "current": None},
             )
         return await call_next(request)
-    if _parse_version(sent) < _parse_version(MIN_MOD_VERSION):
+    sent_version = _parse_version(sent)
+    if sent_version < _parse_version(MIN_MOD_VERSION_EFFECTIVE):
         return JSONResponse(
             status_code=426,
-            content={"error": "outdated", "required": MIN_MOD_VERSION, "current": sent},
+            content={"error": "outdated", "required": MIN_MOD_VERSION_EFFECTIVE, "current": sent},
         )
-    # Stash on request.state + a ContextVar so _mark_mod_seen can stamp
-    # the player row with the version that just made the call. ContextVar
-    # propagates through asyncio's per-task context — caller endpoints
-    # don't need to pass anything down. Used by the leaderboard
-    # player-detail view to show "running v1.26.5" per player.
+    # Stash on request.state + a ContextVar for identity-bound player-row
+    # stamps. ContextVar propagates through asyncio's per-task context.
+    # Used by the leaderboard player-detail view to show the observed version.
     request.state.mod_version = sent
     token = _current_mod_version.set(sent)
     try:
@@ -3443,22 +3590,24 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
     return player
 
 
-async def _mark_mod_seen(db: AsyncSession, player: Player) -> None:
+async def _mark_mod_seen(db: AsyncSession, player: Player, *,
+                         stamp_version: bool = False) -> None:
     """Stamp `mod_seen_at` and auto-grant the Beta title. Called from mod-only
     endpoints (queue join, toggle-ranked, achievements unlock, match-report
     reporter) so the Beta title only lands on confirmed mod users — not on
     casual opponents auto-created by get_or_create_player.
 
-    Also stamps `mod_version` from the per-request contextvar populated by the
-    version-gate middleware. ContextVar propagates through asyncio's task-local
-    context so callers don't need to thread the request through every endpoint."""
+    Version stamping is opt-in: the caller must already have bound this exact
+    player identity with the normal Steam-session check. Future-version headers
+    are served normally but never written into players."""
     if player is None or player.deleted_at is not None:
         return
     try:
         if player.mod_seen_at is None:
             player.mod_seen_at = datetime.now(timezone.utc)
-        observed_version = _current_mod_version.get()
-        if observed_version and player.mod_version != observed_version:
+        observed_version = _player_mod_version_stamp_value(
+            _current_mod_version.get()) if stamp_version else None
+        if observed_version is not None and player.mod_version != observed_version:
             player.mod_version = observed_version
         beta_id = (await db.execute(
             text("SELECT id FROM shop_items WHERE sku = 'title_beta' LIMIT 1")
@@ -3651,7 +3800,7 @@ LATEST_MOD_VERSION = "1.39.1"
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
     """Returns the latest recommended mod version and the gating floor."""
-    return {"version": LATEST_MOD_VERSION, "min_version": MIN_MOD_VERSION}
+    return {"version": LATEST_MOD_VERSION, "min_version": MIN_MOD_VERSION_EFFECTIVE}
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────
@@ -4708,8 +4857,8 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     if report.reported_by_steam_id not in (report.player1.steam_id, report.player2.steam_id):
         raise HTTPException(status_code=400, detail="reporter is not a participant in this match")
     reporter = p1 if report.reported_by_steam_id == report.player1.steam_id else p2
-    # Reporter clearly has the mod installed — stamp them and grant Beta.
-    await _mark_mod_seen(db, reporter)
+    # The session check above binds this request to the reporter.
+    await _mark_mod_seen(db, reporter, stamp_version=True)
 
     # Create match record. duration_seconds mirrors match_duration so anti-cheat
     # queries can use the canonical column going forward; both populated for safety.
@@ -9539,7 +9688,7 @@ async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(.
             player.display_name = _clean
 
     player.ranked_enabled = enabled
-    await _mark_mod_seen(db, player)
+    await _mark_mod_seen(db, player, stamp_version=True)
     await db.commit()
 
     return {"steam_id": steam_id, "ranked_enabled": enabled}
@@ -10513,7 +10662,7 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     # Get or create the player (auto-register on first queue join)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
-    await _mark_mod_seen(db, player)
+    await _mark_mod_seen(db, player, stamp_version=True)
     # Clicking the ranked queue button IS the opt-in. Without this, first-launch
     # players whose async /toggle-ranked POST hasn't landed yet get their first
     # ranked match recorded as casual — required a game restart before /toggle
@@ -10721,8 +10870,8 @@ async def presence_ping(request: Request,
     """Presence heartbeat (v1.29). The mod's always-on loop calls this every
     ~60s while the game is running; the response carries the current online
     count for the queue tab's 'N online' readout. Since v1.33 the ping also
-    stamps players.last_seen (throttled to one write per 5 min per player)
-    so the Home tab's 'recently online' list stays fresh."""
+    stamps players.last_seen so the Home tab's 'recently online' list stays
+    fresh."""
     _presence_touch(steam_id)
     # in_match=<lobby/series id> means "I am IN a game for this group right now".
     # Optional on purpose: pre-v1.35.3 clients never send it, and every consumer
@@ -10798,14 +10947,9 @@ async def presence_ping(request: Request,
                 # longest observed sitting.
                 await _lease_renew(db, _im_pid, _im_mode, _gid, LEASE_TTL_INGAME,
                                    max_total_seconds=LEASE_MAX_INGAME_TOTAL)
-                # COMMIT HERE, explicitly. The only other commit in this
-                # endpoint is the players.last_seen stamp, which is throttled
-                # to one write per 5 minutes per player — so without this line
-                # four out of every five 60-second renewals executed, returned
-                # success, and were then silently ROLLED BACK at session close.
-                # The lease would have been renewed on a 5-minute cadence
-                # against a 10-minute expiry, i.e. two heartbeats of margin
-                # instead of ten, and a live game could have lost its lease.
+                # COMMIT HERE, explicitly. Lease renewal and the player
+                # presence stamp below are separate durability decisions; a
+                # later presence failure must not roll back a valid renewal.
                 await db.commit()
             except Exception as _lex:
                 try:
@@ -10815,15 +10959,43 @@ async def presence_ping(request: Request,
                 print(f"[LEASE] in_match renew failed for {steam_id}: {_lex}")
         else:
             print(f"[PRESENCE] in_match claim rejected (unverified): {steam_id} -> {in_match}")
-    if _presence_db_stamp_ok(steam_id):
+    observed_version = _player_mod_version_stamp_value(
+        getattr(request.state, "mod_version", None))
+    session_token = request.headers.get("X-Session-Token")
+    session_hash = (hashlib.sha256(session_token.encode()).hexdigest()
+                    if session_token else None)
+    try:
+        # One last-write-wins statement owns both fields. The EXISTS predicate
+        # mirrors the FFA queue's session check: a gate-validated version is
+        # stamped only when the token is verified, unexpired, and bound to the
+        # named player. Missing/invalid sessions still refresh last_seen on a
+        # matching non-deleted player row.
+        await db.execute(text("""
+            UPDATE players AS p
+               SET last_seen = NOW(),
+                   mod_version = CASE
+                       WHEN :mod_version IS NOT NULL
+                        AND EXISTS (
+                            SELECT 1 FROM steam_sessions ss
+                             WHERE ss.token_hash = :session_hash
+                               AND ss.steam_id = p.steam_id
+                               AND ss.verified
+                               AND (ss.expires_at IS NULL OR ss.expires_at >= NOW())
+                        )
+                       THEN :mod_version
+                       ELSE p.mod_version
+                   END
+             WHERE p.steam_id = :sid AND p.deleted_at IS NULL
+        """), {"sid": steam_id,
+                 "mod_version": observed_version,
+                 "session_hash": session_hash})
+        await db.commit()
+    except Exception as ex:
         try:
-            await db.execute(text(
-                "UPDATE players SET last_seen = NOW() "
-                "WHERE steam_id = :sid AND deleted_at IS NULL"
-            ), {"sid": steam_id})
-            await db.commit()
-        except Exception as ex:
-            print(f"[PRESENCE] last_seen stamp failed for {steam_id}: {ex}")
+            await db.rollback()
+        except Exception:
+            pass
+        print(f"[PRESENCE] last_seen stamp failed for {steam_id}: {ex}")
     # Aug 7 item 1: alerts revision piggybacks on the cheapest always-on poll
     # — clients refetch /alerts/active only when it moves. Flat-scalar
     # addition, ignored by old parsers (#73).
@@ -13156,10 +13328,18 @@ async def get_recent_multimode_series(
 @app.websocket("/api/v1/ws/chat")
 async def ws_chat(ws: WebSocket):
     """Mod <-> server chat channel. Messages are broadcast fan-out style."""
-    sent = ws.headers.get("x-mod-version")
-    if sent and _parse_version(sent) < _parse_version(MIN_MOD_VERSION):
-        await ws.close(code=1008, reason="outdated")
-        return
+    expected_internal_key = os.getenv("API_SECRET_KEY", "")
+    is_internal = bool(
+        expected_internal_key
+        and ws.headers.get("x-internal-key") == expected_internal_key)
+    if not is_internal:
+        sent = ws.headers.get("x-mod-version")
+        if not sent and REQUIRE_MOD_VERSION:
+            await ws.close(code=1008, reason="outdated")
+            return
+        if sent and _parse_version(sent) < _parse_version(MIN_MOD_VERSION_EFFECTIVE):
+            await ws.close(code=1008, reason="outdated")
+            return
     await chat_manager.connect(ws)
     print(f"[CHAT] subscriber connected (total={chat_manager.count})")
     # Codex r1 f2: the socket's VERIFIED identity. Message steam_ids are
@@ -18261,11 +18441,10 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
                                             r["p1_series_wins"], r["p2_series_wins"])
         # Fail-closed on the reporting capability (see the batched lookup above).
         # Scope, stated honestly: this catches a NULL or below-floor stored
-        # version. It is NOT proof that both clients will report — /series/preflight
-        # stamps BOTH participants' mod_version from the ONE caller's request
-        # header, so a capable caller can stamp an incapable opponent as capable
-        # (the cross-stamp #294 flags as poisonable). It is strictly better than
-        # the nothing that was here, and it matches what 2v2/FFA enforce.
+        # version. It is NOT proof that both clients will report: each player
+        # row holds one session-bound, last-write-wins observation, not a
+        # frozen per-sitting capability. It is strictly better than the
+        # nothing that was here, and it matches what 2v2/FFA enforce.
         if not _lp_capable.get(r["p1_id"], False) or not _lp_capable.get(r["p2_id"], False):
             score_locked = True
         is_tournament = bool(r["is_tournament"])
@@ -18629,10 +18808,9 @@ async def series_preflight(
     # a name (older mod build).
     p1 = await get_or_create_player(db, p1_steam_id, p1_name or p1_steam_id)
     p2 = await get_or_create_player(db, p2_steam_id, p2_name or p2_steam_id)
-    # Both players reached preflight via their own mod's GameStateWatcher,
-    # so both are confirmed mod users.
+    # Preflight's HMAC does not bind the request to p1. Preserve the existing
+    # mod-seen/Beta behavior, but do not stamp either player's mod_version.
     await _mark_mod_seen(db, p1)
-    await _mark_mod_seen(db, p2)
     # Ranked gate (bug #42). ranked_enabled defaults TRUE; a FALSE means the
     # player explicitly opted out via the Settings toggle. The old code
     # force-enabled both players here "for first-launch races", which
@@ -23130,7 +23308,7 @@ async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db
     player = player.scalar_one_or_none()
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
-    await _mark_mod_seen(db, player)
+    await _mark_mod_seen(db, player, stamp_version=True)
 
     # Check if already unlocked
     existing = await db.execute(
@@ -23237,6 +23415,8 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
     player = player.scalar_one_or_none()
     if player:
+        # Bug reports accept an arbitrary subject id and tolerate missing
+        # sessions, so this may mark mod-seen/Beta but cannot stamp a version.
         await _mark_mod_seen(db, player)
 
     # Rate limit: 10 reports per 24h per Steam ID. Returns 429 so the client
@@ -24746,7 +24926,7 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
     await _enrollment_identity_gate(db, req.steam_id)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
-    await _mark_mod_seen(db, player)
+    await _mark_mod_seen(db, player, stamp_version=True)
     # Joining 2v2 queue = ranked opt-in. Same race fix as /api/v1/queue/join.
     if not player.ranked_enabled:
         player.ranked_enabled = True
@@ -31786,8 +31966,8 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
         _parse_version(v.mod_version or "0") >= _floor for v in _vrows)
     if not _all_capable:
         # Codex round 2 (MEDIUM): sudden_death is deliberately NOT in this
-        # collapse. This check reads players.mod_version — the stale,
-        # cross-player-writable column (see the kills tie-break note below) —
+        # collapse. This check reads players.mod_version — a potentially stale,
+        # last-write-wins observation (see the kills tie-break note below) —
         # and it runs BEFORE the strict per-member gate, which can only turn
         # the flag OFF. So a roster that is genuinely capable by every
         # member's own authenticated queue version would still have had the
@@ -31801,9 +31981,9 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
         # this general gate fires and the strict gate still (correctly) leaves
         # sudden death ON. That is the INTENDED outcome — the queue column is
         # the authoritative per-member evidence (#294b) and the players column
-        # is the one that can be written by another player's request. The
-        # other knobs keep riding the weaker gate because a stale version
-        # there only mis-sizes a draw, never desyncs damage.
+        # can change when the same account runs another client version. The
+        # other knobs keep riding the weaker gate because stale evidence there
+        # only mis-sizes a draw, never desyncs damage.
         await db.execute(text("""
             UPDATE ffa_lobbies
                SET score_target=5, card_candidates=5, initial_picks=1,
@@ -31815,11 +31995,10 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     # Kills tie-break capability, frozen HERE (migration 187): TRUE only when
     # EVERY member's ffa_queue.mod_version — stamped by that member's OWN
     # session-authenticated join/create call — clears the floor.
-    # players.mod_version is deliberately NOT consulted for this flag: any
-    # preflight caller can stamp that column onto another player's row (Codex
-    # Aug-3 r2 find 1), while a queue row's version is only ever written by
-    # its own player's request. NULL/missing ⇒ not capable ⇒ legacy shared-tie
-    # semantics (the safe direction, #288).
+    # players.mod_version is deliberately NOT consulted for this flag: it is
+    # global last-write-wins state, while a queue row is this member's own
+    # authenticated, lobby-scoped observation. NULL/missing ⇒ not capable ⇒
+    # legacy shared-tie semantics (the safe direction, #288).
     _kt_vals = (await db.execute(text(
         "SELECT mod_version FROM ffa_queue WHERE player_id = ANY(:ids)"
     ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
@@ -31831,10 +32010,9 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     # rest of the config set, and deliberately does not rely on the
     # `_all_capable` collapse above.
     #
-    # Why: that collapse reads `players.mod_version`, which the comment
-    # immediately above states is cross-player poisonable — any preflight
-    # caller can stamp that column onto ANOTHER player's row (#294b). For the
-    # other knobs (draw size, score target, card cap) a poisoned version only
+    # Why: that collapse reads global, last-write-wins `players.mod_version`,
+    # which can be stale or change when one account runs two versions. For the
+    # other knobs (draw size, score target, card cap) stale evidence only
     # mis-sizes a draw. Sudden death decides whether DAMAGE LANDS, so a
     # client that does not implement it while its peers do produces a real
     # cross-client divergence: one replica suppresses a hit, another applies
@@ -33100,9 +33278,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     _lobby_ranked = bool(lobby["is_ranked"]) if ("is_ranked" in lobby and lobby["is_ranked"] is not None) else True
     # ── Kills tie-break capability: read the flag FROZEN at lock time
     # (migration 187), computed there from each member's OWN session-
-    # authenticated join call (ffa_queue.mod_version) — never from
-    # players.mod_version, which any preflight caller can stamp onto another
-    # player's row (Codex Aug-3 round-2 find 1: provenance, not parsing).
+    # authenticated join call (ffa_queue.mod_version) — never from the global,
+    # last-write-wins players.mod_version observation.
     # Freezing at lock makes the semantics a property of the GAME: no
     # mid-sitting version change, poll race, or reporter identity can flip
     # them between games of one sitting. Missing column/NULL (pre-187 lobby
@@ -35812,8 +35989,8 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
             _re.escape(_series_room) + r"_\d{6}_r\d+",
             (report.photon_room_id or "")):
         raise HTTPException(400, "Report room does not match the series room")
-    # 2v2 reporter clearly has the mod installed.
-    await _mark_mod_seen(db, reporter)
+    # The session check above binds this request to the reporter.
+    await _mark_mod_seen(db, reporter, stamp_version=True)
 
     # First-match-of-series team_series slot alignment. The server's balancer
     # assigned team1/team2 at lock time, but the client's t1a/t1b/t2a/t2b
