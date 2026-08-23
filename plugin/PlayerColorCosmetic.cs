@@ -368,6 +368,16 @@ namespace CompetitiveRounds
                 RevertPlayer(actor);
                 return;
             }
+            // Player/Effects contains gameplay-readability indicators (silence,
+            // stun, overheat and boundary warnings), never body visuals.
+            Transform fx = playerRoot.Find("Effects");
+            if (fx == null)
+            {
+                VanillaFixSupport.DiagLimited(
+                    "PlayerColorCosmetic-effects-missing",
+                    "[PCOLOR] Player/Effects subtree not found; gameplay indicators remain eligible for body tint",
+                    1);
+            }
             Color tint = ParseHex(colorHex, Color.white);
 
             // If we've already tinted this actor, restore originals first so the new
@@ -461,6 +471,7 @@ namespace CompetitiveRounds
                 foreach (var ps in pss)
                 {
                     if (ps == null) continue;
+                    if (fx != null && ps.transform.IsChildOf(fx)) continue;
                     var main = ps.main;
                     Color startC = main.startColor.color;
                     if (!IsTeamLike(startC, teamBaseline)) continue;
@@ -490,6 +501,7 @@ namespace CompetitiveRounds
                 foreach (var sr in sprs)
                 {
                     if (sr == null) continue;
+                    if (fx != null && sr.transform.IsChildOf(fx)) continue;
                     var c0 = sr.color;
                     if (c0.a < 0.3f) continue;
                     if (!IsTeamLike(c0, teamBaseline)) continue;

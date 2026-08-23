@@ -64,8 +64,19 @@ namespace CompetitiveRounds
             // shimmer that was a bug for normal skins (failed approach #3 in
             // Plugin.cs) is the FEATURE for the gold/platinum/aurora skins.
             public Color? Sparkle;
+            // Ambient particle effect drawn on the background layer (Aug 23 "night
+            // pack": Forest Fire embers, Rainy Day rain). Rendered by
+            // MapSkinEffects — a persistent emitter the tint passes never touch,
+            // so it adds no flicker risk to the wall/backdrop pipeline. None for
+            // every pre-existing skin.
+            public SkinEffect Effect;
+            public Color? EffectColor;    // particle colour (start)
+            public Color? EffectColor2;   // optional second colour (random-between)
             public Action<ColorGrading> Configure;
         }
+
+        /// <summary>Ambient effect kinds MapSkinEffects knows how to build.</summary>
+        internal enum SkinEffect { None = 0, Embers = 1, Rain = 2, Stars = 3 }
 
         private static readonly Dictionary<string, Preset> _presets =
             new Dictionary<string, Preset>(StringComparer.OrdinalIgnoreCase)
@@ -416,6 +427,160 @@ namespace CompetitiveRounds
                         cg.colorFilter.Override(new Color(0.38f, 0.42f, 0.47f));
                     }
                 }},
+
+                // ── Night pack (Aug 23, Sid: "more styles like Blackwood — dark
+                // brown / pitch black / deep red backgrounds, walls darker than
+                // usual, vary the colours; moon, eclipse, underworld, night,
+                // rainy day; a Forest Fire with little fire effects"). Tuned
+                // against in-game tour screenshots on the broadcast seat:
+                //  * NO Sky base — Sky's full-screen 'Paint' part sits on layer 14
+                //    in the WALL colours, which turns a "pitch black" skin into a
+                //    bright painted sky and hides anything on the backdrop layer
+                //    (the ambient effects). Gold/Soviet/Poison leave the real sky.
+                //  * NO Sparkle — it glints the WALLS too (ash → cream) and on a
+                //    Soviet base turns the cloud particles into red blotches.
+                //    Star/twinkle looks come from SkinEffect.Stars instead.
+                //  * Greens carry some red (pure dark green renders neon after
+                //    the saturation normalisation) and browns carry extra green
+                //    (Post_Main's gain is red-heavy, a dim brown reads red).
+                // Only temperature/tint/postExposure are live grading knobs
+                // (colorFilter + saturation are normalised downstream). ──
+
+                // Forest Fire — dark smoky sky, night-forest green and bark walls,
+                // embers drifting up through the backdrop.
+                { "mapcolor_forest_fire", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.22f, 0.34f, 0.24f),
+                    SecondaryColor = new Color(0.50f, 0.34f, 0.18f),
+                    Effect = SkinEffect.Embers,
+                    EffectColor = new Color(1.00f, 0.55f, 0.15f),
+                    EffectColor2 = new Color(1.00f, 0.85f, 0.35f),
+                    Configure = cg => {
+                        cg.saturation.Override(-10f);
+                        cg.temperature.Override(14f);
+                        cg.postExposure.Override(-0.70f);
+                        cg.colorFilter.Override(new Color(0.36f, 0.34f, 0.32f));
+                    }
+                }},
+                // Moonlit — pitch-black night with a faint blue cast, pale
+                // silver-blue walls over slate, stars twinkling behind.
+                { "mapcolor_moonlit", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.40f, 0.48f, 0.64f),
+                    SecondaryColor = new Color(0.24f, 0.28f, 0.40f),
+                    Effect = SkinEffect.Stars,
+                    EffectColor = new Color(1.00f, 1.00f, 1.00f),
+                    EffectColor2 = new Color(0.80f, 0.88f, 1.00f),
+                    Configure = cg => {
+                        cg.saturation.Override(-12f);
+                        cg.temperature.Override(-14f);
+                        cg.postExposure.Override(-0.72f);
+                        cg.colorFilter.Override(new Color(0.34f, 0.36f, 0.42f));
+                    }
+                }},
+                // Eclipse — true black sky, charcoal walls rimmed with a corona
+                // amber accent. (Tour-verified as designed on the first pass.)
+                { "mapcolor_eclipse", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.17f, 0.16f, 0.18f),
+                    SecondaryColor = new Color(0.80f, 0.50f, 0.16f),
+                    Configure = cg => {
+                        cg.saturation.Override(-8f);
+                        cg.temperature.Override(6f);
+                        cg.postExposure.Override(-0.72f);
+                        cg.colorFilter.Override(new Color(0.36f, 0.34f, 0.33f));
+                    }
+                }},
+                // Underworld — deep blood-red dark, ash walls with a dark crimson
+                // accent, red embers rising.
+                { "mapcolor_underworld", new Preset {
+                    BaseArt = "Soviet",
+                    MapBlockColor = new Color(0.36f, 0.30f, 0.30f),
+                    SecondaryColor = new Color(0.44f, 0.12f, 0.12f),
+                    Effect = SkinEffect.Embers,
+                    EffectColor = new Color(1.00f, 0.30f, 0.10f),
+                    EffectColor2 = new Color(1.00f, 0.62f, 0.20f),
+                    Configure = cg => {
+                        cg.saturation.Override(-6f);
+                        cg.temperature.Override(18f);
+                        cg.postExposure.Override(-0.68f);
+                        cg.colorFilter.Override(new Color(0.40f, 0.32f, 0.32f));
+                    }
+                }},
+                // Night City — black navy sky, dark steel walls with amber window
+                // glow, city lights twinkling in the backdrop.
+                { "mapcolor_night_city", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.22f, 0.26f, 0.36f),
+                    SecondaryColor = new Color(0.84f, 0.62f, 0.26f),
+                    Effect = SkinEffect.Stars,
+                    EffectColor = new Color(1.00f, 0.88f, 0.60f),
+                    EffectColor2 = new Color(1.00f, 0.70f, 0.40f),
+                    Configure = cg => {
+                        cg.saturation.Override(-6f);
+                        cg.temperature.Override(-4f);
+                        cg.postExposure.Override(-0.72f);
+                        cg.colorFilter.Override(new Color(0.34f, 0.35f, 0.40f));
+                    }
+                }},
+                // Night Park — a park after dark: dark brown night, deep green
+                // hedges and bark-brown walls.
+                { "mapcolor_night_park", new Preset {
+                    BaseArt = "Poison",
+                    MapBlockColor = new Color(0.18f, 0.34f, 0.22f),
+                    SecondaryColor = new Color(0.42f, 0.28f, 0.14f),
+                    Configure = cg => {
+                        cg.saturation.Override(-10f);
+                        cg.temperature.Override(8f);
+                        cg.postExposure.Override(-0.70f);
+                        cg.colorFilter.Override(new Color(0.34f, 0.36f, 0.32f));
+                    }
+                }},
+                // Rainy Day — overcast slate sky, wet teal-grey stone walls, rain
+                // streaking down the backdrop.
+                { "mapcolor_rainy_day", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.30f, 0.35f, 0.37f),
+                    SecondaryColor = new Color(0.33f, 0.40f, 0.43f),
+                    Effect = SkinEffect.Rain,
+                    EffectColor = new Color(0.92f, 0.95f, 1.00f),
+                    EffectColor2 = new Color(0.80f, 0.88f, 1.00f),
+                    Configure = cg => {
+                        cg.saturation.Override(-18f);
+                        cg.temperature.Override(-8f);
+                        cg.postExposure.Override(-0.66f);
+                        cg.colorFilter.Override(new Color(0.36f, 0.38f, 0.40f));
+                    }
+                }},
+                // Midnight — the purest black background in the catalogue, with
+                // dark indigo walls so the map still reads.
+                { "mapcolor_midnight", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.22f, 0.18f, 0.42f),
+                    SecondaryColor = new Color(0.34f, 0.26f, 0.56f),
+                    Configure = cg => {
+                        cg.saturation.Override(-8f);
+                        cg.temperature.Override(-10f);
+                        cg.postExposure.Override(-0.72f);
+                        cg.colorFilter.Override(new Color(0.34f, 0.34f, 0.40f));
+                    }
+                }},
+                // Blood Moon — deep red night, dark ash walls with a pale rose-silver
+                // accent, a sparse red star field behind.
+                { "mapcolor_blood_moon", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.28f, 0.24f, 0.25f),
+                    SecondaryColor = new Color(0.66f, 0.46f, 0.48f),
+                    Effect = SkinEffect.Stars,
+                    EffectColor = new Color(1.00f, 0.70f, 0.70f),
+                    EffectColor2 = new Color(1.00f, 0.45f, 0.45f),
+                    Configure = cg => {
+                        cg.saturation.Override(-6f);
+                        cg.temperature.Override(12f);
+                        cg.postExposure.Override(-0.70f);
+                        cg.colorFilter.Override(new Color(0.40f, 0.32f, 0.33f));
+                    }
+                }},
             };
 
         /// <summary>The skins that are DESIGNED neutral, and must render neutral rather
@@ -547,7 +712,36 @@ namespace CompetitiveRounds
                 { "mapcolor_gilded",      new Color(0.42f, 0.30f, 0.10f) }, // deep bronze vault
                 { "mapcolor_platinum",    new Color(0.24f, 0.26f, 0.29f) }, // gunmetal
                 { "mapcolor_aurora",      new Color(0.05f, 0.08f, 0.18f) }, // polar night (near-black, aurora pops)
+                // Night pack (Aug 23) — all at or below the 0.25 luminance knee of
+                // the sky floor, so they render dark rather than lifted to fog.
+                { "mapcolor_forest_fire", new Color(0.07f, 0.05f, 0.04f) }, // dark smoke with a warm tinge
+                { "mapcolor_moonlit",     new Color(0.02f, 0.02f, 0.05f) }, // pitch black, faint blue
+                { "mapcolor_eclipse",     new Color(0.01f, 0.01f, 0.015f) }, // true black
+                { "mapcolor_underworld",  new Color(0.16f, 0.03f, 0.03f) }, // deep blood red
+                { "mapcolor_night_city",  new Color(0.02f, 0.02f, 0.06f) }, // black navy
+                { "mapcolor_night_park",  new Color(0.10f, 0.06f, 0.03f) }, // dark brown night
+                { "mapcolor_rainy_day",   new Color(0.07f, 0.08f, 0.09f) }, // overcast slate, darker
+                { "mapcolor_midnight",    new Color(0.00f, 0.00f, 0.01f) }, // pure black
+                { "mapcolor_blood_moon",  new Color(0.14f, 0.02f, 0.02f) }, // deep red night
             };
+
+        /// <summary>Ambient effect for the skin (None for every skin without one).</summary>
+        internal static SkinEffect GetEffect(string sku)
+        {
+            if (sku != null && _presets.TryGetValue(sku, out var p)) return p.Effect;
+            return SkinEffect.None;
+        }
+
+        /// <summary>Effect colour pair; the second falls back to the first.</summary>
+        internal static void GetEffectColors(string sku, out Color a, out Color b)
+        {
+            a = Color.white; b = Color.white;
+            if (sku != null && _presets.TryGetValue(sku, out var p))
+            {
+                a = p.EffectColor ?? Color.white;
+                b = p.EffectColor2 ?? a;
+            }
+        }
 
         /// <summary>Dedicated backdrop hue for the atmosphere particles, or null
         /// to fall back to the primary-leaning legacy tint.</summary>

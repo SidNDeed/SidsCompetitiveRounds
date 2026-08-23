@@ -1312,7 +1312,7 @@ namespace CompetitiveRounds
                 {
                     string rcCol = rc > 0f ? "#00FF00" : "#FF6666";
                     tail += "   <color=" + rcCol + ">"
-                         + I18n.TrF("{0} elo", (rc > 0f ? "+" : "") + rc.ToString("F0", INV)) + "</color>";
+                         + I18n.TrF("{0} elo", NativeUI.RatingDeltaText(rc)) + "</color>";
                 }
                 if (grpGold > 0) tail += " <color=#FFD94D>+" + grpGold.ToString(INV) + "g</color>";
             }
@@ -1867,7 +1867,7 @@ namespace CompetitiveRounds
             {
                 string col = sl.rating_change > 0f ? "#00FF00" : "#FF6666";
                 s += " <color=" + col + ">"
-                  + I18n.TrF("{0} elo", (sl.rating_change > 0f ? "+" : "") + sl.rating_change.ToString("F0", INV))
+                  + I18n.TrF("{0} elo", NativeUI.RatingDeltaText(sl.rating_change))
                   + "</color>";
             }
             if (sl.gold_earned > 0) s += " <color=#FFD94D>+" + sl.gold_earned.ToString(INV) + "g</color>";
@@ -2243,7 +2243,7 @@ namespace CompetitiveRounds
             {
                 string col = pl.rating_change > 0f ? "#00FF00" : "#FF6666";
                 line += " <color=" + col + ">"
-                     + I18n.TrF("{0} elo", (pl.rating_change > 0f ? "+" : "") + pl.rating_change.ToString("F0", INV))
+                     + I18n.TrF("{0} elo", NativeUI.RatingDeltaText(pl.rating_change))
                      + "</color>";
             }
             return line;

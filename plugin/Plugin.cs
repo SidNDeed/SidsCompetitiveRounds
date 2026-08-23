@@ -55,6 +55,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> MuteAudioInBackground;
         internal static ConfigEntry<bool> DeepIdleUnfocused;
         internal static ConfigEntry<bool> BroadcastIdleFpsCap;
+        internal static ConfigEntry<int> BroadcastFpsCap;
         internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
@@ -135,6 +136,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastStatusPath;   // §3b lease file
         internal static ConfigEntry<bool> BroadcastHideChatPane;   // broadcast seat only
         internal static ConfigEntry<string> BroadcastTestMapSkin;  // broadcast seat only — map-skin test lever
+        internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
+        internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
         // anchor in BroadcastHud.TopAnchorY) — orphan cfg entries are inert.
@@ -549,6 +552,17 @@ namespace CompetitiveRounds
                 "Broadcast seat only: after 16 minutes continuously idle (no spectate session, no room, nothing pending), drop the engine to 15 FPS regardless of window focus. Restores instantly when a broadcast target appears."
             );
 
+            // Aug 23 (Sid: "GPU temps are kind of high"): the seat rendered
+            // 300-390 FPS against a 60 FPS encode — everything above ~144 is
+            // pure heat. Applies whenever the DIRECTOR is active (idle stages
+            // still drop far lower); manual play with the director disabled is
+            // untouched. 0 disables.
+            BroadcastFpsCap = Config.Bind(
+                "Performance", "BroadcastFpsCap",
+                144,
+                "Broadcast seat only: cap the engine frame rate while the broadcast director is active (the stream encodes at 60 FPS; rendering above ~144 is pure GPU heat). 0 = uncapped."
+            );
+
             BroadcastWindowed1080 = Config.Bind(
                 "Broadcast", "BroadcastWindowed1080",
                 true,
@@ -857,7 +871,16 @@ namespace CompetitiveRounds
                 "Broadcast", "TestMapSkin", "",
                 "Broadcast seat only: render a specific map skin without owning or equipping it, so the broadcast look can be checked outside a live spectate session. "
                 + "Empty = off (normal behaviour). A sku name (e.g. mapcolor_soft) pins that skin. The word 'cycle' runs the spectator auto-cycle on this seat. "
-                + "Ignored entirely unless the local Steam account IS the broadcast identity, so it grants nothing to players."
+                + "Ignored entirely unless the local Steam account IS the broadcast identity, so it grants nothing to players. "
+                + "A comma-separated list of skus is a TOUR (see TestMapSkinTourSeconds)."
+            );
+            BroadcastTestMapSkinSandbox = Config.Bind(
+                "Broadcast", "TestMapSkinSandbox", false,
+                "Broadcast seat only, with TestMapSkin set: enter LOCAL > SANDBOX automatically once the main menu is up, so the pinned skin renders on a map with nobody at the seat. Clear it (and TestMapSkin) when done."
+            );
+            BroadcastTestMapSkinTourSeconds = Config.Bind(
+                "Broadcast", "TestMapSkinTourSeconds", 0,
+                "Broadcast seat only, with a comma-separated TestMapSkin list: advance to the next skin every N seconds while a map is up (0 = stay on the first). Each advance logs [MAPCOLOR-TOUR]."
             );
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
@@ -1664,28 +1687,38 @@ namespace CompetitiveRounds
         private float startupTimer = 0f;
         private bool startupComplete = false;
 
-        // Aug 6 item 8: unfocused FPS cap state. We only restore what we set
-        // (value-checked) so a vanilla Optionshandler change made while
-        // unfocused is never stomped. Vanilla never touches targetFrameRate
-        // (only vSyncCount, Optionshandler.cs:75), so -1/uncapped is the
-        // common saved value.
-        private bool fpsCapApplied = false;
-        private int fpsCapSavedTarget = -1;
-        private int fpsCapSavedVsync = 0;
-        /* Aug 7 item 2: stage 2 — deep idle. After 60s continuously unfocused
-         * AND provably out of any online room / offline battle / pending
-         * match-found, drop to 15 fps. Unlike stage 1 this DOES override vSync:
-         * after 60s out-of-room "zeroing vSync could raise the rate" is moot
-         * (15 < any refresh), and vSync-on players — the vanilla-default
-         * majority — otherwise get zero idle savings. 15 (not 10) keeps PUN
-         * serialization at its native 10/s ceiling if a gate is ever wrong and
-         * bounds WaitForSeconds jitter at ~67ms; a Photon disconnect needs the
-         * main loop SILENT >60s (ack-fallback window), unreachable via any
-         * positive targetFrameRate. */
-        private float unfocusedSinceRt = -1f;
-        private bool fpsDeepIdleApplied = false;
-        private int deepSavedTarget = -1;
-        private int deepSavedVsync = 0;
+        /* FPS governor state (Aug 23 rewrite — review r2 M3/M4). Three
+         * stages want a frame cap: the unfocused cap (Aug 6, 120), deep idle
+         * (Aug 7 / Aug 18, 15) and the broadcast-seat render cap (Aug 23,
+         * BroadcastFpsCap while the director is active). They used to be
+         * three independent save/restore latches layered on each other, and
+         * that layering lost the true baseline: a stage could save a value a
+         * DEEPER stage had written, and a stage could clear its latch while
+         * its restore was masked — so the player's real targetFrameRate was
+         * gone for the session (M3). ONE ownership record instead: the
+         * baseline is captured exactly once, when no stage owns the values,
+         * and restored (value-checked, only what is still ours) when no
+         * stage wants a cap. Stages only ever compute "desired".
+         *
+         * STATIC on purpose: the persistent host is replaced via OnDestroy
+         * respawn (a fresh CompetitiveRoundsBehaviour) while Unity still
+         * holds whatever the old instance wrote — instance fields would read
+         * "nothing applied" and the baseline could never be restored (the
+         * second M3 trigger). unfocusedSinceRt is static for the same
+         * reason (a respawn must not restart the 60s deep-idle clock).
+         *
+         * Vanilla never touches targetFrameRate (only vSyncCount,
+         * Optionshandler.cs:75), so -1/uncapped is the common baseline. */
+        private static bool fpsOwning = false;            // we hold the engine values
+        private static int fpsBaseTarget = -1;            // pre-ownership targetFrameRate
+        private static int fpsBaseVsync = 0;              // pre-ownership vSyncCount
+        private static int fpsWrittenTarget = 0;          // the target we last wrote
+        private static int fpsDesiredLast = 0;            // last desired cap (0 = none)
+        // A player video-settings change while a NON-broadcast stage owned the
+        // values wins: we stand down until the wanted cap changes again.
+        private static bool fpsExternalOverride = false;
+        private static float fpsReassertLogRt = -999f;
+        private static float unfocusedSinceRt = -1f;
 
         // Ranked queue room joining — now handled by Plugin.Update()
         // (Plugin's MonoBehaviour survives scene changes via BepInEx)
@@ -1810,6 +1843,14 @@ namespace CompetitiveRounds
             return Time.realtimeSinceStartup - broadcastIdleGatesPassRt >= 960f;
         }
 
+        private static void FpsWrite(int target)
+        {
+            // vSync overrides targetFrameRate, so every cap write zeroes it.
+            if (QualitySettings.vSyncCount != 0) QualitySettings.vSyncCount = 0;
+            if (Application.targetFrameRate != target) Application.targetFrameRate = target;
+            fpsWrittenTarget = target;
+        }
+
         private void TickUnfocusedFpsCap()
         {
             try
@@ -1818,72 +1859,141 @@ namespace CompetitiveRounds
                 if (!unfocused) unfocusedSinceRt = -1f;
                 else if (unfocusedSinceRt < 0f) unfocusedSinceRt = Time.realtimeSinceStartup;
 
-                // ── Stage 2: deep idle (checked first so its restore runs
-                // before stage 1's check in the same tick — the two stages
-                // layer: deep saves whatever stage 1 left in place). Two
-                // arms, one mechanism: unfocused players, or the broadcast
-                // seat's focus-independent idle (Sid, Aug 18). ──
+                int curTarget = Application.targetFrameRate;   // -1/0 = uncapped
+                int curVsync = QualitySettings.vSyncCount;
+                // The player's/vanilla's chosen values: live while nobody owns
+                // them, the saved pair while we do. Every stage decides from
+                // THIS, never from a value another stage wrote (M3).
+                int baseTarget = fpsOwning ? fpsBaseTarget : curTarget;
+                int baseVsync = fpsOwning ? fpsBaseVsync : curVsync;
+                bool external = fpsOwning && (curTarget != fpsWrittenTarget || curVsync != 0);
+
+                // ── Broadcast-seat render cap (Aug 23, Sid: "GPU temps are kind
+                // of high"): while the DIRECTOR is active this seat exists to
+                // feed a 60 FPS encode; the 300-390 FPS it rendered otherwise
+                // is pure GPU heat. Manual VM use (director disabled) is
+                // untouched. ──
+                int seatCap = (!Plugin.modDisabled && Plugin.BroadcastFpsCap != null) ? Plugin.BroadcastFpsCap.Value : 0;
+                bool seatActive = false;
+                if (seatCap > 0) { try { seatActive = BroadcastMode.DirectorActive; } catch { } }
+
+                int desired = 0;
+                string why = null;
+                // ── Deep idle: unfocused players 60s out of play, or the
+                // broadcast seat's focus-independent 16-minute idle (Aug 18).
+                // Overrides vSync by design: 15 is below any refresh rate. ──
                 bool broadcastIdle = WantBroadcastIdle();
                 bool wantDeep = (unfocused && WantDeepIdle()) || broadcastIdle;
-                if (wantDeep && !fpsDeepIdleApplied)
+                if (wantDeep)
                 {
-                    deepSavedTarget = Application.targetFrameRate;
-                    deepSavedVsync = QualitySettings.vSyncCount;
-                    QualitySettings.vSyncCount = 0; // vSync overrides targetFrameRate
-                    Application.targetFrameRate = 15;
-                    fpsDeepIdleApplied = true;
-                    Plugin.Log.LogInfo(broadcastIdle
-                        ? "[FPSCAP] deep idle engaged (broadcast seat 16min+ idle)"
-                        : "[FPSCAP] deep idle engaged (60s+ unfocused, out of room)");
+                    desired = 15;
+                    why = broadcastIdle ? "deep idle (broadcast seat 16min+ idle)"
+                                        : "deep idle (60s+ unfocused, out of room)";
                 }
-                else if (!wantDeep && fpsDeepIdleApplied)
+                else
                 {
-                    // Value-checked restore, targetFrameRate before vSync — only
-                    // undo what is still OURS (player video changes win).
-                    if (Application.targetFrameRate == 15)
-                        Application.targetFrameRate = deepSavedTarget;
-                    if (QualitySettings.vSyncCount == 0)
-                        QualitySettings.vSyncCount = deepSavedVsync;
-                    fpsDeepIdleApplied = false;
-                    Plugin.Log.LogInfo($"[FPSCAP] deep idle lifted (focused={Application.isFocused})");
-                }
-                if (fpsDeepIdleApplied) return; // stage 1 is subsumed while deep
-
-                bool wantCap = Plugin.CapFpsUnfocused != null && Plugin.CapFpsUnfocused.Value
-                               && !Plugin.modDisabled
-                               && unfocused;
-                if (wantCap && !fpsCapApplied)
-                {
-                    int cur = Application.targetFrameRate; // -1/0 = uncapped
-                    // Only cap when it would REDUCE the rate: an existing cap
-                    // at or below 120 stays untouched.
-                    if (cur > 0 && cur <= 120) return;
+                    // ── Unfocused cap (Aug 6). Only when it would REDUCE the
+                    // rate: an existing cap at or below 120 stays untouched.
                     // Codex round 1 (LOW): vSync is the OTHER cap, and killing
-                    // it can RAISE the effective rate — the whole point of
-                    // this feature is to lower it. With targetFrameRate=-1,
-                    // vSyncCount=1 and a 60 Hz display the player is at 60;
-                    // zeroing vSync and setting 120 would DOUBLE their
-                    // unfocused framerate. Leave any vSync-capped client
-                    // alone: their refresh rate is already the cap, and on a
-                    // >120 Hz display the difference is not worth overriding
-                    // a display setting the player chose.
-                    if (QualitySettings.vSyncCount > 0) return;
-                    fpsCapSavedTarget = cur;
-                    fpsCapSavedVsync = QualitySettings.vSyncCount;
-                    QualitySettings.vSyncCount = 0; // vSync overrides targetFrameRate
-                    Application.targetFrameRate = 120;
-                    fpsCapApplied = true;
+                    // it can RAISE the effective rate (targetFrameRate=-1,
+                    // vSyncCount=1, 60 Hz display = 60 fps; zeroing vSync and
+                    // setting 120 would DOUBLE it). Leave vSync-capped clients
+                    // alone: their refresh rate is already the cap. ──
+                    bool wantCap = Plugin.CapFpsUnfocused != null && Plugin.CapFpsUnfocused.Value
+                                   && !Plugin.modDisabled && unfocused
+                                   && !(baseTarget > 0 && baseTarget <= 120)
+                                   && baseVsync == 0;
+                    if (wantCap) { desired = 120; why = "unfocused cap"; }
                 }
-                else if (!wantCap && fpsCapApplied)
+                if (seatActive)
                 {
-                    // Restore only if our values are still in place — if the
-                    // player changed video settings mid-unfocus, keep theirs.
-                    if (Application.targetFrameRate == 120)
-                        Application.targetFrameRate = fpsCapSavedTarget;
-                    if (QualitySettings.vSyncCount == 0)
-                        QualitySettings.vSyncCount = fpsCapSavedVsync;
-                    fpsCapApplied = false;
+                    // r2 M4: with vSync on, the effective rate follows the
+                    // DISPLAY (240 Hz renders 240) whatever targetFrameRate
+                    // says — so a vSync-on baseline needs ownership even when
+                    // the numeric target is already below the cap. The written
+                    // target keeps a lower existing cap (never raises).
+                    bool capNeeded = baseTarget <= 0 || baseTarget > seatCap || baseVsync > 0;
+                    if (capNeeded)
+                    {
+                        int capTarget = (baseTarget > 0 && baseTarget < seatCap) ? baseTarget : seatCap;
+                        if (desired == 0 || capTarget < desired)
+                        {
+                            desired = capTarget;
+                            why = $"broadcast seat render cap ({seatCap} fps)";
+                        }
+                    }
                 }
+
+                if (desired == 0)
+                {
+                    if (fpsOwning)
+                    {
+                        // Value-checked restore, targetFrameRate before vSync —
+                        // only undo what is still OURS (player changes win).
+                        if (curTarget == fpsWrittenTarget) Application.targetFrameRate = fpsBaseTarget;
+                        if (curVsync == 0) QualitySettings.vSyncCount = fpsBaseVsync;
+                        fpsOwning = false;
+                        Plugin.Log.LogInfo($"[FPSCAP] released (restored target={fpsBaseTarget} vsync={fpsBaseVsync}, focused={Application.isFocused})");
+                    }
+                    fpsExternalOverride = false;
+                    fpsDesiredLast = 0;
+                    return;
+                }
+
+                if (!fpsOwning)
+                {
+                    // A player override stands until the wanted cap CHANGES
+                    // (a different stage engaging) — never overridden on the
+                    // broadcast seat, where nobody plays with the director on.
+                    if (fpsExternalOverride && !seatActive && desired == fpsDesiredLast) return;
+                    fpsBaseTarget = curTarget;
+                    fpsBaseVsync = curVsync;
+                    fpsOwning = true;
+                    fpsExternalOverride = false;
+                    FpsWrite(desired);
+                    fpsDesiredLast = desired;
+                    Plugin.Log.LogInfo($"[FPSCAP] engaged {why}: target={desired} (baseline target={fpsBaseTarget} vsync={fpsBaseVsync})");
+                    return;
+                }
+
+                if (external)
+                {
+                    if (seatActive)
+                    {
+                        // Re-assert (review r1 find 8): a vanilla vSync change
+                        // while the director is active would otherwise defeat
+                        // the cap silently. Throttled log.
+                        FpsWrite(desired);
+                        if (Time.realtimeSinceStartup - fpsReassertLogRt > 30f)
+                        {
+                            fpsReassertLogRt = Time.realtimeSinceStartup;
+                            Plugin.Log.LogInfo($"[FPSCAP] re-asserted {why} over an external change (target={curTarget} vsync={curVsync})");
+                        }
+                    }
+                    else
+                    {
+                        // The player changed video settings while we owned the
+                        // values: theirs win. Drop ownership WITHOUT restoring
+                        // (the values are already theirs) and stand down until
+                        // the wanted cap changes.
+                        fpsOwning = false;
+                        fpsExternalOverride = true;
+                        fpsDesiredLast = desired;
+                        Plugin.Log.LogInfo($"[FPSCAP] released (external video-settings change adopted: target={curTarget} vsync={curVsync})");
+                    }
+                    return;
+                }
+
+                if (desired != fpsWrittenTarget)
+                {
+                    // Stage change while owning (e.g. deep idle lifting back to
+                    // the broadcast cap, or the cap engaging under the
+                    // unfocused cap): the baseline is untouched, only the
+                    // written target moves.
+                    FpsWrite(desired);
+                    Plugin.Log.LogInfo($"[FPSCAP] {why}: target={desired}");
+                }
+                fpsDesiredLast = desired;
             }
             catch { }
         }
@@ -1964,6 +2074,8 @@ namespace CompetitiveRounds
             // NetworkRestart can destroy (#16/#270c). Self-gating: one
             // latched-identity check and out on every non-broadcast install.
             try { BroadcastMode.Step(); } catch { }
+            // Map-skin test lever tour / auto-Sandbox (broadcast identity only).
+            try { ArtHandlerNextArtPatch.TickTestLever(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)
@@ -3756,6 +3868,10 @@ namespace CompetitiveRounds
             // leave+rejoin that lands between samples; this callback cannot).
             // The poll's Left-room branch keeps a lossy backup copy.
             try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
+            try { VanillaFixSupport.ResetDiag(RoundSoundSweep.DiagKey); } catch { }
+            // A ghost loop at the MENU is the most audible variant of the
+            // sound leak — sweep once on the reliable exit edge (Aug 22).
+            try { RoundSoundSweep.Schedule("room-leave"); } catch { }
             try { SpawnOnImpactFieldDiagPatch.ResetBudgets(); } catch { }
             // Tournament banner dies with the room on the reliable edge too
             // (Codex tournament r1 find 5 — the polled exit is the lossy
@@ -4324,7 +4440,12 @@ namespace CompetitiveRounds
             bool hasCustom = false;
             try
             {
-                if (pickerActor > 0)
+                // Honor the local "Show Player Colors" toggle exactly like the
+                // in-match body pipeline (review r1 find 11: with the toggle
+                // off, physical bodies render vanilla team colors — the pick
+                // body must not read the custom prop and disagree).
+                bool colorsHidden = Plugin.ShowPlayerColors != null && !Plugin.ShowPlayerColors.Value;
+                if (pickerActor > 0 && !colorsHidden)
                 {
                     foreach (var pl in RoomActors.ActiveFighters())   // census: a picker is always a fighter
                     {
@@ -4407,8 +4528,12 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-TINT] retint failed: {ex.Message}"); }
 
-            if (sprites > 0 || particles > 0 || skinFields > 0)
-                Plugin.Log.LogInfo($"[CARDPICK-TINT] pickerID={pickerID} team={pickerTeamID} custom={hasCustom} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
+            // Always log (Aug 22): a zero-repaint completion used to be silent,
+            // which made "retint ran but painted nothing" (custom=False
+            // resolution, filter miss) indistinguishable from "retint never
+            // ran" — the #83/#286 prove-the-surface-is-reached rule. One line
+            // per pick, alongside the existing [CARDPICK-DIAG]/[CARDPICK-BODY].
+            Plugin.Log.LogInfo($"[CARDPICK-TINT] pickerID={pickerID} team={pickerTeamID} custom={hasCustom} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
 
             // v1.30 (#58 "no body, cosmetics still show"): the picker's body IS the
             // clone's root particle system (learning #96 — vanilla Play()s exactly
@@ -4490,7 +4615,17 @@ namespace CompetitiveRounds
             LastShownPickerIndex = pickerID;
             try
             {
-                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+                // Bug: "my skin wasn't Mustard during card pick" (casual room,
+                // Aug 22). This gate was IsCompetitiveRoom() — learning #286's
+                // exact shape left behind on the cosmetic surface: room-code
+                // casual (and room-code RATED) rooms never matched, so the
+                // pick-body custom-color retint, the cr_face fallback apply and
+                // every [CARDPICK-*] diagnostic were structurally unreachable
+                // in the rooms most play happens in. Everything below is local,
+                // idempotent, per-seat cosmetic work — the sanctioned gate is
+                // the AnyGameScope shape (VanillaFixes.cs:25-34): any online
+                // room. Offline keeps vanilla's separate Show branch untouched.
+                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return;
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null || pickerID < 0 || pickerID >= pm.players.Count) return;
                 var picker = pm.players[pickerID];
@@ -7244,6 +7379,16 @@ namespace CompetitiveRounds
         {
             yield return null;   // let Unity run the deferred OnDestroy chain
             GMArmsRaceStartGameBlockResetPatch.RunSweep("ResetCharacters (rematch, post-destroy)");
+            // Aug 22 (Mustard-at-card-pick family, fix 3): the rematch teardown
+            // can respawn team-colored sprites (vanilla revive re-bakes
+            // hpSprite from the SkinBank — HealthHandler.Revive), and no
+            // cosmetic path hung off the rematch boundary — OnMatchStarted
+            // deliberately fires only at combat start, AFTER the new game's
+            // first pick phase. Re-assert body cosmetics here; DelayedApplyAll
+            // is idempotent and defers on inactive players, so double-applying
+            // with the later match-start pass is safe.
+            try { PlayerColorCosmetic.OnRoundStart(); } catch { }
+            try { PlayerEffectCosmetic.OnRoundStart(); } catch { }
         }
     }
 
@@ -7623,6 +7768,10 @@ namespace CompetitiveRounds
         // #1 and #2 (see the history above) were about.
         private static int _backdropLayerMask = 0;
         private static int _backdropMaskThisPass = 0;
+        /// <summary>The recorded background-camera culling mask (0 until the first
+        /// tint pass has seen a camera). MapSkinEffects derives its render layer
+        /// from this instead of hardcoding layer 9.</summary>
+        internal static int BackdropLayerMask => _backdropLayerMask;
         private static readonly HashSet<int> _loggedClass = new HashSet<int>();
 
         /// <summary>Records the culling mask of the camera(s) painting the canvas, so
@@ -8093,6 +8242,9 @@ namespace CompetitiveRounds
                 // The strongest lever: SFSS light + ambient carry the sky and the
                 // shadow beams (learning #116 v3).
                 ApplyLighting(sku);
+                // Ambient effect layer (embers / rain) — its own persistent emitter
+                // on the backdrop layer, never a Map-owned system (Aug 23 pack).
+                MapSkinEffects.Apply(sku);
 
                 EnsureTwinkleLoop();
                 Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: {artParts} two-tone wall slab system(s) + {skyParts} sky renderer(s) + lighting; OOB player-warning effects untouched (vanilla)");
@@ -9077,6 +9229,7 @@ namespace CompetitiveRounds
                 RestoreCameraBackground();
                 RestoreLighting();
                 _twinkleSystems.Clear();
+                MapSkinEffects.Clear(why);   // touches only our own emitter — safe in any window
                 // ALWAYS deferred, never conditional on inTransition (Codex r2 #1).
                 // `LastMapStartTime` is stale whenever NextArt lands BEFORE the new
                 // Map.Start stamps it, so `inTransition` reads false while we are in
@@ -9224,6 +9377,10 @@ namespace CompetitiveRounds
             "mapcolor_obsidian",    "mapcolor_abyss",    "mapcolor_pine",
             "mapcolor_iron",        "mapcolor_burgundy", "mapcolor_magma",
             "mapcolor_velvet",      "mapcolor_blackwood",
+            // Night pack (Aug 23) — all budget skus.
+            "mapcolor_forest_fire", "mapcolor_moonlit",  "mapcolor_eclipse",
+            "mapcolor_underworld",  "mapcolor_night_city", "mapcolor_night_park",
+            "mapcolor_rainy_day",   "mapcolor_midnight", "mapcolor_blood_moon",
         };
 
         // Spectator cycle state — deliberately SEPARATE from the fighter-seat
@@ -9242,6 +9399,76 @@ namespace CompetitiveRounds
         // Last value seen from Broadcast.TestMapSkin, so a set→unset edge can release
         // the pinned skin instead of leaving MapColorState.CurrentSku pointing at it.
         private static string _lastTestSkin;
+
+        // ── Test-lever TOUR (Aug 23): TestMapSkin may hold a comma-separated LIST
+        // of skus; TestMapSkinTourSeconds > 0 advances through it on this seat by
+        // firing ArtHandler.NextArt (the same entry the Shift key uses), so one
+        // launch screenshots a whole pack. Broadcast identity only, like the lever.
+        private static int _tourIndex;
+        private static float _tourLastRt = -1f;
+        private static string _tourListKey;
+
+        /// <summary>Resolve the pinned test sku: a single sku, or the current tour
+        /// element of a comma list. Unknown elements are dropped with a warning.</summary>
+        private static string ResolveTestSkin(string raw)
+        {
+            if (raw.IndexOf(',') < 0) return raw;
+            var parts = new List<string>();
+            foreach (var piece in raw.Split(','))
+            {
+                string t = piece.Trim();
+                if (t.Length == 0) continue;
+                if (CustomMapColors.IsCustomSku(t)) parts.Add(t);
+                else Plugin.Log.LogWarning($"[MAPCOLOR] Broadcast.TestMapSkin list element '{t}' is not a known sku — dropped");
+            }
+            if (parts.Count == 0) return null;
+            if (_tourListKey != raw) { _tourListKey = raw; _tourIndex = 0; }
+            return parts[_tourIndex % parts.Count];
+        }
+
+        /// <summary>Per-frame tick from the persistent Update: advance the tour
+        /// and, when asked, drive the menu into Sandbox so the skin renders on a
+        /// map without a human at the seat.</summary>
+        internal static void TickTestLever()
+        {
+            try
+            {
+                if (!BroadcastMode.IsBroadcastIdentity || Plugin.BroadcastTestMapSkin == null) return;
+                string raw = (Plugin.BroadcastTestMapSkin.Value ?? "").Trim();
+                if (raw.Length == 0) { _tourLastRt = -1f; _sandboxLaunched = false; return; }
+
+                // Auto-Sandbox: one PlaySandbox() once the main menu exists and the
+                // seat is not in any room. Vanilla's own button does exactly this.
+                if (Plugin.BroadcastTestMapSkinSandbox != null && Plugin.BroadcastTestMapSkinSandbox.Value && !_sandboxLaunched)
+                {
+                    if (Time.realtimeSinceStartup > 8f && MainMenuHandler.instance != null
+                        && !PhotonNetwork.InRoom && (GameManager.instance == null || !GameManager.instance.isPlaying))
+                    {
+                        _sandboxLaunched = true;
+                        Plugin.Log.LogInfo("[MAPCOLOR] TestMapSkinSandbox: entering Sandbox");
+                        MainMenuHandler.instance.PlaySandbox();
+                    }
+                }
+
+                int every = Plugin.BroadcastTestMapSkinTourSeconds != null ? Plugin.BroadcastTestMapSkinTourSeconds.Value : 0;
+                if (every <= 0 || raw.IndexOf(',') < 0) return;
+                if (GameManager.instance == null || !GameManager.instance.isPlaying) return;
+                if (MapPhysicalColorPatch.InMapTransition()) return;
+                float now = Time.realtimeSinceStartup;
+                if (_tourLastRt < 0f) { _tourLastRt = now; return; }
+                if (now - _tourLastRt < every) return;
+                _tourLastRt = now;
+                _tourIndex++;
+                var ah = ArtHandler.instance;
+                if (ah != null)
+                {
+                    Plugin.Log.LogInfo($"[MAPCOLOR-TOUR] advancing to element {_tourIndex}");
+                    ah.NextArt();    // routes through the NextArt prefix → the pinned sku applies
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] test lever tick failed: {ex.Message}"); }
+        }
+        private static bool _sandboxLaunched;
 
         /// <summary>Resets the spectator cycle to its fresh state. Called on room
         /// change (a new sitting starts the cycle from the top) and from
@@ -9333,10 +9560,14 @@ namespace CompetitiveRounds
                 {
                     if (string.Equals(testSkin, "cycle", StringComparison.OrdinalIgnoreCase))
                         spectatorSeat = true;          // exercise the real spectator path
-                    else if (!CustomMapColors.IsCustomSku(testSkin))
+                    else
                     {
-                        Plugin.Log.LogWarning($"[MAPCOLOR] Broadcast.TestMapSkin='{testSkin}' is not a known sku — ignoring");
-                        testSkin = null;
+                        testSkin = ResolveTestSkin(testSkin);   // single sku or the tour element
+                        if (!string.IsNullOrEmpty(testSkin) && !CustomMapColors.IsCustomSku(testSkin))
+                        {
+                            Plugin.Log.LogWarning($"[MAPCOLOR] Broadcast.TestMapSkin='{testSkin}' is not a known sku — ignoring");
+                            testSkin = null;
+                        }
                     }
                 }
                 // Turning the lever OFF has to actually let go: MapColorState.CurrentSku

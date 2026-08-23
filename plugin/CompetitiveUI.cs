@@ -357,6 +357,7 @@ namespace CompetitiveRounds
             DrawCompareSearch();
             DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
             DrawLeaderboardSearch();
+            DrawHistorySearch();  // Bug 263 — My Stats opponent search
             DrawMapColorToast();
             DrawCustomBetPrompt();
             DrawLfpPrompt();
@@ -1630,6 +1631,51 @@ namespace CompetitiveRounds
                     NativeUI.LeaderboardSearch = next;
                     NativeUI.MarkDirty();
                 }
+            }
+            catch { /* search is best-effort cosmetic */ }
+        }
+
+        // Bug 263 (Stan): My Stats history opponent search — 4th instance of
+        // the IMGUI-over-anchor clone, gated to tab 0, own focus flag feeding
+        // the T-chat mutex. NativeUI.HistorySearch's setter owns the debounce
+        // stamp + dirty, so this only writes the property on change.
+        private static bool histSearchFocused = false;
+        public static bool IsHistSearchFocused => histSearchFocused;
+        private const string HIST_SEARCH_CTRL = "HistSearchField";
+        private static void DrawHistorySearch()
+        {
+            histSearchFocused = false;
+            try
+            {
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 0) return;
+                Rect r = NativeUI.GetHistorySearchScreenRect();
+                if (r.width < 1f || r.height < 1f) return;
+                if (compareSearchStyle == null)
+                    compareSearchStyle = new GUIStyle(GUI.skin.textField) { fontSize = 13, alignment = TextAnchor.MiddleLeft };
+                if (compareSearchHintStyle == null)
+                    compareSearchHintStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleLeft, richText = true };
+                float h = Mathf.Max(r.height, 22f);
+                // Min width 120 (not the siblings' 200 — review r1 find 9):
+                // the 240-unit anchor scales to ~160px at 720p, and a forced
+                // 200px field would paint over the Clear button beside it.
+                var fieldRect = new Rect(r.x, r.y, Mathf.Max(r.width, 120f), h);
+                string cur = NativeUI.HistorySearch ?? "";
+                GUI.SetNextControlName(HIST_SEARCH_CTRL);
+                string next = GUI.TextField(fieldRect, cur, compareSearchStyle);
+                // Cap the VISIBLE field to the server filter length (surrogate-
+                // safe, no trim): the shown text, the request and the cache
+                // identity then describe the same query, so stale rows can't
+                // render under a longer label (review r2).
+                next = ApiClient.CapHistoryQueryUnits(next);
+                histSearchFocused = GUI.GetNameOfFocusedControl() == HIST_SEARCH_CTRL;
+                if (string.IsNullOrEmpty(next))
+                    // Deliberately the EXISTING "search players..." key — the
+                    // filter matches opponent display names, and reusing the
+                    // key ships translated in every locale on day one (#289).
+                    GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
+                              I18n.Tr("<color=#7788AA><i>search players...</i></color>"), compareSearchHintStyle);
+                if (next != cur)
+                    NativeUI.HistorySearch = next;
             }
             catch { /* search is best-effort cosmetic */ }
         }
@@ -6408,7 +6454,10 @@ namespace CompetitiveRounds
                 // July 22 item 8: leaderboard search takes typed text too.
                 || lbSearchFocused
                 // Aug 6 item 2: the metric/card dropdown's search field.
-                || pickerSearchFocused) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
+                || pickerSearchFocused
+                // Bug 263: the My Stats history search field (MANDATORY — a
+                // 't' typed into any search box must never open T-chat).
+                || histSearchFocused) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -6749,6 +6798,9 @@ namespace CompetitiveRounds
             // way DrawChatInput's copy had (Aug 12 UI review) — one list now.
             if (chatInputOpen || AnyModalOwnsInput
                 || compareSearchFocused || lbSearchFocused
+                // Bug 263 review r1 find 2: the history search field too, or
+                // typing 'Y' into it opens quick-chat and eats the key.
+                || histSearchFocused
                 || pickerSearchFocused) { quickChatOpen = false; return; }
             if (IsVanillaChatTyping()) { quickChatOpen = false; return; }
 

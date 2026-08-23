@@ -980,8 +980,10 @@ FAQ_ENTRIES = [
                    "• **Odds** come from Glicko win-probability: 1.01×–3.0× payout. The cap shrinks when either "
                    "player's rating is still uncertain (no farming fresh accounts), and bets under 1.10× are "
                    "rejected as no-profit.\n"
-                   "• Bets **lock** once game 1 reaches 2 points (3 in private rooms) or any game is decided.\n"
-                   "• Payout = stake × odds. If a series never finishes, stakes **auto-refund** (~1 hour).\n"
+                   "• Bets **lock** once game 1 reaches 2 points or any game is decided.\n"
+                   "• Gross payout = stake × odds. A winning heavy-favorite bet (stored odds ≤ 1.5×) can redirect part "
+                   "of its profit—not the stake—to the fighter/team you backed. If a series never finishes, "
+                   "stakes **auto-refund** (~1 hour).\n"
                    "• Want a ping when betting opens? Grab the **Gambler** role — react 🎲 on the signup message "
                    "in the bets channel."),
     },
@@ -1212,7 +1214,9 @@ FAQ_ENTRIES = [
                    "current top-3 player (+2 on a 2-0 sweep) · the **loser** now gets **5-15g** by opponent tier · "
                    "2v2 **50g/25g** win/loss × the opposing team's tier · 1v2 **40g/20g**.\n"
                    "• Levels: **+100g** every 5 levels (to 50), **+500g** per 5 levels after (max 100).\n"
-                   "• Achievements **100g** (Slayers **1000g**) · Boosters **2000g/month** · bets pay stake × odds."),
+                   "• Achievements **100g** (Slayers **1000g**) · Boosters **2000g/month** · gross bet payouts "
+                   "are stake × odds. A winning heavy-favorite bet (stored odds ≤ 1.5×) can redirect part of its profit—"
+                   "not the stake—to the fighter/team you backed."),
     },
     {
         "key": "artist",

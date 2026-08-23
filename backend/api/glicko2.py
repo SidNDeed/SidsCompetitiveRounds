@@ -126,12 +126,13 @@ def _new_volatility(sigma: float, phi: float, v: float, delta: float, tau: float
     return math.exp(A / 2.0)
 
 
+# main.py's GLICKO2_TAU is authoritative; every server call site must pass it explicitly.
 def calculate_new_rating(
     rating: float,
     rd: float,
     volatility: float,
     opponents: list[tuple[float, float, float]],
-    tau: float = 0.5,
+    tau: float = 0.6,
     weights: list[float] | None = None,
 ) -> tuple[float, float, float]:
     """

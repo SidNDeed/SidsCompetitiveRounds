@@ -106,7 +106,10 @@ MATCH_HMAC_SECRET = os.getenv("MATCH_HMAC_SECRET", "")
 # SEPARATE secret that exists only in the server .env and in the admin's own
 # local BepInEx config (delivered out-of-band, never compiled or shipped).
 ADMIN_HMAC_SECRET = os.getenv("ADMIN_HMAC_SECRET", "")
-GLICKO2_TAU = float(os.getenv("GLICKO2_TAU", "0.5"))
+# Code-owned deliberately: the old env knob was never used intentionally,
+# .env is opaque to tooling, and a live pin could silently defeat a code
+# change (learning #190's persisted-default class).
+GLICKO2_TAU = 0.6
 GLICKO2_DEFAULT_RATING = float(os.getenv("GLICKO2_DEFAULT_RATING", "1500"))
 GLICKO2_DEFAULT_RD = float(os.getenv("GLICKO2_DEFAULT_RD", "350"))
 GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06"))
@@ -1939,6 +1942,7 @@ async def min_version_autoraise_loop():
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("Competitive ROUNDS API starting up")
+    print(f"[GLICKO] effective tau={GLICKO2_TAU}")
     tasks: list[asyncio.Task] = []
     try:
         from tournaments import tournament_tick
@@ -2957,7 +2961,8 @@ async def queue_cleanup_loop():
                 # abandoned 1v1 series stay the _prune_stale_series job.
                 stranded_1v1 = (await db.execute(text("""
                     SELECT b.id AS bet_id, b.player_id, b.bet_on_player_id, b.amount,
-                           b.odds_multiplier, rs.winner_id, rs.id AS series_id
+                           b.odds_multiplier, rs.winner_id, rs.id AS series_id,
+                           rs.player1_id, rs.player2_id
                       FROM bets b
                       JOIN ranked_series rs ON rs.id = b.series_id
                      WHERE b.settled_at IS NULL
@@ -2974,6 +2979,13 @@ async def queue_cleanup_loop():
                     # window would otherwise be undone by this payout — the
                     # reversal's own clawback already ran and cannot see a
                     # transaction that starts after it.
+                    # Match submit and admin reversal lock participants before
+                    # ranked_series. The tax adds a winner credit here, so keep
+                    # that global order rather than creating series -> player.
+                    for _pid in sorted((b["player1_id"], b["player2_id"]), key=str):
+                        await db.execute(text(
+                            "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+                        ), {"pid": _pid})
                     still = (await db.execute(text("""
                         SELECT 1 FROM ranked_series
                          WHERE id = :sid AND status = 'completed'
@@ -2984,12 +2996,18 @@ async def queue_cleanup_loop():
                         await db.commit()   # release the lock pass, skip this bet
                         continue
                     won = b["bet_on_player_id"] == b["winner_id"]
-                    pay = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
+                    gross = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
+                    pay, fighter_tax = (_bet_fighter_tax(
+                        b["amount"], b["odds_multiplier"], gross
+                    ) if won else (0, 0))
                     claimed = (await db.execute(text(
-                        "UPDATE bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
+                        "UPDATE bets SET payout = :p, settled_at = NOW(), settlement_kind = :k,"
+                        " fighter_tax = NULLIF(:tax, 0)"
                         " WHERE id = :bid AND settled_at IS NULL RETURNING id"
-                    ), {"p": pay, "k": "won" if won else "lost", "bid": b["bet_id"]})).scalar()
+                    ), {"p": pay, "k": "won" if won else "lost", "tax": fighter_tax,
+                        "bid": b["bet_id"]})).scalar()
                     if claimed is None:
+                        await db.commit()   # release this series' participant/parent locks
                         continue
                     if pay > 0:
                         await db.execute(text(
@@ -2997,6 +3015,8 @@ async def queue_cleanup_loop():
                         ), {"p": pay, "pid": b["player_id"]})
                         db.add(GoldTransaction(player_id=b["player_id"], amount=pay,
                                                reason="bet_win", reference_id=str(b["series_id"])))
+                        await _credit_bet_fighter_tax(
+                            db, b["winner_id"], fighter_tax, "bet_tax", str(b["series_id"]))
                     print(f"[BETS] janitor settled stuck bet {b['bet_id']} on completed series {b['series_id']} (payout {pay})")
                     await db.commit()
         except Exception as e:
@@ -7380,16 +7400,38 @@ async def get_player_matches(
     steam_id: str,
     limit: int = Query(100, ge=1, le=2000),
     offset: int = Query(0, ge=0),
+    name_filter: str | None = Query(None, min_length=1, max_length=64),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a player's match history."""
+    """Get a player's match history.
+
+    name_filter (bug 263, Stan): case-insensitive substring match against the
+    viewer-relative OPPONENT display name (matches stores no name snapshot, so
+    this matches players' CURRENT names; anonymized deleted accounts are
+    unsearchable by design). The /matches/summary totals are deliberately NOT
+    filter-aware — the client suppresses summary totals while a search is
+    active and pages on loaded counts instead. ILIKE wildcards in the input
+    are escaped, so the parameter is always a literal substring; the SQL
+    fragment itself is a fixed literal (never interpolated user text, #188).
+    Scan cost is bounded by the per-player composite indexes
+    (idx_matches_player1/player2) before the name test ever runs."""
 
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    query = text("""
+    params = {"pid": player.id, "limit": limit, "offset": offset}
+    name_sql = ""
+    if name_filter:
+        esc = (name_filter.replace("\\", "\\\\")
+                          .replace("%", "\\%")
+                          .replace("_", "\\_"))
+        params["namepat"] = f"%{esc}%"
+        name_sql = ("          AND (CASE WHEN m.player1_id = :pid THEN p2.display_name "
+                    "ELSE p1.display_name END) ILIKE :namepat ESCAPE '\\'\n")
+
+    query = text(f"""
         SELECT
             m.id AS match_id,
             m.ended_at,
@@ -7490,10 +7532,10 @@ async def get_player_matches(
         LEFT JOIN ranked_series rs ON rs.id = m.series_id
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
-        ORDER BY m.ended_at DESC
+{name_sql}        ORDER BY m.ended_at DESC
         LIMIT :limit OFFSET :offset
     """)
-    rows = (await db.execute(query, {"pid": player.id, "limit": limit, "offset": offset})).mappings().all()
+    rows = (await db.execute(query, params)).mappings().all()
 
     # Dynamic 'Current Rank' title override for opponents (#45): without this,
     # the raw shop-item name "Current Rank" leaked into history rows and the
@@ -8941,11 +8983,13 @@ async def get_gold_sources(
     site — none invented): artist_royalty; bet_win/team_bet_payout/
     ffa_bet_win (winnings only — stake-return refunds refund_abandoned/
     team_bet_refund/ffa_bet_refund are EXCLUDED entirely: returned stakes are
-    not income); series_win/series_loss + ranked-match xp; casual-match xp;
+    not income); series_win/series_loss/bet_tax + ranked-match xp;
+    casual-match xp;
     level_reward (own bucket — the every-5-levels ding is the game's
     3rd-largest gold source, #251/#259, and folding it into a mode bucket
-    would misattribute it); team_xp/team_series_win/team_series_loss;
-    ovt_xp/ovt_series_win/ovt_series_loss; ffa_xp/ffa_placement;
+    would misattribute it); team_xp/team_series_win/team_series_loss/
+    team_bet_tax; ovt_xp/ovt_series_win/ovt_series_loss;
+    ffa_xp/ffa_placement/ffa_bet_tax;
     booster_monthly; achievement; everything else positive -> other.
     The xp-row match join is by reference_id string against matches.id::text
     (reference_id can hold skus/months/keys — never cast it to uuid); xp rows
@@ -8959,13 +9003,13 @@ async def get_gold_sources(
         SELECT CASE
                  WHEN gt.reason = 'artist_royalty' THEN 'shop_sales'
                  WHEN gt.reason IN ('bet_win', 'team_bet_payout', 'ffa_bet_win') THEN 'betting'
-                 WHEN gt.reason IN ('series_win', 'series_loss') THEN 'ranked_1v1'
+                 WHEN gt.reason IN ('series_win', 'series_loss', 'bet_tax') THEN 'ranked_1v1'
                  WHEN gt.reason = 'xp' AND m.is_ranked IS TRUE THEN 'ranked_1v1'
                  WHEN gt.reason = 'xp' AND m.is_ranked IS FALSE THEN 'casual_1v1'
                  WHEN gt.reason = 'level_reward' THEN 'level_ups'
-                 WHEN gt.reason IN ('team_xp', 'team_series_win', 'team_series_loss') THEN 'team_2v2'
+                 WHEN gt.reason IN ('team_xp', 'team_series_win', 'team_series_loss', 'team_bet_tax') THEN 'team_2v2'
                  WHEN gt.reason IN ('ovt_xp', 'ovt_series_win', 'ovt_series_loss') THEN 'ovt_1v2'
-                 WHEN gt.reason IN ('ffa_xp', 'ffa_placement') THEN 'ffa'
+                 WHEN gt.reason IN ('ffa_xp', 'ffa_placement', 'ffa_bet_tax') THEN 'ffa'
                  WHEN gt.reason = 'booster_monthly' THEN 'boosters'
                  WHEN gt.reason = 'achievement' THEN 'achievements'
                  ELSE 'other'
@@ -14421,6 +14465,18 @@ I18N_PORTAL_TTL_MIN = 45
 # bounds one extension, never the chain). Past this, the only way back is a
 # fresh in-game mint, which re-proves the Steam session.
 I18N_PORTAL_MAX_LIFE_MIN = 8 * 60
+# First-use address binding (Aug 23, Kyltist: "Session expired" on every open,
+# game restarts did nothing). The mint binds the token to the GAME's source
+# address; the browser then has to arrive from the same one. That is false for
+# anyone whose game and browser egress differently — Cloudflare WARP / iCloud
+# relay / split-tunnel VPN (their five mints were all bound to a Cloudflare
+# 104.28.x.x egress and not one was ever refreshed). So the mint's binding is
+# PROVISIONAL: the first portal request inside this window may re-bind the
+# token to ITS address, after which the binding is final. The stolen-token
+# threat the binding defends against needs the token BEFORE its owner's browser
+# uses it — the browser opens within a second of the mint — so the window is
+# short and closes at first use regardless of whether a re-bind happened.
+I18N_PORTAL_FIRST_USE_SECONDS = 120
 # Contribution terms revision recorded on every proposal (D15). Bump when the
 # wording shown in the portal changes.
 I18N_LICENSE_TERMS_REV = "v1"
@@ -14658,19 +14714,61 @@ async def _i18n_role(db: AsyncSession, steam_id: str, language: str, scope: str)
     return "moderator" if row else None
 
 
+def _portal_auth_reject(reason: str, steam_id: str, bound_ip: str, client_ip: str) -> HTTPException:
+    """Every portal 401 leaves ONE diagnostic line (never the token): which
+    identity, which reason, and both addresses. The first report of this class
+    (Aug 23) was undiagnosable from logs because nothing recorded the reason —
+    the SPA collapses every 401 into "Session expired" and the access log is
+    off. Prints are unbuffered (docker-compose PYTHONUNBUFFERED, #271)."""
+    print(f"[PORTAL-AUTH] reject reason={reason} steam={steam_id or '-'} "
+          f"bound={bound_ip or '-'} client={client_ip or '-'}")
+    return HTTPException(401, reason)
+
+
 async def _portal_auth(request: Request, db: AsyncSession) -> str:
-    """Validate X-Portal-Token → steam_id. Token is IP-bound and short-TTL."""
+    """Validate X-Portal-Token → steam_id. Token is address-bound (first-use,
+    see I18N_PORTAL_FIRST_USE_SECONDS) and short-TTL."""
     token = request.headers.get("X-Portal-Token") or ""
     if not token or len(token) > 64:
         raise HTTPException(401, "portal session required")
     row = (await db.execute(text(
-        "SELECT steam_id, bound_ip, expires_at FROM i18n_portal_sessions WHERE token = :t"
+        "SELECT steam_id, bound_ip, expires_at, first_use_at, created_at"
+        "  FROM i18n_portal_sessions WHERE token = :t"
     ), {"t": token})).mappings().first()
-    if row is None or row["expires_at"] < datetime.now(timezone.utc):
-        raise HTTPException(401, "portal session expired")
     client_ip = request.client.host if request.client else ""
-    if row["bound_ip"] != client_ip:
-        raise HTTPException(401, "portal session invalid for this address")
+    if row is None or row["expires_at"] < datetime.now(timezone.utc):
+        raise _portal_auth_reject("portal session expired", row["steam_id"] if row else "",
+                                  row["bound_ip"] if row else "", client_ip)
+    if row["first_use_at"] is None:
+        # First portal request for this token. Bind it to THIS address — the
+        # mint bound it to the game's, which is provisional (Aug 23, relay /
+        # split-tunnel egress). Own short transaction (async_session): the
+        # request session's transaction belongs to the handler, and a GET
+        # handler never commits, so a binding written there would vanish and
+        # re-open the window on every call. Conditional on first_use_at still
+        # NULL and the window still open — whichever concurrent first request
+        # wins the UPDATE owns the binding; a loser from a different address
+        # then fails the mismatch check below on its re-read.
+        from database import async_session as _portal_sessions   # own txn (#135: local import, used here only)
+        async with _portal_sessions() as _s2:
+            bound = (await _s2.execute(text(
+                "UPDATE i18n_portal_sessions"
+                "   SET bound_ip = :ip, first_use_at = clock_timestamp()"
+                " WHERE token = :t AND first_use_at IS NULL"
+                "   AND created_at + (:win || ' seconds')::interval > clock_timestamp()"
+                " RETURNING 1"
+            ), {"ip": client_ip, "t": token,
+                "win": str(I18N_PORTAL_FIRST_USE_SECONDS)})).scalar()
+            await _s2.commit()
+        if bound is None and row["bound_ip"] != client_ip:
+            # Window closed without a first use (the browser never opened, or
+            # opened late) and the addresses differ — the mint's provisional
+            # binding is all that is left, and it is not this address.
+            raise _portal_auth_reject("portal session address mismatch",
+                                      row["steam_id"], row["bound_ip"], client_ip)
+    elif row["bound_ip"] != client_ip:
+        raise _portal_auth_reject("portal session address mismatch",
+                                  row["steam_id"], row["bound_ip"], client_ip)
     # SERIALIZE against deletion/ban (round-11 find 1, the #207 advisory
     # pattern): an already-authorized portal mutation could otherwise commit
     # AFTER a deletion that swept this identity. The per-identity advisory
@@ -14685,7 +14783,14 @@ async def _portal_auth(request: Request, db: AsyncSession) -> str:
         "SELECT steam_id, bound_ip, expires_at FROM i18n_portal_sessions WHERE token = :t"
     ), {"t": token})).mappings().first()
     if row is None or row["expires_at"] < datetime.now(timezone.utc):
-        raise HTTPException(401, "portal session expired")
+        raise _portal_auth_reject("portal session expired", row["steam_id"] if row else "",
+                                  row["bound_ip"] if row else "", client_ip)
+    if row["bound_ip"] != client_ip:
+        # The binding is committed state (own transaction above), so this
+        # re-read sees the final owner — a losing concurrent first-use from a
+        # different address ends here.
+        raise _portal_auth_reject("portal session address mismatch",
+                                  row["steam_id"], row["bound_ip"], client_ip)
     # Independent fail-closed on revoked identities (round-10 find 2): the
     # deletion/ban paths purge portal sessions, but a race or missed path
     # must not leave a live token speaking for a dead or banned account.
@@ -14695,9 +14800,9 @@ async def _portal_auth(request: Request, db: AsyncSession) -> str:
         "SELECT deleted_at FROM players WHERE steam_id = :sid"
     ), {"sid": row["steam_id"]})).mappings().first()
     if prow is None or prow["deleted_at"] is not None:
-        raise HTTPException(401, "portal session revoked")
+        raise _portal_auth_reject("portal session revoked", row["steam_id"], row["bound_ip"], client_ip)
     if await _is_banned(db, row["steam_id"]) is not None:
-        raise HTTPException(401, "portal session revoked")
+        raise _portal_auth_reject("portal session revoked", row["steam_id"], row["bound_ip"], client_ip)
     return row["steam_id"]
 
 
@@ -14720,10 +14825,12 @@ def _require_https(request: Request) -> None:
 @app.post("/api/v1/i18n/portal-session", tags=["I18n"])
 async def i18n_portal_session(payload: dict, request: Request,
                               db: AsyncSession = Depends(get_db)):
-    """In-game handoff: mint a short-TTL, IP-bound portal token. Requires a
-    verified Steam session and HTTPS. The client opens the portal with the
+    """In-game handoff: mint a short-TTL, address-bound portal token. Requires
+    a verified Steam session and HTTPS. The client opens the portal with the
     token in the URL FRAGMENT (never a query param — fragments don't reach
-    server logs)."""
+    server logs). The binding written here (the GAME's address) is
+    provisional: the first portal request within I18N_PORTAL_FIRST_USE_SECONDS
+    may re-bind the token to the BROWSER's address (see _portal_auth)."""
     _require_https(request)
     steam_id = str(payload.get("steam_id", ""))[:20]
     # Same per-identity serialization as _portal_auth (round-11 find 1): a
@@ -16075,6 +16182,15 @@ function errText(e){
   if(e.status===401){
     if(d&&d.indexOf("maximum lifetime")>=0)
       return "Session reached its maximum lifetime — reopen the portal from the in-game Settings tab.";
+    // Address mismatch (Aug 23): the game and this browser reached the server
+    // from DIFFERENT addresses (Cloudflare WARP / relay / split-tunnel VPN).
+    // The session binds to whichever address uses it first, so reopening from
+    // the game and letting this tab load within two minutes fixes the split;
+    // a mid-session change of address cannot be healed without a new mint.
+    if(d&&d.indexOf("address")>=0)
+      return "Address mismatch — the game and this browser reached the server from different network addresses "+
+             "(VPN, Cloudflare WARP or a privacy relay?). Reopen the portal from the in-game Settings tab and let this "+
+             "page load within 2 minutes; if it keeps happening, exclude the browser or the game from the relay.";
     return "Session expired — reopen the portal from the in-game Settings tab.";
   }
   if(e.status===403)return "Not allowed: "+d;
@@ -17351,6 +17467,80 @@ def _odds_multiplier(bet_on_rating: float, opponent_rating: float,
 # changing what the client sends.
 RANKED_BET_POINT_LOCK = 2
 
+# The RULE (Sid, Discord Aug 16) is fixed: tax winning low-odds bets and
+# transfer that tax to the fighter/team the winner backed.
+BET_TAX_ODDS_MAX = 1.50  # SID'S BALANCE KNOB (#331): conservative pending tuning.
+BET_TAX_RATE = 0.20      # SID'S BALANCE KNOB (#331): conservative pending tuning.
+assert 0.0 <= BET_TAX_RATE < 1.0
+
+
+def _bet_fighter_tax(amount: int, odds, gross: int) -> tuple[int, int]:
+    """Return ``(net_payout, tax)`` for a winning bet's stored odds.
+
+    Tax is floor(profit * BET_TAX_RATE) when the stored odds are at or below
+    BET_TAX_ODDS_MAX. Tax is on PROFIT only, never stake. Because the rate is
+    below 1, net stays above stake whenever gross was above stake; zero-rounded
+    profit wins remain identified by settlement_kind='won' (learning #244).
+    Persist NET as payout; every read surface renders that stored value and
+    must never recompute the tax for display.
+    """
+    profit = gross - amount
+    if profit <= 0 or float(odds) > BET_TAX_ODDS_MAX:
+        return gross, 0
+    tax = int(profit * BET_TAX_RATE)
+    net_payout = gross - tax
+    assert net_payout > amount
+    return net_payout, tax
+
+
+async def _credit_bet_fighter_tax(
+    db: AsyncSession,
+    fighter_id,
+    tax: int,
+    reason: str,
+    reference_id: str,
+    fighter_obj: Player | None = None,
+) -> None:
+    """Credit one fighter tax as an atomic balance delta plus ledger row."""
+    if tax <= 0:
+        return
+    await _assert_no_service_subject(db, affected_player_ids=[fighter_id])
+    await db.execute(text(
+        "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :tax WHERE id = :pid"
+    ), {"tax": tax, "pid": fighter_id})
+    # A live ORM instance must not later flush its pre-credit balance over the
+    # atomic delta (learning #326).
+    if fighter_obj is not None and fighter_obj.id == fighter_id:
+        db.expire(fighter_obj, ["gold_earned"])
+    db.add(GoldTransaction(
+        player_id=fighter_id, amount=tax,
+        reason=reason, reference_id=str(reference_id),
+    ))
+
+
+async def _credit_team_bet_fighter_tax(
+    db: AsyncSession,
+    slot_a_id,
+    slot_b_id,
+    tax: int,
+    reference_id: str,
+    fighter_objects: tuple[Player, ...] = (),
+) -> None:
+    """Split tax equally, with an odd-gold remainder going to slot A."""
+    if tax <= 0:
+        return
+    objects_by_id = {p.id: p for p in fighter_objects}
+    slot_a_tax = tax // 2 + tax % 2
+    slot_b_tax = tax // 2
+    await _credit_bet_fighter_tax(
+        db, slot_a_id, slot_a_tax, "team_bet_tax", reference_id,
+        objects_by_id.get(slot_a_id),
+    )
+    await _credit_bet_fighter_tax(
+        db, slot_b_id, slot_b_tax, "team_bet_tax", reference_id,
+        objects_by_id.get(slot_b_id),
+    )
+
 
 def _ranked_score_locked(live_p1, live_p2, p1_series_wins, p2_series_wins) -> bool:
     """Is 1v1 betting closed on match progress alone?
@@ -17365,38 +17555,54 @@ def _ranked_score_locked(live_p1, live_p2, p1_series_wins, p2_series_wins) -> bo
 
 
 async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
-    """Called when a series transitions to status='completed'. Pays winning
-    bets from the implicit house pool."""
+    """Settle a completed 1v1 series, including low-odds tax transfers."""
     rows = (await db.execute(
         select(Bet).where(Bet.series_id == series.id, Bet.settled_at.is_(None))
     )).scalars().all()
     if not rows:
         return
     await _assert_no_service_subject(
-        db, affected_player_ids=[bet.player_id for bet in rows])
+        db, affected_player_ids=[bet.player_id for bet in rows] + [series.winner_id])
     now = datetime.now(timezone.utc)
+    winner_obj = (await db.execute(
+        select(Player).where(Player.id == series.winner_id)
+    )).scalar_one_or_none()
     for bet in rows:
-        if bet.bet_on_player_id == series.winner_id:
-            payout = int(round(bet.amount * bet.odds_multiplier))
-            bet.payout = payout
-            bet.settlement_kind = "won"
-            # Credit to bettor — payout INCLUDES stake return.
-            bettor = (await db.execute(select(Player).where(Player.id == bet.player_id))).scalar_one_or_none()
-            if bettor is not None:
-                # r2 find 3: atomic delta — bettor rows sit outside this
-                # transaction's locked set, so an absolute write can
-                # lost-update against a concurrent stake debit or payout.
-                await db.execute(text(
-                    "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
-                ), {"amt": payout, "pid": bettor.id})
-                db.add(GoldTransaction(
-                    player_id=bettor.id, amount=payout,
-                    reason="bet_win", reference_id=str(series.id),
-                ))
+        won = bet.bet_on_player_id == series.winner_id
+        if won:
+            gross = int(round(bet.amount * bet.odds_multiplier))
+            payout, fighter_tax = _bet_fighter_tax(
+                bet.amount, bet.odds_multiplier, gross)
         else:
-            bet.payout = 0  # lost
-            bet.settlement_kind = "lost"
-        bet.settled_at = now
+            payout, fighter_tax = 0, 0
+        # fighter_tax is deliberately unmapped in the ORM (learning #346), so
+        # claim and stamp the whole terminal row through raw SQL.
+        claimed = (await db.execute(text("""
+            UPDATE bets
+               SET payout = :p, settled_at = :now, settlement_kind = :k,
+                   fighter_tax = NULLIF(:tax, 0)
+             WHERE id = :bid AND settled_at IS NULL
+            RETURNING id
+        """), {"p": payout, "now": now, "k": "won" if won else "lost",
+               "tax": fighter_tax, "bid": bet.id})).scalar()
+        if claimed is None:
+            continue
+        if won:
+            # Credit to bettor — payout INCLUDES stake return.
+            # r2 find 3: atomic delta — bettor rows sit outside this
+            # transaction's locked set, so an absolute write can
+            # lost-update against a concurrent stake debit or payout.
+            await db.execute(text(
+                "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+            ), {"amt": payout, "pid": bet.player_id})
+            db.add(GoldTransaction(
+                player_id=bet.player_id, amount=payout,
+                reason="bet_win", reference_id=str(series.id),
+            ))
+            await _credit_bet_fighter_tax(
+                db, series.winner_id, fighter_tax, "bet_tax", str(series.id),
+                winner_obj,
+            )
     print(f"[BETS] Settled {len(rows)} bets on series {series.id}")
 
 
@@ -19434,11 +19640,14 @@ async def place_bet(
         odds_multiplier=mult,
     ))
     await db.commit()
+    gross_payout = int(round(amount * mult))
+    potential_payout, fighter_tax = _bet_fighter_tax(amount, mult, gross_payout)
     return {
         "status": "placed",
         "amount": amount,
         "odds_multiplier": round(mult, 2),
-        "potential_payout": int(round(amount * mult)),
+        "potential_payout": potential_payout,
+        "fighter_tax": fighter_tax,
     }
 
 
@@ -19584,12 +19793,17 @@ async def place_team_bet(
         VALUES (:pid, :sid, :tm, :amt, :mult)
     """), {"pid": bettor.id, "sid": sid, "tm": bet_on_team, "amt": amount, "mult": mult})
     await db.commit()
+    # Settlement rounds the stored DOUBLE odds; quote that exact gross before
+    # applying the same tax helper (the old quote truncated up to 1g lower).
+    gross_payout = int(round(amount * mult))
+    potential_payout, fighter_tax = _bet_fighter_tax(amount, mult, gross_payout)
     return {
         "status": "placed",
         "amount": amount,
         "bet_on_team": bet_on_team,
         "odds_multiplier": round(mult, 2),
-        "potential_payout": int(amount * mult),
+        "potential_payout": potential_payout,
+        "fighter_tax": fighter_tax,
     }
 
 
@@ -24455,7 +24669,7 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
         db, affected_player_ids=[series.player1_id, series.player2_id])
     txns = (await db.execute(
         select(GoldTransaction).where(
-            GoldTransaction.reason.in_(["series_win", "series_loss", "bet_win"]),
+            GoldTransaction.reason.in_(["series_win", "series_loss", "bet_win", "bet_tax"]),
             GoldTransaction.reference_id == str(series.id),
         )
     )).scalars().all()
@@ -24474,9 +24688,8 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
     # July 20 item 6: also claw back the new loser-side series gold — the 2v2
     # counterpart already reverses win AND loss reasons; without series_loss
     # here a colluding pair keeps the loser payout through every reversal.
-    # Aug 9 bet audit find 1: bet payouts are clawed back too (the 2v2 twin
-    # already reverses team_bet_payout; without bet_win here a reversed series
-    # left winners keeping payouts funded by a voided result).
+    # Aug 9 bet audit find 1: bet payouts are clawed back too. Fighter tax is
+    # part of that same transfer, so reversing the result removes both sides.
     for tx in txns:
         db.add(GoldTransaction(
             player_id=tx.player_id, amount=-tx.amount,
@@ -26487,17 +26700,24 @@ async def _complete_team_series_with_ratings(
                   FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL
                  ORDER BY player_id::text, id
             """), {"sid": series_uuid})).mappings().all()
+            winner_a_id, winner_b_id = ((t1a_id, t1b_id) if winner_team == 1
+                                        else (t2a_id, t2b_id))
             for b in unsettled:
                 won = (b["bet_on_team"] == winner_team)
-                payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+                gross = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+                payout, fighter_tax = (_bet_fighter_tax(
+                    b["amount"], b["odds_multiplier"], gross
+                ) if won else (0, 0))
                 # Claim-gated (Codex Jul-29 find 1): the SELECT above is a
                 # snapshot — a janitor reconcile can settle/refund this bet
                 # between it and here, and an unconditional UPDATE would
                 # overwrite that terminal state and pay a second time.
                 claimed = (await db.execute(text(
-                    "UPDATE team_bets SET settled_at=NOW(), payout=:p, settlement_kind=:k"
+                    "UPDATE team_bets SET settled_at=NOW(), payout=:p, settlement_kind=:k,"
+                    " fighter_tax=NULLIF(:tax, 0)"
                     " WHERE id=:id AND settled_at IS NULL RETURNING id"),
-                    {"p": payout, "k": "won" if won else "lost", "id": b["id"]})).scalar()
+                    {"p": payout, "k": "won" if won else "lost",
+                     "tax": fighter_tax, "id": b["id"]})).scalar()
                 if claimed is None:
                     continue
                 if payout > 0:
@@ -26505,6 +26725,8 @@ async def _complete_team_series_with_ratings(
                                      {"p": payout, "pid": b["player_id"]})
                     db.add(GoldTransaction(player_id=b["player_id"], amount=payout,
                                            reason="team_bet_payout", reference_id=str(series_uuid)))
+                    await _credit_team_bet_fighter_tax(
+                        db, winner_a_id, winner_b_id, fighter_tax, str(series_uuid))
             await db.flush()
     except Exception as bex:
         print(f"[TEAM-DC-COMPLETE] bet settle error for {series_uuid}: {bex}")
@@ -26553,13 +26775,14 @@ async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str
     against whatever state committed first.
     Claim-first per bet (settled_at gate inside the UPDATE) so a concurrent
     settle can never double-pay; gold direction mirrors the live paths (win:
-    gold_earned += payout; refund: gold_spent -= stake). Bounded per pass
-    (leftovers picked up by the janitor's next tick). Savepoint-contained,
-    never raises."""
+    bettor gold_earned += net payout and fighters receive the tax; refund:
+    gold_spent -= stake). Bounded per pass (leftovers picked up by the
+    janitor's next tick). Savepoint-contained, never raises."""
     try:
         async with db.begin_nested():
             srow = (await db.execute(text(
-                "SELECT status, winner_team, invalidated_at FROM team_series"
+                "SELECT status, winner_team, invalidated_at,"
+                " t1a_id, t1b_id, t2a_id, t2b_id FROM team_series"
                 " WHERE id = :sid FOR NO KEY UPDATE"
             ), {"sid": series_uuid})).mappings().first()
             if srow is None:
@@ -26573,26 +26796,49 @@ async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str
                 print(f"[TEAM-BETS] reconcile skipped for {series_uuid} ({reason}): "
                       f"status '{srow['status']}' is not terminal here")
                 return
+            winner_ids = ((srow["t1a_id"], srow["t1b_id"])
+                          if settle_against == 1 else
+                          (srow["t2a_id"], srow["t2b_id"])
+                          if settle_against == 2 else ())
+            # Every team lifecycle writer takes series -> canonically ordered
+            # players. Tax credits must keep that order even if slot A/B flips.
+            for winner_id in sorted(winner_ids, key=str):
+                await db.execute(text(
+                    "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+                ), {"pid": winner_id})
             unsettled = (await db.execute(text(
                 "SELECT id, player_id, amount, odds_multiplier, bet_on_team"
                 "  FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL"
                 " ORDER BY player_id::text, id LIMIT 200"
             ), {"sid": series_uuid})).mappings().all()
             await _assert_no_service_subject(
-                db, affected_player_ids=[b["player_id"] for b in unsettled])
+                db, affected_player_ids=[b["player_id"] for b in unsettled] + list(winner_ids))
             settled = refunded = 0
             for b in unsettled:
                 if settle_against is not None:
                     won = b["bet_on_team"] == settle_against
-                    pay = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
+                    gross = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
+                    pay, fighter_tax = (_bet_fighter_tax(
+                        b["amount"], b["odds_multiplier"], gross
+                    ) if won else (0, 0))
                     kind = "won" if won else "lost"
                 else:
                     pay = b["amount"]   # payout == stake marks a refund (#107/#244)
+                    fighter_tax = 0
                     kind = "refunded"
-                claimed = (await db.execute(text(
-                    "UPDATE team_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
-                    " WHERE id = :bid AND settled_at IS NULL RETURNING id"
-                ), {"p": pay, "k": kind, "bid": b["id"]})).scalar()
+                if settle_against is not None:
+                    claimed = (await db.execute(text(
+                        "UPDATE team_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k,"
+                        " fighter_tax = NULLIF(:tax, 0)"
+                        " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+                    ), {"p": pay, "k": kind, "tax": fighter_tax,
+                        "bid": b["id"]})).scalar()
+                else:
+                    # Refunds return principal and never enter the tax path.
+                    claimed = (await db.execute(text(
+                        "UPDATE team_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
+                        " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+                    ), {"p": pay, "k": kind, "bid": b["id"]})).scalar()
                 if claimed is None:
                     continue
                 if settle_against is not None:
@@ -26603,6 +26849,9 @@ async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str
                         ), {"p": pay, "pid": b["player_id"]})
                         db.add(GoldTransaction(player_id=b["player_id"], amount=pay,
                                                reason="team_bet_payout", reference_id=str(series_uuid)))
+                        await _credit_team_bet_fighter_tax(
+                            db, winner_ids[0], winner_ids[1], fighter_tax,
+                            str(series_uuid))
                 else:
                     refunded += 1
                     await db.execute(text(
@@ -26860,7 +27109,7 @@ class _AdminReverseTeamSeriesReq(BaseModel):
 @app.post("/api/v1/admin/team/reverse-series", tags=["Admin"])
 async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSession = Depends(get_db)):
     """Reverse a COMPLETED 2v2 series: undo each slot's Glicko rating change, decrement
-    completed_series, reverse the series-completion gold (+ bet payouts), invalidate its
+    completed_series, reverse the series-completion gold (+ bet payouts/tax), invalidate its
     matches, and cancel the series. Rating-only reversal (RD/volatility not restored),
     matching the 1v1 admin/reverse-series. Admin-HMAC gated."""
     await _require_admin(db, req.admin_steam_id, "reverse_team_series", req.series_id, req.hmac_signature)
@@ -26885,7 +27134,8 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
     reverse_txns = (await db.execute(text("""
         SELECT player_id, amount, reason FROM gold_transactions
          WHERE reference_id = :ref
-           AND reason IN ('team_series_win', 'team_series_loss', 'team_bet_payout')
+           AND reason IN ('team_series_win', 'team_series_loss', 'team_bet_payout',
+                          'team_bet_tax')
          ORDER BY player_id::text, id
     """), {"ref": str(sid)})).mappings().all()
     await _assert_no_service_subject(
@@ -26910,8 +27160,8 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
              WHERE player_id = :pid
         """), {"rc": float(rc or 0), "pid": pid})
 
-    # Reverse series-completion gold (win/loss bonus + bet payouts). Win/loss bonus also
-    # bumped team_gold_earned; bet payouts only gold_earned. Bettor rows sit
+    # Reverse series-completion gold (win/loss bonus + bet payouts/tax). Win/loss bonus also
+    # bumped team_gold_earned; bet payouts/tax only gold_earned. Bettor rows sit
     # outside the four held member locks (same accepted class as live bet
     # settlement); ORDER BY player_id::text matches the settle path's order so
     # the two can't invert against each other.
@@ -33628,6 +33878,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             _wN = min(1.0, (_score_target - 1) / 4.0)
             new_r, new_rd, new_vol = calculate_new_rating(
                 old_r, old_rd, old_vol, opponents,
+                tau=GLICKO2_TAU,
                 weights=([_wN] * len(opponents)) if _wN < 1.0 else None)
             rating_changes[p.steam_id] = round(new_r - old_r, 1)
             pid = id_by_steam[p.steam_id]
@@ -34543,8 +34794,8 @@ def _ffa_room_game_no(room_id: str | None) -> int | None:
 
 
 async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, winner_pid):
-    """Pay/lose every unsettled bet on one specific game. Gold credit is a
-    single atomic UPDATE (#148). Each bet is CLAIMED first (settled_at set in
+    """Pay/lose every unsettled bet on one specific game. Every balance credit
+    is an atomic UPDATE (#148). Each bet is CLAIMED first (settled_at set in
     the same statement that is gated on settled_at IS NULL) so two concurrent
     settle passes — e.g. two reports' catch-up loops, or a report racing the
     stranded-bet janitor — can never both pay the same bet."""
@@ -34554,7 +34805,14 @@ async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, wi
         " ORDER BY player_id::text, id LIMIT 200"
     ), {"lid": lobby_id, "g": game_no})).mappings().all()
     await _assert_no_service_subject(
-        db, affected_player_ids=[b["player_id"] for b in open_bets])
+        db, affected_player_ids=[b["player_id"] for b in open_bets] + [winner_pid])
+    if open_bets:
+        # Live reports already hold the roster in canonical order; closure
+        # reconciliation reaches this helper directly, so take the fighter row
+        # before any outsider bettor delta there as well.
+        await db.execute(text(
+            "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+        ), {"pid": winner_pid})
     n = 0
     for b in open_bets:
         # FLOOR, never round (Codex round-3 find 11): the odds already carry
@@ -34567,11 +34825,16 @@ async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, wi
         # first turns 25 × 1.16 into 28.999999999999996 — a 1g underpay.
         # int() on a positive Decimal truncates, which IS the floor here.
         won = b["bet_on_player_id"] == winner_pid
-        pay = int(b["amount"] * b["odds_multiplier"]) if won else 0
+        gross = int(b["amount"] * b["odds_multiplier"]) if won else 0
+        pay, fighter_tax = (_bet_fighter_tax(
+            b["amount"], b["odds_multiplier"], gross
+        ) if won else (0, 0))
         claimed = (await db.execute(text(
-            "UPDATE ffa_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
+            "UPDATE ffa_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k,"
+            " fighter_tax = NULLIF(:tax, 0)"
             " WHERE id = :bid AND settled_at IS NULL RETURNING id"
-        ), {"p": pay, "k": "won" if won else "lost", "bid": b["id"]})).scalar()
+        ), {"p": pay, "k": "won" if won else "lost", "tax": fighter_tax,
+            "bid": b["id"]})).scalar()
         if claimed is None:
             continue   # another pass got here first — it also moved the gold
         n += 1
@@ -34581,6 +34844,8 @@ async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, wi
             ), {"g": pay, "pid": b["player_id"]})
             db.add(GoldTransaction(player_id=b["player_id"], amount=pay,
                                    reason="ffa_bet_win", reference_id=str(lobby_id)))
+            await _credit_bet_fighter_tax(
+                db, winner_pid, fighter_tax, "ffa_bet_tax", str(lobby_id))
     if n:
         print(f"[FFA-BETS] settled {n} bet(s) on lobby {lobby_id} game {game_no}")
 
@@ -34870,9 +35135,13 @@ async def place_ffa_bet(
     # settlement floors the STORED 2-decimal odds in decimal arithmetic, so
     # the quote does the same — never round(), never the raw float mult.
     _stored_mult = _decimal.Decimal(str(round(mult, 2)))
+    _gross_payout = int(_decimal.Decimal(amount) * _stored_mult)
+    _potential_payout, _fighter_tax = _bet_fighter_tax(
+        amount, _stored_mult, _gross_payout)
     return {"status": "placed", "game_number": game_number, "amount": amount,
             "odds_multiplier": round(mult, 2),
-            "potential_payout": int(_decimal.Decimal(amount) * _stored_mult)}
+            "potential_payout": _potential_payout,
+            "fighter_tax": _fighter_tax}
 
 
 # ── Lobby-phase betting (Sid, Aug 9 — migration 207) ───────────────────────
@@ -36282,9 +36551,9 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                    WHERE id = :sid"""),
             {"t1": new_t1w, "t2": new_t2w, "w": winner_team, "sid": report.series_id},
         )
-        # Settle 2v2 bets. Winning bets pay amount × odds; losing bets close
-        # with payout=0. Mirrors the 1v1 bet settlement that runs on
-        # ranked_series completion (in submit_match elsewhere).
+        # Settle 2v2 bets. Winning GROSS is amount × odds; the stored payout is
+        # net after any low-odds fighter tax. Losing bets close with payout=0.
+        # Mirrors 1v1 settlement in submit_match.
         # SAVEPOINT (learning #187): without begin_nested a failed statement
         # here aborts the whole transaction and the match write dies with it —
         # the old comment's promise was not actually true. flush() runs the
@@ -36299,20 +36568,32 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                 """), {"sid": series_uuid})).mappings().all()
                 await _assert_no_service_subject(
                     db, affected_player_ids=[b["player_id"] for b in unsettled])
+                winner_fighter_ids = ((series["t1a_id"], series["t1b_id"])
+                                      if winner_team == 1 else
+                                      (series["t2a_id"], series["t2b_id"]))
+                _fighter_objects_by_id = {
+                    p.id: p for p in (p_t1a, p_t1b, p_t2a, p_t2b)
+                }
+                winner_fighters = tuple(
+                    _fighter_objects_by_id[pid] for pid in winner_fighter_ids)
                 for b in unsettled:
                     won = (b["bet_on_team"] == winner_team)
-                    payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+                    gross = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+                    payout, fighter_tax = (_bet_fighter_tax(
+                        b["amount"], b["odds_multiplier"], gross
+                    ) if won else (0, 0))
                     # Claim-gated (Codex Jul-29 find 1): a janitor reconcile
                     # can terminal-ize this bet between the snapshot SELECT
                     # and here; an unconditional UPDATE would overwrite it and
                     # double-pay.
                     claimed = (await db.execute(text("""
                         UPDATE team_bets
-                           SET settled_at = NOW(), payout = :p, settlement_kind = :k
+                           SET settled_at = NOW(), payout = :p, settlement_kind = :k,
+                               fighter_tax = NULLIF(:tax, 0)
                          WHERE id = :id AND settled_at IS NULL
                         RETURNING id
                     """), {"p": payout, "k": "won" if won else "lost",
-                           "id": b["id"]})).scalar()
+                           "tax": fighter_tax, "id": b["id"]})).scalar()
                     if claimed is None:
                         continue
                     if payout > 0:
@@ -36326,6 +36607,10 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                             player_id=b["player_id"], amount=payout,
                             reason="team_bet_payout", reference_id=str(series_uuid),
                         ))
+                        await _credit_team_bet_fighter_tax(
+                            db, winner_fighter_ids[0], winner_fighter_ids[1],
+                            fighter_tax, str(series_uuid), winner_fighters,
+                        )
                 await db.flush()
         except Exception as bex:
             # Don't let bet settlement failures block the team-match write.
@@ -37526,9 +37811,36 @@ SPECTATE_BROADCAST_STEAM_IDS = {"76561198709950406"}
 SERVICE_POLICY_WATERMARK = datetime(2026, 8, 16, tzinfo=timezone.utc)
 BROADCAST_EXCLUSION_MAX = 8
 BROADCAST_EXCLUSION_TTL_SECONDS = 15 * 60
-BROADCAST_ROTATE_SECONDS = 180
+BROADCAST_ROTATE_SECONDS = 300
 BROADCAST_ACQ_STALL_SECONDS = 30
 BROADCAST_ACQ_CEILING_SECONDS = 240
+# ── Rotation hardening (Sid, Aug 22: "switching games too often for no
+# reason ... in the middle of games") ──────────────────────────────────────
+# Production evidence (spectate_leases, Aug 20-23): 55 game-to-game switches
+# in ~74h, 47% issued while the previous game was still LIVE, median dwell
+# 9.7 min with a 20-of-55 spike at 2-4 min (= the old 180s dwell +
+# acquisition); worst case 19 A<->B hops in 76 minutes between two
+# floor-sharing candidates, every hop mid-game. TWO levers shipped: the dwell
+# raise above (180 -> 300) and the battle deferral below. BOTH ARE SID'S
+# BALANCE KNOBS (#331) — chosen conservative pending his tuning:
+# A dwell-driven switch DEFERS while the current game's attested phase is
+# "battle" (attests are ~60s coarse, so this lands the exit near a
+# transition rather than exactly on one), up to this much EXTRA wait — the
+# ceiling exists so a stuck/marathon phase cannot pin the seat (#403's test).
+BROADCAST_BATTLE_DEFER_SECONDS = 300
+# NOTE (Aug 23, four review rounds): two further levers were built and then
+# CUT, not tuned. A "challenger margin" on forced evictions was dead code
+# below the 0.85 floor's implicit 1.176 ratio and above it created an
+# UNBOUNDED sub-floor pin (bug 244's class). A "revisit damper" (do not
+# return to a game shown within 600s) could not bound the forced-eviction
+# path — two candidates alternating across the floor still ping-ponged every
+# dwell, because forced eviction is a must-switch the damper has to exempt.
+# The selector and its last_shown history below are therefore HEAD's: forced
+# eviction is margin-free (out of the set = evicted at the next dwell), and
+# peer rotation is least-recently-shown. A future pass wanting to damp the
+# forced A<->B case has to change the ELIGIBILITY (e.g. hysteresis on the
+# floor), not the selector — that is the review's conclusion, recorded so
+# the next attempt does not rebuild the same two levers.
 # 2 (Aug 10, design-review blocker 3): the spectator desync/safety batch.
 # Protocol-1 clients carry the PlayerDied/master-window RPC hazard, the
 # poison roster-quarantine misfire and unregistered husk views — mixed rooms
@@ -38986,6 +39298,17 @@ async def broadcast_target(
     acq_over = acq_age is not None and acq_age > BROADCAST_ACQ_CEILING_SECONDS
     dwell_done = bool(current_ok and activation_age is not None
                       and activation_age >= BROADCAST_ROTATE_SECONDS)
+    # Aug 23 hardening lever 1: dwell switches wait for a non-battle attest.
+    # ONLY the dwell arm — eligibility (game_ended/unready) and acq
+    # stall/ceiling switches are correctness and are never deferred, and a
+    # tier-1 (mandatory tournament) rotation set preempts at the base dwell
+    # exactly as before.
+    battle_deferred = False
+    if (dwell_done and not tier_one and current_candidate is not None
+            and current_candidate.get("phase") == "battle"
+            and activation_age < BROADCAST_ROTATE_SECONDS + BROADCAST_BATTLE_DEFER_SECONDS):
+        dwell_done = False
+        battle_deferred = True
 
     choose_new = selected is None or acq_stalled or acq_over
     # Bug 244: the dwell rotation must also fire when the pinned current
@@ -39035,6 +39358,12 @@ async def broadcast_target(
     next_switch = BROADCAST_ROTATE_SECONDS
     if current_ok and activation_age is not None:
         next_switch = max(0, int(BROADCAST_ROTATE_SECONDS - activation_age))
+        # While battle-deferred: at most one attest cadence (60s), but never
+        # past the deferral ceiling — at the ceiling the switch fires on the
+        # next poll whatever the phase says (review r4 find 4).
+        if battle_deferred:
+            ceiling_left = int(BROADCAST_ROTATE_SECONDS + BROADCAST_BATTLE_DEFER_SECONDS - activation_age)
+            next_switch = max(next_switch, min(60, max(0, ceiling_left)))
 
     # Living stream post upkeep (Aug 17). The post describes what the seat is
     # WATCHING (current), falling back to the director's selection while a

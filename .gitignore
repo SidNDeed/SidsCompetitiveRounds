@@ -63,6 +63,7 @@ AGENTS.override.md
 ai-collab/
 docs/DUAL-AI-SETUP.md
 docs/CODEX-CHEATSHEET.md
+scr-tour-script.md
 
 # NuGet
 packages/

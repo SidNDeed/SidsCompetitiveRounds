@@ -729,6 +729,14 @@ namespace CompetitiveRounds
             {
                 PhotonView[] views = null;
                 try { views = go.GetComponentsInChildren<PhotonView>(true); } catch { }
+                // Stop husk-owned sounds BEFORE deactivation (Aug 22): a
+                // cache-replayed saw husk starts its loop at OnEnable, and its
+                // PlayEnd-on-disable stops nothing (the loop sits in the
+                // un-stopped soundStart slot) — a live-but-inactive transform
+                // is then invisible to Sonigon's fake-null sweep, so the loop
+                // played until room teardown. The public StopAllAtOwner works
+                // here precisely because the transform is still valid.
+                try { RoundSoundSweep.StopAllAtOwnerHard(go.transform); } catch { }
                 go.SetActive(false);
                 if (views != null) SafeLocalCleanViews(views);
             }

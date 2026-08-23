@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
@@ -2611,6 +2612,10 @@ namespace CompetitiveRounds
                 // mode. Deliberately before the scope gate: the stamp is inert
                 // data and the poison protocol has its own room gating.
                 try { PoisonSync.NoteRoundBoundary(); } catch { }
+                // Round-scoped SOUND hygiene rides the same trigger set (its
+                // own coalescing + gating; deliberately before the scope gate
+                // — the sound sweep is per-seat audio hygiene, ungated).
+                try { RoundSoundSweep.Schedule(reason); } catch { }
                 if (!VanillaFixSupport.AnyGameScope()) return;
                 if (_sweepPending && Time.realtimeSinceStartup - _pendingSince < 2f) return;
                 if (Plugin.Instance == null) return;
@@ -2699,7 +2704,458 @@ namespace CompetitiveRounds
         private static Exception Cleanup(MethodBase original, Exception exception)
         {
             if (original != null) return exception;
+            // Eager-resolve the sound sweep's reflection surface at patch time
+            // so a Sonigon member rename fails LOUD in the startup log
+            // (#83/#91), not silently at the first round boundary. Safe here:
+            // SonigonVoiceUpdateGuard's own TargetMethod already proves the
+            // Sonigon assembly is loaded at patch time.
+            try { RoundSoundSweep.EagerResolve(); } catch { }
             return VanillaFixSupport.Cleanup("StaleProjectileSweep", exception);
+        }
+    }
+
+    /// <summary>Round-boundary sweep for LOOPING sounds that outlive their round
+    /// ("the map saws / Abyssal Countdown sometimes stick around", Aug 22).
+    ///
+    /// <para>Two-layer root cause, both verified against the Sonigon decompile
+    /// (logs-snapshot/decompiled/sonigon/) and the serialized prefab data:
+    /// (1) every map-saw prefab plays its LOOPING SFX_Environment_Saw_Loop_SE
+    /// through SoundUnityEventPlayer's soundStart slot (soundStartLoop=null),
+    /// and PlayEnd() only ever stops soundStartLoop — so no component EVER
+    /// stops a map-saw loop; only the engine's dead-transform sweep does,
+    /// ~2s after the next map loads. (2) the engine itself has a zombie
+    /// state: InstanceSoundEvent.PoolSingleVoice's allowFadeOut=true branch
+    /// never clears shouldRestartIfLoop (InstanceSoundEvent.cs:458-468), so a
+    /// voice-STOLEN holder (armed, voice==null) that then receives any
+    /// Stop-with-fade — every vanilla Stop, and the dead-transform sweep
+    /// itself — freezes in FadeOut (fade progression only runs on a LIVE
+    /// voice, VoiceFade/GetVolume), a state the dead-transform sweep skips
+    /// forever (line 599) and the restart branch (663-677) happily
+    /// resurrects. AbyssalCountdown is the worst case: its charge-loop
+    /// container has volumeIntensityEnable=1 + a Continuous intensity param,
+    /// so ShouldBePlaying is unconditionally true, the zombie restarts the
+    /// next frame — and the component's own soundChargeIsPlaying latch is
+    /// false by then, so its SoundStop early-returns forever (OnDisable,
+    /// OnDestroy and the reviveAction reset all no-op through that latch).</para>
+    ///
+    /// <para>The sweep walks Sonigon's live sound table and hard-pools
+    /// (fade=false — the branch that actually clears the restart flag) every
+    /// LOOPING holder that is (a) owned by a destroyed/inactive transform,
+    /// (b) positioned at a destroyed/inactive PlayAtTransform target, or
+    /// (c) a frozen armed zombie (voice==null, shouldRestartIfLoop,
+    /// state==FadeOut — legitimately reachable, see ClassifyLoopVoice: a
+    /// fading stop whose voice is then STOLEN leaves the fade with nothing
+    /// to progress on, so it never reaches FadePool). One-shot
+    /// containers are deliberately untouched — they legitimately outlive
+    /// their hosts (death/explosion sounds). Music is untouchable by
+    /// construction (owner alive+active, DontDestroyOnLoad). Everything is
+    /// reflection: the Sonigon assembly is resolved by name, never
+    /// referenced (house rule, see PhoenixSound above); every member is
+    /// resolved ONCE and a missing one fails LOUD once (#83/#91).</para>
+    ///
+    /// <para>Triggered from StaleProjectileSweepPatch.Schedule (the
+    /// production-proven round-boundary trigger set: point-over RPC +
+    /// MovePlayers, all modes including rematches) and from the reliable
+    /// room-exit edge in Plugin.OnLeftRoom (a ghost saw at the MENU is the
+    /// most audible variant). Each run does a first pass 2 frames in, a
+    /// second pass ~3s later, and a TRAILING pass 8s after the LATEST
+    /// boundary that arrived while the run was pending — the old map's scene
+    /// is unloaded 2s after the next map finishes loading
+    /// (MapManager.UnloadAfterSeconds), so only the delayed passes see those
+    /// transforms dead, and a fast second boundary (review r2 M5) must push
+    /// the tail rather than be swallowed by coalescing. Ungated by room
+    /// type: pure per-seat audio hygiene (#286).</para></summary>
+    internal static class RoundSoundSweep
+    {
+        internal const string DiagKey = "RoundSoundSweep";
+
+        private static bool _pending;
+        private static float _pendingSince = -10f;
+        // Review r2 M5: EVERY Schedule call — coalesced or not — pushes the
+        // trailing deadline; the running coroutine reads it live.
+        private static float _lastBoundaryRt = -10f;
+        // Liveness stamp of the in-flight coroutine (#270c/#367b: the host
+        // can die under it — NetworkRestart — and a pending flag nothing
+        // clears would mute the sweep for the session) + a run token so a
+        // superseded run that merely stalled (suspended game) cannot resume
+        // and double-run beside its successor.
+        private static float _aliveRt = -10f;
+        private static int _gen;
+
+        // Reflection surface, resolved once (#91: a silent miss is a
+        // forever-no-op; log loud, once).
+        private static bool _resolved;
+        private static bool _resolveFailed;
+        private static Type _tSoundManager, _tInstanceSoundEvent;
+        private static PropertyInfo _pInstance, _pData;
+        private static FieldInfo _fEventDict, _fTransformDict, _fHolders;
+        private static FieldInfo _fHolderContainer, _fHolderVoices;
+        private static FieldInfo _fContainerSetting, _fSettingLoop;
+        private static FieldInfo _fVoice, _fVoiceFade, _fRestart, _fPlayTypeInst, _fFadeState;
+        private static FieldInfo _fPlayType, _fOwnerTransform, _fPosTransform;
+        private static MethodInfo _mPoolSingleVoice, _mStop, _mStopAllAtOwner;
+        private static FieldInfo _fAbyssalLoopEvent;
+
+        private static bool Resolve()
+        {
+            if (_resolved) return !_resolveFailed;
+            _resolved = true;
+            try
+            {
+                _tSoundManager = AccessTools.TypeByName("Sonigon.SoundManager");
+                _tInstanceSoundEvent = AccessTools.TypeByName("Sonigon.Internal.InstanceSoundEvent");
+                var tData = AccessTools.TypeByName("Sonigon.Internal.SoundManagerData");
+                var tDictValue = AccessTools.TypeByName("Sonigon.Internal.InstanceDictionaryValue");
+                var tHolder = AccessTools.TypeByName("Sonigon.Internal.InstanceSoundContainerHolder");
+                var tVoiceHolder = AccessTools.TypeByName("Sonigon.Internal.InstanceVoiceHolder");
+                var tPlayTypeInst = AccessTools.TypeByName("Sonigon.Internal.PlayTypeInstance");
+                var tVoiceFade = AccessTools.TypeByName("Sonigon.Internal.VoiceFade");
+                var tContainer = AccessTools.TypeByName("Sonigon.SoundContainer");
+                var tContainerVars = AccessTools.TypeByName("Sonigon.Internal.SoundContainerVariables");
+                if (_tSoundManager == null || _tInstanceSoundEvent == null || tData == null
+                    || tDictValue == null || tHolder == null || tVoiceHolder == null
+                    || tPlayTypeInst == null || tVoiceFade == null || tContainer == null
+                    || tContainerVars == null)
+                    throw new InvalidOperationException("a Sonigon type failed to resolve");
+
+                _pInstance = AccessTools.Property(_tSoundManager, "Instance");
+                _pData = AccessTools.Property(_tSoundManager, "Data");
+                _fEventDict = AccessTools.Field(tData, "soundEventDictionary");
+                _fTransformDict = AccessTools.Field(tDictValue, "transformDictionary");
+                _fHolders = AccessTools.Field(_tInstanceSoundEvent, "instanceSoundContainerHolder");
+                _fHolderContainer = AccessTools.Field(tHolder, "soundContainer");
+                _fHolderVoices = AccessTools.Field(tHolder, "voiceHolder");
+                _fContainerSetting = AccessTools.Field(tContainer, "setting");
+                _fSettingLoop = AccessTools.Field(tContainerVars, "loopEnabled");
+                _fVoice = AccessTools.Field(tVoiceHolder, "voice");
+                _fVoiceFade = AccessTools.Field(tVoiceHolder, "voiceFade");
+                _fRestart = AccessTools.Field(tVoiceHolder, "shouldRestartIfLoop");
+                _fPlayTypeInst = AccessTools.Field(tVoiceHolder, "playTypeInstance");
+                _fFadeState = AccessTools.Field(tVoiceFade, "state");
+                _fPlayType = AccessTools.Field(tPlayTypeInst, "playType");
+                _fOwnerTransform = AccessTools.Field(tPlayTypeInst, "instanceIDTransform");
+                _fPosTransform = AccessTools.Field(tPlayTypeInst, "positionTransform");
+                // PoolSingleVoice(int s, int v, bool shouldRestartIfLoop,
+                //                 bool allowFadeOut, bool isCalledByOnDestroy = false)
+                _mPoolSingleVoice = AccessTools.Method(_tInstanceSoundEvent, "PoolSingleVoice",
+                    new Type[] { typeof(int), typeof(int), typeof(bool), typeof(bool), typeof(bool) });
+                _fAbyssalLoopEvent = AccessTools.Field(typeof(AbyssalCountdown), "soundAbyssalChargeLoop");
+                _mStop = FindManagerMethod("Stop");
+                _mStopAllAtOwner = FindManagerMethod("StopAllAtOwner");
+                if (_fEventDict == null || _fTransformDict == null || _fHolders == null
+                    || _fHolderContainer == null || _fHolderVoices == null
+                    || _fContainerSetting == null || _fSettingLoop == null
+                    || _fVoice == null || _fVoiceFade == null || _fRestart == null
+                    || _fPlayTypeInst == null || _fFadeState == null || _fPlayType == null
+                    || _fOwnerTransform == null || _fPosTransform == null
+                    || _mPoolSingleVoice == null || _pInstance == null || _pData == null)
+                    throw new InvalidOperationException("a Sonigon member failed to resolve");
+            }
+            catch (Exception ex)
+            {
+                _resolveFailed = true;
+                Plugin.Log?.LogWarning("[VANILLA-FIX] RoundSoundSweep: Sonigon reflection surface failed to resolve — sweep disabled: " + ex.Message);
+            }
+            return !_resolveFailed;
+        }
+
+        /// <summary>Resolve a SoundManager method whose trailing parameters are
+        /// all optional (#322: Stop/StopAllAtOwner carry an optional trailing
+        /// allowFadeOut, so exact-arity lookups return null).</summary>
+        private static MethodInfo FindManagerMethod(string name)
+        {
+            foreach (var cand in _tSoundManager.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (cand.Name != name) continue;
+                var ps = cand.GetParameters();
+                if (ps.Length < 1) continue;
+                if (ps[ps.Length - 1].ParameterType != typeof(bool)) continue;
+                bool ok = true;
+                for (int i = 0; i < ps.Length; i++)
+                    if (i >= 2 && !ps[i].HasDefaultValue) { ok = false; break; }
+                if (ok) return cand;
+            }
+            return null;
+        }
+
+        /// <summary>Called once at patch time (StaleProjectileSweep's Cleanup)
+        /// so resolution success/failure is visible in every startup log.</summary>
+        internal static void EagerResolve()
+        {
+            if (Resolve())
+                Plugin.Log?.LogInfo("[VANILLA-FIX] RoundSoundSweep: Sonigon reflection surface resolved");
+        }
+
+        internal static void Schedule(string reason)
+        {
+            try
+            {
+                float now = Time.realtimeSinceStartup;
+                // Every boundary pushes the trailing deadline (r2 M5) — a
+                // coalesced request is NOT dropped, its tail rides the
+                // running coroutine.
+                _lastBoundaryRt = now;
+                // Coalesce only onto a LIVE run: the coroutine stamps _aliveRt
+                // at every resume, so a host death shows up as a stale stamp
+                // and the next boundary simply starts a fresh run.
+                if (_pending && now - _aliveRt < 6f) return;
+                if (Plugin.Instance == null) return;
+                if (!Resolve()) return;
+                _pending = true;
+                _pendingSince = now;
+                _aliveRt = now;
+                int gen = ++_gen;
+                Plugin.Instance.StartCoroutine(SweepTwice(reason, gen));
+            }
+            catch (Exception ex)
+            {
+                _pending = false;
+                VanillaFixSupport.LogError("RoundSoundSweep", ex);
+            }
+        }
+
+        private static System.Collections.IEnumerator SweepTwice(string reason, int gen)
+        {
+            yield return null;
+            yield return null;
+            if (gen != _gen) yield break;
+            _aliveRt = Time.realtimeSinceStartup;
+            SweepNow(reason);
+            // Later passes after the old map's scene unload. Review r1 find 6
+            // measured the real timeline: vanilla waits ~1s after the round
+            // RPC before LOADING the next level, and MapManager unloads the
+            // OLD scene only 2s after the new level finishes — so old-map
+            // transforms can still be alive at +3s (and the 2s dead-transform
+            // grace can then arm the frozen zombie with no sweep left).
+            yield return new WaitForSecondsRealtime(3f);
+            if (gen != _gen) yield break;
+            _aliveRt = Time.realtimeSinceStartup;
+            SweepNow(reason + "+3s");
+            // Trailing pass: 8s after the LATEST boundary seen while this run
+            // was pending (r2 M5 — a fast boundary B coalesced onto A's run
+            // used to get no B-relative pass at all, so a ghost created by
+            // B's transition survived into live play). Bounded at 30s from
+            // the first boundary so a boundary storm cannot pin the run; a
+            // boundary after the tail starts a fresh run.
+            while (Time.realtimeSinceStartup < _lastBoundaryRt + 8f
+                   && Time.realtimeSinceStartup - _pendingSince < 30f)
+            {
+                _aliveRt = Time.realtimeSinceStartup;
+                yield return new WaitForSecondsRealtime(0.5f);
+                if (gen != _gen) yield break;
+            }
+            _pending = false;
+            SweepNow(reason + "+tail");
+        }
+
+        private static void SweepNow(string reason)
+        {
+            try
+            {
+                if (!Resolve()) return;
+                object manager = _pInstance.GetValue(null, null);
+                if (manager == null) return;
+                object data = _pData.GetValue(manager, null);
+                var eventDict = data != null ? _fEventDict.GetValue(data) as IDictionary : null;
+                if (eventDict == null) return;
+
+                int ownerDead = 0, posDead = 0, armedFrozen = 0;
+                var names = new List<string>();
+                foreach (DictionaryEntry eventEntry in eventDict)
+                {
+                    var transformDict = eventEntry.Value != null
+                        ? _fTransformDict.GetValue(eventEntry.Value) as IDictionary : null;
+                    if (transformDict == null) continue;
+                    string evtName = null;
+                    foreach (DictionaryEntry instEntry in transformDict)
+                    {
+                        object inst = instEntry.Value;
+                        if (inst == null) continue;
+                        var holders = _fHolders.GetValue(inst) as Array;
+                        if (holders == null) continue;
+                        for (int s = 0; s < holders.Length; s++)
+                        {
+                            object holder = holders.GetValue(s);
+                            if (holder == null) continue;
+                            object container = _fHolderContainer.GetValue(holder);
+                            object setting = container != null ? _fContainerSetting.GetValue(container) : null;
+                            if (setting == null || !(bool)_fSettingLoop.GetValue(setting)) continue;
+                            var voices = _fHolderVoices.GetValue(holder) as Array;
+                            if (voices == null) continue;
+                            for (int v = 0; v < voices.Length; v++)
+                            {
+                                object vh = voices.GetValue(v);
+                                if (vh == null) continue;
+                                int rule = ClassifyLoopVoice(vh);
+                                if (rule == 0) continue;
+                                // Hard pool: shouldRestartIfLoop=false,
+                                // allowFadeOut=false — the only argument shape
+                                // that both pools the voice AND clears the
+                                // restart flag (the fade branch clears neither).
+                                try { _mPoolSingleVoice.Invoke(inst, new object[] { s, v, false, false, false }); }
+                                catch { continue; }
+                                if (rule == 1) ownerDead++;
+                                else if (rule == 2) posDead++;
+                                else armedFrozen++;
+                                if (evtName == null)
+                                {
+                                    try { evtName = (eventEntry.Key as UnityEngine.Object)?.name ?? "?"; }
+                                    catch { evtName = "?"; }
+                                }
+                                if (names.Count < 8 && !names.Contains(evtName)) names.Add(evtName);
+                            }
+                        }
+                    }
+                }
+
+                ReconcileAbyssal(ref armedFrozen, names);
+
+                if (ownerDead > 0 || posDead > 0 || armedFrozen > 0)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        DiagKey,
+                        "RoundSoundSweep at " + reason + ": ownerDead=" +
+                        ownerDead.ToString(CultureInfo.InvariantCulture) + " posDead=" +
+                        posDead.ToString(CultureInfo.InvariantCulture) + " armedFrozen=" +
+                        armedFrozen.ToString(CultureInfo.InvariantCulture) +
+                        " events=[" + string.Join(",", names.ToArray()) + "]",
+                        50);
+                }
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("RoundSoundSweep", ex);
+            }
+        }
+
+        /// <summary>0 = leave alone; 1 = ownerDead; 2 = posDead; 3 = armedFrozen.</summary>
+        private static int ClassifyLoopVoice(object vh)
+        {
+            try
+            {
+                object pti = _fPlayTypeInst.GetValue(vh);
+                if (pti != null)
+                {
+                    var owner = _fOwnerTransform.GetValue(pti) as Transform;
+                    // Unity fake-null via the overloaded == on the typed ref.
+                    if (owner == null || !owner.gameObject.activeInHierarchy)
+                        return 1;
+                    object playType = _fPlayType.GetValue(pti);
+                    if (playType != null && playType.ToString() == "PlayAtTransform")
+                    {
+                        var pos = _fPosTransform.GetValue(pti) as Transform;
+                        if (pos == null || !pos.gameObject.activeInHierarchy)
+                            return 2;
+                    }
+                }
+                object voice = _fVoice.GetValue(vh);
+                if (voice == null && (bool)_fRestart.GetValue(vh))
+                {
+                    object fade = _fVoiceFade.GetValue(vh);
+                    object state = fade != null ? _fFadeState.GetValue(fade) : null;
+                    // Compare by NAME — the FadeState ordinals are
+                    // FadeHold=0, FadeIn=1, FadeOut=2, FadePool=3 (decompile;
+                    // NOT the declaration order a reader might guess).
+                    // NOTE (review r1, R2 refinement): this state IS
+                    // reachable legitimately — a normal fading Stop followed
+                    // by a voice steal lands here. That holder was already
+                    // STOPPING, so hard-disarming it is safe either way; the
+                    // rule's job is killing the restart branch's zombie.
+                    if (state != null && state.ToString() == "FadeOut")
+                        return 3;
+                }
+            }
+            catch { }
+            return 0;
+        }
+
+        /// <summary>The one zombie class the table walk cannot see: a
+        /// RESTARTED, LIVE abyssal charge loop whose owner (the card object on
+        /// the player) is alive and active, while the component's
+        /// soundChargeIsPlaying latch is false — so the component's own
+        /// SoundStop no-ops forever. Reconcile: latch says silent but the
+        /// engine may be playing → issue a hard Stop (fade=false, which pools
+        /// AND disarms). When the latch is TRUE the component owns the sound —
+        /// never stop behind its back (that would strand the latch the other
+        /// way).</summary>
+        private static void ReconcileAbyssal(ref int armedFrozen, List<string> names)
+        {
+            if (_mStop == null || _fAbyssalLoopEvent == null) return;
+            try
+            {
+                object manager = _pInstance.GetValue(null, null);
+                if (manager == null) return;
+                object data = _pData.GetValue(manager, null);
+                var eventDict = data != null ? _fEventDict.GetValue(data) as IDictionary : null;
+                var comps = UnityEngine.Object.FindObjectsOfType<AbyssalCountdown>();
+                if (comps == null) return;
+                foreach (var comp in comps)
+                {
+                    try
+                    {
+                        if (comp == null || comp.soundChargeIsPlaying) continue;
+                        object evt = _fAbyssalLoopEvent.GetValue(comp);
+                        if (evt == null) continue;
+                        // Review r2 L6: SoundManagerData.Stop simply returns
+                        // when no instance exists for (event, owner), so a
+                        // returning call proves nothing stopped. Only a
+                        // holder that the engine actually tracks for this
+                        // component is a reconcile worth counting — an
+                        // always-on no-op count would burn the bounded diag
+                        // budget three lines per boundary.
+                        bool tracked = false;
+                        if (eventDict != null && eventDict.Contains(evt))
+                        {
+                            var transformDict = _fTransformDict.GetValue(eventDict[evt]) as IDictionary;
+                            // Keyed by owner.GetInstanceID() (SoundManagerData.Stop, decompile).
+                            tracked = transformDict != null && transformDict.Contains(comp.transform.GetInstanceID());
+                        }
+                        if (!tracked) continue;
+                        InvokeManagerStop(_mStop, manager, evt, comp.transform);
+                        // Counts toward the diag line (review r1 find 12: a
+                        // reconcile-only sweep otherwise acted silently —
+                        // the structural-zero observability trap).
+                        armedFrozen++;
+                        if (names.Count < 8 && !names.Contains("AbyssalReconcile")) names.Add("AbyssalReconcile");
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Invoke Stop/StopAllAtOwner with allowFadeOut forced FALSE
+        /// (a fade-stop on an armed holder is exactly the freeze this class
+        /// exists to kill); every other optional gets its declared default.</summary>
+        private static void InvokeManagerStop(MethodInfo m, object manager, object evtOrNull, Transform t)
+        {
+            var ps = m.GetParameters();
+            var args = new object[ps.Length];
+            int i = 0;
+            if (evtOrNull != null) args[i++] = evtOrNull;
+            args[i++] = t;
+            for (; i < ps.Length; i++)
+                args[i] = ps[i].ParameterType == typeof(bool) ? (object)false : ps[i].DefaultValue;
+            m.Invoke(manager, args);
+        }
+
+        /// <summary>For SpectatorSync.SafeBuryAndClean: stop every sound owned
+        /// by a husk BEFORE it is deactivated — cache-replayed saw husks start
+        /// their loop at OnEnable, burial's OnDisable stops nothing (the loop
+        /// is in the un-stopped soundStart slot), and a live-but-INACTIVE
+        /// transform is invisible to the engine's fake-null sweep. The public
+        /// API works here precisely because the transform is still valid at
+        /// burial time.</summary>
+        internal static void StopAllAtOwnerHard(Transform t)
+        {
+            try
+            {
+                if (t == null || !Resolve() || _mStopAllAtOwner == null) return;
+                object manager = _pInstance.GetValue(null, null);
+                if (manager == null) return;
+                InvokeManagerStop(_mStopAllAtOwner, manager, null, t);
+            }
+            catch { }
         }
     }
 

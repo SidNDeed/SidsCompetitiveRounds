@@ -176,6 +176,32 @@ namespace CompetitiveRounds
                 { "nametag_gradient_ember",  (new Color(1.00f, 0.95f, 0.30f), new Color(0.80f, 0.15f, 0.10f)) },
                 // Galaxy — magenta → cyan with violet midpoint (interstellar nebula).
                 { "nametag_gradient_galaxy", (new Color(1.00f, 0.35f, 0.85f), new Color(0.35f, 0.65f, 1.00f)) },
+
+                // ── Aug 23 expansion (Sid: white-black, green-brown, purple-pink,
+                // light blue-dark blue, light green-dark green, grey-to-x, "and
+                // some others"). Dark endpoints stop well above black: a name's
+                // tail must still be legible over the darkest map skins, so the
+                // darkest end is ~0.25 luminance, never 0. Migration 246. ──
+                // Fade — white → dark charcoal.
+                { "nametag_gradient_fade",     (new Color(1.00f, 1.00f, 1.00f), new Color(0.28f, 0.28f, 0.30f)) },
+                // Earth — leaf green → bark brown.
+                { "nametag_gradient_earth",    (new Color(0.45f, 0.85f, 0.35f), new Color(0.45f, 0.28f, 0.14f)) },
+                // Orchid — violet → hot pink.
+                { "nametag_gradient_orchid",   (new Color(0.62f, 0.35f, 0.95f), new Color(1.00f, 0.45f, 0.80f)) },
+                // Sapphire — sky blue → deep royal blue.
+                { "nametag_gradient_sapphire", (new Color(0.55f, 0.85f, 1.00f), new Color(0.12f, 0.25f, 0.75f)) },
+                // Emerald — mint → deep forest green.
+                { "nametag_gradient_emerald",  (new Color(0.55f, 1.00f, 0.65f), new Color(0.08f, 0.42f, 0.20f)) },
+                // Steel — silver → gunmetal blue.
+                { "nametag_gradient_steel",    (new Color(0.86f, 0.88f, 0.92f), new Color(0.30f, 0.36f, 0.48f)) },
+                // Ash — warm grey → ember red (cooling coals).
+                { "nametag_gradient_ash",      (new Color(0.72f, 0.70f, 0.68f), new Color(0.85f, 0.22f, 0.12f)) },
+                // Royal — rich gold → ivory white.
+                { "nametag_gradient_royal",    (new Color(1.00f, 0.78f, 0.20f), new Color(1.00f, 0.97f, 0.88f)) },
+                // Blood — bright red → dark wine.
+                { "nametag_gradient_blood",    (new Color(1.00f, 0.22f, 0.22f), new Color(0.42f, 0.06f, 0.12f)) },
+                // Twilight — sunset orange → dusk purple.
+                { "nametag_gradient_twilight", (new Color(1.00f, 0.58f, 0.22f), new Color(0.42f, 0.22f, 0.70f)) },
             };
 
         /// <summary>Glow color for a given glow SKU — used by NametagGlowRenderer to set

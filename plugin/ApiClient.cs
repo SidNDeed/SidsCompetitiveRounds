@@ -6977,6 +6977,143 @@ namespace CompetitiveRounds
             ));
         }
 
+        // ── Name-filtered history search (bug 263, Stan) ───────────────────
+        // A SEPARATE cache, deliberately (recon risk 2): CachedMatchHistory
+        // feeds other consumers (H2H seeding, session panels), so a filtered
+        // fetch must never overwrite it — clearing the search would otherwise
+        // force a full reload. The generation token retires in-flight
+        // responses and parse coroutines when the query changes or clears
+        // (#367b ownership-token shape / #232 stale-callback family).
+        public static List<MatchHistoryEntry> MatchHistorySearch;   // null = no active search
+        public static string MatchHistorySearchQuery = "";
+        public static bool MatchHistorySearchLoadedAll;
+        private static bool _searchFetchInFlight;
+        private static int _searchFetchGen;
+
+        public static void ClearMatchHistorySearch()
+        {
+            _searchFetchGen++;
+            _searchFetchInFlight = false;
+            MatchHistorySearch = null;
+            MatchHistorySearchQuery = "";
+            MatchHistorySearchLoadedAll = false;
+        }
+
+        /// <summary>Cap to at most 64 UTF-16 units WITHOUT trimming and without
+        /// leaving a dangling high surrogate at the boundary (a lone surrogate
+        /// throws in Uri.EscapeDataString — review r2). The search FIELD uses
+        /// this so it can never hold a query longer than the server filter
+        /// accepts: the visible text, the request and the cache identity then
+        /// describe the same string, so stale/nonmatching rows can't render.</summary>
+        public static string CapHistoryQueryUnits(string query)
+        {
+            string q = query ?? "";
+            if (q.Length <= 64) return q;
+            int cut = 64;
+            if (char.IsHighSurrogate(q[cut - 1])) cut--;   // don't split a pair
+            return q.Substring(0, cut);
+        }
+
+        /// <summary>Canonical history-search KEY = trimmed + unit-capped. The
+        /// request URL, MatchHistorySearchQuery and the NativeUI cache-identity
+        /// check all go through this ONE rule (review r2: incompatible length
+        /// rules relabeled a stale cache). Because the field is already
+        /// unit-capped, this only ever trims.</summary>
+        public static string CanonicalizeHistoryQuery(string query)
+        {
+            return CapHistoryQueryUnits((query ?? "").Trim());
+        }
+
+        /// <summary>Fetch a name-filtered slice of the 1v1 history. append=false
+        /// starts a new query (owns the cache from that moment); append=true
+        /// pages the CURRENT query onward — the same lazy-chunk shape the
+        /// unfiltered history uses.</summary>
+        public static void FetchMatchHistorySearch(string steamId, string query, bool append)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            query = CanonicalizeHistoryQuery(query);
+            if (query.Length == 0) { ClearMatchHistorySearch(); NativeUI.MarkDirty(); return; }
+            if (append)
+            {
+                if (_searchFetchInFlight || MatchHistorySearchLoadedAll) return;
+                if (!string.Equals(query, MatchHistorySearchQuery, StringComparison.Ordinal)) return;
+            }
+            else
+            {
+                _searchFetchGen++;
+                MatchHistorySearchQuery = query;
+                MatchHistorySearchLoadedAll = false;
+                // Review r1 find 1: the OLD query's rows must never render
+                // under the new label (and an append must never offset by
+                // their count) — drop them now; the renderer falls back to
+                // the instant client-side filter until fresh rows land.
+                MatchHistorySearch = null;
+            }
+            int gen = _searchFetchGen;
+            _searchFetchInFlight = true;
+            int offset = append && MatchHistorySearch != null ? MatchHistorySearch.Count : 0;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{steamId}/matches?limit={HISTORY_CHUNK}&offset={offset}&name_filter={Uri.EscapeDataString(query)}",
+                (success, response) =>
+                {
+                    if (gen != _searchFetchGen) return;   // query changed/cleared mid-flight
+                    if (!success) { _searchFetchInFlight = false; return; }
+                    Plugin.Instance.StartCoroutine(ParseSearchHistoryChunked(response, gen, append));
+                }
+            ));
+        }
+
+        private static System.Collections.IEnumerator ParseSearchHistoryChunked(string response, int gen, bool append)
+        {
+            if (string.IsNullOrEmpty(response) || response.Trim() == "[]")
+            {
+                if (gen == _searchFetchGen)
+                {
+                    if (!append || MatchHistorySearch == null) MatchHistorySearch = new List<MatchHistoryEntry>();
+                    MatchHistorySearchLoadedAll = true;
+                    _searchFetchInFlight = false;
+                    NativeUI.MarkDirty();
+                }
+                yield break;
+            }
+            List<string> slices = null;
+            try { slices = SliceHistoryObjects(response); }
+            catch (Exception ex)
+            {
+                if (gen == _searchFetchGen) _searchFetchInFlight = false;
+                Plugin.Log.LogError($"Failed to parse history search: {ex.Message}");
+                yield break;
+            }
+            var entries = new List<MatchHistoryEntry>(slices.Count);
+            const int PER_FRAME = 80;
+            for (int i = 0; i < slices.Count; i++)
+            {
+                try { entries.Add(ParseMatchHistoryChunkEntry(slices[i])); }
+                catch { }
+                if (i > 0 && i % PER_FRAME == 0)
+                {
+                    yield return null;
+                    // Pump-id check after EVERY resume (#299): a stale parse
+                    // must never land rows into a newer query's cache.
+                    if (gen != _searchFetchGen) yield break;
+                }
+            }
+            if (gen != _searchFetchGen) yield break;
+            MatchHistorySearchLoadedAll = entries.Count < HISTORY_CHUNK;
+            if (append && MatchHistorySearch != null)
+            {
+                var seen = new HashSet<string>();
+                foreach (var m in MatchHistorySearch)
+                    if (!string.IsNullOrEmpty(m.match_id)) seen.Add(m.match_id);
+                foreach (var m in entries)
+                    if (string.IsNullOrEmpty(m.match_id) || seen.Add(m.match_id))
+                        MatchHistorySearch.Add(m);
+            }
+            else MatchHistorySearch = entries;
+            _searchFetchInFlight = false;
+            NativeUI.MarkDirty();
+        }
+
         /// <summary>Full-history totals for the pager (flat scalars, manual extract).</summary>
         public static void FetchMatchSummary(string steamId)
         {
@@ -7001,10 +7138,10 @@ namespace CompetitiveRounds
                 _historyFetchInFlight = false;
                 yield break;
             }
-            string[] parts = null;
+            List<string> slices = null;
             try
             {
-                parts = response.Split(new[] { "\"match_id\"" }, StringSplitOptions.None);
+                slices = SliceHistoryObjects(response);
             }
             catch (Exception ex)
             {
@@ -7013,16 +7150,16 @@ namespace CompetitiveRounds
                 Plugin.Log.LogError($"Failed to parse match history: {ex.Message}");
                 yield break;
             }
-            var entries = new List<MatchHistoryEntry>(Math.Max(0, parts.Length - 1));
+            var entries = new List<MatchHistoryEntry>(slices.Count);
             const int PER_FRAME = 80;
-            for (int i = 1; i < parts.Length; i++)
+            for (int i = 0; i < slices.Count; i++)
             {
                 try
                 {
-                    entries.Add(ParseMatchHistoryChunkEntry(parts[i]));
+                    entries.Add(ParseMatchHistoryChunkEntry(slices[i]));
                 }
                 catch { }
-                if (i % PER_FRAME == 0) yield return null;
+                if (i > 0 && i % PER_FRAME == 0) yield return null;
             }
             // Fewer rows than asked for = the server ran out of history.
             MatchHistoryLoadedAll = entries.Count < requested;
@@ -7043,6 +7180,16 @@ namespace CompetitiveRounds
             {
                 CachedMatchHistory = entries;
                 Plugin.Log.LogInfo($"Match history loaded: {CachedMatchHistory.Count} matches (chunked parse, all={MatchHistoryLoadedAll})");
+                // Review r1 find 3: a canonical reload (menu open, Refresh,
+                // post-match) means the world changed — an ACTIVE search
+                // cache is now stale and would miss new matches forever.
+                // Refetch it against the same query; bounded to one refetch
+                // per canonical reload.
+                if (!string.IsNullOrEmpty(MatchHistorySearchQuery))
+                {
+                    try { FetchMatchHistorySearch(MatchTracker.LocalSteamId, MatchHistorySearchQuery, append: false); }
+                    catch { }
+                }
             }
             _historyFetchInFlight = false;
             NativeUI.MarkDirty();
@@ -7123,10 +7270,30 @@ namespace CompetitiveRounds
                 }));
         }
 
+        /// <summary>Split a `[{..},{..}]` history response into per-match object
+        /// slices, STRING-AWARE (learning #156): opponent display names are
+        /// user-authored and can contain any bracket/brace/key-shaped text, so
+        /// a plain split on "match_id" corrupts rows (and the count → the
+        /// offset pager). Cheap linear scan; the expensive per-field parse
+        /// stays frame-chunked in the callers.</summary>
+        private static List<string> SliceHistoryObjects(string response)
+        {
+            int arrStart = response.IndexOf('[');
+            if (arrStart < 0) return new List<string>();
+            int arrEnd = FindMatchingBracketStringAware(response, arrStart);
+            if (arrEnd < 0 || arrEnd <= arrStart) return new List<string>();
+            return SliceTopLevelObjects(response.Substring(arrStart, arrEnd - arrStart + 1));
+        }
+
         private static MatchHistoryEntry ParseMatchHistoryChunkEntry(string chunk)
         {
             var entry = new MatchHistoryEntry();
-            entry.match_id = ExtractJsonString(chunk, "");
+            // match_id read by KEY (bug: the old empty-key ':"' form read the
+            // first ':"' in the chunk, which only worked because chunks were
+            // Split on "match_id"; both parsers now feed full STRING-AWARE
+            // object slices, so an opponent literally named "match_id" can no
+            // longer split one row into two — learning #156).
+            entry.match_id = ExtractJsonString(chunk, "match_id");
             entry.opponent_name = ExtractJsonString(chunk, "opponent_name");
             entry.opponent_steam_id = ExtractJsonString(chunk, "opponent_steam_id");
             entry.opponent_title = ExtractJsonString(chunk, "opponent_title");
