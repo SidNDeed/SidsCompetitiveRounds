@@ -209,3 +209,36 @@ The log proves the pipeline from one session without screenshots:
   rather than being flattened to one sampled colour, which would be a different kind of damage.
 - The first two maps of a spectator sitting can both render cycle entry 0 (cosmetic, and
   documented at the cycle code).
+
+## 7. Designing a skin — what the Aug 23 night-pack tour taught (added 2026-08-23)
+
+Nine skins went through three in-game tours before they matched their design. Every
+one of these would have shipped wrong from the swatch preview alone.
+
+- **The base art is a render decision, not just "shapes".** `Sky`'s full-screen `Paint`
+  part is layer 14 and takes the WALL colours, so a Sky-based "pitch black" skin renders as
+  a bright painted sky — and it sits in front of the layer-9 effect emitter, hiding
+  embers/rain/stars entirely. Gold/Soviet/Poison leave the real sky visible. Use Sky only
+  when the walls ARE the sky you want.
+- **`Sparkle` is a wall glint too**, not a sky star field: an ash primary came out cream,
+  and on a Soviet base the cloud particles turned into red blotches. Twinkle looks come
+  from `SkinEffect.Stars` (below), never from `Sparkle`, on a dark skin.
+- **Post_Main's gain is red-heavy.** A dim brown renders RED and a pure dark green renders
+  NEON after the saturation normalisation — give browns extra green (`0.50,0.34,0.18` reads
+  as bark), greens some red (`0.22,0.34,0.24` reads as night forest).
+- **Ambient effects** (`MapSkinEffects`, `Preset.Effect` = Embers / Rain / Stars +
+  `EffectColor`/`EffectColor2`): one persistent `HideAndDontSave` emitter on the backdrop
+  camera's layer (read from the recorded culling mask, never hardcoded), configured per skin
+  at the END of the deferred tint pass, cleared on every vanilla restore and by the Animated
+  Cosmetics toggle. It is outside both tint walks and the twinkle registry, so it adds no
+  flicker surface. Per-kind liveness is logged 2s after engage (`[MAPFX] live check … bounds`)
+  — a count without bounds cannot tell "emitting" from "parked on the emission line", which
+  is exactly how the rain shipped invisible through two tours (a velocity module whose three
+  axes used different `MinMaxCurve` modes silently does nothing; learning #415).
+- **The tour harness** (`[Broadcast] TestMapSkin = a,b,c` + `TestMapSkinSandbox = true` +
+  `TestMapSkinTourSeconds = 14`) screenshots a whole pack in three minutes with nobody at
+  the seat: `MainMenuHandler.PlaySandbox()` is public, and each advance fires
+  `ArtHandler.NextArt` through the lever's prefix. Clear all three when done. The
+  `TestOpenTab` lever does the same for the F5 overlay (tab index, optional Shop scroll),
+  re-reading the cfg every 2s on the broadcast seat only — synthetic mouse input does not
+  reach the overlay on this VM (learning #420), so this is the way to screenshot UI.
