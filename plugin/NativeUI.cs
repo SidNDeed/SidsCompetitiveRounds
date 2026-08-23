@@ -10531,6 +10531,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.Log.LogInfo("[SETTINGS] Animated cosmetics toggled");
                     Plugin.AnimatedCosmetics.Value = !Plugin.AnimatedCosmetics.Value;
                     try { PlayerEffectCosmetic.OnAnimatedCosmeticsToggled(); } catch { }
+                    try { MapSkinEffects.OnAnimatedCosmeticsToggled(); } catch { }
                     dirty = true;
                 },
                 "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = everything freezes on a static frame.", 34f);

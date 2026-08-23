@@ -2763,8 +2763,11 @@ namespace CompetitiveRounds
     /// is unloaded 2s after the next map finishes loading
     /// (MapManager.UnloadAfterSeconds), so only the delayed passes see those
     /// transforms dead, and a fast second boundary (review r2 M5) must push
-    /// the tail rather than be swallowed by coalescing. Ungated by room
-    /// type: pure per-seat audio hygiene (#286).</para></summary>
+    /// the tail rather than be swallowed by coalescing. A run is capped at
+    /// 30s from its first boundary so a boundary storm cannot pin it; when
+    /// the cap lands inside a boundary's 8s window that boundary is handed a
+    /// fresh run (ceiling carry), so the 8s promise holds per boundary.
+    /// Ungated by room type: pure per-seat audio hygiene (#286).</para></summary>
     internal static class RoundSoundSweep
     {
         internal const string DiagKey = "RoundSoundSweep";
@@ -2781,6 +2784,7 @@ namespace CompetitiveRounds
         // and double-run beside its successor.
         private static float _aliveRt = -10f;
         private static int _gen;
+        private static int _runHostId;   // the Plugin.Instance the live run is hosted on
 
         // Reflection surface, resolved once (#91: a silent miss is a
         // forever-no-op; log loud, once).
@@ -2896,16 +2900,22 @@ namespace CompetitiveRounds
                 // running coroutine.
                 _lastBoundaryRt = now;
                 // Coalesce only onto a LIVE run: the coroutine stamps _aliveRt
-                // at every resume, so a host death shows up as a stale stamp
-                // and the next boundary simply starts a fresh run.
-                if (_pending && now - _aliveRt < 6f) return;
-                if (Plugin.Instance == null) return;
+                // at every resume, AND the run's host must still be the live
+                // Plugin.Instance (review r3 find 4: a NetworkRestart kills the
+                // host mid-wait, and a boundary inside the 6s liveness window
+                // then coalesced onto a coroutine that would never resume).
+                // A replaced host means the run is dead whatever the stamp says.
+                var host = Plugin.Instance;
+                if (host == null) return;
+                int hostId = host.GetInstanceID();
+                if (_pending && now - _aliveRt < 6f && _runHostId == hostId) return;
                 if (!Resolve()) return;
                 _pending = true;
                 _pendingSince = now;
                 _aliveRt = now;
+                _runHostId = hostId;
                 int gen = ++_gen;
-                Plugin.Instance.StartCoroutine(SweepTwice(reason, gen));
+                host.StartCoroutine(SweepTwice(reason, gen));
             }
             catch (Exception ex)
             {
@@ -2946,6 +2956,11 @@ namespace CompetitiveRounds
             }
             _pending = false;
             SweepNow(reason + "+tail");
+            // Ceiling carry (review r3 find 5): if the 30s ceiling cut the
+            // tail short of the LATEST boundary's +8s, that boundary's unload
+            // may still be ahead — hand it a fresh run instead of dropping it.
+            if (Time.realtimeSinceStartup < _lastBoundaryRt + 8f)
+                Schedule(reason + " (ceiling carry)");
         }
 
         private static void SweepNow(string reason)

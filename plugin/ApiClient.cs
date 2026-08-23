@@ -7435,8 +7435,9 @@ namespace CompetitiveRounds
         /// NEVER a token split on "match_id" — a display name ending in
         /// `"match_id` forges that needle across the escaped quote and the
         /// string terminator (#156), splitting one real game into two broken
-        /// fragments. The LOCAL-player chunked parser still token-splits
-        /// (pre-existing; follow-up noted in the deltas file).</summary>
+        /// fragments. Since Aug 23 BOTH history parsers (local chunked and
+        /// search) slice with SliceHistoryObjects and the shared entry parser
+        /// reads match_id by KEY — there is no token-splitting path left.</summary>
         private static System.Collections.IEnumerator ParseMatchHistoryForViewChunked(string response, Action<List<MatchHistoryEntry>, bool> callback)
         {
             var entries = new List<MatchHistoryEntry>();
@@ -7482,13 +7483,9 @@ namespace CompetitiveRounds
                 try
                 {
                     var entry = ParseMatchHistoryChunkEntry(chunks[i]);
-                    // The shared entry parser reads match_id POSITIONALLY (empty-key
-                    // ExtractJsonString) because the local path feeds it fragments
-                    // that start right after the "match_id" token. These chunks are
-                    // whole objects, so re-read match_id by KEY — the `"match_id":"`
-                    // needle cannot be forged inside a JSON string literal (the
-                    // interior quote would have to be escaped). Every other field in
-                    // the shared parser is already key-based and order-independent.
+                    // The shared entry parser already reads match_id by KEY (Aug 23,
+                    // review r2 H1); this re-read is redundant and kept only as a
+                    // belt-and-braces guard for whole-object chunks.
                     entry.match_id = ExtractJsonString(chunks[i], "match_id");
                     entries.Add(entry);
                 }

@@ -43,6 +43,7 @@ namespace CompetitiveRounds
         private static Material _mat;
         private static Texture2D _dotTex, _streakTex;
         private static bool _loggedMaterial;
+        private static float _cfgHw, _cfgHh;   // extents the live config was built for
 
         /// <summary>Configure (or switch off) the effect for the skin being applied.
         /// Idempotent per (sku, kind): a repeat apply for the same skin on the next
@@ -58,12 +59,29 @@ namespace CompetitiveRounds
                     Clear(animOff ? "animated cosmetics off" : "skin has no effect");
                     return;
                 }
-                if (_go == null) CreateHost();
+                if (_go == null)
+                {
+                    // Recreated after an explicit Destroy (review r3 find 7):
+                    // the new ParticleSystem is UNCONFIGURED, so the applied
+                    // record must not let `same` skip Configure below.
+                    CreateHost();
+                    _appliedSku = null;
+                    _appliedKind = CustomMapColors.SkinEffect.None;
+                }
                 if (_go == null || _ps == null) return;
                 _go.layer = BackdropLayer();
                 _go.transform.position = Vector3.zero;   // the map is centred at the origin after MapTransition.Enter
 
                 bool same = _appliedKind == kind && string.Equals(_appliedSku, sku, StringComparison.OrdinalIgnoreCase);
+                if (same)
+                {
+                    // Same skin on a map with a different Map.size, or after a
+                    // resolution/aspect change (review r3 find 8): the emission
+                    // footprint was sized for the OLD view — rebuild it.
+                    ViewHalfExtents(out float hw, out float hh);
+                    if (Mathf.Abs(hw - _cfgHw) > _cfgHw * 0.05f || Mathf.Abs(hh - _cfgHh) > _cfgHh * 0.05f)
+                        same = false;
+                }
                 if (!same)
                 {
                     Configure(kind, sku);
@@ -79,6 +97,22 @@ namespace CompetitiveRounds
                 if (!same && Plugin.Instance != null) Plugin.Instance.StartCoroutine(ReportLive(sku));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPFX] apply failed: {ex.Message}"); }
+        }
+
+        /// <summary>Settings toggle (review r3 find 6): the Animated Cosmetics
+        /// switch must reach a LIVE emitter — off stops it now, on re-applies
+        /// the current skin's effect (Apply only touches this object, so it is
+        /// safe from the settings UI at any time).</summary>
+        internal static void OnAnimatedCosmeticsToggled()
+        {
+            try
+            {
+                bool animOff = Plugin.AnimatedCosmetics != null && !Plugin.AnimatedCosmetics.Value;
+                if (animOff) { Clear("animated cosmetics toggled off"); return; }
+                string sku = MapColorState.CurrentSku;
+                if (!string.IsNullOrEmpty(sku) && CustomMapColors.IsCustomSku(sku)) Apply(sku);
+            }
+            catch { }
         }
 
         /// <summary>Stop emitting (live particles age out) — vanilla backdrop restore,
@@ -103,6 +137,7 @@ namespace CompetitiveRounds
             try
             {
                 if (_ps == null || _go == null) yield break;
+                if (!string.Equals(_appliedSku, sku, StringComparison.OrdinalIgnoreCase)) yield break;   // switched since; the newer engage reports itself
                 var psr = _go.GetComponent<ParticleSystemRenderer>();
                 var b = psr != null ? psr.bounds : new Bounds();
                 Plugin.Log.LogInfo($"[MAPFX] live check {sku}: particles={_ps.particleCount} playing={_ps.isPlaying} emitting={_ps.isEmitting} bounds=({b.center.x:F1},{b.center.y:F1}) size=({b.size.x:F1},{b.size.y:F1}) mode={(psr != null ? psr.renderMode.ToString() : "?")} layer={_go.layer}");
@@ -159,6 +194,7 @@ namespace CompetitiveRounds
             _ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
             CustomMapColors.GetEffectColors(sku, out Color c1, out Color c2);
             ViewHalfExtents(out float hw, out float hh);
+            _cfgHw = hw; _cfgHh = hh;
             var psr = _go.GetComponent<ParticleSystemRenderer>();
             if (_mat == null) _mat = BuildMaterial();
 

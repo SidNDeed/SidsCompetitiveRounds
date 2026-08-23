@@ -1830,7 +1830,10 @@ namespace CompetitiveRounds
          * (idle_stop_seconds). Engaging strictly AFTER that means the
          * throttle can never interact with a live output scene, whatever
          * the OBS scene layout captures. */
-        private float broadcastIdleGatesPassRt = -1f;
+        // STATIC (review r3 find 3): the FPS ownership it feeds is static, so an
+        // instance clock here would reset the 16-minute idle timer on every
+        // host respawn and bounce the owned 15 back up to the seat cap.
+        private static float broadcastIdleGatesPassRt = -1f;
         private bool WantBroadcastIdle()
         {
             if (Plugin.modDisabled) return false;
@@ -1841,6 +1844,18 @@ namespace CompetitiveRounds
             if (!OutOfPlayForIdle()) { broadcastIdleGatesPassRt = -1f; return false; }
             if (broadcastIdleGatesPassRt < 0f) { broadcastIdleGatesPassRt = Time.realtimeSinceStartup; return false; }
             return Time.realtimeSinceStartup - broadcastIdleGatesPassRt >= 960f;
+        }
+
+        /// <summary>Current display refresh in Hz, 0 if unknown.</summary>
+        private static int DisplayRefreshHz()
+        {
+            try
+            {
+                double hz = Screen.currentResolution.refreshRateRatio.value;
+                if (hz > 1.0 && hz < 1000.0) return (int)Math.Round(hz);
+            }
+            catch { }
+            return 0;
         }
 
         private static void FpsWrite(int target)
@@ -1909,13 +1924,20 @@ namespace CompetitiveRounds
                 {
                     // r2 M4: with vSync on, the effective rate follows the
                     // DISPLAY (240 Hz renders 240) whatever targetFrameRate
-                    // says — so a vSync-on baseline needs ownership even when
-                    // the numeric target is already below the cap. The written
-                    // target keeps a lower existing cap (never raises).
-                    bool capNeeded = baseTarget <= 0 || baseTarget > seatCap || baseVsync > 0;
+                    // says — so a vSync-on baseline needs ownership when the
+                    // display's refresh EXCEEDS the cap. r3 find 2: and ONLY
+                    // then — on a 60 Hz display vSync already holds 60, and
+                    // writing vSync=0 + 144 would RAISE the rate, the inverse
+                    // of the feature. The written target never exceeds the
+                    // display rate or a lower existing cap.
+                    int displayHz = DisplayRefreshHz();
+                    bool vsyncHolds = baseVsync > 0 && displayHz > 0 && displayHz <= seatCap;
+                    bool capNeeded = !vsyncHolds
+                                     && (baseTarget <= 0 || baseTarget > seatCap || baseVsync > 0);
                     if (capNeeded)
                     {
                         int capTarget = (baseTarget > 0 && baseTarget < seatCap) ? baseTarget : seatCap;
+                        if (baseVsync > 0 && displayHz > 0 && displayHz < capTarget) capTarget = displayHz;
                         if (desired == 0 || capTarget < desired)
                         {
                             desired = capTarget;
@@ -1973,13 +1995,18 @@ namespace CompetitiveRounds
                     else
                     {
                         // The player changed video settings while we owned the
-                        // values: theirs win. Drop ownership WITHOUT restoring
-                        // (the values are already theirs) and stand down until
-                        // the wanted cap changes.
+                        // values: theirs win. r3 find 1: a PARTIAL change
+                        // (vanilla's vSync callback touches only vSync) must
+                        // not strand the half we wrote — restore whatever is
+                        // still OURS to the baseline, keep whatever they
+                        // changed, then stand down until the wanted cap
+                        // changes.
+                        if (curTarget == fpsWrittenTarget) Application.targetFrameRate = fpsBaseTarget;
+                        if (curVsync == 0) QualitySettings.vSyncCount = fpsBaseVsync;
                         fpsOwning = false;
                         fpsExternalOverride = true;
                         fpsDesiredLast = desired;
-                        Plugin.Log.LogInfo($"[FPSCAP] released (external video-settings change adopted: target={curTarget} vsync={curVsync})");
+                        Plugin.Log.LogInfo($"[FPSCAP] released (external video-settings change adopted: target={Application.targetFrameRate} vsync={QualitySettings.vSyncCount})");
                     }
                     return;
                 }
@@ -9362,8 +9389,9 @@ namespace CompetitiveRounds
         private static List<string> _lastEquippedFiltered;
 
         // ── W6: spectator map-skin cycling ──────────────────────────────────
-        // The 23 budget (<=100g) custom preset skus, in CustomMapColors._presets
-        // declaration order — an EXPLICIT ordered array, never dictionary
+        // The budget (<=150g) custom preset skus (23 original + the 9-skin Aug 23
+        // night pack = 32), in CustomMapColors._presets declaration order — an
+        // EXPLICIT ordered array, never dictionary
         // enumeration order (D1 delta f5). Excludes the 3 premium sparkle skus
         // (gilded/platinum/aurora) and every SKU_TO_ART vanilla-styled sku.
         // Verified entry-by-entry against CustomMapColors._presets.
@@ -9452,6 +9480,11 @@ namespace CompetitiveRounds
 
                 int every = Plugin.BroadcastTestMapSkinTourSeconds != null ? Plugin.BroadcastTestMapSkinTourSeconds.Value : 0;
                 if (every <= 0 || raw.IndexOf(',') < 0) return;
+                // Floor (review r3 find 9): each advance pushes the deferred
+                // tint deadline by MapTransitionGuardSec, so an interval under
+                // it starves the physical/effect pass forever and tours only
+                // the grading. 5s leaves the pass ~3s to settle.
+                if (every < 5) every = 5;
                 if (GameManager.instance == null || !GameManager.instance.isPlaying) return;
                 if (MapPhysicalColorPatch.InMapTransition()) return;
                 float now = Time.realtimeSinceStartup;
