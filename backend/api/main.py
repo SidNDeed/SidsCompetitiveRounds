@@ -11009,7 +11009,12 @@ async def presence_ping(request: Request,
     session_hash = (hashlib.sha256(session_token.encode()).hexdigest()
                     if session_token else None)
     try:
-        # One last-write-wins statement owns both fields. The EXISTS predicate
+        # One last-write-wins statement owns both fields. :mod_version is CAST
+        # explicitly: a bare `:p IS NOT NULL` gives asyncpg no type for the
+        # parameter and the whole statement fails with AmbiguousParameterError
+        # — which silently stopped EVERY last_seen stamp after b7fcd72
+        # (learning #275's class; caught at the v1.39.2 deploy smoke).
+        # The EXISTS predicate
         # mirrors the FFA queue's session check: a gate-validated version is
         # stamped only when the token is verified, unexpired, and bound to the
         # named player. Missing/invalid sessions still refresh last_seen on a
@@ -11018,7 +11023,7 @@ async def presence_ping(request: Request,
             UPDATE players AS p
                SET last_seen = NOW(),
                    mod_version = CASE
-                       WHEN :mod_version IS NOT NULL
+                       WHEN CAST(:mod_version AS VARCHAR) IS NOT NULL
                         AND EXISTS (
                             SELECT 1 FROM steam_sessions ss
                              WHERE ss.token_hash = :session_hash
@@ -11026,7 +11031,7 @@ async def presence_ping(request: Request,
                                AND ss.verified
                                AND (ss.expires_at IS NULL OR ss.expires_at >= NOW())
                         )
-                       THEN :mod_version
+                       THEN CAST(:mod_version AS VARCHAR)
                        ELSE p.mod_version
                    END
              WHERE p.steam_id = :sid AND p.deleted_at IS NULL
