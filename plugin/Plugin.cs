@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.39.1";   // Aug 22: tournament deadline check-ins + extension, kind-scoped histories, FFA early-leave grace goes live, map skin backgrounds, background audio mute, Aug 21 bug sweep, 2 new cosmetics, 44 new translations x4
+        public const string ModVersion = "1.39.2";   // Aug 23: night-pack map skins + ambient effects, 10 gradient name styles, 5 community cosmetics, FPS governor, Mustard pick fix, round-sound sweep, Stan 262/263, portal first-use binding, 53 keys x4 translations
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -138,6 +138,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestMapSkin;  // broadcast seat only — map-skin test lever
         internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
+        internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
+        internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
         // anchor in BroadcastHud.TopAnchorY) — orphan cfg entries are inert.
@@ -396,6 +398,7 @@ namespace CompetitiveRounds
             // device, so the cert is issued via DNS-01 and served on a high port —
             // a cert is port-agnostic). Plain 8443 stays up until MIN_MOD_VERSION
             // is raised past this release, so an un-migrated client keeps working.
+            ConfigFileForLevers = Config;   // the broadcast-seat levers re-read the file (Config is an instance member)
             ApiBaseUrl = Config.Bind(
                 "API", "BaseUrl",
                 DefaultApiUrl,
@@ -877,6 +880,10 @@ namespace CompetitiveRounds
             BroadcastTestMapSkinSandbox = Config.Bind(
                 "Broadcast", "TestMapSkinSandbox", false,
                 "Broadcast seat only, with TestMapSkin set: enter LOCAL > SANDBOX automatically once the main menu is up, so the pinned skin renders on a map with nobody at the seat. Clear it (and TestMapSkin) when done."
+            );
+            BroadcastTestOpenTab = Config.Bind(
+                "Broadcast", "TestOpenTab", "",
+                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom). Re-applied whenever the value changes; clear when done."
             );
             BroadcastTestMapSkinTourSeconds = Config.Bind(
                 "Broadcast", "TestMapSkinTourSeconds", 0,
@@ -1858,6 +1865,37 @@ namespace CompetitiveRounds
             return 0;
         }
 
+        // Broadcast-seat UI verification lever: "tab[:shopScroll]". Applied once
+        // per distinct value (re-applied after a change), identity-gated.
+        private static string _lastTestOpenTab;
+        private static float _testOpenTabAt = -1f;
+        private static float _testOpenTabCfgReloadAt = -1f;
+        private void TickTestOpenTab()
+        {
+            if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;
+            // Re-read the cfg file every 2s so the lever can be driven without
+            // a relaunch (Config.Bind values never track disk edits, #190).
+            if (Time.realtimeSinceStartup - _testOpenTabCfgReloadAt > 2f)
+            {
+                _testOpenTabCfgReloadAt = Time.realtimeSinceStartup;
+                try { Plugin.ConfigFileForLevers?.Reload(); } catch { }
+            }
+            string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
+            if (raw == _lastTestOpenTab) return;
+            if (Time.realtimeSinceStartup < 6f) return;   // let the menu and the overlay's page build settle
+            if (_testOpenTabAt < 0f) { _testOpenTabAt = Time.realtimeSinceStartup; return; }
+            if (Time.realtimeSinceStartup - _testOpenTabAt < 1.5f) return;   // two ticks apart: Toggle then scroll
+            _lastTestOpenTab = raw;
+            _testOpenTabAt = -1f;
+            if (raw.Length == 0) return;
+            string[] parts = raw.Split(':');
+            int idx; float scroll = -1f;
+            if (!int.TryParse(parts[0].Trim(), out idx)) return;
+            if (parts.Length > 1) float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
+            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll}");
+            NativeUI.DevOpenTab(idx, scroll);
+        }
+
         private static void FpsWrite(int target)
         {
             // vSync overrides targetFrameRate, so every cap write zeroes it.
@@ -2111,6 +2149,7 @@ namespace CompetitiveRounds
             try { BroadcastMode.Step(); } catch { }
             // Map-skin test lever tour / auto-Sandbox (broadcast identity only).
             try { ArtHandlerNextArtPatch.TickTestLever(); } catch { }
+            try { TickTestOpenTab(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)

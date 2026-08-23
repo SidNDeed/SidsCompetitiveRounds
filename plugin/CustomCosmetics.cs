@@ -219,8 +219,18 @@ namespace CompetitiveRounds
             // from cosmetic_submissions.approved_* (seasonal_spring rev 2,
             // nuclear_glasses rev 1); Fps is the stored source rate (#317 —
             // 8 frames @ 2.5fps = the artist's 3.2s loop, never re-derived).
-            new CosmeticDef { Sku = "face_detail_seasonal_spring",  DisplayName = "Seasonal Spring",  Slot = CharacterItemType.Detail, PngFile = "detail_seasonal_spring.png",  Scale = 2.0f, Offset = Vector2.zero, Fps = 2.5f },
+            // v1.39.2: Seasonal Spring placement revision 3 (artist re-scaled
+            // 2.0 -> 1.4, approved; art unchanged - md5 01e03dd7...).
+            new CosmeticDef { Sku = "face_detail_seasonal_spring",  DisplayName = "Seasonal Spring",  Slot = CharacterItemType.Detail, PngFile = "detail_seasonal_spring.png",  Scale = 1.4f, Offset = Vector2.zero, Fps = 2.5f },
             new CosmeticDef { Sku = "face_eyes_nuclear_glasses",    DisplayName = "Nuclear glasses",  Slot = CharacterItemType.Eyes,   PngFile = "eyes_nuclear_glasses.png",    Scale = 1.4f, Offset = Vector2.zero },
+            // v1.39.2 (ship step 3b): five community items, approved placement
+            // values copied VERBATIM from cosmetic_submissions.approved_* (all
+            // revision 1, offsets 0/0); PNGs pulled chunked + md5-verified.
+            new CosmeticDef { Sku = "face_eyes_shock_shades",       DisplayName = "Shock Shades",     Slot = CharacterItemType.Eyes,   PngFile = "eyes_shock_shades.png",       Scale = 1.55f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_mouth_cat_mouth",         DisplayName = "Cat Mouth",        Slot = CharacterItemType.Mouth,  PngFile = "mouth_cat_mouth.png",         Scale = 1.55f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_eyes_cat_eyes",           DisplayName = "Cat Eyes",         Slot = CharacterItemType.Eyes,   PngFile = "eyes_cat_eyes.png",           Scale = 1.5f,  Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_mouth_the_challenger",    DisplayName = "The Challenger",   Slot = CharacterItemType.Mouth,  PngFile = "mouth_the_challenger.png",    Scale = 1.7f,  Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_mouth_goober",            DisplayName = "Goober",           Slot = CharacterItemType.Mouth,  PngFile = "mouth_goober.png",            Scale = 1.8f,  Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

@@ -1,5 +1,82 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.39.2 — 2026-08-23
+
+**Map skins: the Night pack (9 new) + an ambient-effect layer**
+
+- **Forest Fire** (embers), **Moonlit** (stars), **Eclipse**, **Underworld**
+  (embers), **Night City** (city-light twinkle), **Night Park**, **Rainy Day**
+  (rain), **Midnight**, **Blood Moon** (red stars). All in the Blackwood
+  family: pitch-black, dark-brown and deep-red skies with walls kept darker
+  than the rest of the catalogue. 75g; the six with an effect 150g.
+- New backdrop-layer effect emitter (`MapSkinEffects`): embers, rain and
+  stars drawn behind the map on the background camera's layer. It never
+  touches the map's own particles, never sits in front of gameplay, obeys
+  the Animated Cosmetics toggle, and engages only after the deferred tint
+  pass. Tour-verified in game on the broadcast seat.
+- Broadcast-seat verification levers: `TestOpenTab` opens the F5 overlay on a
+  tab (optionally scrolling the Shop) from the cfg, re-read every 2s on that
+  seat only; `TestMapSkin` accepts a comma list,
+  `TestMapSkinSandbox` enters LOCAL > SANDBOX by itself, and
+  `TestMapSkinTourSeconds` advances the list — a whole pack screenshots
+  itself in three minutes.
+
+**Name styles: 10 new gradients (1500g)**
+
+- Fade, Earth, Orchid, Sapphire, Emerald, Steel, Ash, Royal, Blood,
+  Twilight — one table line each; dark endpoints stay legible over the
+  darkest skins.
+
+**Community cosmetics**
+
+- Five new face items: Shock Shades, Cat Mouth, Cat Eyes, The Challenger,
+  Goober (approved placements compiled verbatim). Seasonal Spring's
+  re-approved placement (scale 1.4) is published.
+
+**Translation portal**
+
+- "Session expired" on every open for players whose game and browser reach
+  the server from different addresses (Cloudflare WARP, privacy relays,
+  split-tunnel VPNs): the session now binds to the first browser that uses
+  it; an address mismatch is reported as such; every gate 401 logs a
+  `[PORTAL-AUTH]` line.
+- 53 new client keys synced with machine translations seeded in es/ru/uk/sv
+  (also bundled in the client).
+
+**Ranked / economy (server)**
+
+- Glicko-2 tau 0.5 → 0.6 in every mode (FFA previously fell back to a
+  different value); hardcoded, with a startup log of the effective value.
+- Heavy-favourite bet wins (stored odds ≤ 1.5×) redirect 20% of the PROFIT —
+  never the stake — to the fighter/team you backed, in all three modes;
+  quotes already reflect it; reversals claw it back. (Community idea.)
+- Match history is searchable by opponent name (server filter, paged).
+
+**Fixes**
+
+- Rating-change displays show decimals for small changes consistently on
+  every surface (Stan, #262).
+- My Stats history gains a name search box (Stan, #263).
+- Custom player colour missing on the card-pick body in room-code games
+  (the gate matched only mod-issued rooms); also re-asserted on rematch.
+- Looping map sounds (saws, Abyssal Countdown) carrying past their round:
+  a round-boundary sweep stops orphaned loops, with a trailing pass relative
+  to the latest boundary.
+- Presence `last_seen` stamps had been failing silently since the
+  MIN_MOD_VERSION auto-raise deploy (an untyped CASE parameter) — hotfixed.
+- Broadcast seat: engine render cap while the director is active (GPU heat)
+  and one FPS governor for the cap / unfocused cap / deep idle so a player's
+  real frame-rate setting can no longer be lost; rotation dwell 5 min with a
+  non-battle-moment deferral (up to +5 min).
+- Broadcast bot (VM): idle-quit dormancy machinery ships INERT
+  (`dormant_after_seconds` = 0, operator flag) after review; the games-only
+  probe, global recovery floor and permanent safety halt are live.
+
+**Schema changes:** 244 (`fighter_tax` on the three bet tables), 245
+(`i18n_portal_sessions.first_use_at`), 246 (night-pack + gradient shop
+rows), 247 (cosmetic release + Spring rev 3), 248 (53 i18n keys), 249
+(212 translation seeds), 250 (release notes, five locales).
+
 ## v1.39.1 — 2026-08-22
 
 **Tournaments: deadline check-ins and tidier histories (Aug 22)**
