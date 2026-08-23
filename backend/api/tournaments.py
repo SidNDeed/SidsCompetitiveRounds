@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import and_, func, or_, select, text, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -155,6 +155,13 @@ _CHECKIN_ANSWER_MAP = {
     "yes": "yes_playing",
     "nores": "contacted_no_response",
     "notyet": "not_yet",
+    # Match-scoped concession (forfeit rebuild, Aug 22 lifecycle pass).
+    # DELIBERATELY absent from _CHECKIN_INTENT_ANSWERS below: a concession
+    # is never presence intent — the v1.39.1 r2 review's finding 1 showed
+    # that letting it reach the mutual-no-show arbitration penalized BOTH
+    # players and could advance the conceder via the partial-score branch.
+    # The sweep consumes it in its own branch instead.
+    "ff": "self_forfeit",
 }
 _CHECKIN_INTENT_ANSWERS = frozenset({
     "yes_playing",
@@ -727,12 +734,21 @@ def _compute_progress_labels(tournament: Tournament, all_matches: list) -> dict:
             labels[sid] = "signed up"
             continue
         won = last_m.winner_signup_id == sid
-        if won:
+        if won and last_m.status == "double_forfeit":
+            # Phase B b2 find 5: the double-forfeit "winner" is a
+            # bookkeeping carrier — mutual no-show or mutual concession —
+            # and "won by forfeit"/"advanced" painted them as a victor
+            # beside a bare "--" medal. One neutral label.
+            labels[sid] = "mutual forfeit"
+        elif won:
             # Won their last match but nothing pending → tournament over for them
             # as a winner. In double-elim the GF / GF_RESET winner is CHAMPION —
-            # but only a series-DECIDED one (round-2 f8): forfeit terminals
-            # deliberately mint no podium/prizes, and "CHAMPION [FF]" beside a
-            # bare "--" medal cell was a contradiction on the popup.
+            # but only a series-DECIDED one here (round-2 f8): "CHAMPION [FF]"
+            # beside a bare "--" medal cell was a contradiction on the popup.
+            # Since the Aug 22 lifecycle pass, a forfeit-decided final DOES
+            # mint its podium at tournament completion — those winners get
+            # CHAMPION through the placed_rank==1 override downstream; this
+            # label is the pre-completion / provenance-vetoed fallback.
             if last_m.bracket_side in ("GF", "GF_RESET"):
                 labels[sid] = ("CHAMPION" if last_m.status == "completed"
                                else "won by forfeit")
@@ -1759,11 +1775,15 @@ async def _apply_terminal_transitions(db: AsyncSession, m: TournamentMatch, winn
     (for an LB-champion GF) the GF_RESET row — and mint NOTHING: rounds
     33-35 proved that paying forfeit-decided or revoked-provenance gates
     turns any ancestor reversal into a candidate-only wrong payout, and
-    HEAD's pay-nothing-on-forfeit behavior was its safety. A forfeit-
-    created GF_RESET is bracket bookkeeping: its seats carry persistent
-    forfeited flags, so activation resolves it by forfeit — it is never
-    played and never mints (and a PLAYED reset's mint revalidates its GF
-    provenance, round-35 find 1).
+    HEAD's pay-nothing-on-forfeit behavior was its safety. A GF_RESET
+    created by a NO-SHOW/BAN forfeit is bracket bookkeeping: those seats
+    carry persistent forfeited flags, so activation resolves it by forfeit
+    — never played, never minted here (a PLAYED reset's mint revalidates
+    its GF provenance, round-35 find 1). A reset created by a MATCH-SCOPED
+    self-forfeit (Phase B) is different by design: the conceder keeps NO
+    flag, so the reset activates and plays normally — the WB champion who
+    conceded GF#1 genuinely gets their second life, and a played reset
+    mints through the report hook as usual.
 
     Aug 22 lifecycle pass: the ROUND-34 CUT above still holds at THIS site —
     forfeit terminals mint nothing HERE. The forfeited-finals podium gap it
@@ -1965,7 +1985,8 @@ async def _apply_terminal_transitions(db: AsyncSession, m: TournamentMatch, winn
 _MATCH_TERMINAL_STATES = ("completed", "forfeit", "double_forfeit")
 
 
-async def _enqueue_match_completion_notices(db: AsyncSession, m: TournamentMatch) -> None:
+async def _enqueue_match_completion_notices(db: AsyncSession, m: TournamentMatch,
+                                            cause: Optional[str] = None) -> None:
     """Queue match-completion DM notices for BOTH participants of a match that
     just reached a terminal state (Aug 14 contract, kinds: match_won_waiting /
     match_won_next_ready / match_lost_lb / match_lost_out). Same table +
@@ -1993,12 +2014,17 @@ async def _enqueue_match_completion_notices(db: AsyncSession, m: TournamentMatch
     _m_id = m.id
     try:
         async with db.begin_nested():
-            await _enqueue_completion_notices_inner(db, m)
+            # cause threads through to the inner builder's payload (b3 find
+            # 1: the parameter landed on this wrapper while the payload
+            # read it in the inner scope — a NameError the savepoint then
+            # swallowed for EVERY terminal notice).
+            await _enqueue_completion_notices_inner(db, m, cause)
     except Exception as ex:
         print(f"[TOURNAMENT] completion notices for match {_m_id} failed (non-fatal): {ex}")
 
 
-async def _enqueue_completion_notices_inner(db: AsyncSession, m: TournamentMatch) -> None:
+async def _enqueue_completion_notices_inner(db: AsyncSession, m: TournamentMatch,
+                                            cause: Optional[str] = None) -> None:
     if m.status not in _MATCH_TERMINAL_STATES or m.winner_signup_id is None:
         return
     if not (m.p1_signup_id and m.p2_signup_id):
@@ -2167,6 +2193,12 @@ async def _enqueue_completion_notices_inner(db: AsyncSession, m: TournamentMatch
             "tournament_id": str(t.id),
             "match_id": str(m.id),
             "resolution": m.status,   # completed | forfeit | double_forfeit
+            # Phase B b2 find 3: how the terminal came about, when the
+            # writer knows — 'self_forfeit' | 'mutual_concession'. The bot
+            # words a mutual-concession double forfeit honestly instead of
+            # blaming a missed deadline; absent key (no-show sweep, old
+            # rows) keeps the legacy wording (#152/#329 fallback contract).
+            **({"cause": cause} if cause else {}),
             "round": int(m.round or 0),
             "bracket_side": m.bracket_side or "",
             "match_label": _round_label(m.bracket_side, m.round),
@@ -3339,6 +3371,14 @@ async def _record_tournament_match_checkin(
                     "answer": stored_answer,
                     "answered_at": func.clock_timestamp(),
                 },
+                # Stickiness at the WRITE BOUNDARY (Phase B r1 find 2): the
+                # database itself refuses to overwrite a stored concession,
+                # whatever any read-side guard saw. The handler's tri-state
+                # sticky guard normally refuses first; this WHERE is the
+                # backstop that holds even if a future caller forgets it.
+                # A suppressed update is a no-op, not an error — the ff
+                # answer replayed onto its own concession stays idempotent.
+                where=(TournamentMatchCheckin.answer != "self_forfeit"),
             )
             await db.execute(checkin_stmt)
         return True
@@ -3401,6 +3441,34 @@ async def handle_tournament_checkin_response(
     )
     if await _player_id_banned(db, caller_signup.player_id):
         return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+    # STICKY concession, both directions (forfeit rebuild): once this seat
+    # conceded, no later DM answer may act — the checkin UPSERT would
+    # otherwise let an old Yes click overwrite (revoke) the concession,
+    # and a conceder must not consume an extension either. The ff answer
+    # itself routes to the shared evidence helper (idempotent on replay)
+    # and never reaches the extension block below.
+    if answer == "ff":
+        # Decided-series precedence was already checked at the top of this
+        # handler, under the same action/row locks.
+        result = await _record_self_forfeit(db, m, caller_signup)
+        return {"ok": True, "result": result, "new_deadline_epoch": None}
+    _stored = await _match_checkin_answers(
+        db, m, [caller_signup.player_id, opponent_signup.player_id])
+    if _stored is None:
+        # Tri-state fail-closed (Phase B r1 find 2): an unreadable sticky
+        # state must refuse the answer, not fall through to a write that
+        # could overwrite a concession or hand a conceder an extension.
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+    if _stored.get(caller_signup.player_id) == "self_forfeit":
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+    if _stored.get(opponent_signup.player_id) == "self_forfeit":
+        # b2 find 1: the OPPONENT already conceded and the deadline is
+        # pulled — the sweep resolves this match within a tick. A Yes
+        # here must not burn the caller's once-per-opponent extension and
+        # push both deadlines a day past the pull (stalling the recorded
+        # concession); nores/notyet evidence is equally moot on a match
+        # about to close. Refuse before any write.
+        return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
     if answer == "yes" and m.deadline_at is None:
         return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
 
@@ -3441,8 +3509,18 @@ async def _match_checkin_answers(
     db: AsyncSession,
     m: TournamentMatch,
     player_ids: list[uuid.UUID],
-) -> dict[uuid.UUID, str]:
-    """Latest seat answers, fail-soft during a migration deploy gap."""
+):
+    """Latest seat answers — TRI-STATE (Phase B r1 finds 1/2): returns the
+    dict on a successful read, and None when the read FAILED. Every
+    consumer is a CONCESSION consumer now, and a failed read must never
+    masquerade as "no concession": the old fail-soft {} let one recoverable
+    query error make the sweep concession-blind (penalizing the
+    non-conceder / advancing the conceder through the legacy no-show
+    branches) and let an old Yes click overwrite a stored concession
+    through the sticky guard. Callers fail CLOSED on None — the sweep
+    skips the match until the next tick, the check-in handler and the
+    forfeit helper answer match_closed. The savepoint still keeps a
+    migration-gap error from poisoning the caller's transaction."""
     if not player_ids:
         return {}
     try:
@@ -3456,9 +3534,53 @@ async def _match_checkin_answers(
             )))).all()
         return {row.player_id: row.answer for row in rows}
     except Exception as ex:
-        print(f"[TOURNAMENT] check-in lookup for {m.id} failed "
-              f"(legacy behavior): {ex}")
-        return {}
+        print(f"[TOURNAMENT] check-in lookup for {m.id} FAILED — consumers "
+              f"fail closed (skip/refuse), never 'no evidence': {ex}")
+        return None
+
+
+async def _record_self_forfeit(db: AsyncSession, m: TournamentMatch,
+                               caller_signup: TournamentSignup) -> str:
+    """Record a match-scoped concession as EVIDENCE — never terminal state.
+    The overdue sweep is the SOLE terminal writer (the whole architecture
+    of the forfeit rebuild): this helper writes the 'self_forfeit' checkin
+    row and pulls ready_deadline_at to now so the sweep visits promptly.
+    Callers hold the match action lock + row lock and have verified:
+    tournament running, caller is a participant on THIS match, caller not
+    banned, m.status == 'ready', and no decided series takes precedence.
+
+    STICKY/idempotent: an already-stored concession returns
+    'forfeit_recorded' again without rewriting (a replayed button or a
+    second endpoint call changes nothing), and the check-in handler
+    refuses to overwrite a stored concession with any later answer.
+    deadline_at is deliberately untouched — DM epochs stay stable, and a
+    stale pending deadline notice dies at its own revalidation.
+
+    Returns 'forfeit_recorded', or 'match_closed' when the checkin write
+    soft-fails (the r2-verified migration-gap contract)."""
+    existing = await _match_checkin_answers(db, m, [caller_signup.player_id])
+    if existing is None:
+        # Tri-state fail-closed (Phase B r1 finds 1/2): cannot verify the
+        # sticky state — refuse rather than write blind.
+        return "match_closed"
+    if existing.get(caller_signup.player_id) == "self_forfeit":
+        # Idempotent replay STILL re-pulls the deadline (b2 find 1's repair
+        # half): if anything moved ready_deadline_at after the first press,
+        # pressing Forfeit again re-arms the sweep instead of returning
+        # inert while the match idles a day.
+        _now = datetime.now(timezone.utc)
+        if m.ready_deadline_at is None or m.ready_deadline_at > _now:
+            m.ready_deadline_at = _now
+        return "forfeit_recorded"
+    if not await _record_tournament_match_checkin(
+            db, m, caller_signup.player_id, "self_forfeit"):
+        return "match_closed"
+    now = datetime.now(timezone.utc)
+    if m.ready_deadline_at is None or m.ready_deadline_at > now:
+        m.ready_deadline_at = now
+    print(f"[TOURNAMENT] self-forfeit recorded for match {m.id} by signup "
+          f"{caller_signup.id} — the sweep resolves it (evidence-only)")
+    return "forfeit_recorded"
 
 
 async def _match_is_async(db: AsyncSession, m: TournamentMatch) -> bool:
@@ -3591,8 +3713,114 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
         # but it cannot erase a result that committed or a live game whose
         # report is still arriving.
         if not p1_banned and not p2_banned and p1 is not None and p2 is not None:
-            checkin_answers = await _match_checkin_answers(
+            _answers = await _match_checkin_answers(
                 db, m, [p1.player_id, p2.player_id])
+            if _answers is None:
+                # Tri-state fail-closed (Phase B r1 find 1): a failed
+                # evidence read must never masquerade as "no concession" —
+                # under the old fail-soft {}, one recoverable query error
+                # here sent a conceded match through the legacy no-show
+                # branches, penalizing the NON-conceder and advancing the
+                # conceder (as heartbeat survivor or partial-score leader).
+                # With the evidence unreadable, NOTHING below may write:
+                # skip this match entirely; the next 30s tick retries. A
+                # persistently failing read wedges the deadline visibly
+                # (this line, every tick) — conservative beats a silent
+                # wrong resolution (#288). Ban branches are unaffected:
+                # they resolved above without evidence, by design.
+                print(f"[TOURNAMENT] SWEEP SKIP match {m.id}: check-in "
+                      f"evidence unreadable — no resolution under unknown "
+                      f"concession state; retrying next tick")
+                return
+            checkin_answers = _answers
+    # ── Match-scoped self-forfeit consumption (forfeit rebuild, Aug 22) ──
+    # Placement contract, every clause deliberate:
+    #  * AFTER the ban branches — bans resolve first (r2-verified ordering),
+    #    and the evidence dict above is only ever loaded on the no-ban
+    #    path, so this whole branch is inert when any seat is banned;
+    #  * AFTER the in-play grace and the fresh signup re-read;
+    #  * BEFORE the both-ready return (a both-ready sync pair with a
+    #    recorded concession would otherwise spin on this expired deadline
+    #    forever) and BEFORE every readiness branch (a conceder whose
+    #    heartbeat is still alive must never advance through
+    #    "ready and opponent not", and the mutual branch's partial-score
+    #    arm must never advance a conceding series leader — the v1.39.1
+    #    r2 review's finding-1 traps, both closed structurally here:
+    #    whenever any self_forfeit exists this branch RETURNS, so the
+    #    mutual-no-show arbitration and its partial-score arm are
+    #    unreachable, and self_forfeit additionally stays out of
+    #    _CHECKIN_INTENT_ANSWERS so it can never read as presence intent).
+    # Concession beats intent evidence: a seat that answered "yes playing"
+    # wins the match when the other seat concedes, WITHOUT the silent-seat
+    # flag the intent branch applies — the conceder told us, so nobody is
+    # penalized. Match-scoped promise: NO forfeited flag and NO penalty
+    # recompute for a conceder; their next bracket match (a GF reset seats
+    # the conceding WB champion again) activates and plays normally.
+    _p1_conceded = (p1 is not None
+                    and checkin_answers.get(p1.player_id) == "self_forfeit")
+    _p2_conceded = (p2 is not None
+                    and checkin_answers.get(p2.player_id) == "self_forfeit")
+    if _p1_conceded or _p2_conceded:
+        # Round-24-find-1 shape: a played result that committed during this
+        # iteration's queries still wins over any concession.
+        if await _decided_series_takes_precedence(db, m):
+            print(f"[TOURNAMENT] SWEEP SKIP match {m.id}: decided series "
+                  f"{m.series_id} present but unadvanced (crashed hook?) — "
+                  f"leaving it strictly alone; admin follow-up if it stays wedged")
+            return
+        if _p1_conceded != _p2_conceded:
+            winner_id = m.p2_signup_id if _p1_conceded else m.p1_signup_id
+            m.winner_signup_id = winner_id
+            m.status = "forfeit"
+            # clock_timestamp, not the sweep-start snapshot (Phase B r1
+            # find 6): this transaction can wait on the forfeit request's
+            # row lock, and the terminal stamp must not predate the very
+            # evidence that caused it. Same rule as the intent branch.
+            m.ended_at = (await db.execute(select(func.clock_timestamp()))).scalar_one()
+            await _apply_terminal_transitions(db, m, winner_id)
+            await _enqueue_match_completion_notices(db, m, cause="self_forfeit")
+            print(f"[TOURNAMENT] match {m.id} resolved by self-forfeit: "
+                  f"signup {winner_id} advances; the conceding seat keeps "
+                  f"no flag and no penalty (match-scoped)")
+            return
+        # BOTH conceded — mutual concession: double_forfeit with NO flags
+        # and no penalties (both told us), carrier chosen exactly like the
+        # mutual branch below: a valid uneven partial-series leader first,
+        # else the penalty/UUID tiebreak. Someone must advance or the
+        # bracket wedges; the carrier is bookkeeping, not a reward, and
+        # double_forfeit never mints podium.
+        winner_id = None
+        if m.series_id is not None:
+            srow = (await db.execute(
+                text("SELECT player1_id, player2_id, p1_series_wins, p2_series_wins "
+                     "FROM ranked_series WHERE id = :sid "
+                     "AND invalidated_at IS NULL"),
+                {"sid": str(m.series_id)})).first()
+            if srow is not None and srow.p1_series_wins != srow.p2_series_wins:
+                leader_pid = (srow.player1_id
+                              if srow.p1_series_wins > srow.p2_series_wins
+                              else srow.player2_id)
+                if p1.player_id == leader_pid:
+                    winner_id = m.p1_signup_id
+                elif p2.player_id == leader_pid:
+                    winner_id = m.p2_signup_id
+        if winner_id is None:
+            winner_id = m.p1_signup_id
+            if p2.penalty_at_signup < p1.penalty_at_signup:
+                winner_id = m.p2_signup_id
+            elif (p1.penalty_at_signup == p2.penalty_at_signup
+                  and str(m.p2_signup_id) < str(m.p1_signup_id)):
+                winner_id = m.p2_signup_id
+        m.status = "double_forfeit"
+        m.winner_signup_id = winner_id
+        # Same clock_timestamp rule as the single-concession write above.
+        m.ended_at = (await db.execute(select(func.clock_timestamp()))).scalar_one()
+        await _apply_terminal_transitions(db, m, winner_id)
+        await _enqueue_match_completion_notices(db, m, cause="mutual_concession")
+        print(f"[TOURNAMENT] match {m.id} resolved by MUTUAL self-forfeit: "
+              f"double_forfeit, carrier {winner_id}, no flags or penalties "
+              f"(both conceded)")
+        return
     if p1_ready and p2_ready and not await _match_is_async(db, m):
         return  # both ready, client will start match
     # ASYNC IS DEADLINE-ONLY (Codex round 3, HIGH). For a SYNC match "both
@@ -4258,6 +4486,61 @@ async def play_now(
     return await _build_current_response(db, t, player)
 
 
+@router.post("/{tournament_id}/matches/{match_id}/forfeit")
+async def forfeit_match(
+    tournament_id: uuid.UUID,
+    match_id: uuid.UUID,
+    req: TournamentReadyRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Match-scoped self-forfeit — records EVIDENCE only (forfeit rebuild,
+    Aug 22 lifecycle pass). This endpoint NEVER writes terminal bracket
+    state: it stores the 'self_forfeit' checkin answer and pulls
+    ready_deadline_at to now; the overdue sweep — the sole terminal
+    writer — consumes the evidence in its dedicated concession branch
+    (opponent wins a normal single forfeit; the conceder keeps NO
+    forfeited flag and NO penalty). Works for both kinds: sync and async
+    players concede from the F5 button; async additionally has the
+    deadline DM's ff wire through the same evidence helper.
+
+    Result contract (the client renders these honestly — recorded, not
+    resolved): 200 {ok, result: forfeit_recorded | match_closed}; 409
+    'Tournament match is closed' for every not-concedable state (not
+    running, not ready, banned caller, decided series — the played result
+    wins); 403 for a non-participant."""
+    from main import _check_steam_session
+    await _check_steam_session(request, req.steam_id, db)
+    t = await _get_tournament(db, tournament_id)
+    player = await _get_player_by_steam(db, req.steam_id)
+    await _assert_tournament_service_policy(
+        db, player_ids=[player.id], steam_ids=[req.steam_id])
+    if t is None or t.status != "running":
+        raise HTTPException(status_code=409, detail="Tournament match is closed")
+    # Cross-path gate + row lock, the check-in handler's exact protocol:
+    # serialized against reports, DM answers, and the sweep's row locks.
+    m = await _lock_tournament_match_for_action(db, match_id, tournament_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="Match not found")
+    sig = await _get_signup_for(db, tournament_id, player.id)
+    if sig is None or sig.id not in (m.p1_signup_id, m.p2_signup_id):
+        raise HTTPException(status_code=403, detail="Not your match")
+    if m.status != "ready":
+        # Ready-only, deliberately: a 'scheduled' break flips within one
+        # tick and pending/terminal rows have nothing to concede. The
+        # bracket row stays 'ready' during a live BO3, so the server —
+        # not any client gate — arbitrates concession-vs-report races
+        # (decided-series precedence below and in the sweep).
+        raise HTTPException(status_code=409, detail="Tournament match is closed")
+    if await _player_id_banned(db, player.id):
+        raise HTTPException(status_code=409, detail="Tournament match is closed")
+    if await _decided_series_takes_precedence(db, m):
+        raise HTTPException(status_code=409, detail="Tournament match is closed")
+    result = await _record_self_forfeit(db, m, sig)
+    await db.commit()
+    return {"ok": True, "result": result}
+
+
 @router.get("/history")
 async def history(limit: int = 25, offset: int = 0, db: AsyncSession = Depends(get_db)):
     """Site-wide completed-tournament history — the Tournaments tab's "Recent
@@ -4370,7 +4653,11 @@ async def history_detail(limit: int = 8, offset: int = 0,
     wins: dict = {}
     losses: dict = {}
     for m in mrows:
-        if m.is_bye or m.status not in ("completed", "forfeit", "double_forfeit"):
+        # double_forfeit deliberately EXCLUDED (Phase B b2 find 4): its
+        # winner_signup_id is a bookkeeping carrier chosen so the bracket
+        # can close — mutual no-show or mutual concession — and counting
+        # it fabricated a 1-0/0-1 between two players neither of whom won.
+        if m.is_bye or m.status not in ("completed", "forfeit"):
             continue
         if m.winner_signup_id is None or m.p1_signup_id is None or m.p2_signup_id is None:
             continue

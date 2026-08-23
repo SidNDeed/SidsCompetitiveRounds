@@ -19508,6 +19508,71 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // July 17 round 2: live prize block (scales with signups) + the
         // between-rounds Play Now button.
         private static GameObject tPlayNowBtn;
+        // Match-scoped Forfeit (Aug 22 lifecycle pass). Two-stage confirm
+        // state: the arm is keyed to (tournament_id, match_id) and expires
+        // 4s after arming; the render pass clears it whenever the armed key
+        // no longer matches what is on screen (tournament/target/status
+        // change). The control itself is deliberately ClickHandler-ONLY —
+        // see the construction comment.
+        private static GameObject tForfeitBtn;
+        private static string tForfeitArmKey = null;
+        private static float tForfeitArmedAt = -1f;
+
+        private static void OnForfeitClicked()
+        {
+            var t = ApiClient.CachedTournament;
+            if (t == null || string.IsNullOrEmpty(t.tournament_id) || t.matches == null) return;
+            // Kind fence (Phase B r1 find 3): CachedTournament is ONE slot
+            // shared by both sub-tabs — after a sub-tab switch the stale
+            // other-kind snapshot renders until the forced GET lands, and a
+            // key built only from tournament+match ids would stay armed
+            // across it. A destructive submit must never fire off a
+            // snapshot whose kind is not the kind the user is looking at.
+            if (!string.Equals(t.kind, ApiClient.TournamentKind, StringComparison.Ordinal)) return;
+            string matchId = null;
+            foreach (var m in t.matches)
+            {
+                if (m.status == "ready"
+                    && (m.p1_signup_id == t.my_signup_id || m.p2_signup_id == t.my_signup_id)
+                    && !string.IsNullOrEmpty(m.match_id))
+                { matchId = m.match_id; break; }
+            }
+            if (matchId == null) return;
+            string key = t.tournament_id + ":" + matchId;
+            float nowT = Time.unscaledTime;
+            if (tForfeitArmKey == key && tForfeitArmedAt > 0f)
+            {
+                float dt = nowT - tForfeitArmedAt;
+                if (dt >= 0.35f && dt <= 4f)
+                {
+                    // Second distinct press inside the window: submit. The
+                    // server records EVIDENCE and its sweep resolves the
+                    // match — the toast copy says recorded, never resolved.
+                    tForfeitArmKey = null; tForfeitArmedAt = -1f;
+                    UIFactory.SetText(UIFactory.GetButtonText(tForfeitBtn), "Forfeit");
+                    ApiClient.TournamentForfeit(t.tournament_id, matchId, MatchTracker.LocalSteamId);
+                    return;
+                }
+                // <0.35s: a hyper-fast second mousedown — fall through and
+                // RE-ARM (resets the clock; never fires). >4s: expired —
+                // re-arm likewise.
+            }
+            tForfeitArmKey = key;
+            tForfeitArmedAt = nowT;
+            UIFactory.SetText(UIFactory.GetButtonText(tForfeitBtn), "Click again to forfeit");
+            // The render pass (which resets the label on expiry) is dirty/
+            // poll-driven, not per-frame — schedule one refresh just past
+            // the 4s window so an expired arm's label never lingers until
+            // the next ~10s poll (Phase B r1 find 7). Action safety never
+            // depended on the label: the click path rechecks the window.
+            Plugin.Instance.StartCoroutine(_ForfeitExpiryRefresh());
+        }
+
+        private static System.Collections.IEnumerator _ForfeitExpiryRefresh()
+        {
+            yield return new WaitForSecondsRealtime(4.1f);
+            MarkDirty();
+        }
         // Match IDs we've already set PendingRankedRoom for, so the 10s refresh loop
         // doesn't re-dispatch the same match on every tick.
         private static HashSet<string> _tournamentDispatchedMatches = new HashSet<string>();
@@ -19876,6 +19941,41 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     }
                 }
             }, sizeDelta: new Vector2(170, 26));
+            // Forfeit rides its OWN row: the main button row is at its width
+            // budget with Ready+Reconnect, and the armed label ("Click again
+            // to forfeit", longer still in RU/UK/SV) needs real room — a
+            // truncated confirm label on a destructive control is not a
+            // confirm label.
+            var ffRow = new GameObject("TMBR2"); ffRow.transform.SetParent(tMyMatchPanel.transform, false);
+            ffRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(ffRow, spacing: 6);
+            UIFactory.AddLE(ffRow, prefH: 26, flexH: 0);
+            // v1.39.1 r2 find 5 closed BY CONSTRUCTION: CreateButton wires
+            // NEITHER event source when onClick is null (both the Unity
+            // Button.onClick and its ClickHandler registration are gated on
+            // it), so this control gets exactly ONE source — the mousedown
+            // ClickHandler attached below. One physical press therefore
+            // produces exactly one activation: the release-side
+            // Button.onClick that let a single slow press satisfy BOTH
+            // confirm stages across the 0.2s ClickGuard does not exist on
+            // this control. The two-stage arm itself (0.35s minimum, 4s
+            // expiry, key-scoped) lives in OnForfeitClicked.
+            tForfeitBtn = UIFactory.CreateButton("TFf", ffRow.transform, "Forfeit", 14f, C_WHITE,
+                new Color(0.55f, 0.20f, 0.18f, 0.95f), null, sizeDelta: new Vector2(210, 24));
+            {
+                var ffCh = tForfeitBtn.AddComponent<ClickHandler>();
+                ffCh.onClick = () => { if (ClickGuard.Claim(tForfeitBtn)) OnForfeitClicked(); };
+                // Long locale labels OVERFLOW the button edge instead of
+                // being truncated (FitOneLine = overflow + no wrap) — a
+                // slightly wide confirm label beats a cut-off one.
+                UIFactory.FitOneLine(UIFactory.GetButtonText(tForfeitBtn));
+                // A catalogue-driven PAGE REBUILD recreates this button with
+                // the unarmed label while the static arm state survives (b2
+                // find 2) — the next single click would then satisfy a
+                // hidden live arm. A freshly built control always starts
+                // disarmed.
+                tForfeitArmKey = null; tForfeitArmedAt = -1f;
+            }
             tMyMatchPanel.SetActive(false);
 
             // -- RIGHT column: signups + bracket --
@@ -20939,6 +21039,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             bool showMyMatch = false;
             bool showPlayNow = false;
             bool inBreak = false;
+            string myReadyMatchId = null;
             string myMatchLine = "";
             string myRoomCode = "";
             if (t.status == "running" && signedUp && t.matches != null)
@@ -20981,6 +21082,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 {
                     if (m.status != "ready" && m.status != "active") continue;
                     if (m.p1_signup_id != t.my_signup_id && m.p2_signup_id != t.my_signup_id) continue;
+                    // Forfeit target: only a 'ready' bracket row is
+                    // concedable (server contract — everything else 409s).
+                    if (m.status == "ready" && !string.IsNullOrEmpty(m.match_id))
+                        myReadyMatchId = m.match_id;
                     // Aug 13 (owner): ASYNC never shows a room code. Nothing in
                     // the async lifecycle uses one — the series row is created
                     // at bracket activation, the report binds it by PLAYER PAIR
@@ -21098,6 +21203,42 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             if (txtTReconnectBtn != null) txtTReconnectBtn.SetActive(!isAsync && showMyMatch && !inBreak);
             if (tPlayNowBtn != null) tPlayNowBtn.SetActive(!isAsync && showPlayNow);
             if (txtTReadyBtn != null) txtTReadyBtn.SetActive(!isAsync && showMyMatch && !inBreak);
+            // Forfeit shows for BOTH kinds whenever my match is 'ready' —
+            // unlike Ready/Reconnect it is not about entering a room. The
+            // bracket row stays 'ready' throughout a live BO3 and a terminal
+            // transition can land after this snapshot, so the SERVER
+            // arbitrates every race (a 409 surfaces as the failure toast);
+            // this gate decides visibility only.
+            // Kind fence (Phase B r1 find 3): hide — and via the upkeep
+            // below, DISARM — whenever the rendered snapshot's kind is not
+            // the selected sub-tab's kind (the shared CachedTournament slot
+            // serves a stale other-kind snapshot right after a sub-tab
+            // switch). OnForfeitClicked carries the same fence, so even a
+            // click that races this render cannot submit cross-kind.
+            bool showForfeit = showMyMatch && !inBreak && myReadyMatchId != null
+                && string.Equals(t.kind, ApiClient.TournamentKind, StringComparison.Ordinal);
+            if (tForfeitBtn != null)
+            {
+                tForfeitBtn.SetActive(showForfeit);
+                // Its dedicated row too, or the hidden state leaves a 26px
+                // hole in the panel.
+                tForfeitBtn.transform.parent.gameObject.SetActive(showForfeit);
+            }
+            // Arm upkeep: clear the two-stage arm whenever the armed
+            // (tournament, match) no longer matches what is on screen —
+            // tournament/target/status changes all change or null the key —
+            // or once the 4s window lapses (covers sub-tab flips too, since
+            // the click handler independently rechecks the window).
+            string ffKey = (showForfeit && !string.IsNullOrEmpty(t.tournament_id))
+                ? t.tournament_id + ":" + myReadyMatchId : null;
+            if (tForfeitArmKey != null
+                && (ffKey == null || tForfeitArmKey != ffKey
+                    || Time.unscaledTime - tForfeitArmedAt > 4f))
+            {
+                tForfeitArmKey = null; tForfeitArmedAt = -1f;
+                if (tForfeitBtn != null)
+                    UIFactory.SetText(UIFactory.GetButtonText(tForfeitBtn), "Forfeit");
+            }
             if (tMyMatchPanel != null) tMyMatchPanel.SetActive(showMyMatch);
 
             // Signups list (right column). Seed numbers are only shown once the

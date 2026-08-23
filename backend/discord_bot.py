@@ -7972,8 +7972,13 @@ def _tavail_view(tournament_id, steam_id):
     return view
 
 
-_TDLC_ANSWERS = {"yes", "nores", "notyet"}
-_TDLC_RESULTS = {"extended", "recorded", "extension_used", "match_closed"}
+# "ff" = the DM's forfeit button: first press shows a confirmation and
+# posts NOTHING (Phase B r1 find 4 — a stray tap on the danger row must not
+# concede). "ffc" = the confirmation button's press; it posts wire code
+# "ff" to the API (the server knows only "ff").
+_TDLC_ANSWERS = {"yes", "nores", "notyet", "ff", "ffc"}
+_TDLC_RESULTS = {"extended", "recorded", "extension_used", "match_closed",
+                 "forfeit_recorded"}
 
 
 def _tdlc_view(match_id, steam_id):
@@ -7997,6 +8002,15 @@ def _tdlc_view(match_id, steam_id):
         label="Not yet — still coordinating",
         custom_id=f"tdlc:{match_id}:{steam_id}:notyet",
         row=2,
+    ))
+    # Match-scoped concession (forfeit rebuild): records evidence only —
+    # the server's overdue sweep resolves the match shortly after. Danger
+    # style + explicit label are the DM's confirmation affordance.
+    view.add_item(discord.ui.Button(
+        style=discord.ButtonStyle.danger,
+        label="I forfeit this match",
+        custom_id=f"tdlc:{match_id}:{steam_id}:ff",
+        row=3,
     ))
     return view
 
@@ -8025,7 +8039,9 @@ def _tdlc_message(opponent_name, deadline_unix, extension_available):
         "⏰ **Async tournament deadline check-in**\n"
         f"Have you made contact with **{opponent}**, and do you plan to play today?\n"
         f"{deadline}\n\n{extension}\n\n"
-        "Choose the answer that best describes the match right now."
+        "Choose the answer that best describes the match right now.\n"
+        "-# Forfeit concedes ONLY this match — no penalty, and it can't be "
+        "undone once recorded."
     )
 
 
@@ -8170,6 +8186,21 @@ def _tmatch_notice_message(ntype, n, payload):
     _res = str(payload.get("resolution") or "")
     by_forfeit = _res in ("forfeit", "double_forfeit")
     by_double_forfeit = _res == "double_forfeit"
+    # Phase B b2 find 3: a MUTUAL-CONCESSION double forfeit is voluntary —
+    # the legacy no-show wording blamed a deadline nobody missed. The
+    # server stamps payload "cause" on concession-resolved matches; absent
+    # key (old server, no-show sweep) keeps the legacy wording (#152/#329
+    # alias-fallback contract).
+    _cause = str(payload.get("cause") or "")
+    _df_how = ("Both players forfeited that match"
+               if _cause == "mutual_concession"
+               else "Neither player made that match's deadline")
+    _df_how_final = ("Both players forfeited the final match"
+                     if _cause == "mutual_concession"
+                     else "Neither player made the final match's deadline")
+    _df_content = ("🏆 You advance — both players forfeited that match."
+                   if _cause == "mutual_concession"
+                   else "🏆 You advance on the no-show tiebreak.")
     # match_lost_lb covers every non-eliminating drop: losers bracket, the
     # single-elim Third-Place match, and the Grand Final bracket reset —
     # next_match_label names which (server warning; never hardcode "losers").
@@ -8193,10 +8224,9 @@ def _tmatch_notice_message(ntype, n, payload):
         _next_word = "your next opponent is ready" if next_is_ready \
             else "your next match is scheduled"
         if by_double_forfeit:
-            content = "🏆 You advance on the no-show tiebreak."
+            content = _df_content
             title = f"🏆 Advanced — {_next_word}"
-            lines.append("Neither player made that match's deadline; the "
-                         "tiebreak advanced you.")
+            lines.append(f"{_df_how}; the tiebreak advanced you.")
         elif by_forfeit:
             content = "🏆 You advance — your opponent forfeited."
             title = f"🏆 Advanced by forfeit — {_next_word}"
@@ -8234,10 +8264,9 @@ def _tmatch_notice_message(ntype, n, payload):
         color = 0x5865F2
     elif ntype == "match_won_waiting":
         if by_double_forfeit:
-            content = "🏆 You advance on the no-show tiebreak."
+            content = _df_content
             title = "🏆 Advanced — next opponent TBD"
-            lines.append("Neither player made that match's deadline; the "
-                         "tiebreak advanced you.")
+            lines.append(f"{_df_how}; the tiebreak advanced you.")
         elif by_forfeit:
             content = "🏆 You advance — your opponent forfeited."
             title = "🏆 Advanced by forfeit — next opponent TBD"
@@ -8264,9 +8293,8 @@ def _tmatch_notice_message(ntype, n, payload):
         content = f"🛡️ You're not out! Next for you: {dest}."
         title = "🛡️ You're NOT out — still in the tournament"
         if by_double_forfeit:
-            lines.append("Neither player made that match's deadline and the "
-                         "tiebreak went the other way — but "
-                         "**you're still in the tournament.**")
+            lines.append(f"{_df_how} and the tiebreak went the other way "
+                         "— but **you're still in the tournament.**")
         elif by_forfeit:
             lines.append("That match was recorded as a forfeit — but "
                          "**you're still in the tournament.**")
@@ -8294,8 +8322,7 @@ def _tmatch_notice_message(ntype, n, payload):
         except Exception:
             _p1 = False
         if by_double_forfeit:
-            _how = ("Neither player made the final match's deadline; the "
-                    "tiebreak decided it in your favor.")
+            _how = f"{_df_how_final}; the tiebreak decided it in your favor."
         elif by_forfeit:
             _how = "Your opponent forfeited the final match."
         else:
@@ -8888,6 +8915,16 @@ def _tdlc_result_sentence(result, answer, new_deadline_epoch):
                 "did not change.")
     if result == "match_closed":
         return "ℹ️ This match is already closed, so no change was made."
+    if result == "forfeit_recorded":
+        # Honest copy (v1.39.1 r2 find 6): RECORDED, not resolved — the
+        # sweep resolves it shortly, and a played result that lands first
+        # still wins. Outcome-NEUTRAL (Phase B r1 find 5): if BOTH players
+        # concede, the match resolves as a mutual forfeit, so this must
+        # never promise the opponent the win.
+        return ("✅ Your forfeit was recorded — only THIS match is "
+                "affected, and it will be resolved shortly (a completed "
+                "game result reported in the meantime still counts "
+                "instead).")
     if answer == "yes":
         return "✅ Recorded: you and your opponent plan to play today."
     if answer == "nores":
@@ -8931,8 +8968,30 @@ async def on_interaction(interaction: discord.Interaction):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
+            if answer == "ff":
+                # First press = show the confirmation, post NOTHING (Phase B
+                # r1 find 4). Restart-safe like every TDLC button — all
+                # routing state rides the custom_id, and the confirm press
+                # re-runs the identity check above on its own interaction.
+                confirm_view = discord.ui.View(timeout=None)
+                confirm_view.add_item(discord.ui.Button(
+                    style=discord.ButtonStyle.danger,
+                    label="Yes, forfeit this match",
+                    custom_id=f"tdlc:{match_id}:{steam_id}:ffc",
+                ))
+                await interaction.followup.send(
+                    "⚠️ **Confirm forfeit** — this concedes ONLY this match, "
+                    "with no penalty, and cannot be undone once recorded. "
+                    "A completed game result reported in the meantime still "
+                    "counts instead.",
+                    view=confirm_view,
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            wire_answer = "ff" if answer == "ffc" else answer
             ok, result, new_deadline, detail = await _tournament_checkin_response(
-                match_id, steam_id, answer,
+                match_id, steam_id, wire_answer,
             )
             if not ok:
                 await interaction.followup.send(
@@ -9015,12 +9074,21 @@ def _bracket_progress_lines(t, max_lines=28):
         return (_BRACKET_SIDE_ORDER.get(m.get("bracket_side"), 9),
                 m.get("round") or 0, m.get("slot_idx") or 0)
 
+    def _board_name(raw):
+        # b3 find 2: player-authored names must not smuggle newlines or
+        # Markdown into the public board embed — a name like
+        # "X\n# FAKE HEADING" rendered an extra line. escape_markdown
+        # alone keeps line breaks, so collapse ALL whitespace first; this
+        # is the common boundary every board line's names pass through.
+        s = " ".join(str(raw or "").split())
+        return discord.utils.escape_markdown(s) if s else s
+
     for m in sorted([m for m in matches if isinstance(m, dict)], key=keyf):
         side_raw = m.get("bracket_side")
         side = _BRACKET_SIDE_LABEL.get(side_raw, side_raw or "?")
         hdr = f"{side} R{m.get('round')}" if side_raw in ("W", "L") else side
-        p1 = m.get("p1_name") or "TBD"
-        p2 = m.get("p2_name") or "TBD"
+        p1 = _board_name(m.get("p1_name")) or "TBD"
+        p2 = _board_name(m.get("p2_name")) or "TBD"
         st = m.get("status")
         s1, s2 = m.get("p1_score"), m.get("p2_score")
         if st in ("completed", "forfeit", "double_forfeit", "bye_auto"):
@@ -9037,7 +9105,12 @@ def _bracket_progress_lines(t, max_lines=28):
                 body = f"**{w}** {ws}-{ls} {l}"
             elif st == "bye_auto":
                 body = f"**{w}** — bye"
-            elif st in ("forfeit", "double_forfeit"):
+            elif st == "double_forfeit":
+                # Phase B b2 find 3: the double-forfeit "winner" is a
+                # bookkeeping carrier (mutual no-show OR mutual concession)
+                # — nobody defeated anybody; the board must not say so.
+                body = f"**{w}** / {l} — double forfeit"
+            elif st == "forfeit":
                 body = f"**{w}** def. {l} (forfeit)"
             else:
                 body = f"**{w}** def. {l}"
