@@ -1,5 +1,33 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+**The Info library — an in-game wiki (Settings › Info)**
+
+- The Settings tab's "Stats" section grew into a full explainer library on its
+  own sub-tab (Settings group › Info): 29 articles across 8 color-coded
+  categories — game mechanics (blocking, poison with the real shipped tick
+  numbers, Grow's frame-rate math, movement/shield tech, netcode & Photon,
+  known vanilla bugs), every mode, tournaments (pairing, the bot's DMs and
+  what each reply does, deadlines/forfeits/prizes), ratings & the exact
+  reward formulas for every mode, betting, tracking & anti-cheat, the
+  vanilla-safety guarantees, cosmetics, titles and exact achievement
+  conditions for all 50.
+- Left column = topics, right column = a dark reading pane sized for long
+  text. Every factual claim was verified against the code (and, for poison,
+  against the shipped card assets: Poison ticks 10 times over 3 seconds —
+  one tick every 0.3s, exactly one block window wide).
+- The Settings "Stats" box became "Info": a pointer to the library plus the
+  existing "How stats are tracked" popup.
+- The 2v2 / 1v2 / FFA mode explainers were corrected while composing them
+  into the library: 1v2's reward text now shows the real difficulty
+  multipliers (it under-promised since the economy fix), FFA's host-settings
+  list gained the cards-per-draw option, the FFA pick/leaver notes now match
+  the shipped rules, and 2v2's ready-timeout wording covers custom lobbies.
+- Discord bot FAQ fixes riding along: async-tournament cadence (a new one
+  opens 2 days after the last ends) and an up-to-date answer on Grow
+  normalization.
+
 ## v1.39.2 — 2026-08-23
 
 **Map skins: the Night pack (9 new) + an ambient-effect layer**

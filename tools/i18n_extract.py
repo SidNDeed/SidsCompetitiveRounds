@@ -64,6 +64,9 @@ FILES = [
     # Post-session report screens (Aug 19, W7) — ~70 Tr sites; a new file
     # must be listed HERE or its keys are silently unharvestable (#357).
     "PostSessionReport.cs",
+    # Info library (Aug 23) — the explainer wiki: ~31 large verbatim bodies
+    # plus category/article titles, all at I18n.Tr sites.
+    "InfoLibrary.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

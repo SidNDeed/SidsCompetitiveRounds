@@ -3911,11 +3911,15 @@ async def acknowledge_recent_flag(
 
 # ── Anti-cheat detection ───────────────────────────────────────
 #
-# Three checks run on every match submission:
-#   1. >5 cards picked by either player    → vanilla impossible, auto-invalidate
+# Three checks run on every match submission (summary kept in sync with the
+# code below — it drifted once and misled a review; the code is authoritative):
+#   1. > ANTICHEAT_MAX_CARDS_PER_PLAYER (7) cards → ADVISORY flag only.
+#      A clean 5-X loss legitimately picks 6 (1 pre-match + 1 per round lost),
+#      so auto-invalidate was dropped and the threshold sits above 6.
 #   2. Sub-60s pattern between same pair   → 2+ in a 2hr window for ranked, 3+ for casual.
 #                                            Auto-invalidates this match AND retroactively the prior ones.
-#   3. Reporter sat idle (0 shots, 0 blocks, duration > 30s)
+#   3. Reporter fully idle (0 shots, 0 blocks, 0 cards picked,
+#      duration > ANTICHEAT_INACTIVE_MIN_DURATION_SEC = 120s)
 #                                          → flag only (we only see reporter's inputs; opponent could be
 #                                            the cheater instead, so manual review).
 #

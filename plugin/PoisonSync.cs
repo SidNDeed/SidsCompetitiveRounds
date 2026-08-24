@@ -1113,10 +1113,10 @@ namespace CompetitiveRounds
             int attackerId = damagingPlayer != null ? damagingPlayer.PlayerID : -1;
 
             // STREAM START, captured before the loop and before any raise — NOT the
-            // publish time. Load-bearing for the observer's orphan fence: a victim
-            // that stalls is precisely the case that trips a watchdog, and a
-            // publish-time stamp on the late header would fall AFTER the observer
-            // gave up and defeat the fence entirely.
+            // publish time. Its live consumer is the receive path's REVIVE FENCE
+            // (drop verdicts from a stream that began before the victim's latest
+            // revive). The watchdog this stamp originally served was deleted —
+            // see the design record at the top of this file.
             int streamStartTs = PhotonNetwork.ServerTimestamp;
 
             float damageToDeal = Quantise(damage.magnitude);

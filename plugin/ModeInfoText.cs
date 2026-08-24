@@ -18,9 +18,12 @@ namespace CompetitiveRounds
 - Custom lobbies have no Elo band.
   Joining the lobby is consent to play.
 - All 4 players have 120 seconds to ready up.
-  If time expires, everyone returns to searching.
-- After an auto-queue game with a point margin of 3 or more,
-  the weakest winner may swap with the strongest loser.
+  If time expires, auto-queue players go back to
+  searching; a custom lobby is simply released.
+- After an auto-queue game with a point margin of 3 or
+  more, the server proposes swapping the weakest winner
+  with the strongest loser and announces it with a
+  toast. The in-game switch is still shipping.
 
 <color=#FFD94D><b>SCORING</b></color>
 
@@ -64,9 +67,10 @@ namespace CompetitiveRounds
 
 - This is a consent queue with no Elo band and no ready-up.
 - The server assigns one solo and two duo players.
-- Solo Extra Initial Pick is optional.
-  If anyone enables it, the solo draws 2 cards on the
-  opening pick.
+- Solo Extra Initial Pick is optional: the solo draws
+  2 cards on the opening pick. In the random queue any
+  player's opt-in turns it on; in a hosted lobby the
+  host's setting decides.
 
 <color=#FFD94D><b>SCORING</b></color>
 
@@ -76,11 +80,17 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>REWARDS</b></color>
 
-- Each game gives 500 XP.
-  A game win gets x1.5, for 750 XP.
-- A series win gives each winner 40 Gold.
-  A series loss gives each loser 20 Gold.
-- Game XP converts to Gold at 100 XP = 1 Gold.
+- Base XP is 500 per game, x1.5 on a win - then a
+  difficulty multiplier scales it, capped at x4
+  (the win bonus sits on top of the cap):
+  the solo earns x1.5 (and x1.20 more when the extra
+  pick is off), a duo facing a buffed solo earns x1.10,
+  and the opponents' rating tier multiplies up to x3.
+  Facing a top-3 1v2 player adds x1.35, win or lose.
+- Series end: 40 base Gold per winner, 20 per loser,
+  scaled by the opponents' rating tier.
+- Game XP converts to Gold at 100 XP = 1 Gold, and
+  level-ups pay their usual bonus Gold.
 
 <color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>
 
@@ -94,7 +104,9 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- Leaving mid-game is recorded.");
+- Leaving while locked with no games played cancels the
+  series; a leave mid-game leaves the result to the
+  normal match report. The beta has no leave counter.");
 
         public static string FfaTitle => I18n.Tr("FFA - How It Works");
         // Config source for the prose (Codex v1.36 client find 13): while
@@ -135,8 +147,10 @@ Standard ROUNDS scoring - first to {0} points takes the game.
 - The pick timer is shown on screen. A pick landing
   near the end grants everyone a little extra time.
   When your timer hits zero, your highlighted card is
-  picked for you automatically. You always get a
-  card - skipping a pick is not possible.
+  picked for you automatically - walking away never
+  skips your pick. Only a pick that misses the window
+  entirely (a freeze, a crash, or the final split
+  second) yields no card, with a toast saying so.
 
 - You hold up to {1} cards.
   Picking one more replaces your oldest card.
@@ -144,8 +158,9 @@ Standard ROUNDS scoring - first to {0} points takes the game.
 <color=#FFD94D><b>HOST SETTINGS</b></color>
 
 - The host can tune the lobby before starting: score
-  target (3-10), opening draws, max cards held (3-6),
-  the Same Cards rule, and ranked/casual.
+  target (3-10), opening draws, cards offered per
+  draw (1-5), max cards held (3-5 ranked, up to 6
+  casual), the Same Cards rule, and ranked/casual.
 
 - Same Cards rule: everyone's Nth card draw offers the
   SAME candidates, in the same order - if you and a rival
@@ -170,7 +185,9 @@ Standard ROUNDS scoring - first to {0} points takes the game.
 - Your rating is scored against the players placed
   nearest to you (up to 4 of them), so one game can't
   swing your rating several times harder in a 10-player
-  lobby than in a 3-player one.
+  lobby than in a 3-player one. One extra comparison
+  can join those four: the biggest 250+ rating gap
+  that finished upside down outside them.
 
 - A tied placement counts as a draw. New ratings move
   fast and settle down as you play more.
@@ -226,7 +243,10 @@ Standard ROUNDS scoring - first to {0} points takes the game.
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- Leaving mid-game is recorded.
-  A leaver keeps their tallies for placement.", FfaTargetNow, FfaCapNow);
+- Leaving mid-game is recorded. A leaver keeps their
+  tallies and is placed and rated for the game they
+  left - unless they left before the field had scored
+  2 half points while their own tally was still zero,
+  in which case that game does not rate them.", FfaTargetNow, FfaCapNow);
     }
 }

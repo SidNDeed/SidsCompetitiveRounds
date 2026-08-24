@@ -1018,9 +1018,13 @@ FAQ_ENTRIES = [
         "examples": ["how does grow work", "is grow fps based"],
         "answer": ("**Grow** makes a bullet gain damage the longer it stays in flight, so long-distance and "
                    "slow-projectile shots benefit most.\n"
-                   "**Yes, vanilla Grow is frame-rate dependent.** Its growth is not fully normalized to elapsed "
-                   "time, so the result can vary with FPS. SCR currently records and organizes matches but does "
-                   "not alter Grow's gameplay code."),
+                   "**Yes, vanilla Grow is frame-rate dependent.** Its growth compounds per FRAME on the "
+                   "shooter's machine, so lower FPS genuinely means harder-hitting Grow bullets in vanilla.\n"
+                   "**SCR fixes this where it safely can**: in mod-issued rooms (queue/tournament/2v2/1v2/FFA) "
+                   "and in private rooms where every player is modded, up to date, and had Ranked on when they "
+                   "connected, Grow's growth is normalized to a fixed reference tick — FPS no longer changes "
+                   "the damage, and one non-modded player switches the room back to pure vanilla for everyone. "
+                   "Quickplay and mixed lobbies always keep vanilla behavior."),
     },
     {
         "key": "ranked_explained",
@@ -1162,7 +1166,7 @@ FAQ_ENTRIES = [
                    "start time you can make; it locks once **8+ players agree on one time** and at that time you "
                    "just **have ROUNDS open** — the mod auto-connects every bracket match, with a short "
                    "skippable breather between your matches.\n"
-                   "• **Async** (~every 6 weeks): one round per week, 7-day deadline per match — nothing to be "
+                   "• **Async** (rolling: a new one opens 2 days after the previous one ends): one round per week, 7-day deadline per match — nothing to be "
                    "online for. You agree a time with your opponent on Discord (`/dm-opponent`), then play a "
                    "normal private lobby together and it records automatically; no room code from the bracket, "
                    "no Ready Up.\n"

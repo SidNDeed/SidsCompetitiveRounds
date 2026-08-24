@@ -1916,10 +1916,12 @@ namespace CompetitiveRounds
     // PoisonDotSchedulerPatch.Prefix (PoisonSync.cs) as step 1 and the class deleted.
     //
     // This is not tidying. Two prefixes on one method have UNDEFINED relative order,
-    // and Harmony skips every subsequent prefix once one returns false — so with the
-    // poison scheduler also prefixing this method, whichever ran first would silently
-    // decide whether the other ran at all. One merged prefix removes the hazard
-    // outright and makes the ordering explicit and reviewable.
+    // and (learning #352, verified from the shipped 0Harmony.dll) HarmonyX runs
+    // EVERY prefix even after one returns false — the return only ANDs into
+    // __runOriginal — so each prefix would still need its own guard against the
+    // other's decision, with the ordering silently deciding which state each saw.
+    // One merged prefix removes the hazard outright and makes the ordering
+    // explicit and reviewable.
 
     /// <summary>
     /// Bug #186 (Sid) — GROW's damage growth is exponential in FRAME TIME.
@@ -2582,11 +2584,12 @@ namespace CompetitiveRounds
         // BOTH a prefix and a postfix on MovePlayers, deliberately:
         //  * the prefix covers vanilla THROWING mid-loop on a departed
         //    player's entry (#272) — a postfix never runs then;
-        //  * the postfix covers the prefix being SKIPPED — the FFA map-scale
-        //    patch takes MovePlayers over entirely (returns false) on scaled
-        //    maps, and per this file's DeadPlayerDot note HarmonyX skips
-        //    subsequent prefixes once one returns false, with UNDEFINED
-        //    relative order between ours and the takeover's.
+        //  * the postfix covers the ORIGINAL being skipped — the FFA map-scale
+        //    patch takes MovePlayers over entirely (returns false on scaled
+        //    maps). Our prefix still RUNS then (learning #352: HarmonyX runs
+        //    every prefix; a false return only skips the original), but its
+        //    work targets the vanilla loop the takeover replaced — the
+        //    postfix is the arm that fires after the takeover's own pass.
         // Schedule() coalesces, so when both fire the second is a no-op.
         [HarmonyPrefix]
         [HarmonyPatch(typeof(PlayerManager), "MovePlayers")]

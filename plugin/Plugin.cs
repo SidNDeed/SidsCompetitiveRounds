@@ -900,7 +900,7 @@ namespace CompetitiveRounds
             );
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
-                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom). Re-applied whenever the value changes; clear when done."
+                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
             );
             BroadcastTestMapSkinTourSeconds = Config.Bind(
                 "Broadcast", "TestMapSkinTourSeconds", 0,
@@ -1906,11 +1906,19 @@ namespace CompetitiveRounds
             _testOpenTabAt = -1f;
             if (raw.Length == 0) return;
             string[] parts = raw.Split(':');
-            int idx; float scroll = -1f;
+            int idx; float scroll = -1f; string infoKey = null;
             if (!int.TryParse(parts[0].Trim(), out idx)) return;
-            if (parts.Length > 1) float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
-            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll}");
-            NativeUI.DevOpenTab(idx, scroll);
+            // Aug 23: for the Info tab (15) the part after ':' is an ARTICLE
+            // KEY (e.g. "15:rewards"), not a scroll fraction — screenshots of
+            // specific articles need it since synthetic clicks can't reach
+            // the overlay (#420). Other tabs keep the float meaning.
+            if (parts.Length > 1)
+            {
+                if (idx == 15) infoKey = parts[1].Trim();
+                else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
+            }
+            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"}");
+            NativeUI.DevOpenTab(idx, scroll, infoKey);
         }
 
         private static void FpsWrite(int target)
@@ -5029,9 +5037,10 @@ namespace CompetitiveRounds
     }
 
     /// <summary>True when we're in a mod-issued competitive room — 2v2 (cr_ff /
-    /// team_*), 1v1 ranked (ranked_*), or sync tournament (sct-*). Used to scope
-    /// behaviors that should apply uniformly across competitive paths but NOT to
-    /// vanilla casual/private rooms (which may have mixed mod / non-mod players).
+    /// team_*), 1v1 ranked (ranked_*), sync tournament (sct-*), 1v2 (ovt_*), or
+    /// FFA (ffa_* with the engine active). Used to scope behaviors that should
+    /// apply uniformly across competitive paths but NOT to vanilla casual/private
+    /// rooms (which may have mixed mod / non-mod players).
     /// </summary>
     internal static class CompetitiveRoomDetect
     {

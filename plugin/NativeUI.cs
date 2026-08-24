@@ -1603,6 +1603,7 @@ namespace CompetitiveRounds
              * compareSelected (the user's picks, not views), _lblParts/
              * _lblOrder (per-call scratch). */
             achRows.Clear();homeCosRows.Clear();_podiumLbRows.Clear();_podiumTeamRows.Clear();_podiumFfaRows.Clear();
+            infoNavBtns.Clear();infoNavTexts.Clear();infoNavKeys.Clear();   // Info tab nav pool (#147/#149/#150)
             shopRows.Clear();shopRowPool.Clear();shopArtistBtns.Clear();shopArtistBtnTexts.Clear();shopArtistBtnNames.Clear();
             teamLBRows.Clear();teamHistRows.Clear();
             tSignupRowPool.Clear();tSignupRowTexts.Clear();tBracketRowPool.Clear();tBracketRowTexts.Clear();_tBracketRowPurposes.Clear();
@@ -1675,7 +1676,7 @@ namespace CompetitiveRounds
             tIndRow.SetActive(false);
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
-            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);
+            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);
             // (The [ID] button's position is set in CreateHistoryRow itself, so
             // it cannot desync from tab-build ordering.)
 
@@ -1787,10 +1788,11 @@ namespace CompetitiveRounds
         // i18n: expression-bodied property (NOT a static readonly field) so the
         // I18n.Tr calls run at ACCESS time — after I18nCatalogues.Install() — and
         // re-evaluate after a language switch (which rebuilds the page).
-        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned")};
-        private const int NUM_TABS=15;   // Aug 7 item 7: 14 = Banned (Admin sub-tab)
+        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info")};
+        private const int NUM_TABS=16;   // Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab)
         private const int TAB_HOME=13;
         private const int TAB_BANNED=14;
+        private const int TAB_INFO=15;   // Aug 23 (Sid): the explainer library — Settings group sub-tab
         // Top bar order per Sid's spec (July 12 round 2): Multiplayer right after
         // Tournaments; Settings last; Admin gated. Sub-tabs: Compare under
         // Leaderboard, Artist under Shop, 2v2/1v2/FFA under Multiplayer. First
@@ -1799,7 +1801,7 @@ namespace CompetitiveRounds
         // moved under My Stats as sub-tabs (Sid's item 4).
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
         private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Admin"),I18n.Tr("Settings")};
-        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{6,14},new[]{5}};
+        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{6,14},new[]{5,15}};
         private const int GROUP_ADMIN=6;   // GROUP_LABELS index of the admin-gated slot
         private static int GroupOf(int tabIdx){for(int g=0;g<GROUP_MEMBERS.Length;g++)for(int m=0;m<GROUP_MEMBERS[g].Length;m++)if(GROUP_MEMBERS[g][m]==tabIdx)return g;return 0;}
         /* Aug 7 item 7: the Banned sub-tab is ADMIN-only (its only fetch is the
@@ -5112,13 +5114,14 @@ namespace CompetitiveRounds
         /// on a tab and optionally scroll the Shop list, so a seat with nobody at
         /// it can screenshot every tab. Gated by the caller on the broadcast
         /// identity; no state beyond what a click would set.</summary>
-        internal static void DevOpenTab(int idx, float shopScroll)
+        internal static void DevOpenTab(int idx, float shopScroll, string infoArticleKey = null)
         {
             try
             {
                 if (!isOpen) Toggle();
                 if (!isOpen || pageGO == null) return;
                 if (idx >= 0 && idx < NUM_TABS && idx != currentTab) SwitchTab(idx);
+                if (idx == TAB_INFO && !string.IsNullOrEmpty(infoArticleKey)) SelectInfoArticle(infoArticleKey);
                 if (idx == 4 && shopScroll >= 0f && shopScrollGO != null && UIFactory.tScrollRect != null)
                 {
                     var sr = shopScrollGO.GetComponent(UIFactory.tScrollRect);
@@ -10257,6 +10260,130 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
   compress older samples), so graph ratios can differ
   slightly from the exact totals.");
 
+        /// <summary>Info-library accessor for the stats explainer body. The
+        /// literal stays in the private property above so its extractor site
+        /// and shipped translation key are untouched (#289).</summary>
+        internal static string StatsTrackingInfoBody => StatsTrackingInfo;
+
+        // ── Info tab (tab 15, Aug 23 — Sid: "explain as much of the game/mod
+        // mechanics as possible"). Left column = category-grouped topic nav;
+        // right column = fixed-measure reading pane, darker than C_PANEL for
+        // long reading. Content lives in InfoLibrary.cs. Deliberately NO
+        // server fetches and no RefreshCurrentTab case: the library is static
+        // client content, so the dirty/refresh machinery has nothing to do.
+        private static object infoTitleTxt, infoBodyTxt;
+        private static GameObject infoBodyScrollGO;
+        private static RectTransform infoBodyContentRT;
+        private static readonly List<GameObject> infoNavBtns = new List<GameObject>();
+        private static readonly List<object> infoNavTexts = new List<object>();
+        private static readonly List<string> infoNavKeys = new List<string>();
+        private static string infoSelectedKey = "";
+
+        private static GameObject BuildInfoTab(Transform parent)
+        {
+            var outer = new GameObject("InfoOuter");
+            outer.transform.SetParent(parent, false);
+            outer.AddComponent<RectTransform>();
+            UIFactory.AddVLG(outer, spacing: 4);
+            UIFactory.AddLE(outer, flexH: 1);
+            MakeSubTabAnchor(TAB_INFO, outer.transform, true);
+
+            var cols = new GameObject("InfoCols");
+            cols.transform.SetParent(outer.transform, false);
+            cols.AddComponent<RectTransform>();
+            UIFactory.AddHLG(cols, spacing: 10, forceExpandH: true);
+            UIFactory.AddLE(cols, flexH: 1);
+
+            // Left nav — fixed width with flexW:0 EXPLICIT (#132: an HLG
+            // column silently inherits flexibleWidth from any flex child).
+            var nav = UIFactory.CreatePanel("InfoNav", cols.transform, C_PANEL);
+            UIFactory.AddVLG(nav, spacing: 2, padL: 8, padR: 8, padT: 8, padB: 8);
+            UIFactory.AddLE(nav, prefW: 350, flexW: 0, flexH: 1);
+            var navSV = UIFactory.CreateScrollView("InfoNavSV", nav.transform, spacing: 2);
+            UIFactory.AddLE(navSV.scrollGO, flexH: 1);
+            infoNavBtns.Clear(); infoNavTexts.Clear(); infoNavKeys.Clear();
+            foreach (var cat in InfoLibrary.Categories)
+            {
+                var hdr = UIFactory.CreateText("ICat", navSV.content.transform,
+                    cat.Title(), 15f, cat.Color, UIFactory.AlignMidLeft,
+                    sizeDelta: new Vector2(320, 26));
+                UIFactory.SetBold(hdr, true);
+                foreach (var art in cat.Articles)
+                {
+                    string key = art.Key;
+                    var b = UIFactory.CreateButton("IA_" + key, navSV.content.transform,
+                        art.Title(), 14f, C_LABEL, C_BTN,
+                        () => SelectInfoArticle(key),
+                        sizeDelta: new Vector2(320, 28));
+                    UIFactory.AddLE(b, prefH: 28, minH: 28, flexH: 0);
+                    infoNavBtns.Add(b); infoNavTexts.Add(UIFactory.GetButtonText(b)); infoNavKeys.Add(key);
+                }
+            }
+
+            // Reading pane — FIXED measure (~85 chars/line at 23f) rather than
+            // flex-fill: a full-width text line on a 21:9 canvas is unreadable.
+            // Darker than C_PANEL per Sid's ask ("darker background for easier
+            // text viewing").
+            var pane = UIFactory.CreatePanel("InfoPane", cols.transform, new Color(0.055f, 0.065f, 0.09f, 0.97f));
+            UIFactory.AddVLG(pane, spacing: 8, padL: 30, padR: 30, padT: 14, padB: 12);
+            UIFactory.AddLE(pane, prefW: 1240, flexW: 0, flexH: 1);
+            infoTitleTxt = UIFactory.CreateText("InfoTitle", pane.transform, "", 30f, C_GOLD,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(1180, 44));
+            var sv = UIFactory.CreateScrollView("InfoBodySV", pane.transform, spacing: 0);
+            UIFactory.AddLE(sv.scrollGO, flexH: 1);
+            infoBodyScrollGO = sv.scrollGO;
+            infoBodyContentRT = sv.contentRT;
+            infoBodyTxt = UIFactory.CreateText("InfoBody", sv.content.transform, "", 23f,
+                new Color(0.84f, 0.85f, 0.90f), UIFactory.AlignTopLeft, sizeDelta: new Vector2(1180, 400));
+            UIFactory.SetWordWrap(infoBodyTxt, true);
+            UIFactory.SetTextAutoHeight(infoBodyTxt);
+
+            // Trailing spacer eats leftover row width on wide canvases so the
+            // two fixed columns stay left-packed instead of being stretched.
+            var sp = new GameObject("S");
+            sp.transform.SetParent(cols.transform, false);
+            sp.AddComponent<RectTransform>();
+            UIFactory.AddLE(sp, flexW: 1);
+
+            // Rebuilds (language switch) keep the reader's place; first open
+            // lands on the orientation page.
+            SelectInfoArticle(InfoLibrary.Find(infoSelectedKey) != null ? infoSelectedKey : "start-here");
+            return outer;
+        }
+
+        private static void SelectInfoArticle(string key)
+        {
+            var art = InfoLibrary.Find(key);
+            if (art == null) return;
+            infoSelectedKey = key;
+            try
+            {
+                // Titles/bodies are already Tr'd inside InfoLibrary's
+                // properties — SetTextRaw skips the second catalogue lookup
+                // while keeping glyph registration + the bold wrap (#48/#110).
+                UIFactory.SetTextRaw(infoTitleTxt, art.Title());
+                UIFactory.SetColor(infoTitleTxt, InfoLibrary.ColorOf(key));
+                UIFactory.SetTextRaw(infoBodyTxt, art.Body());
+                // Snap back to the top for the new article (both the content
+                // offset and the normalized position — the layout rebuild
+                // lands next frame and clamps whichever survives).
+                if (infoBodyContentRT != null) infoBodyContentRT.anchoredPosition = Vector2.zero;
+                if (infoBodyScrollGO != null && UIFactory.tScrollRect != null)
+                {
+                    var sr = infoBodyScrollGO.GetComponent(UIFactory.tScrollRect);
+                    if (sr != null)
+                        UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition", BindingFlags.Public | BindingFlags.Instance)?.SetValue(sr, 1f);
+                }
+                for (int i = 0; i < infoNavBtns.Count; i++)
+                {
+                    bool sel = infoNavKeys[i] == key;
+                    if (infoNavBtns[i] != null) UIFactory.SetImageColor(infoNavBtns[i], sel ? C_TABACT : C_BTN);
+                    if (infoNavTexts[i] != null) UIFactory.SetColor(infoNavTexts[i], sel ? C_WHITE : C_LABEL);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] select '" + key + "': " + ex.Message); }
+        }
+
         private static GameObject BuildSettingsTab(Transform parent)
         {
             // Outer fills the tab area; scroll view eats all extra height so the
@@ -10269,6 +10396,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             outer.AddComponent<RectTransform>();
             UIFactory.AddVLG(outer, spacing: 0);
             UIFactory.AddLE(outer, flexH: 1);
+            // Aug 23: Settings became a two-member group (Settings | Info), so
+            // it needs a sub-tab anchor like every other grouped tab.
+            MakeSubTabAnchor(5, outer.transform, true);
             var scroll = UIFactory.CreateScrollView("SettingsScroll", outer.transform, spacing: 0);
             UIFactory.AddLE(scroll.scrollGO, flexH: 1);
 
@@ -10405,21 +10535,36 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 "Language / Idioma / Язык / Мова / Språk", 17f, new Color(0.7f, 0.85f, 1f),
                 sizeDelta: new Vector2(700, 24));
 
-            // -- Stats (bug 180, Stan) --
-            // One button opening the scrollable "how stats are tracked"
-            // explainer (ShowInfoPopup already carries the modal conventions:
-            // backdrop + InfoPopupOpen feeding ClickHandler.ModalBlockInput,
-            // #200, and a body ScrollView honoring #199's prefH rules).
+            // -- Info (Aug 23, Sid: the old "Stats" sub-cat, renamed and grown
+            // into a full explainer library on its own sub-tab). This box is
+            // the pointer; the "How stats are tracked" popup stays reachable
+            // here too since players learned to find it in Settings (bug 180).
             var statsHelpBox = UIFactory.CreatePanel("SStatsB", panel.transform, C_PANEL);
             UIFactory.AddVLG(statsHelpBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
             UIFactory.AddLE(statsHelpBox, flexH: 0);
             UIFactory.CreateText("SStatsL", statsHelpBox.transform,
-                "Stats", 17f, new Color(0.7f, 0.85f, 1f),
+                "Info", 17f, new Color(0.7f, 0.85f, 1f),
                 sizeDelta: new Vector2(700, 24));
-            UIFactory.CreateButton("SStatsHelp", statsHelpBox.transform,
+            UIFactory.CreateText("SStatsD", statsHelpBox.transform,
+                "Guides to every mechanic: blocking, poison, netcode, modes, ratings, rewards, tournaments, anti-cheat, and what the mod does (and deliberately doesn't) change.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 34));
+            var infoBtnRow = new GameObject("SInfoRow");
+            infoBtnRow.transform.SetParent(statsHelpBox.transform, false);
+            infoBtnRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(infoBtnRow, spacing: 8, forceExpandH: true);
+            UIFactory.AddLE(infoBtnRow, prefH: 30, flexH: 0);
+            UIFactory.CreateButton("SInfoOpen", infoBtnRow.transform,
+                "Open the Info library", 15f, C_WHITE, new Color(0.20f, 0.34f, 0.55f, 0.92f),
+                () => SwitchTab(TAB_INFO),
+                sizeDelta: new Vector2(300, 28));
+            UIFactory.CreateButton("SStatsHelp", infoBtnRow.transform,
                 "How stats are tracked", 15f, C_WHITE, C_BTN,
                 () => ShowInfoPopup(I18n.Tr("How stats are tracked"), StatsTrackingInfo),
                 sizeDelta: new Vector2(300, 28));
+            var infoRowSp = new GameObject("S");
+            infoRowSp.transform.SetParent(infoBtnRow.transform, false);
+            infoRowSp.AddComponent<RectTransform>();
+            UIFactory.AddLE(infoRowSp, flexW: 1);
 
             // -- Interface --
             var intBox = UIFactory.CreatePanel("SIntB", panel.transform, C_PANEL);

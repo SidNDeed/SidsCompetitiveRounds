@@ -21,11 +21,13 @@ namespace CompetitiveRounds
     ///
     /// Scoring: every player is their own team (TeamID = slot). Last player
     /// alive wins a HALF POINT; 2 half points = a point (halves reset); first
-    /// to 5 points wins the game. (Player-facing language is half point /
-    /// point; the internal names stay points/rounds to match vanilla's.)
+    /// to the lobby's score target (RoundsToWin, host-set 3-10, default 5)
+    /// wins the game. (Player-facing language is half point / point; the
+    /// internal names stay points/rounds to match vanilla's.)
     /// After each point, everyone but the point winner picks a card — ALL AT
-    /// THE SAME TIME (see the pick-phase section) — with a hard 5-card cap:
-    /// picking a 6th erases the oldest ("Rolling Card Bar", reset+replay).
+    /// THE SAME TIME (see the pick-phase section) — with a rolling card cap
+    /// (CardCap, host-set 3-6, default 5): picking one past the cap erases
+    /// the oldest ("Rolling Card Bar", reset+replay).
     /// </summary>
     internal static class FfaMode
     {
