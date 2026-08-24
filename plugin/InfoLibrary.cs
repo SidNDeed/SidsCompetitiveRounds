@@ -518,9 +518,8 @@ For the full is-this-recorded decision tree, see <color=#7FD4FF>When a game coun
 <color=#FFD94D><b>THE MID-SERIES SWAP, PRECISELY</b></color>
 
 - It only fires in auto-balanced series - manual lobbies never swap.
-- After a game with a point margin of 3 or more, the server pairs the winner with the LOWEST balance rating against the loser at the HIGHEST, and announces the swap with a toast.
-- Balance ratings are re-read at swap time, under the same 2v2-if-trusted, else-1v1 rule as above.
-- <color=#FF6666>For now the swap is announced, not enforced:</color> the in-game team switch is still shipping, so play on and treat the toast as a heads-up.
+- The design: after a game with a point margin of 3 or more, the weakest winner trades places with the strongest loser for the next game, under the same 2v2-if-trusted, else-1v1 rating rule as above.
+- <color=#FF6666>Not live yet:</color> the in-game team switch is still shipping, so for now the balancer only logs the swap it would have made and teams stay locked for the whole series.
 
 <color=#FFD94D><b>WHO IS ORANGE, WHO IS BLUE</b></color>
 
@@ -743,6 +742,8 @@ If the lock pushes back a week instead (too few players, or no time slot 8 playe
 
 <color=#7FD4FF>Match is live</color> - your opponent, the 7-day deadline, and how to play: agree a time, host a private lobby together, the result records automatically.
 
+<color=#7FD4FF>Still pending</color> - once your match has sat ready for 3 days unplayed, a daily reminder with your deadline and how to coordinate. No buttons.
+
 <color=#7FD4FF>Deadline check-in</color> - sent in the final 24 hours before your deadline. Three buttons, and your latest answer replaces earlier ones:
 - 'Yes - we plan to play today' - recorded, and <color=#7FE87F>extends the deadline 24 hours</color> - once per opponent per tournament. Pressing it a second time records the answer but the deadline stays put.
 - 'I reached out - no response / they quit' - recorded.
@@ -817,7 +818,7 @@ Only absent seats get the no-show mark (a banned seat forfeits regardless of pre
 
 - <color=#7FE87F>Prizes pay when the whole bracket completes</color>, not when your final match ends. A forfeit-decided rank is skipped rather than passed down.
 
-- <color=#8A8A93>Prize XP is added to your total directly - it doesn't convert to Gold, and a level boundary crossed by prize XP doesn't pay the usual level reward.</color>
+- <color=#8A8A93>Prize XP behaves like any other XP: it converts to Gold at the usual 100 XP = 1 Gold, and a level boundary it crosses pays the normal level reward.</color>
 
 - Trophies are Discord roles: SCR Tournament Winner, Runner Up, and 3rd Place; a second same placement upgrades the role to its (x2) version. Every confirmed participant gets the Participant role. Tournaments grant no in-game shop titles.
 
@@ -950,9 +951,9 @@ FFA pays for FIGHTING, not for time in the lobby. The formula, in readable form:
 
 <color=#FFD94D><b>LEVELS AND THE XP-TO-GOLD DRIP</b></color>
 
-- Match XP converts at <color=#7FE87F>100 XP = 1 Gold</color>, paid every time your running total crosses a hundred mark. Every mode's match XP feeds the same total. (Tournament prize XP is the one exception - it lands as raw XP.)
+- XP converts at <color=#7FE87F>100 XP = 1 Gold</color>, paid every time your running total crosses a hundred mark. Every mode's XP - tournament prizes included - feeds the same total.
 - Climbing into level L costs 100 x L^1.5 XP, truncated: level 2 costs 282, level 5 costs 1118, level 10 costs 3162, level 50 costs 35355, level 100 costs 100000. Max level is 100.
-- Entering a multiple-of-5 level pays bonus Gold: <color=#7FE87F>100g for levels 5 through 50, 500g for 55 through 100</color> - 6000g lifetime if you reach the cap. It lands the moment a game's XP dings the level, in every mode; a ding during an FFA game shows up inside that game's +g number.
+- Entering a multiple-of-5 level pays bonus Gold: <color=#7FE87F>100g for levels 5 through 50, 500g for 55 through 100</color> - 6000g lifetime if you reach the cap. It lands the moment any XP award dings the level - any mode, tournament prizes included; a ding during an FFA game shows up inside that game's +g number.
 
 <color=#FFD94D><b>ACHIEVEMENT GOLD</b></color>
 

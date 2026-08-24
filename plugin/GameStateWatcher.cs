@@ -6482,8 +6482,12 @@ namespace CompetitiveRounds
                     else cardCounts[cn] = 1;
                 }
 
-                // 1. Untouchable — won without taking any damage
-                if (localWon && !achTookDamage)
+                // 1. Untouchable — won without taking any damage. achDied is
+                // checked too (Codex wiki-batch r2): the 10 Hz health sampler
+                // records damage only while 0 < health < max, so a full-health
+                // one-shot between samples left achTookDamage false — a player
+                // could die, respawn, win, and still collect Untouchable.
+                if (localWon && !achTookDamage && !achDied)
                 {
                     Plugin.Log.LogInfo("[ACH] Evaluating: Untouchable — PASSED");
                     ApiClient.UnlockAchievement(steamId, "untouchable");

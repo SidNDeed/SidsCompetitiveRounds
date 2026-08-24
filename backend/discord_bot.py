@@ -7795,13 +7795,15 @@ async def poll_tournaments():
                 prize_txt = (f"{pg[0]}g/{px[0]}xp · {pg[1]}g/{px[1]}xp · {pg[2]}g/{px[2]}xp "
                              f"at {pp} players + trophy roles")
             else:
+                # Fallback amounts refreshed Aug 23 (the old 500/300/60 tiers
+                # matched no live amount): base pool at 8 players, doubling
+                # by 16 — mirrors tournaments.py _prize_amounts.
                 tier = t.get("prize_tier") or "none"
-                prize_txt = {
-                    "full": "500g / 300g / 60g + trophy roles",
-                    "sixty": "300g / 180g / 36g + trophy roles",
-                    "thirty": "150g / 90g / 18g + trophy roles",
-                    "none": "(cancelled)",
-                }.get(tier, tier)
+                # A payload without prize arrays means a PRE-scaling API —
+                # quoting today's amounts would misstate what that server
+                # actually pays (Codex fix-batch find 6). Say so instead.
+                prize_txt = ("(cancelled)" if tier == "none"
+                             else "prizes + trophy roles (amounts unavailable from this API version)")
             await _announce_in_channel(
                 f"**Tournament complete.**  1st: **{winner}** · 2nd: {runner} · 3rd: {third}  ({prize_txt})"
             )
@@ -7888,13 +7890,15 @@ async def dm_opponent(ctx, *, message: str):
         await ctx.reply(f"Couldn't DM {opp_name} — they may have DMs closed.", ephemeral=True)
 
 
-@tasks.loop(hours=24)
+@tasks.loop(hours=1)
 async def nag_pending_async_matches():
-    """Once a day, DM players whose async tournament match has been 'ready'
-    for more than 3 days without completing. Deduped by match_id + date so
-    if the bot restarts on the same day, the same nag doesn't fire twice.
-    Runs 24h cadence so players get at most a couple of nags over the 7-day
-    deadline before the auto-forfeit fires."""
+    """DM players whose async tournament match has been 'ready' for more than
+    3 days without completing — at most once per match per UTC day (the
+    _notified_nag_date dedup). Hourly cadence, not daily (Codex fix-batch
+    find 3): a 24h loop's first tick raced the empty watch cache at startup
+    and could sleep straight past a match's final day. HONEST LIMIT: the
+    dedup is process memory, so a bot restart mid-day can repeat that day's
+    nag once — accepted; deploys are occasional and the cost is one DM."""
     if not _watch_cache:
         return
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

@@ -1060,7 +1060,7 @@ class TeamMatchResponse(BaseModel):
     series_status: str  # "active" or "completed"
     series_score: str   # "1-0" / "2-0" / "2-1" — from the reporter's team perspective
     winner_team: int
-    rebalance_assignments: dict[str, int] | None = None  # filled if a rebalance triggered
+    rebalance_assignments: dict[str, int] | None = None  # ALWAYS None today (proposal-only server; dormant until the client-side swap ships)
     new_t1a_rating: float | None = None
     new_t1b_rating: float | None = None
     new_t2a_rating: float | None = None

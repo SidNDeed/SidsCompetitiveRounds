@@ -20,10 +20,10 @@ namespace CompetitiveRounds
 - All 4 players have 120 seconds to ready up.
   If time expires, auto-queue players go back to
   searching; a custom lobby is simply released.
-- After an auto-queue game with a point margin of 3 or
-  more, the server proposes swapping the weakest winner
-  with the strongest loser and announces it with a
-  toast. The in-game switch is still shipping.
+- Designed but not live yet: after an auto-queue game
+  with a point margin of 3 or more, the weakest winner
+  will trade places with the strongest loser. Until
+  that ships, teams stay locked all series.
 
 <color=#FFD94D><b>SCORING</b></color>
 

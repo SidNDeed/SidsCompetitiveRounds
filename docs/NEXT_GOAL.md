@@ -46,7 +46,7 @@ clearer scope, items lower are open-ended.
 ## 3. Leaderboard rating graph "losing" games
 - Sid's report: graph appears to skip points / show partial history. Should show the entire
   series-rating-change timeline.
-- Source: `players/{steam_id}/stats` returns `rating_history` (populated by Monday 3AM cron
+- Source: `players/{steam_id}/stats` returns `rating_history` (populated inline on series completion; the old "Monday 3AM cron" never existed
   + inline on series completion). Confirm it's actually being populated for everyone (see
   earlier learnings — empty `rating_history` has been a real bug before).
 - If too many points (>200), bucket by date and show daily averages so the graph stays

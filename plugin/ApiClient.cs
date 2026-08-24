@@ -1459,7 +1459,7 @@ namespace CompetitiveRounds
             public float p2_odds;
             public int live_p1_points, live_p2_points;
             public bool bets_locked;
-            public string lock_reason;  // "tournament" | "private_room" | "game_in_progress" | "no_meaningful_odds" | null
+            public string lock_reason;  // "game_in_progress" | "no_meaningful_odds" | null — the only values the server emits (the once-documented "tournament"/"private_room" never existed server-side)
             public bool is_private;
             public bool is_tournament;
             public string tournament_kind; // "sync" | "async" | null
@@ -7683,27 +7683,11 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
 
-        public static void TriggerGlickoRecalc()
-        {
-            // The recalc endpoint requires an api_key parameter
-            string apiKey = Plugin.ApiBaseUrl.Value.Contains("192.168") ? "dev" : "dev";
-            Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/glicko/recalculate?api_key={apiKey}",
-                "",
-                (success, response) =>
-                {
-                    if (success)
-                    {
-                        Plugin.Log.LogInfo($"Glicko-2 recalculation triggered: {response}");
-                        FetchPlayerStats(MatchTracker.LocalSteamId);
-                    }
-                    else
-                    {
-                        Plugin.Log.LogWarning($"Glicko recalc failed: {response}");
-                    }
-                }
-            ));
-        }
+        // TriggerGlickoRecalc was deleted (Aug 23) along with the server's
+        // /glicko/recalculate endpoint: it had zero callers, a hardcoded "dev"
+        // api key that could never authenticate, and the endpoint it targeted
+        // would have double-applied every rated series and rated casual games.
+        // Inline series-completion updates are the only 1v1 rating path.
 
         /// <summary>Read a resumed BO3 tally out of any server response carrying
         /// the {p1_steam_id, p2_steam_id, p1_wins, p2_wins} shape, resolved to
@@ -10894,11 +10878,12 @@ namespace CompetitiveRounds
                         {
                             CompetitiveUI.ShowNotification(I18n.TrF("Series: {0}", sScore), new Color(0.6f, 0.8f, 1f), 4f);
                         }
-                        // Mid-series rebalance — server sends rebalance_assignments
-                        // when the previous match was lopsided enough to swap a
-                        // weakest-winner with strongest-loser. Parse + log so we
-                        // can verify the trigger; full client-side team mutation
-                        // (TeamID + spawn + body color updates) ships next round.
+                        // Mid-series rebalance — DORMANT compatibility scaffolding:
+                        // since Aug 23 the server is proposal-only (it logs the
+                        // swap it would have made and always sends null here),
+                        // because this client half — the actual TeamID + spawn +
+                        // body-color mutation — never shipped. Parser kept so an
+                        // eventual server re-enable degrades to today's toast.
                         try
                         {
                             int rIdx = response.IndexOf("\"rebalance_assignments\":");

@@ -384,13 +384,9 @@ namespace CompetitiveRounds
             return ex;
         }
     }
-    // Bridge the per-patch Finalizers above to the shared helper. Local alias so the
-    // null-check chain reads the same in both ScreenEdgeBounce variants.
-    internal static class _PerfHelpersAlias
-    {
-        public static System.Exception _SwallowAndDestroy(ScreenEdgeBounce mb, System.Exception ex)
-            => _PerfHelpers.SwallowAndDestroy(mb, ex);
-    }
+    // (_PerfHelpersAlias was deleted Aug 23 — dead code with zero callers;
+    // both ScreenEdgeBounce finalizers call _PerfHelpers.SwallowAndDestroy
+    // directly, whose name is legacy: it swallows only, never destroys.)
 }
 
 namespace CompetitiveRounds

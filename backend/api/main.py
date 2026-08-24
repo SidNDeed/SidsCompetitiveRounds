@@ -113,7 +113,6 @@ GLICKO2_TAU = 0.6
 GLICKO2_DEFAULT_RATING = float(os.getenv("GLICKO2_DEFAULT_RATING", "1500"))
 GLICKO2_DEFAULT_RD = float(os.getenv("GLICKO2_DEFAULT_RD", "350"))
 GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06"))
-GLICKO2_PERIOD_HOURS = int(os.getenv("GLICKO2_PERIOD_HOURS", "168"))
 
 # How long a pair's `active` ranked_series stays the "current" one for reuse.
 # A new game between the same two players within this window joins the existing
@@ -9559,107 +9558,17 @@ async def get_similar_players(
     )
 
 
-# ── Routes: Glicko-2 Recalculation ────────────────────────────
-
-@app.post("/api/v1/glicko/recalculate", tags=["System"])
-async def recalculate_ratings(
-    api_key: str = Query(..., description="API secret key for admin operations"),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Trigger a Glicko-2 rating period recalculation.
-    Processes all matches since the last calculation for each player.
-
-    This should be called periodically (e.g. weekly via cron).
-    Requires the API_SECRET_KEY for authentication.
-    """
-    expected_key = os.getenv("API_SECRET_KEY", "")
-    if not expected_key or api_key != expected_key:
-        raise HTTPException(status_code=403, detail="Invalid API key")
-
-    now = datetime.now(timezone.utc)
-    updated_count = 0
-
-    # Get all live players with ratings. Tombstoned (anonymized) players keep
-    # their Glicko row for FK integrity but are skipped by the recalc.
-    result = await db.execute(
-        select(GlickoRating)
-        .join(Player, Player.id == GlickoRating.player_id)
-        .where(Player.deleted_at.is_(None),
-               Player.steam_id.notin_(SPECTATE_BROADCAST_STEAM_IDS))
-    )
-    all_ratings = result.scalars().all()
-
-    for glicko in all_ratings:
-        pid = glicko.player_id
-        await _assert_no_service_subject(db, affected_player_ids=[pid])
-
-        # Get all matches this player played since last calculation
-        matches_query = text("""
-            SELECT
-                m.id,
-                m.winner_id,
-                CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END AS opponent_id
-            FROM matches m
-            WHERE (m.player1_id = :pid OR m.player2_id = :pid)
-              AND m.ended_at > :since
-            ORDER BY m.ended_at
-        """)
-        matches = (await db.execute(matches_query, {
-            "pid": pid, "since": glicko.last_calculated,
-        })).mappings().all()
-
-        # Build opponent list for Glicko-2
-        opponents = []
-        for m in matches:
-            opp_rating_result = await db.execute(
-                select(GlickoRating).where(GlickoRating.player_id == m["opponent_id"])
-            )
-            opp_glicko = opp_rating_result.scalar_one_or_none()
-            if not opp_glicko:
-                continue
-
-            score = 1.0 if m["winner_id"] == pid else 0.0
-            opponents.append((opp_glicko.rating, opp_glicko.rating_deviation, score))
-
-        # Calculate new rating (handles 0 games too, just RD increases)
-        new_rating, new_rd, new_vol = calculate_new_rating(
-            rating=glicko.rating,
-            rd=glicko.rating_deviation,
-            volatility=glicko.volatility,
-            opponents=opponents,
-            tau=GLICKO2_TAU,
-        )
-
-        # Save history snapshot before updating
-        db.add(RatingHistory(
-            player_id=pid,
-            rating=glicko.rating,
-            rating_deviation=glicko.rating_deviation,
-            volatility=glicko.volatility,
-            period_end=now,
-        ))
-
-        # Update current rating
-        glicko.rating = new_rating
-        glicko.rating_deviation = new_rd
-        glicko.volatility = new_vol
-        glicko.peak_rating = max(glicko.peak_rating or new_rating, new_rating)
-        glicko.games_in_period = 0
-        glicko.last_calculated = now
-        glicko.updated_at = now
-        updated_count += 1
-
-    # Refresh the card_stats materialized view
-    await db.execute(text("REFRESH MATERIALIZED VIEW CONCURRENTLY card_stats"))
-
-    await db.commit()
-
-    return {
-        "status": "ok",
-        "players_updated": updated_count,
-        "period_end": now.isoformat(),
-    }
+# ── Glicko-2 recalculation: REMOVED (Aug 23) ────────────────────
+# POST /glicko/recalculate replayed every match since last_calculated with NO
+# is_ranked filter, and the inline series-completion path never advances
+# last_calculated — so one invocation would rate casual games and double-apply
+# every rated series. Empirically it never fired: rating_history has no weekly
+# burst signature and root's crontab carries no such entry (checked Aug 23).
+# Inline series-completion updates are the ONLY 1v1 rating path. If a periodic
+# rating-period pass is ever wanted again, it must apply RD decay for
+# no-result players ONLY — never re-score match rows the inline path already
+# applied. (The card_stats materialized view this endpoint refreshed is legacy
+# — get_card_stats queries live tables; the stale view remains unread.)
 
 
 # ── Routes: Mod Handshake ─────────────────────────────────────
@@ -10769,6 +10678,10 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
         rating_deviation=cur_rd,
         region=req.region,
         home_region=_home_region,
+        # ranked_only is INERT: written here (and in the conflict-update
+        # below) since launch, read by no matchmaking logic. Kept only so a
+        # future consumer inherits real data; do not document it as a
+        # working preference (Codex wiki-batch finding).
         ranked_only=req.ranked_only,
         status="searching",
         matched_with=None,
@@ -18285,6 +18198,16 @@ def _nametag_subgroup(sku: str) -> str | None:
     # separate `nametag_glow_*` subgroup.
     if sku.startswith("nametag_neon_"):
         return "nametag_color"
+    # Rainbow + per-letter gradients are COLOR effects too (Codex wiki-batch
+    # r2, overturned rejection): the client has always classed them into the
+    # color slot, but this classifier missed them — so equipping rainbow after
+    # a solid left BOTH active through the ordinary UI (the client's optimistic
+    # removal was undone by the refetch), and gradients could stack with each
+    # other. One color effect at a time, whatever its kind. (Prod checked at
+    # fix time: zero players actually held a stacked pair, so no cleanup
+    # migration was needed — the classifier fix alone closes it.)
+    if sku == "nametag_rainbow" or sku.startswith("nametag_gradient_"):
+        return "nametag_color"
     for prefix in (
         "nametag_color_",
         "nametag_glow_",
@@ -25096,9 +25019,10 @@ TEAM_SERIES_WIN_GOLD     = 50
 TEAM_SERIES_LOSS_GOLD    = 25
 # Mid-series auto-balance trigger. Fires after a match in an auto-balanced
 # series whose total point margin >= this threshold (e.g., 5-2 = margin 3).
-# Lower → swap more often (every close-ish game), higher → swap only on
-# blowouts. Tester request: "make sure colors/spawns/etc get properly
-# swapped" — server emits rebalance_assignments and the client follows.
+# PROPOSAL-ONLY today (Aug 23): the client never shipped its half of the swap,
+# so the server just logs the swap it would have made — no team or queue
+# mutation, and rebalance_assignments stays null. See the block in
+# submit_team_match for the full story.
 AUTO_BALANCE_SWAP_MARGIN = 3
 
 
@@ -25823,11 +25747,34 @@ async def team_queue_poll(steam_id: str, request: Request,
         await db.commit()
         return TeamQueuePollResponse(status="not_in_queue")
     # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
-    # Use the SAME elo_range as the caller's tier — wider tier callers find each
-    # other faster but a 60s-old caller can't lock with a brand-new 100-Elo-band caller.
+    # BILATERAL for real since Aug 23 (Codex wiki-batch finding): this comment
+    # claimed bilateral for months while the SQL applied only the CALLER's
+    # band — a 120s waiter (band 800) could lock a fresh joiner whose own
+    # ±100 window excluded them, a pairing the 1v1 matcher refuses. The
+    # candidate-side band below mirrors the 1v1 matcher's inline CASE
+    # (compute_elo_range's schedule) off each candidate's OWN joined_at.
+    # Manual queues skip both directions — joining the lobby is consent
+    # (#127), and the caller side is already inert via the 1M range.
     my_qtype = (me.get("queue_type") or "auto").lower()
+    bilateral_sql = ""
+    if my_qtype != "manual":
+        bilateral_sql = """
+              AND :my_r BETWEEN
+                  tq.rating - (CASE
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 120 THEN 800
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 60 THEN 400
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 30 THEN 200
+                      ELSE 100
+                  END)
+                  AND
+                  tq.rating + (CASE
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 120 THEN 800
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 60 THEN 400
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 30 THEN 200
+                      ELSE 100
+                  END)"""
     cands = await db.execute(
-        text("""
+        text(f"""
             SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
                    tq.completed_series, tq.fallback_rating, tq.region, tq.joined_at,
                    tq.manual_pick_enabled, tq.preferred_team, tq.queue_type
@@ -25840,7 +25787,7 @@ async def team_queue_poll(steam_id: str, request: Request,
               -- the 1v2 matcher's 10s rule; matters more now that the janitor
               -- sweep runs at 90s instead of 30s.
               AND tq.last_polled > NOW() - INTERVAL '10 seconds'
-              AND ABS(tq.rating - :my_r) <= :range
+              AND ABS(tq.rating - :my_r) <= :range{bilateral_sql}
               AND tq.player_id NOT IN (
                   SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
                   UNION SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
@@ -28124,7 +28071,8 @@ OVT_MATCH_XP_BASE   = 500          # a touch under 2v2's 600 (games are shorter)
 OVT_MATCH_WIN_MULT  = 1.5
 OVT_SERIES_WIN_GOLD = 40
 OVT_SERIES_LOSS_GOLD = 20
-OVT_READY_TIMEOUT_SECONDS = 90     # matches team ready window (#51)
+# (OVT_READY_TIMEOUT_SECONDS was deleted Aug 23 — 1v2 has no ready-up window;
+#  the constant was defined at launch and consumed by nothing.)
 
 # ── 1v2 difficulty scaling (bug #129) ────────────────────────────────────
 # 1v2 shipped as the ONLY mode with no opponent-tier multiplier and an
@@ -36473,14 +36421,19 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
             xp = int(TEAM_MATCH_XP_BASE * _opp_mult)
             if won_match:
                 xp = int(xp * TEAM_MATCH_WIN_MULT)
-            old_xp_q = await db.execute(text("SELECT total_xp FROM players WHERE id = :pid"), {"pid": p.id})
-            old_xp = old_xp_q.scalar() or 0
-            new_xp = old_xp + xp
-            await db.execute(
-                text("UPDATE players SET total_xp = :new, "
-                     "team_xp_earned = COALESCE(team_xp_earned,0) + :delta WHERE id = :pid"),
-                {"new": new_xp, "delta": xp, "pid": p.id},
-            )
+            # Atomic delta + RETURNING pre/post (#148/#326 — the old
+            # SELECT-then-absolute-write silently erased any concurrent
+            # credit to the same player, e.g. an achievement grant or an FFA
+            # game landing in the gap, while that credit's ledger row stayed).
+            xp_row = (await db.execute(
+                text("UPDATE players SET total_xp = COALESCE(total_xp,0) + :delta, "
+                     "team_xp_earned = COALESCE(team_xp_earned,0) + :delta "
+                     "WHERE id = :pid "
+                     "RETURNING total_xp AS new_xp, total_xp - :delta AS old_xp"),
+                {"delta": xp, "pid": p.id},
+            )).mappings().first()
+            new_xp = int(xp_row["new_xp"] or 0)
+            old_xp = int(xp_row["old_xp"] or 0)
             series_xp_by_pid[p.id] = series_xp_by_pid.get(p.id, 0) + xp
             # Level rewards (v1.26.8): granted when crossing 5x level
             # boundaries. 100g per band through 50, 500g per band 55-100.
@@ -36824,17 +36777,25 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         # ── Auto-balance between matches in an auto-balanced series ──
         # When the previous match was lopsided (point margin >= AUTO_BALANCE_SWAP_MARGIN)
         # AND the series was originally auto-balanced (not a manual pick lobby),
-        # swap the weakest winner with the strongest loser so the next match
-        # plays with reshuffled teams. The rebalance only applies to the NEXT
-        # match — the client gets a `rebalance_assignments` payload on the
-        # response and updates each player's TeamID before round 1 starts.
+        # the balancer PROPOSES swapping the weakest winner with the strongest
+        # loser for the next match. PROPOSAL-ONLY as of Aug 23 (Codex wiki-batch
+        # r2 HIGH): the client half of the swap never shipped — it only ever
+        # toasted `rebalance_assignments` (ApiClient's handler comment says the
+        # TeamID/spawn/body switch "ships next round") — while this block
+        # PERSISTED the new partition, so the round-20 partition gate then
+        # 400-rejected every post-blowout report the clients could actually
+        # send. Until the client can apply the swap in-game (a synchronized
+        # all-clients team mutation, NOT a quick patch — the swap data reaches
+        # only the reporter's HTTP response today), we compute and log the
+        # proposal and change NOTHING: no slot rewrite, no queue rewrite, no
+        # rebalance_assignments in the response.
         # SAVEPOINT (learning #187): this block writes team_series AND
         # team_queue — a failure between the two used to be swallowed with the
         # slot rewrite already applied (queue rows never updated, clients never
         # told), and worse, the failed statement aborted the whole transaction
         # so the match write died too. begin_nested makes the block atomic:
-        # both writes land or neither does, and rebalance_assignments only
-        # survives when they landed.
+        # (Historical: when this block persisted the swap, the savepoint
+        # made its two writes atomic. Today it wraps reads + a log line.)
         try:
             async with db.begin_nested():
                 was_auto = bool(series["was_auto_balanced"]) if "was_auto_balanced" in series else True
@@ -36894,43 +36855,15 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     new_t1.sort(key=lambda pid: pid_to_steam[pid])
                     new_t2.sort(key=lambda pid: pid_to_steam[pid])
 
-                    # Persist new slot order on team_series.
-                    await db.execute(
-                        text("""UPDATE team_series
-                                  SET t1a_id = :t1a, t1b_id = :t1b,
-                                      t2a_id = :t2a, t2b_id = :t2b,
-                                      rebalance_count = COALESCE(rebalance_count, 0) + 1
-                                WHERE id = :sid"""),
-                        {"t1a": new_t1[0], "t1b": new_t1[1],
-                         "t2a": new_t2[0], "t2b": new_t2[1],
-                         "sid": series_uuid},
-                    )
-                    # Update queue rows so /poll reflects the new team_assigned.
-                    await _lock_queue_rows_ordered(
-                        db, "team_queue",
-                        [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id],
-                    )
-                    await db.execute(
-                        text("""UPDATE team_queue
-                                  SET team_assigned = CASE
-                                                        WHEN player_id = ANY(:t1) THEN 1
-                                                        ELSE 2
-                                                      END
-                                WHERE series_id = :sid"""),
-                        {"t1": new_t1, "sid": series_uuid},
-                    )
-
-                    # Build rebalance_assignments keyed by Steam ID (the client
-                    # uses the Steam ID it knows for each peer to look up the new
-                    # team and update its local Player.TeamID + spawn / body color).
-                    steam_to_pid = {v: k for k, v in pid_to_steam.items()}
-                    rebalance_assignments = {}
-                    for pid in new_t1:
-                        rebalance_assignments[pid_to_steam[pid]] = 1
-                    for pid in new_t2:
-                        rebalance_assignments[pid_to_steam[pid]] = 2
-                    print(f"[TEAM-REBALANCE] series={series_uuid} margin={margin} swapped: "
-                          f"weakest_winner={pid_to_steam[weakest_winner]} ↔ strongest_loser={pid_to_steam[strongest_loser]}")
+                    # Proposal log only (see the block comment above): the
+                    # partition on team_series stays EXACTLY what the clients
+                    # are playing, so their next report always matches it.
+                    pid_to_steam = {
+                        p_t1a.id: p_t1a.steam_id, p_t1b.id: p_t1b.steam_id,
+                        p_t2a.id: p_t2a.steam_id, p_t2b.id: p_t2b.steam_id,
+                    }
+                    print(f"[TEAM-REBALANCE] series={series_uuid} margin={margin} PROPOSED (not applied): "
+                          f"weakest_winner={pid_to_steam[weakest_winner]} <-> strongest_loser={pid_to_steam[strongest_loser]}")
         except Exception as rex:
             rebalance_assignments = None
             print(f"[TEAM-REBALANCE] error: {rex}")

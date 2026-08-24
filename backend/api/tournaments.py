@@ -1511,6 +1511,10 @@ async def _flip_scheduled_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         await _assert_signup_service_policy(
             db, [m.p1_signup_id, m.p2_signup_id])
         m.status = "ready"
+        # started_at = the ready transition (Aug 23): written nowhere before,
+        # which left the bot's async pending-match nag structurally dead (its
+        # fallback, ready_deadline_at, is a FUTURE time for async matches).
+        m.started_at = now
         m.ready_deadline_at = now + timedelta(seconds=MATCH_READY_GRACE_SECONDS * 2)
         # Durable readiness DM (r2 find 4) — the break-end flip is a ready
         # transition like any other.
@@ -1724,6 +1728,7 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         # just told the start time. Async: 7-day match deadline, unchanged.
         if t.kind == "async":
             m.status = "ready"
+            m.started_at = now   # ready transition - feeds the bot's 3-day nag
             m.deadline_at = now + timedelta(days=ASYNC_MATCH_DEADLINE_DAYS)
             m.ready_deadline_at = m.deadline_at
             # Durable readiness DM (Codex tournament r2 find 4). The
@@ -1736,6 +1741,7 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.scheduled_ready_at = now + timedelta(seconds=MATCH_BREAK_SECONDS)
         else:
             m.status = "ready"
+            m.started_at = now   # ready transition (see the flip site's note)
             # July 20 item 7: round 1 gets the same 600s as rounds 2+ — the
             # lock DM promises "5-10 min grace" and a force-started tournament's
             # only real notice window is exactly this deadline; 300s punished
@@ -2526,9 +2532,41 @@ async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:
             """), {"pid": sig.player_id, "g": g,
                    "reason": f"tournament_rank_{rank_idx + 1}", "ref": str(t.id)})
         if x:
-            await db.execute(text("""
+            # Prize XP now rides the SAME rails as every other XP grant
+            # (Codex wiki-batch finding): it used to land as raw total_xp,
+            # silently skipping the 100xp->1g conversion and the level-up
+            # gold every match path pays — a level boundary crossed via a
+            # prize paid nothing. Atomic delta + RETURNING pre/post (#148).
+            # Function-local import on purpose (#135: never lean on another
+            # function's local imports).
+            from main import level_from_xp, level_reward_for  # noqa: PLC0415
+            xp_row = (await db.execute(text("""
                 UPDATE players SET total_xp = COALESCE(total_xp, 0) + :x WHERE id = :pid
-            """), {"x": x, "pid": sig.player_id})
+                RETURNING total_xp AS new_xp, total_xp - :x AS old_xp
+            """), {"x": x, "pid": sig.player_id})).mappings().first()
+            new_xp = int(xp_row["new_xp"] or 0)
+            old_xp = int(xp_row["old_xp"] or 0)
+            gold_delta = (new_xp // 100) - (old_xp // 100)
+            if gold_delta > 0:
+                await db.execute(text("""
+                    UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid
+                """), {"g": gold_delta, "pid": sig.player_id})
+                await db.execute(text("""
+                    INSERT INTO gold_transactions (player_id, amount, reason, reference_id, created_at)
+                    VALUES (:pid, :g, 'xp', :ref, NOW())
+                """), {"pid": sig.player_id, "g": gold_delta, "ref": str(t.id)})
+            old_lvl, _, _ = level_from_xp(old_xp)
+            new_lvl, _, _ = level_from_xp(new_xp)
+            if new_lvl > old_lvl:
+                lvl_reward = sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
+                if lvl_reward > 0:
+                    await db.execute(text("""
+                        UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid
+                    """), {"g": lvl_reward, "pid": sig.player_id})
+                    await db.execute(text("""
+                        INSERT INTO gold_transactions (player_id, amount, reason, reference_id, created_at)
+                        VALUES (:pid, :g, 'level_reward', :ref, NOW())
+                    """), {"pid": sig.player_id, "g": lvl_reward, "ref": str(t.id)})
 
     await do_grant(t.winner_signup_id, 0)
     await do_grant(t.runner_up_signup_id, 1)

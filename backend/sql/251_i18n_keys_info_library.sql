@@ -54,7 +54,7 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, NULL,
 - <color=#7FE87F>Early-leave grace:</color> leave a game before the field has scored 2 half points, while your own tally (points, half points, kills) is still zero, and that game is unrated for you - no rating change, no pay. Any later or scored leave counts in full: leaving early doesn't dodge the loss.
 - Players who left in an EARLIER game ride along as absent ghosts - on the roster, excluded from rating and pay.
 - A game that drops under 3 players before 2 half points were scored is cancelled; dropping under 3 after a game over ends the sitting.$k251$, 'a2a07fe57be14e9898f98cbb8ed17e6b00fe1370', TRUE),
-('1a1ae7d38eda87e1', 'client', $k251$<color=#FFD94D><b>HOW THE BALANCER RATES YOU</b></color>
+('a824f29d33590ce9', 'client', $k251$<color=#FFD94D><b>HOW THE BALANCER RATES YOU</b></color>
 
 - The balancer uses your 2v2 rating once it is trustworthy: 10 or more completed series, or earlier once the rating has settled (its uncertainty has dropped enough). Until then, your 1v1 rating stands in.
 - Ratings are snapshotted when you join the queue - the balancer works from those values.
@@ -63,9 +63,8 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, NULL,
 <color=#FFD94D><b>THE MID-SERIES SWAP, PRECISELY</b></color>
 
 - It only fires in auto-balanced series - manual lobbies never swap.
-- After a game with a point margin of 3 or more, the server pairs the winner with the LOWEST balance rating against the loser at the HIGHEST, and announces the swap with a toast.
-- Balance ratings are re-read at swap time, under the same 2v2-if-trusted, else-1v1 rule as above.
-- <color=#FF6666>For now the swap is announced, not enforced:</color> the in-game team switch is still shipping, so play on and treat the toast as a heads-up.
+- The design: after a game with a point margin of 3 or more, the weakest winner trades places with the strongest loser for the next game, under the same 2v2-if-trusted, else-1v1 rating rule as above.
+- <color=#FF6666>Not live yet:</color> the in-game team switch is still shipping, so for now the balancer only logs the swap it would have made and teams stay locked for the whole series.
 
 <color=#FFD94D><b>WHO IS ORANGE, WHO IS BLUE</b></color>
 
@@ -82,7 +81,7 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, NULL,
 <color=#FFD94D><b>REWARDS, PER SLOT</b></color>
 
 - XP and gold accrue per player slot inside the series, so the panel shows each player's own +g and +xp, and the lifetime Gold/XP columns count 2v2 play only.
-- The tier multiplier uses the AVERAGE of the two opposing players' 2v2 ratings; a player with no 2v2 rating yet counts as 1500 - and 1500 already sits in the x1.5 Intermediate tier, so a fresh lobby pays above base.$k251$, '9b1f9b1dc73acc1bc338613f55c0bee9a4f9839f', TRUE),
+- The tier multiplier uses the AVERAGE of the two opposing players' 2v2 ratings; a player with no 2v2 rating yet counts as 1500 - and 1500 already sits in the x1.5 Intermediate tier, so a fresh lobby pays above base.$k251$, '9deba99e00d05dced7ec579c859f8b250bb287b9', TRUE),
 ('a4ae6fe168654f46', 'client', $k251$<color=#FFD94D><b>STREAKS</b></color>
 
 All streaks are 1v1-only. Casual streaks count games; ranked streaks count completed series.
@@ -255,7 +254,7 @@ Community artists make a large share of the catalog. The pipeline:
 
 Only artists can gift, and only their own items: a free copy to any player who has used the mod, including before sales open. Gifts still consume stock on a limited drop. There is no player-to-player gifting, and no way to send gold to another player.$k251$, 'dfe626546b634d9bfe3f685b9e583517f207bb03', TRUE),
 ('70575acc4c8435c3', 'client', $k251$Deadlines & forfeits$k251$, 'e530201df3b466b7afb745f02669182642d7a8ef', TRUE),
-('87fbc5890bf73522', 'client', $k251$Every finished game pays XP, XP converts to Gold at 100 XP = 1 Gold, and ranked play multiplies the base rewards below by your opponent's rank tier. This is the pay table - exact numbers, mode by mode. (Tournament podium prizes are separate; see <color=#7FD4FF>Deadlines & forfeits</color>.)
+('c14135018e41f6f6', 'client', $k251$Every finished game pays XP, XP converts to Gold at 100 XP = 1 Gold, and ranked play multiplies the base rewards below by your opponent's rank tier. This is the pay table - exact numbers, mode by mode. (Tournament podium prizes are separate; see <color=#7FD4FF>Deadlines & forfeits</color>.)
 
 <color=#FFD94D><b>THE TIER MULTIPLIER</b></color>
 
@@ -322,9 +321,9 @@ FFA pays for FIGHTING, not for time in the lobby. The formula, in readable form:
 
 <color=#FFD94D><b>LEVELS AND THE XP-TO-GOLD DRIP</b></color>
 
-- Match XP converts at <color=#7FE87F>100 XP = 1 Gold</color>, paid every time your running total crosses a hundred mark. Every mode's match XP feeds the same total. (Tournament prize XP is the one exception - it lands as raw XP.)
+- XP converts at <color=#7FE87F>100 XP = 1 Gold</color>, paid every time your running total crosses a hundred mark. Every mode's XP - tournament prizes included - feeds the same total.
 - Climbing into level L costs 100 x L^1.5 XP, truncated: level 2 costs 282, level 5 costs 1118, level 10 costs 3162, level 50 costs 35355, level 100 costs 100000. Max level is 100.
-- Entering a multiple-of-5 level pays bonus Gold: <color=#7FE87F>100g for levels 5 through 50, 500g for 55 through 100</color> - 6000g lifetime if you reach the cap. It lands the moment a game's XP dings the level, in every mode; a ding during an FFA game shows up inside that game's +g number.
+- Entering a multiple-of-5 level pays bonus Gold: <color=#7FE87F>100g for levels 5 through 50, 500g for 55 through 100</color> - 6000g lifetime if you reach the cap. It lands the moment any XP award dings the level - any mode, tournament prizes included; a ding during an FFA game shows up inside that game's +g number.
 
 <color=#FFD94D><b>ACHIEVEMENT GOLD</b></color>
 
@@ -336,7 +335,7 @@ Every achievement pays <color=#7FE87F>100g</color> unless listed here:
 
 The FFA shutouts nest: one 5-0 win in a 5-player lobby pays Clean House (100g) + Party Crasher (300g) + Hostile Takeover (500g) in a single game. The translator achievements (Rosetta, Dragoman, Babel) trigger at 10, 100 and 1000 approved live strings.
 
-<color=#8A8A93>Outside matches: Discord server boosters are paid 2000g monthly, and community artists earn a 30% royalty (rounded down to whole Gold) when another player buys their item - gifts pay none.</color>$k251$, '75fb320fc4639a407cb23c67e944242c6cd0fb70', TRUE),
+<color=#8A8A93>Outside matches: Discord server boosters are paid 2000g monthly, and community artists earn a 30% royalty (rounded down to whole Gold) when another player buys their item - gifts pay none.</color>$k251$, 'befb751987d134277812bfa647884dbbdeffbd1f', TRUE),
 ('325b2f12f56594dd', 'client', $k251$Every game you play with the mod runs the same pipeline: every modded client watches the match, one of them files the report, and the server decides what it counts for. This page covers how a game gets classified and reported. For what each stat actually measures, see <color=#7FD4FF>How stats are tracked</color>.
 
 <color=#FFD94D><b>WHAT MAKES A GAME COMPETITIVE</b></color>
@@ -435,7 +434,7 @@ Five tiers, each split into rungs I to V - V is the top of its tier. The number 
 - <color=#7FD4FF>Beginner</color> - I 0, II 1140, III 1260, IV 1360, V 1440
 
 Reaching 1980 (Master) or 2330 (Grand Master) in ranked 1v1 or 2v2 also grants the matching achievement - FFA rating does not trigger these. Discord rank roles follow your 1v1 rating, and the Current Rank shop title always renders your live rank name in its tier color. Your opponent's tier also multiplies your match rewards (see <color=#7FD4FF>XP, Gold & levels</color>).$k251$, '7092efd0e1c1a7263fce0c81c6c69b2e65a70b3e', TRUE),
-('4c6f60b4c2837ec8', 'client', $k251$Every tournament runs through Discord DMs from the SCR bot. None of them reach you unless your Discord is linked (F5, Discord Link tab). The big notices (lock, match live, results) are durable - if the bot is down when one fires, it retries until your DM lands. The play-day nudges (starts-in-15, next-up, waiting-on-you) are best-effort and can be missed across a bot restart.
+('c19efa9de8c603da', 'client', $k251$Every tournament runs through Discord DMs from the SCR bot. None of them reach you unless your Discord is linked (F5, Discord Link tab). The big notices (lock, match live, results) are durable - if the bot is down when one fires, it retries until your DM lands. The play-day nudges (starts-in-15, next-up, waiting-on-you) are best-effort and can be missed across a bot restart.
 
 <color=#FFD94D><b>BEFORE THE TOURNAMENT</b></color>
 
@@ -463,6 +462,8 @@ If the lock pushes back a week instead (too few players, or no time slot 8 playe
 
 <color=#7FD4FF>Match is live</color> - your opponent, the 7-day deadline, and how to play: agree a time, host a private lobby together, the result records automatically.
 
+<color=#7FD4FF>Still pending</color> - once your match has sat ready for 3 days unplayed, a daily reminder with your deadline and how to coordinate. No buttons.
+
 <color=#7FD4FF>Deadline check-in</color> - sent in the final 24 hours before your deadline. Three buttons, and your latest answer replaces earlier ones:
 - 'Yes - we plan to play today' - recorded, and <color=#7FE87F>extends the deadline 24 hours</color> - once per opponent per tournament. Pressing it a second time records the answer but the deadline stays put.
 - 'I reached out - no response / they quit' - recorded.
@@ -482,7 +483,7 @@ When the bracket completes, the podium is announced in the tournament channel an
 
 <color=#7FD4FF>/opp-online</color> - checks whether your tournament opponent currently shows as online on Discord.
 
-The tournament channel keeps a living board for both tournament kinds, refreshed every 2 minutes.$k251$, '7a38d6f04b01cefa3740a7ff56c75e8b0c9030ad', TRUE),
+The tournament channel keeps a living board for both tournament kinds, refreshed every 2 minutes.$k251$, '1462856754fe43cab560f9ae38427dfb892331a3', TRUE),
 ('7f82c46780cd1b48', 'client', $k251$Free-for-all for 3-10 players. Every player is their own team.
 Standard ROUNDS scoring - first to {0} points takes the game.
 
@@ -1357,7 +1358,7 @@ The whole contract is: <color=#7FE87F>have ROUNDS open at the start time - sitti
 
 - In the final 24 hours before the deadline the bot sends a check-in DM; answering that you plan to play today extends the deadline 24 hours, once per opponent.$k251$, '15506e4394620a3ac95b282acc4f1601ce59df92', TRUE),
 ('127ceae105cad5ec', 'client', $k251$Tracking & Fair Play$k251$, 'c42e9abf5a38ab33401c8bf8760d6a1a2d460ddd', FALSE),
-('5cfbc02a79a8a928', 'client', $k251$Two teams of two play a best-of-3 series.
+('5e99bccde500db1a', 'client', $k251$Two teams of two play a best-of-3 series.
 
 <color=#FFD94D><b>HOW TO PLAY</b></color>
 
@@ -1368,10 +1369,10 @@ The whole contract is: <color=#7FE87F>have ROUNDS open at the start time - sitti
 - All 4 players have 120 seconds to ready up.
   If time expires, auto-queue players go back to
   searching; a custom lobby is simply released.
-- After an auto-queue game with a point margin of 3 or
-  more, the server proposes swapping the weakest winner
-  with the strongest loser and announces it with a
-  toast. The in-game switch is still shipping.
+- Designed but not live yet: after an auto-queue game
+  with a point margin of 3 or more, the weakest winner
+  will trade places with the strongest loser. Until
+  that ships, teams stay locked all series.
 
 <color=#FFD94D><b>SCORING</b></color>
 
@@ -1406,7 +1407,7 @@ The whole contract is: <color=#7FE87F>have ROUNDS open at the start time - sitti
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- Leaving mid-game is recorded.$k251$, '2b08d3024ae9be767251576d7e6a094c3d536dfc', TRUE),
+- Leaving mid-game is recorded.$k251$, '9c58c47f379b8af787fea4b478aac44660dcf37a', TRUE),
 ('5e7990ce511a1502', 'client', $k251$Vanilla stays vanilla$k251$, '722b8253ed5d9130b7ce842a66865d6780fa4b64', FALSE),
 ('496ab005cd8a3b4f', 'client', $k251$Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on this page comes straight from the game's code.
 
@@ -1472,7 +1473,7 @@ These run in every online room too. Each repairs your screen's bookkeeping towar
 <color=#7FD4FF>Round-end phantom kills</color> - poison and burn ticks during the round-won animation could kill mid-transition and award a phantom round. Modded clients ignore damage-over-time and deaths during the transition window; full room-wide protection needs the room's (usually modded) host seat too.
 
 <color=#7FD4FF>Leftover bullets after the point</color> - vanilla never clears mid-air bullets at a point boundary, so an end-of-round poison bullet could hit you AFTER respawn. Each client now despawns its own bullets at the boundary, via vanilla's own despawn call.$k251$, '0dfd2c2a42475a101ace09e8af90e5a56cf53e0c', FALSE),
-('35b52b7fd911bb5f', 'client', $k251$What happens when someone doesn't show up, quits, or leaves a tournament - and exactly how prizes are computed. Short version: <color=#7FE87F>a finished series always stands</color>, absence is what gets punished, and forfeit wins never pay podium prizes.
+('99685a1ab2965e95', 'client', $k251$What happens when someone doesn't show up, quits, or leaves a tournament - and exactly how prizes are computed. Short version: <color=#7FE87F>a finished series always stands</color>, absence is what gets punished, and forfeit wins never pay podium prizes.
 
 <color=#FFD94D><b>DEADLINES</b></color>
 
@@ -1525,13 +1526,13 @@ Only absent seats get the no-show mark (a banned seat forfeits regardless of pre
 
 - <color=#7FE87F>Prizes pay when the whole bracket completes</color>, not when your final match ends. A forfeit-decided rank is skipped rather than passed down.
 
-- <color=#8A8A93>Prize XP is added to your total directly - it doesn't convert to Gold, and a level boundary crossed by prize XP doesn't pay the usual level reward.</color>
+- <color=#8A8A93>Prize XP behaves like any other XP: it converts to Gold at the usual 100 XP = 1 Gold, and a level boundary it crosses pays the normal level reward.</color>
 
 - Trophies are Discord roles: SCR Tournament Winner, Runner Up, and 3rd Place; a second same placement upgrades the role to its (x2) version. Every confirmed participant gets the Participant role. Tournaments grant no in-game shop titles.
 
 - Every tournament game is a normal ranked best-of-3: it moves your regular 1v1 rating whether or not you reach the podium.
 
-- Tournament matches are bettable on the same terms as any live ranked series: betting locks at 2 live points in game 1 or once any game is decided. An async pairing that waits days stays bettable the whole wait at 0-0.$k251$, 'dc6c3915de4ed8abdbd502724888a96aefd5a5cd', TRUE),
+- Tournament matches are bettable on the same terms as any live ranked series: betting locks at 2 live points in game 1 or once any game is decided. An async pairing that waits days stays bettable the whole wait at 0-0.$k251$, 'f96cb1e2a99916b8478ad8dbedcc9ece51d1da2e', TRUE),
 ('2d6511ec4b504a94', 'client', $k251$What other players can and cannot see of your mod. The short version is a guarantee: <color=#7FE87F>the only thing a non-modded opponent can ever see of the mod is your nametag styling.</color> Everything else either needs the mod on the viewer's side or never leaves your machine.
 
 <color=#FFD94D><b>WHAT A NON-MODDED OPPONENT SEES</b></color>
@@ -1629,7 +1630,7 @@ DO $$
 DECLARE v_ok INTEGER;
 BEGIN
     SELECT COUNT(*) INTO v_ok FROM i18n_keys
-     WHERE retired_at IS NULL AND key_id IN ('624efda8fd0ebd84','1a1ae7d38eda87e1','a4ae6fe168654f46','6aac6cbbebced3a5','98d8d78a1d5e941d','c64eb8b40ee8fec4','b6d9767052faaed9','3e3901c226612420','c995f8cdd8ce52e7','66de64e1b1a3b21c','3a55d6d7a2ec803c','540aa824d2c28b31','910f67b5efb72a02','c84c43c265080ec2','70575acc4c8435c3','87fbc5890bf73522','325b2f12f56594dd','ffd0bcba80bcba7d','4c6f60b4c2837ec8','7f82c46780cd1b48','d4e55c6cad6429ea','17359b8ec6399a4a','aa14ce6adac1c333','c5596757a88ea76b','77d8d2d50b004dd4','614580a23bb3bc8f','b0a7c6d3a3a1f50e','6b9260da4b06a2c5','42ca762d56c495c7','b5f34f740a723641','15a0134039dff3c3','60a0927f3dfe3ebd','06906a07a445cfbd','a5b68a6c5bcde4fc','33e496e0673a0869','c1b4072db0812e45','5893137c242888d0','507db85caf0e602a','251cda79e9ae8cec','24fd7e49c61320e1','c62b982567217472','c4facebcda2e750a','9568055ad9672251','5ebd9e4ca23d91dc','455b2461eac3e08d','04753f943853fd1f','09a7675c5e72711f','5d139a2aa3e9277f','3bf441e561ef91aa','d1b8be2788734885','18a1d1922241aa36','c8d198d08b2458b4','b28a75d1dad8e07b','492328683cba65c5','304838dece8548b7','2423e49b4ee3ddaf','243cd0d8462d92a0','127ceae105cad5ec','5cfbc02a79a8a928','5e7990ce511a1502','496ab005cd8a3b4f','5dd73a36dbbf1de3','35b52b7fd911bb5f','2d6511ec4b504a94','1bd91200b53d69fb','9e4688ee7855897b','b58acd5e29be1ec7','0f58f10cbab027e1');
+     WHERE retired_at IS NULL AND key_id IN ('624efda8fd0ebd84','a824f29d33590ce9','a4ae6fe168654f46','6aac6cbbebced3a5','98d8d78a1d5e941d','c64eb8b40ee8fec4','b6d9767052faaed9','3e3901c226612420','c995f8cdd8ce52e7','66de64e1b1a3b21c','3a55d6d7a2ec803c','540aa824d2c28b31','910f67b5efb72a02','c84c43c265080ec2','70575acc4c8435c3','c14135018e41f6f6','325b2f12f56594dd','ffd0bcba80bcba7d','c19efa9de8c603da','7f82c46780cd1b48','d4e55c6cad6429ea','17359b8ec6399a4a','aa14ce6adac1c333','c5596757a88ea76b','77d8d2d50b004dd4','614580a23bb3bc8f','b0a7c6d3a3a1f50e','6b9260da4b06a2c5','42ca762d56c495c7','b5f34f740a723641','15a0134039dff3c3','60a0927f3dfe3ebd','06906a07a445cfbd','a5b68a6c5bcde4fc','33e496e0673a0869','c1b4072db0812e45','5893137c242888d0','507db85caf0e602a','251cda79e9ae8cec','24fd7e49c61320e1','c62b982567217472','c4facebcda2e750a','9568055ad9672251','5ebd9e4ca23d91dc','455b2461eac3e08d','04753f943853fd1f','09a7675c5e72711f','5d139a2aa3e9277f','3bf441e561ef91aa','d1b8be2788734885','18a1d1922241aa36','c8d198d08b2458b4','b28a75d1dad8e07b','492328683cba65c5','304838dece8548b7','2423e49b4ee3ddaf','243cd0d8462d92a0','127ceae105cad5ec','5e99bccde500db1a','5e7990ce511a1502','496ab005cd8a3b4f','5dd73a36dbbf1de3','99685a1ab2965e95','2d6511ec4b504a94','1bd91200b53d69fb','9e4688ee7855897b','b58acd5e29be1ec7','0f58f10cbab027e1');
     IF v_ok <> 68 THEN
         RAISE EXCEPTION 'post-check FAILED: % of 68 info-library keys live', v_ok;
     END IF;
