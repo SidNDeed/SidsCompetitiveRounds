@@ -1,11 +1,11 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.39.3 — 2026-08-24
 
 **The Info library — an in-game wiki (Settings › Info)**
 
 - The Settings tab's "Stats" section grew into a full explainer library on its
-  own sub-tab (Settings group › Info): 29 articles across 8 color-coded
+  own sub-tab (Settings group › Info): 31 articles across 8 color-coded
   categories — game mechanics (blocking, poison with the real shipped tick
   numbers, Grow's frame-rate math, movement/shield tech, netcode & Photon,
   known vanilla bugs), every mode, tournaments (pairing, the bot's DMs and
@@ -17,8 +17,37 @@
   text. Every factual claim was verified against the code (and, for poison,
   against the shipped card assets: Poison ticks 10 times over 3 seconds —
   one tick every 0.3s, exactly one block window wide).
-- The Settings "Stats" box became "Info": a pointer to the library plus the
-  existing "How stats are tracked" popup.
+- The Settings "Stats" box became "Info": a single pointer button into the
+  library. (The old "How stats are tracked" popup button was dropped in the
+  same pass, per Sid — its full content is the library's 'How stats are
+  tracked' article.)
+- **Search**: a search box above the topic list filters articles by title
+  AND full body text, live per keystroke, in every language. Empty
+  categories hide while filtering.
+- **Cross-references are real links now**: the blue article names inside a
+  page (e.g. "see Blocking") open that article on click.
+- **New article — "Damage types & buffs", by Spirit**: his complete 'On
+  Damage Types and Buff Activation' research paper, reproduced with the
+  full 31-row damage-interaction table, the RefreshValid model, the 0.35s
+  window, the damage thresholds, and the decision flow. All findings and
+  the voice are his; credited in the byline.
+
+**Background mute now opt-in (bug 267, Stan/Archnith)**
+
+- "Mute audio when tabbed out" default flipped ON -> OFF with a one-shot
+  migration for existing installs, and the missing F5 Settings toggle for it
+  was added (Performance box).
+
+**Broadcast seat: night-pack rotation, swapped during card picks**
+
+- The stream's auto-rotation now cycles ONLY the 9 dark night-pack skins
+  (per Sid, for the foreseeable future), and advances during the card pick
+  phase instead of seconds into the next battle, so the swap lands while
+  viewers are on the pick screen. FFA (no shared pick screen) keeps the
+  per-map-load advance within the same night pool.
+- The auto-rotation is now broadcast-identity-only: a normal spectator keeps
+  their own equipped map skins and manual Shift cycling, exactly like when
+  they play.
 - The 2v2 / 1v2 / FFA mode explainers were corrected while composing them
   into the library: 1v2's reward text now shows the real difficulty
   multipliers (it under-promised since the economy fix), FFA's host-settings

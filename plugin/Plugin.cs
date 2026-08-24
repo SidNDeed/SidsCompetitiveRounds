@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.39.2";   // Aug 23: night-pack map skins + ambient effects, 10 gradient name styles, 5 community cosmetics, FPS governor, Mustard pick fix, round-sound sweep, Stan 262/263, portal first-use binding, 53 keys x4 translations
+        public const string ModVersion = "1.39.3";   // Aug 24: Info library (wiki tab + search + clickable cross-refs + Spirit's damage-types article), background-mute default OFF + toggle, broadcast night-pack rotation at pick phase
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -890,7 +890,7 @@ namespace CompetitiveRounds
             BroadcastTestMapSkin = Config.Bind(
                 "Broadcast", "TestMapSkin", "",
                 "Broadcast seat only: render a specific map skin without owning or equipping it, so the broadcast look can be checked outside a live spectate session. "
-                + "Empty = off (normal behaviour). A sku name (e.g. mapcolor_soft) pins that skin. The word 'cycle' runs the spectator auto-cycle on this seat. "
+                + "Empty = off (normal behaviour). A sku name (e.g. mapcolor_soft) pins that skin. The word 'cycle' runs the broadcast night-pack auto-cycle on this seat. "
                 + "Ignored entirely unless the local Steam account IS the broadcast identity, so it grants nothing to players. "
                 + "A comma-separated list of skus is a TOUR (see TestMapSkinTourSeconds)."
             );
@@ -1908,13 +1908,16 @@ namespace CompetitiveRounds
             string[] parts = raw.Split(':');
             int idx; float scroll = -1f; string infoKey = null;
             if (!int.TryParse(parts[0].Trim(), out idx)) return;
-            // Aug 23: for the Info tab (15) the part after ':' is an ARTICLE
-            // KEY (e.g. "15:rewards"), not a scroll fraction — screenshots of
-            // specific articles need it since synthetic clicks can't reach
-            // the overlay (#420). Other tabs keep the float meaning.
+            // Aug 23: for the Info tab (15) EVERYTHING after the first ':' is
+            // the article directive (e.g. "15:rewards", "15:search:poison",
+            // "15:linktest") — NativeUI.DevOpenTab owns that grammar, and a
+            // bare Split(':') would eat the query half of "search:<q>".
+            // Screenshots of specific articles need this lever since
+            // synthetic clicks can't reach the overlay (#420). Other tabs
+            // keep the float scroll meaning.
             if (parts.Length > 1)
             {
-                if (idx == 15) infoKey = parts[1].Trim();
+                if (idx == 15) infoKey = raw.Substring(raw.IndexOf(':') + 1).Trim();
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
             Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"}");
@@ -4786,6 +4789,12 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
         }
     }
+
+    // (Aug 23 round 2: the broadcast pick-phase skin swap briefly lived here
+    // as a CardChoiceVisuals.Show postfix — moved to
+    // SpectatorSync.PlayPointSequence's round-conversion branch after Codex
+    // r1 find 2 proved Show never reaches a spectator seat outside the 1v1
+    // DoWinSequence path. See ArtHandlerNextArtPatch.OnPickPhaseObserved.)
 
     /// <summary>Instinct achievement tracker (v1.30). ROUNDS broadcasts every
     /// card-selection change through CardChoiceVisuals.RPCA_SetCurrentSelected;
@@ -8039,8 +8048,15 @@ namespace CompetitiveRounds
         private static System.Collections.IEnumerator DelayedApplyTints(string sku, int gen)
         {
             // Wait for the LATEST requested deadline — it is pushed while we
-            // sleep whenever another map load requests the same sku.
-            while (Time.time < _tintNotBefore) yield return null;
+            // sleep whenever another map load requests the same sku. ALSO
+            // re-check the transition state at wake (Codex v1.39.3 r1 find 1):
+            // the deadline is only pushed by NextArt CALLS, and MapTransition
+            // can begin Move up to ~0.1s before its switchMapEvent fires
+            // NextArt — a deadline expiring inside that window used to apply
+            // particles mid-Move (the #45/#85 stall class). InMapTransition()
+            // covers both the live flag and the 2s post-Map.Start tail, and
+            // always clears, so this cannot wedge the pass.
+            while (Time.time < _tintNotBefore || InMapTransition()) yield return null;
             // Superseded generation: a later Shift claimed the slot (including
             // an A→B→A cycle). The newest coroutine owns the slot AND the
             // apply — exit before the current-sku check, never apply.
@@ -9461,24 +9477,17 @@ namespace CompetitiveRounds
         // that list until a NEW non-empty list replaces it.
         private static List<string> _lastEquippedFiltered;
 
-        // ── W6: spectator map-skin cycling ──────────────────────────────────
-        // The budget (<=150g) custom preset skus (23 original + the 9-skin Aug 23
-        // night pack = 32), in CustomMapColors._presets declaration order — an
-        // EXPLICIT ordered array, never dictionary
-        // enumeration order (D1 delta f5). Excludes the 3 premium sparkle skus
-        // (gilded/platinum/aurora) and every SKU_TO_ART vanilla-styled sku.
-        // Verified entry-by-entry against CustomMapColors._presets.
-        private static readonly string[] SpectatorCycleSkus = new string[]
+        // ── W6: broadcast-seat map-skin cycling ─────────────────────────────
+        // Aug 23 round 2 (Sid): the auto-cycle is BROADCAST-ONLY now — a
+        // normal spectator keeps their own equipped skins + manual Shift (the
+        // fighter branch below), exactly like when they play. And the
+        // broadcast pool is the 9-skin Aug 23 night pack ("the new dark
+        // series") ONLY, "for the foreseeable future" — the old 23-sku
+        // full-catalogue rotation was retired with it, deliberately. Explicit
+        // ordered array, never dictionary enumeration order (D1 delta f5);
+        // verified entry-by-entry against CustomMapColors._presets.
+        private static readonly string[] BroadcastCycleSkus = new string[]
         {
-            "mapcolor_soft",        "mapcolor_moss",     "mapcolor_cream",
-            "mapcolor_lavender",    "mapcolor_dusk",     "mapcolor_sand",
-            "mapcolor_mono",        "mapcolor_forest",   "mapcolor_amethyst",
-            "mapcolor_charcoal",    "mapcolor_crimson_map", "mapcolor_slate",
-            "mapcolor_rose",        "mapcolor_mint",     "mapcolor_sunset",
-            "mapcolor_obsidian",    "mapcolor_abyss",    "mapcolor_pine",
-            "mapcolor_iron",        "mapcolor_burgundy", "mapcolor_magma",
-            "mapcolor_velvet",      "mapcolor_blackwood",
-            // Night pack (Aug 23) — all budget skus.
             "mapcolor_forest_fire", "mapcolor_moonlit",  "mapcolor_eclipse",
             "mapcolor_underworld",  "mapcolor_night_city", "mapcolor_night_park",
             "mapcolor_rainy_day",   "mapcolor_midnight", "mapcolor_blood_moon",
@@ -9586,10 +9595,16 @@ namespace CompetitiveRounds
             _specCycleRoom = null;
         }
 
-        /// <summary>Spectator-seat sku selection: one advance per MAP LOAD through
-        /// SpectatorCycleSkus, keeping the skin stable across the 2-3 NextArt calls
-        /// each round start fires. Never returns null/vanilla — every entry is a
-        /// CustomMapColors preset sku.</summary>
+        /// <summary>Broadcast-seat sku selection. Aug 23 round 2 (Sid): the
+        /// advance moved from "one per MAP LOAD" to "one per CARD PICK PHASE"
+        /// (OnPickPhaseObserved below), so viewers see the swap over the pick
+        /// screen instead of seconds into the next battle. This method only
+        /// RESOLVES the current sku, keeping it stable across the 2-3 NextArt
+        /// calls each round start fires. EXCEPTION — FFA rooms: their pick
+        /// phase is the custom simultaneous protocol (no CardChoiceVisuals
+        /// Show on any seat), so FFA keeps the old one-advance-per-map-load
+        /// behaviour, stamp-latched exactly as before. Never returns
+        /// null/vanilla — every entry is a CustomMapColors preset sku.</summary>
         private static string NextSpectatorCycleSku()
         {
             // New room = new sitting → start the cycle fresh.
@@ -9600,51 +9615,120 @@ namespace CompetitiveRounds
                 ResetSpectatorCycle();
                 _specCycleRoom = room;
             }
-            // Advance exactly once per DISTINCT LastMapStartTime stamp (one advance
-            // per map load), with ONE exception: the FIRST call after a cycle reset
-            // ADOPTS the current stamp without advancing. R1 f19: the old 6s realtime
-            // floor here violated one-advance-per-map — a distinct Map.Start stamp
-            // arriving within 6s of the last advance was adopted WITHOUT advancing,
-            // so that entire map repeated the previous skin. The floor only existed
-            // to kill the burst-straddle double-advance at cycle start (bug-233:
-            // NextArt can run on EITHER side of Map.Start's stamp within one load —
-            // a pre-stamp call latched the old value, then a post-stamp call in the
-            // same burst saw a fresh one). Adopt-without-advance-first closes that
-            // case with no clock at all: the pre-stamp call adopts the OLD stamp
-            // (rendering [0] via the Max clamp below), and the post-stamp call sees
-            // a distinct stamp and performs the single legitimate advance (-1 -> 0,
-            // still [0] — no flicker). Residual (cosmetic, cycle-start only): if no
-            // pre-stamp call happens, map 1 renders [0] un-advanced and map 2's
-            // advance lands on [0] again.
             float stamp = MapPhysicalColorPatch.LastMapStartTime;
             bool advanced = false;
             if (float.IsNegativeInfinity(_specAdvanceMapStamp))
             {
                 // Fresh cycle (room change / ResetSpectatorCycle): adopt without
-                // advancing — see the burst-straddle note above.
+                // advancing (bug-233's burst-straddle: NextArt can run on EITHER
+                // side of Map.Start's stamp within one load — adopt-first closes
+                // the double-advance with no clock at all).
                 _specAdvanceMapStamp = stamp;
             }
-            else if (stamp != _specAdvanceMapStamp)
+            else if (stamp != _specAdvanceMapStamp && IsFfaRoomName(room))
             {
-                _specCycleIndex = (_specCycleIndex + 1) % SpectatorCycleSkus.Length;
+                // FFA fallback only — round modes advance in OnPickPhaseObserved.
+                _specCycleIndex = (_specCycleIndex + 1) % BroadcastCycleSkus.Length;
                 _specAdvanceMapStamp = stamp;
                 advanced = true;
             }
-            string sku = SpectatorCycleSkus[Mathf.Max(_specCycleIndex, 0) % SpectatorCycleSkus.Length];
-            Plugin.Log.LogInfo($"[MAPCOLOR] spectator {(advanced ? "cycle" : "keep")} → {sku} (index {Mathf.Max(_specCycleIndex, 0)}/{SpectatorCycleSkus.Length})");
+            string sku = BroadcastCycleSkus[Mathf.Max(_specCycleIndex, 0) % BroadcastCycleSkus.Length];
+            Plugin.Log.LogInfo($"[MAPCOLOR] broadcast {(advanced ? "cycle" : "keep")} → {sku} (index {Mathf.Max(_specCycleIndex, 0)}/{BroadcastCycleSkus.Length})");
             return sku;
+        }
+
+        /// <summary>Room-NAME test, deliberately not FfaMode.EngineActive():
+        /// the engine predicate is seat-scoped state this cosmetic timing
+        /// choice must not depend on — a spectator seat only ever holds a
+        /// lease into real mod lobbies, so the prefix is trustworthy here.</summary>
+        private static bool IsFfaRoomName(string room)
+            => !string.IsNullOrEmpty(room) && room.StartsWith("ffa_", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Pick-phase swap trigger (Aug 23 round 2). Called from
+        /// SpectatorSync.PlayPointSequence when the observed point is a round
+        /// CONVERSION — the one observer-side event that a pick phase is
+        /// beginning in EVERY round mode. (Codex r1 find 2 killed the first
+        /// design: a CardChoiceVisuals.Show postfix — on a spectator seat
+        /// Show fires only from the 1v1 DoWinSequence path; team modes run
+        /// DoSequence and game-start runs a suppressed DoStartGame, so
+        /// 2v2/1v2 rotations froze on skin [0].) Everything but the
+        /// broadcast spectator seat returns on the first lines.
+        /// Debounce: one advance per LastMapStartTime stamp — every round's
+        /// final point loaded its own map, so duplicate observations within
+        /// one round share the stamp and are no-ops.
+        /// Known quiet edges, accepted (all self-heal at the next round):
+        /// game-START picks (game 2+ of a sitting) have no observer signal,
+        /// so the skin simply carries over until that game's first round
+        /// conversion; FFA advances per map load instead (its pick protocol
+        /// has no conversion event on the observer path either — see
+        /// NextSpectatorCycleSku); and a conversion observed while
+        /// MapTransition.isTransitioning (fast next point / lagging
+        /// catch-up) is discarded without retry, keeping the previous skin
+        /// one extra round (Codex r2 LOW, accepted).</summary>
+        internal static void OnPickPhaseObserved()
+        {
+            try
+            {
+                if (!BroadcastMode.IsBroadcastIdentity) return;
+                if (!RoomActors.LocalIsSpectator) return;
+                try
+                {
+                    var t = Plugin.BroadcastTestMapSkin != null ? (Plugin.BroadcastTestMapSkin.Value ?? "").Trim() : "";
+                    // A pinned/tour test skin owns the seat — no auto-swap
+                    // under it. ('cycle' deliberately falls through: it asks
+                    // for the real rotation.)
+                    if (t.Length > 0 && !string.Equals(t, "cycle", StringComparison.OrdinalIgnoreCase)) return;
+                }
+                catch { }
+                if (PhotonNetwork.OfflineMode) return;
+                string room = null;
+                try { room = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null; } catch { }
+                if (IsFfaRoomName(room)) return;   // FFA advances per map load (see NextSpectatorCycleSku)
+                // Only the AUTHORITATIVE transition flag here — NOT the
+                // stamp-tail InMapTransition() (Codex r1 find 3: a fast map
+                // load puts the whole pick window inside the 2s tail, and a
+                // rejected conversion has no retry, freezing the rotation).
+                // Proceeding during the tail is safe: the immediate work is
+                // volume-only grading, and the particle pass defers AND
+                // re-checks InMapTransition() at wake (DelayedApplyTints).
+                try { if (MapTransition.isTransitioning) return; } catch { }
+                float stamp = MapPhysicalColorPatch.LastMapStartTime;
+                if (!float.IsNegativeInfinity(_specAdvanceMapStamp) && stamp == _specAdvanceMapStamp) return;
+                // Keep the room binding fresh BEFORE advancing, or the first
+                // pick of a new sitting advances a stale cycle and the
+                // NextArt below resets it (room-change check) — losing the
+                // advance and double-logging.
+                if (!string.Equals(room, _specCycleRoom, StringComparison.Ordinal))
+                {
+                    ResetSpectatorCycle();
+                    _specCycleRoom = room;
+                }
+                _specCycleIndex = (_specCycleIndex + 1) % BroadcastCycleSkus.Length;
+                _specAdvanceMapStamp = stamp;
+                Plugin.Log.LogInfo($"[MAPCOLOR] broadcast pick-phase swap → index {_specCycleIndex}/{BroadcastCycleSkus.Length}");
+                // Apply through the normal entry (same route as the tour and
+                // a manual Shift): the prefix resolves the freshly-advanced
+                // index. Grading/backdrop swap same-frame; the particle pass
+                // defers a couple seconds (spectator seats always defer) —
+                // both land inside the pick window.
+                var ah = ArtHandler.instance;
+                if (ah != null) ah.NextArt();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] pick-phase swap failed: {ex.Message}"); }
         }
 
         static bool Prefix(ArtHandler __instance)
         {
             try
             {
-                // W6 — broadcast spectator seat: it has no equipped skins of its own,
-                // so cycle the budget-preset catalogue one skin per MAP LOAD for
-                // on-stream variety with zero input. Equipped state (active_color_skus,
-                // _cycleIndex, manual Shift, toast) is fighter-only and never consulted
-                // or touched on this path.
+                // W6 — spectator seats. `spectatorSeat` feeds the DEFER decision
+                // (every spectator always defers particle mutation — D1 delta f3);
+                // `broadcastAutoCycle` picks the sku BRANCH. Aug 23 round 2 (Sid):
+                // the night-pack auto-cycle is BROADCAST-IDENTITY-ONLY — a normal
+                // spectator falls through to the fighter branch below and keeps
+                // their own equipped skins + manual Shift, like when they play.
                 bool spectatorSeat = RoomActors.LocalIsSpectator;
+                bool broadcastAutoCycle = spectatorSeat && BroadcastMode.IsBroadcastIdentity;
                 // Set only by the fighter branch, and only for a REAL Shift keypress.
                 // The synchronous particle path is gated on it — see the defer decision.
                 bool manualShiftNow = false;
@@ -9665,7 +9749,10 @@ namespace CompetitiveRounds
                 if (!string.IsNullOrEmpty(testSkin))
                 {
                     if (string.Equals(testSkin, "cycle", StringComparison.OrdinalIgnoreCase))
+                    {
                         spectatorSeat = true;          // exercise the real spectator path
+                        broadcastAutoCycle = true;     // (lever is already identity-gated above)
+                    }
                     else
                     {
                         testSkin = ResolveTestSkin(testSkin);   // single sku or the tour element
@@ -9695,7 +9782,7 @@ namespace CompetitiveRounds
                     sku = testSkin;
                     Plugin.Log.LogInfo($"[MAPCOLOR] Broadcast.TestMapSkin pinned → {sku}");
                 }
-                else if (spectatorSeat)
+                else if (broadcastAutoCycle)
                 {
                     sku = NextSpectatorCycleSku();
                 }
@@ -9942,10 +10029,11 @@ namespace CompetitiveRounds
                     return false;
                 }
 
-                // Spectator seats never reach the branches below: SpectatorCycleSkus
-                // holds only CustomMapColors preset skus (IsCustomSku is true by
-                // construction), so the SKU_TO_ART / vanilla fallthrough — including
-                // the explicit-"default" restore — stays fighter-only.
+                // Broadcast auto-cycle never reaches the branches below:
+                // BroadcastCycleSkus holds only CustomMapColors preset skus
+                // (IsCustomSku is true by construction), so the SKU_TO_ART /
+                // vanilla fallthrough — including the explicit-"default"
+                // restore — stays fighter/normal-spectator-only.
                 // Every branch below hands the scene to a VANILLA art, which grades the
                 // untouched red clear with its own hueShift. Whatever the previous
                 // custom skin painted — canvas, SFSS light/ambient, sky particles —

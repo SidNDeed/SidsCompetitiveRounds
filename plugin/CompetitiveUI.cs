@@ -358,6 +358,7 @@ namespace CompetitiveRounds
             DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
             DrawLeaderboardSearch();
             DrawHistorySearch();  // Bug 263 — My Stats opponent search
+            DrawInfoSearch();     // Aug 23 r2 — Info library article search
             DrawMapColorToast();
             DrawCustomBetPrompt();
             DrawLfpPrompt();
@@ -1631,6 +1632,46 @@ namespace CompetitiveRounds
                     NativeUI.LeaderboardSearch = next;
                     NativeUI.MarkDirty();
                 }
+            }
+            catch { /* search is best-effort cosmetic */ }
+        }
+
+        // Info library search (Aug 23 round 2) — 5th instance of the
+        // IMGUI-over-anchor clone, gated to tab 15, own focus flag feeding
+        // the T-chat mutex. NativeUI.InfoSearch's setter filters the static
+        // nav list itself — no MarkDirty, no debounce, no server call.
+        private static bool infoSearchFocused = false;
+        public static bool IsInfoSearchFocused => infoSearchFocused;
+        private const string INFO_SEARCH_CTRL = "InfoSearchField";
+        private static void DrawInfoSearch()
+        {
+            infoSearchFocused = false;
+            try
+            {
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 15) return;
+                Rect r = NativeUI.GetInfoSearchScreenRect();
+                if (r.width < 1f || r.height < 1f) return;
+                if (compareSearchStyle == null)
+                    compareSearchStyle = new GUIStyle(GUI.skin.textField) { fontSize = 13, alignment = TextAnchor.MiddleLeft };
+                if (compareSearchHintStyle == null)
+                    compareSearchHintStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleLeft, richText = true };
+                float h = Mathf.Max(r.height, 22f);
+                // Min width 120, not 200 — the anchor sits beside a Clear
+                // button in a 350-unit column and a forced 200px field would
+                // paint over it at low resolutions (the DrawHistorySearch
+                // lesson, review r1 find 9).
+                var fieldRect = new Rect(r.x, r.y, Mathf.Max(r.width, 120f), h);
+                string cur = NativeUI.InfoSearch ?? "";
+                GUI.SetNextControlName(INFO_SEARCH_CTRL);
+                string next = GUI.TextField(fieldRect, cur, compareSearchStyle);
+                infoSearchFocused = GUI.GetNameOfFocusedControl() == INFO_SEARCH_CTRL;
+                if (string.IsNullOrEmpty(next))
+                    // Deliberately the EXISTING "search..." key (picker search)
+                    // so the hint ships translated on day one (#289).
+                    GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
+                              I18n.Tr("<color=#7788AA><i>search...</i></color>"), compareSearchHintStyle);
+                if (next != cur)
+                    NativeUI.InfoSearch = next;   // setter filters the nav list
             }
             catch { /* search is best-effort cosmetic */ }
         }
@@ -6457,7 +6498,9 @@ namespace CompetitiveRounds
                 || pickerSearchFocused
                 // Bug 263: the My Stats history search field (MANDATORY — a
                 // 't' typed into any search box must never open T-chat).
-                || histSearchFocused) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
+                || histSearchFocused
+                // Aug 23 r2: the Info library search field, same contract.
+                || infoSearchFocused) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -6801,6 +6844,8 @@ namespace CompetitiveRounds
                 // Bug 263 review r1 find 2: the history search field too, or
                 // typing 'Y' into it opens quick-chat and eats the key.
                 || histSearchFocused
+                // Aug 23 r2: the Info library search field, same contract.
+                || infoSearchFocused
                 || pickerSearchFocused) { quickChatOpen = false; return; }
             if (IsVanillaChatTyping()) { quickChatOpen = false; return; }
 

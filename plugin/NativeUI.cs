@@ -1270,6 +1270,9 @@ namespace CompetitiveRounds
                 string q=histSearch?.Trim()??"";
                 if(q.Length>0){try{ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,q,append:false);}catch{}}
             }
+            // Info tab: cross-ref link clicks are a raw Input poll (edge
+            // trigger, so it must live on this per-frame path — #120).
+            if (currentTab == TAB_INFO) TickInfoLinkClicks();
             // Codex r1 f16: timed alerts expire LOCALLY — when the soonest
             // expiry passes, drop it and repaint so the banner clears within
             // seconds. Throttled; no server calls.
@@ -1604,6 +1607,7 @@ namespace CompetitiveRounds
              * _lblOrder (per-call scratch). */
             achRows.Clear();homeCosRows.Clear();_podiumLbRows.Clear();_podiumTeamRows.Clear();_podiumFfaRows.Clear();
             infoNavBtns.Clear();infoNavTexts.Clear();infoNavKeys.Clear();   // Info tab nav pool (#147/#149/#150)
+            infoNavCatHdrs.Clear();infoNavCatOfBtn.Clear();infoNoMatchGO=null;infoSearchField=null;   // Info search pool (Aug 23 r2)
             shopRows.Clear();shopRowPool.Clear();shopArtistBtns.Clear();shopArtistBtnTexts.Clear();shopArtistBtnNames.Clear();
             teamLBRows.Clear();teamHistRows.Clear();
             tSignupRowPool.Clear();tSignupRowTexts.Clear();tBracketRowPool.Clear();tBracketRowTexts.Clear();_tBracketRowPurposes.Clear();
@@ -5121,7 +5125,19 @@ namespace CompetitiveRounds
                 if (!isOpen) Toggle();
                 if (!isOpen || pageGO == null) return;
                 if (idx >= 0 && idx < NUM_TABS && idx != currentTab) SwitchTab(idx);
-                if (idx == TAB_INFO && !string.IsNullOrEmpty(infoArticleKey)) SelectInfoArticle(infoArticleKey);
+                if (idx == TAB_INFO && !string.IsNullOrEmpty(infoArticleKey))
+                {
+                    // Lever grammar (broadcast verification, #420):
+                    //   15:<article-key>      open an article
+                    //   15:search:<query>     drive the nav search filter
+                    //   15:linktest           grid-scan the open article's links
+                    if (infoArticleKey.StartsWith("search:", StringComparison.OrdinalIgnoreCase))
+                        InfoSearch = infoArticleKey.Substring("search:".Length);
+                    else if (string.Equals(infoArticleKey, "linktest", StringComparison.OrdinalIgnoreCase))
+                        InfoLinkSelfTest();
+                    else
+                        SelectInfoArticle(infoArticleKey);
+                }
                 if (idx == 4 && shopScroll >= 0f && shopScrollGO != null && UIFactory.tScrollRect != null)
                 {
                     var sr = shopScrollGO.GetComponent(UIFactory.tScrollRect);
@@ -10278,6 +10294,31 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static readonly List<object> infoNavTexts = new List<object>();
         private static readonly List<string> infoNavKeys = new List<string>();
         private static string infoSelectedKey = "";
+        // ── Info search (Aug 23 round 2, Sid) — 5th IMGUI-over-anchor field
+        // (CompetitiveUI.DrawInfoSearch draws over ISLbl; focus-mutexed vs
+        // T-chat like its four siblings). Pure client-side filter over the
+        // static library: no debounce, no server fetch, the setter filters
+        // the nav list directly.
+        private static readonly List<GameObject> infoNavCatHdrs = new List<GameObject>();
+        private static readonly List<int> infoNavCatOfBtn = new List<int>();
+        private static GameObject infoNoMatchGO;
+        private static object infoSearchField;   // empty anchor label above the nav list
+        private static string infoSearch = "";
+        // key -> rich-text-stripped searchable haystack (title + body), built
+        // lazily per article and cleared on every page build so a language
+        // switch re-strips the freshly-translated bodies.
+        private static readonly Dictionary<string, string> infoSearchHaystacks = new Dictionary<string, string>();
+        public static string InfoSearch
+        {
+            get { return infoSearch; }
+            set
+            {
+                string v = value ?? "";
+                if (infoSearch == v) return;
+                infoSearch = v;
+                ApplyInfoNavFilter();
+            }
+        }
 
         private static GameObject BuildInfoTab(Transform parent)
         {
@@ -10299,15 +10340,34 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var nav = UIFactory.CreatePanel("InfoNav", cols.transform, C_PANEL);
             UIFactory.AddVLG(nav, spacing: 2, padL: 8, padR: 8, padT: 8, padB: 8);
             UIFactory.AddLE(nav, prefW: 350, flexW: 0, flexH: 1);
+            // Search row ABOVE the nav scroll — anchor pattern from the
+            // history search (no flexW:1 spacers, #132; the IMGUI field is
+            // drawn over ISLbl by CompetitiveUI.DrawInfoSearch).
+            var isr = new GameObject("InfoSearchRow");
+            isr.transform.SetParent(nav.transform, false);
+            isr.AddComponent<RectTransform>();
+            UIFactory.AddHLG(isr, spacing: 6);
+            UIFactory.AddLE(isr, prefH: 24, flexH: 0, flexW: 0);
+            UIFactory.CreateText("ISc", isr.transform, "<color=#8899AA>Search</color>",
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(52, 22));
+            infoSearchField = UIFactory.CreateText("ISLbl", isr.transform, "",
+                13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(210, 22));
+            UIFactory.CreateButton("ISClr", isr.transform, "Clear", 11f, C_LABEL,
+                new Color(0.25f, 0.3f, 0.4f, 0.9f), () => { InfoSearch = ""; },
+                sizeDelta: new Vector2(48, 20));
             var navSV = UIFactory.CreateScrollView("InfoNavSV", nav.transform, spacing: 2);
             UIFactory.AddLE(navSV.scrollGO, flexH: 1);
             infoNavBtns.Clear(); infoNavTexts.Clear(); infoNavKeys.Clear();
+            infoNavCatHdrs.Clear(); infoNavCatOfBtn.Clear();
+            infoSearchHaystacks.Clear();   // language switch = fresh Tr'd bodies
+            int catIdx = 0;
             foreach (var cat in InfoLibrary.Categories)
             {
                 var hdr = UIFactory.CreateText("ICat", navSV.content.transform,
                     cat.Title(), 15f, cat.Color, UIFactory.AlignMidLeft,
                     sizeDelta: new Vector2(320, 26));
                 UIFactory.SetBold(hdr, true);
+                infoNavCatHdrs.Add((hdr as Component)?.gameObject);
                 foreach (var art in cat.Articles)
                 {
                     string key = art.Key;
@@ -10317,8 +10377,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         sizeDelta: new Vector2(320, 28));
                     UIFactory.AddLE(b, prefH: 28, minH: 28, flexH: 0);
                     infoNavBtns.Add(b); infoNavTexts.Add(UIFactory.GetButtonText(b)); infoNavKeys.Add(key);
+                    infoNavCatOfBtn.Add(catIdx);
                 }
+                catIdx++;
             }
+            var noMatch = UIFactory.CreateText("INoMatch", navSV.content.transform,
+                "No articles match your search.", 13f, C_DIM,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(320, 26));
+            infoNoMatchGO = (noMatch as Component)?.gameObject;
+            if (infoNoMatchGO != null) infoNoMatchGO.SetActive(false);
+            // A rebuild keeps any active query (the IMGUI field still shows
+            // it), so re-apply the filter to the fresh button pool.
+            if (!string.IsNullOrEmpty(infoSearch)) ApplyInfoNavFilter();
 
             // Reading pane — FIXED measure (~85 chars/line at 23f) rather than
             // flex-fill: a full-width text line on a 21:9 canvas is unreadable.
@@ -10361,9 +10431,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // Titles/bodies are already Tr'd inside InfoLibrary's
                 // properties — SetTextRaw skips the second catalogue lookup
                 // while keeping glyph registration + the bold wrap (#48/#110).
+                // LinkifyInfoBody wraps each cross-ref span in a TMP <link>
+                // tag AT RENDER TIME — never in the source bodies, which
+                // would re-key every translation (#289).
                 UIFactory.SetTextRaw(infoTitleTxt, art.Title());
                 UIFactory.SetColor(infoTitleTxt, InfoLibrary.ColorOf(key));
-                UIFactory.SetTextRaw(infoBodyTxt, art.Body());
+                UIFactory.SetTextRaw(infoBodyTxt, LinkifyInfoBody(art.Body()));
                 // Snap back to the top for the new article (both the content
                 // offset and the normalized position — the layout rebuild
                 // lands next frame and clamps whichever survives).
@@ -10382,6 +10455,225 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] select '" + key + "': " + ex.Message); }
+        }
+
+        // ── Info search filter ──────────────────────────────────────────
+        /// <summary>Show only the nav buttons whose article title or body
+        /// contains the query; hide category headers with no visible child.
+        /// Empty query restores everything. Pure local work — the library is
+        /// static client content.</summary>
+        private static void ApplyInfoNavFilter()
+        {
+            try
+            {
+                string q = (infoSearch ?? "").Trim();
+                bool all = q.Length == 0;
+                var visibleByCat = new int[infoNavCatHdrs.Count];
+                int total = 0;
+                for (int i = 0; i < infoNavBtns.Count; i++)
+                {
+                    bool vis = all || InfoArticleMatches(infoNavKeys[i], q);
+                    if (infoNavBtns[i] != null) infoNavBtns[i].SetActive(vis);
+                    if (!vis) continue;
+                    total++;
+                    if (i < infoNavCatOfBtn.Count)
+                    {
+                        int c = infoNavCatOfBtn[i];
+                        if (c >= 0 && c < visibleByCat.Length) visibleByCat[c]++;
+                    }
+                }
+                for (int c = 0; c < infoNavCatHdrs.Count; c++)
+                    if (infoNavCatHdrs[c] != null) infoNavCatHdrs[c].SetActive(all || visibleByCat[c] > 0);
+                if (infoNoMatchGO != null) infoNoMatchGO.SetActive(!all && total == 0);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] search filter: " + ex.Message); }
+        }
+
+        /// <summary>Case-insensitive substring match over title + tag-stripped
+        /// body. InvariantCultureIgnoreCase, not Ordinal, so Cyrillic/accented
+        /// queries fold against translated bodies. Haystacks are cached per
+        /// article and cleared on page rebuild (language switch).</summary>
+        private static bool InfoArticleMatches(string key, string q)
+        {
+            var art = InfoLibrary.Find(key);
+            if (art == null) return false;
+            string hay;
+            if (!infoSearchHaystacks.TryGetValue(key, out hay))
+            {
+                string body = "";
+                try { body = art.Body() ?? ""; } catch { }
+                string title = "";
+                try { title = art.Title() ?? ""; } catch { }
+                hay = title + "\n" + System.Text.RegularExpressions.Regex.Replace(body, "<[^>]{1,40}>", "");
+                infoSearchHaystacks[key] = hay;
+            }
+            try { return hay.IndexOf(q, StringComparison.InvariantCultureIgnoreCase) >= 0; }
+            catch { return hay.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0; }
+        }
+
+        public static Rect GetInfoSearchScreenRect()
+        {
+            try
+            {
+                var go = (infoSearchField as Component)?.gameObject;
+                if (go == null) return new Rect(0, 0, 0, 0);
+                var rt = go.GetComponent<RectTransform>();
+                if (rt == null) return new Rect(0, 0, 0, 0);
+                var c = new Vector3[4]; rt.GetWorldCorners(c);
+                float x = c[0].x, w = c[2].x - c[0].x, h = c[1].y - c[0].y;
+                float guiY = Screen.height - c[1].y;
+                if (w < 1f || h < 1f) return new Rect(0, 0, 0, 0);
+                return new Rect(x, guiY, w, h);
+            }
+            catch { return new Rect(0, 0, 0, 0); }
+        }
+
+        // ── Info cross-ref hyperlinks (Aug 23 round 2, Sid: "the hyper links
+        // don't actually do anything when clicked") ─────────────────────
+        /// <summary>Wrap every cross-ref span (<color=#7FD4FF>Title</color>
+        /// where Title exactly equals a registered article's Tr'd title) in a
+        /// TMP <link=key> tag. Render-time only — source bodies and their
+        /// translation keys stay untouched (#289). Cyan spans that are NOT
+        /// article titles (Discord, Bug reports) are left plain, and a
+        /// translated body whose ref wording drifted from the article title
+        /// simply stays unlinked — graceful in every locale.</summary>
+        private static string LinkifyInfoBody(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return body;
+            int n = 0;
+            try
+            {
+                foreach (var cat in InfoLibrary.Categories)
+                {
+                    foreach (var art in cat.Articles)
+                    {
+                        string t = null;
+                        try { t = art.Title(); } catch { }
+                        if (string.IsNullOrEmpty(t)) continue;
+                        string span = "<color=#7FD4FF>" + t + "</color>";
+                        if (body.IndexOf(span, StringComparison.Ordinal) < 0) continue;
+                        int idx = 0;
+                        while ((idx = body.IndexOf(span, idx, StringComparison.Ordinal)) >= 0) { n++; idx += span.Length; }
+                        body = body.Replace(span, "<link=" + art.Key + ">" + span + "</link>");
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] linkify: " + ex.Message); }
+            if (n > 0) Plugin.Log.LogInfo("[INFO-TAB] linkified " + n + " cross-ref(s)");
+            return body;
+        }
+
+        /// <summary>Per-frame (from Tick, Update context — #120) click
+        /// resolution for the body's link spans. Raw-poll input path, so it
+        /// carries its own modal gate (#141) and its own viewport clip test
+        /// (#185: TMP link hitboxes exist even for glyphs scrolled out of
+        /// view under the scroll mask).</summary>
+        private static float infoLinkClickAt = -1f;
+        private static void TickInfoLinkClicks()
+        {
+            try
+            {
+                if (infoBodyTxt == null || !Input.GetMouseButtonDown(0)) return;
+                if (ClickHandler.ModalBlockInput) return;
+                var svGo = infoBodyScrollGO;
+                if (svGo == null) return;
+                var rt = svGo.GetComponent<RectTransform>();
+                if (rt == null) return;
+                var c = new Vector3[4]; rt.GetWorldCorners(c);
+                Vector3 mp = Input.mousePosition;
+                if (mp.x < c[0].x || mp.x > c[2].x || mp.y < c[0].y || mp.y > c[1].y) return;
+                string key = TmpLinkAtScreenPoint(infoBodyTxt, mp);
+                if (string.IsNullOrEmpty(key)) return;
+                if (Time.unscaledTime - infoLinkClickAt < 0.2f) return;   // #7-class debounce
+                infoLinkClickAt = Time.unscaledTime;
+                Plugin.Log.LogInfo("[INFO-TAB] cross-ref click -> '" + key + "'");
+                SelectInfoArticle(key);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] link click: " + ex.Message); }
+        }
+
+        // TMP link hit-testing via reflection (no TMPro assembly reference,
+        // #15). Resolution failure is loud ONCE and downgrades links to
+        // display-only — never an exception storm on the click path (#83).
+        private static Type tTmpUtils;
+        private static MethodInfo mTmpFindLink;
+        private static PropertyInfo pTmpTextInfo;
+        private static FieldInfo fTmpLinkInfo;
+        private static MethodInfo mTmpGetLinkId;
+        private static bool tmpLinkResolveFailed;
+        internal static string TmpLinkAtScreenPoint(object tmpText, Vector3 screenPos)
+        {
+            if (tmpText == null || tmpLinkResolveFailed) return null;
+            try
+            {
+                if (mTmpFindLink == null)
+                {
+                    var asm = tmpText.GetType().Assembly;   // Unity.TextMeshPro
+                    tTmpUtils = asm.GetType("TMPro.TMP_TextUtilities");
+                    var tTmpText = asm.GetType("TMPro.TMP_Text");
+                    if (tTmpUtils != null && tTmpText != null)
+                        mTmpFindLink = tTmpUtils.GetMethod("FindIntersectingLink",
+                            BindingFlags.Public | BindingFlags.Static, null,
+                            new[] { tTmpText, typeof(Vector3), typeof(Camera) }, null);
+                    if (mTmpFindLink == null)
+                    {
+                        tmpLinkResolveFailed = true;
+                        Plugin.Log.LogWarning("[INFO-TAB] TMP_TextUtilities.FindIntersectingLink unresolvable — cross-refs are display-only");
+                        return null;
+                    }
+                }
+                // Overlay canvas is ScreenSpaceOverlay (EnsureOverlayCanvas
+                // sets renderMode 0), so the camera argument is null.
+                int idx = (int)mTmpFindLink.Invoke(null, new object[] { tmpText, screenPos, null });
+                if (idx < 0) return null;
+                if (pTmpTextInfo == null)
+                    pTmpTextInfo = tmpText.GetType().GetProperty("textInfo", BindingFlags.Public | BindingFlags.Instance);
+                var ti = pTmpTextInfo?.GetValue(tmpText);
+                if (ti == null) return null;
+                if (fTmpLinkInfo == null)
+                    fTmpLinkInfo = ti.GetType().GetField("linkInfo", BindingFlags.Public | BindingFlags.Instance);
+                var linkArr = fTmpLinkInfo?.GetValue(ti) as Array;
+                if (linkArr == null || idx >= linkArr.Length) return null;
+                object li = linkArr.GetValue(idx);
+                if (li == null) return null;
+                if (mTmpGetLinkId == null)
+                    mTmpGetLinkId = li.GetType().GetMethod("GetLinkID", BindingFlags.Public | BindingFlags.Instance);
+                return mTmpGetLinkId?.Invoke(li, null) as string;
+            }
+            catch (Exception ex)
+            {
+                tmpLinkResolveFailed = true;
+                Plugin.Log.LogWarning("[INFO-TAB] TMP link hit-test failed (links now display-only): " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>Broadcast-lever self-test ("15:linktest"): grid-scan the
+        /// body viewport with the REAL hit-test and log every link id found —
+        /// end-to-end proof of the reflection chain on a seat where synthetic
+        /// clicks can't reach the overlay (#420).</summary>
+        internal static void InfoLinkSelfTest()
+        {
+            try
+            {
+                var svGo = infoBodyScrollGO;
+                if (svGo == null || infoBodyTxt == null) { Plugin.Log.LogWarning("[INFO-TAB] linktest: no body"); return; }
+                var rt = svGo.GetComponent<RectTransform>();
+                var c = new Vector3[4]; rt.GetWorldCorners(c);
+                var found = new List<string>();
+                int probes = 0;
+                for (float fy = 0.02f; fy < 1f; fy += 0.03f)
+                    for (float fx = 0.02f; fx < 1f; fx += 0.03f)
+                    {
+                        var p = new Vector3(c[0].x + (c[2].x - c[0].x) * fx, c[0].y + (c[1].y - c[0].y) * fy, 0f);
+                        probes++;
+                        string k = TmpLinkAtScreenPoint(infoBodyTxt, p);
+                        if (!string.IsNullOrEmpty(k) && !found.Contains(k)) found.Add(k);
+                    }
+                Plugin.Log.LogInfo("[INFO-TAB] linktest: " + probes + " probes, links hit: "
+                    + (found.Count == 0 ? "(none)" : string.Join(", ", found.ToArray())));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] linktest: " + ex.Message); }
         }
 
         private static GameObject BuildSettingsTab(Transform parent)
@@ -10537,8 +10829,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             // -- Info (Aug 23, Sid: the old "Stats" sub-cat, renamed and grown
             // into a full explainer library on its own sub-tab). This box is
-            // the pointer; the "How stats are tracked" popup stays reachable
-            // here too since players learned to find it in Settings (bug 180).
+            // the pointer only. The "How stats are tracked" popup button that
+            // briefly lived here was removed on Sid's direction (Aug 23 round
+            // 2) - the same content is the wiki's 'How stats are tracked'
+            // article (InfoLibrary key stats-tracked, which still reads
+            // NativeUI.StatsTrackingInfoBody, so that property stays).
             var statsHelpBox = UIFactory.CreatePanel("SStatsB", panel.transform, C_PANEL);
             UIFactory.AddVLG(statsHelpBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
             UIFactory.AddLE(statsHelpBox, flexH: 0);
@@ -10556,10 +10851,6 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.CreateButton("SInfoOpen", infoBtnRow.transform,
                 "Open the Info library", 15f, C_WHITE, new Color(0.20f, 0.34f, 0.55f, 0.92f),
                 () => SwitchTab(TAB_INFO),
-                sizeDelta: new Vector2(300, 28));
-            UIFactory.CreateButton("SStatsHelp", infoBtnRow.transform,
-                "How stats are tracked", 15f, C_WHITE, C_BTN,
-                () => ShowInfoPopup(I18n.Tr("How stats are tracked"), StatsTrackingInfo),
                 sizeDelta: new Vector2(300, 28));
             var infoRowSp = new GameObject("S");
             infoRowSp.transform.SetParent(infoBtnRow.transform, false);

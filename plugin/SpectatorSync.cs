@@ -1205,6 +1205,21 @@ namespace CompetitiveRounds
                         CompetitiveUI.ShowNotification(I18n.TrF("Game over - {0} wins", who), Color.green, 6f);
                     return;
                 }
+                // Aug 23 round 2 (Sid): the broadcast night-pack skin swap
+                // fires at pick-phase start. A round CONVERSION is the one
+                // observer-side signal that a pick phase is beginning in
+                // EVERY round mode — Codex r1 find 2: CardChoiceVisuals.Show
+                // reaches a spectator only on the 1v1 DoWinSequence path
+                // (team modes run DoSequence, game-start runs a suppressed
+                // DoStartGame), so a Show postfix froze 2v2/1v2 rotations.
+                // Placed BEFORE the UI early-returns below — a 3-point room
+                // skips the score sequence but still has its pick phase.
+                // First line of the callee returns on every non-broadcast
+                // seat.
+                if (conversion)
+                {
+                    try { ArtHandlerNextArtPatch.OnPickPhaseObserved(); } catch { }
+                }
                 // Vanilla's pip logic hardcodes the 2-point round shape (r2
                 // find 5: values > 1 render "ROUND", so a 3-point room's
                 // second point mis-renders). Custom thresholds skip the
