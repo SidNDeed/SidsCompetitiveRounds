@@ -25,10 +25,95 @@ namespace CompetitiveRounds
         /// <summary>Factor applied to the current map (1 when unscaled).</summary>
         public static float CurrentFactor { get; private set; } = 1f;
 
+        // ── Self-publish ticket (bug #269) ───────────────────────────────
+        //
+        // PUN does NOT apply a room property to the client that SET it. The
+        // only optimistic local apply lives in
+        // LoadBalancingClient.OpSetPropertiesOfRoom and is gated on
+        // `!CurrentRoom.BroadcastPropertiesChangeToAll`; RoomOptions'
+        // broadcastPropsChangeToAll defaults to TRUE and neither ROUNDS nor
+        // this mod ever overrides it (Plugin.cs's RoomOptions sets only
+        // MaxPlayers/IsOpen/IsVisible/CustomRoomProperties). So the SETTER's
+        // own CurrentRoom.CustomProperties updates only when the server
+        // echoes the change back — a full round trip. Peers are fine: the
+        // property op and the RPC are both reliable on channel 0 from one
+        // sender, so they observe property-then-load.
+        //
+        // FfaDoStartGame publishes and calls LoadNextLevel() on the very next
+        // line, and PhotonNetwork runs an RpcTarget.All RPC LOCALLY and
+        // SYNCHRONOUSLY (ExecuteRpc(..., LocalPlayer)), so the master's own
+        // SetStartPos ran before its echo returned. It read -1 and ran the
+        // FIRST map of every FFA room UNSCALED while every peer scaled it.
+        // Because only the master instantiates PhotonMapObjects — at ITS OWN
+        // placeholder world positions — every peer then received the crates
+        // and saws at unscaled coordinates inside a scaled map, streamed from
+        // an authority whose colliders disagreed with their geometry. That is
+        // the "boxes spawn at normal map size locations" + vibration report.
+        //
+        // The round-transition path publishes a full second before its load
+        // and so has NOT been seen to fail — but that is a probabilistic
+        // latency mask, not a guarantee (Codex r1 find 3): a queued op or a
+        // late dispatch past one second reproduces the identical split. The
+        // ticket below covers BOTH publish sites, so neither depends on
+        // timing.
+        //
+        // Shape: a ONE-SHOT ticket, not a persistent cache. A persistent
+        // cache would need a globally ordered epoch to survive master
+        // handoff, and a per-client sequence is not globally monotonic
+        // (Codex r1 find 5). One-shot needs no version at all: it is armed by
+        // a publish and consumed by the next map load, which is exactly the
+        // pairing that is broken.
+        private static bool ticketArmed;
+        private static int ticketCount = -1;
+        // The Room OBJECT, not just its name: a leave and a fast rejoin can
+        // produce a DIFFERENT room that carries the SAME server-issued name,
+        // with actor numbering reset so we are actor 1 / master again. Name
+        // equality alone would let that rejoin consume the previous room's
+        // count. PUN allocates a fresh Room per entry, so reference identity
+        // is the exact incarnation test.
+        private static Photon.Realtime.Room ticketRoomRef;
+        private static string ticketRoomName;
+        private static int ticketActor = -1;
+
+        private static void ClearTicket()
+        {
+            ticketArmed = false;
+            ticketCount = -1;
+            ticketRoomRef = null;
+            ticketRoomName = null;
+            ticketActor = -1;
+        }
+
+        /// <summary>Per-map degrade path: this map load is not being scaled.
+        /// Called only from the SetStartPos postfix, which is also the ONLY
+        /// consumer of the ticket — so a ticket still armed here was not
+        /// consumed by the load it was armed for and must die with it. That
+        /// is the one-shot lifetime, not a room lifetime.</summary>
         public static void Reset()
         {
-            try { CurrentFactor = 1f; }
+            try { CurrentFactor = 1f; ClearTicket(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA-SCALE] Reset: {ex.Message}"); }
+        }
+
+        /// <summary>Room teardown. Same effect as Reset today, kept as a
+        /// separate name because the CALL SITES differ in meaning (a room
+        /// exit, not a map that declined to scale) and because the reliable
+        /// Photon OnLeftRoom edge must be able to say so explicitly.</summary>
+        public static void OnRoomLeft()
+        {
+            try { CurrentFactor = 1f; ClearTicket(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA-SCALE] OnRoomLeft: {ex.Message}"); }
+        }
+
+        /// <summary>Master handoff invalidates our authority to speak for the
+        /// room (Codex r1 find: a former master must not revive a ticket from
+        /// an earlier transition and outvote the new master's published
+        /// value). Once the switch is observed, the room property is the only
+        /// authority.</summary>
+        public static void OnMasterClientSwitched()
+        {
+            try { if (ticketArmed) ClearTicket(); }
+            catch { }
         }
 
         /// <summary>
@@ -54,12 +139,65 @@ namespace CompetitiveRounds
                     n = RoomActors.ActiveFighterCount();   // census: scale by fighters, not actors
                 n = Math.Max(2, n);
 
+                // Capture BOTH identities BEFORE sending. If we sent first and
+                // only then found LocalPlayer null, the property would already
+                // be on the wire — peers would load with the new count while
+                // this seat cleared its ticket and fell back to the old/absent
+                // property, recreating the exact master-vs-peer split this
+                // patch exists to close (and logging "Photon refused it", which
+                // would be false). Fail BEFORE the send instead.
+                var room = PhotonNetwork.CurrentRoom;
+                var me = PhotonNetwork.LocalPlayer;
+                if (!PhotonNetwork.OfflineMode && me == null)
+                {
+                    ClearTicket();
+                    Plugin.Log.LogWarning(
+                        "[FFA-SCALE] no local player — count not published, this map falls back to the room property");
+                    return;
+                }
+
                 var h = new ExitGames.Client.Photon.Hashtable();
                 h[PropKey] = n;
-                PhotonNetwork.CurrentRoom.SetCustomProperties(h);
+                bool sent = room.SetCustomProperties(h);
+
+                // Arm ONLY on a confirmed enqueue (Codex r1 find 7). The old
+                // code ignored the return entirely. If the send is refused we
+                // must NOT install a local value: the master would scale while
+                // every peer kept the old one, which is this same bug with the
+                // seats swapped. RpcTarget.All still executes the load locally
+                // whatever happens here, so a failed publish must degrade to
+                // "read the room property like everyone else", never to a
+                // stalled or cancelled map load.
+                if (PhotonNetwork.OfflineMode)
+                {
+                    // Offline: Photon merges the property synchronously
+                    // (Room.SetCustomProperties' isOffline branch), so the
+                    // normal read path already sees it. No ticket needed.
+                    ClearTicket();
+                }
+                else if (sent)
+                {
+                    // Armed from the CAPTURED identities above, never re-read
+                    // here: re-reading would reintroduce the null case the
+                    // pre-send guard just eliminated. ticketArmed is set LAST
+                    // so a throw mid-assignment cannot leave a half-built
+                    // ticket armed.
+                    ticketCount = n;
+                    ticketRoomRef = room;
+                    ticketRoomName = room.Name;
+                    ticketActor = me.ActorNumber;
+                    ticketArmed = true;
+                }
+                else
+                {
+                    ClearTicket();
+                    Plugin.Log.LogWarning(
+                        "[FFA-SCALE] count publish was refused by Photon — this map falls back to the room property");
+                }
             }
             catch (Exception ex)
             {
+                ClearTicket();
                 Plugin.Log.LogWarning($"[FFA-SCALE] MasterPublishCount: {ex.Message}");
             }
         }
@@ -69,11 +207,41 @@ namespace CompetitiveRounds
             return Mathf.Clamp(1f + PerPlayer * (playerCount - 4), 1f, MaxFactor);
         }
 
+        /// <summary>Called ONLY from the SetStartPos postfix — one call per
+        /// map load, which is what makes the one-shot ticket sound.</summary>
         private static int ReadPublishedCount()
         {
             try
             {
-                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
+                var room = PhotonNetwork.CurrentRoom;
+
+                // Consume our own publish first: on the publishing seat the
+                // room property lags a full round trip, so the ticket holds
+                // the FRESHER value — and it is exactly the value every peer
+                // reads for this same map load. Every identity check below is
+                // load-bearing: the room REFERENCE (a same-named rejoin is a
+                // different incarnation), the room NAME (cheap corroboration),
+                // the actor (never honour a ticket we did not write), and
+                // still-being-master (a former master must defer to the new
+                // master's published value). Spent either way, so a later
+                // unpublished load falls through to the property.
+                if (ticketArmed)
+                {
+                    bool valid = room != null
+                        && ReferenceEquals(ticketRoomRef, room)
+                        && ticketRoomName == room.Name
+                        && PhotonNetwork.IsMasterClient
+                        && PhotonNetwork.LocalPlayer != null
+                        && PhotonNetwork.LocalPlayer.ActorNumber == ticketActor;
+                    // Either way the ticket is spent: a valid one is consumed,
+                    // and an invalid one can only get staler, so it must never
+                    // survive to be re-tested against a later map.
+                    int t = ticketCount;
+                    ClearTicket();
+                    if (valid) return t;
+                }
+
+                var props = room?.CustomProperties;
                 if (props == null || !props.ContainsKey(PropKey)) return -1;
                 if (props[PropKey] is int i) return i;
                 if (props[PropKey] is string s && int.TryParse(s, out var parsed))
@@ -91,6 +259,7 @@ namespace CompetitiveRounds
         {
             static void Postfix(Map map)
             {
+                bool mapAlreadyScaled = false;
                 try
                 {
                     if (map == null) return;
@@ -103,6 +272,17 @@ namespace CompetitiveRounds
                     int n = ReadPublishedCount();
                     if (n <= 0)
                     {
+                        // Bug #269 hid inside FOUR bug bundles because this
+                        // branch was silent: the master simply had no
+                        // [FFA-SCALE] line at all on map 1 and nothing said
+                        // why. One line here turns the next occurrence into a
+                        // grep instead of an investigation.
+                        // Room name via DescribeRoom, never raw: on the
+                        // broadcast seat the room name is a credential (§7.1)
+                        // and that seat's logs reach bug bundles.
+                        Plugin.Log.LogWarning(
+                            $"[FFA-SCALE] no player count available — this map stays UNSCALED " +
+                            $"({Diag2v2.DescribeRoom()} master={PhotonNetwork.IsMasterClient})");
                         Reset();
                         return;
                     }
@@ -117,6 +297,13 @@ namespace CompetitiveRounds
                     map.transform.localScale = new Vector3(f, f, 1f);
                     map.size *= f;
                     CurrentFactor = f;
+                    // From here on the MAP GEOMETRY IS SCALED, so the outer
+                    // catch below must not Reset() the factor back to 1 — a
+                    // scaled map with f == 1 consumers is precisely bug #269's
+                    // divergence, manufactured locally. Unreachable today (only
+                    // a log and an inner-guarded scan follow), one edit away
+                    // from firing.
+                    mapAlreadyScaled = true;
                     Plugin.Log.LogInfo(
                         $"[FFA-SCALE] map scaled x{f:F2} for {n} players (size {map.size:F1})");
                     // Bug #116: while the map is still parked and untouched, look
@@ -136,7 +323,9 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex)
                 {
-                    Reset();
+                    // See mapAlreadyScaled above: only degrade to factor 1
+                    // when the geometry is still vanilla.
+                    if (!mapAlreadyScaled) Reset();
                     Plugin.Log.LogWarning($"[FFA-SCALE] SetStartPos: {ex.Message}");
                 }
             }

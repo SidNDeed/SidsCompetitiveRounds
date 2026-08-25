@@ -1179,7 +1179,7 @@ namespace CompetitiveRounds
             pickDeadlineRealtime = 0f;
             pickDeadlineShared = false;
             localPickOpen = false;
-            try { FfaMapScale.Reset(); } catch { }
+            try { FfaMapScale.OnRoomLeft(); } catch { }
             try { FfaSpawnPoints.Clear(); } catch { }
             ClearSpawnGrace();
             try { FfaCardSequence.OnRoomLeft(); } catch { }
@@ -1397,8 +1397,13 @@ namespace CompetitiveRounds
                   * it rejects -1, so it awards nothing either way. */
                 int winnerTeam = alive.Count == 1 ? alive[0].TeamID : WINNER_DOUBLE_KO;
                 // Map-scale count rides ahead of the round RPC: Photon orders
-                // a sender's operations, so every client holds the fresh count
-                // before its transition loads the next map (FfaMapScale).
+                // a sender's operations, so every PEER holds the fresh count
+                // before its transition loads the next map. NOT this seat —
+                // PUN never applies a room property to the client that set it
+                // (bug #269), so the publisher reads it back only after a
+                // server round trip. FfaMapScale's self-publish ticket is what
+                // makes the publisher agree with the peers; do not assume this
+                // line alone is sufficient.
                 try { FfaMapScale.MasterPublishCount(); } catch { }
                 gm.view.RPC("RPCA_NextRound", RpcTarget.All, winnerTeam, winnerTeam, 0, 0, 0, 0);
             }
@@ -1872,8 +1877,15 @@ namespace CompetitiveRounds
             try { UIHandler.instance.HideJoinGameText(); } catch { }
             PlayerManager.instance.SetPlayersSimulated(false);
             PlayerManager.instance.SetPlayersVisible(false);
-            // Publish the live count BEFORE the load RPC so every client's
-            // SetStartPos sees it (FfaMapScale; prop-before-RPC ordering).
+            // Publish the live count BEFORE the load RPC so every PEER's
+            // SetStartPos sees it (prop-before-RPC ordering). This seat sees
+            // NOTHING here: PUN does not apply a room property to its setter,
+            // and LoadNextLevel's RpcTarget.All executes RPCA_LoadLevel
+            // locally and SYNCHRONOUSLY on the next line — so our own
+            // SetStartPos ran a round trip too early and left the first map of
+            // every FFA room unscaled while every peer scaled it (bug #269).
+            // FfaMapScale's self-publish ticket closes that; this ordering
+            // comment is about the peers only.
             if (PhotonNetwork.IsMasterClient)
                 try { FfaMapScale.MasterPublishCount(); } catch { }
             MapManager.instance.LoadNextLevel();

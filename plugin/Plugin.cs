@@ -3340,6 +3340,10 @@ namespace CompetitiveRounds
         public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
+            // Bug #269: a handoff revokes our authority to speak for the room,
+            // so any unconsumed map-scale publish ticket dies here — before
+            // the spectator-transfer block below, which can return early.
+            try { FfaMapScale.OnMasterClientSwitched(); } catch { }
             // Master authority must never rest on a spectator (design §3.6):
             // simulation ownership on a client with no characters and no
             // stake. Photon assigns the LOWEST ActorNumber, and spectators
@@ -3939,6 +3943,13 @@ namespace CompetitiveRounds
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+            // Bug #269: the map-scale publish ticket must die on the RELIABLE
+            // leave edge, not only through FfaMode's room poll — a leave and a
+            // fast rejoin to a same-named recreated room can land between poll
+            // samples, and the rejoin resets actor numbering so the old ticket
+            // would pass every identity check. First statement, before any of
+            // the branches below can return.
+            try { FfaMapScale.OnRoomLeft(); } catch { }
             // Flush the active/aborted game and room totals before role/session
             // state is cleared. Do not use the InRoom poll here: it turns false
             // during Leaving, before queued receive work and this callback.
