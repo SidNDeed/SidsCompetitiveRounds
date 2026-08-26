@@ -150,9 +150,10 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Drop one diagnostic budget entry so a per-sitting diag
-        /// gets a fresh budget. Called from room-TRANSITION edges (today:
-        /// GameStateWatcher's room-exit edge resets the stale-projectile
-        /// sweep's key). Dynamic per-room keys were tried and rejected in
+        /// gets a fresh budget. Called from BOTH room-exit edges — the reliable
+        /// Photon callback (Plugin.OnLeftRoom) and the lossy poll backup in
+        /// GameStateWatcher. An older version of this note named only the poll,
+        /// which undersold the guarantee. Dynamic per-room keys were tried and rejected in
         /// review (r2/r3): they grow the dict per room and an in-sweep reset
         /// can only see key CHANGES, so a directly-rejoined room inherited
         /// its spent budget. Fixed key + edge reset has neither hole.</summary>
@@ -1407,8 +1408,11 @@ namespace CompetitiveRounds
     ///     gun ON THIS SEAT currently has entries. NOT proof of divergence
     ///     on its own — a bullet fired before the owner's last card change
     ///     legitimately matches (round-tail bullets, rebuild boundaries);
-    ///     the [FFA-GUNAUDIT] apply stamps are what dates the gun state
-    ///     during analysis. Owner-null hits are counted under a SEPARATE
+    ///     the ownerCards count carried in the message is what dates the gun
+    ///     state during analysis. It replaced a pointer to [FFA-GUNAUDIT],
+    ///     which is emitted only from FfaMode's card-apply path and therefore
+    ///     cannot exist in the 2v2/1v1 captures this line usually arrives in
+    ///     (#306). Owner-null hits are counted under a SEPARATE
     ///     key/budget (review find 1: most Owner-null empty-list hits are
     ///     ordinary pre-init bullets that may carry no spawn cards at all,
     ///     and must not drain this key).
@@ -1426,6 +1430,18 @@ namespace CompetitiveRounds
 
         // Reset together at the room-leave edges (both the reliable callback
         // and the lossy poll backup), exactly like the sweep key.
+        //
+        // This array is the per-sitting reset list for every key ResetBudgets()
+        // owns. A key that belongs here and is not listed keeps a
+        // PROCESS-LIFETIME budget, i.e. game 1 noise blinds every later game of
+        // the session. (It is not the only reset list in the file:
+        // StaleProjectileSweepPatch.DiagKey and RoundSoundSweep.DiagKey are
+        // reset independently at the same two room-exit callers.) That is the exact rule stated in the
+        // summary above, and bug #310 proved two keys were breaking it: a
+        // 4-hour sitting arrived with EndScreenKill-player-died exhausted, so
+        // the one diagnostic that would have dated the reported deaths had
+        // been spent hours earlier. Anything added here must be a bounded
+        // log-only key; adding a key is free, forgetting one is silent.
         internal static readonly string[] DiagKeys = new[]
         {
             "SpawnDiag-target-view-gone",
@@ -1434,6 +1450,16 @@ namespace CompetitiveRounds
             "SpawnDiag-dead-effect",
             "SpawnDiag-not-allowed",
             FfaAuditFailKey,
+            // Bug #310: both were process-lifetime until 2026-08-25.
+            "EndScreenKill-damage",
+            "EndScreenKill-player-died",
+            // Bug #309: the card-deal guard's four keys (see
+            // CardChoiceStaleSpawnedCardsPatch). Separate keys so normal-path
+            // control lines can never starve the anomaly budgets.
+            CardChoiceStaleSpawnedCardsPatch.PrunedKey,
+            CardChoiceStaleSpawnedCardsPatch.NonEmptyDealKey,
+            CardChoiceStaleSpawnedCardsPatch.StateKey,
+            CardChoiceStaleSpawnedCardsPatch.WaitKey,
         };
 
         internal static void ResetBudgets()
@@ -1504,6 +1530,7 @@ namespace CompetitiveRounds
                         return;
                     }
                     int ownerGunLen = -1;
+                    int ownerCards = -1;
                     try
                     {
                         var gun = owner.data != null && owner.data.weaponHandler != null
@@ -1512,13 +1539,29 @@ namespace CompetitiveRounds
                             ownerGunLen = gun.objectsToSpawn.Length;
                     }
                     catch { }
+                    // Card count travels with the message because it is the only
+                    // mode-agnostic way to date the owner's gun state. This line
+                    // used to say "date via FFA-GUNAUDIT" — but [FFA-GUNAUDIT] is
+                    // emitted from exactly one place, FfaMode's card-apply path,
+                    // so outside an ffa_ room it names a tool that cannot produce
+                    // output. Bug #310 arrived from a 2v2 room with 19 of these
+                    // lines and no way to act on any of them (#306: a diagnostic
+                    // must not point at evidence that cannot exist in the context
+                    // that emits it).
+                    try
+                    {
+                        if (owner.data != null && owner.data.currentCards != null)
+                            ownerCards = owner.data.currentCards.Count;
+                    }
+                    catch { }
                     if (ownerGunLen > 0)
                     {
                         VanillaFixSupport.DiagLimited(
                             "SpawnDiag-replica-empty-spawnlist",
                             "SpawnDiag remote copy hit with EMPTY objectsToSpawn while owner's CURRENT gun has " +
                             ownerGunLen.ToString(CultureInfo.InvariantCulture) +
-                            " entr(ies) on this seat (bullet may predate the last card change — date via FFA-GUNAUDIT)" +
+                            " entr(ies) on this seat (bullet may predate the owner's last card change)" +
+                            " ownerCards=" + ownerCards.ToString(CultureInfo.InvariantCulture) +
                             " ownerPid=" + owner.PlayerID.ToString(CultureInfo.InvariantCulture) +
                             " view=" + view.ViewID.ToString(CultureInfo.InvariantCulture) +
                             " target=" + viewID.ToString(CultureInfo.InvariantCulture) +
@@ -2560,8 +2603,9 @@ namespace CompetitiveRounds
         // costs at most one 2-second suppression window, self-healing.
         private static bool _sweepPending;
         private static float _pendingSince = -10f;
-        // Fixed diag key; its budget is reset at the room-LEAVE edge in
-        // GameStateWatcher, not here (see the DiagLimited call for why).
+        // Fixed diag key; its budget is reset at the room-LEAVE edges — the
+        // Photon OnLeftRoom callback AND GameStateWatcher's poll backup — not
+        // here (see the DiagLimited call for why).
         internal const string DiagKey = "StaleProjectileSweep-despawn";
 
         [HarmonyPostfix]
@@ -3902,6 +3946,444 @@ namespace CompetitiveRounds
                 __result = null;
                 return false;
             }
+        }
+    }
+
+    /// <summary>Bug #309 — the "stuck on the card-selection screen, could not see
+    /// or choose any card" softlock. Prunes DESTROYED entries out of
+    /// CardChoice.spawnedCards before vanilla reads the list.
+    ///
+    /// MECHANISM, verified against logs-snapshot/decompiled/full/CardChoice.cs.
+    /// Vanilla dereferences list ELEMENTS in six places. FOUR are unguarded:
+    ///   * SpawnUniqueCard:302   spawnedCards[i].GetComponent&lt;CardInfo&gt;()      UNGUARDED
+    ///   * ReplaceCards:216      spawnedCards[i].GetComponentInChildren&lt;...&gt;()  UNGUARDED
+    ///   * ReplaceCards:233      spawnedCards[i].AddComponent&lt;PublicInt&gt;()     UNGUARDED
+    ///   * CardIDs:103           spawnedCards[i].GetComponent&lt;PhotonView&gt;()    UNGUARDED
+    /// and TWO already guard their own element reads:
+    ///   * IDoEndPick:143        if ((bool)spawnedCards[i])                     guarded
+    ///   * DoPlayerSelect:392/398 (bool)spawnedCards[j] / [currentlySelectedCard] != null
+    /// A destroyed GameObject is Unity fake-null: the managed wrapper is still
+    /// alive so the call is ENTERED, and the native pointer is dead so it throws
+    /// inside GetComponent. The reporter's stack carries both the
+    /// managed-to-native frame and the GameObject.GetComponent[T] frame, which is
+    /// what distinguishes "entered with a destroyed object" from a plain managed
+    /// null — the latter throws at the call site and produces no callee frame.
+    ///
+    /// WHY ONE BAD ENTRY IS A PERMANENT ROOM-WIDE SOFTLOCK. The throw kills the
+    /// ReplaceCards coroutine before `picks--`, before `isPlaying = false`, and
+    /// before the else-branch's RPC("RPCA_DonePicking", RpcTarget.All) — the ONLY
+    /// writer of IsPicking = false. So picks never reaches 0, the RPC is never
+    /// sent, and EVERY client spins in DoPick's `while (IsPicking)` forever. No
+    /// cards are visible because the throw lands inside the deal loop, and Jump is
+    /// gated on !isPlaying, so nobody can ready up either. That is the report,
+    /// exactly, and it ends the match for all four players.
+    ///
+    /// UNGATED, deliberately. The trigger is NOT mode-specific: GM_ArmsRace's
+    /// DoStartGame runs the same sequential DoPick chain in every mode that uses
+    /// vanilla's pick flow — 1v1, 2v2 and 1v2. (FFA is the exception and needs no
+    /// gate for it: FfaMode prefixes DoStartGame, returns false and substitutes its
+    /// own flow, which never calls DoPick/StartPick at all, so this patch is simply
+    /// never reached there.) The
+    /// incident bundle contains a healthy four-picker chain in the same room plus
+    /// six two-picker 1v1 chains. Gating this on a mode — or on
+    /// IsCompetitiveRoom(), which excludes the room-code games that are most of
+    /// real play — would be #272/#286 repeated. It is a correctness fix.
+    ///
+    /// WHEN IT IS SAFE TO PRUNE — the load-bearing rule, and the one a first
+    /// version of this patch got WRONG (Codex review round 1, confirmed HIGH).
+    /// Removing only the DEAD entries from a MIXED dead+live list does not repair
+    /// anything: vanilla then deals into a NON-EMPTY list, and the deal body does
+    ///     spawnedCards.Add(SpawnUniqueCard(...));
+    ///     spawnedCards[i].AddComponent&lt;PublicInt&gt;().theInt = i;   // i = CHILD index
+    /// which only addresses the just-added card when the list STARTED EMPTY. With
+    /// a live survivor still in slot 0 the anchors shift. PRECISELY what that
+    /// costs (r2 find 3 corrected r1's wording, and mine with it): theInt is only
+    /// the pick-UI CHILD index, so selecting a card still applies THAT card's own
+    /// ApplyCardStats from its own PhotonView — the effect is not swapped. What it
+    /// does cause is a stale, no-op offer left selectable, the wrong UI slot
+    /// animated, slot-based achievement tracking corrupted, and — for a trailing
+    /// card that never received a PublicInt — an exception raised AFTER its effect
+    /// already landed. Still materially worse than vanilla, which fails visibly
+    /// and applies nothing. So the prune runs ONLY where it restores vanilla's own
+    /// invariant:
+    ///   * every entry dead  -&gt; pruning empties the list, which is exactly the
+    ///                          state the deal branch requires. Strictly better.
+    ///   * clear == true     -&gt; vanilla dereferences every entry UNEQUAL to
+    ///                          pickedCard at :216 and then calls
+    ///                          spawnedCards.Clear() itself, so dropping dead
+    ///                          entries only skips derefs vanilla would have made.
+    ///                          (True when pickedCard is FAKE-null. With a REAL
+    ///                          managed null, Unity's == returns "equal" for every
+    ///                          dead entry and vanilla dereferences none of them.
+    ///                          Academic either way: the only clear:true producer
+    ///                          in the whole decompile is CardChoice.cs:356, inside
+    ///                          an Application.isEditor branch, so this arm has no
+    ///                          shipped caller at all.)
+    ///                          (Not always a throw it avoids, but narrower than
+    ///                          an earlier draft of this comment claimed: Unity
+    ///                          equality compares INSTANCE IDs, so two DISTINCT
+    ///                          destroyed objects are still unequal. A fake-null
+    ///                          pickedCard therefore skips only the exact picked
+    ///                          entry; any OTHER dead entry stays unequal and
+    ///                          vanilla still dereferences it.)
+    ///   * mixed, clear==false -&gt; DO NOT TOUCH IT. Log and leave vanilla's own
+    ///                          outcome exactly as it is.
+    /// Nothing here destroys or clears live cards: CardVisuals.Leave() ends in
+    /// Object.Destroy on a Photon-owned card root, which a patch may never call
+    /// (#94).
+    ///
+    /// COVERAGE LIMIT, stated plainly because an earlier draft of this comment
+    /// claimed the guard was "correct regardless" of the trigger, and that was
+    /// FALSE. A Prefix on an iterator method runs at state-machine CONSTRUCTION,
+    /// so it sees the list ONCE, before the first MoveNext. The deal then yields
+    /// 0.1s between every card, and CardIDs() runs later still. A card destroyed
+    /// DURING those yields, or between the completed deal and selection, is not
+    /// covered and reproduces the identical softlock. Closing that window is not
+    /// a matter of pruning more often: compacting mid-deal is UNSAFE, because the
+    /// body indexes spawnedCards[i] by child index immediately after Add, so
+    /// removing an earlier slot turns the next write into an IndexOutOfRange.
+    /// Covering it properly means guarding ALL FOUR unguarded dereferences at
+    /// their point of use, and the prescription must be complete or it makes
+    /// things worse (r2 find 2): a transpiler on SpawnUniqueCard:302 that merely
+    /// SKIPS a dead entry, without preserving slots, lets the deal run on to
+    /// ReplaceCards:233 and stamp PublicInt onto a stale or wrong slot. So the
+    /// full set is: preserve list slots across the deal, guard SpawnUniqueCard:302
+    /// and CardIDs:103, AND add the per-element guard inside the
+    /// ReplaceCards(clear=true) loop at :216 — a separate and larger piece of
+    /// work, tracked as its own item. This patch covers construction-time
+    /// staleness only — and is a strict improvement there.
+    ///
+    /// THE MOST LIKELY TRIGGER — decompile-verified as a mechanism, but NOT proven
+    /// from the incident capture — is repaired IN THE COMMON CASE by the Postfix
+    /// wrapper further down (its own SCOPE note records what it does not cover):
+    /// a cross-client race in which the next picker's client begins its deal while
+    /// its OWN IDoEndPick is still between the picked card's immediate destroy and
+    /// its own spawnedCards.Clear(). The Prefix below runs at iterator
+    /// CONSTRUCTION, i.e. BEFORE that wait — so what it observes is a PRE-WAIT
+    /// CANDIDATE, not a verdict. In the common case the owning coroutine then
+    /// clears the list and vanilla deals cleanly. Only the wrapper's timeout path
+    /// reports an actual unrepaired state.</summary>
+    [HarmonyPatch(typeof(CardChoice), "ReplaceCards")]
+    internal static class CardChoiceStaleSpawnedCardsPatch
+    {
+        internal const string PrunedKey = "CardChoice-stale-pruned";
+        internal const string NonEmptyDealKey = "CardChoice-nonempty-deal";
+        internal const string StateKey = "CardChoice-replace-state";
+        internal const string WaitKey = "CardChoice-stale-wait";
+
+        /// <summary>How long the deal may wait for the PREVIOUS pick's IDoEndPick
+        /// to reach its own spawnedCards.Clear(). Vanilla's normal tail is ~0.67s
+        /// and the previous owner also spends 0.2s in its final ReplaceCards
+        /// before sending RPCA_DonePicking, so 2.0s is scheduling margin rather
+        /// than a guess — long enough to cover the race, short enough that a
+        /// genuinely wedged client is not held indefinitely.</summary>
+        private const float StaleWaitSeconds = 2.0f;
+
+        // Priority.Last, deliberately (Codex r1 find 3). The only other prefix on
+        // this method, OvtExtraPickRestorePickerPatch (Plugin.cs), REPAIRS
+        // pickrID from -1 back to the extra-pick picker. Running first would make
+        // the state lines below record pickrID=-1 for a perfectly healthy 1v2
+        // extra deal — a value vanilla's body never sees — and a future
+        // investigation would be reading an artefact. Running last logs the state
+        // the body actually receives. Safe because that sibling never touches
+        // spawnedCards, and per #352 HarmonyX runs every prefix regardless.
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Last)]
+        private static void Prefix(CardChoice __instance, bool clear)
+        {
+            try
+            {
+                if (__instance == null) return;
+                var list = __instance.spawnedCards;
+                if (list == null) return;
+
+                int before = list.Count;
+                int dead = 0;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    // Unity fake-null. `list[i] == null` is true for a DESTROYED
+                    // GameObject and for a real null, which are precisely the two
+                    // things vanilla cannot dereference. Never use `(object)x !=
+                    // null` or `?.` for this test — both PASS for a destroyed
+                    // object and would make the guard a silent no-op.
+                    if (list[i] == null) dead++;
+                }
+                int live = before - dead;
+
+                // COUNT FIRST, MUTATE ONLY WHERE IT REPAIRS. See the rule in the
+                // summary: compacting a mixed list hands vanilla a non-empty list
+                // to deal into, which shifts PublicInt.theInt — leaving a stale
+                // offer selectable and the trailing cards without a PublicInt.
+                // Worse than the visible softlock it would replace.
+                if (dead > 0 && (live == 0 || clear))
+                {
+                    // Reverse walk — RemoveAt shifts every higher index down.
+                    for (int i = list.Count - 1; i >= 0; i--)
+                        if (list[i] == null) list.RemoveAt(i);
+
+                    VanillaFixSupport.DiagLimited(
+                        PrunedKey,
+                        // Deliberately neutral about what vanilla WOULD have done
+                        // (r2 find 4): with clear=true, a fake-null pickedCard
+                        // compares EQUAL only to its own entry — Unity equality
+                        // is an instance-ID comparison, so other dead entries stay
+                        // unequal and vanilla would still dereference them. Some
+                        // dead entries are skipped and some are not, so asserting
+                        // a throw we did not establish is the comment-guarantee
+                        // failure this repo keeps paying for.
+                        "CardChoice pruned " + dead.ToString(CultureInfo.InvariantCulture) +
+                        " destroyed entr(ies) from spawnedCards before vanilla read the list" +
+                        " (bug #309)." +
+                        " before=" + before.ToString(CultureInfo.InvariantCulture) +
+                        " after=" + list.Count.ToString(CultureInfo.InvariantCulture) +
+                        " live=" + live.ToString(CultureInfo.InvariantCulture) +
+                        " clear=" + clear +
+                        " picks=" + __instance.picks.ToString(CultureInfo.InvariantCulture) +
+                        " pickrID=" + __instance.pickrID.ToString(CultureInfo.InvariantCulture) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture) +
+                        " t=" + VanillaFixSupport.Float(Time.realtimeSinceStartup),
+                        20);
+                    return;
+                }
+
+                if (dead > 0)
+                {
+                    // Non-all-dead with clear==false: compacting here would be
+                    // worse than the disease, so the list is left exactly as
+                    // vanilla produced it. This is NOT a failure report — the
+                    // Postfix wrapper below has not run yet, and it usually waits
+                    // this state away by letting the owning IDoEndPick reach its
+                    // own Clear(). Recorded as the pre-wait observation, so a
+                    // capture can be read against the wrapper's own outcome line.
+                    VanillaFixSupport.DiagLimited(
+                        PrunedKey,
+                        "CardChoice found a MIXED spawnedCards (dead=" +
+                        dead.ToString(CultureInfo.InvariantCulture) + " live=" +
+                        live.ToString(CultureInfo.InvariantCulture) + ") with clear=false —" +
+                        " NOT pruning: compacting would misalign PublicInt.theInt, leaving a" +
+                        " stale offer selectable and the trailing cards without a PublicInt." +
+                        " Observation only. When picks>0 the Postfix wrapper then waits for the" +
+                        " owning IDoEndPick to clear this list; when picks<=0 there is no deal" +
+                        " to protect and no wait happens (bug #309)." +
+                        " picks=" + __instance.picks.ToString(CultureInfo.InvariantCulture) +
+                        " pickrID=" + __instance.pickrID.ToString(CultureInfo.InvariantCulture) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture) +
+                        " t=" + VanillaFixSupport.Float(Time.realtimeSinceStartup),
+                        20);
+                    return;
+                }
+
+                // Reached only when every entry is LIVE (dead == 0). With
+                // clear=false the deal does `spawnedCards.Add(...)` and then
+                // `spawnedCards[i]`, where i is the CHILDREN index — which only
+                // addresses the card just added when the list started EMPTY. A
+                // non-empty list here misaligns PublicInt.theInt: a stale offer
+                // stays selectable, the trailing cards never receive a PublicInt,
+                // and Pick() can throw AFTER that card's effect already landed.
+                //
+                // This branch used to say the state was "deliberately NOT
+                // repaired". That is now STALE, and the completeness audit was
+                // right to flag it: the Postfix wrapper added in this same change
+                // DOES act on exactly this state — all-live, non-empty, !clear,
+                // picks > 0 — by holding the deal until the owning IDoEndPick
+                // clears the list. What stays true is that the PREFIX does not
+                // repair it, and must not: emptying the list here would mean
+                // CardVisuals.Leave(), which ends in Object.Destroy on a
+                // Photon-owned card root, and a patch may never make that call
+                // (#94). So this line is an observation recorded before the wait,
+                // not a statement that nothing happens.
+                if (!clear && __instance.picks > 0 && list.Count > 0)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        NonEmptyDealKey,
+                        "CardChoice entering a deal with clear=false and a NON-EMPTY spawnedCards" +
+                        " (count=" + list.Count.ToString(CultureInfo.InvariantCulture) +
+                        ") — pre-wait observation; if the owning IDoEndPick does not clear it" +
+                        " before the deadline, PublicInt.theInt alignment will be wrong" +
+                        " picks=" + __instance.picks.ToString(CultureInfo.InvariantCulture) +
+                        " pickrID=" + __instance.pickrID.ToString(CultureInfo.InvariantCulture) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        20);
+                    return;
+                }
+
+                // Normal-path control, bounded. Without it a clean capture cannot
+                // be told apart from a patch that never attached (#83) or one that
+                // attached but was never reached (#286) — which is exactly the
+                // ambiguity that made this bug expensive to read the first time.
+                VanillaFixSupport.DiagLimited(
+                    StateKey,
+                    "CardChoice ReplaceCards count=" + list.Count.ToString(CultureInfo.InvariantCulture) +
+                    " clear=" + clear +
+                    " picks=" + __instance.picks.ToString(CultureInfo.InvariantCulture) +
+                    " pickrID=" + __instance.pickrID.ToString(CultureInfo.InvariantCulture) +
+                    " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                    24);
+            }
+            catch (Exception ex)
+            {
+                // Diagnostics and repair are never allowed to affect vanilla flow.
+                VanillaFixSupport.LogError("CardChoiceStaleSpawnedCards", ex);
+            }
+        }
+
+        /// <summary>THE actual bug #309 repair: hold the new deal until the
+        /// PREVIOUS pick's own IDoEndPick has cleared the list.
+        ///
+        /// THE RACE, verified from the decompile. ReplaceCards runs ONLY on the
+        /// current picker's client (Pick()'s else-branch tests the picker's
+        /// view.IsMine, CardChoice.cs:92-95). IsPicking is released on EVERY
+        /// client by the PREVIOUS picker's RPCA_DonePicking, which that client
+        /// sends from the ReplaceCards started at IDoEndPick:175 — i.e. after ITS
+        /// OWN spawnedCards.Clear() at :172. But every client runs its own
+        /// IDoEndPick. If the next picker's client is running slower, that RPC
+        /// lands while its own IDoEndPick is still between the picked card's
+        /// IMMEDIATE destroy (CardVisuals.Leave -> Object.Destroy, ~0.25s) and its
+        /// own Clear() (~0.67s). Its DoPick loop exits, StartPick fires, and
+        /// ReplaceCards(null, clear:false) deals into a list still holding the
+        /// previous picker's DEAD card — the throw in SpawnUniqueCard:302 that
+        /// softlocks the room. It is a CROSS-CLIENT timing race, which is why it
+        /// is rare and why the reporter was the last of four sequential pickers.
+        ///
+        /// WHY WAIT RATHER THAN MUTATE. Clearing the list here would be actively
+        /// harmful: if our own IDoEndPick has not yet reached its element loop,
+        /// an early clear means the non-picked cards never receive
+        /// RemoveAfterSeconds (CardChoice.cs:145-150) and become permanent
+        /// litter. Compacting is worse still — it breaks the theInt = i index
+        /// invariant. Waiting mutates nothing and lets the coroutine that OWNS
+        /// the cleanup finish it.
+        ///
+        /// clear == true is deliberately NOT wrapped (design review A6): vanilla's
+        /// own Clear() for that path is at :225, INSIDE this very iterator, so
+        /// waiting for Count == 0 would wait on ourselves until the deadline.
+        ///
+        /// FAIL-OPEN IS THE LOAD-BEARING PROPERTY (design review find 1). Every
+        /// wrapper-owned step is individually guarded, because anything we throw
+        /// before driving the original iterator would skip picks--, isPlaying and
+        /// RPCA_DonePicking and manufacture the very softlock this repairs. We
+        /// never catch exceptions thrown by the ORIGINAL iterator — those are
+        /// vanilla's and must stay visible.
+        ///
+        /// SCOPE. This closes the verified construction-time race. It is not a
+        /// general stale-card repair. ALL THREE remaining unguarded dereferences
+        /// stay unguarded — CardIDs:103, the clear:true loop at :216, and
+        /// ReplaceCards:233 (spawnedCards[i].AddComponent&lt;PublicInt&gt;()), which is
+        /// reachable on the very timeout path the next clause admits. No vanilla
+        /// producer was found for the first two, and the timeout fallback below can
+        /// still reach vanilla's throw for the third. Those
+        /// need a separate slot-preserving design and are tracked as their own
+        /// item.</summary>
+        [HarmonyPostfix]
+        private static void Postfix(CardChoice __instance, bool clear, ref IEnumerator __result)
+        {
+            try
+            {
+                if (__result == null || __instance == null) return;
+                // Vanilla clears the list itself on this path; see A6 above.
+                if (clear) return;
+                // picks <= 0 means this call only sends RPCA_DonePicking.
+                if (__instance.picks <= 0) return;
+                var list = __instance.spawnedCards;
+                if (list == null || list.Count == 0) return;   // healthy: untouched
+                __result = WaitForStaleListThenDeal(__instance, __result);
+            }
+            catch (Exception ex)
+            {
+                // Leave __result exactly as vanilla produced it. A failure to
+                // WRAP must never become a failure to DEAL.
+                VanillaFixSupport.LogError("CardChoiceStaleDealWrap", ex);
+            }
+        }
+
+        private static IEnumerator WaitForStaleListThenDeal(CardChoice cc, IEnumerator inner)
+        {
+            // Vanilla sets this too, as its SECOND statement — the first is the
+            // card-appear sound at CardChoice.cs:205-208, which our wait therefore
+            // defers by up to StaleWaitSeconds. Required here: during our wait the list
+            // still holds the PREVIOUS offer, and DoPlayerSelect's Jump branch is
+            // gated on !isPlaying (CardChoice.cs:398) — without this the player
+            // could pick a card from the offer that just ended.
+            try { cc.isPlaying = true; } catch { }
+
+            float deadline = 0f;
+            bool armed = false;
+            try { deadline = Time.realtimeSinceStartup + StaleWaitSeconds; armed = true; }
+            catch { armed = false; }
+
+            bool emptied = false;
+            if (armed)
+            {
+                while (true)
+                {
+                    bool wait = false;
+                    try
+                    {
+                        var l = cc.spawnedCards;
+                        if (l == null || l.Count == 0) { emptied = true; }
+                        else if (Time.realtimeSinceStartup < deadline) { wait = true; }
+                    }
+                    catch { wait = false; }        // inspection failed -> fall through to vanilla
+                    if (emptied || !wait) break;
+                    yield return null;
+                }
+            }
+
+            if (armed && !emptied)
+            {
+                // Deadline. Give the owning coroutine one last scheduler turn
+                // before judging it dead (design review A3), then re-examine.
+                yield return null;
+                try { FinalPruneIfAllDead(cc); } catch { }
+            }
+
+            // Drive vanilla to completion. Deliberately unguarded: an exception
+            // from HERE is vanilla's own and must not be swallowed or reshaped.
+            while (inner.MoveNext()) yield return inner.Current;
+        }
+
+        /// <summary>Deadline fallback. The construction-time Prefix ran up to
+        /// StaleWaitSeconds ago, so the list may have become ALL-dead while we
+        /// waited — a state it would now be safe to prune but which it never saw
+        /// (design review find 2). Prunes ONLY when every remaining entry is
+        /// fake-null, i.e. when pruning empties the list and restores the deal
+        /// branch's required invariant. Any list with a live survivor — mixed or
+        /// wholly live — is left exactly as vanilla found it.</summary>
+        private static void FinalPruneIfAllDead(CardChoice cc)
+        {
+            var list = cc == null ? null : cc.spawnedCards;
+            if (list == null || list.Count == 0) return;
+
+            int before = list.Count;
+            int live = 0;
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] != null) live++;
+
+            if (live == 0)
+            {
+                list.Clear();
+                VanillaFixSupport.DiagLimited(
+                    WaitKey,
+                    "CardChoice stale-list wait hit the " +
+                    StaleWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
+                    "s deadline; every remaining entry had died meanwhile, so the list was" +
+                    " emptied and the deal proceeds cleanly (bug #309 fallback)." +
+                    " before=" + before.ToString(CultureInfo.InvariantCulture) +
+                    " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                    20);
+                return;
+            }
+
+            VanillaFixSupport.DiagLimited(
+                WaitKey,
+                "CardChoice stale-list wait hit the " +
+                StaleWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
+                "s deadline with the previous offer still present (count=" +
+                before.ToString(CultureInfo.InvariantCulture) + " live=" +
+                live.ToString(CultureInfo.InvariantCulture) + "). NOT pruning a" +
+                " non-all-dead list — entering vanilla unchanged, which may throw" +
+                " and softlock exactly as it does today (bug #309, uncovered shape)." +
+                " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                20);
         }
     }
 }
