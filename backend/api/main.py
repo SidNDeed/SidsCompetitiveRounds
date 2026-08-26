@@ -25339,7 +25339,17 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
     if gold_amt and not await _achievement_payment_eligible(db, target.id, req.achievement_key):
         # Logged, because a silently-withheld payment is indistinguishable from
         # a bug when the admin who pressed the button asks why nothing moved.
-        print(f"[ACH] admin grant of {req.achievement_key} to {req.steam_id} - "
+        # req.target_steam_id, NOT req.steam_id: this model has no steam_id, and
+        # with no extra="allow" anywhere in this file that attribute access
+        # raises AttributeError and 500s the request. The money property still
+        # held -- the raise lands before the gold UPDATE and before commit -- but
+        # it held by CRASHING, and the whole transaction went with it: the
+        # achievement row, the gated title item, and the audit row all rolled
+        # back, so the intended "grant it, just without payment" became "grant
+        # nothing, show the admin an opaque 500". The line whose entire purpose
+        # was to stop a withheld payment looking like a bug was the line that
+        # could not print.
+        print(f"[ACH] admin grant of {req.achievement_key} to {req.target_steam_id} - "
               f"gold already booked, granting achievement without payment")
         gold_amt = 0
     if gold_amt:
