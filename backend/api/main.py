@@ -28,7 +28,7 @@ import json as _json
 from pydantic import BaseModel, Field
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -106,6 +106,85 @@ MATCH_HMAC_SECRET = os.getenv("MATCH_HMAC_SECRET", "")
 # SEPARATE secret that exists only in the server .env and in the admin's own
 # local BepInEx config (delivered out-of-band, never compiled or shipped).
 ADMIN_HMAC_SECRET = os.getenv("ADMIN_HMAC_SECRET", "")
+
+# ── Read-replica mode ──────────────────────────────────────────
+#
+# The standby runs this SAME application against a PostgreSQL in streaming
+# recovery, and the edge routes a regex allowlist of GET/HEAD analytics reads
+# to it. Recovery REJECTS every write, so a code path that writes must be
+# SKIPPED there, not attempted — and the dangerous ones are not the loud
+# failures but the quiet ones (see _grant_podium_titles).
+#
+# FAIL TOWARD THE PRIMARY, ALWAYS. Absent, empty, whitespace, misspelled, or
+# any value that is not an explicit affirmative means PRIMARY. A typo in the
+# .env, a half-rendered template, or a parser written years from now can then
+# only ever produce a normal primary — never a production box whose schedulers
+# have been silently switched off.
+#
+# THE ABSENCE OF THIS VAR ON THE PRIMARY IS ITSELF THE SAFETY PROPERTY. DO NOT
+# "TIDY" THE TEMPLATE BY ADDING SCR_REPLICA_MODE=0 THERE. os.getenv() returns
+# the STRING "0", which is TRUTHY in Python: the value check below handles it
+# correctly, but a future presence check — `if os.getenv("SCR_REPLICA_MODE"):`
+# — would read it as ENABLED and neuter the primary. Emitting nothing is
+# unambiguous under every possible parser, including ones this template will
+# never see. Rendered from `scr_role`, so the line follows the ROLE and not the
+# box across a rotation.
+#
+# DELIVERY IS NOT AUTOMATIC, and this was a CONFIRMED HIGH in review: putting
+# the line in .env is necessary and NOT sufficient. This compose project has no
+# `env_file:`, and the api service enumerates `environment:` explicitly, so a
+# .env key reaches compose for INTERPOLATION but never reaches the container
+# process unless it is listed there too. Without that entry os.getenv returns
+# "" here and the whole of replica mode is INERT while looking healthy -- the
+# exact silent-no-op class this feature exists to remove. The mapping lives in
+# docker-compose.yml beside STEAM_AUTH_ENFORCE.
+#
+# THE STANDBY GETS THIS BY GIT, NOT BY SCP, and the distinction cost a round of
+# review to get right. The deploy runbook says "do NOT push docker-compose.yml
+# to the standby" -- true, and about the SCP path: the two boxes do not run the
+# same service set. But /opt/competitive-rounds on both boxes is a CLONE of this
+# repo tracking main, refreshed by the infra-side ansible git task, and this
+# file is an unmodified clone artifact there. So the mapping arrives on the
+# standby the moment it is committed and pushed. Do NOT "helpfully" hand-edit
+# the standby's copy to hurry it along: that turns a clean clone into a locally
+# modified one, and the next repo update refuses or conflicts.
+#
+# ACCEPTANCE TEST, and it is not optional -- an env var and a mapping can both be
+# right while the box still boots as a primary:
+#   ssh ccdeploy@<standby> 'logs:api' | grep 'BOOTING AS READ REPLICA'
+# Banners print on BOTH branches deliberately, so all three outcomes are
+# distinguishable: the replica banner means it took; the PRIMARY banner on the
+# standby means the var did not reach the process; no banner at all means the
+# deploy predates this code. Until the replica banner is observed there, replica
+# mode is NOT shipped and every guard in this file is dead on that box while all
+# of its logs look perfectly healthy.
+#
+# Note the mapping uses `${SCR_REPLICA_MODE:-}`, so on the primary the container
+# receives the key with an EMPTY value rather than not at all. That is still
+# safe under the check below, and safe under a presence check too (empty string
+# is falsy). The `=0` warning above is unaffected and still applies.
+#
+# Prefixed deliberately: the .env is shared with the postgres container, where
+# a bare REPLICA_MODE would be ambiguous. SCR_ has precedent in this backend
+# (discord_bot.py's SCR_TOURNAMENTS_CHANNEL).
+IS_REPLICA = os.getenv("SCR_REPLICA_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+
+# Every replica guard announces itself ONCE per process. Without this the
+# guards are silent by construction, and silence is indistinguishable from
+# "this code never ran" -- which is precisely the failure mode replica mode
+# exists to remove (a silently-skipped write is what made the podium grant
+# invisible for as long as read-routing has been live). Once per name, not per
+# call: the podium guard sits on a per-request path and a line per request
+# would bury everything else. It is also the ONLY signal that would reveal the
+# edge allowlist drifting to route a write-bearing endpoint here.
+_REPLICA_SKIPS_SEEN: set = set()
+
+
+def _replica_skip(name: str) -> None:
+    if name not in _REPLICA_SKIPS_SEEN:
+        _REPLICA_SKIPS_SEEN.add(name)
+        print(f"[REPLICA] skipped write path {name!r} "
+              f"(read replica; the primary owns this work)")
 # Code-owned deliberately: the old env knob was never used intentionally,
 # .env is opaque to tooling, and a live pin could silently defeat a code
 # change (learning #190's persisted-default class).
@@ -347,6 +426,20 @@ async def _grant_podium_titles(player_ids: list) -> None:
     handled at render time by _display_title_sync."""
     if not player_ids:
         return
+    if IS_REPLICA:
+        _replica_skip("podium_grant")
+        # THE reason replica mode cannot be a scheduler switch. This helper is
+        # reached from fifteen GET routes, and the edge's read allowlist
+        # demonstrably routes two of them — /leaderboard and
+        # /players/{id}/matches. On a replica the INSERT raises, and because
+        # this runs in its OWN session and swallows its own exception below, it
+        # fails SILENTLY: no 500, no signal, just a log line every 60s per
+        # board forever. The read-routing acceptance test was "smoke every
+        # endpoint, zero 500s", which cannot see this class at all.
+        # Skipping costs nothing: the grant is idempotent and grant-only, the
+        # PRIMARY performs it from its own traffic, and display is decided at
+        # render time by _display_title_sync rather than by this row.
+        return
     try:
         from database import async_session
         async with async_session() as gdb:
@@ -443,6 +536,13 @@ async def _grant_mode_podium_titles(sku: str, player_ids: list) -> None:
     transaction), so it must commit without touching the caller's. Grant only,
     never revoke — falling off the podium is a render-time decision."""
     if not player_ids:
+        return
+    if IS_REPLICA:
+        _replica_skip("mode_podium_grant")
+        # Same silent-failure class as _grant_podium_titles, same reasoning:
+        # own session, own swallow, reached from the routed mode boards
+        # (/ffa/leaderboard, /team/leaderboard, /ovt/leaderboard, /ffa/recent,
+        # /team/all-series-paged). The primary owns the grant.
         return
     try:
         from database import async_session
@@ -1877,6 +1977,7 @@ async def min_version_autoraise_loop():
     holdout_params = {"latest": LATEST_MOD_VERSION,
                       "mins": str(QUIET_MINUTES)}
     while True:
+        _cancelled = False
         try:
             # This must precede every other DB action and the in-memory
             # no-op check: a transient boot read heals within one sweep.
@@ -1934,7 +2035,78 @@ async def min_version_autoraise_loop():
                   f"(adopters={adopters}, quiet={QUIET_MINUTES}m)")
         except Exception as ex:
             print(f"[MINVER] sweep error ({type(ex).__name__}: {ex})")
-        await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            # CancelledError derives from BaseException, so the handler above
+            # does NOT catch it -- but the `finally` below still runs, and an
+            # `await sleep(60)` started DURING teardown makes lifespan's
+            # gather() hang for up to a minute per loop (review MEDIUM). Flag
+            # it so the sleep is skipped, and re-raise so cancellation still
+            # unwinds normally.
+            _cancelled = True
+            raise
+        finally:
+            # `finally`, NOT a trailing statement. This sleep used to sit
+            # outside the try, and the try contains SIX `continue`s — every one
+            # of them skipped it. The steady state after a successful raise is
+            # the second continue (`effective >= LATEST`), which is true
+            # FOREVER, so this loop span at full speed issuing a SELECT per
+            # iteration against the single-worker API's own pool. A `continue`
+            # inside a try still runs `finally`, so this now throttles every
+            # path. Pre-existing production defect found during the replica
+            # work, fixed here because this loop is being touched anyway.
+            if not _cancelled:
+                await asyncio.sleep(60)
+
+
+async def min_version_follow_loop():
+    """REPLICA-ONLY, READ-ONLY twin of min_version_autoraise_loop.
+
+    MIN_MOD_VERSION_EFFECTIVE is a module global refreshed by
+    _min_version_autoraise_restore() -- at boot, and at the top of every
+    autoraise sweep. (An earlier draft said "ONLY by"; that is false --
+    min_version_autoraise_loop also assigns it directly after a successful
+    raise. The distinction matters here because the replica never takes that
+    branch, so the restore really is its only source.) Replica mode disables that sweep because its second half
+    WRITES (runtime_settings + pending_dms), but disabling it wholesale would
+    freeze the replica's version floor at whatever it read during boot. The
+    primary would then auto-raise and the replica would keep returning 200 to
+    clients the primary 426s — on precisely the endpoints the edge routes to
+    it. The two boxes' version gates would diverge until the next restart.
+
+    The restore half is a pure SELECT of runtime_settings, which recovery
+    permits. So the replica follows the floor and never raises it.
+
+    BOUND, stated because the docstring above would otherwise overclaim: the
+    restore CLAMPS the stored floor to this box's own compiled
+    LATEST_MOD_VERSION. So if the standby is running an older release than the
+    primary -- exactly what happens when the standby half of a deploy is
+    skipped, which has shipped undetected once already -- it will follow the
+    floor only up to its own LATEST and then stop. That residual divergence is
+    bounded by the version lag and clears when the standby is redeployed; it is
+    not something this loop can fix, and the clamp firing is logged by the
+    restore itself.
+    """
+    while True:
+        _cancelled = False
+        try:
+            await _min_version_autoraise_restore()
+        except asyncio.CancelledError:
+            # See the sibling loop: BaseException, so `except Exception` misses
+            # it, but `finally` still runs and would start a fresh 60s sleep
+            # during shutdown.
+            _cancelled = True
+            raise
+        except Exception as ex:
+            print(f"[MINVER] replica floor-follow error ({type(ex).__name__}: {ex})")
+        finally:
+            # In `finally` from the outset -- the sibling loop above shipped
+            # with this same sleep OUTSIDE its try, and span in production
+            # until this batch fixed it. (An earlier draft of this comment said
+            # "for months"; the sibling is recent, and the spin is what was
+            # long-lived, not the line. Corrected rather than left as a
+            # plausible-sounding number nobody had checked.)
+            if not _cancelled:
+                await asyncio.sleep(60)
 
 
 @asynccontextmanager
@@ -1945,18 +2117,59 @@ async def lifespan(app: FastAPI):
     tasks: list[asyncio.Task] = []
     try:
         from tournaments import tournament_tick
+        # Read-only, and deliberately OUTSIDE the replica branch: both roles
+        # need the durable floor at boot, or the box enforces the COMPILED
+        # default instead of the stored one.
         await _min_version_autoraise_restore()
-        tasks.append(asyncio.create_task(
-            _supervised("queue_cleanup", queue_cleanup_loop)))
-        tasks.append(asyncio.create_task(
-            _supervised("team_queue_cleanup", team_queue_cleanup_loop)))
-        tasks.append(asyncio.create_task(
-            _supervised("tournament_tick", tournament_tick)))
-        tasks.append(asyncio.create_task(
-            _supervised("min_version_autoraise", min_version_autoraise_loop)))
-        # Detached one-shot, deliberately NOT under _supervised (its while-True
-        # would rerun a returning task forever) and not awaited on the boot path.
-        tasks.append(asyncio.create_task(_run_janitor_query_selftest()))
+        if IS_REPLICA:
+            # Every loop below this line WRITES -- queue/lobby DELETEs, series
+            # cancels, gold movement, tournament progression, runtime_settings
+            # upserts -- and those writes raise in recovery. (Not literally "on
+            # every tick, all of them": min_version_autoraise_loop only writes
+            # when it actually raises the floor, and otherwise just reads. The
+            # earlier wording overstated it; the conclusion is unchanged,
+            # because a loop whose whole purpose is a write has nothing to do
+            # on a replica.) A supervised task that raises every 60s is also
+            # pure noise that buries real errors. The PRIMARY owns all of this
+            # work; the replica is a read surface and nothing more.
+            print("[REPLICA] BOOTING AS READ REPLICA: write schedulers disabled "
+                  "(queue_cleanup, team_queue_cleanup, tournament_tick, "
+                  "min_version_autoraise, janitor self-test)")
+            # The floor still has to track the primary — see the docstring.
+            tasks.append(asyncio.create_task(
+                _supervised("min_version_follow", min_version_follow_loop)))
+            # Say so, rather than leaving the endpoint reporting "pending"
+            # forever -- which is indistinguishable from a self-test that hung.
+            _janitor_selftest_report.clear()
+            _janitor_selftest_report.update({
+                "status": "skipped",
+                "reason": "read replica: the janitor writers this validates do not run here",
+            })
+            # The janitor self-test is skipped rather than trusted: it EXPLAINs
+            # janitor SQL containing FOR UPDATE SKIP LOCKED, and whether
+            # recovery accepts EXPLAIN of a locking statement is UNVERIFIED
+            # here. It is boot-time diagnostics for writers this box does not
+            # run, so there is nothing to learn and a false-alarm banner to
+            # lose.
+        else:
+            # Say the role out loud on BOTH paths. With a banner on only one of
+            # them, "which mode did this box boot in" is answerable solely by
+            # the ABSENCE of a line -- indistinguishable from a log that
+            # scrolled, or from an older build that predates the feature.
+            print("[REPLICA] booting as PRIMARY: all write schedulers enabled")
+            tasks.append(asyncio.create_task(
+                _supervised("queue_cleanup", queue_cleanup_loop)))
+            tasks.append(asyncio.create_task(
+                _supervised("team_queue_cleanup", team_queue_cleanup_loop)))
+            tasks.append(asyncio.create_task(
+                _supervised("tournament_tick", tournament_tick)))
+            tasks.append(asyncio.create_task(
+                _supervised("min_version_autoraise", min_version_autoraise_loop)))
+            # Detached one-shot, deliberately NOT under _supervised (its while-True
+            # would rerun a returning task forever) and not awaited on the boot path.
+            tasks.append(asyncio.create_task(_run_janitor_query_selftest()))
+        # Read-only (SELECT COUNT per table, each begin_nested-wrapped), so it
+        # runs on both roles.
         await _run_service_policy_audit(force=True)
         yield
     finally:
@@ -3091,6 +3304,30 @@ REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should b
 # counters. They keep working otherwise (per-match columns still store).
 STATS_CLEAN_MIN_VERSION = "1.34.0"
 
+# #308 part 5 - the BULLET floor, deliberately SEPARATE from the block floor
+# above. The two counters were fixed in different releases and share nothing but
+# the `if` they used to sit behind.
+#
+# 1.34.0 fixed the BLOCK spec and it has been correct ever since, so blocks must
+# keep accumulating from 1.34.0 onward. 1.34.0 is also the release that OPENED
+# the bullet leak: it began counting direct hits at the impact funnel while the
+# fired side stayed gated on a log-text pick-phase flag, so the denominator lost
+# shots the numerator kept and career Hit% drifted to a hard 100% (#308). Every
+# "clean" bullet total since the migration-135 wipe was fed by that client.
+#
+# Raising the shared constant would have been wrong in both directions at once:
+# it would discard four releases of perfectly good block data, and it still
+# would not fix bullets, because the totals already banked stay mixed. Hence a
+# split floor plus a one-time reset of the bullet columns only.
+#
+# WHY 1.39.4 AND NOT THE RELEASE NUMBER ITSELF: the fix is unreleased, and the
+# release it ships in is the owner's call. 1.39.3 is live, so no build can ever
+# exist between it and the next release - which makes "the smallest version
+# above the current one" correct for ANY number the owner picks (1.39.4, 1.40.0,
+# ...) while still excluding every build that carries the bug. Naming a guessed
+# release here would silently disarm the floor if the guess came in high.
+BULLET_STATS_CLEAN_MIN_VERSION = "1.39.4"
+
 # Per-request mod version captured from the X-Mod-Version header by the
 # version-gate middleware. Identity-bound _mark_mod_seen callers may use it
 # to stamp players.mod_version without threading the request object through.
@@ -3297,6 +3534,16 @@ _RL_SENSITIVE_PREFIXES = (
     "/api/v1/shop/purchase", "/api/v1/queue/join", "/api/v1/team/queue/join",
     "/api/v1/players/block", "/api/v1/players/unblock", "/api/v1/mod/toggle-ranked",
     "/api/v1/auth/steam",  # token minting — throttle floods (July 21)
+    # Credential minting, same reasoning as /auth/steam. Does NOT collide with
+    # /players/link-discord (different prefix), and the bot's calls carry
+    # X-Internal-Key and bypass the limiter anyway. A real client mints one code
+    # per button press, so 20/10s is nowhere near binding.
+    "/api/v1/players/link-code",
+    # Log downloads can return megabytes each, so they belong in the tighter
+    # bucket. THE TRAILING SLASH IS LOAD-BEARING: it must not match the POST
+    # submit route (/api/v1/bug-reports, no slash), which is unauthenticated
+    # and already has its own per-steam daily cap.
+    "/api/v1/bug-reports/",
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
     # Lobby-phase wagers (migration 207). startswith also covers
@@ -3462,6 +3709,53 @@ async def version_gate(request: Request, call_next):
         _current_mod_version.reset(token)
 
 
+@app.middleware("http")
+async def replica_write_gate(request: Request, call_next):
+    """On a read replica, refuse anything that is not a read.
+
+    DEFENCE IN DEPTH, not the primary control. The edge already gates by
+    method: `map $request_method $scr_read_target` sends only GET and HEAD to
+    the standby and everything else to the primary, verified empirically with
+    the debug-upstream header. In normal operation this never fires.
+
+    It exists because that allowlist is config on another box, and nginx
+    `location` matching is itself method-BLIND -- only the map makes it
+    method-aware. An edit that dropped the map, or a request that reached this
+    node without passing the edge, would put writes on a database in recovery.
+    The honest answer then is a clean refusal naming the reason, rather than a
+    500 surfacing from postgres several layers down, or a half-applied write.
+
+    Registered LAST, so it is the OUTERMOST middleware and refuses before any
+    other layer does work. Inert on the primary: one boolean per request.
+
+    WHAT IT DOES NOT COVER, stated because a gate is easy to over-read:
+      * WRITE-ON-GET. This codebase's dominant write shape is a GET that writes
+        through a shared helper, and no method test can see those. They are
+        handled individually at their choke points (grep IS_REPLICA), and the
+        real control for them is the edge's read allowlist, which is a regex of
+        analytics reads and routes nothing else here.
+      * WEBSOCKETS. Starlette's http middleware never runs for a websocket
+        scope, so the chat socket bypasses this entirely. It is not in the edge
+        allowlist either, so it cannot arrive here through the documented path.
+    This gate is a backstop for the one case a method test CAN catch: a
+    non-GET arriving at a read replica.
+    """
+    if IS_REPLICA and request.method not in ("GET", "HEAD", "OPTIONS"):
+        # Announce once per METHOD. A refusal that leaves no trace means the
+        # box can be rejecting every write while `logs:api` shows nothing --
+        # and since the edge is supposed to make this unreachable, a single
+        # line here is evidence that its method map has stopped working.
+        _replica_skip(f"write-gate:{request.method}")
+        return JSONResponse(
+            status_code=503,
+            content={"error": "read_replica",
+                     "detail": "This node serves reads only; writes are handled by "
+                               "the primary. Seeing this means a request reached the "
+                               "standby that should not have."},
+        )
+    return await call_next(request)
+
+
 # ── Helpers ────────────────────────────────────────────────────
 
 # End-of-game BUILD STATS (Aug 12 item 1, migration 216). ONE fixed-shape,
@@ -3502,6 +3796,30 @@ def _hash_steam_id(steam_id: str) -> str:
     """Server-salted one-way hash. Used to identify previously-purged Steam IDs
     without storing the Steam ID itself."""
     return hashlib.sha256(f"{MATCH_HMAC_SECRET}:{steam_id}".encode()).hexdigest()
+
+
+async def _purged_steam_ids(db: AsyncSession, steam_ids: list) -> set:
+    """Which of these SteamID64s belong to accounts that exercised deletion?
+
+    ONE query, not one per id. The per-id helper below is fine for a single
+    check but the bug-log scrubber feeds it up to 500 distinct ids from
+    attacker-authored content, and 500 sequential round trips on an API that
+    runs exactly one worker (#125) is a self-inflicted stall.
+
+    CAST is load-bearing (#275): a bare parameter inside ANY() gives asyncpg's
+    prepare no type context, which is an AmbiguousParameterError at runtime and
+    a silent feature death in review.
+    """
+    if not steam_ids or not MATCH_HMAC_SECRET:
+        return set()
+    by_hash = {}
+    for sid in steam_ids:
+        by_hash[_hash_steam_id(sid)] = sid
+    rows = (await db.execute(text(
+        "SELECT steam_id_hash FROM deleted_steam_ids "
+        "WHERE steam_id_hash = ANY(CAST(:hashes AS text[]))"
+    ), {"hashes": list(by_hash.keys())})).scalars().all()
+    return {by_hash[h] for h in rows if h in by_hash}
 
 
 async def _is_steam_id_purged(db: AsyncSession, steam_id: str) -> bool:
@@ -5153,11 +5471,16 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # (REQUIRE_MOD_VERSION); _parse_version returns (0,) on garbage → fails
     # closed. Per-match p1_/p2_ columns still store for every client.
     _reporter_ver = _parse_version(_current_mod_version.get() or "0")
-    if _reporter_ver >= _parse_version(STATS_CLEAN_MIN_VERSION):
+    # #308 part 5: bullets and blocks now clear SEPARATE floors. Blocks have been
+    # correct since 1.34.0; bullets only became correct in the release named by
+    # BULLET_STATS_CLEAN_MIN_VERSION. One `if` for both would either keep feeding
+    # broken bullet counts or throw away four releases of valid block counts.
+    if _reporter_ver >= _parse_version(BULLET_STATS_CLEAN_MIN_VERSION):
         if report.local_bullets_fired:
             reporter.bullets_fired = (reporter.bullets_fired or 0) + report.local_bullets_fired
         if report.local_bullets_hit:
             reporter.bullets_hit = (reporter.bullets_hit or 0) + report.local_bullets_hit
+    if _reporter_ver >= _parse_version(STATS_CLEAN_MIN_VERSION):
         if report.local_blocks_activated:
             reporter.blocks_activated = (reporter.blocks_activated or 0) + report.local_blocks_activated
         if report.local_blocks_successful:
@@ -9914,7 +10237,13 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
                     "SELECT 1 FROM steam_sessions WHERE steam_id = :sid "
                     "AND verified AND issued_at > NOW() - INTERVAL '7 days' LIMIT 1"
                 ), {"sid": steam_id})).scalar() is not None
-                if armed:
+                if armed and IS_REPLICA:
+                    _replica_skip("steam_auth_arming_backfill")
+                if armed and not IS_REPLICA:
+                    # `and not IS_REPLICA`: the backfill below is a WRITE on a
+                    # read path. It is already savepointed and soft-failing, so
+                    # a replica would only produce a misleading log line every
+                    # time — skipped so that log stays meaningful.
                     # Codex review find: a verified mint that beat the Player
                     # row's creation stamped nothing (UPDATE hit zero rows).
                     # Backfill the monotonic column whenever session history
@@ -12338,11 +12667,47 @@ async def report_casual_dc(
 # ── Routes: Discord Linking ──────────────────────────────────────
 
 @app.post("/api/v1/players/link-code", tags=["Discord"])
-async def generate_link_code(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def generate_link_code(
+    request: Request,
+    steam_id: str = Query(..., max_length=32),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Generate a 6-character verification code for Discord linking.
     Code expires after 10 minutes.
+
+    STRICT session gate (2026-08-25). The code is a BEARER credential:
+    /players/link-discord binds whoever types "!link <code>" in Discord to this
+    steam_id with no further proof of ownership, and it OVERWRITES an existing
+    discord_id, silently displacing the prior owner. Until now this endpoint
+    took a bare steam_id with NO authentication whatsoever, so anyone could read
+    a steam_id off the public leaderboard, mint that account's code here, and
+    bind their own Discord to it. The /link-discord half was already bot-gated
+    and its own comment names the threat ("anyone who glimpsed a victim's 6-char
+    code") -- but glimpsing was never necessary. The gate belongs on the MINT.
+
+    STRICT rather than _check_steam_session: that helper only raises when
+    STEAM_AUTH_ENFORCE is armed, which is OFF in production (probed), and its
+    remaining carve-out keys on the attacker-controlled X-Mod-Version. Its own
+    docstring calls that "a compatibility carve-out, not a security boundary" --
+    which a privilege gate cannot be built on.
     """
+    # BEFORE the Player lookup, deliberately. Checking after would answer 404
+    # for an unknown steam_id and 401 for a known one, turning this into an
+    # account-existence oracle for unauthenticated callers -- and it would leave
+    # the "DELETE FROM link_codes WHERE player_id" below reachable, which
+    # pre-fix let an attacker wipe a victim's pending code in the window between
+    # the victim reading it off the F5 panel and typing it into Discord.
+    #
+    # The detail string is LOAD-BEARING, not cosmetic: ApiClient
+    # .HandleSessionReject matches the literal "session_required" to invalidate
+    # a stale token, so a client with an expired session self-heals (401 ->
+    # invalidate -> re-mint -> the second click works). Any other string leaves
+    # it broken until the session would have expired anyway.
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        print(f"[LINK] link-code refused (no valid session) steam_id={steam_id}")
+        raise HTTPException(status_code=401, detail="session_required")
+
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if not player:
@@ -12351,8 +12716,12 @@ async def generate_link_code(steam_id: str = Query(...), db: AsyncSession = Depe
     # Delete any existing codes for this player
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": player.id})
 
-    # Generate a 6-char uppercase alphanumeric code
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    # Generate a 6-char uppercase alphanumeric code.
+    # secrets, not random: this is a BEARER credential and every other mint in
+    # this file already uses secrets. random.choices draws from MT19937, which
+    # is not a security PRNG -- cheap to fix, and it removes the question
+    # entirely rather than arguing about how feasible predicting it would be.
+    code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
     expires = datetime.now(timezone.utc) + timedelta(minutes=10)
 
     db.add(LinkCode(player_id=player.id, code=code, expires_at=expires))
@@ -12385,8 +12754,15 @@ async def link_discord(
     await db.execute(text("DELETE FROM link_codes WHERE expires_at < now()"))
 
     # Find the code
+    # The expires_at predicate is deliberate belt-and-braces: today this lookup
+    # is correct ONLY because the "DELETE ... WHERE expires_at < now()" sweep
+    # happens to run just above it in the same transaction. Move that sweep,
+    # wrap it in a savepoint that rolls back, or reorder it, and every expired
+    # code silently becomes valid forever. One predicate stops the ordering
+    # being load-bearing.
     result = await db.execute(
-        select(LinkCode).where(LinkCode.code == code.upper())
+        select(LinkCode).where(LinkCode.code == code.upper(),
+                               LinkCode.expires_at > func.now())
     )
     link = result.scalar_one_or_none()
     if not link:
@@ -12398,7 +12774,10 @@ async def link_discord(
     )
     existing_player = existing.scalar_one_or_none()
     if existing_player and existing_player.id != link.player_id:
-        # Unlink old player
+        # Unlink old player. Logged because there is no audit row anywhere for a
+        # discord_id change: before this, a takeover was retroactively invisible.
+        print(f"[LINK] rebind: discord_id={discord_id} released from "
+              f"steam_id={existing_player.steam_id}")
         existing_player.discord_id = None
 
     # Link the discord account
@@ -12407,6 +12786,9 @@ async def link_discord(
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
+    if player.discord_id and player.discord_id != discord_id:
+        print(f"[LINK] rebind: steam_id={player.steam_id} "
+              f"discord {player.discord_id} -> {discord_id}")
     player.discord_id = discord_id
     if discord_username:
         player.discord_username = discord_username
@@ -18312,6 +18694,13 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     have a 7-day match deadline and the series row is created at lock time
     (potentially days before the players actually meet up).
     Returns the number of series changed across all modes."""
+    if IS_REPLICA:
+        _replica_skip("prune_stale_series")
+        # Moves GOLD (refunds via _refund_series_bets) and abandons series.
+        # The edge does not route /series/active — only series/recent — so this
+        # is defence rather than a live path, but routing is config that can
+        # change and this helper must never run against recovery.
+        return 0
     cutoff_min = 30
     stalled_min = 60
     # Mode 1: no match reported → abandon.
@@ -18374,7 +18763,19 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
     try:
         await _prune_stale_series(db)
     except Exception as e:
+        # THE ROLLBACK IS LOAD-BEARING, and its absence is a live defect on the
+        # PRIMARY (#235's exact mechanism). Under asyncpg a failed write ABORTS
+        # the surrounding transaction, so without this the very next statement —
+        # the main SELECT below, which is OUTSIDE this try — dies with
+        # InFailedSqlTransaction and the endpoint 500s. Intermittent by nature:
+        # it only fires when there is actually a stale series to prune, which is
+        # exactly why it has survived unnoticed. Catching without rolling back
+        # does not contain a failure; it defers it onto an innocent statement.
         print(f"[SERIES] prune error: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
     rows = (await db.execute(text("""
         SELECT
             rs.id::text                AS series_id,
@@ -23265,6 +23666,53 @@ async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
         print(f"[ACHIEVEMENT] granted title item {sku} to {player_id}")
 
 
+async def _achievement_payment_eligible(db: AsyncSession, player_id, achievement_key: str) -> bool:
+    """Is this player owed GOLD for this achievement key, or have they already
+    been paid for it? (bug #268, migration 257.)
+
+    Achievements can be REVOKED and re-earned: the Untouchable cohort was
+    revoked wholesale because a detector bug had granted it wrongly, with the
+    owner's direction that holders KEEP the gold. Nothing before this consulted
+    anything but the absence of a PlayerAchievement row — which is exactly what
+    a revocation removes — so every re-earn paid a second time.
+
+    MUST be consulted by EVERY paying grant path. There are THREE, and each
+    revision of this fix has missed one:
+      1. `_grant_achievement_inline`  - server-derived achievements.
+      2. `POST /achievements/unlock`  - signed, client-DETECTED achievements,
+         which is how Untouchable is actually granted. Guarding (1) alone was a
+         no-op for the very cohort the migration was written for.
+      3. `POST /admin/grant-achievement` - the admin path. Missed by the first
+         TWO revisions, and by the docstring that claimed there were only two;
+         a reviewer found it. Counting the callers in prose is exactly how it
+         stayed missed -- grep for _achievement_gold and check each hit.
+
+    Reason semantics, per-key:
+      * 'achievement'         — the normal per-key payment.
+      * 'achievement_prepaid' — a 0-amount marker for holders paid before
+                                per-key ledger rows existed (migration 020
+                                booked ONE aggregate 'backfill_achievement' row
+                                per player with an EMPTY reference_id, which
+                                cannot be attributed to any key).
+      * 'achievement_revoked' — a CLAWBACK (the team_sweep cohort, migration
+                                088). Gold taken back is owed again on re-earn.
+
+    Eligibility is a COUNT COMPARISON, not "has any clawback": a
+    paid -> clawed -> repaid history leaves paid=2, clawed=1, and testing merely
+    for the presence of a clawback would wrongly re-open payment on a later
+    keep-the-gold revocation. Owed only when every payment so far has been
+    clawed back."""
+    row = await db.execute(text(
+        "SELECT"
+        " COUNT(*) FILTER (WHERE reason IN ('achievement','achievement_prepaid')) AS paid,"
+        " COUNT(*) FILTER (WHERE reason = 'achievement_revoked') AS clawed"
+        " FROM gold_transactions"
+        " WHERE player_id = :pid AND reference_id = :k"
+    ), {"pid": player_id, "k": achievement_key})
+    paid, clawed = row.one()
+    return paid == 0 or clawed >= paid
+
+
 async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:
     """Idempotent inline grant — insert PlayerAchievement row (+ gold when the
     key pays anything), no commit.
@@ -23292,6 +23740,10 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
     # priced 2026-08-07, so this branch is currently unreachable. It stays
     # because re-introducing a 0g key is a one-line ACHIEVEMENT_GOLD_OVERRIDES
     # edit.
+    if gold_amt and not await _achievement_payment_eligible(db, player_id, achievement_key):
+        print(f"[ACHIEVEMENT] {achievement_key} re-earned by {player_id} —"
+              f" gold already booked, not paying again")
+        gold_amt = 0
     if gold_amt:
         await db.execute(
             text("UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid"),
@@ -23514,6 +23966,17 @@ async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db
     # 0 gold; a raw-curl outsider with no secret gets neither. Server-derived
     # achievements pay via _grant_achievement_inline, which is unaffected.
     gold_ok = _verify_action_sig(f"achievement:{req.steam_id}:{req.achievement_key}", req.hmac_signature)
+    # Bug #268: this is the path client-DETECTED achievements actually take —
+    # Untouchable among them — so the no-double-pay rule has to live here too,
+    # not only in _grant_achievement_inline. Migration 257 revoked Untouchable
+    # from everyone while deliberately leaving their gold; without this the
+    # first legitimate re-earn pays each of them a second time.
+    already_paid = False
+    if gold_ok and not await _achievement_payment_eligible(db, player.id, req.achievement_key):
+        print(f"[ACH] {req.achievement_key} re-earned by {req.steam_id} -"
+              f" gold already booked, recording unlock without payment")
+        gold_ok = False
+        already_paid = True
     gold_awarded = 0
     if gold_ok:
         gold_awarded = _achievement_gold(req.achievement_key)
@@ -23528,7 +23991,12 @@ async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db
             reason="achievement",
             reference_id=req.achievement_key,
         ))
-    else:
+    elif not already_paid:
+        # `elif not already_paid`: this line names the SIGNATURE as the reason,
+        # and the no-double-pay guard above also clears gold_ok. Without the
+        # guard here, a validly-signed re-earn logged BOTH its own correct line
+        # and this one blaming an "unsigned/old client" -- a false cause in the
+        # log, printed by the fix that was supposed to make this path honest.
         print(f"[ACH] unlock recorded WITHOUT gold (unsigned/old client) "
               f"steam={req.steam_id} key={req.achievement_key}")
 
@@ -23551,6 +24019,197 @@ import gzip as _gzip
 import pathlib as _pathlib
 
 BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-rounds/bug-reports")
+
+# -- Bug-report log scrubbing --------------------------------------------
+#
+# These attachments are the raw client log. They carry things diagnosis needs
+# and things it does not, and the split is not obvious, so it is written down.
+#
+# SCRUBBED -- real-world identity, no diagnostic value:
+#   * OS usernames inside filesystem paths. The client interpolates the
+#     ABSOLUTE log path into every bundle header, so each report carries
+#     C:\Users\<person>\... in a machine-parseable position. That is a third
+#     party's real name, in a project that has twice force-pushed git history
+#     to scrub exactly that class of leak from the maintainer's OWN name.
+#     Enforcing the rule in one direction only was a bug, not a policy.
+#   * Discord snowflakes -- an off-platform identity linking a game account to
+#     a person. Nothing in a gameplay log needs one.
+#
+# NOT SCRUBBED -- pseudonymous game identifiers with real diagnostic value:
+#   * SteamID64s and display names of LIVE accounts. They are public on every
+#     leaderboard, and they are how an admin answers "who did this player
+#     fight". Redacting them would defeat the reason this endpoint exists.
+#     DELIBERATE DIVERGENCE from the infra-side exporter, which pseudonymises
+#     them; recorded here so the two postures differ on purpose, not by drift.
+#
+# SCRUBBED ANYWAY -- SteamID64s of accounts that exercised DELETION.
+#   delete_player_data never touches bug_reports (learning #437), so a deleted
+#   player's identity survives in this corpus. Redacting at read time is the
+#   one place that deletion can still be honoured here.
+#
+# The version rides out with every scrubbed copy -- as an X-Scrub-Version
+# header on the download endpoint, and as a `log_scrub_version` field on
+# GET /bug-reports/{id} -- so a borrower can always prove which ruleset
+# produced what they are holding. Bump it whenever the rules below change.
+_BUG_LOG_SCRUB_VERSION = "1"
+_BUG_LOG_MAX_GZ = 8 * 1024 * 1024        # refuse a stored blob bigger than this
+_BUG_LOG_MAX_TEXT = 16 * 1024 * 1024     # gunzip ceiling
+_BUG_LOG_STEAMID_PROBE_MAX = 500         # distinct ids fed to the purge lookup
+
+# Quote characters are deliberately NOT in these exclusion classes: a path
+# segment ends at a separator or a newline, and keeping quotes out of the
+# class avoids nested-quote escaping that is easy to get subtly wrong.
+# IGNORECASE on the path rules: Windows paths are case-insensitive and logs
+# carry every spelling of "Users"/"USERS"/"users". A privacy control that a
+# single flag's worth of casing can walk around is not a control.
+_SCRUB_WINUSER_RE = _re.compile(r"([A-Za-z]:[\\/]Users[\\/])([^\\/\r\n]+)", _re.IGNORECASE)
+_SCRUB_NIXUSER_RE = _re.compile(r"(/(?:home|Users)/)([^/\r\n]+)", _re.IGNORECASE)
+# Accepts discord_id / discordId / discordID / "discord id" as a JSON-ish key.
+_SCRUB_DISCORD_KV_RE = _re.compile(r'("discord[ _]?id"\s*:\s*)("?\d{15,20}"?)', _re.IGNORECASE)
+_SCRUB_DISCORD_TXT_RE = _re.compile(
+    r'((?:discord|Discord)[ _-]?(?:id|ID)?\s*[:=]\s*)(\d{15,20})')
+# Every SteamID64 begins 7656119 and is 17 digits.
+_SCRUB_STEAMID_RE = _re.compile(r"\b7656119\d{10}\b")
+
+
+def _read_bug_log_sync(path_str: str) -> str:
+    """Blocking gunzip of a stored bundle. MUST be driven through
+    asyncio.to_thread: this API runs ONE uvicorn worker on purpose (#125) and
+    a stored blob can be megabytes, so doing it inline stalls the event loop
+    for the whole community while one admin opens one report.
+
+    Overflow keeps the TAIL. A log's recent lines are the ones that explain
+    the crash; head-truncating a bundle discards the part being asked about.
+    """
+    p = _pathlib.Path(path_str)
+    if not p.exists():
+        return ""
+    size = p.stat().st_size
+    if size > _BUG_LOG_MAX_GZ:
+        raise ValueError(f"stored log is {size} bytes gzipped, over the {_BUG_LOG_MAX_GZ} cap")
+    with _gzip.open(p, "rt", encoding="utf-8", errors="replace") as f:
+        data = f.read(_BUG_LOG_MAX_TEXT + 1)
+        if len(data) <= _BUG_LOG_MAX_TEXT:
+            return data
+        # Over the ceiling. The first version claimed to keep the TAIL and kept
+        # the HEAD: read(N+1) returns the FIRST N+1 characters, so slicing
+        # [-N:] off that yields characters 1..N -- the beginning of the file,
+        # under a banner promising the end of it (review MEDIUM). Stream the
+        # remainder and keep a rolling window instead, so the banner is true.
+        window = data[-_BUG_LOG_MAX_TEXT:]
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            window = (window + chunk)[-_BUG_LOG_MAX_TEXT:]
+    return ("[scrubber: bundle exceeded the read ceiling; OLDEST lines dropped, "
+            "tail kept]\n") + window
+
+
+def _scrub_pass_one(body: str) -> tuple:
+    """Regex half, stage 1: path usernames + discord ids, and collect the
+    distinct SteamID64s the caller must ask the database about.
+
+    SYNCHRONOUS AND THREAD-DESTINED. Review measured the split the first
+    version got backwards: the gunzip that was moved off the loop costs ~0.035s
+    while the regex passes left ON it cost up to ~2.4s over a large bundle --
+    on an API that runs exactly one worker by design (#125). Offloading the
+    cheap half and keeping the expensive half is not an optimisation. Touches
+    no session and no async state, so it is safe in a worker thread.
+    """
+    counts = {"os_user": 0, "discord_id": 0, "deleted_steam_id": 0}
+    if not body:
+        return body, counts, []
+
+    def _user(m):
+        counts["os_user"] += 1
+        return m.group(1) + "[os-user]"
+    body = _SCRUB_WINUSER_RE.sub(_user, body)
+    body = _SCRUB_NIXUSER_RE.sub(_user, body)
+
+    def _disc(m):
+        counts["discord_id"] += 1
+        return m.group(1) + "[discord-id]"
+    body = _SCRUB_DISCORD_KV_RE.sub(_disc, body)
+    body = _SCRUB_DISCORD_TXT_RE.sub(_disc, body)
+
+    # finditer, NOT findall, and the difference is measurable. CPython's `re`
+    # does not release the GIL, so running these passes in a worker thread does
+    # NOT free the event loop the way the gunzip offload does (zlib does release
+    # it). Review measured the split on a 12 MB bundle: every .sub() above takes
+    # a Python replacement function, so the interpreter can honour a GIL switch
+    # at each match and the worst loop stall stays in the 6-28 ms band -- but a
+    # bare findall() has no callback at all, so it is one uninterrupted C scan
+    # holding the GIL for ~500 ms in a single block. Walking matches instead
+    # restores the switch points, and stopping at the cap avoids scanning the
+    # tail of a huge bundle for ids that would be dropped anyway. The resulting
+    # id list is identical to the old expression's: first-seen order, capped.
+    seen_ids = {}
+    for m in _SCRUB_STEAMID_RE.finditer(body):
+        seen_ids.setdefault(m.group(0), None)
+        if len(seen_ids) >= _BUG_LOG_STEAMID_PROBE_MAX:
+            break
+    return body, counts, list(seen_ids)
+
+
+def _scrub_pass_two(body: str, purged: set, counts: dict) -> str:
+    """Regex half, stage 2: redact the ids stage 1 found and the DB confirmed
+    deleted. Also thread-destined, same reasoning."""
+    if not purged:
+        return body
+
+    def _sid(m):
+        if m.group(0) in purged:
+            counts["deleted_steam_id"] += 1
+            return "[DELETED-USER]"
+        return m.group(0)
+    return _SCRUB_STEAMID_RE.sub(_sid, body)
+
+
+async def _scrub_bug_log(db: AsyncSession, body: str) -> tuple:
+    """Apply the posture documented above. Returns (scrubbed_text, counts).
+
+    Three steps: regex -> probe -> regex, with both regex halves handed to
+    worker threads and only the database probe awaited on the loop.
+
+    WHAT THAT DOES AND DOES NOT BUY, because the first version of this
+    docstring overclaimed it. CPython's `re` does not release the GIL, so a
+    regex in a worker thread still contends with the event-loop thread; the
+    offload is not the clean win the gunzip one is (zlib DOES release it).
+    Measured on a 12 MB bundle: inline cost a 1508 ms stall, threaded cost
+    593 ms, and switching the id scan from findall to finditer removes most of
+    what remained. So this reduces the stall substantially -- it does not make
+    the loop free. Do not read this function as non-blocking.
+    """
+    body, counts, ids = await asyncio.to_thread(_scrub_pass_one, body)
+    if not body:
+        return body, counts
+
+    # Deleted accounts only. `purged` is initialised BEFORE the try on purpose:
+    # assigning it inside would make a probe failure a NameError further down,
+    # and a scrubber that crashes is a scrubber that does not scrub. (The id
+    # collection that used to live in this try is now in _scrub_pass_one, in a
+    # worker thread -- an earlier version of this comment still named
+    # findall() here.)
+    purged = set()
+    try:
+        # SAVEPOINT, and it is load-bearing (review HIGH). The first version of
+        # this caught the probe failure and did NOT roll back -- which under
+        # asyncpg leaves the caller's transaction ABORTED, so the next
+        # statement dies with InFailedSqlTransaction. In get_bug_report that
+        # next statement is the events SELECT, sitting OUTSIDE this try, and
+        # the admin pane 500s. That is the identical defect this same batch
+        # fixed in GET /series/active, reintroduced in new code a few edits
+        # later. begin_nested rolls back only to the savepoint, so a failed
+        # probe costs redaction coverage and nothing else.
+        async with db.begin_nested():
+            purged = await _purged_steam_ids(db, ids)
+    except Exception as ex:
+        # Redact whatever was already PROVEN deleted and stop probing. Partial
+        # redaction beats abandoning the pass and serving every id unredacted.
+        print(f"[BUG-LOG] purge probe failed (partial redaction applied): {type(ex).__name__}")
+    body = await asyncio.to_thread(_scrub_pass_two, body, purged, counts)
+    return body, counts
 BUG_REPORT_PER_STEAM_PER_DAY = 10
 BUG_REPORT_VALID_SEVERITIES = ("low", "medium", "high", "crash")
 # chat_report: the /report command's evidence rows (§2.6 v1 moderation
@@ -23903,12 +24562,22 @@ async def get_bug_report(
         raise HTTPException(404, "Bug report not found")
 
     log_text: str | None = None
+    log_scrubbed = False
     if include_log and row["log_filename"]:
         try:
+            # THE SHARED PATH, and scrubbing it is the load-bearing half of
+            # this change. This endpoint ALREADY served the whole unscrubbed
+            # bundle -- include_log DEFAULTS TO TRUE and the in-game admin pane
+            # calls it that way (plugin/ApiClient.cs) -- so the exposure was
+            # never "internal, awaiting a new door". Scrubbing only a NEW
+            # endpoint while this one stayed as-is would make the scrub a
+            # rendering suggestion rather than a control (#159's shape).
+            #
+            # to_thread: this gunzip used to run inline on the single worker.
             path = _pathlib.Path(BUG_REPORT_LOG_DIR) / row["log_filename"]
-            if path.exists():
-                with _gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
-                    log_text = f.read()
+            raw = await asyncio.to_thread(_read_bug_log_sync, str(path))
+            log_text, _scrub_counts = await _scrub_bug_log(db, raw)
+            log_scrubbed = True
         except Exception as ex:
             log_text = f"[log read error: {ex}]"
 
@@ -23942,6 +24611,17 @@ async def get_bug_report(
     out["created_at"] = out["created_at"].isoformat() if out["created_at"] else None
     out["updated_at"] = out["updated_at"].isoformat() if out["updated_at"] else None
     out["log_text"] = log_text
+    # The scrub receipt, on THIS door too. The download endpoint returns it as
+    # an X-Scrub-Version header, and the posture comment claimed the version
+    # "rides out in a response header" -- true of one of the two scrubbing
+    # paths and not the other, which is the door the admin pane actually uses.
+    # A receipt that is absent exactly where the reader is looking is not a
+    # receipt.
+    # Keyed on the SCRUB, not on log_text being non-empty: the read-error
+    # branch above puts a diagnostic string in log_text, and stamping a scrub
+    # receipt onto text that was never scrubbed is precisely the kind of
+    # receipt that is worse than none.
+    out["log_scrub_version"] = _BUG_LOG_SCRUB_VERSION if log_scrubbed else None
     out["events"] = events
     return out
 
@@ -23964,6 +24644,102 @@ async def _record_bug_event(db, report_id, actor_steam_id, actor_name, event_typ
     await db.execute(
         text("UPDATE bug_reports SET updated_at = NOW() WHERE id = :rid"),
         {"rid": report_id},
+    )
+
+
+@app.get("/api/v1/bug-reports/{report_id}/log", tags=["Bug Reports"])
+async def download_bug_report_log(
+    report_id: str,
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: download one bug report's log as plain text, scrubbed.
+
+    WHY THIS EXISTS. The log is the thing actually needed when triaging, and
+    the two existing doors both make that awkward: the ops SSH verb returns the
+    bundle inside a shell session, and GET /bug-reports/{id} inlines it into a
+    JSON envelope alongside metadata and the event timeline. This serves the
+    file, as a file.
+
+    THE HMAC ACTION IS DELIBERATELY DISTINCT -- "bug_reports_log", not
+    "bug_reports". The canonical is admin:{admin}:{action}:{target}, so reusing
+    the sibling's action would make a signature minted to read a report's
+    METADATA byte-identical to one that downloads its RAW LOG. One grant would
+    silently confer the other. If the log is more sensitive than the metadata
+    -- and it is, that is the entire premise of the scrubbing below -- the two
+    must not share an action string.
+
+    SCRUBBING IS UNCONDITIONAL. There is no raw=true. A flag would make the
+    safe path the one you have to remember, and would recreate the exact
+    "control that is really a suggestion" shape this change exists to remove.
+    Genuine raw access remains available out-of-band to whoever holds shell.
+
+    NOT ROUTED TO THE REPLICA: /api/v1/bug-reports does not appear in the edge
+    read allowlist in any form, so this endpoint is unaffected by read-routing
+    in either method.
+
+    NOTE ON THE VERSION GATE: _VERSION_GATE_BYPASS is a frozenset of EXACT
+    paths, and this route has a path parameter, so it cannot be added to it.
+    Callers must therefore send X-Mod-Version -- which the in-game admin pane
+    does natively, and a curl does with one -H. Do NOT reach for X-Internal-Key
+    instead: that bypasses the rate limiter AND the body-size gate wholesale
+    (#285), which is a far larger grant than an admin HMAC.
+    """
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, "bug_reports_log", report_id, hmac_signature):
+        raise HTTPException(403, "Invalid admin signature")
+    try:
+        rid = UUID(report_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid report_id")
+
+    row = (await db.execute(
+        text("""SELECT id, bug_number, log_filename, log_bytes, created_at
+                  FROM bug_reports WHERE id = :rid"""),
+        {"rid": rid},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Bug report not found")
+    if not row["log_filename"]:
+        raise HTTPException(404, "This report has no log attachment")
+
+    # report_id is the ONLY input, and it is parsed as a UUID above. The stored
+    # filename is written exactly once, from path.name at submit time, and is
+    # never request-controlled -- which is what keeps this free of path
+    # traversal. Keep it that way: never accept a filename or path component
+    # from the caller.
+    path = _pathlib.Path(BUG_REPORT_LOG_DIR) / row["log_filename"]
+    try:
+        raw = await asyncio.to_thread(_read_bug_log_sync, str(path))
+    except ValueError as ex:
+        raise HTTPException(413, str(ex))
+    except Exception as ex:
+        print(f"[BUG-LOG] read failed for #{row['bug_number']}: {type(ex).__name__}: {ex}")
+        raise HTTPException(500, "Log read failed")
+    if not raw:
+        # The row claims an attachment the filesystem does not have. Distinct
+        # from "no attachment" above so the two are diagnosable apart.
+        raise HTTPException(410, "Log attachment is recorded but missing on disk")
+
+    body, counts = await _scrub_bug_log(db, raw)
+    print(f"[BUG-LOG] #{row['bug_number']} downloaded by {admin_steam_id} "
+          f"({len(body)} chars; redacted os_user={counts['os_user']} "
+          f"discord={counts['discord_id']} deleted_steam={counts['deleted_steam_id']})")
+
+    return PlainTextResponse(
+        content=body,
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="bug-{row["bug_number"] or 0}.log"',
+            # A URL that is effectively a bearer token, returning a body that
+            # is someone's log, must not sit in an intermediary cache.
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            # The borrower's receipt: which ruleset produced this copy.
+            "X-Scrub-Version": _BUG_LOG_SCRUB_VERSION,
+        },
     )
 
 
@@ -24552,14 +25328,27 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
         return {"status": "already_unlocked"}
     db.add(PlayerAchievement(player_id=target.id, achievement_key=req.achievement_key))
     gold_amt = _achievement_gold(req.achievement_key)
-    # r3 find 1: atomic delta (see the settlement/royalty twins).
-    await db.execute(text(
-        "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
-    ), {"amt": gold_amt, "pid": target.id})
-    db.add(GoldTransaction(
-        player_id=target.id, amount=gold_amt,
-        reason="achievement", reference_id=req.achievement_key,
-    ))
+    # THE THIRD PAYING GRANT PATH (review MEDIUM). _achievement_payment_eligible
+    # was added guarding the inline and signed-unlock paths, and its docstring
+    # asserted "there are two" -- there are three, and this admin one paid
+    # unconditionally. After migration 257 revokes an achievement while holders
+    # KEEP the gold, an admin re-grant here would pay the reward a second time
+    # to someone already carrying the prepaid marker. Same guard, same reason.
+    if gold_amt and not await _achievement_payment_eligible(db, target.id, req.achievement_key):
+        # Logged, because a silently-withheld payment is indistinguishable from
+        # a bug when the admin who pressed the button asks why nothing moved.
+        print(f"[ACH] admin grant of {req.achievement_key} to {req.steam_id} - "
+              f"gold already booked, granting achievement without payment")
+        gold_amt = 0
+    if gold_amt:
+        # r3 find 1: atomic delta (see the settlement/royalty twins).
+        await db.execute(text(
+            "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+        ), {"amt": gold_amt, "pid": target.id})
+        db.add(GoldTransaction(
+            player_id=target.id, amount=gold_amt,
+            reason="achievement", reference_id=req.achievement_key,
+        ))
     # Achievement-gated titles must follow EVERY grant path (find 4). Five
     # keys map to a title today (the two slayers + the three translator
     # tiers); before this, only the inline path granted the item.
@@ -39048,6 +39837,11 @@ async def _stream_post_upkeep(db: AsyncSession, stream_live: int | None,
     the surrounding poll handler is otherwise read-only. Never raises: the
     poll's real job (the director) must not fail over a Discord nicety
     (#187 family)."""
+    if IS_REPLICA:
+        _replica_skip("stream_post_upkeep")
+        # Writes stream_channel_posts from a GET. Broadcast-account gated and
+        # not in the edge allowlist, so defence only.
+        return
     if not stream_live or not stream_session:
         return
     if not _STREAM_SESSION_RE.match(stream_session):

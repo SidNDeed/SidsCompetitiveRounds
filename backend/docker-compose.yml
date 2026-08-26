@@ -75,6 +75,16 @@ services:
       # MATCH_HMAC_SECRET. Lives in .env; unset = every admin endpoint fails
       # closed (403), by design.
       ADMIN_HMAC_SECRET: ${ADMIN_HMAC_SECRET:-}
+      # Read-replica role flag. THIS MAPPING IS REQUIRED, not decorative: this
+      # project has no `env_file:`, so a key in .env reaches compose for
+      # interpolation but NEVER reaches the container process unless it is
+      # named here. Without this line the standby boots with replica mode
+      # silently OFF while every log line and health check looks normal.
+      # Rendered on the standby only (from scr_role); the primary's .env has no
+      # such key, so `:-` yields an empty value there -- which main.py's value
+      # check reads as PRIMARY. Never write SCR_REPLICA_MODE=0 into a .env:
+      # os.getenv would return the string "0", which is truthy.
+      SCR_REPLICA_MODE: ${SCR_REPLICA_MODE:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`
