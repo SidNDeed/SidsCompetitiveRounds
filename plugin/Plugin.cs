@@ -4007,6 +4007,11 @@ namespace CompetitiveRounds
             // caller, so the flush the r4 cap depends on never ran and a
             // filled cache stayed capped for the rest of the process.
             try { CardBarTeamColor.Reset(); } catch { }
+            // (A room-leave flush of the #308 birth tally was tried here and
+            // REMOVED in review r3 find 3: it neither reset nor marked the tally,
+            // so leaving room A and joining room B emitted the same numbers twice
+            // and broke the "once per generation" contract the summary depends on.
+            // The tally is emitted by NewGeneration alone.)
             if (Diag2v2.PendingSlot() < 0) return;
             try { Plugin.Log.LogWarning($"[2v2-DIAG] LeftRoom (Photon callback) stack={Diag2v2.ShortStack()}"); }
             catch { }
@@ -6549,84 +6554,16 @@ namespace CompetitiveRounds
             return false;  // skip the original Attack — local shot suppressed while F5 is open
         }
 
-        // Counter Postfix lives in the same class so Harmony resolves it to exactly the
-        // Attack overload the Prefix already works on (the one that fires on every user
-        // click). Earlier standalone patch classes using TargetMethod picked the wrong
-        // overload and fired once per session.
-        private static bool _postfixFirstFireLogged;
-        private static bool _postfixFirstPvRejectLogged;
-        private static bool _postfixFirstIsMineRejectLogged;
-        private static bool _postfixFirstFalseRejectLogged;
-        private static bool _postfixFirstForcedRejectLogged;
-        static void Postfix(Gun __instance, bool __result, float charge, bool forceAttack)
-        {
-            if (!_postfixFirstFireLogged)
-            {
-                _postfixFirstFireLogged = true;
-                Plugin.Log.LogInfo($"[GUN-POST] Attack Postfix first invocation (gun={__instance?.name}, uiOpen={NativeUI.IsOpen})");
-            }
-            if (NativeUI.IsOpen) return;  // Prefix blocked this shot, don't credit it
-            // Attack returns false when no volley launched (cooldown/reload) — the
-            // auto-fire branch retries every frame through a reload, so counting
-            // false returns inflated bullets_fired by hundreds per match (bug #77 era).
-            if (!__result)
-            {
-                if (!_postfixFirstFalseRejectLogged) { _postfixFirstFalseRejectLogged = true; Plugin.Log.LogInfo("[GUN-POST] first __result=false reject (reload/cooldown phantom)"); }
-                return;
-            }
-            // forceAttack=true is never a player trigger pull: EMP block-rings,
-            // RadarShot auto-shots and spawned shooters all force. Only deliberate
-            // shots count toward accuracy (Sid: EMP projectiles aren't "shots").
-            if (forceAttack)
-            {
-                if (!_postfixFirstForcedRejectLogged) { _postfixFirstForcedRejectLogged = true; Plugin.Log.LogInfo("[GUN-POST] first forceAttack reject (card-driven attack)"); }
-                return;
-            }
-            try
-            {
-                // ROUNDS' Gun GameObject hierarchy ("WeaponBase(Clone)") doesn't walk up to a
-                // PhotonView — logs confirmed GetComponentInParent<PhotonView>() returns null
-                // for every user shot. The reliable path is Gun.player → the Player component
-                // whose PhotonView represents the match ownership. Fall back to the hierarchy
-                // lookup if the Gun.player ref is somehow null.
-                PhotonView pv = null;
-                try
-                {
-                    var gunPlayer = __instance?.player;
-                    if (gunPlayer != null)
-                        pv = gunPlayer.data?.view ?? gunPlayer.GetComponent<PhotonView>();
-                }
-                catch { }
-                if (pv == null) pv = __instance?.GetComponentInParent<PhotonView>();
-
-                if (pv == null)
-                {
-                    if (!_postfixFirstPvRejectLogged) { _postfixFirstPvRejectLogged = true; Plugin.Log.LogInfo($"[GUN-POST] first pv-null reject on gun={__instance?.name}"); }
-                    return;
-                }
-                if (!pv.IsMine)
-                {
-                    if (!_postfixFirstIsMineRejectLogged) { _postfixFirstIsMineRejectLogged = true; Plugin.Log.LogInfo($"[GUN-POST] first !IsMine reject (pv.owner={pv.Owner?.NickName})"); }
-                    return;
-                }
-                int projectiles = 1;
-                try { projectiles = Math.Max(1, __instance.numberOfProjectiles); } catch { }
-                // Real bullets per successful Attack = attacks (charge volleys) x bursts x
-                // projectiles — vanilla FireBurst spawns all of them and each can register
-                // a hit, so the denominator must match or Burst/charge builds inflate hit%.
-                try
-                {
-                    int bursts = Math.Max(1, __instance.bursts);
-                    int attacks = 1;
-                    if (!__instance.lockGunToDefault && charge > 0f && __instance.attackSpeed > 0f)
-                        attacks = Mathf.Clamp(Mathf.RoundToInt(0.5f * charge / __instance.attackSpeed), 1, 10);
-                    projectiles *= bursts * attacks;
-                }
-                catch { }
-                GameStateWatcher.OnLocalBulletFired(projectiles);
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[GUN-POST] exception: {ex.Message}"); }
-        }
+        // THE COUNTER POSTFIX WAS DELETED (bug #308, review r3 find 1).
+        // Its only remaining job was one-shot reject diagnostics, and it was an
+        // unguarded log on a live combat path: BepInEx 5 dispatches listeners
+        // without exception isolation, so a throwing listener inside it could
+        // propagate out of a NESTED forced Attack and stop the outer DoAttack from
+        // ever constructing its FireBurst — losing the player's volley. A
+        // diagnostic is never worth that. The denominator it used to own now lives
+        // at the projectile's birth (GunApplyPlayerStuffProvenancePatch); nothing
+        // here needs to run at all. The Prefix above stays — it is the F5
+        // click-block and has a real job.
     }
 
     [HarmonyPatch(typeof(Block), "TryBlock")]
@@ -6649,23 +6586,22 @@ namespace CompetitiveRounds
     //
     // Separate patches from the F5 input-gate above because the gate short-circuits the
     // original with `return false` when F5 is open, and we must NOT count suppressed
-    // actions. Harmony Postfixes run even after a false Prefix, so each counting patch
-    // checks NativeUI.IsOpen and bails.
+    // actions. The BLOCK counters still guard themselves with NativeUI.IsOpen. The
+    // BULLET counters no longer need to: the denominator is taken at the projectile's
+    // birth (GunApplyPlayerStuffProvenancePatch), and a suppressed Attack never runs
+    // the original, so no projectile is ever born to count.
     //
     // Only the LOCAL player is tracked (PhotonView.IsMine on the Gun / Block / target).
     // See learnings.md #4: only the lower Steam ID reports matches, so these counters
     // accumulate on whichever side reports. The backend stores them on the reporter.
 
-    // Gun.Attack patch removed — TargetMethod(most-params) attached to an overload that's
-    // only called from internal code paths (once per session per the logs), not from user
-    // clicks. The F5-block patch uses `[HarmonyPatch(typeof(Gun), "Attack")]` without args
-    // and works, but layering a Postfix under that attribute on a different patch class
-    // disambiguates to potentially-different overloads and was unreliable in testing.
-    // Instead, bullets_fired reuses the existing mouse-click counter (LocalShotsThisMatch)
-    // which is driven by Input.GetMouseButtonDown(0) in GameStateWatcher — reliable, exactly
-    // "one trigger pull per click", good enough semantically for Hit % on the leaderboard.
-    // Each trigger pull is one "shot" even if the weapon is a shotgun — aligns with how
-    // most players intuitively think about "my accuracy."
+    // HISTORICAL NOTE, kept because it records two dead ends. bullets_fired once
+    // reused the mouse-click counter (LocalShotsThisMatch), i.e. one "shot" per
+    // trigger pull regardless of how many projectiles it birthed; it later became a
+    // Gun.Attack Postfix computing numberOfProjectiles * bursts * attacks. Both are
+    // gone. The denominator now counts ACTUAL PROJECTILE BIRTHS at
+    // GunApplyPlayerStuffProvenancePatch, which is the only form that agrees with
+    // the numerator — see the bug #308 block near the end of this file.
 
     [HarmonyPatch]
     class HealthHandlerTakeDamageCounterPatch
@@ -6790,7 +6726,48 @@ namespace CompetitiveRounds
                 if (targetPlayer == null) targetPlayer = targetView.GetComponentInParent<global::Player>();
                 if (targetPlayer == null) return;     // hit a box or other damagable, not a player
                 if (targetPlayer.TeamID == own.TeamID) return;  // self or teammate (2v2)
-                GameStateWatcher.OnLocalBulletHit();
+
+                // NO WINDOW CHECK HERE, deliberately (review r2 find 1). An
+                // earlier version gated the hit on battleOngoing too, reasoning
+                // that "the same window at both ends" made the halves agree. It
+                // did the opposite: a projectile fired DURING battle is counted
+                // as fired, but if the point ends while it is still in flight —
+                // another player's faster shot decides the round — its landing
+                // was then rejected, so fired counted and the hit did not. That
+                // is the original asymmetry inverted, and a regression against
+                // the numerator that shipped.
+                //
+                // Eligibility is frozen ONCE, at birth, in TagState.FiredCounted.
+                // That is the fact both halves agree on; Generation already
+                // rejects a projectile from an earlier match. The window belongs
+                // at the birth site only.
+
+                // Provenance + first-hit credit, in one call. Rejects a projectile
+                // that was not born of a deliberate player-initiated volley
+                // (unknown provenance is NOT counted — fail-closed), and rejects a
+                // SECOND impact from a projectile already credited. That second
+                // guard matters: RayHitReflect returns hasToReturn, so one bullet
+                // can survive its first impact and hit again — two impacts from
+                // one projectile would otherwise report 2/2 = 100% off a single
+                // hit. Hit% means "projectiles that hit at least one enemy", which
+                // is the semantic the hit<=fired cap already implies.
+                if (!ShotProvenance.TryConsumeHit(__instance)) return;
+
+                // Observe acceptance, exactly as the birth side does. TryConsumeHit
+                // has already burned this projectile's ONE credit, but
+                // OnLocalBulletHit has its own gates (isTracking, and the
+                // _hitsRemaining budget) and can still refuse. Without this the
+                // credit is spent on an impact that was never counted, and the
+                // projectile can never score again — under-reporting only, but it
+                // made "both halves decided by the same fact" true of eligibility
+                // and not of acceptance. Completeness audit, post-r4.
+                int hitBefore = GameStateWatcher.LocalBulletsHitThisMatch;
+                try { GameStateWatcher.OnLocalBulletHit(); }
+                catch { /* observed via the delta below */ }
+                bool hitTaken;
+                try { hitTaken = GameStateWatcher.LocalBulletsHitThisMatch > hitBefore; }
+                catch { hitTaken = false; }
+                if (!hitTaken) ShotProvenance.ReleaseHitCredit(__instance);
             }
             catch { /* never break vanilla's hit path */ }
         }
@@ -10109,5 +10086,530 @@ namespace CompetitiveRounds
                 return true;
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bug #308 — Hit% saturating at exactly 100%.
+    //
+    // THE DEFECT. The two halves of the accuracy fraction were filtered
+    // asymmetrically. The DENOMINATOR (Gun.Attack Postfix) rejected every
+    // forceAttack volley — card-driven rings, spawned shooters — on the owner's
+    // ruling that those are not "shots". The NUMERATOR (ProjectileHit.RPCA_DoHit
+    // Prefix) had NO origin test at all and counted any unblocked enemy impact by
+    // any projectile the local player owned. _hitsRemaining is mutated during an
+    // active tracking epoch at exactly two sites (plus its per-match resets), so
+    // within a match it equals fired - hit, and every uncounted-fired projectile
+    // that lands eats budget a real trigger pull paid for. Once it
+    // reaches zero, hit == fired and the display SATURATES at exactly 100%,
+    // indistinguishable from perfect aim. Regression datable: the numerator moved
+    // to RPCA_DoHit in v1.31.0 while both halves still counted forced volleys, and
+    // v1.34.0 added the forceAttack reject to the denominator ONLY.
+    //
+    // THE SHAPE THAT SURVIVED DESIGN REVIEW:
+    //   verified input attack -> captured intent -> DoAttacks iterator ->
+    //   FireBurst iterator -> ApplyPlayerStuff birth record + fired count ->
+    //   FIRST qualifying ProjectileHit credit
+    //
+    // Both halves are now decided by the SAME fact, recorded at the SAME moment: a
+    // bullet may score only if its birth was ACCEPTED into the denominator
+    // (TagState.FiredCounted). "Deliberate" alone is NOT enough — that was review
+    // find 1, and it left the original asymmetry reachable. Fixing
+    // only the numerator would have pushed honest players' accuracy DOWN, which is
+    // visibly harmful; birth-time eligibility for both sides keeps the fraction
+    // symmetric.
+    //
+    // FAIL-CLOSED. Unknown provenance contributes NEITHER a fired bullet NOR a
+    // hit. `!forceAttack` alone is not a provenance token — its actual vanilla
+    // guarantee is only "bypass cooldown/reload", so a future or third-party card
+    // calling gun.Attack(0f) without it would be tagged deliberate. Intent is
+    // therefore captured at WeaponHandler.Attack (the verified player-input
+    // funnel, and the only NON-FORCED gun.Attack found in the vanilla assembly —
+    // the forced callers include BulletPoint, GeneralShooter, RadarShot,
+    // RotatingShooter, SpawnObjectEffect and SyncPlayerMovement's Shoot RPC; that
+    // list is what was observed, not a proof of exhaustiveness) and
+    // carried through the two iterators. Remote peers run the ProjectileInit RPC
+    // handlers with no FireBurst context and so record false — correct, and
+    // harmless because the hit patch already rejects projectiles whose ownPlayer
+    // is not local.
+    //
+    // NOT YET COMPLETE. The design review requires this to ship as ONE statistics
+    // epoch with two further parts that live outside this file: a lifetime
+    // bullets_fired/bullets_hit reset behind a NEW bullet-specific clean-version
+    // floor (the existing STATS_CLEAN_MIN_VERSION is "1.34.0" — the very release
+    // that opened this leak — and it also gates block counters, so the floors must
+    // be split), and a semantic epoch on the cr_gstats peer broadcast so a fixed
+    // client renders an old peer's Hit% as unknown rather than blending two
+    // definitions. Until those land this must NOT be released, or it publishes a
+    // third mutually-incompatible Hit% era.
+    internal static class ShotProvenance
+    {
+        internal sealed class TagState
+        {
+            /// <summary>Born of a verified player-initiated volley.</summary>
+            internal bool Deliberate;
+            /// <summary>This projectile was ACCEPTED into the denominator. Review
+            /// find 1 (HIGH): provenance alone is not eligibility. A deliberate
+            /// bullet whose fired count was refused — by the combat window, by
+            /// ownership, or by GameStateWatcher's own inner gate — must never be
+            /// allowed to score a hit, or it consumes budget belonging to a
+            /// projectile that WAS counted and re-creates the exact asymmetry this
+            /// whole change exists to remove. Reachable in stock play: a burst's
+            /// later FireBurst iterations can birth bullets after the point ends,
+            /// be refused the fired count, survive map cleanup into the next
+            /// round, and then land.</summary>
+            internal bool FiredCounted;
+            /// <summary>First qualifying enemy impact only.</summary>
+            internal bool HitCredited;
+            /// <summary>Projectile-lifetime generation. NOT the cr_gstats
+            /// statistics epoch of part 6 — different concept, different
+            /// lifetime; conflating them was review find 5.</summary>
+            internal int Generation;
+        }
+
+        // Aggregate, SATURATING, reason-coded rejection counters (review find 4;
+        // saturation added in r2 find 3 — they were described as capped while
+        // every update was an unrestricted ++).
+        // Without these, "the patch attached but provenance never arrived" is
+        // indistinguishable from an intentional fail-closed exclusion — the #83
+        // ambiguity. Summed per generation and emitted once, never per projectile.
+        internal static int RejNoProvenance;   // ActiveGun mismatch / no volley context
+        internal static int RejNotOwner;       // deliberate, but not our projectile
+        internal static int RejWindowClosed;   // deliberate + ours, but battle not ongoing
+        internal static int RejFiredRefused;   // denominator call did not take it
+        internal static int AcceptedFired;     // counted into the denominator
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ProjectileHit, TagState> _tags =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<ProjectileHit, TagState>();
+
+        // Keyed by the ProjectileHit itself, never by instance id: an id-keyed
+        // dictionary cannot survive Unity id reuse by an object that never passes
+        // through BulletInit, which would hand a stale `true` to an untagged
+        // projectile. The weak table dies with the object and cannot alias.
+        // The generation is belt: a POOLED ProjectileHit that reached the hit
+        // path across a match boundary without a fresh BulletInit fails closed.
+        internal static int Generation;
+
+        // Set while WeaponHandler.Attack is on the stack — the player-input funnel.
+        internal static Gun InputAttackGun;
+        // Set by the Gun.Attack prefix and read when vanilla constructs the
+        // DoAttacks iterator, which happens inside that same Attack call. (The
+        // synchronous-first-MoveNext detail matters one layer down, for carrying
+        // the context into FireBurst — not for constructing DoAttacks.)
+        internal static Gun PendingGun;
+        internal static bool PendingDeliberate;
+        // Live only around a FireBurst MoveNext, which is where bullets are born.
+        internal static Gun ActiveGun;
+        internal static bool ActiveDeliberate;
+
+        /// <summary>The combat window, applied at BIRTH ONLY — deliberately not at
+        /// the hit (review r2 find 1: gating both ends rejected the landing of a
+        /// projectile fired during battle whose point ended mid-flight, which is
+        /// the asymmetry inverted). Eligibility is frozen once, in
+        /// TagState.FiredCounted; do not re-add a window check on the hit side.
+        ///
+        /// `inPickPhase` was rejected in design review as the predicate: it is
+        /// driven by debug-log TEXT, it is explicitly false from "Round over" until
+        /// "PICK PHASE" (~2.3s later, so post-round impacts still counted), and it
+        /// is never true for point transitions without card selection.
+        /// battleOngoing is real game state.</summary>
+        internal static bool WindowOpen()
+        {
+            try { return GameManager.instance != null && GameManager.instance.battleOngoing; }
+            catch { return false; }
+        }
+
+        internal static TagState Tag(ProjectileHit ph, bool deliberate)
+        {
+            if (ph == null) return null;
+            TagState s;
+            if (!_tags.TryGetValue(ph, out s))
+            {
+                s = new TagState();
+                _tags.Add(ph, s);
+            }
+            // ALWAYS overwrite, never conditionally: bullets are pooled, and an
+            // unconditional write is the only thing that makes reuse safe.
+            s.Deliberate = deliberate;
+            s.FiredCounted = false;     // earned at the denominator, not here
+            s.HitCredited = false;
+            s.Generation = Generation;
+            return s;
+        }
+
+        /// <summary>Marks a birth as ACCEPTED into the denominator. Only a
+        /// projectile that reaches this may ever score a hit.</summary>
+        internal static void MarkFiredCounted(ProjectileHit ph)
+        {
+            if (ph == null) return;
+            TagState s;
+            if (_tags.TryGetValue(ph, out s)) s.FiredCounted = true;
+        }
+
+        /// <summary>Hands back the one hit credit when the counter refused the
+        /// impact, so a later legitimate impact from the same projectile can still
+        /// score. Only ever called after TryConsumeHit returned true.</summary>
+        internal static void ReleaseHitCredit(ProjectileHit ph)
+        {
+            if (ph == null) return;
+            TagState s;
+            if (_tags.TryGetValue(ph, out s)) s.HitCredited = false;
+        }
+
+        internal static bool TryConsumeHit(ProjectileHit ph)
+        {
+            if (ph == null) return false;
+            TagState s;
+            if (!_tags.TryGetValue(ph, out s)) return false;   // unknown -> not counted
+            if (!s.Deliberate || s.Generation != Generation) return false;
+            // The symmetry guard. Not merely "was it deliberate" but "was it
+            // actually counted as fired" — see TagState.FiredCounted.
+            if (!s.FiredCounted) return false;
+            if (s.HitCredited) return false;                    // first enemy impact only
+            s.HitCredited = true;
+            return true;
+        }
+
+        /// <summary>Saturating, so a pathological session cannot wrap a counter
+        /// into a misleading value (review r2 find 3).</summary>
+        private static void Bump(ref int counter)
+        {
+            if (counter < int.MaxValue) counter++;
+        }
+
+        internal static void Bump(Reason r)
+        {
+            switch (r)
+            {
+                case Reason.NoProvenance:    Bump(ref RejNoProvenance); break;
+                case Reason.NotOwner:        Bump(ref RejNotOwner); break;
+                case Reason.WindowClosed:    Bump(ref RejWindowClosed); break;
+                case Reason.FiredRefused:    Bump(ref RejFiredRefused); break;
+                case Reason.Accepted:        Bump(ref AcceptedFired); break;
+            }
+        }
+
+        internal enum Reason { NoProvenance, NotOwner, WindowClosed, FiredRefused, Accepted }
+
+        /// <summary>Logging that can never escape into a combat path. BepInEx 5's
+        /// logger dispatches listeners without exception isolation, so a throwing
+        /// third-party listener propagates straight back into the caller — which,
+        /// on a correctness path, is how a diagnostic silently becomes a gameplay
+        /// defect (review r2 find 2).</summary>
+        internal static void SafeLog(string msg)
+        {
+            try { Plugin.Log.LogInfo(msg); } catch { }
+        }
+
+        private static string SummaryLine(string why)
+        {
+            if (AcceptedFired == 0 && RejNoProvenance == 0 && RejNotOwner == 0
+                && RejWindowClosed == 0 && RejFiredRefused == 0)
+                return null;
+            return $"[HIT-PROV] gen {Generation} births ({why}): counted={AcceptedFired}" +
+                   $" rejected(no-provenance={RejNoProvenance} not-owner={RejNotOwner}" +
+                   $" window-closed={RejWindowClosed} fired-refused={RejFiredRefused})";
+        }
+
+        internal static void NewGeneration(string why)
+        {
+            // STATE FIRST, LOGGING LAST (review r2 find 2). An earlier version
+            // logged the outgoing tally before resetting and incrementing; a
+            // throwing log listener then meant the generation never advanced, and
+            // a live tag from the previous match stayed eligible to consume the
+            // new match's hit budget. Nothing below this line may gate the bump.
+            string summary = null;
+            try { summary = SummaryLine(why); } catch { }
+
+            RejNoProvenance = RejNotOwner = RejWindowClosed = 0;
+            RejFiredRefused = AcceptedFired = 0;
+            unchecked { Generation++; }
+
+            if (summary != null) SafeLog(summary);
+            SafeLog($"[HIT-PROV] projectile generation -> {Generation} ({why})");
+        }
+    }
+
+    /// <summary>Marks the player-input attack funnel. WeaponHandler.Attack
+    /// (WeaponHandler.cs:115) is the only NON-FORCED gun.Attack found in the vanilla
+    /// assembly; the forced callers observed are BulletPoint, GeneralShooter,
+    /// RadarShot, RotatingShooter, SpawnObjectEffect and SyncPlayerMovement's Shoot
+    /// RPC. That list is what was observed, not a proof of exhaustiveness — which is
+    /// exactly why provenance is fail-closed rather than a denylist. Finalizer, not
+    /// Postfix, so the marker is restored even if vanilla throws.</summary>
+    [HarmonyPatch(typeof(WeaponHandler), "Attack")]
+    class WeaponHandlerAttackIntentPatch
+    {
+        static void Prefix(WeaponHandler __instance, out Gun __state)
+        {
+            __state = ShotProvenance.InputAttackGun;
+            try { ShotProvenance.InputAttackGun = __instance != null ? __instance.gun : null; }
+            catch { ShotProvenance.InputAttackGun = null; }
+        }
+
+        static void Finalizer(Gun __state)
+        {
+            ShotProvenance.InputAttackGun = __state;   // restore, never blind-clear
+        }
+    }
+
+    /// <summary>Captures whether THIS Attack is deliberate, for the DoAttacks
+    /// iterator that vanilla is about to construct. Deliberate requires both
+    /// !forceAttack AND that we are inside WeaponHandler.Attack for this same gun.</summary>
+    [HarmonyPatch(typeof(Gun), "Attack")]
+    class GunAttackIntentCapturePatch
+    {
+        // __state saves the OUTER pending context; the Finalizer restores it.
+        // Review find 3: overwriting it unconditionally is not re-entrancy-safe.
+        // Gun.DoAttack invokes attackAction() immediately before constructing its
+        // FireBurst, and AddAttackAction is public — so a nested forced Attack can
+        // run between an outer deliberate Attack and the FireBurst that carries its
+        // intent. Without save/restore the nested call's DoAttacks postfix consumes
+        // and clears Pending, and the OUTER player-fired projectiles are then
+        // excluded from BOTH halves. A Finalizer also cleans up the cooldown/reload
+        // `false` return and the F5 suppression path, neither of which reaches a
+        // DoAttacks postfix to consume the value.
+        [HarmonyPriority(Priority.First)]
+        static void Prefix(Gun __instance, bool forceAttack, out ValueTuple<Gun, bool> __state)
+        {
+            __state = new ValueTuple<Gun, bool>(ShotProvenance.PendingGun, ShotProvenance.PendingDeliberate);
+            try
+            {
+                ShotProvenance.PendingGun = __instance;
+                ShotProvenance.PendingDeliberate =
+                    !forceAttack && ReferenceEquals(ShotProvenance.InputAttackGun, __instance);
+            }
+            catch { ShotProvenance.PendingGun = null; ShotProvenance.PendingDeliberate = false; }
+        }
+
+        static void Finalizer(ValueTuple<Gun, bool> __state)
+        {
+            ShotProvenance.PendingGun = __state.Item1;
+            ShotProvenance.PendingDeliberate = __state.Item2;
+        }
+    }
+
+    /// <summary>Carries the captured intent through the DoAttacks iterator, which
+    /// spans frames (it waits 0.3s/attacks between charge volleys).</summary>
+    [HarmonyPatch(typeof(Gun), "DoAttacks")]
+    class GunDoAttacksIntentPatch
+    {
+        static void Postfix(Gun __instance, ref IEnumerator __result)
+        {
+            try
+            {
+                if (__result == null) return;
+                bool deliberate = ShotProvenance.PendingDeliberate
+                                  && ReferenceEquals(ShotProvenance.PendingGun, __instance);
+                ShotProvenance.PendingGun = null;          // consume
+                ShotProvenance.PendingDeliberate = false;
+                __result = Carry(__instance, deliberate, __result);
+            }
+            catch (Exception ex) { ShotProvenance.SafeLog($"[HIT-PROV] DoAttacks wrap failed: {ex.Message}"); }
+        }
+
+        static IEnumerator Carry(Gun gun, bool deliberate, IEnumerator inner)
+        {
+            while (true)
+            {
+                bool moved;
+                var pg = ShotProvenance.PendingGun;
+                var pd = ShotProvenance.PendingDeliberate;
+                ShotProvenance.PendingGun = gun;
+                ShotProvenance.PendingDeliberate = deliberate;
+                try { moved = inner.MoveNext(); }
+                finally { ShotProvenance.PendingGun = pg; ShotProvenance.PendingDeliberate = pd; }
+                if (!moved) yield break;
+                yield return inner.Current;
+            }
+        }
+    }
+
+    /// <summary>The layer that actually matters: bullets are born inside
+    /// FireBurst's MoveNext. Save/set/finally/restore rather than blind-clear, so a
+    /// forced volley nested inside a deliberate one restores the outer context
+    /// instead of destroying it. (The Pending layer needed the same treatment and
+    /// lacked it until review find 3 — it is now saved and restored by the
+    /// Gun.Attack prefix/finalizer pair.) Note the vanilla wait at Gun.cs:498-500 is per
+    /// BURST, not per bullet — one MoveNext can birth a whole batch.</summary>
+    [HarmonyPatch(typeof(Gun), "FireBurst")]
+    class GunFireBurstProvenancePatch
+    {
+        static void Postfix(Gun __instance, ref IEnumerator __result)
+        {
+            try
+            {
+                if (__result == null) return;
+                bool deliberate = ShotProvenance.PendingDeliberate
+                                  && ReferenceEquals(ShotProvenance.PendingGun, __instance);
+                __result = Bracket(__instance, deliberate, __result);
+            }
+            catch (Exception ex) { ShotProvenance.SafeLog($"[HIT-PROV] FireBurst wrap failed: {ex.Message}"); }
+        }
+
+        static IEnumerator Bracket(Gun gun, bool deliberate, IEnumerator inner)
+        {
+            while (true)
+            {
+                bool moved;
+                var ag = ShotProvenance.ActiveGun;
+                var ad = ShotProvenance.ActiveDeliberate;
+                ShotProvenance.ActiveGun = gun;
+                ShotProvenance.ActiveDeliberate = deliberate;
+                try { moved = inner.MoveNext(); }
+                finally { ShotProvenance.ActiveGun = ag; ShotProvenance.ActiveDeliberate = ad; }
+                if (!moved) yield break;
+                yield return inner.Current;
+            }
+        }
+    }
+
+    /// <summary>Birth record AND the denominator. The counting boundary is a
+    /// projectile that successfully reached OWNERSHIP ASSIGNMENT in
+    /// ApplyPlayerStuff — not "a successful BulletInit" (review r4 find 3): later
+    /// work in BulletInit, a ShootPojectileAction subscriber or gunAmmo.Shoot, may
+    /// still fail afterwards. Counting it anyway is correct, because by that point
+    /// the projectile exists, has its stats applied and has an owner, so it is a
+    /// real birth capable of hitting. Counting births is what makes the denominator
+    /// correct for free:
+    /// vanilla births bursts x projectiles.Length x (numberOfProjectiles +
+    /// RoundToInt(chargeNumberOfProjectilesTo * charge)), clamped and overridden to
+    /// 1 by lockGunToDefault (Gun.cs:423, 433-437). The old Attack-time formula
+    /// computed numberOfProjectiles * bursts * attacks — it omitted the prefab
+    /// array and the charge term (under-counting, so accuracy read HIGH) and
+    /// over-counted lock-to-default guns. Counting births also handles spawn
+    /// failures for free.</summary>
+    // Hooked on ApplyPlayerStuff, NOT on BulletInit (review r3 find 2). Vanilla's
+    // order inside BulletInit is:
+    //     ApplyPlayerStuff(bullet);          <- ownPlayer is now set
+    //     if (ShootPojectileAction != null) ShootPojectileAction(bullet);
+    //     gunAmmo.Shoot(bullet);
+    // A BulletInit POSTFIX therefore tags AFTER ShootPojectileAction, which is a
+    // public synchronous extension seam cards subscribe to. A subscriber that makes
+    // the just-initialised projectile hit an enemy synchronously would reach
+    // RPCA_DoHit while the projectile is still UNTAGGED: the hit is refused, then
+    // the Postfix accepts the fired count — fired +1, hit +0, the asymmetry again.
+    // ApplyPlayerStuff is private with exactly ONE caller (Gun.cs:524), so a
+    // Postfix on it lands after ownPlayer is assigned and before that seam can run.
+    [HarmonyPatch(typeof(Gun), "ApplyPlayerStuff")]
+    class GunApplyPlayerStuffProvenancePatch
+    {
+        private static bool _firstDeliberateLogged;
+
+        static void Postfix(Gun __instance, GameObject obj)
+        {
+            var bullet = obj;
+            try
+            {
+                if (bullet == null) return;
+                var ph = bullet.GetComponent<ProjectileHit>();
+                // Defensive only — NOT a diagnostic bucket (review r4 find 2).
+                // Vanilla dereferences ProjectileHit in ApplyProjectileStats
+                // (Gun.cs:563) and in ApplyPlayerStuff itself (Gun.cs:551), so a
+                // bullet without one makes the ORIGINAL throw before any Postfix
+                // of ours runs. A counter here could never be non-zero.
+                if (ph == null) return;
+
+                bool deliberate = ShotProvenance.ActiveDeliberate
+                                  && ReferenceEquals(ShotProvenance.ActiveGun, __instance);
+                // Tag every birth unconditionally — pooled reuse is only safe
+                // because this always overwrites. FiredCounted starts false and is
+                // EARNED below; provenance is not eligibility (review find 1).
+                ShotProvenance.Tag(ph, deliberate);
+                if (!deliberate) { ShotProvenance.Bump(ShotProvenance.Reason.NoProvenance); return; }
+
+                // Owner-side only, and only inside the BIRTH-TIME combat window
+                // (never re-add a window check on the hit side — review r2 find 1).
+                var pv = __instance != null && __instance.player != null
+                    ? __instance.player.data?.view : null;
+                if (pv == null || !pv.IsMine) { ShotProvenance.Bump(ShotProvenance.Reason.NotOwner); return; }
+                if (!ShotProvenance.WindowOpen()) { ShotProvenance.Bump(ShotProvenance.Reason.WindowClosed); return; }
+
+                // Did the denominator ACTUALLY take it? OnLocalBulletFired is void
+                // and carries its own inner gate (isTracking, and historically inPickPhase) which
+                // lives in a file this change cannot edit, so acceptance is
+                // observed rather than assumed: the counter is read either side of
+                // the synchronous call. Only an accepted birth may later score.
+                int before = GameStateWatcher.LocalBulletsFiredThisMatch;
+                // The call is wrapped and the after-read ALWAYS happens (review r2
+                // find 2). If the denominator throws part-way — or a log listener
+                // inside it does — the counter may still have moved, and the tag
+                // must reflect what the counter actually says rather than whether
+                // control reached the next line. Anything else lets the denominator
+                // accept a projectile whose tag denies it, which is finding 1 in
+                // yet another disguise.
+                try { GameStateWatcher.OnLocalBulletFired(1); }
+                catch { /* observed via the delta below */ }
+
+                bool accepted;
+                try { accepted = GameStateWatcher.LocalBulletsFiredThisMatch > before; }
+                catch { accepted = false; }
+
+                if (!accepted)
+                {
+                    ShotProvenance.Bump(ShotProvenance.Reason.FiredRefused);
+                    return;                       // stays FiredCounted == false
+                }
+                ShotProvenance.MarkFiredCounted(ph);
+                ShotProvenance.Bump(ShotProvenance.Reason.Accepted);
+                if (!_firstDeliberateLogged)
+                {
+                    _firstDeliberateLogged = true;
+                    ShotProvenance.SafeLog("[HIT-PROV] first deliberate bullet counted at ApplyPlayerStuff");
+                }
+            }
+            catch (Exception ex) { ShotProvenance.SafeLog($"[HIT-PROV] ApplyPlayerStuff tag failed: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Bumps the PROJECTILE-LIFETIME GENERATION so a pooled projectile
+    /// cannot carry a deliberate tag across a match boundary. This is NOT the
+    /// cr_gstats statistics epoch that part 6 still owes — different concept,
+    /// different lifetime, and conflating the two was review find 5. Both hooks are
+    /// needed: GM_ArmsRace.StartGame does NOT fire on same-room rematches
+    /// (learning #138), PlayerManager.ResetCharacters does.</summary>
+    [HarmonyPatch]
+    class ShotProvenanceEpochPatch
+    {
+        // GM_ArmsRace.StartGame's whole body is `if (!GameManager.instance.isPlaying)`,
+        // and PlayerJoined calls it whenever the registered-player count meets the
+        // threshold — so a legitimate reconnect mid-round invokes a NO-OP StartGame.
+        // Harmony still runs the postfix, so bumping unconditionally would stale
+        // every live projectile tag and silently drop their legitimate hits
+        // (review find 2; the same trap as learning #280). Bump only on a real
+        // false -> true transition.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(GM_ArmsRace), "StartGame")]
+        static void BeforeStartGame(out bool __state)
+        {
+            __state = false;
+            try { __state = GameManager.instance != null && GameManager.instance.isPlaying; } catch { }
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(GM_ArmsRace), "StartGame")]
+        static void AfterStartGame(bool __state, bool __runOriginal)
+        {
+            try
+            {
+                // __runOriginal (review r4 find 1). NOTE the reason, because an
+                // earlier version of this comment — and the review finding it came
+                // from — stated it backwards: a Priority.First suppressor does NOT
+                // stop sibling prefixes. Per learning #352, verified against the
+                // shipped 0Harmony.dll, HarmonyX runs EVERY prefix and `return
+                // false` skips only the ORIGINAL. So the Prefix above does run and
+                // __state is accurate. What the suppressor removes is the original
+                // body — so isPlaying never flips, and this call must not be read
+                // as a false -> true transition even though __state says false.
+                if (!__runOriginal) return;
+                if (__state) return;                     // was already playing: no-op call
+                if (GameManager.instance == null || !GameManager.instance.isPlaying) return;
+                ShotProvenance.NewGeneration("StartGame");
+            }
+            catch { }
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(PlayerManager), "ResetCharacters")]
+        static void AfterResetCharacters() { try { ShotProvenance.NewGeneration("ResetCharacters"); } catch { } }
     }
 }
