@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.39.3";   // Aug 24: Info library (wiki tab + search + clickable cross-refs + Spirit's damage-types article), background-mute default OFF + toggle, broadcast night-pack rotation at pick phase
+        public const string ModVersion = "1.39.4";   // Aug 26: Hit% counted symmetrically and withheld when a peer predates the fix, Untouchable revoked/re-earnable, five community faces, damage tracked by event
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string

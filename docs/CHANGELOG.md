@@ -1,5 +1,66 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.39.4 — 2026-08-26
+
+**Hit % stopped drifting to 100%**
+
+- Shots fired and shots hit were counted by different rules. The fired side was
+  gated on a pick-phase flag driven by ROUNDS' debug-log TEXT, which is false
+  from "Round over" until "PICK PHASE" is logged ~2.3s later. That window is
+  live combat, so its shots were refused the denominator while their hits still
+  counted, and the ratio climbed until a hits<=fired clamp pinned it at exactly
+  100 rather than above it. Symmetry is now enforced at projectile birth.
+- A fixed client can no longer be fooled by an unfixed PEER. The telemetry
+  broadcast carries a counting-era tag, and a peer's bullet numbers go over the
+  wire as NULL rather than guessed at when that tag is absent — including the
+  derived hover-graph series, which shipped ungated in the first attempt and drew
+  the old ~100% curve under a 0% caption. Covers the 2v2 and FFA peer paths too,
+  not only the 1v1 summary.
+- The 1v1 history row no longer fabricates "Opp: Hit 0%" for a peer that merely
+  blocked once. Career Hit % totals are deliberately left alone: measured against
+  production, the drift tops out at 50% and 0.37% of match rows saturate, so a
+  wipe would destroy real history to remove a bias invisible at that scale.
+
+**Untouchable revoked and re-earnable**
+
+- The detector sampled a "took damage" STATE at 10 Hz instead of hooking the
+  damage EVENT, so a player who went from full health straight to dead never
+  occupied the state it looked for and was awarded it anyway. Revoked from
+  everyone; holders KEEP the gold. The no-double-pay guard now covers all three
+  paying grant paths — the third (admin grant) was missed by two revisions of
+  that fix and by a docstring asserting there were only two.
+
+**Five community faces**
+
+- Lucky Coin, Lucky Ears, Militia Man, Sadness, Sinister Smile, bundled from the
+  approved placement snapshot with each PNG verified against its stored md5
+  before being written.
+
+**Fixes**
+
+- FFA: the first map of a sitting ran unscaled on the host while every peer
+  scaled it, which is why networked crates and saws sat at the wrong positions.
+- A destroyed card in the offer list could softlock the room.
+- Damage tracking counts events rather than sampling at 10 Hz.
+- Session tally re-arms on the series-start edge; head-to-head staleness is
+  marked when a series ends; an unread marker on match history.
+- Link codes require a live Steam session, and the label showing them wraps
+  instead of clipping a long Discord handle or a translated string.
+
+**Server**
+
+- Read-replica mode: the standby skips every write path rather than attempting
+  writes against a database in recovery. The podium-title grant had been failing
+  silently there, from fifteen GET routes, for as long as read-routing was on.
+- `/health` now reports which box answered. It returned byte-identical JSON on
+  both, so nothing on the network could tell a write-skipping box from a
+  writable one.
+- Three pre-existing defects: a version-check loop spinning with no throttle, an
+  endpoint that 500'd intermittently after catching a failed write without
+  rolling back, and the admin grant path above.
+- Bug-report logs are scrubbed of OS usernames and Discord ids before an admin
+  reads them, on the existing endpoint as well as the new download route.
+
 ## v1.39.3 — 2026-08-24
 
 **The Info library — an in-game wiki (Settings › Info)**
