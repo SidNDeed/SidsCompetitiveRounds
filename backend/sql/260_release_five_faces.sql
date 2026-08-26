@@ -52,13 +52,18 @@ DECLARE
         ['face_eyes_sadness',          '1.55'],
         ['face_mouth_sinister_smile',  '1.55']
     ];
-    sku      TEXT;
+    -- v_sku, not sku: inside a DO block PL/pgSQL resolves a bare identifier as
+    -- the VARIABLE, so `WHERE shop_items.sku = sku` is ambiguous and raises.
+    -- It raised on the first real run and rolled back -- loud, which is what
+    -- the explicit BEGIN/COMMIT is for. Dry-running the SELECT half against
+    -- production had not exercised this UPDATE (#313).
+    v_sku    TEXT;
     want     NUMERIC;
     rec      RECORD;
     flipped  INT := 0;
 BEGIN
     FOR i IN 1 .. array_length(expected, 1) LOOP
-        sku  := expected[i][1];
+        v_sku  := expected[i][1];
         want := expected[i][2]::numeric;
 
         SELECT cs.approved_render_scale, cs.approved_render_offset_x,
@@ -66,38 +71,38 @@ BEGIN
                cs.status, cs.frame_count
           INTO rec
           FROM cosmetic_submissions cs
-         WHERE cs.shop_sku = sku;
+         WHERE cs.shop_sku = v_sku;
 
         IF NOT FOUND THEN
-            RAISE EXCEPTION 'no cosmetic_submissions row for %', sku;
+            RAISE EXCEPTION 'no cosmetic_submissions row for %', v_sku;
         END IF;
         IF rec.status <> 'approved' THEN
-            RAISE EXCEPTION '% is no longer approved (status=%)', sku, rec.status;
+            RAISE EXCEPTION '% is no longer approved (status=%)', v_sku, rec.status;
         END IF;
         IF rec.approved_placement_revision IS DISTINCT FROM 1 THEN
             RAISE EXCEPTION '% approved revision moved to % since the bundle was cut - '
                             'recompile the catalog before publishing',
-                            sku, rec.approved_placement_revision;
+                            v_sku, rec.approved_placement_revision;
         END IF;
         IF ROUND(rec.approved_render_scale::numeric, 3) <> ROUND(want, 3) THEN
             RAISE EXCEPTION '% approved scale is % but the client was built with % - '
                             'recompile the catalog before publishing',
-                            sku, rec.approved_render_scale, want;
+                            v_sku, rec.approved_render_scale, want;
         END IF;
         IF COALESCE(rec.approved_render_offset_x, 0) <> 0
            OR COALESCE(rec.approved_render_offset_y, 0) <> 0 THEN
             RAISE EXCEPTION '% approved offset is now (%,%) but the client was built '
                             'with (0,0) - recompile the catalog before publishing',
-                            sku, rec.approved_render_offset_x, rec.approved_render_offset_y;
+                            v_sku, rec.approved_render_offset_x, rec.approved_render_offset_y;
         END IF;
         IF COALESCE(rec.frame_count, 1) <> 1 THEN
             RAISE EXCEPTION '% is now animated (frame_count=%) but only a single frame '
                             'was bundled - ship every frame or none (#317)',
-                            sku, rec.frame_count;
+                            v_sku, rec.frame_count;
         END IF;
 
         UPDATE shop_items SET catalog_ready = TRUE
-         WHERE shop_items.sku = sku AND catalog_ready IS DISTINCT FROM TRUE;
+         WHERE shop_items.sku = v_sku AND catalog_ready IS DISTINCT FROM TRUE;
         flipped := flipped + 1;
     END LOOP;
 
