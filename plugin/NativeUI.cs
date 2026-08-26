@@ -1036,6 +1036,9 @@ namespace CompetitiveRounds
         private static GameObject lbGraphPanel;
         private static object txtRecentSeries;
         private static int recentSeriesPage=0;private static object txtSeriesPage;private static GameObject seriesPrev,seriesNext;
+        /* Bug #265: newest-row watermark + "a row arrived while you were on a
+         * later page" flag. Both are render-side only; nothing else reads them. */
+        private static string recentSeriesNewestTs="";private static bool recentSeriesUnread=false;
         private class LBRow{public GameObject root,hlWrap;public object txtRank,txtLv,txtName,txtRating,txtW,txtL,txtWL,txtGold;public string steamId;}
         private static List<CardRow> cardRows=new List<CardRow>();private static int cardFilter;private static string cardSort="times_picked";private static bool cardSortDesc=true;
         private static object[] cardSortTexts;private static GameObject[] cardSortBtns,cardFilterBtns;private static object[] cardFilterTexts;
@@ -5248,7 +5251,32 @@ namespace CompetitiveRounds
             /* Discord Link panel (moved from My Stats — same statics rewired). */
             var linkBox=UIFactory.CreatePanel("LkB",left.transform,C_PANEL);UIFactory.AddVLG(linkBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(linkBox,flexH:0);UIFactory.CreateText("LkL",linkBox.transform,"Discord Link",19f,new Color(0.55f,0.55f,0.95f),sizeDelta:new Vector2(340,28));var lkRow=new GameObject("LkR");lkRow.transform.SetParent(linkBox.transform,false);lkRow.AddComponent<RectTransform>();UIFactory.AddHLG(lkRow,spacing:8);UIFactory.AddLE(lkRow,prefH:28);/* 160 wide (Sid, Aug 18): 13 bold chars at 15pt clipped in the old 130px box — rendered "Get Link Cod". */linkCodeBtn=UIFactory.CreateButton("LkBtn",lkRow.transform,"Get Link Code",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.GenerateLinkCode(id);},sizeDelta:new Vector2(160,26));/* Click-to-reveal on the link text - Discord ID/username defaults hidden for streamers.
  * TMP text IS already a Graphic; adding an Image to the same GO throws. Just enable its own raycastTarget. */
-            txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Discord",15f,C_DIM,sizeDelta:new Vector2(360,26),raycastTarget:true);{var lkTextComp=txtLinkCode as Component;if(lkTextComp!=null){var ch=lkTextComp.gameObject.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()){discordRevealed=!discordRevealed;dirty=true;}};}}
+            /* Bug #274 (Stan/broadcast): this text used to sit INSIDE lkRow, whose
+             * HLG has ~400px to give while its children asked for 160 (button) +
+             * 360 (this) + 8 spacing = 528, with no minW on either. Unity resolved
+             * that by squeezing the text to ~271px against a ~295px need, and with
+             * Truncate + no wrap it clipped mid-word — the reported "cut off at
+             * Dis". Not the #292/#297 font class: locale is en and there is no
+             * inline size tag; it is the #132/#245 width-budget class.
+             * Fix is to stop sharing a row with the button — linkBox is a VLG, so
+             * this gets the panel's full content width on its own line. Width stays
+             * 340, NOT 360. An earlier version of this comment contradicted
+             * itself: it claimed 360 "cannot overflow the box at its 360px minW
+             * (content 340)" while asking for 360 inside 340. The left column can
+             * shrink to its 360px minW and the panel takes 10px padding each side,
+             * so 340 IS the content width and 360 overflowed at minimum width.
+             * It also now WRAPS with auto-height, because the content is not fixed
+             * English: the revealed state renders a user-chosen Discord handle and
+             * the hidden state renders a translated string (uk runs noticeably
+             * longer). A one-line fitter is the wrong tool when the text is
+             * user-controlled, since it would shrink someone's handle away.
+             * Superseded reasoning kept for the record: it clears the 295px need
+             * with headroom and cannot
+             * overflow the box at its 360px minW (content 340), whereas widening to
+             * 400 would. Do NOT "fix" this by raising the button's or this element's
+             * prefW inside lkRow — that re-creates the same over-commit and
+             * regresses the Aug-18 "Get Link Cod" button fix noted above. */
+            txtLinkCode=UIFactory.CreateText("LkC",linkBox.transform,"Type !link CODE in Discord",15f,C_DIM,sizeDelta:new Vector2(340,26),raycastTarget:true);UIFactory.SetWordWrap(txtLinkCode,true);UIFactory.SetTextAutoHeight(txtLinkCode);{var lkTextComp=txtLinkCode as Component;if(lkTextComp!=null){var ch=lkTextComp.gameObject.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()){discordRevealed=!discordRevealed;dirty=true;}};}}
             /* Newest cosmetics — now shows the ACTUAL art (animated included),
              * so it's taller and eats flex space the Players box used to take
              * (Sid feedback). prefH 300 vs the old 170; Players (onBox flexH:1)
@@ -11768,7 +11796,79 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetText(txtRecentSeries,txt);
             if(seriesPrev!=null)seriesPrev.SetActive(recentSeriesPage>0);
             if(seriesNext!=null)seriesNext.SetActive(recentSeriesPage<totalPages-1);
-            if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,totalPages>1?$"{recentSeriesPage+1}/{totalPages}":"");
+            /* Bug #265 (Spirit: "recent game not showing up"). The DATA half was
+             * already exonerated by his own log — the client fetched and counted
+             * the new row (89 -> 90). What is left is retention: rows are sorted
+             * newest-first and inserted at index 0, while `recentSeriesPage`
+             * persists across refreshes, so a reader parked on page 2 never sees
+             * an arrival and reasonably concludes it was never recorded.
+             *
+             * Deliberately NOT a blanket auto-reset to page 0: on a busy evening
+             * that would yank anyone browsing history back to the top every few
+             * minutes. Instead the pager says a new row landed, and the jump is
+             * automatic only when the arrival is the reader's OWN series — which
+             * is the case they are actually waiting on. There is also no
+             * telemetry for either retention variable today, which is precisely
+             * why this could not be closed from the last report; the log line
+             * below makes the next one self-diagnosing. */
+            string newestTs=merged[0].ts??"";
+            bool sawNewer=!string.IsNullOrEmpty(newestTs)
+                          &&!string.IsNullOrEmpty(recentSeriesNewestTs)
+                          &&string.CompareOrdinal(newestTs,recentSeriesNewestTs)>0;
+            if(sawNewer)
+            {
+                /* Scan EVERY row newer than the watermark, not just merged[0].
+                 * Review find: two series can complete between two 30s refreshes,
+                 * and if the newest is somebody else's, checking only the top row
+                 * misses that the reader's OWN result also arrived — exactly the
+                 * case they are waiting for. Rows are sorted newest-first, so
+                 * stop at the first one at or below the watermark. */
+                int newCount=0;bool mine=false;
+                for(int i=0;i<merged.Count;i++)
+                {
+                    string ts=merged[i].ts??"";
+                    if(string.IsNullOrEmpty(ts)||string.CompareOrdinal(ts,recentSeriesNewestTs)<=0)break;
+                    newCount++;
+                    if(!mine&&RowInvolves(merged[i],myName))mine=true;
+                }
+                Plugin.Log.LogInfo($"[RECENT] {newCount} new series row(s) (mine={mine}) while on page {recentSeriesPage+1}/{totalPages}");
+                if(mine&&recentSeriesPage!=0){recentSeriesPage=0;dirty=true;}
+                else if(recentSeriesPage!=0)recentSeriesUnread=true;
+            }
+            if(recentSeriesPage==0)recentSeriesUnread=false;
+            recentSeriesNewestTs=newestTs;
+            if(txtSeriesPage!=null)
+                UIFactory.SetText(txtSeriesPage,totalPages>1
+                    ?(recentSeriesUnread?$"<color=#FFD700>{recentSeriesPage+1}/{totalPages}*</color>":$"{recentSeriesPage+1}/{totalPages}")
+                    :"");
+        }
+
+        /// <summary>Bug #265: does this merged row involve the local player?
+        ///
+        /// STEAM ID, never the display name. The first version compared names
+        /// and, for multimode rows, substring-searched the RENDERED line — which
+        /// review correctly killed: display names are user-authored and not
+        /// unique, so a duplicate name yanks the wrong reader off their history
+        /// page, and a name like "FFA" matches the "[FFA]" mode label on rows
+        /// belonging to complete strangers.
+        ///
+        /// MultimodeSeriesEntry carries only left_label/right_label — no ids —
+        /// so multimode arrivals deliberately return false and are announced by
+        /// the unread marker only. Under-claiming is the safe direction here: a
+        /// missed auto-jump still shows the star, whereas a false positive
+        /// interrupts someone mid-read.</summary>
+        private static bool RowInvolves(MergedSeriesRow r,string myName)
+        {
+            try
+            {
+                string me=MatchTracker.LocalSteamId;
+                if(string.IsNullOrEmpty(me)||me=="unknown")return false;
+                if(r.oneVone!=null)
+                    return string.Equals(r.oneVone.p1_steam_id,me,StringComparison.Ordinal)
+                        || string.Equals(r.oneVone.p2_steam_id,me,StringComparison.Ordinal);
+            }
+            catch{}
+            return false;
         }
 
         private static void RefreshVersionStatus(){if(txtVersionStatus==null)return;if(ApiClient.ForceUpdateRequired){UIFactory.SetText(txtVersionStatus,"<color=#FF4444>UPDATE REQUIRED</color>");if(updateBtn!=null)updateBtn.SetActive(true);return;}if(ApiClient.UpdateReady){UIFactory.SetText(txtVersionStatus,"<color=#44FF44>Close ROUNDS to apply update</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(ApiClient.IsUpdating){UIFactory.SetText(txtVersionStatus,"<color=#66CCFF>Downloading...</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}string latest=ApiClient.LatestModVersion;if(latest==null){UIFactory.SetText(txtVersionStatus,"");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(latest==Plugin.ModVersion){UIFactory.SetText(txtVersionStatus,"<color=#44AA44>Up to date</color>");if(updateBtn!=null)updateBtn.SetActive(false);}else{UIFactory.SetText(txtVersionStatus,$"<color=#FFAA33>v{latest} available!</color>");if(updateBtn!=null)updateBtn.SetActive(true);}}
@@ -12020,7 +12120,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// rendered "6-x" (Sid's July 12 item 1). Treat >=2 as already-counted.</summary>
         private static string FmtHalfScore(int rounds,int pts){if(pts>=2)pts=0;return pts>0?(rounds+pts*0.5f).ToString("0.#",System.Globalization.CultureInfo.InvariantCulture):rounds.ToString();}
 
-        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {FmtHalfScore(m.player_rounds_won,m.player_points)}-{FmtHalfScore(m.opponent_rounds_won,m.opponent_points)}");UIFactory.SetColor(row.txtResult,c);/* r2 find 3: the character budget below is a first pass; the pixel fit is what actually keeps this cell out of the FPS column, because FitOneLine leaves it unclipped. 236 = the 240px cell less a hair of slack. *//* r3 find 14: TrF the whole template — `$"vs {name}"` produced the dynamic string "vs Alice", which can never match the catalogue key "vs {0}", so this cell stayed English in es/ru (compose-after-Tr, learning #298c). Raw because the text is already translated. */UIFactory.SetTextRaw(row.txtOpp,indent?"":UIFactory.FitToWidth(row.txtOpp,I18n.TrF("vs {0}",FormatOpponentForRow(m,HIST_OPP_BUDGET_ROW,HIST_OPP_BUDGET_ROW)),236f));UIFactory.SetText(row.txtFps,BuildFpsTag(m));UIFactory.SetText(row.txtPing,BuildPingTag(m));RegisterTeleGraphRectFor(row.txtFps,m.player_fps_timeline,m.opp_fps_timeline,false,m.point_times,m.point_timeline,durationSeconds:m.duration_seconds);RegisterTeleGraphRectFor(row.txtPing,m.player_ping_timeline,m.opp_ping_timeline,true,m.point_times,m.point_timeline,durationSeconds:m.duration_seconds);/* Item 4: per-game combat stats under the FPS line. Only rows with telemetry (post-mig-111 + both mods) render; old rows stay clean. July 22 item 1: split into per-player elements — hovering a Hit% pops that player's fired-vs-hit graph, a Block% pops dmg-taken-vs-blocks, all with point markers. */{string durTag=m.duration_seconds>0?$"      <color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";UIFactory.SetText(row.txtStats,durTag);string hy="",by="",ky="",ho="",bo="",ko="";if(m.player_bullets_fired>0||m.player_blocks_activated>0){float hp=m.player_bullets_fired>0?100f*m.player_bullets_hit/m.player_bullets_fired:0f;float bp=m.player_blocks_activated>0?100f*m.player_blocks_successful/m.player_blocks_activated:0f;float kps=m.player_active_seconds>0.5f?m.player_keys_pressed/m.player_active_seconds:0f;hy=I18n.TrF("<color=#99B3E6>You: Hit {0}%</color>",hp.ToString("F0",_INV));by=$"<color=#99B3E6>{I18n.TrF("Block {0}%",bp.ToString("F0",_INV))}</color>";ky=$"<color=#99B3E6>{I18n.TrF("{0} keys/s",kps.ToString("F1",_INV))}</color>";if(m.opp_bullets_fired>0||m.opp_blocks_activated>0){float ohp=m.opp_bullets_fired>0?100f*m.opp_bullets_hit/m.opp_bullets_fired:0f;float obp=m.opp_blocks_activated>0?100f*m.opp_blocks_successful/m.opp_blocks_activated:0f;float okps=m.opp_active_seconds>0.5f?m.opp_keys_pressed/m.opp_active_seconds:0f;ho=I18n.TrF("<color=#E69988>Opp: Hit {0}%</color>",ohp.ToString("F0",_INV));bo=$"<color=#E69988>{I18n.TrF("Block {0}%",obp.ToString("F0",_INV))}</color>";ko=$"<color=#E69988>{I18n.TrF("{0} keys/s",okps.ToString("F1",_INV))}</color>";}}
+        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {FmtHalfScore(m.player_rounds_won,m.player_points)}-{FmtHalfScore(m.opponent_rounds_won,m.opponent_points)}");UIFactory.SetColor(row.txtResult,c);/* r2 find 3: the character budget below is a first pass; the pixel fit is what actually keeps this cell out of the FPS column, because FitOneLine leaves it unclipped. 236 = the 240px cell less a hair of slack. *//* r3 find 14: TrF the whole template — `$"vs {name}"` produced the dynamic string "vs Alice", which can never match the catalogue key "vs {0}", so this cell stayed English in es/ru (compose-after-Tr, learning #298c). Raw because the text is already translated. */UIFactory.SetTextRaw(row.txtOpp,indent?"":UIFactory.FitToWidth(row.txtOpp,I18n.TrF("vs {0}",FormatOpponentForRow(m,HIST_OPP_BUDGET_ROW,HIST_OPP_BUDGET_ROW)),236f));UIFactory.SetText(row.txtFps,BuildFpsTag(m));UIFactory.SetText(row.txtPing,BuildPingTag(m));RegisterTeleGraphRectFor(row.txtFps,m.player_fps_timeline,m.opp_fps_timeline,false,m.point_times,m.point_timeline,durationSeconds:m.duration_seconds);RegisterTeleGraphRectFor(row.txtPing,m.player_ping_timeline,m.opp_ping_timeline,true,m.point_times,m.point_timeline,durationSeconds:m.duration_seconds);/* Item 4: per-game combat stats under the FPS line. Only rows with telemetry (post-mig-111 + both mods) render; old rows stay clean. July 22 item 1: split into per-player elements — hovering a Hit% pops that player's fired-vs-hit graph, a Block% pops dmg-taken-vs-blocks, all with point markers. */{string durTag=m.duration_seconds>0?$"      <color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";UIFactory.SetText(row.txtStats,durTag);string hy="",by="",ky="",ho="",bo="",ko="";if(m.player_bullets_fired>0||m.player_blocks_activated>0){float hp=m.player_bullets_fired>0?100f*m.player_bullets_hit/m.player_bullets_fired:0f;float bp=m.player_blocks_activated>0?100f*m.player_blocks_successful/m.player_blocks_activated:0f;float kps=m.player_active_seconds>0.5f?m.player_keys_pressed/m.player_active_seconds:0f;hy=I18n.TrF("<color=#99B3E6>You: Hit {0}%</color>",hp.ToString("F0",_INV));by=$"<color=#99B3E6>{I18n.TrF("Block {0}%",bp.ToString("F0",_INV))}</color>";ky=$"<color=#99B3E6>{I18n.TrF("{0} keys/s",kps.ToString("F1",_INV))}</color>";if(m.opp_bullets_fired>0||m.opp_blocks_activated>0){/* #308: this disjunction opens the OPPONENT block for blocks alone, which is correct for Block% and keys/s -- but the Hit cell below must gate on opp_bullets_fired SPECIFICALLY. A pre-epoch peer sends JSON null for bullets (ExtractJsonInt reads null back as 0) while opp_blocks_activated stays real, so gating Hit on this disjunction rendered "Opp: Hit 0%" from numbers the epoch deliberately withheld, and registered a hover graph drawn from the un-withheld series underneath it. */float ohp=m.opp_bullets_fired>0?100f*m.opp_bullets_hit/m.opp_bullets_fired:0f;float obp=m.opp_blocks_activated>0?100f*m.opp_blocks_successful/m.opp_blocks_activated:0f;float okps=m.opp_active_seconds>0.5f?m.opp_keys_pressed/m.opp_active_seconds:0f;if(m.opp_bullets_fired>0)ho=I18n.TrF("<color=#E69988>Opp: Hit {0}%</color>",ohp.ToString("F0",_INV));bo=$"<color=#E69988>{I18n.TrF("Block {0}%",obp.ToString("F0",_INV))}</color>";ko=$"<color=#E69988>{I18n.TrF("{0} keys/s",okps.ToString("F1",_INV))}</color>";}}
         /* Aug 6 item 4: avg DPS = damage dealt / game length. A row whose damage
          * column is NULL shows a DASH rather than "0.0 dps" (#257 — 0 is a real
          * value here: a player can genuinely deal no damage).

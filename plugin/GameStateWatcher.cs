@@ -314,6 +314,28 @@ namespace CompetitiveRounds
 
         // Achievement tracking within current match
         private static bool achTookDamage = false;       // health ever < MaxHealth during a round
+
+        /// <summary>Bug #268: event-driven "the local player was damaged", from
+        /// the CharacterStatModifiers.DealtDamage postfix in CombatTelemetry.
+        ///
+        /// The field above is sampled at 10Hz as a STATE (health &lt; MaxHealth
+        /// while alive), which cannot see damage that does not persist across a
+        /// sample boundary — a one-shot kill (the reported case, closed in
+        /// v1.39.3 by the died-this-game guard) or a hit healed inside 100ms
+        /// (still open). #120's lesson applied to a boolean: a discrete EVENT
+        /// read at poll cadence is silently lossy. DealtDamage runs downstream
+        /// of HealthHandler.DoDamage's early-return guard (#256), so reaching it
+        /// proves damage actually landed rather than being blocked or zeroed.
+        ///
+        /// The sampler is deliberately KEPT as a backstop: it also catches
+        /// health loss from sources that never route through DealtDamage, such
+        /// as the out-of-bounds drain.</summary>
+        internal static void NoteLocalTookDamage()
+        {
+            if (achTookDamage) return;
+            achTookDamage = true;
+            Plugin.Log.LogInfo("[ACH] Player took damage (damage event)");
+        }
         private static bool achPhoenixUsed = false;       // remainingRespawns < respawns detected
         private static bool achDied = false;              // data.dead became true (actual death)
         private static int achMaxOpponentRounds = 0;      // highest round count opponent reached (for comeback)
@@ -466,17 +488,52 @@ namespace CompetitiveRounds
         // 1.0s time-dedup let Abyssal-style auto-absorbs produce succ > act).
         private static bool _activationSuccessCredited = true;
 
-        // Per-projectile hit gating. Previous binary gate "arm on click, consume on first hit"
-        // produced 1 hit max per trigger-pull, which undercounts shotguns (5 pellets hitting
-        // = 5 real hits but we'd count 1). Switch to a counter: Gun.Attack Postfix adds N to
-        // _hitsRemaining where N is numberOfProjectiles, then each filtered bullet-impact on
-        // an enemy decrements. Bounds bullets_hit ≤ bullets_fired naturally without drops on
-        // multi-projectile weapons.
+        // Per-projectile hit gating. The original binary gate ("arm on click,
+        // consume on first hit") produced at most 1 hit per trigger-pull, which
+        // undercounts shotguns — 5 pellets landing is 5 real hits counted as 1.
+        // A counter fixes that: each counted shot tops the budget up, each
+        // filtered enemy impact decrements, so bullets_hit ≤ bullets_fired holds
+        // without dropping hits on multi-projectile weapons.
+        //
+        // THE FEEDER CHANGED (#308). This used to read "Gun.Attack Postfix adds
+        // N where N is numberOfProjectiles". That Postfix is GONE — its arithmetic
+        // (numberOfProjectiles * bursts * attacks) never matched what vanilla
+        // actually births, and predicting the count was the wrong shape. The
+        // budget is now fed one unit at a time from the projectile's OWN birth,
+        // via GunApplyPlayerStuffProvenancePatch -> OnLocalBulletFired(1), so it
+        // counts what happened rather than what was forecast.
+        //
+        // KNOWN-REDUNDANT, DELIBERATELY KEPT. Provenance now tags each birth with
+        // "was this counted" and "has this already scored", so hits ≤ fired is
+        // already guaranteed per-projectile and this global budget double-bounds.
+        // It is kept because its failure direction is safe: if any accounting skew
+        // ever appears it drops hits (under-reports) rather than inflating. Note
+        // it is ALSO what pinned the #308 symptom at exactly 100% instead of
+        // overflowing past it — which is what made broken counting look like
+        // perfect aim (learning #137). Post-fix it should never bind; if it does,
+        // that is a signal worth having. Do not remove it without a review pass.
         private static int _hitsRemaining;
 
         public static void OnLocalBulletFired(int projectiles)
         {
-            if (!isTracking || inPickPhase) return;
+            // #308: the `inPickPhase` half of this gate is GONE, and its removal
+            // is the reason the ratio could exceed reality at all.
+            //
+            // `inPickPhase` is driven by ROUNDS' debug-log TEXT and is false
+            // from "Round over" until "PICK PHASE" is logged ~2.3s later, so it
+            // never covered the window it was named for. What it DID cover was
+            // live combat frames on either side of that boundary: a shot fired
+            // there was refused the denominator AND refused its budget top-up,
+            // while hits from earlier banked shots kept counting - denominator
+            // loses rounds the numerator keeps, ratio climbs, and _hitsRemaining
+            // pins it at exactly 100% instead of above it (learning #137).
+            //
+            // Phase is now decided ONCE, at projectile birth, by
+            // ShotProvenance.WindowOpen() - which reads battleOngoing, real
+            // engine state rather than log text - and the same verdict governs
+            // whether the projectile may ever score. One authority, applied to
+            // both sides, is the whole point.
+            if (!isTracking) return;
             if (projectiles < 1) projectiles = 1;
             LocalBulletsFiredThisMatch += projectiles;
             _hitsRemaining += projectiles;
@@ -491,8 +548,17 @@ namespace CompetitiveRounds
             // PHASE" logged (which flips inPickPhase=true via the log hook)
             // BEFORE our Postfix executes — so the old gate silently dropped
             // exactly the kill shot of every round. A real bullet impact is a
-            // hit regardless of phase; nothing can be FIRED during the pick
-            // phase anyway (the fired-side gate stays), so this can't inflate.
+            // hit regardless of phase.
+            //
+            // THE ORIGINAL JUSTIFICATION HERE IS GONE, and saying so matters more
+            // than tidying it away: this used to read "the fired-side gate stays,
+            // so this can't inflate". That gate was removed thirty lines above as
+            // part 7 -- and it was removed precisely BECAUSE it inflated, by
+            // refusing live combat shots the denominator while their hits still
+            // counted. Symmetry is now enforced at projectile BIRTH instead
+            // (ShotProvenance.WindowOpen plus TagState.FiredCounted), which is a
+            // real invariant rather than a phase flag driven by log text. Do not
+            // "restore" a gate here to make an old comment true.
             if (!isTracking) return;
             if (_hitsRemaining <= 0)
             {
@@ -1929,6 +1995,38 @@ namespace CompetitiveRounds
         public static int OppStatBlocksSuccessful { get; private set; }
         public static int OppStatKeysPressed { get; private set; }
         public static float OppStatActiveSeconds { get; private set; }
+
+        // #308 part 6 - SEMANTIC EPOCH for the bullet counters on this channel.
+        //
+        // Fields 1-2 of cr_gstats are the peer's OWN bullets_fired/bullets_hit,
+        // and we render them as their Hit% and ship them to the server as
+        // opp_bullets_*. The counting SEMANTICS changed: pre-fix clients gated
+        // the fired side on a log-text pick-phase flag while leaving the hit
+        // side open, so their denominator dropped shots their numerator kept and
+        // the ratio drifted up to a hard 100% (bug #308).
+        //
+        // reporter_mod_version cannot answer this. It identifies the REPORTER -
+        // the seat that happens to hold the lower Steam ID (#4) - and says
+        // nothing about the PEER whose payload we are storing. A fixed reporter
+        // reading a stale peer would stamp its own clean version onto numbers
+        // produced by the broken definition, which is worse than not having
+        // them: it launders old-era data as new-era data.
+        //
+        // So the broadcast carries its own tag. Deliberately NOT
+        // ShotProvenance.Generation - that is a projectile-lifetime counter that
+        // resets every match; this is a build-wide statement about what the two
+        // numbers MEAN, and conflating them was a review finding on the other
+        // half of this change.
+        //
+        // 0 = peer never sent the field, i.e. a pre-epoch client -> UNKNOWN.
+        internal const int BULLET_STATS_EPOCH = 2;
+        public static int OppBulletStatsEpoch { get; private set; }
+
+        /// <summary>True only when the peer's bullet counters were produced by
+        /// our own counting definition. Everything else - a silent old client, a
+        /// garbled field, a future era we do not understand - is UNKNOWN, and
+        /// unknown must render and report as absent rather than as zero.</summary>
+        public static bool OppBulletStatsUsable => OppBulletStatsEpoch == BULLET_STATS_EPOCH;
         public static int OppStatMacroSuspectSeconds { get; private set; }
         public static int OppStatMacroPeakKeysPerSecond { get; private set; }
         public static int OppStatMacroPeakClicksPerSecond { get; private set; }
@@ -1966,7 +2064,11 @@ namespace CompetitiveRounds
                 // Aug 6 items 1+4 — fields 19-22 (indexes 18-21): cumulative
                 // damage dealt, max single hit, max health seen, best bounce
                 // kill. Old clients ignore extras; parsers gate on Length.
-                $"|{(int)LocalDamageDealtThisMatch}|{(int)LocalMaxSingleHit}|{(int)LocalMaxHealthSeen}|{LocalBestBounceKill}";
+                $"|{(int)LocalDamageDealtThisMatch}|{(int)LocalMaxSingleHit}|{(int)LocalMaxHealthSeen}|{LocalBestBounceKill}" +
+                // Field 23 - #308 part 6 bullet-stats epoch. Every consumer of
+                // this payload gates on parts.Length >= N, so appending is
+                // backward-compatible: an old peer simply never sees it.
+                $"|{BULLET_STATS_EPOCH}";
         }
 
         private static void BroadcastGstatsImmediate()
@@ -2048,6 +2150,22 @@ namespace CompetitiveRounds
                                     OppStatBlocksSuccessful = int.Parse(parts[3]);
                                     OppStatKeysPressed = int.Parse(parts[4]);
                                     OppStatActiveSeconds = float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture);
+                                    // Read the epoch HERE, inside the same
+                                    // payload that supplied the counters above,
+                                    // rather than in a later block: this loop
+                                    // walks every peer, and an epoch harvested
+                                    // from a different actor's payload would
+                                    // certify numbers it never produced.
+                                    // TryParse, not Parse. This block's own doc
+                                    // says a garbled field reads as UNKNOWN -- with
+                                    // Parse it instead THROWS, which leaves the
+                                    // PREVIOUS epoch standing beside these fresh
+                                    // counters (a stale 2 keeps certifying) and
+                                    // aborts the rest of this peer's parse. Failing
+                                    // to 0 is what the comment already promised.
+                                    int _ep = 0;
+                                    if (parts.Length >= 23) int.TryParse(parts[22], out _ep);
+                                    OppBulletStatsEpoch = _ep;
                                 }
                                 // Fields 14-18 carry the peer's macro evidence.
                                 // Without them only the elected reporter's own
@@ -2261,10 +2379,13 @@ namespace CompetitiveRounds
         /// happens at match end and never from the deferred submit.</summary>
         internal static bool TryGetPeerTelemetry(int actorNumber,
             out string fpsTl, out string pingTl, out string hitTl, out string blockTl,
-            out string damageTl, out int[] counters)
+            out string damageTl, out int[] counters, out bool bulletsKnown)
         {
             fpsTl = pingTl = hitTl = blockTl = damageTl = null;
             counters = null;
+            // Pessimistic default: a caller that bails before the epoch is read
+            // must never be handed "known".
+            bulletsKnown = false;
             PeerTelemetry t;
             if (!peerTele.TryGetValue(actorNumber, out t) || string.IsNullOrEmpty(t.lastRaw)) return false;
             try
@@ -2281,8 +2402,40 @@ namespace CompetitiveRounds
                 // client) — the report must carry "" so the server can store
                 // NULL, never a synthesised 0 (#257).
                 damageTl = string.Join(",", t.damage.Items);
+                // #308 epoch, applied HERE TOO. This is the 2v2 and FFA path --
+                // NOT 1v2, whose caller takes only the damage timeline and ships
+                // no bullet fields at all. (An earlier version of this comment
+                // said "2v2/1v2/FFA" and was wrong about the third.)
+                // and the first version of part 6 gated only the 1v1 summary --
+                // so a pre-epoch peer's drifted bullet counters still shipped
+                // from every multi-player report, under the REPORTER's clean
+                // mod_version. That is exactly the laundering the epoch comment
+                // calls "worse than not having them".
+                //
+                // Zeroed rather than nulled because this path serialises
+                // non-nullably, and the renderer for these rows gates on
+                // `bullets_fired > 0` (unlike the 1v1 history row, which had to
+                // be fixed) -- so a zero renders as NO Hit% cell, which is the
+                // honest display. The stored value is a compromise: it says 0
+                // for a peer that fired some, and that is worth knowing if these
+                // rows are ever mined for anything other than display.
+                int _peerEpoch = 0;
+                if (parts.Length >= 23) int.TryParse(parts[22], out _peerEpoch);
+                bulletsKnown = _peerEpoch == BULLET_STATS_EPOCH;
+                if (!bulletsKnown)
+                {
+                    // DROP THE DERIVED CURVE TOO. hitTl is built from the SAME
+                    // parts[0]:parts[1] bytes as the two counters, so withholding
+                    // the counters while still shipping the series they are
+                    // computed from withholds nothing -- it stored honest zeros
+                    // beside the old era's ~100% curve. Empty makes the server
+                    // store NULL, exactly as the damage timeline already does for
+                    // peers that predate it (#257).
+                    hitTl = "";
+                }
                 counters = new int[] {
-                    int.Parse(parts[0]), int.Parse(parts[1]),
+                    bulletsKnown ? int.Parse(parts[0]) : 0,
+                    bulletsKnown ? int.Parse(parts[1]) : 0,
                     int.Parse(parts[2]), int.Parse(parts[3]),
                     int.Parse(parts[4]),
                     (int)float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture)
@@ -4489,6 +4642,7 @@ namespace CompetitiveRounds
             // Item 4: fresh per-game scoring timeline + opponent-stat snapshot.
             matchPointTimeline.Clear();
             OppStatBulletsFired = 0; OppStatBulletsHit = 0;
+            OppBulletStatsEpoch = 0;   // #308 part 6: unknown until a peer says otherwise
             OppStatBlocksActivated = 0; OppStatBlocksSuccessful = 0;
             OppStatKeysPressed = 0; OppStatActiveSeconds = 0f;
             OppStatMacroSuspectSeconds = 0;
@@ -4790,24 +4944,86 @@ namespace CompetitiveRounds
                     // A new BO3 starts here — re-arm the session series tally.
                     sessionSeriesCounted = false;
                 }
+                // Bug #271: the reset ABOVE was the only re-arm site, and it can
+                // only fire while the decided series' 2-x score is still on the
+                // counters — which is true on the non-reporter and FALSE on the
+                // reporter, because IncrementSessionRankedSeries' already-counted
+                // early-return zeroes both counters as it returns. So on the
+                // reporting client (the lower Steam ID of every 1v1 pair) the
+                // latch stuck true after series 1 and the lifetime "Total Series"
+                // HUD number froze for the rest of the process — wrong since
+                // v1.34.2.
+                //
+                // Re-arm on the SERIES-START edge instead, which is the fact we
+                // actually mean and which survives either reset: both counters at
+                // zero on entry means this game-over is game 1 of a new series.
+                // RoomSeriesGeneration was the obvious alternative key. My first
+                // reason for rejecting it was WRONG and is corrected here: I said
+                // its Diag2v2-gated bump would freeze the 2v2 tally, but 2v2 has
+                // its own tally and this block is now 1v1-only, so that is exactly
+                // what you want. The real reason a bare generation integer is not
+                // enough is that it RESETS on room join, so it cannot distinguish
+                // series across a room change; a sound key would be (room
+                // incarnation, generation) or the server series id. The edge below
+                // needs neither.
+                //
+                // KNOWN RESIDUAL, stated rather than claimed away: an earlier
+                // draft of this comment asserted that a duplicate server callback
+                // for the same series "still lands before the next series' game 1
+                // and still finds the latch set". That is NOT guaranteed.
+                // PostRequestWithRetry can take ~34s to succeed (three request
+                // windows plus two backoffs), so a deciding report that only
+                // succeeds on its third attempt can land AFTER the next series'
+                // game 1 has already re-armed the latch — counting series 1 twice
+                // and resetting series 2's 1-0. Not reachable at observed ranked
+                // game lengths (131-261s in the bug #271 logs), so it is left as a
+                // residual rather than fixed here; closing it properly means
+                // deduping on a series incarnation (the server series id, or
+                // (room incarnation, local series generation) captured at report
+                // send) instead of one process-wide boolean.
+                if (currentSeriesGamesWon == 0 && currentSeriesGamesLost == 0)
+                    sessionSeriesCounted = false;
                 if (localWon) currentSeriesGamesWon++; else currentSeriesGamesLost++;
                 // Count the series locally the moment this game decides it (first
                 // to 2). Both clients reach this, so the non-reporting player's
                 // session series tally is no longer stuck at 0-0. Idempotent: the
                 // reporter's server-confirmed call finds it already counted.
-                if (currentSeriesGamesWon >= 2 || currentSeriesGamesLost >= 2)
+                // Bug #271 review: the SESSION TALLY and the H2H bump are
+                // 1v1-only; the per-series counters above are NOT. matchIsRanked
+                // is also true for 2v2 cr_ff games flowing through this path, so
+                // letting 2v2 reach the tally credits a TEAM series to the 1v1
+                // session counters and fires OnSeriesCompletedVsOpponent at the
+                // single stale `opponentSteamId`. That leak was previously masked
+                // by accident — the stuck latch this bug is about suppressed it —
+                // so fixing the latch unmasks it.
+                //
+                // The gate is deliberately HERE and not around the whole block:
+                // wrapping the counters too (my first attempt) stopped the
+                // contamination but froze `currentSeriesGames*` at 0-0, which the
+                // generic ranked HUD and the leaver banner still render in cr_ff
+                // rooms — trading a stats bug for a display bug. 2v2 keeps its
+                // counters; it just cannot reach the 1v1 tally.
+                if (!Diag2v2.IsActive()
+                    && (currentSeriesGamesWon >= 2 || currentSeriesGamesLost >= 2))
                 {
                     bool seriesWon = currentSeriesGamesWon >= 2;
                     if (!sessionSeriesCounted)
                     {
                         sessionSeriesCounted = true;
                         if (seriesWon) sessionRankedSeriesWins++; else sessionRankedSeriesLosses++;
-                        // Review find: this local BO3-decision path is the one
-                        // that actually fires in the normal flow on BOTH clients
-                        // (the reporter's server-confirmed call arrives later and
-                        // dedupes out on sessionSeriesCounted) — so the lifetime
-                        // H2H "Total Series" bump must live HERE, not only in
-                        // IncrementSessionRankedSeries where it was unreachable.
+                        // This local BO3-decision path fires in the normal flow on
+                        // BOTH clients (the reporter's server-confirmed call
+                        // arrives later and dedupes out on sessionSeriesCounted),
+                        // so the lifetime H2H "Total Series" bump lives here.
+                        //
+                        // The earlier wording of this comment claimed the bump
+                        // "must live HERE, not only in IncrementSessionRankedSeries
+                        // where it was unreachable". That was a false guarantee:
+                        // BOTH bump sites sit behind the SAME sessionSeriesCounted
+                        // latch, so moving it here bought nothing on its own — once
+                        // the latch stuck (bug #271) this site was equally
+                        // unreachable from series 2 onward. The re-arm fix above is
+                        // what actually makes either site fire.
                         try { ApiClient.OnSeriesCompletedVsOpponent(opponentSteamId, seriesWon); } catch { }
                         Plugin.Log.LogInfo($"[SESSION] Ranked series tally (local BO3 decision): {sessionRankedSeriesWins}-{sessionRankedSeriesLosses}");
                         SaveSessionState();
@@ -5149,11 +5365,27 @@ namespace CompetitiveRounds
                     isRanked: matchIsRanked,
                     localShotsFired: LocalShotsThisMatch,
                     localBlocksRaised: LocalBlocksThisMatch,
-                    // bullets_fired = projectile count via Gun.Attack Postfix × numberOfProjectiles
-                    // (captures shotgun pellets, auto-fire, burst weapons — not just trigger pulls).
-                    // blocks_activated = right-click count. bullets_hit / blocks_successful come
-                    // from Harmony hooks (HealthHandler.TakeDamage with projectile filter, and
-                    // Block.DoBlock) wired in Plugin.cs.
+                    // Where these four actually come from (all wired in Plugin.cs).
+                    // Corrected #308 — every hook named here had moved:
+                    //
+                    //   bullets_fired      one unit per PROJECTILE BIRTH, from a
+                    //                      Gun.ApplyPlayerStuff patch. It is NOT a
+                    //                      Gun.Attack Postfix multiplying
+                    //                      numberOfProjectiles: that Postfix is gone,
+                    //                      and forecasting a count never matched what
+                    //                      vanilla births. Still captures shotgun
+                    //                      pellets, auto-fire and bursts — by counting
+                    //                      them rather than predicting them.
+                    //   bullets_hit        ProjectileHit.RPCA_DoHit — the single funnel
+                    //                      every real impact passes through, gated on
+                    //                      provenance + one credit per projectile. NOT
+                    //                      HealthHandler.TakeDamage: damagingWeapon is
+                    //                      the GUN for DOT ticks too, so no filter there
+                    //                      can separate a direct hit from poison burn
+                    //                      (learning #137).
+                    //   blocks_activated   right-click count, from a Block.TryBlock patch.
+                    //   blocks_successful  a DoBlock-family Postfix (resolved dynamically,
+                    //                      so no single method name is pinned here).
                     localBulletsFired: LocalBulletsFiredThisMatch,
                     localBulletsHit: LocalBulletsHitThisMatch,
                     // July 21 item 1 (Stan's spec): activations = user right-clicks only
@@ -5184,6 +5416,18 @@ namespace CompetitiveRounds
                     // history hover graph.
                     oppBulletsFired: OppStatBulletsFired,
                     oppBulletsHit: OppStatBulletsHit,
+                    // #308 part 6: when the peer predates the epoch these two go
+                    // over the wire as JSON null, not 0 -- the schema models them
+                    // as `int | None`, and 0 is indistinguishable from "genuinely
+                    // never fired".
+                    //
+                    // The render sites gate on `opp_bullets_fired > 0` so unknown
+                    // shows no Hit% cell at all. That was NOT true when this
+                    // comment was first written: the 1v1 history row opened on a
+                    // DISJUNCTION with blocks, so a peer who merely blocked once
+                    // produced a fabricated "Opp: Hit 0%". Fixed at that site
+                    // rather than by softening this sentence.
+                    oppBulletStatsKnown: OppBulletStatsUsable,
                     oppBlocksActivated: OppStatBlocksActivated,
                     oppBlocksSuccessful: OppStatBlocksSuccessful,
                     oppKeysPressed: OppStatKeysPressed,
@@ -5210,7 +5454,17 @@ namespace CompetitiveRounds
                     // July 22 item 1: cumulative Hit%/Block% pair timelines +
                     // per-point timestamps for the new hover graphs.
                     localHitTimeline: string.Join(",", localHitTimeline.Items),
-                    oppHitTimeline: string.Join(",", oppHitTimeline.Items),
+                    // GATED ON THE SAME VERDICT AS THE SCALARS, and the first
+                    // version was not. The epoch withheld opp_bullets_fired/hit
+                    // while this series -- built from the SAME parts[0]:parts[1]
+                    // bytes, one line of parsing away -- shipped unconditionally.
+                    // The history row then rendered a label from the withheld
+                    // numbers and a hover graph from the un-withheld ones: a ~100%
+                    // curve under a 0% caption. Withholding a statistic and
+                    // shipping the series it is computed from is not withholding.
+                    // "" makes the server store NULL, matching the damage-timeline
+                    // precedent for pre-Aug-6 peers (#257).
+                    oppHitTimeline: OppBulletStatsUsable ? string.Join(",", oppHitTimeline.Items) : "",
                     localBlockTimeline: localBlockTimeline.Count > 0
                         ? "v2|" + string.Join(",", localBlockTimeline.Items) : "",
                     oppBlockTimeline: oppBlockTimeline.Count > 0
@@ -5402,7 +5656,7 @@ namespace CompetitiveRounds
                 // sends nothing and stays EMPTY = NULL server-side, not 0 (#257).
                 string dmgTl = "";
                 if (pp.IsLocal) { if (localCards != null && localCards.Count > 0) picks = new List<MatchTracker.CardPickData>(localCards); int myFps = LocalAvgFps; if (myFps > 0) fps = myFps; dmgTl = string.Join(",", localDamage3sTimeline.Items); }
-                else if (TryGetPeerTelemetry(pp.ActorNumber, out _, out _, out _, out _, out string pDmg, out _)) dmgTl = pDmg ?? "";
+                else if (TryGetPeerTelemetry(pp.ActorNumber, out _, out _, out _, out _, out string pDmg, out _, out _)) dmgTl = pDmg ?? "";
                 info[sid] = (name, teamId, picks, fps, dmgTl);
             }
             if (info.Count != 3) { Plugin.Log.LogWarning($"[1v2-REPORT] resolved {info.Count}/3 players"); return false; }
@@ -5886,7 +6140,7 @@ namespace CompetitiveRounds
                 // and it ships at player level below as damageTimeline.
                 else if (TryGetPeerTelemetry(pp.ActorNumber,
                              out string pFps, out string pPing, out string pHit, out string pBlock,
-                             out _, out int[] pCounters))
+                             out _, out int[] pCounters, out bool pBulletsKnown))
                 {
                     int pingAvg = 0;
                     try
@@ -5902,6 +6156,7 @@ namespace CompetitiveRounds
                         fpsTimeline = pFps, pingTimeline = pPing, pingAvg = pingAvg,
                         hitTimeline = pHit, blockTimeline = pBlock,
                         bulletsFired = pCounters[0], bulletsHit = pCounters[1],
+                        bulletStatsKnown = pBulletsKnown,
                         blocksActivated = pCounters[2], blocksSuccessful = pCounters[3],
                         keysPressed = pCounters[4], activeSeconds = pCounters[5],
                     };
@@ -6131,7 +6386,7 @@ namespace CompetitiveRounds
                 }
                 else if (TryGetPeerTelemetry(pp.ActorNumber,
                              out string pFps, out string pPing, out string pHit, out string pBlock,
-                             out string pDamage, out int[] pCounters))
+                             out string pDamage, out int[] pCounters, out bool pBulletsKnown))
                 {
                     int pingAvg = 0;
                     try
@@ -6155,6 +6410,7 @@ namespace CompetitiveRounds
                         damageTimeline = pDamage,
                         bulletsFired = pCounters[0],
                         bulletsHit = pCounters[1],
+                        bulletStatsKnown = pBulletsKnown,
                         blocksActivated = pCounters[2],
                         blocksSuccessful = pCounters[3],
                         keysPressed = pCounters[4],

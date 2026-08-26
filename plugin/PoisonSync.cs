@@ -1380,9 +1380,16 @@ namespace CompetitiveRounds
     ///
     /// The inactive-GameObject guard that used to be VanillaFixes.DeadPlayerDotPatch
     /// is folded in as step 1. Two prefixes on one method have UNDEFINED relative
-    /// order and Harmony skips subsequent prefixes once one returns false, so
-    /// splitting them would let whichever ran first silently decide whether the
-    /// other ran at all.</summary>
+    /// order, so splitting them would let whichever ran first decide the shared
+    /// state the other reads.
+    ///
+    /// NOT because a false return suppresses the sibling: it does not. HarmonyX
+    /// runs EVERY prefix on a target and merely ANDs their results into
+    /// __runOriginal, so a separate guard prefix returning false could never have
+    /// stopped this one running, and each prefix must carry its own guard. An
+    /// earlier version of this comment asserted the opposite, which would have
+    /// pointed the next maintainer at an unsafe split (VanillaFixes.cs states the
+    /// correct rule).</summary>
     [HarmonyPatch(typeof(DamageOverTime), "TakeDamageOverTime")]
     internal static class PoisonDotSchedulerPatch
     {

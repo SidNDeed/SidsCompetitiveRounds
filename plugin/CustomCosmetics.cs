@@ -231,6 +231,14 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_eyes_cat_eyes",           DisplayName = "Cat Eyes",         Slot = CharacterItemType.Eyes,   PngFile = "eyes_cat_eyes.png",           Scale = 1.5f,  Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_mouth_the_challenger",    DisplayName = "The Challenger",   Slot = CharacterItemType.Mouth,  PngFile = "mouth_the_challenger.png",    Scale = 1.7f,  Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_mouth_goober",            DisplayName = "Goober",           Slot = CharacterItemType.Mouth,  PngFile = "mouth_goober.png",            Scale = 1.8f,  Offset = Vector2.zero },
+            // v-next batch: five approved community faces, bundled from the
+            // approved_* snapshot (submissions 28-32). Offsets are all zero as
+            // approved; scales are the artists' reviewed values, not re-derived.
+            new CosmeticDef { Sku = "face_detail_lucky_coin",      DisplayName = "Lucky Coin",       Slot = CharacterItemType.Detail, PngFile = "detail_lucky_coin.png",      Scale = 1.65f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_lucky_ears",      DisplayName = "Lucky Ears",       Slot = CharacterItemType.Detail, PngFile = "detail_lucky_ears.png",      Scale = 1.4f,  Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_militia_man",     DisplayName = "Militia Man",      Slot = CharacterItemType.Detail, PngFile = "detail_militia_man.png",     Scale = 1.45f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_eyes_sadness",           DisplayName = "Sadness",          Slot = CharacterItemType.Eyes,   PngFile = "eyes_sadness.png",           Scale = 1.55f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_mouth_sinister_smile",   DisplayName = "Sinister Smile",   Slot = CharacterItemType.Mouth,  PngFile = "mouth_sinister_smile.png",   Scale = 1.55f, Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

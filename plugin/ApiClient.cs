@@ -4703,6 +4703,11 @@ namespace CompetitiveRounds
             // ("2:0,2:1,4:1,..." — rounds*2+points per event) for the history
             // hover graph. All advisory, not in HMAC.
             int oppBulletsFired = 0, int oppBulletsHit = 0,
+            // #308 part 6. False => the peer's counters predate our counting
+            // definition and are sent as null (unknown), never as 0 - a 0 here
+            // is indistinguishable from "genuinely never fired" and would be
+            // averaged into their career Hit% as a real observation.
+            bool oppBulletStatsKnown = true,
             int oppBlocksActivated = 0, int oppBlocksSuccessful = 0,
             int oppKeysPressed = 0, float oppActiveSeconds = 0f,
             string pointTimeline = null,
@@ -4805,8 +4810,14 @@ namespace CompetitiveRounds
             sb.Append($"\"opp_macro_peak_eps\":{oppMacroPeakEps},");
             sb.Append($"\"opp_macro_timeline\":\"{Escape(ClampTimeline(oppMacroTimeline, 1024))}\",");
             // v1.30 item 4 — opponent per-game stats + scoring timeline (advisory).
-            sb.Append($"\"opp_bullets_fired\":{oppBulletsFired},");
-            sb.Append($"\"opp_bullets_hit\":{oppBulletsHit},");
+            // #308 part 6: `int | None` server-side with ge=0, so null is the
+            // schema's own "unknown" and a negative sentinel would 422.
+            sb.Append(oppBulletStatsKnown
+                ? $"\"opp_bullets_fired\":{oppBulletsFired},"
+                : "\"opp_bullets_fired\":null,");
+            sb.Append(oppBulletStatsKnown
+                ? $"\"opp_bullets_hit\":{oppBulletsHit},"
+                : "\"opp_bullets_hit\":null,");
             sb.Append($"\"opp_blocks_activated\":{oppBlocksActivated},");
             sb.Append($"\"opp_blocks_successful\":{oppBlocksSuccessful},");
             sb.Append($"\"opp_keys_pressed\":{oppKeysPressed},");
@@ -5423,6 +5434,46 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, float> _h2hAttemptAt = new Dictionary<string, float>();
         private static readonly HashSet<string> _h2hInFlight = new HashSet<string>();
 
+        // Bug #272: pairs whose cached H2H is known to be out of date, with the
+        // earliest realtime at which re-fetching them is worthwhile.
+        //
+        // Nothing used to invalidate _h2hCache at all, so the spectator's
+        // "Overall Series" sat up to H2H_CACHE_TTL (300s) behind while the
+        // "Session Series" beside it stepped instantly — Sid's "-1 behind",
+        // every time, for five minutes. The fighters' own HUD does not have
+        // this problem because OnSeriesCompletedVsOpponent bumps CachedOppLifetime
+        // in place; a SPECTATOR is a third party to both fighters and never calls
+        // it, so it needs its own signal (SpectatorViewState.RecordSessionSeries).
+        //
+        // The DELAY is the same lesson OnSeriesCompletedVsOpponent already
+        // records: the deciding /matches report can still be in the retry outbox
+        // when the spectator observes the score change, so an immediate refetch
+        // reads the PRE-commit count and would cache the wrong value for another
+        // full TTL — turning a 5-minute wrong into a 10-minute wrong. Waiting a
+        // few seconds costs nothing because the stale value keeps rendering.
+        private static readonly Dictionary<string, float> _h2hDirtyAfter = new Dictionary<string, float>();
+        // 90s, matching OnSeriesCompletedVsOpponent's own window rather than the
+        // 20s this first shipped with. Review find (HIGH): the deciding /matches
+        // report can succeed on its THIRD attempt at ~34s, or later still out of
+        // the retry outbox. Refetching at 20s reads the PRE-commit count and
+        // re-stamps it with a fresh timestamp — leaving the spectator one behind
+        // for another full 300s TTL, i.e. strictly worse than doing nothing.
+        // Stale-for-90s beats wrong-for-390s, and the cached value keeps
+        // rendering throughout either way.
+        private const float H2H_DIRTY_DELAY = 90f;
+
+        /// <summary>Mark a pair's cached head-to-head stale (bug #272). Does NOT
+        /// drop the entry: the renderer keeps showing the old number until a
+        /// fresh one lands, because a briefly-wrong value beats the segment
+        /// blinking out — and the existing design rule here is "never a wrong
+        /// number" only in the sense of never showing an UNFETCHED one.</summary>
+        public static void MarkHeadToHeadStale(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || a == "unknown"
+                || string.IsNullOrEmpty(b) || b == "unknown" || a == b) return;
+            _h2hDirtyAfter[H2HKeyFor(a, b)] = Time.realtimeSinceStartup + H2H_DIRTY_DELAY;
+        }
+
         private static string H2HKeyFor(string a, string b)
             => string.CompareOrdinal(a, b) <= 0 ? a + "|" + b : b + "|" + a;
 
@@ -5437,7 +5488,10 @@ namespace CompetitiveRounds
                 || subjectSteamId == viewerSteamId || Plugin.Instance == null)
             { cb?.Invoke(null); return; }
             string key = H2HKeyFor(subjectSteamId, viewerSteamId);
-            _h2hAttemptAt[key] = Time.realtimeSinceStartup;
+            // When this fetch STARTED, so its success callback can tell whether it
+            // is entitled to clear the staleness mark (bug #272, review find 2).
+            float fetchStartedAt = Time.realtimeSinceStartup;
+            _h2hAttemptAt[key] = fetchStartedAt;
             if (!_h2hInFlight.Add(key)) { cb?.Invoke(null); return; }
             try
             {
@@ -5447,7 +5501,21 @@ namespace CompetitiveRounds
                     // Failures are NOT cached — the attempt stamp alone floors the
                     // retry, and a stale-but-good entry keeps rendering meanwhile.
                     if (data != null)
+                    {
                         _h2hCache[key] = (Time.realtimeSinceStartup, subjectSteamId, viewerSteamId, data);
+                        // Clear the staleness mark only when THIS fetch is
+                        // entitled to. Success alone is not enough (review find
+                        // 2): an entry can hit the ordinary 300s TTL and be
+                        // refetched by the normal expiry path DURING the 90s
+                        // settlement window, succeed, and return the PRE-commit
+                        // count — then unconditionally dropping the mark would
+                        // stamp that wrong value fresh and hold it for another
+                        // full TTL. Same for a fetch already in flight when
+                        // MarkHeadToHeadStale lands. A fetch may only clear a
+                        // mark it started at or after.
+                        if (!_h2hDirtyAfter.TryGetValue(key, out float dueAt) || fetchStartedAt >= dueAt)
+                            _h2hDirtyAfter.Remove(key);
+                    }
                     try { cb?.Invoke(data); } catch { }
                 }, viewerSteamId);
             }
@@ -5474,7 +5542,26 @@ namespace CompetitiveRounds
             string key = H2HKeyFor(a, b);
             float now = Time.realtimeSinceStartup;
             if (_h2hCache.TryGetValue(key, out var e) && now - e.at < H2H_CACHE_TTL)
+            {
+                // Bug #272: a fresh-by-TTL entry can still be known-stale. Kick a
+                // refresh off once the settle delay has passed, but KEEP RETURNING
+                // the cached value — blanking the segment for a round trip would
+                // be a worse regression than being one behind for a few seconds.
+                if (_h2hDirtyAfter.TryGetValue(key, out float dirtyAfter) && now >= dirtyAfter
+                    && !_h2hInFlight.Contains(key)
+                    && (!_h2hAttemptAt.TryGetValue(key, out float lastTry) || now - lastTry >= H2H_REFETCH_FLOOR))
+                {
+                    // Do NOT clear the dirty mark here. Review find (MEDIUM):
+                    // clearing on DISPATCH meant a fetch that timed out or errored
+                    // took the only record of staleness with it, and the entry —
+                    // still fresh by TTL — then served the old number for the
+                    // remaining ~280s with nothing left to retry it. The mark is
+                    // cleared in FetchHeadToHead's success path instead, and
+                    // H2H_REFETCH_FLOOR bounds the retry rate meanwhile.
+                    FetchHeadToHead(a, b, null);
+                }
                 return e.data;
+            }
             if (!_h2hInFlight.Contains(key)
                 && (!_h2hAttemptAt.TryGetValue(key, out float at) || now - at >= H2H_REFETCH_FLOOR))
                 FetchHeadToHead(a, b, null);
@@ -10744,6 +10831,21 @@ namespace CompetitiveRounds
             public string damageTimeline;
             public int pingAvg;
             public int bulletsFired, bulletsHit, blocksActivated, blocksSuccessful, keysPressed;
+            /// <summary>False when the PEER that produced bulletsFired/bulletsHit
+            /// predates the #308 counting fix, so those two numbers mean something
+            /// different from what this build means by them.
+            ///
+            /// Defaults TRUE because every other producer of this struct is the
+            /// LOCAL client, whose counters are by definition current-era. Only the
+            /// peer-harvest path can set it false.
+            ///
+            /// When false the two counters and the hit TIMELINE are all sent as
+            /// JSON null. Sending 0 instead was the first attempt and it is worse
+            /// than sending nothing: the server stores a real zero, which reads as
+            /// "fired no shots" rather than "not recorded" (#257's distinction),
+            /// and the derived curve would sit beside it still drawn from the old
+            /// era's numbers.</summary>
+            public bool bulletStatsKnown = true;
             public float activeSeconds;
         }
 
@@ -10760,8 +10862,14 @@ namespace CompetitiveRounds
             // An empty string is stored as NULL server-side, so an old/unwired
             // caller costs nothing beyond two bytes on the wire.
             sb.Append($"\"damage_dealt_timeline\":\"{Escape(ClampTimeline(t.damageTimeline, 1024))}\",");
-            sb.Append($"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},");
-            sb.Append($"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},");
+            // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
+            sb.Append(t.bulletStatsKnown
+                ? $"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},"
+                : "\"bullets_fired\":null,");
+            // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
+            sb.Append(t.bulletStatsKnown
+                ? $"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},"
+                : "\"bullets_hit\":null,");
             sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
             sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
             sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
@@ -16340,8 +16448,14 @@ namespace CompetitiveRounds
                     sb.Append($"\"ping_avg\":{Math.Max(0, Math.Min(30000, t.pingAvg))},");
                     sb.Append($"\"hit_timeline\":\"{Escape(ClampTimeline(t.hitTimeline, 1024))}\",");
                     sb.Append($"\"block_timeline\":\"{Escape(ClampTimeline(t.blockTimeline, 1024))}\",");
-                    sb.Append($"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},");
-                    sb.Append($"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},");
+                    // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
+                    sb.Append(t.bulletStatsKnown
+                        ? $"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},"
+                        : "\"bullets_fired\":null,");
+                    // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
+                    sb.Append(t.bulletStatsKnown
+                        ? $"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},"
+                        : "\"bullets_hit\":null,");
                     sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
                     sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
                     sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
@@ -17075,6 +17189,55 @@ namespace CompetitiveRounds
 
         public static void GenerateLinkCode(string steamId)
         {
+            // Bug #274: this broadcast CLIENT does not generate link codes.
+            // Its Home tab is on a 24/7 stream, and this call's success path
+            // paints the 6-char code into a 15s cyan toast, an unmasked log
+            // line, and the Home panel — three readable copies on camera. The
+            // code is a BEARER credential: the bot binds whoever types
+            // "!link <code>" with no proof of ownership, so anyone reading it
+            // off the stream inside its 10-minute life takes the account's
+            // Discord link. Owner's call (Aug 24): stop this seat generating
+            // codes rather than masking the UI.
+            //
+            // SCOPE, stated honestly: this is a CLIENT gate and therefore only
+            // stops US from minting a code (learning #159 — a client-side gate
+            // is a rendering suggestion, not a gate). The server's
+            // POST /players/link-code takes a bare steam_id and has NO
+            // authentication, so anyone can still mint a code for any account
+            // and bind their own Discord to it. That hole is real, affects all
+            // players rather than just this seat, and needs a server fix; it is
+            // reported separately and is NOT closed here.
+            if (BroadcastMode.IsBroadcastIdentity)
+            {
+                Plugin.Log.LogInfo("[LINK] broadcast identity — link-code generation suppressed on this client (bug #274)");
+                try
+                {
+                    CompetitiveUI.ShowNotification(
+                        I18n.Tr("Link codes are disabled on the broadcast seat."),
+                        new Color(1f, 0.8f, 0.4f), 5f);
+                }
+                catch { }
+                return;
+            }
+            // Strict-session endpoint as of 2026-08-25 (the mint is now gated on
+            // a verified Steam session, because the code it returns is a bearer
+            // credential — see the server side). Pre-filter rather than firing a
+            // request we know will 401, and SAY SO: the pre-existing failure text
+            // is a flat red "Couldn't get a link code", which for the dominant
+            // real case — the first seconds after launch, before SteamAuth has
+            // minted — reads as broken when it is merely early.
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken))
+            {
+                Plugin.Log.LogInfo("[LINK] no Steam session yet — link-code request suppressed");
+                try
+                {
+                    CompetitiveUI.ShowNotification(
+                        I18n.Tr("Steam sign-in still pending - try again in a moment."),
+                        new Color(1f, 0.8f, 0.4f), 5f);
+                }
+                catch { }
+                return;
+            }
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/players/link-code?steam_id={Escape(steamId)}",
                 "",

@@ -83,6 +83,43 @@ namespace CompetitiveRounds
         }
 
         // ─────────────────────────────────────────────────────────────────
+        /// <summary>Bug #268: the local player TOOK damage. Independent second
+        /// postfix on the same method as the tracker above — Harmony runs them
+        /// independently, and the concerns are separate (that one is about
+        /// damage this player DEALT, for DPS; this one is about damage this
+        /// player RECEIVED, for the Untouchable achievement).
+        ///
+        /// Untouchable's existing check samples "health &lt; MaxHealth while
+        /// alive" at 10Hz, which cannot observe damage that does not survive
+        /// across a sample boundary: a one-shot kill never occupies the
+        /// damaged-but-alive state at all, and a hit healed within 100ms is
+        /// gone before the next sample. This is the EVENT, so neither escapes.
+        ///
+        /// selfDamage counts, deliberately: the achievement is "win a game
+        /// without taking any damage", and damage you inflicted on yourself is
+        /// still damage taken. That is a rule decision, not an oversight.
+        ///
+        /// Failure direction is safe by construction — a spurious fire only
+        /// DENIES an achievement, never grants one.</summary>
+        [HarmonyPatch(typeof(CharacterStatModifiers), "DealtDamage")]
+        internal static class LocalTookDamageTrackerPatch
+        {
+            [HarmonyPostfix]
+            private static void AfterDealtDamage(Vector2 damage, bool selfDamage, Player damagedPlayer)
+            {
+                try
+                {
+                    if (damagedPlayer == null || damage.magnitude <= 0f) return;
+                    if (!VanillaFixSupport.AnyGameScope()) return;
+                    var d = damagedPlayer.data;
+                    if (d == null || d.view == null || !d.view.IsMine) return;
+                    GameStateWatcher.NoteLocalTookDamage();
+                }
+                catch { }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
         /// <summary>Damage-source stamp on HealthHandler.DoDamage, written in
         /// the PREFIX and retracted in the Postfix if nothing landed.
         ///

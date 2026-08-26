@@ -10132,8 +10132,15 @@ namespace CompetitiveRounds
     // harmless because the hit patch already rejects projectiles whose ownPlayer
     // is not local.
     //
-    // NOT YET COMPLETE. The design review requires this to ship as ONE statistics
-    // epoch with two further parts that live outside this file: a lifetime
+    // COMPLETE as of this batch. Parts 5a (split bullet/block floors), 6 (the
+    // cr_gstats semantic epoch, incl. the derived opp_hit_timeline and the
+    // 2v2/1v2/FFA peer path) and 7 (the asymmetric fired-side gate) have all
+    // landed. The original text is kept below because the REASONING is still
+    // the reason the epoch exists -- only the "must NOT be released" status has
+    // changed, and leaving a stale ship-block in place is its own hazard.
+    //
+    // HISTORICAL, the design review's requirement: this had to ship as ONE
+    // statistics epoch with two further parts that live outside this file: a lifetime
     // bullets_fired/bullets_hit reset behind a NEW bullet-specific clean-version
     // floor (the existing STATS_CLEAN_MIN_VERSION is "1.34.0" — the very release
     // that opened this leak — and it also gates block counters, so the floors must
