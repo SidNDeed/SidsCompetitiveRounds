@@ -607,6 +607,25 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "1.0.0"
     database: str = "connected"
+    # Which ROLE answered. Before this, /health was byte-identical on the
+    # primary and on the read standby -- same status, same version, same
+    # database -- so nothing on the network could tell a box that SKIPS writes
+    # from one that performs them, and the only way to find out was to exec
+    # into the container. A failover lever pointed at that signal would happily
+    # move all traffic onto the replica with every probe still green.
+    #
+    # That is the same defect shape as the boot banner it complements: an
+    # absence cannot distinguish "read replica" from "old build that predates
+    # the flag". This field makes the role a POSITIVE signal at runtime, the
+    # banner does it at boot, and neither relies on the absence of anything.
+    #
+    # Deliberately on the UNAUTHENTICATED health path rather than an admin
+    # route: the consumer is monitoring and failover, which must be able to ask
+    # this without holding a credential, and the disclosure is a topology fact
+    # about a box that is not individually reachable from the internet (the
+    # edge fronts both). Health endpoints that hide operational truth to save a
+    # byte of disclosure are how the wrong box gets promoted.
+    replica: bool = False
 
 
 # ── Queue ─────────────────────────────────────────────────────

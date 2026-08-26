@@ -4127,9 +4127,11 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
     try:
         await db.execute(text("SELECT 1"))
-        return HealthResponse(status="ok", database="connected")
+        return HealthResponse(status="ok", database="connected", replica=IS_REPLICA)
     except Exception:
-        return HealthResponse(status="degraded", database="disconnected")
+        # Report the role even when the database is unreachable: "which box is
+        # this" is exactly the question being asked when things are degraded.
+        return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA)
 
 
 LATEST_MOD_VERSION = "1.39.3"
