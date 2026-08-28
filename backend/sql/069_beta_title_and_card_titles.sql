@@ -5,8 +5,9 @@
 -- the in-game UI doesn't accommodate longer text without shrinking).
 
 -- Beta — free, dark blue, auto-granted to all current players and equipped
--- if they have no active title. Future joiners get it via get_or_create_player
--- in main.py.
+-- if they have no active title. Future joiners got it via _mark_mod_seen()
+-- in main.py (never get_or_create_player — migration 071 cleaned that up),
+-- until the v1.39.4 launch retired it from offers (migration 261).
 INSERT INTO shop_items (sku, kind, name, description, price, rarity, preview_color)
 VALUES
     ('title_beta', 'title', 'Beta',

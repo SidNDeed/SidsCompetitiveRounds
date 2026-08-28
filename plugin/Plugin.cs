@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.39.4";   // Aug 26: Hit% counted symmetrically and withheld when a peer predates the fix, Untouchable revoked/re-earnable, five community faces, damage tracked by event
+        public const string ModVersion = "1.39.5";   // Aug 28: public launch build — new players start on the live rank title; Beta title retired from offers (owners keep it)
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string

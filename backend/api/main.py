@@ -3929,10 +3929,16 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
 
 async def _mark_mod_seen(db: AsyncSession, player: Player, *,
                          stamp_version: bool = False) -> None:
-    """Stamp `mod_seen_at` and auto-grant the Beta title. Called from mod-only
-    endpoints (queue join, toggle-ranked, achievements unlock, match-report
-    reporter) so the Beta title only lands on confirmed mod users — not on
+    """Stamp `mod_seen_at` and grant the free dynamic rank title, equipping it
+    as the default on the player's FIRST mod-authenticated action only. Called
+    from mod-only endpoints (queue join, toggle-ranked, achievements unlock,
+    match-report reporter) so grants only land on confirmed mod users — not on
     casual opponents auto-created by get_or_create_player.
+
+    The Beta-title era ended at public launch: new players start on their live
+    rank title instead. Existing Beta owners are untouched — migration 261
+    moved title_beta to the owners-only pool, so they keep and can still equip
+    it, while nobody new can obtain it.
 
     Version stamping is opt-in: the caller must already have bound this exact
     player identity with the normal Steam-session check. Future-version headers
@@ -3940,27 +3946,31 @@ async def _mark_mod_seen(db: AsyncSession, player: Player, *,
     if player is None or player.deleted_at is not None:
         return
     try:
-        if player.mod_seen_at is None:
+        first_touch = player.mod_seen_at is None
+        if first_touch:
             player.mod_seen_at = datetime.now(timezone.utc)
         observed_version = _player_mod_version_stamp_value(
             _current_mod_version.get()) if stamp_version else None
         if observed_version is not None and player.mod_version != observed_version:
             player.mod_version = observed_version
-        beta_id = (await db.execute(
-            text("SELECT id FROM shop_items WHERE sku = 'title_beta' LIMIT 1")
+        rank_id = (await db.execute(
+            text("SELECT id FROM shop_items WHERE sku = :sku LIMIT 1"),
+            {"sku": TITLE_RANK_SKU},
         )).scalar()
-        if beta_id is None:
+        if rank_id is None:
             return
         await db.execute(
             text("INSERT INTO player_items (player_id, item_id, purchase_price) "
                  "VALUES (:pid, :iid, 0) "
                  "ON CONFLICT (player_id, item_id) DO NOTHING"),
-            {"pid": player.id, "iid": beta_id},
+            {"pid": player.id, "iid": rank_id},
         )
-        if player.active_title_id is None:
-            player.active_title_id = beta_id
+        # Default-equip ONLY on first touch: an existing player who
+        # deliberately cleared their active title must stay title-less.
+        if first_touch and player.active_title_id is None:
+            player.active_title_id = rank_id
     except Exception as ex:
-        print(f"[BETA] mark_mod_seen failed for {player.steam_id}: {ex}")
+        print(f"[TITLE] mark_mod_seen failed for {player.steam_id}: {ex}")
 
 
 def verify_hmac(report: MatchReport) -> bool:
@@ -4134,7 +4144,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA)
 
 
-LATEST_MOD_VERSION = "1.39.4"
+LATEST_MOD_VERSION = "1.39.5"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
