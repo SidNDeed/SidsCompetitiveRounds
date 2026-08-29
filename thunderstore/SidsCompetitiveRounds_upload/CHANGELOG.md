@@ -1,3 +1,18 @@
+## v1.39.5 — 2026-08-28
+
+**The launch build**
+
+- Public launch of the mod alongside the announcement and trailer.
+- **New players now start on the live rank title** (it updates automatically
+  as they climb): the rank title is granted and default-equipped on a
+  player's first mod-authenticated action (`_mark_mod_seen`).
+- **The Beta title is retired from offers** (migration 261): it can no longer
+  be bought or granted — but everyone who owns it keeps it forever and can
+  still equip it, a permanent beta-tester badge. Existing players' equipped
+  titles are untouched, and a deliberately cleared title stays cleared (the
+  default-equip only fires on a player's first-ever mod action).
+- In-game release notes in all five languages (migration 262).
+
 ## v1.39.4 — 2026-08-26
 
 **Hit % stopped drifting to 100%**
