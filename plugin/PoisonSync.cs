@@ -1338,11 +1338,17 @@ namespace CompetitiveRounds
                         }
                         else
                         {
-                            Plugin.Log.LogWarning("[POISON-SILENT] capable victim view=" + viewId
-                                + " actor=" + actor + " has published no verdict " + SilenceReportMs
-                                + "ms into a damage-over-time stream — its damage is not being applied "
-                                + "on ANY client. Expected only on a severe client stall; if it repeats "
-                                + "for one player, treat as a possible modified client.");
+                            // Local observation ONLY (Codex, bug-321 audit): this seat can
+                            // prove it RECEIVED nothing, never that nothing was published or
+                            // that other seats withheld damage — a victim-side stall, a
+                            // relay/path delivery stall, and THIS seat's own receive lag all
+                            // print the identical line (the bundle's arrivalGap=13s with
+                            // senderGap=0.3s was a delivery stall, not a sender freeze).
+                            Plugin.Log.LogWarning("[POISON-SILENT] no verdict received on THIS seat from capable victim view=" + viewId
+                                + " actor=" + actor + " within " + SilenceReportMs
+                                + "ms of a damage-over-time stream — sender/path/receiver undetermined; "
+                                + "damage state on other seats unknown. Correlate across seats before "
+                                + "blaming the victim's client.");
                         }
                     }
                 }

@@ -12377,6 +12377,7 @@ async def get_player_blocks(steam_id: str, db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/v1/report-disconnect", tags=["Players"])
 async def report_disconnect(
+    request: Request,
     reporter_steam_id: str = Query(...),
     disconnected_steam_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -12387,6 +12388,15 @@ async def report_disconnect(
     Only counts if the match was ranked and enough gameplay occurred.
     The client enforces eligibility (ranked, >=2 total points, neither has >=4 rounds).
     """
+    # Codex (bug-321 audit): the F5 hardening below verifies the PAIR (shared
+    # active series + per-series dedup) but never verified the CALLER — any
+    # third party who can read the live-games listings could pin one spurious
+    # DC per series on either participant (ranked_dc_count feeds the leave-%
+    # denominator, learning #37). Bind the claimed reporter to their Steam
+    # session; enforcement strength follows the fleet-wide steam-auth arming
+    # exactly like every other mutating endpoint. Safe for deployed clients:
+    # the shipped client's PostRequest already attaches X-Session-Token here.
+    await _check_steam_session(request, reporter_steam_id, db)
     await _assert_no_service_subject(
         db, affected_steam_ids=[reporter_steam_id, disconnected_steam_id])
     # Validate both players exist
