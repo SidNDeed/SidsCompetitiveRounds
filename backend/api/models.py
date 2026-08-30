@@ -805,7 +805,12 @@ class TournamentMatchCheckin(Base):
     __table_args__ = (
         UniqueConstraint("match_id", "player_id", name="uq_tournament_match_checkins_match_player"),
         CheckConstraint(
-            "answer IN ('yes_playing', 'contacted_no_response', 'not_yet')",
+            # Matches migration 238's DB CHECK exactly: self_forfeit was
+            # permitted there all along (retained through the v1.39.1 cut
+            # as a harmless never-written value) and is written again by
+            # the forfeit rebuild's evidence helper.
+            "answer IN ('yes_playing', 'contacted_no_response', 'not_yet', "
+            "'self_forfeit')",
             name="ck_tournament_match_checkins_answer",
         ),
     )

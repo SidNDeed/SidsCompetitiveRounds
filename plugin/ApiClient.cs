@@ -18399,6 +18399,39 @@ namespace CompetitiveRounds
                 }));
         }
 
+        // Match-scoped self-forfeit (Aug 22 lifecycle pass). The server
+        // records EVIDENCE only — its overdue sweep resolves the match — so
+        // the success copy says RECORDED, never resolved/forfeited (v1.39.1
+        // r2 find 6: a completed game result reported meanwhile still wins,
+        // and claiming a final technical loss here would be false).
+        public static void TournamentForfeit(string tournamentId, string matchId, string steamId)
+        {
+            string body = $"{{\"steam_id\":\"{Escape(steamId)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/matches/{matchId}/forfeit", body,
+                (s, r) =>
+                {
+                    string result = s ? ExtractString(r ?? "", "result") : null;
+                    // RAW literals — ShowNotification translates at its own
+                    // chokepoint, and pre-wrapping here would translate
+                    // twice (Phase B r1 find 8).
+                    if (s && result == "forfeit_recorded")
+                        CompetitiveUI.ShowNotification("Forfeit recorded - the match will be resolved shortly.", new Color(1f, 0.75f, 0.4f));
+                    else
+                    {
+                        // ALWAYS the catalogued generic (b4 find 1): the
+                        // server's 409 detail is English-only and would
+                        // render raw on ES/RU/UK/SV clients. The detail
+                        // still goes to the log for diagnostics.
+                        Plugin.Log.LogInfo($"[TOURNAMENT] forfeit refused: {ExtractErrorDetail(r) ?? (r ?? "(no body)")}");
+                        CompetitiveUI.ShowNotification("Forfeit failed", new Color(1f, 0.5f, 0.4f));
+                    }
+                    // Refresh so the panel reflects the recorded concession /
+                    // the real state behind a refusal.
+                    FetchTournamentCurrent(steamId, force: true);
+                }));
+        }
+
         private static string ExtractErrorDetail(string response)
         {
             if (string.IsNullOrEmpty(response)) return null;
