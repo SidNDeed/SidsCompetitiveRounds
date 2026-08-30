@@ -385,6 +385,7 @@ namespace CompetitiveRounds
             // Wave-2 find 10: the quick-chat popup can overlap live F5 buttons —
             // a phrase click must not ALSO fire the shop/queue control
             // underneath, on EITHER input path.
+            DrawRankedHintCallout();
             bool anyModal = BackdroplessModalOpen || quickChatOpen;
             NativeUI.SetClickBlocker(anyModal);
             // The raw-poll half additionally covers the modals that DO raise
@@ -395,6 +396,52 @@ namespace CompetitiveRounds
             ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        /// <summary>First-timer Search-Ranked callout (Spirit, Aug 27):
+        /// bouncing gold pointer ABOVE the rainbow-tinted button, its down-
+        /// caret aimed at it (r1 finding 9 moved it up — under the button it
+        /// sat squarely on the tab bar; above is the title/alert text strip,
+        /// label-only). IMGUI so it has ZERO layout footprint; anchor rect
+        /// read LIVE per draw (#143); display-only, raycast-free by nature.
+        /// Geometry and font scale with the uGUI canvas's width-match factor
+        /// (r2 nit: fixed pixels read ~half-size on ultrawide).</summary>
+        private static GUIStyle rankedHintStyle;
+        private static void DrawRankedHintCallout()
+        {
+            try
+            {
+                if (Event.current == null || Event.current.type != EventType.Repaint) return;
+                if (!NativeUI.IsOpen || !NativeUI.RankedHintActive) return;
+                var anchor = NativeUI.GetRankedHintAnchorRect();
+                if (anchor.width < 1f) return;
+                float k = Mathf.Clamp(Screen.width / 1920f, 1f, 2f);
+                if (rankedHintStyle == null)
+                {
+                    rankedHintStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        fontStyle = FontStyle.Bold,
+                        alignment = TextAnchor.MiddleCenter,
+                        wordWrap = false,
+                        richText = false,
+                        clipping = TextClipping.Overflow,   // #143: IMGUI metrics clip short rects
+                    };
+                }
+                rankedHintStyle.fontSize = Mathf.RoundToInt(14f * k);
+                float bounce = 4f * k * Mathf.Abs(Mathf.Sin(Time.unscaledTime * 3f));
+                float w = 300f * k, h = 24f * k;
+                float cx = anchor.x + anchor.width * 0.5f;
+                var r = new Rect(cx - w * 0.5f, anchor.y - h - 20f * k, w, h);
+                var caret = new Rect(cx - 10f * k, anchor.y - 18f * k + bounce, 20f * k, 16f * k);
+                var bg = new Color(0.08f, 0.07f, 0.02f, 0.85f);
+                var old = GUI.color;
+                GUI.color = bg; GUI.DrawTexture(r, Texture2D.whiteTexture);
+                GUI.color = new Color(1f, 0.85f, 0.35f, 1f);
+                GUI.Label(r, I18n.Tr("Play your first ranked match here"), rankedHintStyle);
+                GUI.Label(caret, "v", rankedHintStyle);
+                GUI.color = old;
+            }
+            catch { }
         }
 
         // -- Spectator roster (fighter-side, design §6.8) -------------------

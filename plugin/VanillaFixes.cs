@@ -3270,16 +3270,21 @@ namespace CompetitiveRounds
         {
             try
             {
-                // Only while OUR box owns the keyboard. Every other caller
-                // (a genuine Enter with our chat closed, the platform dialog
-                // callback) passes through untouched.
+                // Only while OUR box — or the open F5 overlay (Aug 30 r1
+                // finding 8: DevConsole.Update calls ToggleConsole directly
+                // on raw Return, so an Enter typed into an overlay field was
+                // opening the hidden vanilla input and latching
+                // isTyping/lockInput) — owns the keyboard. Every other
+                // caller (a genuine Enter with everything closed, the
+                // platform dialog callback) passes through untouched.
                 //
                 // Deadlock-proof by construction: if vanilla's box is ACTUALLY on
                 // screen we always let the toggle through, so Enter can close it
                 // even in the (patch-failed, flag-desynced) state where both boxes
                 // somehow ended up open. A guard that can trap the player behind a
                 // live text field is worse than the bug it fixes.
-                if (CompetitiveUI.IsChatInputOpen && !CompetitiveUI.VanillaChatBoxOnScreen)
+                if ((CompetitiveUI.IsChatInputOpen || NativeUI.InputCaptureActive)
+                    && !CompetitiveUI.VanillaChatBoxOnScreen)
                     return false;
             }
             catch (Exception ex) { VanillaFixSupport.LogError("DevConsoleToggleGuard", ex); }
@@ -3440,7 +3445,11 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (CompetitiveUI.AnyChatTyping) return false;
+                // Overlay gate (Aug 30): the open F5 menu owns the keyboard
+                // exactly like a chat box does — Space must not confirm a
+                // card behind it. Visibility-backed predicate, never bare
+                // IsOpen (design review).
+                if (CompetitiveUI.AnyChatTyping || NativeUI.InputCaptureActive) return false;
             }
             catch (Exception ex) { VanillaFixSupport.LogError("CardPickChatInputGuard", ex); }
             return true;

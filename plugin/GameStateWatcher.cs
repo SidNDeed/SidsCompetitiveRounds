@@ -825,6 +825,20 @@ namespace CompetitiveRounds
         private static string tournamentLabel = "";
         public static bool IsTournamentMatch => tournamentMatch;
         public static string TournamentLabel => tournamentLabel;
+        /// <summary>Room-scoped provenance latch (Aug 30 r3 finding 1): TRUE
+        /// only after a fenced CURRENT-ROOM preflight response carrying the
+        /// tournament field has been applied. A queue-staged
+        /// ActiveRankedSeriesId can survive a failed join into a later room
+        /// (documented at the staging site), so "a series id exists" is NOT
+        /// proof this room's preflight resolved — consumers that need that
+        /// proof (EscLeaveRow's room-code gate) require THIS latch. Cleared
+        /// on every room join/leave via EscLeaveRow's lifecycle hooks;
+        /// marked only by the preflight callback, inside its generation +
+        /// same-room fences.</summary>
+        public static bool TournamentContextResolvedThisRoom { get; private set; }
+        public static void MarkTournamentContextResolved() { TournamentContextResolvedThisRoom = true; }
+        public static void ClearTournamentContextResolved() { TournamentContextResolvedThisRoom = false; }
+
         public static void SetTournamentContext(bool isTournament, string label)
         {
             bool was = tournamentMatch;
@@ -3143,6 +3157,11 @@ namespace CompetitiveRounds
                         EscMenuLeaveGuard.Arm();
                 }
                 catch { }
+                // LEAVE MATCH row reconcile — deliberately NOT gated on
+                // IsCompetitiveRoom: the row also covers room-code ranked
+                // games (#286 population), and its own ComputeContext is the
+                // eligibility predicate. Cheap when ineligible.
+                try { EscLeaveRow.Reconcile(); } catch { }
             }
 
             if (!inRoom && wasInRoom)
@@ -3271,6 +3290,7 @@ namespace CompetitiveRounds
                 // OnLeftRoom callback is primary). Attempts the restore —
                 // Disarm catches its own failure; no-op when never armed.
                 try { EscMenuLeaveGuard.Disarm(); } catch { }
+                try { EscLeaveRow.OnRoomLeft(); } catch { }
                 // Consume LeavingForRanked on EVERY observed room exit (lobby
                 // impl round 6): the flag's meaning is "the NEXT room exit is
                 // our deliberate leave-for-ranked". The tracking-gated scoring

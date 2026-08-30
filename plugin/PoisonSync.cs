@@ -994,9 +994,31 @@ namespace CompetitiveRounds
                                 + " — authoritative display verdict applied",
                                 20);
 
+                        float preTick = cds.health;
                         float nh = cds.health - rec.Slice.magnitude;
                         cds.health = nh < 1f ? 1f : nh;
                         rec.Applied++;
+                        // Owner item 3 (Aug 30): the red "recently lost"
+                        // trailing segment. The ONLY thing the fighter-seat
+                        // damage path does to the health bar is
+                        // HealthBar.TakeDamage — a single sinceDamage=0
+                        // write (HealthBar.cs:54-57) — so calling it here
+                        // gives exact fighter parity (vanilla DOT ticks it
+                        // once per DoDamage too). Display-only: touches no
+                        // state beyond the bar's own timer, so the #338
+                        // observer fence above is untouched. Gated on an
+                        // ACTUAL drop (design review, Aug 30): at the 1-HP
+                        // clamp nothing was lost, and arming the timer there
+                        // would paint a phantom red segment.
+                        try
+                        {
+                            if (cds.health < preTick)
+                            {
+                                var hbBar = view.GetComponentInChildren<HealthBar>(true);
+                                if (hbBar != null) hbBar.TakeDamage(default, false);
+                            }
+                        }
+                        catch { }
                         // Bug 202: render the ATTACKER's LIFESTEAL for this
                         // tick — and ONLY lifesteal. Fighter seats get the
                         // full DealtDamage chain via DoDamage, so a

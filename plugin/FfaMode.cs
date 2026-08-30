@@ -2818,7 +2818,9 @@ namespace CompetitiveRounds
                 // either chat owns the keyboard. lastDir is zeroed rather than
                 // frozen so the first real nudge after closing chat registers.
                 var actions = localPlayer?.data?.playerActions;
-                if (CompetitiveUI.AnyChatTyping) { lastDir = 0; }
+                // Overlay gate (Aug 30): same rule as chat — an open F5 menu
+                // owns the keyboard, so the pick highlight freezes under it.
+                if (CompetitiveUI.AnyChatTyping || NativeUI.InputCaptureActive) { lastDir = 0; }
                 else if (actions != null)
                 {
                     int dir = 0;

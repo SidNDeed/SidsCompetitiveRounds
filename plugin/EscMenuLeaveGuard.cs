@@ -93,6 +93,40 @@ namespace CompetitiveRounds
         /// confirm on a single click (first stamps, second confirms).</summary>
         private static readonly UnityEngine.Events.UnityAction Handler = OnGatedClick;
 
+        /// <summary>Shared scene scan for THE disconnect button (persistent-
+        /// call method name "NetworkRestart" — never label text, #47).
+        /// Extracted Aug 30 so EscLeaveRow can locate the esc-menu container
+        /// and a safe clone template READ-ONLY without duplicating the scan
+        /// (#330). Returns the match count; anything but exactly 1 means the
+        /// scene invariant broke — every caller fails open.</summary>
+        internal static int FindDisconnectButton(out Component btn, out object onClickEvent, out int persistentIdx)
+        {
+            btn = null; onClickEvent = null; persistentIdx = -1;
+            int matches = 0;
+            try
+            {
+                try { UIFactory.InitTypes(); } catch { }
+                var btnType = UIFactory.tButton;
+                if (btnType == null) return 0;
+                foreach (var obj in Resources.FindObjectsOfTypeAll(btnType))
+                {
+                    var comp = obj as Component;
+                    if (comp == null || !comp.gameObject.scene.IsValid()) continue;   // skip assets/prefabs
+                    var pOnClick = comp.GetType().GetProperty("onClick");
+                    var oc = pOnClick?.GetValue(comp) as UnityEngine.Events.UnityEventBase;
+                    if (oc == null) continue;
+                    for (int i = 0; i < oc.GetPersistentEventCount(); i++)
+                    {
+                        if (oc.GetPersistentMethodName(i) != "NetworkRestart") continue;
+                        matches++;
+                        btn = comp; onClickEvent = oc; persistentIdx = i;
+                    }
+                }
+            }
+            catch { }
+            return matches;
+        }
+
         /// <summary>Idempotent; safe to call every poll tick, and DOES need a
         /// recurring caller (r2 find 3 — join-edge-only callers cannot retry
         /// a scan that failed or re-arm a button replaced mid-room). Armed
@@ -132,24 +166,8 @@ namespace CompetitiveRounds
                 if (Time.unscaledTime - lastScanAt < RescanCooldownSeconds) return;
                 lastScanAt = Time.unscaledTime;
 
-                try { UIFactory.InitTypes(); } catch { }
-                var btnType = UIFactory.tButton;
-                if (btnType == null) return;
-                Component found = null; object foundOnClick = null; int foundIdx = -1; int matches = 0;
-                foreach (var obj in Resources.FindObjectsOfTypeAll(btnType))
-                {
-                    var comp = obj as Component;
-                    if (comp == null || !comp.gameObject.scene.IsValid()) continue;   // skip assets/prefabs
-                    var pOnClick = comp.GetType().GetProperty("onClick");
-                    var onClick = pOnClick?.GetValue(comp) as UnityEngine.Events.UnityEventBase;
-                    if (onClick == null) continue;
-                    for (int i = 0; i < onClick.GetPersistentEventCount(); i++)
-                    {
-                        if (onClick.GetPersistentMethodName(i) != "NetworkRestart") continue;
-                        matches++;
-                        found = comp; foundOnClick = onClick; foundIdx = i;
-                    }
-                }
+                Component found; object foundOnClick; int foundIdx;
+                int matches = FindDisconnectButton(out found, out foundOnClick, out foundIdx);
                 // Exactly one is the scene-proven invariant; anything else
                 // means the assumption broke (game update, another mod) —
                 // fail OPEN to vanilla rather than gate the wrong control.
@@ -346,11 +364,14 @@ namespace CompetitiveRounds
                 return;
             }
 
-            // Confirmed (or degraded) leave: NetworkRestart is reached even if
-            // Disarm or logging throws — each step is isolated.
-            try { Disarm(); } catch { }
+            // Confirmed (or degraded) leave, through the ONE shared exit seam
+            // (CompetitiveExit.Request — r1 finding 18: two hand-rolled
+            // Disarm+NetworkRestart copies would silently diverge the moment
+            // a future settlement step lands in the seam). The seam isolates
+            // each step, so NetworkRestart is reached even if Disarm or
+            // logging throws.
             try { Plugin.Log.LogInfo("[ESC-GUARD] leave confirmed — disconnecting"); } catch { }
-            try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
+            CompetitiveExit.Request("esc-menu");
         }
     }
 }

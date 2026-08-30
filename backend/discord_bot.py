@@ -4208,7 +4208,11 @@ async def _outbound_locked() -> int:
 
 def _twitch_out_format(entry: dict) -> str:
     src = entry.get("source") or ""
-    tag = {"ingame": "[G]", "discord": "[D]", "youtube": "[YT]"}.get(src, "[?]")
+    # Spelled-out tags, matching the in-game pane's [Game]/[Discord]/[YouTube]
+    # convention — the terse [G]/[D]/[YT] forms re-introduced the exact
+    # abbreviations the client deliberately retired, and this string is what
+    # the Twitch audience reads (owner report, Aug 30).
+    tag = {"ingame": "[Game]", "discord": "[Discord]", "youtube": "[YouTube]"}.get(src, "[?]")
     name = str(entry.get("display_name") or "player")[:40]
     msg = str(entry.get("message") or "")
     msg = msg.replace("\r", " ").replace("\n", " ").strip()

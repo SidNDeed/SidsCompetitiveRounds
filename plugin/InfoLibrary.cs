@@ -31,11 +31,28 @@ namespace CompetitiveRounds
     /// an extension so popup and wiki can never drift apart (#279).</summary>
     internal static class InfoLibrary
     {
+        /// <summary>One reading-pane segment: EITHER a Tr'd rich-text block
+        /// (one of the SAME literals Body joins — never a re-split of one,
+        /// #289) OR an InfoViz visual key. Typed on design-review advice so
+        /// no body text can ever collide with a marker syntax.</summary>
+        internal struct Seg
+        {
+            public string Text;
+            public string Viz;
+            public static Seg T(string text) => new Seg { Text = text };
+            public static Seg V(string vizKey) => new Seg { Viz = vizKey };
+        }
+
         internal sealed class Article
         {
             public string Key;          // stable id (not player-visible)
             public Func<string> Title;  // Tr'd short title: nav label + page heading
             public Func<string> Body;   // Tr'd rich-text body
+            /// <summary>Optional interleaved reading-pane layout (Aug 30 viz
+            /// upgrade). Null = plain single-text article. Body stays
+            /// authoritative for search and the no-viz fallback either way —
+            /// it must join the exact text segments listed here.</summary>
+            public Func<Seg[]> Segments;
         }
 
         internal sealed class Category
@@ -73,12 +90,16 @@ namespace CompetitiveRounds
             new Category { Title = () => I18n.Tr("Start Here"), Color = CAT_START, Articles = new[]
             {
                 new Article { Key = "start-here",    Title = () => I18n.Tr("About this library"), Body = () => StartHere },
+                new Article { Key = "controls",      Title = () => I18n.Tr("Controls & keys"),    Body = () => ControlsIntro + "\n\n" + ControlsOutro,
+                              Segments = () => new[] { Seg.T(ControlsIntro), Seg.V("keyboard"), Seg.T(ControlsOutro) } },
                 new Article { Key = "getting-better",Title = () => I18n.Tr("Getting better"),     Body = () => GettingBetter },
             }},
             new Category { Title = () => I18n.Tr("Game Mechanics"), Color = CAT_GAME, Articles = new[]
             {
-                new Article { Key = "blocking",     Title = () => I18n.Tr("Blocking"),                 Body = () => Blocking },
-                new Article { Key = "poison",       Title = () => I18n.Tr("Poison & damage over time"),Body = () => Poison },
+                new Article { Key = "blocking",     Title = () => I18n.Tr("Blocking"),                 Body = () => Blocking,
+                              Segments = () => new[] { Seg.V("block-window"), Seg.T(Blocking) } },
+                new Article { Key = "poison",       Title = () => I18n.Tr("Poison & damage over time"),Body = () => Poison,
+                              Segments = () => new[] { Seg.V("dot-timeline"), Seg.T(Poison) } },
                 new Article { Key = "grow",         Title = () => I18n.Tr("Grow"),                     Body = () => Grow },
                 // Community research: Spirit's 'On Damage Types and Buff
                 // Activation' (Aug 23). ATTRIBUTED work presented as his
@@ -92,10 +113,12 @@ namespace CompetitiveRounds
             }},
             new Category { Title = () => I18n.Tr("Modes"), Color = CAT_MODES, Articles = new[]
             {
-                new Article { Key = "ranked-1v1", Title = () => I18n.Tr("Ranked 1v1"), Body = () => Ranked1v1 },
+                new Article { Key = "ranked-1v1", Title = () => I18n.Tr("Ranked 1v1"), Body = () => Ranked1v1,
+                              Segments = () => new[] { Seg.V("series-format"), Seg.T(Ranked1v1) } },
                 new Article { Key = "mode-2v2",   Title = () => I18n.Tr("2v2"),        Body = () => ModeInfoText.Team + "\n\n" + Mode2v2Ext },
                 new Article { Key = "mode-1v2",   Title = () => I18n.Tr("1v2"),        Body = () => ModeInfoText.Ovt + "\n\n" + Mode1v2Ext },
-                new Article { Key = "mode-ffa",   Title = () => I18n.Tr("FFA"),        Body = () => ModeInfoText.Ffa + "\n\n" + ModeFfaExt },
+                new Article { Key = "mode-ffa",   Title = () => I18n.Tr("FFA"),        Body = () => ModeInfoText.Ffa + "\n\n" + ModeFfaExt,
+                              Segments = () => new[] { Seg.V("ffa-scoring"), Seg.T(ModeInfoText.Ffa + "\n\n" + ModeFfaExt) } },
                 new Article { Key = "spectating", Title = () => I18n.Tr("Spectating"), Body = () => Spectating },
             }},
             new Category { Title = () => I18n.Tr("Tournaments"), Color = CAT_TOURN, Articles = new[]
@@ -106,8 +129,10 @@ namespace CompetitiveRounds
             }},
             new Category { Title = () => I18n.Tr("Ratings & Rewards"), Color = CAT_RATING, Articles = new[]
             {
-                new Article { Key = "rating",  Title = () => I18n.Tr("Ratings (Glicko-2)"), Body = () => Rating },
-                new Article { Key = "rewards", Title = () => I18n.Tr("XP, Gold & levels"),  Body = () => Rewards },
+                new Article { Key = "rating",  Title = () => I18n.Tr("Ratings (Glicko-2)"), Body = () => Rating,
+                              Segments = () => new[] { Seg.V("rank-ladder"), Seg.T(Rating), Seg.V("glicko-rd") } },
+                new Article { Key = "rewards", Title = () => I18n.Tr("XP, Gold & levels"),  Body = () => Rewards,
+                              Segments = () => new[] { Seg.V("gold-sources"), Seg.T(Rewards), Seg.V("xp-curve") } },
                 new Article { Key = "betting", Title = () => I18n.Tr("Betting"),            Body = () => Betting },
             }},
             new Category { Title = () => I18n.Tr("Tracking & Fair Play"), Color = CAT_FAIR, Articles = new[]
@@ -156,6 +181,19 @@ The column on the left lists every article, grouped by category. Click a topic a
 - <color=#7FD4FF>Bug reports</color> - on the Settings tab, find 'Report a bug' and press Open Report Form. You can attach your game logs (a Preview button shows exactly what gets sent), you get up to 10 reports a day, and if your Discord account is linked, responses from the team arrive as DMs.
 
 If something looks wrong mid-match, file the report right after that session - the attached log is usually what makes a bug findable.");
+
+        private static string ControlsIntro => I18n.Tr(@"The mod never rebinds anything - every vanilla control works exactly as it always has, and the competitive keys are added AROUND them. The board below shows every key that does something during competitive play: gold keys belong to the mod, blue keys to the base game, purple to both.");
+
+        private static string ControlsOutro => I18n.Tr(@"<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
+F5 works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, Space does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
+
+Chat has three doors. T types a message, Y opens the quick-chat wheel (then 1-9 or 0 sends a phrase), and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode.
+
+Hold Tab during a match for the live scoreboard: score, cards, accuracy and connection info for everyone in the room, without opening the full menu.
+
+Shift swaps between your equipped map color skins as a new round paints in. If you have none equipped, it does nothing.
+
+Vanilla rebinding lives in the game options; the mod keys themselves are fixed. For what to practice with all of this, read <color=#7FD4FF>Getting better</color>.");
 
         private static string GettingBetter => I18n.Tr(@"Getting better at competitive ROUNDS is mechanical, not mystical: blocking discipline, netcode awareness, drafting, and reading the numbers the mod already keeps on you. Every tip below is tied to a real mechanic you can go test.
 

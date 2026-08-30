@@ -6057,6 +6057,11 @@ namespace CompetitiveRounds
                                 bool unlocked = parts[i].Contains("\"unlocked\":true") || parts[i].Contains("\"unlocked\": true");
                                 dict[key] = new AchievementData { achievement_key = key, unlocked = unlocked };
                             }
+                            // Identity fence (design review, Aug 30): a late
+                            // response for player A must not land after the
+                            // selection moved to B — the cache is global and
+                            // the detail panel renders it under B's name.
+                            if (selectedAchSteamId != steamId) return;
                             SelectedPlayerAchievements = dict;
                             NativeUI.MarkDirty();
                         }
@@ -7320,6 +7325,13 @@ namespace CompetitiveRounds
             NativeUI.MarkDirty();
         }
 
+        /// <summary>True ranked-game count for the LOCAL account, -1 until a
+        /// summary response has carried it. wins/losses on PlayerStatsData
+        /// include non-ranked play and series counters miss unfinished
+        /// series (design review, Aug 30), so the first-timer hint keys on
+        /// THIS field only. Bound to the local steam id at assignment.</summary>
+        public static int LocalRankedMatches = -1;
+
         /// <summary>Full-history totals for the pager (flat scalars, manual extract).</summary>
         public static void FetchMatchSummary(string steamId)
         {
@@ -7331,6 +7343,11 @@ namespace CompetitiveRounds
                     HistoryTotalMatches = ExtractJsonInt(resp, "total");
                     HistoryTotalRankedGroups = ExtractJsonInt(resp, "ranked_groups");
                     HistoryTotalCasual = ExtractJsonInt(resp, "casual_matches");
+                    // Presence-checked (#400): an old server without the field
+                    // must read as UNKNOWN, never as zero ranked games.
+                    if (resp.IndexOf("\"ranked_matches\"", StringComparison.Ordinal) >= 0
+                        && steamId == MatchTracker.LocalSteamId)
+                        LocalRankedMatches = ExtractJsonInt(resp, "ranked_matches");
                     NativeUI.MarkDirty();
                 }));
         }
@@ -8055,8 +8072,6 @@ namespace CompetitiveRounds
                     string sid = ExtractJsonString(resp, "series_id");
                     if (!string.IsNullOrEmpty(sid))
                     {
-                        ActiveRankedSeriesId = sid;
-                        Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} status={ExtractJsonString(resp, "status")}");
                         // Aug 15 (bug 231): tournament banner context from the
                         // preflight's contract fields. The key-presence guard is
                         // LOAD-BEARING: an old server that lacks the field must
@@ -8068,14 +8083,30 @@ namespace CompetitiveRounds
                         // differs). Inherits this callback's generation +
                         // same-room fences above — those ARE the room binding
                         // that makes the flag safe to store.
+                        //
+                        // ORDER IS LOAD-BEARING (Aug 30 r2/r3): tournament
+                        // context and its room-scoped provenance latch land
+                        // BEFORE ActiveRankedSeriesId is published.
+                        // EscLeaveRow requires BOTH the id and the latch — a
+                        // staged id alone is not current-room proof (it can
+                        // survive a failed queue join into a later room).
+                        // The log sits after all state writes in its own try
+                        // so a throwing listener cannot split them.
                         try
                         {
                             if (resp != null && resp.Contains("\"tournament\":"))
+                            {
                                 GameStateWatcher.SetTournamentContext(
                                     ExtractJsonBool(resp, "tournament"),
                                     ExtractJsonString(resp, "tournament_label"));
+                                // Provenance latch (r3 finding 1): THIS room's
+                                // preflight has now answered tournament-or-not.
+                                GameStateWatcher.MarkTournamentContextResolved();
+                            }
                         }
                         catch { }
+                        ActiveRankedSeriesId = sid;
+                        try { Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} status={ExtractJsonString(resp, "status")}"); } catch { }
                         // Aug 9 (Sid): a rated ROOMCODE game must end every
                         // other search — the room-entry teardown deliberately
                         // ignores non-prefix rooms (bug #112: casual-while-
@@ -9120,6 +9151,10 @@ namespace CompetitiveRounds
             public int minutesAgo;
             public string title;
             public string titleColor;
+            // The server has always sent steam_id (main.py presence rows);
+            // the parse dropped it, which blocked driving Compare/leaderboard
+            // views from this list (broadcast idle showcase, Aug 30).
+            public string steamId;
         }
 
         public static List<OnlinePlayerEntry> CachedOnlinePlayers;
@@ -9211,6 +9246,7 @@ namespace CompetitiveRounds
                     minutesAgo = ExtractJsonInt(chunk, "minutes_ago"),
                     title = ExtractJsonString(chunk, "title"),
                     titleColor = ExtractJsonString(chunk, "title_color"),
+                    steamId = ExtractJsonString(chunk, "steam_id"),
                 };
                 if (!string.IsNullOrEmpty(e.name)) list.Add(e);
             }

@@ -3461,6 +3461,10 @@ namespace CompetitiveRounds
             // callback ATTEMPTS it on the join frame (discovery or reflection
             // can abort); the recurring poll tick retries and re-arms.
             try { EscMenuLeaveGuard.Disarm(); } catch { }
+            // LEAVE MATCH row: bump the room generation + reset its confirm on
+            // EVERY join (same-name rejoin included); the recurring poll
+            // reconciles visibility/injection afterwards.
+            try { EscLeaveRow.OnRoomJoined(); } catch { }
             try
             {
                 if (!SpectatorSession.IsLocalSpectator && CompetitiveRoomDetect.IsCompetitiveRoom())
@@ -3959,6 +3963,7 @@ namespace CompetitiveRounds
             // restore failure; the next successful Arm repairs that button).
             // The poll's Left-room branch is the lossy backup.
             try { EscMenuLeaveGuard.Disarm(); } catch { }
+            try { EscLeaveRow.OnRoomLeft(); } catch { }
             // Spectator room exit observed — the point where the session's
             // statics are actually dropped (#249: clear local state in the
             // response/observation handler, never optimistically before).
@@ -5869,8 +5874,14 @@ namespace CompetitiveRounds
             // back for the rest of the session (bug #27, "menu item always
             // disappears after a few games"). In-room ticks are free now, and
             // leaving a room refreshes the budget.
+            // Bug #46/#122 (Spirit, Aug 27): the OfflineMode exemption is
+            // load-bearing. Photon's Sandbox simulates a room and KEEPS
+            // InRoom==true at the main menu after leaving it, so a bare
+            // InRoom test here parked this gate permanently after any
+            // Sandbox visit and the menu button never reappeared (F5 kept
+            // working — it has no room check).
             bool inRoomNow = false;
-            try { inRoomNow = Photon.Pun.PhotonNetwork.InRoom; } catch { }
+            try { inRoomNow = Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode; } catch { }
             if (inRoomNow)
             {
                 wasInRoomLastCheck = true;
@@ -6544,7 +6555,9 @@ namespace CompetitiveRounds
     {
         static bool Prefix(Gun __instance)
         {
-            if (!NativeUI.IsOpen) return true;
+            // Visibility-backed predicate (Aug 30 design review): a wedged
+            // isOpen flag with no visible page must never suppress firing.
+            if (!NativeUI.InputCaptureActive) return true;
             try
             {
                 var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
@@ -6571,7 +6584,7 @@ namespace CompetitiveRounds
     {
         static bool Prefix(Block __instance)
         {
-            if (!NativeUI.IsOpen) return true;
+            if (!NativeUI.InputCaptureActive) return true;   // visibility-backed (Aug 30)
             try
             {
                 var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;

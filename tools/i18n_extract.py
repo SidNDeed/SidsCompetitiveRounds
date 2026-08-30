@@ -67,6 +67,11 @@ FILES = [
     # Info library (Aug 23) — the explainer wiki: ~31 large verbatim bodies
     # plus category/article titles, all at I18n.Tr sites.
     "InfoLibrary.cs",
+    # Info-tab visualizations (Aug 30) — chart headers/captions/legends at
+    # I18n.Tr sites; numeric labels deliberately raw.
+    "InfoViz.cs",
+    # Esc-menu LEAVE MATCH row (Aug 30) — labels + honest leave copy.
+    "EscLeaveRow.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

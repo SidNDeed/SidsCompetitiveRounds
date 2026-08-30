@@ -289,6 +289,7 @@ namespace CompetitiveRounds
                     // The entry stays queued (Interrupt contract) and replays
                     // when the director is re-enabled.
                     try { if (PostSessionReport.Active) PostSessionReport.Interrupt(); } catch { }
+                    try { IdleShowcase.Interrupt(); } catch { }
                     if (_state == State.Idle || _state == State.Faulted) return;
                     if (_state == State.Watching || _state == State.AwaitingActivation)
                         EnterLeaving("director disabled", invokeLeave: true, dueToFailure: false);
@@ -307,6 +308,12 @@ namespace CompetitiveRounds
                 // beside any acquisition arc. Locally guarded so an engine
                 // throw can never cost this frame's lease write.
                 try { PostSessionReport.Tick(_state == State.Idle && _ticket == null); } catch { }
+                // Idle showcase ticks AFTER the report engine (so a report
+                // going Active is observed and yielded to the same frame)
+                // and BEFORE the lease write (so this frame's payload
+                // reflects this frame's showcase state) — design review
+                // ordering, Aug 30.
+                try { IdleShowcase.Tick(_state == State.Idle && _ticket == null); } catch { }
                 TickLease();
             }
             catch { /* Step must never throw into the persistent Update */ }
@@ -808,8 +815,11 @@ namespace CompetitiveRounds
             // on-screen report the instant an acquisition starts. The entry
             // stays queued and replays from the start (Interrupt contract).
             // FIRST statement, so no acquisition step can ever race a report
-            // still painting over the screen the join needs.
+            // still painting over the screen the join needs. The showcase
+            // closes its owned F5 page here too — before the ticket exists,
+            // so no join/spectator path ever runs under an open overlay.
             try { PostSessionReport.Interrupt(); } catch { }
+            try { IdleShowcase.Interrupt(); } catch { }
             _ticket = new SpectateAcquisition
             {
                 TicketId = Guid.NewGuid().ToString("N").Substring(0, 12),
@@ -1558,6 +1568,28 @@ namespace CompetitiveRounds
                         sb.Append(",\"report_total_elo\":").Append(PostSessionReport.CurrentTotalElo);
                         sb.Append(",\"report_id\":\"").Append(LeaseEscape(PostSessionReport.CurrentReportId)).Append('"');
                     }
+                }
+            }
+            catch { }
+            // Idle-content hint (Aug 30, owner item 7): tells the director
+            // there is live content to SHOW while the lease state is idle,
+            // so it holds the Live scene instead of the between-games card.
+            // "report" only while a report is VISIBLY on screen, "showcase"
+            // only while the showcase's OWNED page is visibly active; report
+            // wins any overlap. A payload KEY, not a lease state — the D1
+            // cut above stands, and an old bot ignores unknown keys
+            // (mixed-deploy safe in both directions).
+            try
+            {
+                if (_state == State.Idle)
+                {
+                    string idleContent = null;
+                    if (PostSessionReport.Active && !string.IsNullOrEmpty(PostSessionReport.CurrentScreenKind))
+                        idleContent = "report";
+                    else if (IdleShowcase.VisiblyActive)
+                        idleContent = "showcase";
+                    if (idleContent != null)
+                        sb.Append(",\"idle_content\":\"").Append(idleContent).Append('"');
                 }
             }
             catch { }
