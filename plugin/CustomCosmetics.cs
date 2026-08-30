@@ -239,6 +239,20 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_detail_militia_man",     DisplayName = "Militia Man",      Slot = CharacterItemType.Detail, PngFile = "detail_militia_man.png",     Scale = 1.45f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_eyes_sadness",           DisplayName = "Sadness",          Slot = CharacterItemType.Eyes,   PngFile = "eyes_sadness.png",           Scale = 1.55f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_mouth_sinister_smile",   DisplayName = "Sinister Smile",   Slot = CharacterItemType.Mouth,  PngFile = "mouth_sinister_smile.png",   Scale = 1.55f, Offset = Vector2.zero },
+            // v1.39.6 batch: five approved community faces (submissions
+            // 61-64 + 66), values from the approved_* snapshot (#165), all
+            // approved offsets (0,0). Display names keep the artists' own
+            // spellings verbatim — artist-authored text stays raw (#368).
+            // Phoneix Gaze is ANIMATED: 4 frames (base + __f2..__f4 in
+            // cosmetics.zip) at the artist's approved anim_fps of 5 — the
+            // source's own timing, never a default (#317) — and sits at
+            // approved_placement_revision 2; the release migration's guard
+            // pins each sku's revision, frame count and fps.
+            new CosmeticDef { Sku = "face_detail_the_mobsta",      DisplayName = "The Mobsta",       Slot = CharacterItemType.Detail, PngFile = "detail_the_mobsta.png",      Scale = 1.55f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_well_wraped_hat", DisplayName = "Well Wraped Hat",  Slot = CharacterItemType.Detail, PngFile = "detail_well_wraped_hat.png", Scale = 1.3f,  Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_eyes_phoneix_gaze",      DisplayName = "Phoneix Gaze",     Slot = CharacterItemType.Eyes,   PngFile = "eyes_phoneix_gaze.png",      Scale = 1.8f,  Offset = Vector2.zero, Fps = 5f },
+            new CosmeticDef { Sku = "face_eyes_smart_specs",       DisplayName = "Smart Specs",      Slot = CharacterItemType.Eyes,   PngFile = "eyes_smart_specs.png",       Scale = 1.55f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_eyes_the_cryptid",       DisplayName = "The Cryptid",      Slot = CharacterItemType.Eyes,   PngFile = "eyes_the_cryptid.png",       Scale = 1.45f, Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();
