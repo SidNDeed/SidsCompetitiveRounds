@@ -109,19 +109,32 @@ BEGIN
     RAISE NOTICE 'post-check OK: verified and published % face sku(s)', flipped;
 END $$;
 
--- Fails loudly if any of the five is still unpublished after the loop.
+-- Fails loudly unless ALL FIVE rows EXIST and are live. The old shape only
+-- counted existing-but-unpublished rows, so an ABSENT shop_items row (schema-
+-- valid: cosmetic_submissions.shop_sku carries no FK) would half-publish four
+-- faces and still report success — the v1.39.6 focused review's one finding.
+-- Asserting presence-by-expected-array closes it and stays rerun-safe (a
+-- re-run sees all five already TRUE and passes).
 DO $$
-DECLARE missing INT;
+DECLARE live INT; missing TEXT;
 BEGIN
-    SELECT COUNT(*) INTO missing
+    SELECT COUNT(*) INTO live
       FROM shop_items
      WHERE kind = 'face'
        AND sku IN ('face_detail_the_mobsta', 'face_detail_well_wraped_hat',
                    'face_eyes_phoneix_gaze', 'face_eyes_smart_specs',
                    'face_eyes_the_cryptid')
-       AND catalog_ready IS DISTINCT FROM TRUE;
-    IF missing > 0 THEN
-        RAISE EXCEPTION 'post-check FAILED: % of the five faces still unpublished', missing;
+       AND catalog_ready IS TRUE;
+    IF live <> 5 THEN
+        SELECT string_agg(e.sku, ', ') INTO missing
+          FROM unnest(ARRAY['face_detail_the_mobsta', 'face_detail_well_wraped_hat',
+                            'face_eyes_phoneix_gaze', 'face_eyes_smart_specs',
+                            'face_eyes_the_cryptid']) AS e(sku)
+          LEFT JOIN shop_items si ON si.sku = e.sku AND si.kind = 'face'
+                                 AND si.catalog_ready IS TRUE
+         WHERE si.sku IS NULL;
+        RAISE EXCEPTION 'post-check FAILED: only % of 5 faces live - missing or unpublished: %',
+                        live, missing;
     END IF;
     RAISE NOTICE 'post-check OK: all five v1.39.6 faces are live';
 END $$;
