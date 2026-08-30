@@ -13343,7 +13343,12 @@ class _ChatManager:
 chat_manager = _ChatManager()
 
 
-async def _persist_chat(entry: dict) -> tuple[int | None, str | None]:
+async def _persist_chat(entry: dict, *,
+                        origin_user_id: str | None = None,
+                        origin_login: str | None = None,
+                        author_verified: bool = False,
+                        origin_mirror: tuple[str, str, str | None] | None = None,
+                        ) -> tuple[int | None, str | None]:
     """Insert one chat row and return (id, created_at_iso). Swallows failures
     (returns (None, None)) — chat durability is nice-to-have, never critical path.
 
@@ -13352,14 +13357,28 @@ async def _persist_chat(entry: dict) -> tuple[int | None, str | None]:
     consistent key. (The old flow broadcast a now()-stamp then inserted a row
     with a *different* created_at — the bot's WS path and catchup poll couldn't
     match them, and every WS-relayed message was eligible for a second post from
-    the poll. Bug #34/#30 'double sent to discord'.)"""
+    the poll. Bug #34/#30 'double sent to discord'.)
+
+    The moderation identity fields ride keyword-only params, NOT `entry`, on
+    purpose: `entry` doubles as the WS broadcast frame, and platform identities
+    have no business on the wire. `author_verified` records whether the sender
+    identity was proven at ingest (WS: session-verified socket matched the
+    claim; /chat/post: server-resolved discord id; bridge: internal-key reader
+    supplied a stable platform id) — mute-by-message refuses to target an
+    UNVERIFIED in-game identity (design F1). `origin_mirror` registers the
+    message's own platform copy (Twitch/YouTube native id, original Discord
+    message) as a chat_mirrors row IN THE SAME TRANSACTION as the insert
+    (design F3: an origin registered after the fact can race the deletion that
+    should have covered it)."""
     from database import async_session
     try:
         async with async_session() as db:
             row = (await db.execute(
                 text(
-                    "INSERT INTO chat_messages (source, steam_id, discord_id, display_name, message, channel) "
-                    "VALUES (:source, :steam_id, :discord_id, :display_name, :message, :channel) "
+                    "INSERT INTO chat_messages (source, steam_id, discord_id, display_name, message, channel,"
+                    "                           origin_user_id, origin_login, author_verified) "
+                    "VALUES (:source, :steam_id, :discord_id, :display_name, :message, :channel,"
+                    "        :origin_user_id, :origin_login, :author_verified) "
                     "RETURNING id, created_at"
                 ),
                 {
@@ -13369,8 +13388,20 @@ async def _persist_chat(entry: dict) -> tuple[int | None, str | None]:
                     "display_name": entry.get("display_name", "")[:64],
                     "message": entry.get("message", "")[:500],
                     "channel": entry.get("channel", "global"),
+                    "origin_user_id": (origin_user_id or None),
+                    "origin_login": ((origin_login or "").lower()[:64] or None),
+                    "author_verified": bool(author_verified),
                 },
             )).first()
+            if row is not None and origin_mirror is not None:
+                _mp, _mid, _mchan = origin_mirror
+                if _mid:
+                    await db.execute(text(
+                        "INSERT INTO chat_mirrors (chat_id, platform, mirror_id, channel_ref)"
+                        " VALUES (:cid, :p, :m, :cr)"
+                        " ON CONFLICT (platform, mirror_id) DO NOTHING"
+                    ), {"cid": row[0], "p": _mp, "m": str(_mid)[:128],
+                        "cr": (str(_mchan)[:32] if _mchan else None)})
             await db.commit()
             if row is not None:
                 return (row[0], row[1].isoformat() if row[1] else None)
@@ -13451,6 +13482,203 @@ def _chat_spam_ok(conn_key: int, message: str) -> bool:
             _chat_rate.pop(k, None)
             _chat_last_msg.pop(k, None)
     return True
+
+
+# ── Cross-platform chat moderation support (design: ai-collab/chat-moderation-
+# design.md v3). Everything below is single-worker in-process state (#125). ──
+
+import unicodedata as _unicodedata
+
+# Confusable fold for the spam squash. NFKD already decomposes accented latin
+# (à → a + combining mark, dropped below); this map covers the common
+# NON-decomposing lookalikes the observed spam actually used (ø in "yøur").
+# dict-form maketrans so multi-char expansions (ß→ss) are legal.
+_SPAM_CONFUSABLES = str.maketrans({
+    "ø": "o", "Ø": "o", "ð": "d", "đ": "d", "Đ": "d", "ł": "l", "Ł": "l",
+    "ß": "ss", "æ": "ae", "Æ": "ae", "œ": "oe", "Œ": "oe", "þ": "th", "Þ": "th",
+})
+
+
+def _squash_for_spam(s: str) -> str:
+    """Normalize hostile text for pattern containment: lowercase → NFKD →
+    drop combining marks → confusable-fold → keep ASCII alphanumerics only.
+    "Ai viewers twitchmax .com" and "Àì vïewers twïtchmax . cöm" both squash
+    to a string containing "aiviewers" and "twitchmax". Returns "" on any
+    error — and an empty squash matches NO pattern (patterns are length>=4,
+    containment in "" is false), so failure direction is fail-open by
+    construction, never match-everything."""
+    try:
+        s = (s or "").lower()
+        s = _unicodedata.normalize("NFKD", s)
+        s = "".join(ch for ch in s if _unicodedata.category(ch) != "Mn")
+        s = s.translate(_SPAM_CONFUSABLES)
+        return "".join(ch for ch in s if ch.isascii() and ch.isalnum())
+    except Exception:
+        return ""
+
+
+# Active-pattern cache: patterns change rarely (admin add/revoke), the bridge
+# checks every message. 60s TTL; a failed refresh KEEPS the stale list (fail
+# open with last-known data — one spam line beats dropping legit chat).
+_SPAM_PAT_TTL = 60.0
+_spam_pat_cache = {"at": 0.0, "pats": []}
+
+
+async def _bridge_spam_hit(message: str) -> str | None:
+    """Return the matched normalized pattern, or None."""
+    now = _time_mod.monotonic()
+    if now - _spam_pat_cache["at"] > _SPAM_PAT_TTL:
+        _spam_pat_cache["at"] = now   # stamp first: a failing DB retries at TTL cadence, not per message
+        try:
+            from database import async_session
+            async with async_session() as db:
+                rows = (await db.execute(text(
+                    "SELECT pattern FROM bridge_spam_patterns WHERE revoked_at IS NULL"
+                ))).scalars().all()
+            _spam_pat_cache["pats"] = [p for p in rows if p and len(p) >= 4]
+        except Exception as ex:
+            print(f"[CHAT-MOD] spam pattern refresh failed (keeping {len(_spam_pat_cache['pats'])}): {ex}")
+    pats = _spam_pat_cache["pats"]
+    if not pats:
+        return None
+    sq = _squash_for_spam(message)
+    if not sq:
+        return None
+    for p in pats:
+        if p in sq:
+            return p
+    return None
+
+
+# Chat lockdown (design S7). FAIL-CLOSED WITH STICKY LAST-KNOWN (D1 F7): the
+# cached value survives read failures; only the never-loaded-and-unreadable
+# state treats mutating ingress as LOCKED. The toggle endpoint updates the
+# cache synchronously post-commit, so a lock takes effect on the next message
+# regardless of TTL.
+_CHAT_LOCKDOWN_TTL = 5.0
+_chat_lockdown_cache = {"value": False, "loaded": False, "at": 0.0, "gen": 0}
+
+
+async def _chat_lockdown_active() -> bool:
+    now = _time_mod.monotonic()
+    c = _chat_lockdown_cache
+    if c["loaded"] and now - c["at"] <= _CHAT_LOCKDOWN_TTL:
+        return c["value"]
+    # R1 M1: a NEVER-loaded cache whose read just failed must not re-query on
+    # every message — that turns a DB outage into one extra query per chat
+    # line from unauthenticated sockets. Recent failed attempt + still
+    # unknown = stay closed without touching the DB until the TTL lapses.
+    if not c["loaded"] and c["at"] > 0 and now - c["at"] <= _CHAT_LOCKDOWN_TTL:
+        return True
+    # R1 H2: generation fence. A toggle that lands while this read is in
+    # flight bumps `gen`; the stale read then DISCARDS its result instead of
+    # overwriting the newer post-commit cache set (single worker + single
+    # event loop, so the fence is just a compare across the await).
+    gen = c["gen"]
+    try:
+        from database import async_session
+        async with async_session() as db:
+            raw = (await db.execute(text(
+                "SELECT value FROM runtime_settings WHERE key = 'chat_lockdown'"
+            ))).scalar()
+        val = (str(raw or "").strip() == "1")
+        if c["gen"] == gen:
+            c["value"] = val
+            c["loaded"] = True
+            c["at"] = _time_mod.monotonic()
+            return val
+        return c["value"]   # a toggle superseded this read — its value wins
+    except Exception as ex:
+        if c["gen"] == gen:
+            c["at"] = _time_mod.monotonic()   # retry at TTL cadence, not per message
+        if c["loaded"]:
+            return c["value"]          # sticky last-known
+        print(f"[CHAT-MOD] lockdown read failed with NO known state — failing closed: {ex}")
+        return True                    # unknown state = locked for mutating ingress
+
+
+def _chat_lockdown_cache_set(value: bool) -> None:
+    _chat_lockdown_cache["gen"] += 1   # invalidate any in-flight refresh (R1 H2)
+    _chat_lockdown_cache["value"] = bool(value)
+    _chat_lockdown_cache["loaded"] = True
+    _chat_lockdown_cache["at"] = _time_mod.monotonic()
+
+
+async def _bridge_identity_muted(platform: str, author_id: str | None,
+                                 author_login: str | None, channel: str) -> bool:
+    """Live bridge_mutes check for one platform identity. Identity rule
+    (D1 F4): a mute row carrying a stable user id matches ONLY that id;
+    login comparison applies ONLY to rows whose stored user id IS NULL
+    (seeded/legacy name mutes) — a login is a mutable alias. Fails OPEN on
+    error, mirroring _is_chat_muted (a DB blip must not silence chat; the
+    lockdown switch is the fail-closed control, not this)."""
+    if not author_id and not author_login:
+        return False
+    try:
+        from database import async_session
+        async with async_session() as db:
+            hit = (await db.execute(text(
+                "SELECT 1 FROM bridge_mutes"
+                " WHERE platform = :p AND revoked_at IS NULL"
+                "   AND (expires_at IS NULL OR expires_at > NOW())"
+                "   AND (channel IS NULL OR channel = :chan)"
+                "   AND ((:aid IS NOT NULL AND platform_user_id = :aid)"
+                "        OR (platform_user_id IS NULL AND :login IS NOT NULL"
+                "            AND platform_login = :login))"
+                " LIMIT 1"
+            ), {"p": platform, "chan": (channel or "global").lower(),
+                "aid": (author_id or None),
+                "login": ((author_login or "").lower() or None)})).scalar()
+            return hit is not None
+    except Exception as ex:
+        print(f"[CHAT-MOD] bridge mute check error ({platform}): {ex}")
+        return False
+
+
+def _mod_action_payload(**kw) -> str:
+    return _json.dumps({k: v for k, v in kw.items() if v is not None})
+
+
+async def _enqueue_mirror_deletes(db, chat_ids: list[int],
+                                  skip: set[tuple[str, str]] | None = None) -> int:
+    """Queue a delete action for every external copy of the given (already
+    soft-deleted, same transaction) chat rows. `skip` is the set of
+    (platform, mirror_id) pairs whose deletion TRIGGERED this fan-out — those
+    copies are already gone on their own platform. Caller commits; runs
+    INSIDE the caller's transaction so a crash can never leave a delete
+    without its fan-out (D1 F3 ordering: lock → delete+audit+outbox → commit
+    → broadcast)."""
+    if not chat_ids:
+        return 0
+    mirrors = (await db.execute(text(
+        "SELECT chat_id, platform, mirror_id, channel_ref FROM chat_mirrors"
+        " WHERE chat_id = ANY(:ids)"
+    ), {"ids": [int(i) for i in chat_ids]})).mappings().all()
+    n = 0
+    for m in mirrors:
+        if skip and (m["platform"], m["mirror_id"]) in skip:
+            continue
+        if m["platform"] == "discord":
+            if not m["channel_ref"]:
+                continue   # can't delete without the channel — origin rows always carry it
+            kind, payload = "discord_delete", _mod_action_payload(
+                channel_id=m["channel_ref"], message_id=m["mirror_id"])
+        elif m["platform"] == "twitch":
+            kind, payload = "twitch_delete", _mod_action_payload(mirror_id=m["mirror_id"])
+        else:
+            # YouTube: no delete capability this batch (readonly scope) — skip.
+            continue
+        await db.execute(text(
+            "INSERT INTO chat_mod_actions (kind, payload) VALUES (:k, :p)"
+        ), {"k": kind, "p": payload})
+        n += 1
+    return n
+
+
+async def _enqueue_mod_action(db, kind: str, **payload) -> None:
+    await db.execute(text(
+        "INSERT INTO chat_mod_actions (kind, payload) VALUES (:k, :p)"
+    ), {"k": kind, "p": _mod_action_payload(**payload)})
 
 
 async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | None = None) -> dict:
@@ -13712,6 +13940,18 @@ async def ws_chat(ws: WebSocket):
             return
     await chat_manager.connect(ws)
     print(f"[CHAT] subscriber connected (total={chat_manager.count})")
+    # Lockdown snapshot for LATE JOINERS (D1 F15): the toggle broadcast only
+    # reaches sockets connected at that moment, so every new socket is told
+    # the current state up front — in BOTH states, because ChatClient.ChatLocked
+    # is a session-static that survives reconnects: a client locked before a
+    # disconnect must learn the unlock happened while it was away. Flat frame,
+    # no "message" key, bare number — provably inert on old clients (see the
+    # retraction-frame contract below).
+    try:
+        _locked_now = await _chat_lockdown_active()
+        await ws.send_text('{"type":"lock","locked":' + ("1" if _locked_now else "0") + '}')
+    except Exception:
+        pass
     # Codex r1 f2: the socket's VERIFIED identity. Message steam_ids are
     # client-claimed (deterrent-tier for drops), but the censor STRIKE writes
     # durable state against the claimed id — an unauthenticated socket could
@@ -13767,6 +14007,16 @@ async def ws_chat(ws: WebSocket):
                 continue
             if (_is_broadcast_account(verified_sid or "")
                     or _is_broadcast_account(steam_id)):
+                continue
+            # Chat lockdown (design S7): mutating ingress is refused while the
+            # channel is locked. The sender gets the lock frame (new clients
+            # render a "chat is locked" system line; old clients ignore it and
+            # are shadow-limited — accepted degrade, design §6).
+            if await _chat_lockdown_active():
+                try:
+                    await ws.send_text('{"type":"lock","locked":1}')
+                except Exception:
+                    pass
                 continue
             # Any chat send proves the client is alive — feed the online counter.
             _presence_touch(steam_id)
@@ -13839,7 +14089,10 @@ async def ws_chat(ws: WebSocket):
             # Persist FIRST so the broadcast carries the row's id + created_at —
             # the bot's dedup key. Fall back to a broadcast-time stamp (no id)
             # if the insert failed; the bot treats id-less entries legacy-style.
-            mid, created_iso = await _persist_chat(out)
+            # author_verified records whether THIS socket proved the claimed id
+            # (design F1: only verified rows may become mute-by-message targets).
+            mid, created_iso = await _persist_chat(
+                out, author_verified=(verified_sid is not None and verified_sid == steam_id))
             out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
             if mid is not None:
                 out["id"] = mid
@@ -13898,6 +14151,16 @@ async def post_chat_from_discord(
     channel = str(payload.get("channel", "global")).lower()
     if channel not in CHAT_CHANNELS_ALLOWED:
         channel = "global"
+    # Chat lockdown (design S7): the bot reacts to this status by skipping its
+    # FAQ task and best-effort deleting the original (D1 F15).
+    if await _chat_lockdown_active():
+        return {"status": "locked"}
+    # Platform-identity mute: an UNLINKED Discord account has no steam identity,
+    # so the chat_mutes gate below never touches it — bridge_mutes keyed on the
+    # discord id is what makes "mute that Discord user" real (design S2).
+    if discord_id and await _bridge_identity_muted("discord", discord_id, None, channel):
+        print(f"[CHAT-MOD] dropped bridge-muted discord chatter discord_id={discord_id} in [{channel}]")
+        return {"status": "muted"}
     # Mute gate for the relay path (Aug 6 item 5). Unlike the WS path, the
     # identity here is SERVER-RESOLVED from the Discord account the bot
     # authenticated, so this half is trustworthy: a muted player cannot dodge
@@ -13929,13 +14192,22 @@ async def post_chat_from_discord(
         "message": message,
         "channel": channel,
     }
-    mid, created_iso = await _persist_chat(out)
+    # The bot passes the ORIGINAL Discord message's ids so it becomes a
+    # chat_mirrors row atomically with the insert (design F3) — that is how a
+    # mod's native Discord delete resolves back to this row. Old bots omit the
+    # fields and degrade to an unregistered original (deploy-skew tolerant).
+    _omid = str(payload.get("origin_message_id", "") or "")[:128] or None
+    _ochan = str(payload.get("origin_channel_id", "") or "")[:32] or None
+    mid, created_iso = await _persist_chat(
+        out, author_verified=bool(discord_id),
+        origin_mirror=(("discord", _omid, _ochan) if _omid else None))
     out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
     if mid is not None:
         out["id"] = mid
     print(f"[CHAT] <- discord {out['display_name']}({meta['rating']}) [{channel}]: {message[:80]} (subs={chat_manager.count})")
     await chat_manager.broadcast(out, channel=channel)
-    return {"status": "posted", "subscribers": chat_manager.count}
+    # `id` (D1 F3): the bot needs the row id to correlate/register mirrors.
+    return {"status": "posted", "subscribers": chat_manager.count, "id": mid}
 
 
 # ── Stream-chat bridge (Aug 18): Twitch/YouTube viewer chat -> SCR chat ────
@@ -13992,6 +14264,11 @@ async def bridge_stream_chat(
     if not message:
         return {"status": "empty"}
     author = str(payload.get("author", "") or "").strip()[:64] or source.capitalize()
+    # Stable platform identity (design S1): Twitch user-id tag + login from the
+    # IRC prefix; YouTube authorDetails.channelId. Optional — an old bot omits
+    # them and its rows degrade to unmutable-by-identity (same as pre-263).
+    author_id = str(payload.get("author_id", "") or "").strip()[:64] or None
+    author_login = str(payload.get("author_login", "") or "").strip().lower()[:64] or None
     # Replay guard on the platform's own message id (IRC id tag / YouTube
     # message id): a bot restart re-reading recent platform history must not
     # double-post. Windowed in memory — a restart HERE forgets ids, worst
@@ -14005,6 +14282,17 @@ async def bridge_stream_chat(
             _bridge_native_set.discard(_bridge_native_q[0])
         _bridge_native_q.append(nkey)
         _bridge_native_set.add(nkey)
+    # New gates (design S2/S3/S7), in the design-reviewed order: lockdown →
+    # identity mute → spam patterns → the pre-existing rate/censor gates.
+    if await _chat_lockdown_active():
+        return {"status": "locked"}
+    if await _bridge_identity_muted(source, author_id, author_login, "global"):
+        print(f"[CHAT-MOD] dropped bridge-muted {source} chatter {author!r} (id={author_id})")
+        return {"status": "muted"}
+    _spam = await _bridge_spam_hit(message)
+    if _spam is not None:
+        print(f"[CHAT-MOD] spam-pattern drop [{_spam}] {source} {author!r}: {message[:80]}")
+        return {"status": "spam_pattern"}
     now = _time_mod.monotonic()
     sq = _bridge_source_rate.setdefault(source, collections_mod.deque())
     while sq and now - sq[0] > _CHAT_RATE_WINDOW:
@@ -14029,7 +14317,13 @@ async def bridge_stream_chat(
         "message": message,
         "channel": "global",
     }
-    mid, created_iso = await _persist_chat(out)
+    # Origin identity persisted for moderation (design S1), and the platform's
+    # own message id registered as this row's origin mirror ATOMICALLY with the
+    # insert (design F3) — that is how a Twitch CLEARMSG resolves back here.
+    mid, created_iso = await _persist_chat(
+        out, origin_user_id=author_id, origin_login=author_login,
+        author_verified=bool(author_id),
+        origin_mirror=((source, native_id, None) if native_id else None))
     out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
     if mid is not None:
         out["id"] = mid
@@ -14209,7 +14503,11 @@ async def internal_chat_since(
             "message": r["message"],
             "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
         })
-    return {"max_id": int(max_id or 0), "messages": messages}
+    # R1 M2: the Twitch outbound mirror pauses on this flag (a locked channel
+    # must not keep draining its pre-lock backlog onto Twitch). Additive —
+    # the Discord relay ignores it, and old bots never read it.
+    return {"max_id": int(max_id or 0), "messages": messages,
+            "locked": 1 if await _chat_lockdown_active() else 0}
 
 
 # ── T-chat moderation (Aug 6 item 5) ──────────────────────────────────────
@@ -14430,6 +14728,11 @@ async def chat_moderate_delete(req: _ChatModDeleteReq, request: Request,
                  "author_display_name": row["display_name"],
                  "moderator_steam_id": req.steam_id,
                  "moderator_role": role})
+    # Cross-platform fan-out (design S4): every external copy gets a delete
+    # action, queued IN THIS TRANSACTION so a crash can never leave the row
+    # deleted here but standing elsewhere. The already-deleted branch above
+    # deliberately enqueues nothing — retries rebroadcast, never re-queue.
+    await _enqueue_mirror_deletes(db, [int(req.message_id)])
     await db.commit()
     print(f"[CHAT-MOD] {role} {req.steam_id} deleted message {req.message_id} in [{chan}]")
     await _broadcast_chat_delete(req.message_id, chan)
@@ -14497,10 +14800,14 @@ async def chat_moderate_mute(req: _ChatModMuteReq, request: Request,
         " WHERE steam_id = :sid AND revoked_at IS NULL"
         "   AND channel IS NOT DISTINCT FROM :chan"
     ), {"sid": req.target_steam_id[:32], "chan": chan})
+    # make_interval, not `:mins || ' minutes'` — the concat form types the
+    # param as TEXT while `:mins > 0` needs an INT, an asyncpg #275-class
+    # hazard this statement carried untested (chat_mutes had zero rows when
+    # checked 2026-08-29, so the timed arm had never once executed).
     await db.execute(text(
         "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
         " VALUES (:sid, :chan, :by, :why,"
-        "         CASE WHEN :mins > 0 THEN NOW() + (:mins || ' minutes')::interval ELSE NULL END)"
+        "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
     ), {"sid": req.target_steam_id[:32], "chan": chan, "by": req.steam_id[:32],
         "why": (req.reason or "")[:256] or None, "mins": mins})
     await _log_admin_action(
@@ -14605,6 +14912,22 @@ async def chat_moderate_list_mutes(
         + scope_sql +
         " ORDER BY m.created_at DESC LIMIT 500"
     ), params)).mappings().all()
+    # Bridge (platform-identity) mutes ride a SEPARATE top-level array: the
+    # shipped client's ParseChatMutes locates the "mutes" array by key and
+    # never sees a sibling, so old clients render exactly what they always
+    # did while new clients parse both (design Q4). Same scope rule: an admin
+    # sees everything; a moderator sees only their channels (a NULL-channel
+    # row is all-channels authority and stays admin-only to see or clear).
+    bscope_sql = "" if role == "admin" else " AND b.channel = ANY(:chans)"
+    brows = (await db.execute(text(
+        "SELECT b.id, b.platform, b.platform_user_id, b.platform_login, b.channel,"
+        "       b.display_name, b.muted_by, b.reason, b.created_at, b.expires_at"
+        "  FROM bridge_mutes b"
+        " WHERE b.revoked_at IS NULL"
+        "   AND (b.expires_at IS NULL OR b.expires_at > NOW())"
+        + bscope_sql +
+        " ORDER BY b.created_at DESC LIMIT 500"
+    ), params)).mappings().all()
     return {"mutes": [{
         "id": int(r["id"]),
         "steam_id": r["steam_id"],
@@ -14617,7 +14940,19 @@ async def chat_moderate_list_mutes(
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
         "permanent": r["expires_at"] is None,
-    } for r in rows], "count": len(rows), "role": role}
+    } for r in rows], "bridge_mutes": [{
+        "mute_id": int(r["id"]),
+        "platform": r["platform"],
+        "platform_user_id": r["platform_user_id"],
+        "platform_login": r["platform_login"],
+        "channel": r["channel"],
+        "display_name": r["display_name"],
+        "muted_by": r["muted_by"],
+        "reason": r["reason"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+        "permanent": r["expires_at"] is None,
+    } for r in brows], "count": len(rows), "role": role}
 
 
 async def _is_chat_muted(steam_id: str, channel: str) -> bool:
@@ -14642,6 +14977,778 @@ async def _is_chat_muted(steam_id: str, channel: str) -> bool:
     except Exception as e:
         print(f"[CHAT-MOD] mute check error for {steam_id}: {e}")
         return False
+
+
+# ── Cross-platform moderation (design v3 S2/S4/S5/S6/S7) ─────────────────
+
+
+async def _bridge_mute_upsert(db, *, platform: str, user_id: str | None,
+                              login: str | None, channel: str | None,
+                              display_name: str | None, muted_by: str,
+                              reason: str | None, minutes: int) -> int:
+    """Supersede-then-insert on bridge_mutes (same lifecycle as chat_mutes).
+    Identity scope for the supersede follows the F4 rule: rows with a stable
+    id supersede by id; login-only rows supersede by login. Returns the new
+    mute row id. Runs in the caller's transaction. Interval built with
+    make_interval (the automute pattern) — NEVER `:mins || ' minutes'`, which
+    types the param as text under asyncpg (#275)."""
+    login = (login or "").lower()[:64] or None
+    await db.execute(text(
+        "UPDATE bridge_mutes SET revoked_at = NOW()"
+        " WHERE platform = :p AND revoked_at IS NULL"
+        "   AND channel IS NOT DISTINCT FROM :chan"
+        "   AND ((:aid IS NOT NULL AND platform_user_id = :aid)"
+        "        OR (:aid IS NULL AND platform_user_id IS NULL AND platform_login = :login))"
+    ), {"p": platform, "chan": channel, "aid": user_id, "login": login})
+    new_id = (await db.execute(text(
+        "INSERT INTO bridge_mutes (platform, platform_user_id, platform_login, channel,"
+        "                          display_name, muted_by, reason, expires_at)"
+        " VALUES (:p, :aid, :login, :chan, :dn, :by, :why,"
+        "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
+        " RETURNING id"
+    ), {"p": platform, "aid": user_id, "login": login, "chan": channel,
+        "dn": (display_name or "")[:64] or None, "by": muted_by[:64],
+        "why": (reason or "")[:256] or None, "mins": int(minutes)})).scalar()
+    return int(new_id or 0)
+
+
+# Twitch timeouts cap at 2 weeks; anything longer becomes a permanent ban on
+# the Twitch side while the bridge mute keeps its own expiry.
+_TWITCH_TIMEOUT_MAX_S = 1209600
+
+
+async def _enqueue_twitch_enforcement(db, *, user_id: str | None, login: str | None,
+                                      minutes: int, reason: str | None) -> None:
+    """Queue the Twitch-side half of a twitch-identity mute (design S2): a
+    timeout for expiring mutes, a ban for permanent ones. No stable id = no
+    enforcement (the relay-mute still holds)."""
+    if not user_id:
+        return
+    dur = None
+    if minutes and minutes > 0:
+        dur = min(int(minutes) * 60, _TWITCH_TIMEOUT_MAX_S)
+    await _enqueue_mod_action(db, "twitch_ban", user_id=user_id, login=login,
+                              duration_s=dur, reason=(reason or "")[:200] or None)
+
+
+async def _purge_identity_rows(db, *, kind: str, value: str, actor: str,
+                               window_hours: int = 24,
+                               channel: str | None = None,
+                               ) -> tuple[list[tuple[int, str]], bool]:
+    """Soft-delete every non-deleted chat row matching one identity inside the
+    window, in id-ordered batches of 100 LOOPED TO COMPLETION (D1 F10 — a cap
+    is a batch size, not a terminal limit), with a 10-batch hard ceiling
+    reported as `truncated`. Returns ([(id, channel)...], truncated). Mirror
+    delete actions are enqueued in the same transaction; the caller commits
+    and then broadcasts the retraction frames. `channel` scopes the purge to
+    one room (R1 H1: a channel-scoped moderator's purge must not reach rooms
+    outside their authority); None = every room (admins, platform events)."""
+    # Predicates are code-owned constants (never interpolated values). The
+    # twitch_all arm binds no :v — binding an unused param whose only use is
+    # `:v = :v` leaves asyncpg unable to type $1 (#275's class).
+    preds = {
+        "twitch_user":  ("source = 'twitch' AND origin_user_id = :v", True),
+        "youtube_user": ("source = 'youtube' AND origin_user_id = :v", True),
+        "twitch_all":   ("source = 'twitch'", False),
+        "steam":        ("steam_id = :v", True),
+        "discord":      ("discord_id = :v", True),
+    }
+    pred, needs_value = preds[kind]
+    # Conditional fragment, not a bound-NULL test — `:chan IS NULL` leaves
+    # asyncpg unable to type the param (#275 again).
+    chan_pred = " AND channel = :chan" if channel else ""
+    deleted: list[tuple[int, str]] = []
+    truncated = False
+    for _batch in range(10):
+        params = {"actor": actor[:32], "wh": int(window_hours)}
+        if needs_value:
+            params["v"] = value
+        if channel:
+            params["chan"] = channel
+        rows = (await db.execute(text(
+            "UPDATE chat_messages SET deleted_at = NOW(), deleted_by_steam_id = :actor"
+            " WHERE id IN (SELECT id FROM chat_messages"
+            f"              WHERE deleted_at IS NULL AND {pred}{chan_pred}"
+            "                AND created_at > NOW() - make_interval(hours => :wh)"
+            "              ORDER BY id LIMIT 100)"
+            " RETURNING id, channel"
+        ), params)).all()
+        if not rows:
+            break
+        deleted.extend((int(r[0]), (r[1] or "global")) for r in rows)
+        if len(rows) < 100:
+            break
+    else:
+        truncated = True
+    if deleted:
+        await _enqueue_mirror_deletes(db, [i for i, _ in deleted])
+    return deleted, truncated
+
+
+async def _broadcast_deletes(rows: list[tuple[int, str]]) -> None:
+    for mid, chan in rows:
+        await _broadcast_chat_delete(mid, chan)
+
+
+# The Discord channel the bot's global chat relay lives in — lockdown notices
+# post there via the pending_channel_posts outbox (same hardcoded-id precedent
+# as the automute's #scr-admin post above; the bot compiles the same default).
+_CHAT_GLOBAL_DISCORD_CHANNEL = "1492022404829020230"
+
+
+async def _set_chat_lockdown(db, locked: bool, actor: str) -> None:
+    """Persist + audit + announce a lockdown change, in the caller's
+    transaction. Caller commits, then updates the in-process cache and
+    broadcasts the WS frame (cache/broadcast are post-commit so a rollback
+    can't leave phantom state)."""
+    await db.execute(text(
+        "INSERT INTO runtime_settings (key, value) VALUES ('chat_lockdown', :v)"
+        " ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()"
+    ), {"v": "1" if locked else "0"})
+    await _log_admin_action(db, admin_steam_id=actor[:20], action="chat_lockdown",
+                            details={"locked": bool(locked), "actor": actor})
+    # Announcements: Discord (durable channel-post outbox), Twitch chat line
+    # (at-most-once, D1 F13) and best-effort emote-only (D1 F11 — native
+    # Twitch chat cannot be fully silenced; this is the honest mitigation).
+    txt = ("\N{LOCK} Chat has been locked by moderators — messages are paused everywhere."
+           if locked else
+           "\N{OPEN LOCK} Chat has been unlocked — carry on.")
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
+            ), {"ch": _CHAT_GLOBAL_DISCORD_CHANNEL, "c": txt})
+    except Exception as ex:
+        print(f"[CHAT-MOD] lockdown channel post failed: {ex}")
+    await _enqueue_mod_action(db, "twitch_say",
+                              text=("Chat locked by moderators — messages are paused."
+                                    if locked else "Chat unlocked — carry on."))
+    await _enqueue_mod_action(db, "twitch_settings", emote_only=bool(locked))
+
+
+async def _apply_mute_for_row(db, row, *, actor: str, role: str,
+                              scope_channel: str | None, minutes: int,
+                              reason: str, purge: bool) -> dict:
+    """Shared mute-by-message core (design S6) for the in-game endpoint and
+    the Discord context menu. `row` is the locked chat_messages row. Routes by
+    the row's source; refuses targets the caller may not silence. Runs in the
+    caller's transaction; returns the result dict with `purged_rows` for the
+    caller to broadcast after commit."""
+    mins = max(0, int(minutes or 0))
+    source = row["source"]
+    purged: list[tuple[int, str]] = []
+    truncated = False
+    if source == "ingame":
+        # F1: the WS steam_id is client-claimed. Only a row whose socket was
+        # session-verified as that id may be auto-targeted; everything else
+        # needs the identity-explicit mute flow after human confirmation.
+        if not row["steam_id"] or not row["author_verified"]:
+            raise HTTPException(409, "This message's sender identity is unverified — "
+                                     "delete it, or mute the player explicitly from the mute flow")
+        target = row["steam_id"]
+        t_role, _ = await _chat_moderator_scope(db, target)
+        if t_role is not None and role != "admin":
+            raise HTTPException(403, "You cannot mute another moderator or an admin")
+        await db.execute(text(
+            "UPDATE chat_mutes SET revoked_at = NOW()"
+            " WHERE steam_id = :sid AND revoked_at IS NULL"
+            "   AND channel IS NOT DISTINCT FROM :chan"
+        ), {"sid": target[:32], "chan": scope_channel})
+        await db.execute(text(
+            "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
+            " VALUES (:sid, :chan, :by, :why,"
+            "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
+        ), {"sid": target[:32], "chan": scope_channel, "by": actor[:32],
+            "why": (reason or "")[:256] or None, "mins": mins})
+        if purge:
+            purged, truncated = await _purge_identity_rows(
+                db, kind="steam", value=target, actor=actor, channel=scope_channel)
+        return {"status": "ok", "muted": f"steam:{target}", "channel": scope_channel,
+                "purged": len(purged), "truncated": truncated, "purged_rows": purged}
+    if source == "discord":
+        if not row["discord_id"]:
+            raise HTTPException(409, "This Discord message carries no author identity")
+        await _bridge_mute_upsert(db, platform="discord", user_id=row["discord_id"],
+                                  login=None, channel=scope_channel,
+                                  display_name=row["display_name"], muted_by=actor,
+                                  reason=reason, minutes=mins)
+        # Linked steam identity (server-resolved, so trustworthy): mute it too,
+        # same scope, so the pair can't dodge by switching surfaces.
+        linked = (await db.execute(text(
+            "SELECT steam_id FROM players WHERE discord_id = :d AND deleted_at IS NULL"
+        ), {"d": row["discord_id"]})).scalar()
+        if linked:
+            t_role, _ = await _chat_moderator_scope(db, linked)
+            if t_role is not None and role != "admin":
+                raise HTTPException(403, "You cannot mute another moderator or an admin")
+            await db.execute(text(
+                "UPDATE chat_mutes SET revoked_at = NOW()"
+                " WHERE steam_id = :sid AND revoked_at IS NULL"
+                "   AND channel IS NOT DISTINCT FROM :chan"
+            ), {"sid": linked[:32], "chan": scope_channel})
+            await db.execute(text(
+                "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
+                " VALUES (:sid, :chan, :by, :why,"
+                "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
+            ), {"sid": linked[:32], "chan": scope_channel, "by": actor[:32],
+                "why": (reason or "")[:256] or None, "mins": mins})
+        if purge:
+            purged, truncated = await _purge_identity_rows(
+                db, kind="discord", value=row["discord_id"], actor=actor, channel=scope_channel)
+        return {"status": "ok", "muted": f"discord:{row['discord_id']}",
+                "linked_steam": linked, "channel": scope_channel,
+                "purged": len(purged), "truncated": truncated, "purged_rows": purged}
+    if source in _BRIDGE_SOURCES:
+        # F4: only a stable platform id may be targeted; legacy rows (pre-263,
+        # origin columns NULL) would be a display-name-derived guess — refuse.
+        if not row["origin_user_id"]:
+            raise HTTPException(409, "This message predates identity capture — "
+                                     "it can be deleted but its author cannot be muted from it")
+        await _bridge_mute_upsert(db, platform=source, user_id=row["origin_user_id"],
+                                  login=row["origin_login"], channel=scope_channel,
+                                  display_name=row["display_name"], muted_by=actor,
+                                  reason=reason, minutes=mins)
+        if source == "twitch":
+            await _enqueue_twitch_enforcement(db, user_id=row["origin_user_id"],
+                                              login=row["origin_login"],
+                                              minutes=mins, reason=reason)
+        if purge:
+            purged, truncated = await _purge_identity_rows(
+                db, kind=f"{source}_user", value=row["origin_user_id"], actor=actor, channel=scope_channel)
+        return {"status": "ok", "muted": f"{source}:{row['origin_user_id']}",
+                "channel": scope_channel,
+                "purged": len(purged), "truncated": truncated, "purged_rows": purged}
+    raise HTTPException(409, f"Messages from source '{source}' cannot be identity-muted")
+
+
+_CHAT_ROW_LOCK_SQL = (
+    "SELECT id, source, channel, steam_id, discord_id, display_name,"
+    "       origin_user_id, origin_login, author_verified, deleted_at"
+    "  FROM chat_messages WHERE id = :mid FOR UPDATE")
+
+
+class _ChatModMuteMsgReq(BaseModel):
+    steam_id: str                        # the moderator / admin
+    message_id: int
+    duration_minutes: int | None = None  # None/<=0 = permanent
+    reason: str = ""
+    purge: bool = True
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/chat/moderate/mute-by-message", tags=["Chat"])
+async def chat_moderate_mute_by_message(req: _ChatModMuteMsgReq, request: Request,
+                                        db: AsyncSession = Depends(get_db)):
+    """The unified mod verb (design S6): resolve a message, mute its author's
+    identity on whatever platform it came from, optionally purge their recent
+    lines everywhere. Authorization is decided against the ROW's channel, so a
+    language moderator reaches only their language's rows and every bridged
+    (global) row stays admin-only by the existing scope rule (D1 F5)."""
+    mins = int(req.duration_minutes) if req.duration_minutes else 0
+    if mins > 60 * 24 * 365:
+        raise HTTPException(400, "duration_minutes too large")
+    role, langs = await _chat_mod_authn(db, request, req, "chat_mute_msg", str(req.message_id))
+    row = (await db.execute(text(_CHAT_ROW_LOCK_SQL),
+                            {"mid": req.message_id})).mappings().first()
+    if row is None:
+        raise HTTPException(404, "No such message")
+    chan = (row["channel"] or "global").lower()
+    if not _chat_scope_allows(role, langs, chan):
+        raise HTTPException(403, f"Your moderation grant does not cover the '{chan}' channel")
+    scope_channel = None if role == "admin" else chan
+    result = await _apply_mute_for_row(db, row, actor=req.steam_id, role=role,
+                                       scope_channel=scope_channel, minutes=mins,
+                                       reason=req.reason, purge=bool(req.purge))
+    await _log_admin_action(
+        db, admin_steam_id=req.steam_id, action="chat_mute_msg",
+        target_steam_id=row["steam_id"],
+        details={"message_id": int(req.message_id), "channel": chan,
+                 "muted": result.get("muted"), "duration_minutes": mins or None,
+                 "purged": result.get("purged"), "moderator_role": role})
+    await db.commit()
+    purged_rows = result.pop("purged_rows", [])
+    await _broadcast_deletes(purged_rows)
+    print(f"[CHAT-MOD] {role} {req.steam_id} mute-by-message {req.message_id} -> "
+          f"{result.get('muted')} ({result.get('purged')} purged)")
+    return result
+
+
+class _ChatModBridgeUnmuteReq(BaseModel):
+    steam_id: str
+    mute_id: int
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/chat/moderate/bridge-unmute", tags=["Chat"])
+async def chat_moderate_bridge_unmute(req: _ChatModBridgeUnmuteReq, request: Request,
+                                      db: AsyncSession = Depends(get_db)):
+    """Revoke one bridge (platform-identity) mute. Twitch revocations also
+    queue the unban so the platform side converges."""
+    role, langs = await _chat_mod_authn(db, request, req, "chat_unmute_bridge", str(req.mute_id))
+    row = (await db.execute(text(
+        "SELECT id, platform, platform_user_id, platform_login, channel"
+        "  FROM bridge_mutes WHERE id = :i FOR UPDATE"
+    ), {"i": req.mute_id})).mappings().first()
+    if row is None:
+        raise HTTPException(404, "No such mute")
+    # A NULL-channel row is all-channels authority — admin only, both ways.
+    if not _chat_scope_allows(role, langs, row["channel"]):
+        raise HTTPException(403, "Your moderation grant does not cover that mute's scope")
+    cleared = (await db.execute(text(
+        "UPDATE bridge_mutes SET revoked_at = NOW()"
+        " WHERE id = :i AND revoked_at IS NULL RETURNING id"
+    ), {"i": req.mute_id})).scalars().all()
+    if cleared and row["platform"] == "twitch" and row["platform_user_id"]:
+        await _enqueue_mod_action(db, "twitch_unban", user_id=row["platform_user_id"],
+                                  login=row["platform_login"])
+    if cleared:
+        await _log_admin_action(
+            db, admin_steam_id=req.steam_id, action="chat_unmute_bridge",
+            details={"mute_id": int(req.mute_id), "platform": row["platform"],
+                     "platform_user_id": row["platform_user_id"],
+                     "platform_login": row["platform_login"],
+                     "moderator_role": role})
+    await db.commit()
+    return {"status": "ok", "cleared": len(cleared), "mute_id": req.mute_id}
+
+
+class _ChatLockdownReq(BaseModel):
+    steam_id: str
+    locked: bool
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/chat/moderate/lockdown", tags=["Chat"])
+async def chat_moderate_lockdown(req: _ChatLockdownReq,
+                                 db: AsyncSession = Depends(get_db)):
+    """Whole-channel lockdown toggle (design S7). Admin HMAC only — this is
+    the biggest hammer in the drawer. The Discord-side toggle is the internal
+    endpoint below (bot-asserted channel-effective Manage Messages)."""
+    await _require_admin(db, req.steam_id, "chat_lockdown",
+                         "1" if req.locked else "0", req.hmac_signature)
+    await _set_chat_lockdown(db, bool(req.locked), req.steam_id)
+    await db.commit()
+    _chat_lockdown_cache_set(bool(req.locked))
+    await chat_manager.broadcast(
+        {"type": "lock", "locked": 1 if req.locked else 0}, channel="global")
+    print(f"[CHAT-MOD] admin {req.steam_id} set lockdown={bool(req.locked)}")
+    return {"status": "ok", "locked": bool(req.locked)}
+
+
+class _ChatSpamPatternReq(BaseModel):
+    steam_id: str
+    pattern: str = ""
+    note: str = ""
+    pattern_id: int | None = None
+    hmac_signature: str | None = None
+
+
+@app.get("/api/v1/chat/moderate/spam-patterns", tags=["Chat"])
+async def chat_moderate_spam_patterns(
+    steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_admin(db, steam_id, "chat_spam_pattern", "list", hmac_signature)
+    rows = (await db.execute(text(
+        "SELECT id, pattern, note, added_by, created_at FROM bridge_spam_patterns"
+        " WHERE revoked_at IS NULL ORDER BY created_at DESC LIMIT 200"
+    ))).mappings().all()
+    return {"patterns": [{
+        "id": int(r["id"]), "pattern": r["pattern"], "note": r["note"],
+        "added_by": r["added_by"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    } for r in rows], "count": len(rows)}
+
+
+@app.post("/api/v1/chat/moderate/spam-patterns/add", tags=["Chat"])
+async def chat_moderate_spam_pattern_add(req: _ChatSpamPatternReq,
+                                         db: AsyncSession = Depends(get_db)):
+    """Add one normalized drop pattern. The signature covers the RAW input;
+    the server normalizes AFTER auth (a client-side squash mirror would be a
+    byte-drift bug waiting to happen, #295d) and refuses a squash shorter
+    than 4 chars — an empty pattern would match every message (D1 F16)."""
+    await _require_admin(db, req.steam_id, "chat_spam_pattern",
+                         f"add:{req.pattern}", req.hmac_signature)
+    norm = _squash_for_spam(req.pattern)[:128]
+    if len(norm) < 4:
+        raise HTTPException(400, "Pattern too short after normalization (need >= 4 alphanumerics)")
+    row_id = (await db.execute(text(
+        "INSERT INTO bridge_spam_patterns (pattern, note, added_by)"
+        " SELECT :p, :n, :by"
+        " WHERE NOT EXISTS (SELECT 1 FROM bridge_spam_patterns"
+        "                    WHERE pattern = :p AND revoked_at IS NULL)"
+        " RETURNING id"
+    ), {"p": norm, "n": (req.note or "")[:256] or None, "by": req.steam_id[:64]})).scalar()
+    await _log_admin_action(db, admin_steam_id=req.steam_id, action="chat_spam_pattern",
+                            details={"op": "add", "raw": req.pattern[:128],
+                                     "normalized": norm, "id": row_id})
+    await db.commit()
+    _spam_pat_cache["at"] = 0.0   # force refresh on next bridge message
+    return {"status": "ok" if row_id else "duplicate", "pattern": norm, "id": row_id}
+
+
+@app.post("/api/v1/chat/moderate/spam-patterns/revoke", tags=["Chat"])
+async def chat_moderate_spam_pattern_revoke(req: _ChatSpamPatternReq,
+                                            db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.steam_id, "chat_spam_pattern",
+                         f"revoke:{int(req.pattern_id or 0)}", req.hmac_signature)
+    cleared = (await db.execute(text(
+        "UPDATE bridge_spam_patterns SET revoked_at = NOW()"
+        " WHERE id = :i AND revoked_at IS NULL RETURNING pattern"
+    ), {"i": int(req.pattern_id or 0)})).scalars().all()
+    await _log_admin_action(db, admin_steam_id=req.steam_id, action="chat_spam_pattern",
+                            details={"op": "revoke", "id": req.pattern_id,
+                                     "pattern": (cleared[0] if cleared else None)})
+    await db.commit()
+    _spam_pat_cache["at"] = 0.0
+    return {"status": "ok", "cleared": len(cleared)}
+
+
+# ── Internal seams for the Discord bot (all under /api/v1/internal/* — the
+# middleware refuses unauthenticated requests BEFORE the body is parsed, #388;
+# the in-handler key check is belt-and-braces). ──────────────────────────────
+
+
+@app.post("/api/v1/internal/chat/mirrors", tags=["Chat"])
+async def internal_chat_mirrors(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register one external copy of a chat message (design S4). Takes the
+    chat row's FOR UPDATE lock so the deleted_at check cannot race the delete
+    fan-out: registering against an already-deleted row queues that copy's
+    own delete action in the same transaction (D1 F3's self-healing arm)."""
+    _require_internal_key(x_internal_key)
+    try:
+        chat_id = int(payload.get("chat_id"))
+    except Exception:
+        raise HTTPException(422, "chat_id required")
+    platform = str(payload.get("platform", "")).lower()
+    if platform not in ("discord", "twitch", "youtube"):
+        raise HTTPException(422, "unknown platform")
+    mirror_id = str(payload.get("mirror_id", "") or "")[:128]
+    if not mirror_id:
+        raise HTTPException(422, "mirror_id required")
+    channel_ref = str(payload.get("channel_ref", "") or "")[:32] or None
+    row = (await db.execute(text(
+        "SELECT id, deleted_at FROM chat_messages WHERE id = :cid FOR UPDATE"
+    ), {"cid": chat_id})).mappings().first()
+    if row is None:
+        raise HTTPException(404, "No such chat message")
+    await db.execute(text(
+        "INSERT INTO chat_mirrors (chat_id, platform, mirror_id, channel_ref)"
+        " VALUES (:cid, :p, :m, :cr) ON CONFLICT (platform, mirror_id) DO NOTHING"
+    ), {"cid": chat_id, "p": platform, "m": mirror_id, "cr": channel_ref})
+    already_deleted = row["deleted_at"] is not None
+    if already_deleted:
+        if platform == "discord" and channel_ref:
+            await _enqueue_mod_action(db, "discord_delete",
+                                      channel_id=channel_ref, message_id=mirror_id)
+        elif platform == "twitch":
+            await _enqueue_mod_action(db, "twitch_delete", mirror_id=mirror_id)
+    await db.commit()
+    return {"status": "ok", "deleted": already_deleted}
+
+
+@app.post("/api/v1/internal/chat/bridge-moderation", tags=["Chat"])
+async def internal_chat_bridge_moderation(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Platform-side moderation flowing IN (design S5): Twitch CLEARMSG /
+    CLEARCHAT and YouTube deletion/ban events, forwarded by the reader."""
+    _require_internal_key(x_internal_key)
+    source = str(payload.get("source", "")).lower()
+    if source not in _BRIDGE_SOURCES:
+        raise HTTPException(422, "unknown source")
+    kind = str(payload.get("kind", ""))
+    actor = f"{source}_mod"
+    if kind == "delete_message":
+        native_id = str(payload.get("native_id", "") or "")[:128]
+        if not native_id:
+            raise HTTPException(422, "native_id required")
+        row = (await db.execute(text(
+            "SELECT cm.id, cm.channel, cm.deleted_at"
+            "  FROM chat_mirrors mr JOIN chat_messages cm ON cm.id = mr.chat_id"
+            " WHERE mr.platform = :p AND mr.mirror_id = :m"
+            " FOR UPDATE OF cm"
+        ), {"p": source, "m": native_id})).mappings().first()
+        if row is None:
+            return {"status": "unknown_message"}
+        chan = (row["channel"] or "global").lower()
+        if row["deleted_at"] is not None:
+            await db.commit()
+            return {"status": "ok", "already_deleted": True}
+        await db.execute(text(
+            "UPDATE chat_messages SET deleted_at = NOW(), deleted_by_steam_id = :by"
+            " WHERE id = :mid AND deleted_at IS NULL"
+        ), {"mid": row["id"], "by": actor})
+        await _log_admin_action(db, admin_steam_id=actor, action="chat_delete",
+                                details={"message_id": int(row["id"]), "channel": chan,
+                                         "native_id": native_id, "via": f"{source} event"})
+        await _enqueue_mirror_deletes(db, [int(row["id"])], skip={(source, native_id)})
+        await db.commit()
+        await _broadcast_chat_delete(int(row["id"]), chan)
+        print(f"[CHAT-MOD] {source} event deleted message {row['id']} in [{chan}]")
+        return {"status": "ok", "message_id": int(row["id"])}
+    if kind == "purge_user":
+        user_id = str(payload.get("platform_user_id", "") or "")[:64]
+        if not user_id:
+            raise HTTPException(422, "platform_user_id required")
+        login = str(payload.get("login", "") or "").lower()[:64] or None
+        display = str(payload.get("display_name", "") or "")[:64] or None
+        ban_duration_s = payload.get("ban_duration_s")
+        permanent = bool(payload.get("permanent"))
+        purged, truncated = await _purge_identity_rows(
+            db, kind=f"{source}_user", value=user_id, actor=actor)
+        mins = 0
+        if not permanent and ban_duration_s:
+            try:
+                mins = max(1, int(int(ban_duration_s) / 60))
+            except Exception:
+                mins = 0
+        if permanent or mins > 0:
+            # Mirror the platform's own ban semantics into the relay (design
+            # S5): permanent ban -> permanent mute, timeout -> expiring mute.
+            # No twitch enforcement enqueue — the ban CAME from the platform.
+            await _bridge_mute_upsert(db, platform=source, user_id=user_id, login=login,
+                                      channel=None, display_name=display,
+                                      muted_by=actor,
+                                      reason=("platform ban" if permanent
+                                              else f"platform timeout {ban_duration_s}s"),
+                                      minutes=mins)
+        await _log_admin_action(db, admin_steam_id=actor, action="chat_purge_user",
+                                details={"platform": source, "platform_user_id": user_id,
+                                         "login": login, "purged": len(purged),
+                                         "truncated": truncated, "permanent": permanent,
+                                         "ban_duration_s": ban_duration_s})
+        await db.commit()
+        await _broadcast_deletes(purged)
+        print(f"[CHAT-MOD] {source} purge_user {login or user_id}: {len(purged)} rows"
+              + (" TRUNCATED" if truncated else ""))
+        return {"status": "ok", "purged": len(purged), "truncated": truncated}
+    if kind == "purge_channel":
+        if source != "twitch":
+            raise HTTPException(422, "purge_channel is twitch-only")
+        purged, truncated = await _purge_identity_rows(
+            db, kind="twitch_all", value="x", actor=actor)
+        await _log_admin_action(db, admin_steam_id=actor, action="chat_purge_channel",
+                                details={"platform": source, "purged": len(purged),
+                                         "truncated": truncated})
+        await db.commit()
+        await _broadcast_deletes(purged)
+        print(f"[CHAT-MOD] twitch /clear: purged {len(purged)} bridged rows"
+              + (" TRUNCATED" if truncated else ""))
+        return {"status": "ok", "purged": len(purged), "truncated": truncated}
+    raise HTTPException(422, "unknown kind")
+
+
+@app.post("/api/v1/internal/chat/discord-deleted", tags=["Chat"])
+async def internal_chat_discord_deleted(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """A message (or bulk) was deleted in a relay Discord channel. Resolves
+    each id through chat_mirrors — which covers BOTH a deleted original and a
+    deleted bot relay — and propagates. No-ops on unknown ids (non-chat
+    messages) and on already-deleted rows, which is what terminates the
+    propagation loop when our own outbox delete triggers this event."""
+    _require_internal_key(x_internal_key)
+    raw_ids = payload.get("message_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(422, "message_ids required")
+    mids = [str(m)[:128] for m in raw_ids[:100] if str(m or "").strip()]
+    if not mids:
+        return {"status": "ok", "deleted": 0}
+    rows = (await db.execute(text(
+        "SELECT cm.id, cm.channel, cm.deleted_at, mr.mirror_id"
+        "  FROM chat_mirrors mr JOIN chat_messages cm ON cm.id = mr.chat_id"
+        " WHERE mr.platform = 'discord' AND mr.mirror_id = ANY(:mids)"
+        " FOR UPDATE OF cm"
+    ), {"mids": mids})).mappings().all()
+    live = [r for r in rows if r["deleted_at"] is None]
+    if not live:
+        await db.commit()
+        return {"status": "ok", "deleted": 0}
+    live_ids = sorted({int(r["id"]) for r in live})
+    await db.execute(text(
+        "UPDATE chat_messages SET deleted_at = NOW(), deleted_by_steam_id = 'discord_mod'"
+        " WHERE id = ANY(:ids) AND deleted_at IS NULL"
+    ), {"ids": live_ids})
+    skip = {("discord", r["mirror_id"]) for r in live}
+    await _enqueue_mirror_deletes(db, live_ids, skip=skip)
+    await _log_admin_action(db, admin_steam_id="discord_mod", action="chat_delete",
+                            details={"message_ids": live_ids, "via": "discord delete event",
+                                     "discord_message_ids": sorted({r["mirror_id"] for r in live})})
+    await db.commit()
+    frames = sorted({(int(r["id"]), (r["channel"] or "global")) for r in live})
+    await _broadcast_deletes(frames)
+    print(f"[CHAT-MOD] discord delete event -> {len(live_ids)} chat row(s)")
+    return {"status": "ok", "deleted": len(live_ids)}
+
+
+@app.post("/api/v1/internal/chat/discord-mute", tags=["Chat"])
+async def internal_chat_discord_mute(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The Discord context menu 'SCR: Mute chatter' (design §5). The BOT
+    asserts the actor holds channel-effective Manage Messages in the INVOKING
+    relay channel (D1 F17); this endpoint additionally requires the message
+    to resolve into a tracked chat row at all. Actor lands in the audit as
+    discord:<id>.
+
+    R1 H1: mute SCOPE follows the INVOKING channel's language — the one room
+    the bot just proved the actor moderates. Invoked from the global relay
+    channel = all-channel mute (NULL, the global mods' hammer); invoked from
+    a language channel = that language only. The bot sends the lang it
+    resolved from its own channel map; absent/unknown degrades to the
+    row's own channel (never to NULL)."""
+    _require_internal_key(x_internal_key)
+    message_id = str(payload.get("message_id", "") or "")[:128]
+    if not message_id:
+        raise HTTPException(422, "message_id required")
+    actor_id = str(payload.get("actor_discord_id", "") or "")[:32]
+    actor = f"discord:{actor_id or 'unknown'}"
+    actor_lang = str(payload.get("actor_channel_lang", "") or "").lower()[:16]
+    mins = 0
+    try:
+        mins = max(0, int(payload.get("duration_minutes") or 0))
+    except Exception:
+        mins = 0
+    row = (await db.execute(text(
+        "SELECT cm.id, cm.source, cm.channel, cm.steam_id, cm.discord_id,"
+        "       cm.display_name, cm.origin_user_id, cm.origin_login,"
+        "       cm.author_verified, cm.deleted_at"
+        "  FROM chat_mirrors mr JOIN chat_messages cm ON cm.id = mr.chat_id"
+        " WHERE mr.platform = 'discord' AND mr.mirror_id = :m"
+        " FOR UPDATE OF cm"
+    ), {"m": message_id})).mappings().first()
+    if row is None:
+        return {"status": "unknown_message"}
+    # R1 H1 scope rule (docstring above). role="discord_mod" keeps the
+    # moderator-protection rule — a Discord mod cannot mute an SCR admin or
+    # moderator through the context menu.
+    if actor_lang == "global":
+        scope_channel = None
+    elif actor_lang in CHAT_CHANNELS_ALLOWED:
+        scope_channel = actor_lang
+    else:
+        scope_channel = (row["channel"] or "global").lower()
+    result = await _apply_mute_for_row(db, row, actor=actor, role="discord_mod",
+                                       scope_channel=scope_channel, minutes=mins,
+                                       reason=f"via Discord by {payload.get('actor_name', '')}"[:200],
+                                       purge=True)
+    await _log_admin_action(db, admin_steam_id=actor[:20], action="chat_mute_msg",
+                            target_steam_id=row["steam_id"],
+                            details={"message_id": int(row["id"]), "actor": actor,
+                                     "actor_name": str(payload.get("actor_name", ""))[:64],
+                                     "muted": result.get("muted"),
+                                     "purged": result.get("purged"),
+                                     "via": "discord context menu"})
+    await db.commit()
+    await _broadcast_deletes(result.pop("purged_rows", []))
+    print(f"[CHAT-MOD] {actor} mute via context menu -> {result.get('muted')}")
+    return result
+
+
+@app.post("/api/v1/internal/chat/lockdown", tags=["Chat"])
+async def internal_chat_lockdown(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Discord-side lockdown toggle (bot-asserted channel-effective Manage
+    Messages in the GLOBAL relay channel — D1 F17's unified rule)."""
+    _require_internal_key(x_internal_key)
+    locked = bool(payload.get("locked"))
+    actor = f"discord:{str(payload.get('actor_discord_id', '') or 'unknown')[:32]}"
+    await _set_chat_lockdown(db, locked, actor)
+    await db.commit()
+    _chat_lockdown_cache_set(locked)
+    await chat_manager.broadcast(
+        {"type": "lock", "locked": 1 if locked else 0}, channel="global")
+    print(f"[CHAT-MOD] {actor} set lockdown={locked}")
+    return {"status": "ok", "locked": locked}
+
+
+@app.get("/api/v1/internal/chat/lockdown-state", tags=["Chat"])
+async def internal_chat_lockdown_state(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """R2 M2: the Twitch outbound mirror revalidates lockdown BEFORE EACH
+    send — a lock landing mid-page must stop the drain at the next send
+    boundary, not after the page. Served from the 5s in-process cache, so
+    the per-send probe costs no DB round-trip in the common case."""
+    _require_internal_key(x_internal_key)
+    return {"locked": 1 if await _chat_lockdown_active() else 0}
+
+
+_mod_actions_last_prune = 0.0
+
+
+@app.get("/api/v1/internal/chat/mod-actions", tags=["Chat"])
+async def internal_chat_mod_actions(
+    limit: int = Query(50, ge=1, le=100),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unacked moderation actions, id-asc. NO age predicate (D1 F8: a bot
+    outage must never orphan moderation — the consumer decides what is too
+    old to act on and acks it undeliverable)."""
+    _require_internal_key(x_internal_key)
+    rows = (await db.execute(text(
+        "SELECT id, kind, payload, created_at, attempts FROM chat_mod_actions"
+        " WHERE acked_at IS NULL ORDER BY id ASC LIMIT :lim"
+    ), {"lim": limit})).mappings().all()
+    if rows:
+        await db.execute(text(
+            "UPDATE chat_mod_actions SET attempts = attempts + 1 WHERE id = ANY(:ids)"
+        ), {"ids": [int(r["id"]) for r in rows]})
+        await db.commit()
+    return {"actions": [{
+        "id": int(r["id"]), "kind": r["kind"], "payload": r["payload"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "attempts": int(r["attempts"]),
+    } for r in rows]}
+
+
+@app.post("/api/v1/internal/chat/mod-actions/ack", tags=["Chat"])
+async def internal_chat_mod_actions_ack(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_internal_key(x_internal_key)
+    global _mod_actions_last_prune
+    ids = payload.get("action_ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(422, "action_ids required")
+    try:
+        ids = [int(i) for i in ids[:200]]
+    except Exception:
+        raise HTTPException(422, "action_ids must be integers")
+    undeliverable = bool(payload.get("undeliverable"))
+    acked = (await db.execute(text(
+        "UPDATE chat_mod_actions SET acked_at = NOW(), undeliverable = :u"
+        " WHERE id = ANY(:ids) AND acked_at IS NULL RETURNING id"
+    ), {"ids": ids, "u": undeliverable})).scalars().all()
+    # Time-gated retention sweep: ACKED rows only, 7 days (the unacked feed
+    # never ages out by design).
+    now = _time_mod.monotonic()
+    if now - _mod_actions_last_prune > 3600:
+        _mod_actions_last_prune = now
+        await db.execute(text(
+            "DELETE FROM chat_mod_actions"
+            " WHERE acked_at IS NOT NULL AND acked_at < NOW() - INTERVAL '7 days'"
+        ))
+    await db.commit()
+    return {"status": "ok", "acked": len(acked)}
 
 
 # ── Routes: Admin panel reads (Aug 6 item 5) ─────────────────────────────

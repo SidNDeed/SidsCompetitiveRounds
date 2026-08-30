@@ -943,7 +943,10 @@ namespace CompetitiveRounds
          * retraction frame can locate and drop an already-rendered
          * line. 0 = local echo / system line / pre-id row, which a
          * retraction can never target. */
-        public struct ChatEntry { public string Line; public DateTime AddedUtc; public DateTime SentUtc; public string Channel; public long Seq; public int ChatId; }
+        // Source is client-internal (never on the wire out): it lets the
+        // mute-from-message picker say WHICH platform a row came from, since
+        // the rendered Line has already baked the tag into rich text.
+        public struct ChatEntry { public string Line; public DateTime AddedUtc; public DateTime SentUtc; public string Channel; public long Seq; public int ChatId; public string Source; }
         private static long chatSeqNext = 1;
         /* Newest server-issued timestamp observed this session, kept even after
          * the row itself is evicted or filtered away. It is the anchor a
@@ -17500,32 +17503,62 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                                     removed = true;
                                     break;   // ids are unique
                                 }
+                                // R2 finding 9: TOMBSTONE regardless of whether a
+                                // row was present. A retraction can arrive BEFORE
+                                // its own message — the live WS delete overtaking
+                                // an in-flight /chat/recent snapshot is the normal
+                                // case, not an exotic one — and without a
+                                // tombstone that snapshot row renders the deleted
+                                // content and it stays on screen. Bounded by the
+                                // same FIFO discipline as the seen-id set.
+                                // R3 (LOW): only enqueue when the id is genuinely
+                                // NEW. Idempotent moderation retries rebroadcast
+                                // the same id, and enqueuing every copy meant a
+                                // later dequeue of an early duplicate removed the
+                                // set entry while other copies still sat in the
+                                // queue — evicting a tombstone that was still
+                                // supposed to be live.
+                                // Chat-mod design v3 D3: this mutation moved
+                                // INSIDE chatLinesLock — the reader at the
+                                // seen-id gate below holds that lock, and this
+                                // method runs from both the WS thread and the
+                                // scrollback coroutine, so the old outside-the-
+                                // lock placement was an unsynchronized HashSet.
+                                if (_retractedChatIds.Add(delId))
+                                    _retractedChatOrder.Enqueue(delId);
+                                while (_retractedChatOrder.Count > SEEN_CHAT_CAP)
+                                    _retractedChatIds.Remove(_retractedChatOrder.Dequeue());
                             }
-                            // R2 finding 9: TOMBSTONE regardless of whether a
-                            // row was present. A retraction can arrive BEFORE
-                            // its own message — the live WS delete overtaking
-                            // an in-flight /chat/recent snapshot is the normal
-                            // case, not an exotic one — and without a
-                            // tombstone that snapshot row renders the deleted
-                            // content and it stays on screen. Bounded by the
-                            // same FIFO discipline as the seen-id set.
-                            // R3 (LOW): only enqueue when the id is genuinely
-                            // NEW. Idempotent moderation retries rebroadcast
-                            // the same id, and enqueuing every copy meant a
-                            // later dequeue of an early duplicate removed the
-                            // set entry while other copies still sat in the
-                            // queue — evicting a tombstone that was still
-                            // supposed to be live.
-                            if (_retractedChatIds.Add(delId))
-                                _retractedChatOrder.Enqueue(delId);
-                            while (_retractedChatOrder.Count > SEEN_CHAT_CAP)
-                                _retractedChatIds.Remove(_retractedChatOrder.Dequeue());
                             if (removed)
                             {
-                                RefreshChatLog();
+                                // D3's second half: no RefreshChatLog() here —
+                                // it touches Unity UI and this can be the WS
+                                // background thread. MarkDirty() is the pattern
+                                // every other path in this method uses; the
+                                // next UI tick rebuilds the pane, and the
+                                // overlay re-pulls CopyChatTail every repaint.
                                 MarkDirty();
                                 Plugin.Log.LogInfo($"[CHAT] message {delId} retracted by a moderator");
                             }
+                        }
+                    }
+                    /* Chat lockdown (design v3 S7): flat, no "message" key,
+                     * bare number — old clients drop it at the guard above.
+                     * Broadcast on toggle AND unicast as a snapshot to every
+                     * new socket, so ChatClient.ChatLocked converges across
+                     * reconnects; the change guard keeps repeat snapshots from
+                     * re-printing the system line. */
+                    if (frameType == "lock")
+                    {
+                        bool lockedNow = ExtractChatIntField(json, "locked") > 0;
+                        if (ChatClient.ChatLocked != lockedNow)
+                        {
+                            ChatClient.ChatLocked = lockedNow;
+                            AppendSystemChatLine(lockedNow
+                                ? I18n.Tr("Chat has been locked by moderators - messages are paused.")
+                                : I18n.Tr("Chat has been unlocked - carry on."));
+                            MarkDirty();
+                            Plugin.Log.LogInfo($"[CHAT] lockdown={lockedNow}");
                         }
                     }
                     /* Aug 7 item 9: auto-mod notice. The server censors the
@@ -17702,7 +17735,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                         long seq = chatSeqNext++;
                         var entry = new ChatEntry { Line = line, AddedUtc = DateTime.UtcNow, SentUtc = stamp,
                             Channel = string.IsNullOrEmpty(channel) ? "global" : channel, Seq = seq,
-                            ChatId = chatId };
+                            ChatId = chatId,
+                            Source = string.IsNullOrEmpty(source) ? "ingame" : source };
                         /* r4 find 3: compare against `stamp`, the value actually
                          * being stored — comparing the raw parsed `sentUtc` here
                          * placed a local line by a timestamp it does not carry,
@@ -17896,6 +17930,14 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 while (chatLines.Count > CHAT_LOG_MAX) chatLines.RemoveAt(0);
             }
             MarkDirty();
+        }
+
+        /// <summary>Feedback for a send attempt refused by the lockdown
+        /// (design v3 S7). Internal: CompetitiveUI's T-key/submit paths call it;
+        /// ChatClient.Send's own gate stays silent (belt, not the surface).</summary>
+        internal static void NotifyChatLockedAttempt()
+        {
+            AppendSystemChatLine(I18n.Tr("Chat is locked by moderators right now - your message was not sent."));
         }
 
         /// <summary>Item 5: display name for a chat channel id. "all" (and the
@@ -18778,6 +18820,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 StartChatMuteFlow(), sizeDelta: new Vector2(185, 26));
             UIFactory.CreateButton("AChatDel", modActionRow.transform, "Delete Chat Message...", 13f, C_WHITE, new Color(0.5f, 0.22f, 0.22f, 0.9f), () =>
                 OpenChatDeletePicker(), sizeDelta: new Vector2(235, 26));
+            // Mute-by-message (design v3 S6): works on BRIDGED chatters too
+            // (Twitch/YouTube/Discord), which the player-search flow above
+            // structurally cannot reach — they have no players row. Left
+            // un-wrapped like its three siblings: the server scopes language
+            // moderators to their own rows and refuses the rest verbatim.
+            UIFactory.CreateButton("AMuteMsg", modActionRow.transform, "Mute From Message...", 13f, C_WHITE, new Color(0.55f, 0.3f, 0.35f, 0.9f), () =>
+                OpenChatMuteFromMessagePicker(), sizeDelta: new Vector2(215, 26));
+            // Whole-channel lockdown (design v3 S7) — the biggest hammer, so
+            // admin HMAC only (wrapped like the other admin-only buttons).
+            adminOnlySections.Add(UIFactory.CreateButton("ALockdown", modActionRow.transform, "Chat Lockdown...", 13f, C_WHITE, new Color(0.45f, 0.2f, 0.2f, 0.9f), () =>
+                StartChatLockdownFlow(), sizeDelta: new Vector2(175, 26)));
 
             // Recent Ranked Series — the main series-management section (Award/Void/Reverse).
             var seriesHdrRow = new GameObject("ASHRow"); seriesHdrRow.transform.SetParent(panel.transform, false); seriesHdrRow.AddComponent<RectTransform>();
@@ -19677,16 +19730,43 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return string.IsNullOrEmpty(channel) ? "ALL" : AdminDisplay(channel, 12).ToUpperInvariant();
         }
 
+        /* Picker keys are TYPED — "s:<id>" for chat_mutes rows, "b:<id>" for
+         * bridge_mutes rows (design v3 F6): the two tables have independent id
+         * sequences both starting at 1, so a bare numeric key would let steam
+         * mute 12 and twitch mute 12 collide and a click unmute the wrong one. */
         private static ApiClient.ChatMuteEntry FindChatMute(string key)
         {
             var src = ApiClient.CachedChatMutes;
-            if (src == null || string.IsNullOrEmpty(key)) return null;
-            foreach (var m in src) if (m != null && m.id.ToString(_INV) == key) return m;
+            if (src == null || string.IsNullOrEmpty(key) || !key.StartsWith("s:")) return null;
+            string id = key.Substring(2);
+            foreach (var m in src) if (m != null && m.id.ToString(_INV) == id) return m;
+            return null;
+        }
+
+        private static ApiClient.BridgeMuteEntry FindBridgeMute(string key)
+        {
+            var src = ApiClient.CachedBridgeMutes;
+            if (src == null || string.IsNullOrEmpty(key) || !key.StartsWith("b:")) return null;
+            string id = key.Substring(2);
+            foreach (var m in src) if (m != null && m.mute_id.ToString(_INV) == id) return m;
             return null;
         }
 
         private static string ChatMuteLabel(string key)
         {
+            var b = FindBridgeMute(key);
+            if (b != null)
+            {
+                string bname = AdminDisplay(string.IsNullOrEmpty(b.display_name)
+                    ? (string.IsNullOrEmpty(b.platform_login) ? b.platform_user_id : b.platform_login)
+                    : b.display_name, 22);
+                string buntil = b.permanent ? "permanent"
+                              : string.IsNullOrEmpty(b.expires_at) ? "no expiry recorded"
+                              : "until " + FormatAdminQuarantineTime(b.expires_at);
+                string breason = AdminDisplay(b.reason, 28);
+                return $"[{AdminDisplay(b.platform, 8).ToUpperInvariant()}] {bname}   [{ChatChannelLabel(b.channel)}]   {buntil}"
+                     + (string.IsNullOrEmpty(breason) ? "" : $"   {breason}");
+            }
             var e = FindChatMute(key);
             if (e == null) return key;
             string name = AdminDisplay(string.IsNullOrEmpty(e.display_name) ? e.steam_id : e.display_name, 22);
@@ -19718,7 +19798,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                                 // both failed to parse an id would both key on "0",
                                 // so a click would unmute whichever came first.
                                 if (m != null && m.id > 0 && !string.IsNullOrEmpty(m.steam_id))
-                                    keys.Add(m.id.ToString(_INV));
+                                    keys.Add("s:" + m.id.ToString(_INV));
+                        var bsrc = ApiClient.CachedBridgeMutes;
+                        if (bsrc != null)
+                            foreach (var b in bsrc)
+                                if (b != null && b.mute_id > 0)
+                                    keys.Add("b:" + b.mute_id.ToString(_INV));
                         return keys;
                     },
                     ChatMuteLabel,
@@ -19731,9 +19816,28 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         private static void ConfirmChatUnmute(string key)
         {
-            var e = FindChatMute(key);
             var sid = MatchTracker.LocalSteamId;
-            if (e == null || string.IsNullOrEmpty(e.steam_id) || string.IsNullOrEmpty(sid)) return;
+            if (string.IsNullOrEmpty(sid)) return;
+            var b = FindBridgeMute(key);
+            if (b != null)
+            {
+                // Resolve NOW (the list refetches after any moderation write).
+                int muteId = b.mute_id;
+                string bwho = AdminDisplay(string.IsNullOrEmpty(b.display_name)
+                    ? (string.IsNullOrEmpty(b.platform_login) ? b.platform_user_id : b.platform_login)
+                    : b.display_name, 28);
+                string plat = AdminDisplay(b.platform, 10).ToUpperInvariant();
+                string btail = b.platform == "twitch"
+                    ? "Their Twitch-side ban/timeout is lifted too."
+                    : "Their messages relay again immediately.";
+                CompetitiveUI.OpenConfirm(
+                    $"Unmute [{plat}] {bwho}?\n\n{btail}",
+                    () => ApiClient.AdminChatBridgeUnmute(sid, muteId,
+                        (ok, resp) => ShowModerationResult(ok, "Unmute", $"Unmuted [{plat}] {bwho}.", resp)));
+                return;
+            }
+            var e = FindChatMute(key);
+            if (e == null || string.IsNullOrEmpty(e.steam_id)) return;
             // Resolve everything NOW: the mute list refetches itself after any
             // moderation write, and the confirm can outlive that refresh.
             string target = e.steam_id, channel = e.channel;
@@ -19920,6 +20024,126 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 $"Delete this chat message?\n\n{preview}\n\nIt disappears for everyone in that channel.",
                 () => ApiClient.AdminChatDelete(sid, id,
                     (ok, resp) => ShowModerationResult(ok, "Delete message", $"Message #{key} deleted.", resp)));
+        }
+
+        // -- Mute-from-message (design v3 S6) --------------------------------
+        /* Same shape as the delete picker: candidates are this client's own
+         * received rows (ChatId > 0), so the flow reaches BRIDGED chatters
+         * (Twitch/YouTube/Discord) that the player-search mute cannot — they
+         * have no players row to find. The server resolves the row's author
+         * identity and refuses the unverifiable cases (unverified in-game
+         * claim, pre-263 bridged row) with text this surfaces verbatim. */
+        private static readonly List<ChatEntry> chatMuteMsgCandidates = new List<ChatEntry>();
+
+        private static List<string> ChatMuteMsgKeys()
+        {
+            chatMuteMsgCandidates.Clear();
+            var keys = new List<string>();
+            var snap = SnapshotChat(CHAT_LOG_MAX);
+            for (int i = snap.Length - 1; i >= 0; i--)
+            {
+                if (snap[i].ChatId <= 0) continue;
+                chatMuteMsgCandidates.Add(snap[i]);
+                keys.Add(snap[i].ChatId.ToString(_INV));
+            }
+            return keys;
+        }
+
+        private static string ChatMuteMsgLabel(string key)
+        {
+            for (int i = 0; i < chatMuteMsgCandidates.Count; i++)
+            {
+                var e = chatMuteMsgCandidates[i];
+                if (e.ChatId.ToString(_INV) != key) continue;
+                string src = string.IsNullOrEmpty(e.Source) ? "game" : e.Source;
+                string body = AdminDisplay(GameStateWatcher.StripRichText(e.Line ?? ""), 84);
+                return $"[{AdminDisplay(src, 8).ToUpperInvariant()}] {body}   #{key}";
+            }
+            return key;
+        }
+
+        private static void OpenChatMuteFromMessagePicker()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            if (ChatMuteMsgKeys().Count == 0)
+            {
+                ShowInfoPopup("Mute from message",
+                    "No server-issued chat lines are in this session's log.\n\n"
+                  + "Pick a message the author sent; the mute lands on whatever "
+                  + "platform identity wrote it (Steam, Discord, Twitch or YouTube).");
+                return;
+            }
+            ShowPicker(I18n.Tr("Mute the author of which message?"),
+                ChatMuteMsgKeys, ChatMuteMsgLabel,
+                _ => new Color(1f, 0.7f, 0.6f),
+                _ => false,
+                key => ChatMuteMsgDuration(sid, key),
+                multiSelect: false);
+        }
+
+        private static void ChatMuteMsgDuration(string sid, string key)
+        {
+            int id;
+            if (!int.TryParse(key, out id) || id <= 0) return;
+            string preview = ChatMuteMsgLabel(key);
+            CompetitiveUI.OpenArtistPicker(I18n.Tr("How long?"),
+                CHAT_MUTE_DURATION_LABELS, CHAT_MUTE_DURATION_IDS,
+                durId =>
+                {
+                    if (string.IsNullOrEmpty(durId)) return;   // cancelled
+                    int minutes;
+                    if (!int.TryParse(durId, out minutes)) return;
+                    CompetitiveUI.OpenArtistInput(
+                        I18n.Tr("Why are they being muted?"),
+                        I18n.Tr("Reason (optional)"), "",
+                        why =>
+                        {
+                            /* purge is always ON from this surface: "see spam →
+                             * mute the account" is its whole use case, and the
+                             * purge is what clears the last 24h of their lines
+                             * from every platform at the same time. */
+                            CompetitiveUI.OpenConfirm(
+                                $"Mute the author of this message for {ChatMuteDurationLabel(durId)}?\n\n{preview}\n\n"
+                              + "Their recent messages (last 24h) are removed from every "
+                              + "platform, and a Twitch author is banned/timed out on Twitch too.",
+                                () => ApiClient.AdminChatMuteByMessage(sid, id, minutes,
+                                    (why ?? "").Trim(), purge: true,
+                                    (ok, resp) => ShowModerationResult(ok, "Mute",
+                                        "Author muted and their recent messages removed.", resp)));
+                        });
+                },
+                actionLabel: I18n.Tr("Next"), showClear: false, itemNoun: "");
+        }
+
+        // -- Whole-channel lockdown (design v3 S7) ---------------------------
+        private static void StartChatLockdownFlow()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            bool currentlyLocked = ChatClient.ChatLocked;
+            string[] labels = currentlyLocked
+                ? new[] { I18n.Tr("Unlock chat everywhere"), I18n.Tr("Keep it locked") }
+                : new[] { I18n.Tr("LOCK chat everywhere"), I18n.Tr("Leave it open") };
+            string[] ids = currentlyLocked ? new[] { "unlock", "" } : new[] { "lock", "" };
+            CompetitiveUI.OpenArtistPicker(
+                currentlyLocked ? I18n.Tr("Chat is currently LOCKED.") : I18n.Tr("Chat is currently open."),
+                labels, ids,
+                choice =>
+                {
+                    if (choice != "lock" && choice != "unlock") return;
+                    bool locked = choice == "lock";
+                    string body = locked
+                        ? "Lock chat EVERYWHERE?\n\nIn-game sends, Discord relay and stream-chat "
+                          + "relay all pause; Twitch chat goes emote-only. Native Twitch/YouTube "
+                          + "chats keep scrolling on their own platforms."
+                        : "Unlock chat everywhere?";
+                    CompetitiveUI.OpenConfirm(body,
+                        () => ApiClient.AdminChatLockdown(sid, locked,
+                            (ok, resp) => ShowModerationResult(ok, "Lockdown",
+                                locked ? "Chat locked everywhere." : "Chat unlocked.", resp)));
+                },
+                actionLabel: I18n.Tr("Next"), showClear: false, itemNoun: "");
         }
 
         // -- Admin recent-series rows -------------------------------------

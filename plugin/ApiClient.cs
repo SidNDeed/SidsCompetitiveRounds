@@ -4143,6 +4143,9 @@ namespace CompetitiveRounds
         //   /chat/moderate/mute      -> action "chat_mute",          target "{steam}:{chan|all}"
         //   /chat/moderate/unmute    -> action "chat_unmute",        target "{steam}:{chan|all}"
         //   /chat/moderate/mutes     -> action "chat_mutes_list",    target ""
+        //   /chat/moderate/mute-by-message -> action "chat_mute_msg",       target "{message_id}"
+        //   /chat/moderate/bridge-unmute   -> action "chat_unmute_bridge",  target "{mute_id}"
+        //   /chat/moderate/lockdown        -> action "chat_lockdown",       target "1"|"0"
         // A canonical that is one byte off is a silent 403 for every admin, so
         // any edit here needs re-reading the handler, not the comment.
         //
@@ -4178,10 +4181,23 @@ namespace CompetitiveRounds
             public bool permanent;
         }
 
+        /// <summary>Platform-identity mute (Twitch/YouTube/Discord chatter —
+        /// chat-moderation design v3 S2). Server field is "mute_id", NOT "id",
+        /// on purpose: it must never masquerade as a chat_mutes row (D1 F6),
+        /// and the picker keys the two tables with distinct prefixes.</summary>
+        public class BridgeMuteEntry
+        {
+            public int mute_id;
+            public string platform, platform_user_id, platform_login, channel;
+            public string display_name, muted_by, reason, created_at, expires_at;
+            public bool permanent;
+        }
+
         public static List<AdminUserEntry> CachedAdmins { get; private set; } = new List<AdminUserEntry>();
         public static List<AdminActionEntry> CachedAdminActions { get; private set; } = new List<AdminActionEntry>();
         public static int CachedAdminActionsTotal { get; private set; }
         public static List<ChatMuteEntry> CachedChatMutes { get; private set; } = new List<ChatMuteEntry>();
+        public static List<BridgeMuteEntry> CachedBridgeMutes { get; private set; } = new List<BridgeMuteEntry>();
         // Last refusal text per surface, mirroring AdminQuarantineError: the fetch
         // callbacks are Action<bool>, so this is where a 403 explains itself.
         // Cleared on every success so a stale message can't outlive its cause.
@@ -4302,9 +4318,10 @@ namespace CompetitiveRounds
                 try
                 {
                     CachedChatMutes = ParseChatMutes(body);
+                    CachedBridgeMutes = ParseBridgeMutes(body);
                     ChatMutesLoaded = true;
                     ChatMutesError = "";
-                    Plugin.Log.LogInfo($"[CHAT-MOD] live mutes: {CachedChatMutes.Count}");
+                    Plugin.Log.LogInfo($"[CHAT-MOD] live mutes: {CachedChatMutes.Count} steam + {CachedBridgeMutes.Count} bridge");
                     NativeUI.MarkDirty();
                     callback?.Invoke(true);
                 }
@@ -4415,6 +4432,79 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>The unified mod verb (design v3 S6): mute the AUTHOR of one
+        /// chat message on whatever platform it came from, purging their recent
+        /// lines everywhere when `purge`. The server routes by the row's source
+        /// and refuses unverifiable targets (an unverified in-game identity, a
+        /// pre-263 bridged row) with a refusal this surfaces verbatim.</summary>
+        public static void AdminChatMuteByMessage(string steamId, int messageId,
+            int durationMinutes, string reason, bool purge, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || messageId <= 0)
+            { callback?.Invoke(false, "missing target"); return; }
+            string mid = messageId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string why = ClampLen(reason, 256);
+            string sig = ComputeAdminHmacHex($"admin:{steamId}:chat_mute_msg:{mid}");
+            string body = "{"
+                + $"\"steam_id\":\"{Escape(steamId)}\","
+                + $"\"message_id\":{mid},"
+                + $"\"reason\":\"{JsonEscapeFull(why)}\","
+                + $"\"purge\":{(purge ? "true" : "false")},"
+                + $"\"duration_minutes\":{(durationMinutes > 0 ? durationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")},"
+                + $"\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/chat/moderate/mute-by-message", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[CHAT-MOD] mute-by-message #{mid}: ok={ok} resp={Trunc120(resp)}");
+                if (ok) FetchChatMutes(steamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        /// <summary>Revoke one platform-identity (bridge) mute by its own row id.
+        /// Distinct endpoint + canonical from the steam unmute — the two tables'
+        /// ids are independent sequences and must never share a key (D1 F6).</summary>
+        public static void AdminChatBridgeUnmute(string steamId, int muteId,
+            Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || muteId <= 0)
+            { callback?.Invoke(false, "missing target"); return; }
+            string mid = muteId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string sig = ComputeAdminHmacHex($"admin:{steamId}:chat_unmute_bridge:{mid}");
+            string body = "{"
+                + $"\"steam_id\":\"{Escape(steamId)}\","
+                + $"\"mute_id\":{mid},"
+                + $"\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/chat/moderate/bridge-unmute", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[CHAT-MOD] bridge unmute #{mid}: ok={ok} resp={Trunc120(resp)}");
+                if (ok) FetchChatMutes(steamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        /// <summary>Whole-channel lockdown toggle (design v3 S7; admin only —
+        /// the server enforces that, this just signs). The state lands back on
+        /// every client through the WS lock frame, ChatClient.ChatLocked
+        /// included, so there is nothing to set locally on success.</summary>
+        public static void AdminChatLockdown(string steamId, bool locked,
+            Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId)) { callback?.Invoke(false, "missing steam id"); return; }
+            string sig = ComputeAdminHmacHex($"admin:{steamId}:chat_lockdown:{(locked ? "1" : "0")}");
+            string body = "{"
+                + $"\"steam_id\":\"{Escape(steamId)}\","
+                + $"\"locked\":{(locked ? "true" : "false")},"
+                + $"\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/chat/moderate/lockdown", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[CHAT-MOD] lockdown={locked}: ok={ok} resp={Trunc120(resp)}");
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
         /// <summary>Byte-for-byte mirror of the server's own channel normalization
         /// (`(req.channel or "").lower().strip() or None`). The result feeds BOTH the
         /// HMAC canonical and the request body, so any divergence here is a 403 the
@@ -4510,6 +4600,35 @@ namespace CompetitiveRounds
                     permanent = ExtractJsonBool(chunk, "permanent"),
                 };
                 if (e.id > 0) list.Add(e);
+            }
+            return list;
+        }
+
+        /// <summary>Sibling of ParseChatMutes over the response's SEPARATE
+        /// "bridge_mutes" array (design v3 Q4: a separate array is what keeps
+        /// shipped parsers blind to these rows). Keyed on mute_id.</summary>
+        private static List<BridgeMuteEntry> ParseBridgeMutes(string json)
+        {
+            var list = new List<BridgeMuteEntry>();
+            if (string.IsNullOrEmpty(json)) return list;
+            if (!LocateArray(json, "bridge_mutes", out int open, out int close)) return list;
+            foreach (string chunk in SliceTopLevelObjects(json.Substring(open + 1, close - open - 1)))
+            {
+                var e = new BridgeMuteEntry
+                {
+                    mute_id = ExtractJsonInt(chunk, "mute_id"),
+                    platform = ExtractJsonString(chunk, "platform"),
+                    platform_user_id = ExtractJsonString(chunk, "platform_user_id"),
+                    platform_login = ExtractJsonString(chunk, "platform_login"),
+                    channel = ExtractJsonString(chunk, "channel"),
+                    display_name = ExtractJsonString(chunk, "display_name"),
+                    muted_by = ExtractJsonString(chunk, "muted_by"),
+                    reason = ExtractJsonString(chunk, "reason"),
+                    created_at = ExtractJsonString(chunk, "created_at"),
+                    expires_at = ExtractJsonString(chunk, "expires_at"),
+                    permanent = ExtractJsonBool(chunk, "permanent"),
+                };
+                if (e.mute_id > 0) list.Add(e);
             }
             return list;
         }

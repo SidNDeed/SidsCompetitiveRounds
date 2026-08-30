@@ -129,6 +129,17 @@ services:
       YOUTUBE_BRIDGE_CLIENT_ID: ${YOUTUBE_BRIDGE_CLIENT_ID:-}
       YOUTUBE_BRIDGE_CLIENT_SECRET: ${YOUTUBE_BRIDGE_CLIENT_SECRET:-}
       YOUTUBE_BRIDGE_REFRESH_TOKEN: ${YOUTUBE_BRIDGE_REFRESH_TOKEN:-}
+      # Twitch outbound mirror + moderation enforcement (chat-moderation
+      # design v3 S8; D1 F12 — a key in .env is NOT an env var in the
+      # container unless enumerated here, #438). User token via refresh flow;
+      # scopes: user:write:chat + moderator:manage:chat_messages +
+      # moderator:manage:banned_users + moderator:manage:chat_settings, and
+      # the account must be broadcaster or a mod of the stream channel.
+      # Unset = outbound logs once and stays off; twitch actions in the
+      # moderation outbox are acked undeliverable.
+      TWITCH_BRIDGE_CLIENT_ID: ${TWITCH_BRIDGE_CLIENT_ID:-}
+      TWITCH_BRIDGE_CLIENT_SECRET: ${TWITCH_BRIDGE_CLIENT_SECRET:-}
+      TWITCH_BRIDGE_REFRESH_TOKEN: ${TWITCH_BRIDGE_REFRESH_TOKEN:-}
     volumes:
       # R2 f1: the YouTube chat quota ledger must survive container
       # rebuilds — Google's PT-day quota doesn't reset on redeploy, so an

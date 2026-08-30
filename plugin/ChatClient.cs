@@ -264,6 +264,14 @@ namespace CompetitiveRounds
             socket = null;
         }
 
+        /// <summary>Server-driven chat lockdown state (chat-moderation design v3
+        /// S7). Set by NativeUI's lock-frame handler: the server broadcasts
+        /// {"type":"lock","locked":N} on every toggle AND unicasts a snapshot to
+        /// each new socket, so this converges across reconnects. volatile — the
+        /// WS receive thread writes it, the main thread reads it. Session-scoped,
+        /// never persisted (same contract as UsingWsFallback below).</summary>
+        public static volatile bool ChatLocked;
+
         /// <summary>Queue a chat message for send. Drained by the sender task.</summary>
         public static void Send(string steamId, string displayName, string message)
         {
@@ -271,6 +279,15 @@ namespace CompetitiveRounds
             // service account never speaks in chat. Single entry point — every
             // chat-send surface funnels through here.
             if (BroadcastMode.FenceBlocksFighterPath("chat-send")) return;
+            // Lockdown gate (design S7). HERE and not only in the UI, because
+            // this is the one funnel every send surface passes — and returning
+            // before the echo below matters: a phantom echo of a message the
+            // server will drop reads as "my chat works, nobody answers".
+            if (ChatLocked)
+            {
+                Plugin.Log.LogInfo("[CHAT] send suppressed — chat is locked");
+                return;
+            }
             if (string.IsNullOrEmpty(message)) return;
             // client_msg_id: per-message nonce baked into the queued JSON. When a
             // send fails mid-flight the SAME string is re-queued, so a resend

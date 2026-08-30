@@ -396,6 +396,10 @@ async def on_ready():
         _bridge_readers_started = True
         asyncio.create_task(twitch_chat_bridge())
         asyncio.create_task(youtube_chat_bridge())
+        # Twitch outbound mirror (design S8) — same once-guard: a second
+        # sender would double-post every line.
+        asyncio.create_task(twitch_chat_outbound())
+    if not poll_chat_mod_actions.is_running(): poll_chat_mod_actions.start()
     # One-shot backfill — resolve Discord usernames for any player that was
     # linked before the discord_username column existed.
     asyncio.create_task(backfill_discord_usernames())
@@ -2665,12 +2669,38 @@ async def on_message(message: discord.Message):
                         "display_name": display,
                         "message": content,
                         "channel": _relay_lang,
+                        # Origin ids (design S4/F3): the server registers the
+                        # ORIGINAL Discord message as this row's mirror
+                        # atomically with the insert, so a mod's native delete
+                        # of it propagates everywhere.
+                        "origin_message_id": str(message.id),
+                        "origin_channel_id": str(getattr(message.channel, "id", "") or ""),
                     },
                     headers={"X-Internal-Key": API_SECRET_KEY},
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     body = await resp.text()
                     print(f"[CHAT] Relay Discord→API [{_relay_lang}]: status={resp.status} body={body[:100]}")
+                    _relay_status = ""
+                    try:
+                        _relay_status = str((json.loads(body) or {}).get("status") or "")
+                    except Exception:
+                        pass
+                    # Lockdown (design S7/F15): the server refused the relay.
+                    # Best-effort delete of the original (needs Manage
+                    # Messages — degrade to a log), and SKIP the FAQ task so
+                    # the bot can't answer into a locked room. Command
+                    # messages are left standing so mods keep their tools.
+                    if resp.status == 200 and _relay_status == "locked":
+                        if not (message.content or "").startswith("!"):
+                            try:
+                                await message.delete()
+                            except discord.Forbidden:
+                                print("[CHAT-MOD] lockdown: cannot delete original (no Manage Messages)")
+                            except Exception as dex:
+                                print(f"[CHAT-MOD] lockdown delete failed: {dex}")
+                        await bot.process_commands(message)
+                        return
             except Exception as e:
                 print(f"[CHAT] Failed to relay Discord -> API: {e}")
     # A plain (non-command) DM to the bot is treated as a follow-up on one of
@@ -2953,7 +2983,7 @@ async def _forward_ingame_to_discord(data: dict) -> str:
         return "fail"
     src_label = "(in-game)" if src == "ingame" else "(Twitch)" if src == "twitch" else "(YouTube)"
     try:
-        await channel.send(
+        _sent_msg = await channel.send(
             f"{lang_prefix}**{discord.utils.escape_markdown(name)}"
             f"{discord.utils.escape_markdown(title_str)}"
             f"{rating_str}** {src_label}: "
@@ -2974,6 +3004,14 @@ async def _forward_ingame_to_discord(data: dict) -> str:
         # Finding 4: delivery is a fact distinct from the claim above — mark
         # it only HERE, after channel.send returned without throwing.
         _mark_delivered(claim_key)
+        # Mirror registration (design S4/D4): this Discord copy's id makes the
+        # row deletable-everywhere later. Best-effort task — a miss costs only
+        # future auto-delete of THIS copy, never the message; the server's
+        # deleted-check at registration self-heals the send-vs-delete race.
+        _cid = _entry_db_id(data)
+        if _cid:
+            asyncio.create_task(_register_chat_mirror(
+                _cid, "discord", str(_sent_msg.id), str(getattr(channel, "id", "") or "")))
         if ts:
             _last_relayed_ts = ts
         print(f"[CHAT] Posted to Discord: {name}{title_str}: {content[:60]}")
@@ -3205,23 +3243,41 @@ async def chat_ws_listener():
 # anywhere — the VM overlay renders the bridged copies it receives over the
 # SCR websocket (ai-collab/streaming-design-addendum-chat.md).
 STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
-_TWITCH_PRIVMSG_RE = re.compile(r"@(?P<tags>[^ ]+) :[^ ]+ PRIVMSG #[^ ]+ :(?P<text>.*)")
+# The prefix (`:login!login@login.tmi...`) carries the sender's LOGIN — the
+# stable lowercase handle, captured for mute identity (design S1). The tags
+# dict carries user-id (the truly stable numeric id) and display-name.
+_TWITCH_PRIVMSG_RE = re.compile(r"@(?P<tags>[^ ]+) :(?P<login>[^! ]+)![^ ]+ PRIVMSG #[^ ]+ :(?P<text>.*)")
+# Moderation events (already on the wire — twitch.tv/commands has been in the
+# CAP REQ since the reader shipped; they were just unparsed until design S5):
+#   CLEARMSG  = one message deleted; tags carry login + target-msg-id.
+#   CLEARCHAT = per-user purge (tags: target-user-id, ban-duration present ⇒
+#               timeout seconds, absent ⇒ permanent ban) with the login as
+#               the trailing param; NO trailing param ⇒ whole-channel /clear.
+_TWITCH_CLEARMSG_RE = re.compile(r"@(?P<tags>[^ ]+) :[^ ]+ CLEARMSG #[^ ]+ :(?P<text>.*)")
+_TWITCH_CLEARCHAT_RE = re.compile(r"@(?P<tags>[^ ]+) :[^ ]+ CLEARCHAT #[^ ]+(?: :(?P<login>.*))?$")
 # Video id of the live session's YouTube broadcast; maintained by
 # poll_stream_posts (an un-finalized stream post row = live). None = no live.
 _bridge_youtube_video = None
 _bridge_readers_started = False
 
 
-async def _bridge_post(source: str, author: str, message: str, native_id: str) -> None:
+async def _bridge_post(source: str, author: str, message: str, native_id: str,
+                       author_id: str | None = None,
+                       author_login: str | None = None) -> None:
     """Relay one platform chat line into SCR chat. The server's bridge
-    endpoint owns dedup/rate/censor; a transport failure just drops the
-    line (viewer chat is nice-to-have, never critical path)."""
+    endpoint owns dedup/rate/censor (and now lockdown/mute/spam-pattern —
+    design v3); a transport failure just drops the line (viewer chat is
+    nice-to-have, never critical path). author_id/author_login are the
+    STABLE platform identity (Twitch user-id tag + prefix login, YouTube
+    channel id) that makes bridged chatters mutable server-side (S1)."""
     if http_session is None or not API_SECRET_KEY:
         return
     try:
         async with http_session.post(
             f"{API_BASE_URL}/api/v1/internal/chat/bridge",
-            json={"source": source, "author": author, "message": message, "native_id": native_id},
+            json={"source": source, "author": author, "message": message,
+                  "native_id": native_id, "author_id": author_id or "",
+                  "author_login": author_login or ""},
             headers={"X-Internal-Key": API_SECRET_KEY},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
@@ -3229,6 +3285,34 @@ async def _bridge_post(source: str, author: str, message: str, native_id: str) -
                 print(f"[BRIDGE] {source} relay HTTP {resp.status}")
     except Exception as e:
         print(f"[BRIDGE] {source} relay failed: {e}")
+
+
+async def _bridge_moderation_post(payload: dict) -> None:
+    """Forward one platform-side moderation event (Twitch CLEARMSG/CLEARCHAT,
+    YouTube deleted/banned) to the server (design S5). Best-effort with ONE
+    quick retry: the event fires exactly once on the wire, so a lost forward
+    means that deletion never propagates — worth one more attempt, not a
+    durable queue (the platform itself already applied the action)."""
+    if http_session is None or not API_SECRET_KEY:
+        return
+    for attempt in (0, 1):
+        try:
+            async with http_session.post(
+                f"{API_BASE_URL}/api/v1/internal/chat/bridge-moderation",
+                json=payload,
+                headers={"X-Internal-Key": API_SECRET_KEY},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                body = await resp.text()
+                if resp.status == 200:
+                    print(f"[CHAT-MOD] event forwarded {payload.get('source')}/{payload.get('kind')}: {body[:120]}")
+                    return
+                print(f"[CHAT-MOD] event forward HTTP {resp.status}: {body[:120]}")
+                if 400 <= resp.status < 500:
+                    return   # judged, not transport — retrying re-sends the same verdict
+        except Exception as e:
+            print(f"[CHAT-MOD] event forward failed (attempt {attempt + 1}): {e}")
+        await asyncio.sleep(2)
 
 
 async def twitch_chat_bridge():
@@ -3261,13 +3345,55 @@ async def twitch_chat_bridge():
                     continue
                 m = _TWITCH_PRIVMSG_RE.match(text_line)
                 if not m:
+                    # Moderation events (design S5). CLEARMSG first — its shape
+                    # is a superset-lookalike of CLEARCHAT's.
+                    cm = _TWITCH_CLEARMSG_RE.match(text_line)
+                    if cm:
+                        ctags = dict(t.split("=", 1) if "=" in t else (t, "")
+                                     for t in cm.group("tags").split(";"))
+                        target = ctags.get("target-msg-id") or ""
+                        if target:
+                            await _bridge_moderation_post({
+                                "source": "twitch", "kind": "delete_message",
+                                "native_id": target})
+                        continue
+                    cc = _TWITCH_CLEARCHAT_RE.match(text_line)
+                    if cc:
+                        ctags = dict(t.split("=", 1) if "=" in t else (t, "")
+                                     for t in cc.group("tags").split(";"))
+                        t_login = (cc.group("login") or "").strip().lower()
+                        t_uid = ctags.get("target-user-id") or ""
+                        dur = (ctags.get("ban-duration") or "").strip()
+                        if t_login and t_uid:
+                            payload = {"source": "twitch", "kind": "purge_user",
+                                       "platform_user_id": t_uid, "login": t_login,
+                                       "display_name": t_login}
+                            if dur.isdigit():
+                                payload["ban_duration_s"] = int(dur)
+                            else:
+                                payload["permanent"] = True
+                            await _bridge_moderation_post(payload)
+                        elif not t_login:
+                            # Whole-channel /clear — purge every bridged
+                            # twitch row (design F10: no longer log-only).
+                            await _bridge_moderation_post(
+                                {"source": "twitch", "kind": "purge_channel"})
+                        continue
                     continue
                 tags = dict(t.split("=", 1) if "=" in t else (t, "") for t in m.group("tags").split(";"))
                 native_id = tags.get("id") or ""
                 if not native_id:
                     continue   # id tag is the replay-guard key; no id, no relay
+                login = (m.group("login") or "").lower()
+                user_id = tags.get("user-id") or ""
+                # Loop prevention (design S8): the outbound mirror's own sends
+                # come back down this socket — skip our sender account or every
+                # relayed line re-enters the bridge as a fresh Twitch message.
+                if _twitch_outbound_is_self(user_id, login):
+                    continue
                 author = tags.get("display-name") or "Twitch"
-                await _bridge_post("twitch", author, m.group("text"), native_id)
+                await _bridge_post("twitch", author, m.group("text"), native_id,
+                                   author_id=user_id, author_login=login)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -3649,11 +3775,42 @@ async def youtube_chat_bridge():
                         break   # attachment moved mid-page: stop relaying stale rows
                     snip = item.get("snippet") or {}
                     native = str(item.get("id") or "")
-                    author = str(((item.get("authorDetails") or {}).get("displayName")) or "YouTube")
+                    adetails = item.get("authorDetails") or {}
+                    author = str(adetails.get("displayName") or "YouTube")
+                    # YouTube-side moderation rides the SAME list response
+                    # (design S5) — these item types carry no displayMessage,
+                    # so the pre-263 code silently skipped them.
+                    etype = str(snip.get("type") or "")
+                    if etype == "messageDeletedEvent":
+                        del_id = str(((snip.get("messageDeletedDetails") or {})
+                                      .get("deletedMessageId")) or "")
+                        if del_id:
+                            await _bridge_moderation_post({
+                                "source": "youtube", "kind": "delete_message",
+                                "native_id": del_id})
+                        continue
+                    if etype == "userBannedEvent":
+                        det = snip.get("userBannedDetails") or {}
+                        banned = det.get("bannedUserDetails") or {}
+                        b_cid = str(banned.get("channelId") or "")
+                        if b_cid:
+                            payload = {"source": "youtube", "kind": "purge_user",
+                                       "platform_user_id": b_cid,
+                                       "display_name": str(banned.get("displayName") or "")[:64]}
+                            if str(det.get("banType") or "") == "temporary":
+                                try:
+                                    payload["ban_duration_s"] = int(det.get("banDurationSeconds") or 0)
+                                except Exception:
+                                    pass
+                            else:
+                                payload["permanent"] = True
+                            await _bridge_moderation_post(payload)
+                        continue
                     text_msg = str(snip.get("displayMessage") or "")
                     if not text_msg or not native:
                         continue   # native id is the replay-guard key; no id, no relay
-                    await _bridge_post("youtube", author, text_msg, native)
+                    await _bridge_post("youtube", author, text_msg, native,
+                                       author_id=str(adetails.get("channelId") or "") or None)
                 page_token = body.get("nextPageToken") or page_token
                 if body.get("offlineAt"):
                     # Documented end-of-stream marker on the list response.
@@ -3683,9 +3840,744 @@ async def youtube_chat_bridge():
                 pass
 
 
+# ── Cross-platform chat moderation + Twitch outbound (design v3) ─────────────
+#
+# One dedicated HEADER-FREE session owns every Twitch OAuth + Helix call,
+# outbound and moderation alike (D1 F12): the shared http_session defaults
+# X-Internal-Key onto every request, and routing any external host through it
+# ships the backend's private key off-box (it happened once, to Google — see
+# the youtube bridge's _gsession rationale).
+
+TWITCH_BRIDGE_CLIENT_ID = os.getenv("TWITCH_BRIDGE_CLIENT_ID", "").strip()
+TWITCH_BRIDGE_CLIENT_SECRET = os.getenv("TWITCH_BRIDGE_CLIENT_SECRET", "").strip()
+TWITCH_BRIDGE_REFRESH_TOKEN = os.getenv("TWITCH_BRIDGE_REFRESH_TOKEN", "").strip()
+
+_twitch_session = None
+_twitch_tok = {"value": None, "deadline": 0.0}
+# Resolved at startup by _twitch_resolve_ids: the sending account (self) and
+# the broadcaster of STREAM_BRIDGE_TWITCH_CHANNEL. sender_* also feed the IRC
+# reader's self-echo skip (loop prevention, design S8).
+_twitch_ids = {"sender_id": None, "sender_login": None, "broadcaster_id": None}
+
+
+def _twitch_creds_present() -> bool:
+    return bool(TWITCH_BRIDGE_CLIENT_ID and TWITCH_BRIDGE_CLIENT_SECRET
+                and TWITCH_BRIDGE_REFRESH_TOKEN)
+
+
+def _twitch_outbound_is_self(user_id: str, login: str) -> bool:
+    """Is this IRC line from our own sending account? (Reader-side loop
+    guard.) False when outbound is unconfigured — nothing to loop."""
+    sid = _twitch_ids.get("sender_id")
+    slog = _twitch_ids.get("sender_login")
+    if sid and user_id and user_id == sid:
+        return True
+    if slog and login and login == slog:
+        return True
+    return False
+
+
+def _tw_session():
+    global _twitch_session
+    if _twitch_session is None or _twitch_session.closed:
+        _twitch_session = aiohttp.ClientSession()
+    return _twitch_session
+
+
+class _TwitchAuthError(Exception):
+    """Token endpoint refused the refresh — creds wrong/revoked, permanent
+    until a human fixes .env. Callers back off long."""
+
+
+async def _twitch_access_token(force: bool = False) -> str:
+    now = asyncio.get_running_loop().time()
+    if not force and _twitch_tok["value"] and now < _twitch_tok["deadline"]:
+        return _twitch_tok["value"]
+    async with _tw_session().post(
+        "https://id.twitch.tv/oauth2/token",
+        data={"client_id": TWITCH_BRIDGE_CLIENT_ID,
+              "client_secret": TWITCH_BRIDGE_CLIENT_SECRET,
+              "refresh_token": TWITCH_BRIDGE_REFRESH_TOKEN,
+              "grant_type": "refresh_token"},
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        try:
+            body = await resp.json()
+        except Exception:
+            body = {}
+        if resp.status != 200 or not body.get("access_token"):
+            # Error CODE only — never token material in logs (#371).
+            raise _TwitchAuthError(f"HTTP {resp.status} {body.get('message', '')[:60]}")
+        _twitch_tok["value"] = body["access_token"]
+        _twitch_tok["deadline"] = now + max(0, int(body.get("expires_in", 3600)) - 60)
+        return _twitch_tok["value"]
+
+
+async def _twitch_helix(method: str, path: str, *, params: dict | None = None,
+                        json_body: dict | None = None) -> tuple[int, dict]:
+    """One authorized Helix call. 401 → refresh once, retry once. Returns
+    (status, body-dict). Raises _TwitchAuthError only from the token layer."""
+    for attempt in (0, 1):
+        token = await _twitch_access_token(force=(attempt == 1))
+        async with _tw_session().request(
+            method, f"https://api.twitch.tv/helix/{path}",
+            params=params, json=json_body,
+            headers={"Authorization": f"Bearer {token}",
+                     "Client-Id": TWITCH_BRIDGE_CLIENT_ID},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status == 401 and attempt == 0:
+                continue
+            try:
+                body = await resp.json()
+            except Exception:
+                body = {}
+            return resp.status, (body if isinstance(body, dict) else {})
+    return 401, {}
+
+
+async def _twitch_resolve_ids() -> bool:
+    """Resolve sender (token user) + broadcaster ids once. True on success."""
+    try:
+        st, body = await _twitch_helix("GET", "users")
+        data = (body.get("data") or [])
+        if st != 200 or not data:
+            print(f"[TW-OUT] users(self) HTTP {st} — ids unresolved")
+            return False
+        _twitch_ids["sender_id"] = str(data[0].get("id") or "") or None
+        _twitch_ids["sender_login"] = str(data[0].get("login") or "").lower() or None
+        st2, body2 = await _twitch_helix("GET", "users",
+                                         params={"login": STREAM_BRIDGE_TWITCH_CHANNEL})
+        data2 = (body2.get("data") or [])
+        if st2 != 200 or not data2:
+            print(f"[TW-OUT] users({STREAM_BRIDGE_TWITCH_CHANNEL}) HTTP {st2} — ids unresolved")
+            return False
+        _twitch_ids["broadcaster_id"] = str(data2[0].get("id") or "") or None
+        print(f"[TW-OUT] resolved sender={_twitch_ids['sender_login']}({_twitch_ids['sender_id']}) "
+              f"broadcaster={STREAM_BRIDGE_TWITCH_CHANNEL}({_twitch_ids['broadcaster_id']})")
+        return bool(_twitch_ids["sender_id"] and _twitch_ids["broadcaster_id"])
+    except _TwitchAuthError as e:
+        print(f"[TW-OUT] token refresh failed resolving ids ({e})")
+        return False
+    except Exception as e:
+        print(f"[TW-OUT] id resolution failed: {e}")
+        return False
+
+
+async def _register_chat_mirror(chat_id: int, platform: str, mirror_id: str,
+                                channel_ref: str = "") -> None:
+    """Best-effort mirror registration (design S4). The server's deleted-check
+    under the row lock makes a registration that raced a deletion enqueue its
+    own cleanup, so no outcome here needs handling beyond a log."""
+    if http_session is None or not API_SECRET_KEY or not mirror_id:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/chat/mirrors",
+            json={"chat_id": int(chat_id), "platform": platform,
+                  "mirror_id": str(mirror_id), "channel_ref": channel_ref or ""},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[CHAT-MOD] mirror register {platform}/{chat_id} HTTP {resp.status}")
+    except Exception as e:
+        print(f"[CHAT-MOD] mirror register failed ({platform}/{chat_id}): {e}")
+
+
+async def _post_discord_deleted(channel_id: int, message_ids: list) -> None:
+    """Forward Discord deletions in relay channels to the server. Best-effort
+    + one retry (the raw event fires once; a lost forward = a lingering copy)."""
+    if http_session is None or not API_SECRET_KEY or not message_ids:
+        return
+    payload = {"channel_id": str(channel_id),
+               "message_ids": [str(m) for m in message_ids[:100]]}
+    for attempt in (0, 1):
+        try:
+            async with http_session.post(
+                f"{API_BASE_URL}/api/v1/internal/chat/discord-deleted",
+                json=payload,
+                headers={"X-Internal-Key": API_SECRET_KEY},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status == 200:
+                    body = await resp.json()
+                    if int(body.get("deleted") or 0) > 0:
+                        print(f"[CHAT-MOD] discord deletion -> {body.get('deleted')} chat row(s)")
+                    return
+                print(f"[CHAT-MOD] discord-deleted HTTP {resp.status}")
+                if 400 <= resp.status < 500:
+                    return
+        except Exception as e:
+            print(f"[CHAT-MOD] discord-deleted forward failed (attempt {attempt + 1}): {e}")
+        await asyncio.sleep(2)
+
+
+@bot.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    # Raw event: fires for uncached messages too (the on_raw_message_edit
+    # precedent). Only relay channels matter; everything else is noise.
+    if payload.channel_id not in CHAT_LANG_BY_CHAN:
+        return
+    try:
+        await _post_discord_deleted(payload.channel_id, [payload.message_id])
+    except Exception as ex:
+        print(f"[CHAT-MOD] raw delete handler error: {ex}")
+
+
+@bot.event
+async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent):
+    if payload.channel_id not in CHAT_LANG_BY_CHAN:
+        return
+    try:
+        await _post_discord_deleted(payload.channel_id, list(payload.message_ids))
+    except Exception as ex:
+        print(f"[CHAT-MOD] raw bulk delete handler error: {ex}")
+
+
+def _chat_mod_perms_ok(channel, user) -> bool:
+    """Channel-effective Manage Messages (D1 F17 — never bare
+    guild_permissions: a channel override can grant or deny what the guild
+    default doesn't)."""
+    try:
+        perms = channel.permissions_for(user)
+        return bool(perms and perms.manage_messages)
+    except Exception:
+        return False
+
+
+@bot.tree.context_menu(name="SCR: Mute chatter")
+async def ctx_mute_chatter(interaction: discord.Interaction, message: discord.Message):
+    """Right-click any message in a relay channel → mute its author's
+    identity everywhere + purge their last 24h (design §5). Works on
+    RELAYED messages too (Twitch/YouTube/in-game copies) because the server
+    resolves through the mirror map."""
+    ch = interaction.channel
+    if getattr(ch, "id", 0) not in CHAT_LANG_BY_CHAN:
+        await interaction.response.send_message(
+            "This only works in the chat-relay channels.", ephemeral=True)
+        return
+    if not _chat_mod_perms_ok(ch, interaction.user):
+        await interaction.response.send_message(
+            "Requires Manage Messages in this channel.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    if http_session is None or not API_SECRET_KEY:
+        await interaction.followup.send("API session not ready.", ephemeral=True)
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/chat/discord-mute",
+            json={"channel_id": str(getattr(ch, "id", "") or ""),
+                  "message_id": str(message.id),
+                  "actor_discord_id": str(interaction.user.id),
+                  "actor_name": getattr(interaction.user, "display_name", "")
+                                or interaction.user.name,
+                  # R1 H1: the mute's SCOPE is the invoking channel's language
+                  # — the one room the gate above just proved this actor
+                  # moderates. 'global' = all-channel authority server-side.
+                  "actor_channel_lang": CHAT_LANG_BY_CHAN.get(getattr(ch, "id", 0), "")},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            body = {}
+            try:
+                body = await resp.json()
+            except Exception:
+                pass
+            if resp.status == 200 and body.get("status") == "ok":
+                purged = int(body.get("purged") or 0)
+                await interaction.followup.send(
+                    f"Muted `{body.get('muted')}` everywhere and removed {purged} "
+                    f"recent message(s).", ephemeral=True)
+            elif resp.status == 200 and body.get("status") == "unknown_message":
+                await interaction.followup.send(
+                    "That message isn't a tracked chat message (it may predate "
+                    "the mirror map, or it isn't part of the cross-platform chat).",
+                    ephemeral=True)
+            else:
+                detail = str(body.get("detail") or "")[:180]
+                await interaction.followup.send(
+                    f"Mute refused (HTTP {resp.status}). {detail}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Mute failed: {e}", ephemeral=True)
+
+
+@bot.hybrid_command(name="chatlockdown",
+                    description="Lock or unlock the cross-platform chat (mods only)")
+@app_commands.describe(state="on to lock, off to unlock")
+async def cmd_chatlockdown(ctx, state: str = ""):
+    """Whole-channel lockdown from Discord. Gate: channel-effective Manage
+    Messages in the GLOBAL relay channel (D1 F17's unified rule) — checked
+    against that channel regardless of where the command is typed."""
+    want = (state or "").strip().lower()
+    if want not in ("on", "off"):
+        await ctx.reply("Usage: `/chatlockdown on` or `/chatlockdown off`", ephemeral=True)
+        return
+    gid = CHAT_CHAN_BY_LANG.get("global", CHAT_CHANNEL_ID)
+    gchan = bot.get_channel(gid)
+    if gchan is None:
+        try:
+            gchan = await bot.fetch_channel(gid)
+        except Exception:
+            gchan = None
+    if gchan is None or not _chat_mod_perms_ok(gchan, ctx.author):
+        await ctx.reply("Requires Manage Messages in the global chat channel.", ephemeral=True)
+        return
+    if http_session is None or not API_SECRET_KEY:
+        await ctx.reply("API session not ready.", ephemeral=True)
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/chat/lockdown",
+            json={"locked": want == "on",
+                  "actor_discord_id": str(ctx.author.id),
+                  "actor_name": getattr(ctx.author, "display_name", "") or ctx.author.name},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status == 200:
+                await ctx.reply(f"Chat is now **{'LOCKED' if want == 'on' else 'unlocked'}** "
+                                f"across all surfaces.", ephemeral=True)
+            else:
+                await ctx.reply(f"Lockdown toggle failed (HTTP {resp.status}).", ephemeral=True)
+    except Exception as e:
+        await ctx.reply(f"Lockdown toggle failed: {e}", ephemeral=True)
+
+
+# ── Twitch outbound mirror (design S8) ───────────────────────────────────────
+
+_TWITCH_OUT_CURSOR_FILE = "/opt/bot-state/twitch_out_cursor.json"
+_TWITCH_OUT_MAX_AGE_S = 300     # restart-burst guard: older rows are skipped, counted
+_TWITCH_OUT_PACE_S = 1.2        # ≥1.2s between sends (~18/30s < the 20/30s floor)
+_twitch_out_skipped_old = 0
+_twitch_out_dropped = 0         # is_sent=false / AutoMod rejections (permanent)
+
+
+def _twitch_out_cursor_load() -> int | None:
+    try:
+        import json as _json_mod
+        with open(_TWITCH_OUT_CURSOR_FILE, "r", encoding="utf-8") as f:
+            return int((_json_mod.load(f) or {}).get("after_id"))
+    except Exception:
+        return None
+
+
+def _twitch_out_cursor_save(after_id: int) -> None:
+    # Atomic tmp+replace (the yt quota ledger pattern): a torn cursor file
+    # would re-send or skip a page after a crash.
+    try:
+        import json as _json_mod
+        tmp = _TWITCH_OUT_CURSOR_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json_mod.dump({"after_id": int(after_id)}, f)
+        os.replace(tmp, _TWITCH_OUT_CURSOR_FILE)
+    except Exception as e:
+        print(f"[TW-OUT] cursor save failed: {e}")
+
+
+# R2 M2: per-send lockdown revalidation. The page-level check catches a lock
+# that predates the fetch; this probe catches one landing MID-page, at the
+# next send boundary. 404 = deploy-skew (old API without the endpoint) —
+# remember it and stop probing rather than stalling outbound forever.
+_lockdown_probe_supported = True
+
+
+async def _outbound_locked() -> int:
+    """1 = locked, 0 = unlocked, -1 = unknown (transient probe failure —
+    the caller pauses conservatively and retries next tick)."""
+    global _lockdown_probe_supported
+    if not _lockdown_probe_supported or http_session is None or not API_SECRET_KEY:
+        return 0
+    try:
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/internal/chat/lockdown-state",
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status == 404:
+                _lockdown_probe_supported = False
+                print("[TW-OUT] lockdown-state endpoint absent (old API) — per-send probe disabled")
+                return 0
+            if resp.status != 200:
+                return -1
+            return 1 if int((await resp.json()).get("locked") or 0) else 0
+    except Exception:
+        return -1
+
+
+def _twitch_out_format(entry: dict) -> str:
+    src = entry.get("source") or ""
+    tag = {"ingame": "[G]", "discord": "[D]", "youtube": "[YT]"}.get(src, "[?]")
+    name = str(entry.get("display_name") or "player")[:40]
+    msg = str(entry.get("message") or "")
+    msg = msg.replace("\r", " ").replace("\n", " ").strip()
+    # The fixed prefix guarantees user text never LEADS the message, so a
+    # typed "/ban x" or ".me" can't become a command (design Q5). 500 is the
+    # platform cap; 450 leaves prefix headroom.
+    return f"{tag} {name}: {msg}"[:450]
+
+
+async def _twitch_send_chat(text_out: str) -> tuple[str, str]:
+    """One Helix send. Returns (outcome, message_id): outcome is 'sent',
+    'dropped' (permanent content rejection — advance past it), or 'fail'
+    (transport/5xx — retry without advancing)."""
+    try:
+        st, body = await _twitch_helix(
+            "POST", "chat/messages",
+            json_body={"broadcaster_id": _twitch_ids["broadcaster_id"],
+                       "sender_id": _twitch_ids["sender_id"],
+                       "message": text_out})
+        if st == 200:
+            data = (body.get("data") or [{}])[0]
+            if data.get("is_sent"):
+                return ("sent", str(data.get("message_id") or ""))
+            reason = ((data.get("drop_reason") or {}).get("message") or "dropped")
+            global _twitch_out_dropped
+            _twitch_out_dropped += 1
+            print(f"[TW-OUT] send dropped by Twitch ({reason}) — total {_twitch_out_dropped}")
+            return ("dropped", "")
+        if 400 <= st < 500:
+            # Bad request / banned sender / missing scope: content-or-config
+            # judgement, not transport. Log + advance (retrying re-sends the
+            # identical judgement).
+            print(f"[TW-OUT] send HTTP {st}: {str(body)[:120]}")
+            return ("dropped", "")
+        print(f"[TW-OUT] send HTTP {st} — will retry")
+        return ("fail", "")
+    except _TwitchAuthError as e:
+        print(f"[TW-OUT] token refresh failed ({e})")
+        return ("fail", "")
+    except Exception as e:
+        print(f"[TW-OUT] send failed: {e}")
+        return ("fail", "")
+
+
+async def twitch_chat_outbound():
+    """Mirror the global discussion into Twitch chat (design S8). Poll-only
+    consumer of /internal/chat/since with its OWN durable cursor (independent
+    failure domain from the Discord relay). Per-row conclusive handling: the
+    cursor advances only past rows that were sent, dropped-permanent, or
+    skipped by rule (D1 F14) — a transport failure retries the same row next
+    tick. Always-on: Twitch chat is channel-scoped, no live-lifecycle."""
+    global _twitch_out_skipped_old
+    if not _twitch_creds_present():
+        print("[TW-OUT] twitch outbound disabled (TWITCH_BRIDGE_* creds not set)")
+        return
+    while not await _twitch_resolve_ids():
+        await asyncio.sleep(120)
+    cursor = _twitch_out_cursor_load()
+    backoff = 2
+    while True:
+        try:
+            if http_session is None:
+                await asyncio.sleep(2)
+                continue
+            if cursor is None:
+                # Cold start: seed at max_id, mirror nothing historical (the
+                # Discord catchup's cold-start rule).
+                async with http_session.get(
+                    f"{API_BASE_URL}/api/v1/internal/chat/since",
+                    params={"after_id": 0, "limit": 1},
+                    headers={"X-Internal-Key": API_SECRET_KEY},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status != 200:
+                        await asyncio.sleep(10)
+                        continue
+                    cursor = int((await resp.json()).get("max_id") or 0)
+                _twitch_out_cursor_save(cursor)
+                print(f"[TW-OUT] cold start: cursor seeded at {cursor}")
+                continue
+            async with http_session.get(
+                f"{API_BASE_URL}/api/v1/internal/chat/since",
+                params={"after_id": cursor, "limit": 50},
+                headers={"X-Internal-Key": API_SECRET_KEY},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60)
+                    continue
+                page = await resp.json()
+            backoff = 2
+            # R1 M2: lockdown pauses the mirror OUTRIGHT — the pre-lock
+            # backlog must not keep draining onto Twitch after operators
+            # locked the channel. Cursor untouched; on unlock the 5-min age
+            # guard skips whatever went stale during the pause.
+            if int(page.get("locked") or 0):
+                await asyncio.sleep(5)
+                continue
+            wedged = False
+            for entry in (page.get("messages") or []):
+                eid = entry.get("id")
+                if not isinstance(eid, int):
+                    continue
+                # Skip rules (each a counted PERMANENT skip, never a stall):
+                # non-global rooms, twitch-origin (no echo), stale rows.
+                skip = ((entry.get("channel") or "global") != "global"
+                        or (entry.get("source") or "") == "twitch"
+                        or not (entry.get("message") or "").strip())
+                if not skip:
+                    ts = entry.get("timestamp")
+                    try:
+                        age = (datetime.now(timezone.utc)
+                               - datetime.fromisoformat(str(ts))).total_seconds() if ts else 0
+                    except Exception:
+                        age = 0
+                    if age > _TWITCH_OUT_MAX_AGE_S:
+                        _twitch_out_skipped_old += 1
+                        skip = True
+                if skip:
+                    cursor = eid
+                    continue
+                # R2 M2: revalidate lockdown at EVERY send boundary. Locked
+                # (1) or unknown (-1) → stop WITHOUT advancing past this row;
+                # the next tick's page-level check owns the locked sleep, and
+                # a transient probe failure costs one ~2s pause. R3 LOW:
+                # a bare break (wedged stays False) — the 10s backoff is
+                # for SEND transport failures; a probe stop re-polls at the
+                # normal 2s cadence of the loop tail.
+                if await _outbound_locked() != 0:
+                    break
+                outcome, msg_id = await _twitch_send_chat(_twitch_out_format(entry))
+                if outcome == "fail":
+                    wedged = True
+                    break   # retry THIS row next tick; cursor stays put
+                if outcome == "sent" and msg_id:
+                    await _register_chat_mirror(eid, "twitch", msg_id,
+                                                _twitch_ids["broadcaster_id"] or "")
+                cursor = eid
+                _twitch_out_cursor_save(cursor)
+                await asyncio.sleep(_TWITCH_OUT_PACE_S)
+            _twitch_out_cursor_save(cursor)
+            await asyncio.sleep(10 if wedged else 2)   # `paused` re-polls at the normal 2s
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[TW-OUT] loop error: {e}")
+            await asyncio.sleep(15)
+
+
+# ── Moderation-action outbox consumer (design S4) ────────────────────────────
+
+seen_mod_actions: set = set()
+
+
+async def _ack_mod_actions(action_ids, undeliverable: bool = False) -> bool:
+    """True only when the server confirmed the ack (R1 M4: `twitch_say`'s
+    at-most-once guarantee is only real if the send is gated on a CONFIRMED
+    ack — an assumed ack that actually failed re-delivers after a restart)."""
+    if not action_ids or http_session is None or not API_SECRET_KEY:
+        return False
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/chat/mod-actions/ack",
+            json={"action_ids": list(action_ids), "undeliverable": bool(undeliverable)},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[CHAT-MOD] action ack failed: {resp.status}")
+                return False
+            return True
+    except Exception as ex:
+        print(f"[CHAT-MOD] action ack error: {ex}")
+        return False
+
+
+async def _do_discord_delete(payload: dict) -> str:
+    """Delete one relayed Discord copy. Returns 'ok' | 'undeliverable' |
+    'retry'. Forbidden is UNDELIVERABLE, not retry — a missing Manage
+    Messages grant does not heal on its own, and #167's stream-post lesson
+    cuts the other way here: for a DELETE, retry-forever on 403 is the
+    infinite loop."""
+    try:
+        cid = int(payload.get("channel_id") or 0)
+        mid = int(payload.get("message_id") or 0)
+    except Exception:
+        return "undeliverable"
+    if not cid or not mid:
+        return "undeliverable"
+    channel = bot.get_channel(cid)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(cid)
+        except discord.NotFound:
+            return "undeliverable"
+        except discord.Forbidden:
+            print(f"[CHAT-MOD] cannot access channel {cid} (Forbidden)")
+            return "undeliverable"
+        except Exception as e:
+            print(f"[CHAT-MOD] channel fetch {cid} failed: {e}")
+            return "retry"
+    try:
+        await channel.get_partial_message(mid).delete()
+        return "ok"
+    except discord.NotFound:
+        return "ok"          # already gone — converged
+    except discord.Forbidden:
+        print(f"[CHAT-MOD] delete {mid} Forbidden — grant the bot Manage Messages "
+              f"in the chat channels for cross-platform deletion")
+        return "undeliverable"
+    except Exception as e:
+        print(f"[CHAT-MOD] delete {mid} failed: {e}")
+        return "retry"
+
+
+async def _do_twitch_action(kind: str, payload: dict) -> str:
+    """Execute one Twitch moderation action. Returns 'ok' | 'undeliverable'
+    | 'retry'. Requires resolved ids; 4xx = permanent judgement (too old /
+    not a mod / already banned / not banned), 5xx/transport = retry."""
+    if not _twitch_creds_present():
+        return "undeliverable"   # F8: don't head-of-line-block discord actions
+    if not (_twitch_ids["sender_id"] and _twitch_ids["broadcaster_id"]):
+        if not await _twitch_resolve_ids():
+            return "retry"
+    b_id, m_id = _twitch_ids["broadcaster_id"], _twitch_ids["sender_id"]
+    try:
+        if kind == "twitch_delete":
+            st, _ = await _twitch_helix(
+                "DELETE", "moderation/chat",
+                params={"broadcaster_id": b_id, "moderator_id": m_id,
+                        "message_id": str(payload.get("mirror_id") or "")})
+            return "ok" if st in (200, 204) else ("undeliverable" if 400 <= st < 500 else "retry")
+        if kind == "twitch_ban":
+            body = {"data": {"user_id": str(payload.get("user_id") or "")}}
+            if payload.get("duration_s"):
+                body["data"]["duration"] = int(payload["duration_s"])
+            if payload.get("reason"):
+                body["data"]["reason"] = str(payload["reason"])[:200]
+            st, rb = await _twitch_helix(
+                "POST", "moderation/bans",
+                params={"broadcaster_id": b_id, "moderator_id": m_id},
+                json_body=body)
+            if st in (200, 204):
+                return "ok"
+            if st == 400 and "already banned" in str(rb).lower():
+                return "ok"
+            return "undeliverable" if 400 <= st < 500 else "retry"
+        if kind == "twitch_unban":
+            st, rb = await _twitch_helix(
+                "DELETE", "moderation/bans",
+                params={"broadcaster_id": b_id, "moderator_id": m_id,
+                        "user_id": str(payload.get("user_id") or "")})
+            if st in (200, 204):
+                return "ok"
+            if st == 400 and "not banned" in str(rb).lower():
+                return "ok"
+            return "undeliverable" if 400 <= st < 500 else "retry"
+        if kind == "twitch_settings":
+            st, _ = await _twitch_helix(
+                "PATCH", "chat/settings",
+                params={"broadcaster_id": b_id, "moderator_id": m_id},
+                json_body={"emote_mode": bool(payload.get("emote_only"))})
+            return "ok" if st == 200 else ("undeliverable" if 400 <= st < 500 else "retry")
+        if kind == "twitch_say":
+            # AT-MOST-ONCE (D1 F13): the caller acked BEFORE this ran.
+            await _twitch_send_chat(str(payload.get("text") or "")[:450])
+            return "ok"
+    except _TwitchAuthError as e:
+        print(f"[CHAT-MOD] twitch action token failure ({e})")
+        return "retry"
+    except Exception as e:
+        print(f"[CHAT-MOD] twitch action {kind} failed: {e}")
+        return "retry"
+    return "undeliverable"
+
+
+@tasks.loop(seconds=15)
+async def poll_chat_mod_actions():
+    """Durable moderation-action consumer (the poll_bug_report_events shape:
+    process-lifetime seen-set, permanent failures acked undeliverable,
+    transient failures retried next tick, whole body guarded — #129)."""
+    try:
+        if http_session is None or not API_SECRET_KEY:
+            return
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/internal/chat/mod-actions",
+            params={"limit": 50},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                return
+            data = await resp.json()
+        actions = data.get("actions") or []
+        if not actions:
+            return
+        ack_ok, ack_bad = [], []
+        for a in actions:
+            aid = a.get("id")
+            if aid is None:
+                continue
+            if aid in seen_mod_actions:
+                ack_ok.append(aid)   # earlier ack lost — re-ack, don't re-run
+                continue
+            kind = str(a.get("kind") or "")
+            try:
+                payload = json.loads(a.get("payload") or "{}")
+            except Exception:
+                payload = {}
+            if kind == "twitch_say":
+                # Ack FIRST = at-most-once (D1 F13 — a duplicate lockdown
+                # announcement is worse than a lost one). R1 M4: the send is
+                # gated on the ack being CONFIRMED — a failed/timed-out ack
+                # means nothing was sent and nothing marked seen, so the next
+                # poll retries the whole ack-then-send fresh; the row can only
+                # ever be sent after a server-confirmed ack, so a restart can
+                # never replay it.
+                if await _ack_mod_actions([aid]):
+                    seen_mod_actions.add(aid)
+                    await _do_twitch_action(kind, payload)
+                continue
+            if kind == "discord_delete":
+                outcome = await _do_discord_delete(payload)
+            elif kind.startswith("twitch_"):
+                outcome = await _do_twitch_action(kind, payload)
+            else:
+                print(f"[CHAT-MOD] unknown action kind {kind!r} — acking undeliverable")
+                outcome = "undeliverable"
+            # R1 M3: bounded-liveness backstop. `attempts` counts server-side
+            # FETCHES; a row still retrying after ~40 (≈10 min at the 15s
+            # cadence) is stuck on something a human must fix (revoked Twitch
+            # creds, unreachable channel) and would otherwise head-of-line-
+            # block the oldest-50 page forever — ack it undeliverable, loudly.
+            if outcome == "retry" and int(a.get("attempts") or 0) > 40:
+                print(f"[CHAT-MOD] action {aid} ({kind}) stuck after "
+                      f"{a.get('attempts')} fetches — acking undeliverable")
+                outcome = "undeliverable"
+            if outcome == "ok":
+                seen_mod_actions.add(aid)
+                ack_ok.append(aid)
+            elif outcome == "undeliverable":
+                seen_mod_actions.add(aid)
+                ack_bad.append(aid)
+            # 'retry': no ack, no seen — next poll re-fetches it.
+        if ack_ok:
+            await _ack_mod_actions(ack_ok)
+        if ack_bad:
+            await _ack_mod_actions(ack_bad, undeliverable=True)
+        if len(seen_mod_actions) > 2000:
+            seen_mod_actions.clear()
+    except Exception as e:
+        print(f"[CHAT-MOD] action poll error: {e}")
+
+
+@poll_chat_mod_actions.before_loop
+async def _before_poll_chat_mod_actions():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_close():
     if http_session: await http_session.close()
+    global _twitch_session
+    if _twitch_session is not None and not _twitch_session.closed:
+        try:
+            await _twitch_session.close()
+        except Exception:
+            pass
 
 @bot.hybrid_command(name="link", description="Link your Discord to your ROUNDS Steam account")
 @app_commands.describe(code="6-character code from the in-game Competitive menu")

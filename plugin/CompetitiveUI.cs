@@ -6531,6 +6531,15 @@ namespace CompetitiveRounds
                 if (IsAnotherTextInputActive()) return;
                 if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.T)
                 {
+                    // Lockdown (design v3 S7): don't open a box whose submit
+                    // would be refused — the system line IS the feedback, and
+                    // it shows on the overlay whether or not F5 is open.
+                    if (ChatClient.ChatLocked)
+                    {
+                        NativeUI.NotifyChatLockedAttempt();
+                        ev.Use();
+                        return;
+                    }
                     chatInputOpen = true;
                     chatJustOpened = true;
                     // F4: resume a draft an incidental close stashed (one-shot,
@@ -6798,6 +6807,15 @@ namespace CompetitiveRounds
                         // §2.6 v1 moderation groundwork: files a bug-report row
                         // with the local chat lines mentioning that name.
                         NativeUI.HandleReportCommand(text);
+                    }
+                    else if (ChatClient.ChatLocked)
+                    {
+                        // Lockdown (design v3 S7): the lock can land WHILE the
+                        // box is open (the T-key gate below only covers opening).
+                        // Local /mute//report commands above stay usable — they
+                        // never reach the server. The draft is deliberately
+                        // discarded with the close below, same as a normal send.
+                        NativeUI.NotifyChatLockedAttempt();
                     }
                     else
                     {
