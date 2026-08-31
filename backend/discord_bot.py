@@ -8210,7 +8210,13 @@ async def _tag_announced_in_channel(release_json):
     """
     try:
         channel = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
-        witness = _RELEASE_FOOTER_MARK + _release_url(release_json)
+        # THE shared helper, verbatim — never hand-build this string. The
+        # first cut of this line concatenated MARK + url itself, omitting the
+        # helper's ZWSP: every genuine announcement then failed its own check
+        # (next cold start would DUPLICATE it) while the body-lookalike the
+        # ZWSP exists to reject still matched. Building the witness anywhere
+        # except _release_footer recreates exactly that drift.
+        witness = _release_footer(release_json)
         # limit=100 spans many months of an announcements-only channel;
         # documented residual: an announcement buried under 100+ newer
         # messages re-announces once on the next cold start (visible,
