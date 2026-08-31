@@ -1,3 +1,109 @@
+## v1.39.6 — 2026-08-30
+
+**The menu no longer leaks into the game**
+
+- While the F5 menu is open, your inputs stay OUT of the match: clicks no
+  longer fire your gun, Space no longer readies you up or confirms cards,
+  Remote Control bullets stop tracking the cursor across menu buttons, and a
+  fire button held across the menu closing can no longer deliver a surprise
+  charged shot.
+- Escape while the menu is open now ONLY closes the menu. It no longer opens
+  the game's pause menu behind it — and no longer cancels a ranked match that
+  is mid-connect (the loading screen's escape abort was reachable from the
+  same key press).
+- The main-menu mod button reappears after visiting Sandbox (Photon's offline
+  mode kept pretending you were still in a room, which parked the injector
+  forever).
+
+**Finding your first game**
+
+- Until your first ranked game, the Search Ranked button glows through a
+  rainbow cycle with a floating callout above it pointing at it, plus a
+  one-time hint toast. Clears permanently the first time you press it (per
+  account).
+- New Info-library article: "Controls & keys" — a keyboard map of the
+  competitive and base-game controls used during play, with a plain-language
+  legend.
+
+**Tournament forfeit, finally visible**
+
+- The tournament Forfeit button (built earlier, never shipped — it merged
+  after v1.39.5 was cut) reaches players in this release: it is its own row
+  on the My Match panel in the Tournaments tab whenever your match is in its
+  ready phase, with a two-click confirm.
+- Opening the Tournaments tab now lands on the sub-tab that holds YOUR live
+  match (once the mod's ~20s match poll has seen it — a cold-start open
+  stays on the default sub-tab until the first poll) — a participant whose
+  tournament sat under the other sub-tab used to open the tab and see no
+  match panel (and no Forfeit) at all.
+
+**Leaving on purpose**
+
+- The escape menu now has a LEAVE MATCH row during competitive play, with a
+  two-click confirm and per-mode copy that says exactly what leaving does.
+  It deliberately does NOT say "forfeit": today's rules settle a leave
+  differently per mode, and the button promises only what actually happens.
+  (Tournament matches keep their own Forfeit button in the Tournaments tab.)
+
+**Info library, now with pictures**
+
+- Seven articles gained nine charts and diagrams built from the real game
+  data: the DoT tick timeline vs the 0.3s block window, the rank ladder with
+  reward multipliers, rating-confidence bands, the XP curve with level-up
+  gold markers, a gold-sources legend, the best-of-3 flow, FFA placement
+  shares, and the keyboard guide above.
+
+**Health bar honesty**
+
+- Spectators now see the red "recently lost" segment when poison and other
+  damage-over-time drains a fighter (the spectator display path bypassed the
+  vanilla trigger).
+- NEW: a blue "recently healed" segment on everyone's health bar — lifesteal
+  and regeneration finally render as the health flowing back in, on every
+  seat including the broadcast spectator.
+
+**Silence's red X**
+
+- Restored the silence X (and the stun triangles) two ways: the mod's own
+  body-color pass no longer captures the indicator sprites, and a vanilla
+  lifecycle trap — where the indicator's scale could be snapshotted as ZERO
+  and stay invisible forever — is now repaired at the moment the debuff
+  fires. If an X still fails to show after this build, the log line
+  `[STATUS-X]` will say which mechanism fired.
+
+**Five community faces**
+
+- The Mobsta, Well Wraped Hat, Phoneix Gaze (the catalogue's second ANIMATED
+  face — 4 frames at the artist's approved 5fps), Smart Specs, The Cryptid.
+  Bundled from the approved placement snapshot with every PNG (and every
+  animation frame) verified against its stored md5 before being written.
+
+**Cross-platform chat moderation (server + client)**
+
+- Moderators can now mute a person's Twitch/YouTube identity, not just their
+  in-game one; a mute follows the person across every bridged surface, and
+  deleting a message removes its mirrored copies from the other platforms
+  too.
+- Chat lockdown: moderators can pause the whole bridged chat during an
+  incident; players see an explicit locked/unlocked notice instead of
+  messages silently vanishing.
+- Disconnect reports are now bound to the reporter's own authenticated
+  session, and the POISON-SILENT diagnostic claims only what that seat
+  actually observed.
+
+**Broadcast (ops)**
+
+- The stream no longer parks on the black between-games card: while idle the
+  broadcast seat now tours the mod (Compare across the ~12 most recent
+  online players, their leaderboard profiles, the 2v2/FFA boards), and
+  post-game report screens no longer lose their opening ~12 seconds to the
+  "Starting soon" card.
+- Stream chat: mirrored in-game/Discord/YouTube lines no longer render twice
+  on the overlay during normal connected operation (during a brief chat-
+  server outage the mirror copy deliberately still shows so no chat is
+  lost), and the Twitch mirror now spells out [Game]/[Discord]/[YouTube]
+  instead of [G]/[D]/[YT].
+
 ## v1.39.5 — 2026-08-28
 
 **The launch build**
