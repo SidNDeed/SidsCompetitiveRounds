@@ -8111,12 +8111,17 @@ def _format_release_message(release_json):
     Home tab's primary source is now the API's own uncut store)."""
     tag = release_json.get("tag_name") or "v?"
     name = release_json.get("name") or tag
-    url = release_json.get("html_url") or f"https://github.com/{GITHUB_RELEASES_REPO}/releases/tag/{tag}"
+    url = _release_url(release_json)
     body = release_json.get("body") or ""
     body = body.replace("\r\n", "\n").strip()
     header = f"**\N{ROCKET} New release: {name}**\n{url}\n\n"
-    footer = f"\n\n— Full notes: {url}"
-    budget = 1900  # per-message body budget under the 2000 cap
+    footer = _release_footer(release_json)
+    # Budget derived from the ACTUAL footer so the completion witness can
+    # never be truncated off the final chunk by the sender's [:2000] slice
+    # (xhigh review LOW-2: a fixed 1900 assumed the footer fits in 100 chars,
+    # which a long tag URL could exceed — every cold start would then
+    # re-announce forever, since no posted message ends with the witness).
+    budget = 2000 - len(footer) - 8
     pieces = []
     remaining = body
     while remaining:
@@ -8142,12 +8147,101 @@ def _format_release_message(release_json):
     return pieces
 
 
+# Shared by the formatter and the announced-in-channel check so the two can
+# never drift (a checker matching a footer the formatter no longer emits
+# would silently re-announce every release on every cold start).
+_RELEASE_FOOTER_MARK = "— Full notes: "
+
+
+def _release_footer(release_json) -> str:
+    """THE completion witness, built in exactly one place for the formatter
+    (which appends it to the final chunk only) and the announced-check
+    (which requires a bot message to END with it). The zero-width space
+    between the mark and the URL is the structural discriminator (xhigh
+    review LOW-1): a release BODY whose text happens to end with the
+    visible words '— Full notes: <this url>' cannot impersonate the final
+    chunk, because a hand-authored markdown body carries no ZWSP, and a
+    copy-paste of a PREVIOUS announcement's footer carries the wrong URL.
+    Mid-content placement (not trailing) so no Discord-side trim can touch
+    it — the same character already survives production round-trips as
+    RELEASE_CONT_MARK's prefix. Transition note: announcements posted
+    before this deploy (v1.39.5 and older) lack the ZWSP, which only
+    matters if such a tag is still /latest at a cold start — it is not
+    (v1.39.6, unannounced, is), and every announcement from this deploy
+    forward carries it."""
+    return "\n\n" + _RELEASE_FOOTER_MARK + "\u200b" + _release_url(release_json)
+
+
+def _release_url(release_json) -> str:
+    """The announcement URL, resolved ONE way for both the formatter and the
+    completion check: GitHub's own html_url verbatim (it arrives percent-
+    encoded for tags like release#1 — a hand-built URL from the raw tag
+    would never match it), with the formatter's historical fallback."""
+    tag = release_json.get("tag_name") or "v?"
+    return release_json.get("html_url") or (
+        f"https://github.com/{GITHUB_RELEASES_REPO}/releases/tag/{tag}")
+
+
+async def _tag_announced_in_channel(release_json):
+    """Whether the announcement for this release COMPLETED in #releases.
+
+    The channel itself is the durable was-it-announced record. The process
+    anchor below dies with the container, so a bot recreated between a
+    release landing and its first poll tick used to anchor PAST the release
+    and never announce it — v1.39.6 was swallowed exactly this way when
+    deploy-bot ran two minutes after the GitHub release (the #167 cold-start
+    class, with the deploy itself as the downtime window; /tmp cursors do
+    not survive a container RECREATE either).
+
+    The witness is the FINAL chunk's exact footer line, matched with
+    endswith against the same _RELEASE_FOOTER_MARK + _release_url() the
+    formatter emits (review findings: chunk 1's header URL only proves a
+    START — matching it would permanently strand chunks 2..N of a partial
+    send; an exact-URL endswith also cannot confuse v1.39.6 with
+    v1.39.6-rc1 the way a boundary regex could, and a bot-echoed user
+    string can't sit at the very end of a message that ends with this
+    line). A partial send whose container died mid-announcement therefore
+    reads NOT-announced and is re-sent whole — duplicated leading chunks
+    are the visible at-least-once tradeoff (#167), chosen over silent loss.
+
+    Returns True/False on a definitive read, None on a transient error —
+    the caller retries, BOUNDED (see the cold-start branch), rather than
+    guessing in either direction.
+    """
+    try:
+        channel = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
+        witness = _RELEASE_FOOTER_MARK + _release_url(release_json)
+        # limit=100 spans many months of an announcements-only channel;
+        # documented residual: an announcement buried under 100+ newer
+        # messages re-announces once on the next cold start (visible,
+        # bounded — never silent loss).
+        async for msg in channel.history(limit=100):
+            if msg.author.id == bot.user.id and (msg.content or "").rstrip().endswith(witness):
+                return True
+        return False
+    except Exception as e:
+        print(f"[RELEASES] announced-check failed: {e}")
+        return None
+
+
+# Bounded cold-start retry budget for _tag_announced_in_channel errors. A
+# TRANSIENT error retries the whole cold-start decision next tick; after
+# this many consecutive failures (a PERMANENT condition — e.g. Read Message
+# History revoked while Send still works) the poller falls back to the
+# LEGACY anchor, so a broken history permission degrades to pre-fix
+# behavior (the cold-start tag may go unannounced; /announce-release
+# recovers it) instead of wedging EVERY future announcement forever
+# (review HIGH: initialization held hostage blocks the steady-state
+# announce path for all later tags too).
+_release_coldstart_check_fails = 0
+
+
 @tasks.loop(minutes=5)
 async def poll_github_releases():
     """Watch the public GitHub releases endpoint for the mod repo. When a new
     tag appears (different from `_last_release_tag`), post the formatted
     release notes to #releases and mirror to the discussions/chat channel."""
-    global _last_release_tag, _release_poller_initialized
+    global _last_release_tag, _release_poller_initialized, _release_coldstart_check_fails
     if not http_session:
         return
     if not RELEASES_CHANNEL_ID and not CHAT_CHANNEL_ID:
@@ -8208,10 +8302,14 @@ async def poll_github_releases():
             print(f"[RELEASES] drain of {_pend} failed: {_pe} — retrying next tick")
 
     # Cold-start: don't repost on bot restart — EXCEPT when the durable
-    # cursor says THIS tag was mid-announcement when the process died.
+    # cursor says THIS tag was mid-announcement when the process died, or
+    # the CHANNEL proves the tag was never announced at all (see
+    # _tag_announced_in_channel — the v1.39.6 swallow). On a transient
+    # channel error the one-shot is NOT consumed, so the next tick retries
+    # the whole cold-start decision instead of anchoring blind.
     if not _release_poller_initialized:
-        _release_poller_initialized = True
         if tag in _release_state_load():
+            _release_poller_initialized = True
             msgs = _format_release_message(payload)
             if await _send_release_chunks(tag, msgs):
                 _last_release_tag = tag
@@ -8219,8 +8317,37 @@ async def poll_github_releases():
             else:
                 print(f"[RELEASES] cold start: {tag} still incomplete — retrying next tick")
             return
+        announced = await _tag_announced_in_channel(payload)
+        if announced is None:
+            _release_coldstart_check_fails += 1
+            if _release_coldstart_check_fails < 3:
+                print("[RELEASES] cold start: channel check failed — retrying next tick")
+                return
+            # Permanent-looking failure: degrade to the LEGACY anchor so the
+            # steady-state announce path stays alive for future tags. The
+            # cold-start tag itself may go unannounced — recover with
+            # /announce-release. Never let a history error wedge forever.
+            _release_poller_initialized = True
+            _last_release_tag = tag
+            print(f"[RELEASES] cold start: channel check failed {_release_coldstart_check_fails}x — "
+                  f"anchored at {tag} WITHOUT proof (legacy behavior; /announce-release recovers a miss)")
+            return
+        _release_coldstart_check_fails = 0
+        _release_poller_initialized = True
+        if not announced:
+            msgs = _format_release_message(payload)
+            if await _send_release_chunks(tag, msgs):
+                _last_release_tag = tag
+                print(f"[RELEASES] cold start: {tag} was never announced — posted now")
+            else:
+                # _last_release_tag deliberately NOT advanced (matches the
+                # steady-state rule: the tag advances only once every chunk
+                # lands) — next tick falls through to the sender, which
+                # resumes from the live chunk cursor.
+                print(f"[RELEASES] cold start: {tag} announcement incomplete — resuming next tick")
+            return
         _last_release_tag = tag
-        print(f"[RELEASES] cold start, anchored at {tag}")
+        print(f"[RELEASES] cold start, anchored at {tag} (already announced)")
         return
 
     # Codex r8: an anchored tag with a LIVE CURSOR is a partially-sent
