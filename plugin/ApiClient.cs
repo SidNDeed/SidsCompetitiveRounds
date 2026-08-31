@@ -17979,10 +17979,16 @@ namespace CompetitiveRounds
         // Phase 1 behavior.
         public static string TournamentKind = "sync";
 
+        // Monotonic per-request generation for /tournaments/current: a response
+        // is applied only if no NEWER request has been issued since (r2 review:
+        // the kind fence alone still let two SAME-kind responses land out of
+        // order, oldest-wins). Single-writer (main thread), so a plain int.
+        private static int _tournamentFetchGen;
         public static void FetchTournamentCurrent(string steamId, bool force = false)
         {
             if (!force && Time.unscaledTime < _tournamentRefreshAt) return;
             _tournamentRefreshAt = Time.unscaledTime + 5f;   // throttle
+            int myGen = ++_tournamentFetchGen;
             string kindParam = string.IsNullOrEmpty(TournamentKind) ? "sync" : TournamentKind;
             string q = string.IsNullOrEmpty(steamId) || steamId == "unknown"
                 ? $"?kind={kindParam}"
@@ -17992,6 +17998,20 @@ namespace CompetitiveRounds
                 (success, response) =>
                 {
                     if (!success || string.IsNullOrEmpty(response)) return;
+                    // Generation fence first (r2 review): drop any response a
+                    // NEWER request has superseded — covers same-kind
+                    // reordering, which the kind fence below cannot see.
+                    if (myGen != _tournamentFetchGen) return;
+                    // Kind fence (Aug 30 review LOW): a slower response for the
+                    // PREVIOUSLY selected kind must not overwrite the cache after
+                    // a sub-tab switch (manual or tab-entry auto-select) — the
+                    // stale snapshot would hide the My Match panel until the next
+                    // poll. Same identity-fence shape as SelectedPlayerAchievements.
+                    // Kept as belt over the generation fence for any future
+                    // TournamentKind write site that forgets to refetch.
+                    if (!string.Equals(kindParam,
+                            string.IsNullOrEmpty(TournamentKind) ? "sync" : TournamentKind,
+                            StringComparison.Ordinal)) return;
                     try
                     {
                         CachedTournamentJson = response;

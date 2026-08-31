@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.39.6 — 2026-08-30
 
 **The menu no longer leaks into the game**
 
@@ -26,6 +26,18 @@
 - New Info-library article: "Controls & keys" — a keyboard map of the
   competitive and base-game controls used during play, with a plain-language
   legend.
+
+**Tournament forfeit, finally visible**
+
+- The tournament Forfeit button (built earlier, never shipped — it merged
+  after v1.39.5 was cut) reaches players in this release: it is its own row
+  on the My Match panel in the Tournaments tab whenever your match is in its
+  ready phase, with a two-click confirm.
+- Opening the Tournaments tab now lands on the sub-tab that holds YOUR live
+  match (once the mod's ~20s match poll has seen it — a cold-start open
+  stays on the default sub-tab until the first poll) — a participant whose
+  tournament sat under the other sub-tab used to open the tab and see no
+  match panel (and no Forfeit) at all.
 
 **Leaving on purpose**
 
@@ -60,6 +72,26 @@
   and stay invisible forever — is now repaired at the moment the debuff
   fires. If an X still fails to show after this build, the log line
   `[STATUS-X]` will say which mechanism fired.
+
+**Five community faces**
+
+- The Mobsta, Well Wraped Hat, Phoneix Gaze (the catalogue's second ANIMATED
+  face — 4 frames at the artist's approved 5fps), Smart Specs, The Cryptid.
+  Bundled from the approved placement snapshot with every PNG (and every
+  animation frame) verified against its stored md5 before being written.
+
+**Cross-platform chat moderation (server + client)**
+
+- Moderators can now mute a person's Twitch/YouTube identity, not just their
+  in-game one; a mute follows the person across every bridged surface, and
+  deleting a message removes its mirrored copies from the other platforms
+  too.
+- Chat lockdown: moderators can pause the whole bridged chat during an
+  incident; players see an explicit locked/unlocked notice instead of
+  messages silently vanishing.
+- Disconnect reports are now bound to the reporter's own authenticated
+  session, and the POISON-SILENT diagnostic claims only what that seat
+  actually observed.
 
 **Broadcast (ops)**
 

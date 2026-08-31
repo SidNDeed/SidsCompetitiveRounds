@@ -150,7 +150,7 @@ namespace CompetitiveRounds
             // pulsing star; ~3.6s loop — slowed from 9fps per Sid, a calmer flash).
             // Widest animated set so far; exercises the __fN loader past 4 frames.
             // Wide arch, so it sits high like the other crowns.
-            new CosmeticDef { Sku = "face_detail_party_crown",   DisplayName = "Party Crown",      Slot = CharacterItemType.Detail, PngFile = "detail_party_crown.png",   Scale = 1.2f, Offset = new Vector2(0f, 0.55f), Fps = 3.6f },
+            new CosmeticDef { Sku = "face_detail_party_crown",   DisplayName = "Party Crown",      Slot = CharacterItemType.Detail, PngFile = "detail_party_crown.png",   Scale = 1.4f, Offset = new Vector2(0f, 0.55f), Fps = 3.6f }, // Scale 1.2->1.4: artist's approved placement revision 2 (migration 268; art untouched since v1.32.1)
             // July 17: Galaxyice's first two (new community artist). Both are
             // the artist's own 512px spec exports used VERBATIM — the canvas
             // composition IS the placement (cat drawn in the top half so it
