@@ -100,22 +100,27 @@ namespace CompetitiveRounds
                               Segments = () => new[] { Seg.V("block-window"), Seg.T(Blocking) } },
                 new Article { Key = "poison",       Title = () => I18n.Tr("Poison & damage over time"),Body = () => Poison,
                               Segments = () => new[] { Seg.V("dot-timeline"), Seg.T(Poison) } },
-                new Article { Key = "grow",         Title = () => I18n.Tr("Grow"),                     Body = () => Grow },
+                new Article { Key = "grow",         Title = () => I18n.Tr("Grow"),                     Body = () => Grow,
+                              Segments = () => new[] { Seg.V("grow-curve"), Seg.T(Grow) } },
                 // Community research: Spirit's 'On Damage Types and Buff
                 // Activation' (Aug 23). ATTRIBUTED work presented as his
                 // findings (byline in part 1) - the factual claims are his
                 // sandbox research, faithfully reproduced from his PDF, not
                 // re-derived from the decompile like the house articles.
-                new Article { Key = "damage-buffs", Title = () => I18n.Tr("Damage types & buffs"),     Body = () => DamageBuffsP1 + "\n\n" + DamageBuffsP2 + "\n\n" + DamageBuffsP3 },
-                new Article { Key = "movement-tech",Title = () => I18n.Tr("Movement & shield tech"),   Body = () => MovementTech },
-                new Article { Key = "netcode",      Title = () => I18n.Tr("Netcode & Photon"),         Body = () => Netcode },
+                new Article { Key = "damage-buffs", Title = () => I18n.Tr("Damage types & buffs"),     Body = () => DamageBuffsP1 + "\n\n" + DamageBuffsP2 + "\n\n" + DamageBuffsP3,
+                              Segments = () => new[] { Seg.V("refresh-flow"), Seg.T(DamageBuffsP1 + "\n\n" + DamageBuffsP2 + "\n\n" + DamageBuffsP3) } },
+                new Article { Key = "movement-tech",Title = () => I18n.Tr("Movement & shield tech"),   Body = () => MovementTech,
+                              Segments = () => new[] { Seg.V("movement-window"), Seg.T(MovementTech) } },
+                new Article { Key = "netcode",      Title = () => I18n.Tr("Netcode & Photon"),         Body = () => Netcode,
+                              Segments = () => new[] { Seg.V("netcode-map"), Seg.T(Netcode) } },
                 new Article { Key = "vanilla-bugs", Title = () => I18n.Tr("Known vanilla bugs"),       Body = () => VanillaBugs },
             }},
             new Category { Title = () => I18n.Tr("Modes"), Color = CAT_MODES, Articles = new[]
             {
                 new Article { Key = "ranked-1v1", Title = () => I18n.Tr("Ranked 1v1"), Body = () => Ranked1v1,
                               Segments = () => new[] { Seg.V("series-format"), Seg.T(Ranked1v1) } },
-                new Article { Key = "mode-2v2",   Title = () => I18n.Tr("2v2"),        Body = () => ModeInfoText.Team + "\n\n" + Mode2v2Ext },
+                new Article { Key = "mode-2v2",   Title = () => I18n.Tr("2v2"),        Body = () => ModeInfoText.Team + "\n\n" + Mode2v2Ext,
+                              Segments = () => new[] { Seg.V("team-format"), Seg.T(ModeInfoText.Team + "\n\n" + Mode2v2Ext) } },
                 new Article { Key = "mode-1v2",   Title = () => I18n.Tr("1v2"),        Body = () => ModeInfoText.Ovt + "\n\n" + Mode1v2Ext },
                 new Article { Key = "mode-ffa",   Title = () => I18n.Tr("FFA"),        Body = () => ModeInfoText.Ffa + "\n\n" + ModeFfaExt,
                               Segments = () => new[] { Seg.V("ffa-scoring"), Seg.T(ModeInfoText.Ffa + "\n\n" + ModeFfaExt) } },
@@ -123,9 +128,11 @@ namespace CompetitiveRounds
             }},
             new Category { Title = () => I18n.Tr("Tournaments"), Color = CAT_TOURN, Articles = new[]
             {
-                new Article { Key = "tourn-how",      Title = () => I18n.Tr("How tournaments run"), Body = () => TournHow },
+                new Article { Key = "tourn-how",      Title = () => I18n.Tr("How tournaments run"), Body = () => TournHow,
+                              Segments = () => new[] { Seg.V("bracket-flow"), Seg.T(TournHow) } },
                 new Article { Key = "tourn-bot",      Title = () => I18n.Tr("The bot & check-ins"), Body = () => TournBot },
-                new Article { Key = "tourn-forfeits", Title = () => I18n.Tr("Deadlines & forfeits"),Body = () => TournForfeits },
+                new Article { Key = "tourn-forfeits", Title = () => I18n.Tr("Deadlines & forfeits"),Body = () => TournForfeits,
+                              Segments = () => new[] { Seg.V("forfeit-clock"), Seg.T(TournForfeits) } },
             }},
             new Category { Title = () => I18n.Tr("Ratings & Rewards"), Color = CAT_RATING, Articles = new[]
             {
@@ -133,12 +140,14 @@ namespace CompetitiveRounds
                               Segments = () => new[] { Seg.V("rank-ladder"), Seg.T(Rating), Seg.V("glicko-rd") } },
                 new Article { Key = "rewards", Title = () => I18n.Tr("XP, Gold & levels"),  Body = () => Rewards,
                               Segments = () => new[] { Seg.V("gold-sources"), Seg.T(Rewards), Seg.V("xp-curve") } },
-                new Article { Key = "betting", Title = () => I18n.Tr("Betting"),            Body = () => Betting },
+                new Article { Key = "betting", Title = () => I18n.Tr("Betting"),            Body = () => Betting,
+                              Segments = () => new[] { Seg.V("bet-window"), Seg.T(Betting) } },
             }},
             new Category { Title = () => I18n.Tr("Tracking & Fair Play"), Color = CAT_FAIR, Articles = new[]
             {
                 new Article { Key = "tracking",     Title = () => I18n.Tr("How games are tracked"), Body = () => Tracking },
-                new Article { Key = "when-counts",  Title = () => I18n.Tr("When a game counts"),    Body = () => WhenCounts },
+                new Article { Key = "when-counts",  Title = () => I18n.Tr("When a game counts"),    Body = () => WhenCounts,
+                              Segments = () => new[] { Seg.V("when-counts"), Seg.T(WhenCounts) } },
                 new Article { Key = "anticheat",    Title = () => I18n.Tr("Anti-cheat"),            Body = () => Anticheat },
                 new Article { Key = "stats-tracked",Title = () => I18n.Tr("How stats are tracked"), Body = () => NativeUI.StatsTrackingInfoBody },
             }},
@@ -187,7 +196,9 @@ If something looks wrong mid-match, file the report right after that session - t
         private static string ControlsOutro => I18n.Tr(@"<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
 F5 works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, Space does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
 
-Chat has three doors. T types a message, Y opens the quick-chat wheel (then 1-9 or 0 sends a phrase), and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode.
+Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode.
+
+Holding E between rounds opens the emote wheel: point at a dance you own and release to play it for everyone. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
 
 Hold Tab during a match for the live scoreboard: score, cards, accuracy and connection info for everyone in the room, without opening the full menu.
 
@@ -928,7 +939,7 @@ What an answer is worth: if the deadline passes with the match undecided and nei
 
 After each match, both sides get a completion DM that's honest about how it ended: a played win says you won; a forfeit says 'You advance - your opponent forfeited'; a mutual no-show says 'You advance on the no-show tiebreak'. A forfeit is never dressed up as a played win.
 
-When the bracket completes, the podium is announced in the tournament channel and trophy roles are handed out.
+When the bracket completes, the podium is announced in the tournament channel. Trophy roles are handed out only for brackets of 16 or more players; smaller brackets keep their prizes and achievements but hand out no Discord roles.
 
 <color=#FFD94D><b>COMMANDS AND THE BOARD</b></color>
 
@@ -993,7 +1004,7 @@ Only absent seats get the no-show mark (a banned seat forfeits regardless of pre
 
 - <color=#8A8A93>Prize XP behaves like any other XP: it converts to Gold at the usual 100 XP = 1 Gold, and a level boundary it crosses pays the normal level reward.</color>
 
-- Trophies are Discord roles: SCR Tournament Winner, Runner Up, and 3rd Place; a second same placement upgrades the role to its (x2) version. Every confirmed participant gets the Participant role. Tournaments grant no in-game shop titles.
+- Trophies are Discord roles: SCR Tournament Winner, Runner Up, and 3rd Place; a second same placement upgrades the role to its (x2) version. Every confirmed participant gets the Participant role. Roles only go out for brackets of 16 or more players. Winning or taking 2nd in a tournament also unlocks a paying achievement (separate ones for sync and async), and playing a bracket through without ever forfeiting unlocks Iron Bracket.
 
 - Every tournament game is a normal ranked best-of-3: it moves your regular 1v1 rating whether or not you reach the podium.
 
@@ -1477,12 +1488,12 @@ Three caveats:
 
 <color=#FFD94D><b>PODIUM TITLES</b></color>
 
-There are three podium titles, one per ranked ladder: 1v1, 2v2 and FFA. Each is granted permanently once you enter that board's visible top 3 <color=#8A8A93>(the position check runs on a cached board, so the grant can trail your climb by a minute or two)</color>. A board only lists players who have at least one counted series - or, for FFA, one recorded game - so a fresh account can't hold a podium.
+There are three podium titles, one per ranked ladder: 1v1, 2v2 and FFA. Each is granted the moment you enter that board's visible top 3, and taken back the moment you fall out of it <color=#8A8A93>(the position check runs on a cached board, so both directions can trail the actual standings by a minute or two)</color>. A board only lists players who have at least one counted series - or, for FFA, one recorded game - so a fresh account can't hold a podium.
 
 The rendering is the interesting part:
 
-- While you hold a podium spot, the title renders live as <color=#FFD700>1st Place</color>, <color=#C0C0C0>2nd Place</color> or <color=#CD7F32>3rd Place</color> in gold, silver or bronze - always your CURRENT position, with a 2v2 or FFA prefix everywhere except that ladder's own board.
-- <color=#FF6666>Off the podium, the equipped title renders as nothing at all</color> until you climb back into the top 3. The grant is permanent; the display is rented.
+- While you hold a podium spot, the title renders live as <color=#FFD700>1st Place</color>, <color=#C0C0C0>2nd Place</color> or <color=#CD7F32>3rd Place</color> in gold, silver or bronze - always your CURRENT position, with a 1v1, 2v2 or FFA prefix everywhere except that ladder's own board.
+- <color=#FF6666>Off the podium, the title leaves your inventory entirely</color> until you climb back into the top 3. You hold it exactly as long as you hold the spot.
 
 Podium titles never rotate on a schedule and can never be bought. The only way in is the top 3.
 

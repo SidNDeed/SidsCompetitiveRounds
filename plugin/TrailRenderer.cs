@@ -234,10 +234,12 @@ namespace CompetitiveRounds
             if (sku == "trail_prism")
                 go.AddComponent<PrismaticHueCycle>().Target = tr;
 
-            // >3k trails with effects: Phoenix, Void, Prism (legacy) + Tride (v1.22).
+            // >3k trails with effects: Phoenix, Void, Prism, Tride, and the 2026 catalog wave.
             // 4k two-color gradient trails (Colossus/Ascendant/Sovereign/Titan) stay particle-free
             // per the shop description — the gradient is the effect.
-            if (sku == "trail_phoenix" || sku == "trail_void" || sku == "trail_prism" || sku == "trail_tride")
+            if (sku == "trail_phoenix" || sku == "trail_void" || sku == "trail_prism" || sku == "trail_tride" ||
+                sku == "trail_aurora" || sku == "trail_stardust" || sku == "trail_toxic" ||
+                sku == "trail_firefly" || sku == "trail_galaxy")
                 AttachParticles(go.transform, sku);
 
             Plugin.Log.LogInfo($"[TRAIL] Attached actor={actor} sku={sku} color={hexColor} len={len:F2}s gradient={(grad!=null?"yes":"no")}");
@@ -245,6 +247,7 @@ namespace CompetitiveRounds
 
         // Sparkle/glow particles that ride along with the trail. Configured per-SKU:
         // Phoenix = warm yellow sparks rising, Void = cold purple wisps, Prism = white sparkles.
+        // Aurora/Galaxy use color ramps; Stardust/Toxic/Fireflies use distinct tint and motion.
         // Parented to the trail GO so OnMatchEnd's Destroy(go) cleans them up automatically.
         private static void AttachParticles(Transform parent, string sku)
         {
@@ -262,9 +265,22 @@ namespace CompetitiveRounds
                 var main = ps.main;
                 main.duration = 1.0f;
                 main.loop = true;
-                main.startLifetime = sku == "trail_void" ? 0.7f : 0.5f;
-                main.startSpeed = sku == "trail_void" ? 0.6f : 1.4f;
-                main.startSize = sku == "trail_void" ? 0.18f : 0.12f;
+                if (sku == "trail_galaxy")        main.startLifetime = 1.1f;  // slow starfield lingers longest
+                else if (sku == "trail_firefly") main.startLifetime = 0.9f;  // drifting sparks need time to separate
+                else if (sku == "trail_void")    main.startLifetime = 0.7f;
+                else if (sku == "trail_aurora")  main.startLifetime = 0.55f; // quick shimmer behind the player
+                else if (sku == "trail_stardust") main.startLifetime = 0.45f; // brief twinkles
+                else                              main.startLifetime = 0.5f;
+
+                if (sku == "trail_firefly")      main.startSpeed = 0.4f;  // drift instead of spray
+                else if (sku == "trail_galaxy")  main.startSpeed = 0.5f;  // slow-moving starfield
+                else if (sku == "trail_void")    main.startSpeed = 0.6f;
+                else                              main.startSpeed = 1.4f;
+
+                if (sku == "trail_void") main.startSize = 0.18f;
+                else if (sku == "trail_toxic") main.startSize = 0.15f;  // visible droplets
+                else if (sku == "trail_stardust" || sku == "trail_galaxy") main.startSize = 0.10f;  // pinprick stars
+                else main.startSize = 0.12f;
                 main.maxParticles = 80;
                 main.simulationSpace = ParticleSystemSimulationSpace.World;  // particles trail behind player
                 main.scalingMode = ParticleSystemScalingMode.Local;
@@ -274,6 +290,11 @@ namespace CompetitiveRounds
                 {
                     case "trail_phoenix": tint = new Color(1f, 0.65f, 0.15f, 1f); break;
                     case "trail_void":    tint = new Color(0.6f, 0.25f, 0.95f, 1f); break;
+                    case "trail_aurora":  tint = Color.white; break;  // preserve its color-over-lifetime gradient
+                    case "trail_stardust": tint = Color.white; break;
+                    case "trail_toxic":   tint = new Color(0.65f, 1f, 0.3f, 1f); break;
+                    case "trail_firefly": tint = new Color(1f, 0.85f, 0.35f, 1f); break;
+                    case "trail_galaxy":  tint = Color.white; break;  // white-blue-violet gradient supplies its color
                     case "trail_tride":   tint = new Color(0.95f, 0.78f, 0.87f, 1f); break;  // soft pink — trans palette base
                     default:              tint = new Color(1f, 1f, 1f, 1f); break;  // prism — colorOverLifetime supplies the rainbow
                 }
@@ -281,7 +302,12 @@ namespace CompetitiveRounds
 
                 var emission = ps.emission;
                 emission.enabled = true;
-                emission.rateOverTime = sku == "trail_void" ? 14f : 22f;
+                if (sku == "trail_aurora") emission.rateOverTime = 20f;  // dense shimmer
+                else if (sku == "trail_stardust") emission.rateOverTime = 24f;  // frequent brief twinkles
+                else if (sku == "trail_toxic") emission.rateOverTime = 18f;  // visible droplets without a solid cloud
+                else if (sku == "trail_firefly") emission.rateOverTime = 10f;  // sparse identifiable sparks
+                else if (sku == "trail_galaxy") emission.rateOverTime = 16f;  // sparse because stars linger
+                else emission.rateOverTime = sku == "trail_void" ? 14f : 22f;
 
                 var shape = ps.shape;
                 shape.enabled = true;
@@ -313,6 +339,28 @@ namespace CompetitiveRounds
                             new GradientColorKey(ParseHex("#55CDFC"), 0f),
                             new GradientColorKey(ParseHex("#F7A8B8"), 0.5f),
                             new GradientColorKey(Color.white,        1f),
+                        },
+                        new[] { new GradientAlphaKey(0.95f, 0f), new GradientAlphaKey(0f, 1f) });
+                }
+                else if (sku == "trail_aurora")
+                {
+                    // Green-to-violet shimmer follows the world trail palette.
+                    cg.SetKeys(
+                        new[] {
+                            new GradientColorKey(ParseHex("#4DFF9E"), 0f),
+                            new GradientColorKey(ParseHex("#2EC8E6"), 0.5f),
+                            new GradientColorKey(ParseHex("#7A5CFF"), 1f),
+                        },
+                        new[] { new GradientAlphaKey(0.95f, 0f), new GradientAlphaKey(0f, 1f) });
+                }
+                else if (sku == "trail_galaxy")
+                {
+                    // Cool white stars drift through blue into violet before fading.
+                    cg.SetKeys(
+                        new[] {
+                            new GradientColorKey(Color.white, 0f),
+                            new GradientColorKey(ParseHex("#7AB4FF"), 0.5f),
+                            new GradientColorKey(ParseHex("#7A5CFF"), 1f),
                         },
                         new[] { new GradientAlphaKey(0.95f, 0f), new GradientAlphaKey(0f, 1f) });
                 }
@@ -349,7 +397,7 @@ namespace CompetitiveRounds
             }
         }
 
-        // Per-SKU multi-stop gradients for 5k+ trails. Returns null for trails that should
+        // Per-SKU multi-stop gradients for 4k+ trails. Returns null for trails that should
         // keep the cheap single-color alpha fade (3k tier) — caller falls back to start/endColor.
         // Stops are along the trail's tail (0 = newest, 1 = oldest), with alpha fading to 0 at the tip.
         private static Gradient BuildGradientForSku(string sku, Color baseColor)
@@ -389,6 +437,42 @@ namespace CompetitiveRounds
                         new[] { 0f, 0.25f, 0.5f, 0.75f, 1f });
                 case "trail_prism":    // PrismaticHueCycle drives this per-frame via start/endColor — return null so it gets the 2-key path.
                     return null;
+                case "trail_sunset":    // Orange melting into pink
+                    return MakeGradient(
+                        new[] { ParseHex("#FF7A2F"), ParseHex("#FF4E88") },
+                        new[] { 0f, 1f });
+                case "trail_ember":     // Bright ember cooling into ash
+                    return MakeGradient(
+                        new[] { ParseHex("#FF8A3C"), ParseHex("#5A2A20") },
+                        new[] { 0f, 1f });
+                case "trail_lagoon":    // Tropical teal sinking into deep blue
+                    return MakeGradient(
+                        new[] { ParseHex("#2EE6C8"), ParseHex("#1E5AC8") },
+                        new[] { 0f, 1f });
+                case "trail_dusk":      // Dusty rose fading into indigo
+                    return MakeGradient(
+                        new[] { ParseHex("#C87890"), ParseHex("#40348C") },
+                        new[] { 0f, 1f });
+                case "trail_aurora":    // Green through teal into violet
+                    return MakeGradient(
+                        new[] { ParseHex("#4DFF9E"), ParseHex("#2EC8E6"), ParseHex("#7A5CFF") },
+                        new[] { 0f, 0.5f, 1f });
+                case "trail_stardust":  // Midnight blue into silver
+                    return MakeGradient(
+                        new[] { ParseHex("#24306E"), ParseHex("#C8D4FF") },
+                        new[] { 0f, 1f });
+                case "trail_toxic":     // Radioactive green into lime
+                    return MakeGradient(
+                        new[] { ParseHex("#46E62E"), ParseHex("#B4FF3C") },
+                        new[] { 0f, 1f });
+                case "trail_firefly":   // Dark wake; warm particles carry the identity
+                    return MakeGradient(
+                        new[] { ParseHex("#14321E"), ParseHex("#060A08") },
+                        new[] { 0f, 1f });
+                case "trail_galaxy":    // Deep violet through blue starlight
+                    return MakeGradient(
+                        new[] { ParseHex("#1A1033"), ParseHex("#4A2C8C"), ParseHex("#7AB4FF") },
+                        new[] { 0f, 0.5f, 1f });
                 default:
                     return null;
             }
@@ -608,6 +692,48 @@ namespace CompetitiveRounds
                 case "trail_titan":
                     fx.startColor = Hex("#FF4848"); fx.midColor = Color.Lerp(Hex("#FF4848"), Hex("#CC9AAB"), 0.5f);
                     fx.endColor   = new Color(Hex("#CC9AAB").r, Hex("#CC9AAB").g, Hex("#CC9AAB").b, 0f);
+                    break;
+                case "trail_sunset":
+                    fx.startColor = Hex("#FF7A2F"); fx.midColor = Color.Lerp(Hex("#FF7A2F"), Hex("#FF4E88"), 0.5f);
+                    fx.endColor   = new Color(Hex("#FF4E88").r, Hex("#FF4E88").g, Hex("#FF4E88").b, 0f);
+                    break;
+                case "trail_ember":
+                    fx.startColor = Hex("#FF8A3C"); fx.midColor = Color.Lerp(Hex("#FF8A3C"), Hex("#5A2A20"), 0.5f);
+                    fx.endColor   = new Color(Hex("#5A2A20").r, Hex("#5A2A20").g, Hex("#5A2A20").b, 0f);
+                    break;
+                case "trail_lagoon":
+                    fx.startColor = Hex("#2EE6C8"); fx.midColor = Color.Lerp(Hex("#2EE6C8"), Hex("#1E5AC8"), 0.5f);
+                    fx.endColor   = new Color(Hex("#1E5AC8").r, Hex("#1E5AC8").g, Hex("#1E5AC8").b, 0f);
+                    break;
+                case "trail_dusk":
+                    fx.startColor = Hex("#C87890"); fx.midColor = Color.Lerp(Hex("#C87890"), Hex("#40348C"), 0.5f);
+                    fx.endColor   = new Color(Hex("#40348C").r, Hex("#40348C").g, Hex("#40348C").b, 0f);
+                    break;
+                case "trail_aurora":
+                    fx.startColor = Hex("#4DFF9E"); fx.midColor = Hex("#2EC8E6");
+                    fx.endColor   = new Color(Hex("#7A5CFF").r, Hex("#7A5CFF").g, Hex("#7A5CFF").b, 0f);
+                    break;
+                case "trail_stardust":
+                    fx.startColor = Hex("#24306E"); fx.midColor = Color.Lerp(Hex("#24306E"), Hex("#C8D4FF"), 0.5f);
+                    fx.endColor   = new Color(Hex("#C8D4FF").r, Hex("#C8D4FF").g, Hex("#C8D4FF").b, 0f);
+                    break;
+                case "trail_toxic":
+                    fx.startColor = Hex("#46E62E"); fx.midColor = Color.Lerp(Hex("#46E62E"), Hex("#B4FF3C"), 0.5f);
+                    fx.endColor   = new Color(Hex("#B4FF3C").r, Hex("#B4FF3C").g, Hex("#B4FF3C").b, 0f);
+                    break;
+                case "trail_firefly":
+                    // Mostly-dark dots punctuated by yellow reads as sparks rather than a gold trail.
+                    fx.cycleColors = new[] {
+                        Hex("#14321E"), Hex("#14321E"), Hex("#060A08"), Hex("#FFD24A"),
+                        Hex("#14321E"), Hex("#060A08"), Hex("#060A08"), Hex("#FFD24A"),
+                    };
+                    fx.preserveSpawnColor = true;
+                    fx.startColor = Hex("#14321E"); fx.midColor = Hex("#FFD24A");
+                    fx.endColor   = new Color(0f, 0f, 0f, 0f);
+                    break;
+                case "trail_galaxy":
+                    fx.startColor = Hex("#1A1033"); fx.midColor = Hex("#4A2C8C");
+                    fx.endColor   = new Color(Hex("#7AB4FF").r, Hex("#7AB4FF").g, Hex("#7AB4FF").b, 0f);
                     break;
                 case "trail_tride":
                     // Standard trans-pride cyan + pink, no white (white melted everything together

@@ -509,6 +509,11 @@ class CardStatEntry(BaseModel):
     win_rate: float
     times_offered: int = 0
     pass_rate: float = 0.0  # Fraction of offerings rejected (0..1). Only meaningful when times_offered > 0.
+    # Aug 31 (Compare > Cards metrics): 5-0 match wins carrying the card, and
+    # builds that stacked >= 2 copies of it. Defaults keep a stale replica's
+    # rows parseable (#422 — new response fields, absent until it rebuilds).
+    sweeps_with_card: int = 0
+    stacked_builds: int = 0
 
     model_config = {"from_attributes": True}
 

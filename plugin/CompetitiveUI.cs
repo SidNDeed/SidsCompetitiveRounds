@@ -257,7 +257,7 @@ namespace CompetitiveRounds
         // ── The modal set, defined ONCE ─────────────────────────────────────
         // Three hand-maintained copies of "is a modal on screen" used to exist:
         // the click-blocker assignment in DrawUI, DrawChatInput's T/M guard and
-        // DrawQuickChat's Y guard. They had drifted — neither hotkey guard
+        // DrawQuickChat's open guard (Q since Aug 31). They had drifted — neither hotkey guard
         // listed the generic yes/no confirm (DrawConfirm) or the spectator
         // leave menu, so pressing M behind either cycled and PERSISTED the chat
         // overlay mode underneath it and toasted about it, and Y opened the
@@ -325,6 +325,7 @@ namespace CompetitiveRounds
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
+            DrawDancePreview();   // dance shop preview puppet (Aug 31 item 5)
             DrawSpawnSpotlight();
             // Item 10: the horizontal multi-entry band draws BEFORE the single
             // slot, because DrawNotification reads NotificationSetLift() to
@@ -336,7 +337,8 @@ namespace CompetitiveRounds
             DrawMatchStatus();
             DrawInGameChat();
             DrawChatInput();
-            DrawQuickChat();   // §2.6 key-based quick-chat (Y in an online room)
+            DrawQuickChat();   // §2.6 hold-Q radial quick-chat wheel (Aug 31)
+            DrawDanceWheel();  // hold-E dance wheel (Aug 31 item 5)
             DrawAdminPrompt();
             DrawConfirm();
             DrawBugReportModal();
@@ -357,6 +359,7 @@ namespace CompetitiveRounds
             DrawCompareSearch();
             DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
             DrawLeaderboardSearch();
+            DrawCardStatsSearch();   // Aug 31 — Card Stats card search
             DrawHistorySearch();  // Bug 263 — My Stats opponent search
             DrawInfoSearch();     // Aug 23 r2 — Info library article search
             DrawMapColorToast();
@@ -386,14 +389,14 @@ namespace CompetitiveRounds
             // a phrase click must not ALSO fire the shop/queue control
             // underneath, on EITHER input path.
             DrawRankedHintCallout();
-            bool anyModal = BackdroplessModalOpen || quickChatOpen;
+            bool anyModal = BackdroplessModalOpen || quickChatOpen || danceWheelOpen;
             NativeUI.SetClickBlocker(anyModal);
             // The raw-poll half additionally covers the modals that DO raise
             // their own uGUI backdrop (info popup, picker, language prompt,
             // consent) — a backdrop stops EventSystem clicks but not a
             // ClickHandler polling Input.GetMouseButtonDown itself (#141/#200).
             // Adding them to anyModal instead would double-blocker them.
-            ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen;
+            ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen || danceWheelOpen;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -1677,6 +1680,41 @@ namespace CompetitiveRounds
                 if (next != cur)
                 {
                     NativeUI.LeaderboardSearch = next;
+                    NativeUI.MarkDirty();
+                }
+            }
+            catch { /* search is best-effort cosmetic */ }
+        }
+
+        // Card Stats search (Aug 31) — 6th instance of the IMGUI-over-anchor
+        // clone, gated to tab 2, own focus flag feeding the T-chat mutex.
+        private static bool cardStatsSearchFocused = false;
+        public static bool IsCardStatsSearchFocused => cardStatsSearchFocused;
+        private const string CARDSTATS_SEARCH_CTRL = "CardStatsSearchField";
+        private static void DrawCardStatsSearch()
+        {
+            cardStatsSearchFocused = false;
+            try
+            {
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 2) return;
+                Rect r = NativeUI.GetCardStatsSearchScreenRect();
+                if (r.width < 1f || r.height < 1f) return;
+                if (compareSearchStyle == null)
+                    compareSearchStyle = new GUIStyle(GUI.skin.textField) { fontSize = 13, alignment = TextAnchor.MiddleLeft };
+                if (compareSearchHintStyle == null)
+                    compareSearchHintStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleLeft, richText = true };
+                float h = Mathf.Max(r.height, 22f);
+                var fieldRect = new Rect(r.x, r.y, Mathf.Max(r.width, 200f), h);
+                string cur = NativeUI.CardStatsSearch ?? "";
+                GUI.SetNextControlName(CARDSTATS_SEARCH_CTRL);
+                string next = GUI.TextField(fieldRect, cur, compareSearchStyle);
+                cardStatsSearchFocused = GUI.GetNameOfFocusedControl() == CARDSTATS_SEARCH_CTRL;
+                if (string.IsNullOrEmpty(next))
+                    GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
+                              I18n.Tr("<color=#7788AA><i>search cards...</i></color>"), compareSearchHintStyle);
+                if (next != cur)
+                {
+                    NativeUI.CardStatsSearch = next;
                     NativeUI.MarkDirty();
                 }
             }
@@ -6334,6 +6372,7 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning("[CHAT] chat box went unrendered for >0.5s — "
                                       + "force-closing and releasing the input lock");
                 quickChatOpen = false;   // the popup shares the lock (§2.6)
+                DwClose();               // so does the E wheel (round-3 PLAUSIBLE-low)
                 // Forced close: an upstream throw starved the renderer. The
                 // player never ended their message, so keep it (F4).
                 CloseChatInput(discardDraft: false);
@@ -6547,7 +6586,9 @@ namespace CompetitiveRounds
                 // 't' typed into any search box must never open T-chat).
                 || histSearchFocused
                 // Aug 23 r2: the Info library search field, same contract.
-                || infoSearchFocused) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
+                || infoSearchFocused
+                // Aug 31: the Card Stats search field, same contract.
+                || cardStatsSearchFocused) { quickChatOpen = false; DwClose(); CloseChatInput(discardDraft: false); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -6563,10 +6604,16 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning("[QUICKCHAT] popup went unrendered for >2s — force-closing");
                     quickChatOpen = false;
                 }
+                if (danceWheelOpen && Time.unscaledTime - danceWheelDrawStampedAt > 2f)
+                {
+                    Plugin.Log.LogWarning("[DANCE] wheel went unrendered for >2s — force-closing");
+                    DwClose();
+                }
                 // Assert-from-state, SINGLE WRITER (#200): the desired lock
                 // state is the union of every IMGUI surface that owns typing/
-                // clicking — currently the T-chat box and the quick-chat popup.
-                SetGameplayInputLock(quickChatOpen);
+                // clicking — the T-chat box, the Q quick-chat wheel, and the
+                // E dance wheel.
+                SetGameplayInputLock(quickChatOpen || danceWheelOpen);
                 // Vanilla's Enter chat owns the keyboard while it's open — T there
                 // is a literal 't' in their message, not our hotkey (bug #128).
                 if (IsVanillaChatTyping()) return;
@@ -6883,36 +6930,378 @@ namespace CompetitiveRounds
             }
         }
 
-        // ── Quick chat (§2.6 — key-based canned phrases) ─────────
-        // Y in an online room opens a phrase list; click or 1-9/0 sends the
-        // phrase KEY over Photon (QuickChat.Send); every recipient renders it
-        // in their OWN locale. While open, the same gameplay-input lock as the
+        // ── Quick chat (§2.6, Aug 31 rework: HOLD-Q radial wheel) ─────────
+        // HOLD Q in an online room to open a Fortnite-style wheel; the mouse
+        // DIRECTION from screen center picks a sector (no button precision
+        // needed — Sid: "direction matters more than clicking"); RELEASING Q
+        // (or clicking) sends the highlighted phrase. The bottom sector opens
+        // a second "More" wheel in click-to-send mode for the rarely-used
+        // phrases (social/recruiting lines + emoticons). The phrase KEY is
+        // sent over Photon (QuickChat.Send); every recipient renders it in
+        // their OWN locale. While open, the same gameplay-input lock as the
         // T-chat box is held (asserted by DrawChatInput, the single writer),
-        // so a click on a phrase can never also fire the gun.
+        // so a click or release can never also fire the gun / raise a block
+        // — the "absorbs shooting/blocking through the clicks" requirement.
+        // The 1-9 digit selection and the old list panel are RETIRED.
         private static bool quickChatOpen = false;
         private static float quickChatDrawStampedAt = -999f;
         public static bool IsQuickChatOpen => quickChatOpen;
+
+        // Wheel state. Stage 0 = main (hold-release), stage 1 = More (click).
+        private static int qcStage;
+        private static bool qcClickMode;
+        // Broadcast-only PAINT pin for headless layout verification (#420 —
+        // synthetic clicks cannot reach the overlay). Bypasses ONLY the
+        // in-room gate; sends still refuse offline, so nothing can leak.
+        internal static bool DevWheelPin;
+        internal static void DevReleaseQuickChatWheel() { DevWheelPin = false; QcClose(); }
+        internal static void DevForceQuickChatWheel(int stage)
+        {
+            quickChatOpen = true; qcStage = stage; qcClickMode = true;
+            qcHighlight = -1; qcOpenedAt = Time.unscaledTime; DevWheelPin = true;
+        }
+        private static int qcHighlight = -1;      // sector index, -1 = dead zone
+        private static float qcOpenedAt;
+        private static Texture2D qcDiscTex;
+        private static GUIStyle qcLabelStyle, qcLabelHiStyle, qcHintStyle;
+
+        // Main wheel: 8 sectors, index 0 at 12 o'clock, clockwise. Entries are
+        // wire ids into QuickChat.Phrases; -1 = the "More" category sector.
+        // GG and Hi! reuse REWORDED ids 1/12 so old clients still render them
+        // (see the Phrases table's comment).
+        private static readonly int[] QC_MAIN =
+            { 1, 3, 2, 14, -1, 15, 0, 12 };
+        // More wheel (click mode): social/recruiting + courtesy + emoticons.
+        private static readonly int[] QC_MORE =
+            { 16, 17, 18, 19, 5, 6, 4, 10, 9, 20, 21, 22 };
+
+        private static bool qcFontProbed;
+        private static void QcEnsureStyles()
+        {
+            if (qcDiscTex == null) qcDiscTex = BuildFfaDotTexture(false, "CR_QcDisc");
+            // One-shot glyph-coverage evidence (round-2 review G3): the wheels
+            // render through IMGUI, which never sees the TMP OS fallback
+            // (#110), so ru/uk labels depend on THIS font's own coverage.
+            if (!qcFontProbed)
+            {
+                qcFontProbed = true;
+                try
+                {
+                    // style.font null = inherit GUI.skin.font; both null =
+                    // Unity's builtin default (the font the T-chat overlay
+                    // already renders live Russian player chat with).
+                    var f = GUI.skin.label.font != null ? GUI.skin.label.font : GUI.skin.font;
+                    Plugin.Log.LogInfo($"[QC] IMGUI font '{(f != null ? f.name : "builtin-default")}' cyrillic={(f != null ? f.HasCharacter('я').ToString() : "n/a-builtin")}");
+                }
+                catch { }
+            }
+            if (qcLabelStyle == null)
+                qcLabelStyle = new GUIStyle(GUI.skin.label)
+                { fontSize = 14, alignment = TextAnchor.MiddleCenter, richText = true, clipping = TextClipping.Overflow, wordWrap = false };
+            if (qcLabelHiStyle == null)
+                qcLabelHiStyle = new GUIStyle(GUI.skin.label)
+                { fontSize = 16, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, richText = true, clipping = TextClipping.Overflow, wordWrap = false };
+            if (qcHintStyle == null)
+                qcHintStyle = new GUIStyle(GUI.skin.label)
+                { fontSize = 12, alignment = TextAnchor.MiddleCenter, richText = true, clipping = TextClipping.Overflow };
+        }
+
+        /// <summary>Sector label for a wheel entry: the phrase (Tr'd), long
+        /// recruiting lines shortened for the ring (the FULL phrase still
+        /// sends — receivers render the id, not this label).</summary>
+        private static string QcLabel(int id)
+        {
+            if (id == -1) return I18n.Tr("More...");
+            if (id < 0 || id >= QuickChat.Phrases.Length) return "?";
+            string p = QuickChat.Phrases[id];
+            // Ring labels for the two longest recruiting lines (the wheel is a
+            // ring of short labels; a 60-char sector label overlaps its
+            // neighbours at every resolution).
+            if (id == 17) return I18n.Tr("Join Competitive Rounds!");
+            if (id == 19) return I18n.Tr("I play with the SCR mod");
+            return I18n.Tr(p);
+        }
+
+        private static void QcClose()
+        {
+            quickChatOpen = false; qcStage = 0; qcHighlight = -1; qcClickMode = false;
+        }
+
+        private static void QcSend(int id)
+        {
+            if (id >= 0 && id < QuickChat.Phrases.Length)
+            {
+                if (!QuickChat.Send(id))
+                    ShowNotification(I18n.Tr("Quick chat is on cooldown - one message every couple of seconds."),
+                                     new Color(1f, 0.8f, 0.4f), 2f);
+            }
+            QcClose();
+        }
+
+        // ── Hold-E dance wheel (Aug 31 item 5) ───────────────────────────
+        // Same radial machinery as the Q wheel, over the OWNED dances only.
+        // Opens only when a dance could actually play (participant seat,
+        // DanceEmotes.WindowOpen — between rounds / lobby, never mid-battle)
+        // and a local body exists to dance with (offline sandbox included:
+        // Send() has a local install path there). Mutually exclusive with the
+        // Q wheel via both wheels' exclusion lists.
+        private static bool danceWheelOpen = false;
+        private static float danceWheelDrawStampedAt = -999f;
+        internal static bool IsDanceWheelOpen => danceWheelOpen;
+        private static int dwHighlight = -1;
+        private static float dwOpenedAt;
+        private static bool dwClickMode;
+        private static int[] dwIds;   // owned dance indexes, captured at open
+
+        private static void DwClose()
+        {
+            danceWheelOpen = false; dwHighlight = -1; dwClickMode = false; dwIds = null;
+        }
+
+        // Broadcast-only PAINT pin (#420) — all defined dances regardless of
+        // ownership (Send still refuses unowned, so nothing can leak).
+        internal static bool DevDanceWheelPin;
+        internal static void DevForceDanceWheel()
+        {
+            var all = new int[DanceEmotes.Defs.Length];
+            for (int i = 0; i < all.Length; i++) all[i] = i;
+            danceWheelOpen = true; dwIds = all;
+            dwHighlight = -1; dwClickMode = true; dwOpenedAt = Time.unscaledTime;
+            DevDanceWheelPin = true;
+        }
+        internal static void DevReleaseDanceWheel() { DevDanceWheelPin = false; DwClose(); }
+
+        private static void DwSend(int danceIdx)
+        {
+            if (!DanceEmotes.Send(danceIdx))
+                ShowNotification(I18n.Tr("Dance is on cooldown - try again in a moment."),
+                                 new Color(1f, 0.8f, 0.4f), 2f);
+            DwClose();
+        }
+
+        private static void DrawDanceWheel()
+        {
+            danceWheelDrawStampedAt = Time.unscaledTime;
+            if (!Plugin.DataConsentGranted) { DwClose(); return; }
+            // Same modal exclusions as the Q wheel, PLUS the Q wheel itself.
+            if (chatInputOpen || AnyModalOwnsInput || quickChatOpen
+                || compareSearchFocused || lbSearchFocused
+                || histSearchFocused || infoSearchFocused
+                || pickerSearchFocused || cardStatsSearchFocused) { DwClose(); return; }
+            if (IsVanillaChatTyping()) { DwClose(); return; }
+
+            var ev = Event.current;
+            if (!danceWheelOpen)
+            {
+                if (ev == null || ev.type != EventType.KeyDown || ev.keyCode != KeyCode.E) return;
+                if (IsAnotherTextInputActive()) return;
+                bool spec = false;
+                try { spec = RoomActors.LocalIsSpectator; } catch { }
+                if (spec) return;
+                // A body to dance with: any online room, or offline/sandbox
+                // with players spawned (#122 — OfflineMode lingers InRoom at
+                // the menu, where the empty players list keeps E inert).
+                bool hasStage = false;
+                try
+                {
+                    hasStage = Photon.Pun.PhotonNetwork.InRoom
+                        && (!Photon.Pun.PhotonNetwork.OfflineMode
+                            || (PlayerManager.instance != null
+                                && PlayerManager.instance.players != null
+                                && PlayerManager.instance.players.Count > 0));
+                }
+                catch { }
+                if (!hasStage) return;
+                if (!DanceEmotes.WindowOpen()) return;   // never mid-battle / mid-pick
+                var owned = DanceEmotes.OwnedDanceIndexes();
+                if (owned == null)
+                {
+                    // Shop cache never fetched this session — kick a fetch so
+                    // the NEXT press works, and say so (silent inert keys are
+                    // the #98 class).
+                    // AUTHENTICATED fetch only (round-2 review C2): an
+                    // anonymous fetch would overwrite the cache with
+                    // owned=false rows and erase the player's dances. No id
+                    // yet = nothing useful to fetch; the toast still shows.
+                    try
+                    {
+                        var sid = MatchTracker.LocalSteamId;
+                        if (!string.IsNullOrEmpty(sid) && sid != "unknown") ApiClient.FetchShopItems(sid);
+                    }
+                    catch { }
+                    ShowNotification(I18n.Tr("Loading your dances - try E again in a second."),
+                                     new Color(0.75f, 0.85f, 1f), 2.5f);
+                    ev.Use();
+                    return;
+                }
+                if (owned.Count == 0)
+                {
+                    ShowNotification(I18n.Tr("You don't own any dances yet - check the Shop's DANCES section!"),
+                                     new Color(1f, 0.85f, 0.5f), 3f);
+                    ev.Use();
+                    return;
+                }
+                danceWheelOpen = true;
+                dwIds = owned.ToArray();
+                dwHighlight = -1; dwClickMode = false;
+                dwOpenedAt = Time.unscaledTime;
+                ev.Use();
+                return;
+            }
+
+            // Open wheel upkeep. The window can slam shut under us (battle
+            // starts, card pick opens) — close rather than dangle a wheel
+            // whose Send would refuse. Room loss closes too (round-2 review
+            // C1: WindowOpen does not test InRoom, so a disconnect with the
+            // wheel in click mode stranded the input lock over the menu).
+            bool stillInRoom = false;
+            try { stillInRoom = Photon.Pun.PhotonNetwork.InRoom; } catch { }
+            if (!stillInRoom && !DevDanceWheelPin) { DwClose(); return; }
+            if (dwIds == null || dwIds.Length == 0 || !DanceEmotes.WindowOpen()) { DwClose(); return; }
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { DwClose(); ev.Use(); return; }
+            if (dwClickMode && ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.E)
+            { DwClose(); ev.Use(); return; }
+
+            QcEnsureStyles();
+            int n = dwIds.Length;
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
+            float R = Mathf.Min(Screen.width, Screen.height) * 0.24f;
+            float dead = R * 0.30f;
+
+            Vector2 mouse = ev != null ? ev.mousePosition
+                                       : new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
+            Vector2 d = new Vector2(mouse.x - cx, cy - mouse.y);
+            if (d.magnitude < dead) dwHighlight = -1;
+            else
+            {
+                float ang = Mathf.Atan2(d.x, d.y) * Mathf.Rad2Deg;
+                if (ang < 0f) ang += 360f;
+                float step = 360f / n;
+                dwHighlight = Mathf.FloorToInt(((ang + step * 0.5f) % 360f) / step);
+                if (dwHighlight >= n) dwHighlight = 0;
+            }
+
+            bool held = Input.GetKey(KeyCode.E);
+            bool clicked = ev != null && ev.type == EventType.MouseDown && ev.button == 0;
+            if (clicked) ev.Use();
+            if (clicked)
+            {
+                if (dwHighlight < 0) DwClose();
+                else DwSend(dwIds[dwHighlight]);
+                return;
+            }
+            if (!dwClickMode && !held && Time.unscaledTime - dwOpenedAt > 0.25f)
+            {
+                if (dwHighlight >= 0) { DwSend(dwIds[dwHighlight]); return; }
+                dwClickMode = true;   // released over the dead zone: stay open, clicks confirm
+            }
+
+            if (ev == null || ev.type != EventType.Repaint) return;
+            GUI.DrawTexture(new Rect(cx - R * 1.45f, cy - R * 1.45f, R * 2.9f, R * 2.9f),
+                qcDiscTex, ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.55f), 0, 0);
+            GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
+                $"<color=#FFC8F0><b>{I18n.Tr("Dances")}</b></color>", qcHintStyle);
+            GUI.Label(new Rect(cx - 120f, cy + 2f, 240f, 20f),
+                $"<color=#8899AA>{I18n.Tr("point + release E to dance")}</color>", qcHintStyle);
+            if (dwHighlight >= 0)
+            {
+                Vector2 dirN = d.normalized;
+                GuiLine(new Vector2(cx + dirN.x * dead * 0.8f, cy - dirN.y * dead * 0.8f),
+                        new Vector2(cx + dirN.x * R * 0.72f, cy - dirN.y * R * 0.72f),
+                        new Color(1f, 0.78f, 0.94f, 0.7f), 2f);
+            }
+            for (int i = 0; i < n; i++)
+            {
+                float ang = (360f / n) * i;
+                float rad = ang * Mathf.Deg2Rad;
+                float lx = cx + Mathf.Sin(rad) * R;
+                float ly = cy - Mathf.Cos(rad) * R;
+                bool hi = i == dwHighlight;
+                if (hi)
+                    GUI.DrawTexture(new Rect(lx - 92f, ly - 20f, 184f, 40f), qcDiscTex,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.55f, 0.30f, 0.48f, 0.88f), 0, 0);
+                else
+                    GUI.DrawTexture(new Rect(lx - 80f, ly - 16f, 160f, 32f), qcDiscTex,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.10f, 0.08f, 0.14f, 0.72f), 0, 0);
+                int di = dwIds[i];
+                string label = di >= 0 && di < DanceEmotes.Defs.Length ? I18n.Tr(DanceEmotes.Defs[di].Name) : "?";
+                GUI.Label(new Rect(lx - 100f, ly - 16f, 200f, 32f),
+                          hi ? $"<color=#FFFFFF>{label}</color>" : $"<color=#E0C8D8>{label}</color>",
+                          hi ? qcLabelHiStyle : qcLabelStyle);
+            }
+        }
+
+        // ── Dance shop preview puppet (Aug 31 item 5) ────────────────────
+        // Driven by DanceEmotes.TryGetPreviewPose — the SAME Evaluate() that
+        // moves real bodies, so what the buyer sees is what they get.
+        // Repaint-only, display-only, no input (#162).
+        private static void DrawDancePreview()
+        {
+            try
+            {
+                var ev = Event.current;
+                if (ev == null || ev.type != EventType.Repaint) return;
+                string name; Vector2 body, al, ar;
+                if (!DanceEmotes.TryGetPreviewPose(out name, out body, out al, out ar)) return;
+                QcEnsureStyles();
+                var tex = Texture2D.whiteTexture;
+                const float S = 55f;   // px per world unit
+                float w = 250f, h = 300f;
+                float x = Screen.width - w - 40f;
+                float y = (Screen.height - h) * 0.5f;
+                GUI.DrawTexture(new Rect(x, y, w, h), tex, ScaleMode.StretchToFill, true, 0,
+                    new Color(0.07f, 0.08f, 0.12f, 0.93f), 0, 0);
+                GUI.Label(new Rect(x, y + 8f, w, 20f),
+                    $"<color=#FFC8F0><b>{I18n.TrF("Preview: {0}", I18n.Tr(name))}</b></color>", qcHintStyle);
+                GUI.Label(new Rect(x, y + h - 26f, w, 20f),
+                    $"<color=#8899AA>{I18n.Tr("click Preview again to stop")}</color>", qcHintStyle);
+                // Puppet. Rest body center sits low in the panel; +y offsets
+                // move UP on screen. Proportions mirror a ROUNDS body (~1 unit
+                // across) at 55 px/unit with shoulder-hung arm targets.
+                float px = x + w * 0.5f, py0 = y + h - 90f;
+                GuiLine(new Vector2(x + 30f, py0 + 30f), new Vector2(x + w - 30f, py0 + 30f),
+                        new Color(0.35f, 0.38f, 0.45f, 0.8f), 2f);   // ground
+                float bx = px + body.x * S, by = py0 - body.y * S;
+                GUI.DrawTexture(new Rect(bx - 22f, by - 22f, 44f, 44f), tex,
+                    ScaleMode.StretchToFill, true, 0, new Color(0.95f, 0.55f, 0.20f, 1f), 0, 0);   // orange-team body
+                GUI.DrawTexture(new Rect(bx - 10f, by - 8f, 6f, 6f), tex,
+                    ScaleMode.StretchToFill, true, 0, new Color(0.1f, 0.1f, 0.1f, 1f), 0, 0);      // eyes
+                GUI.DrawTexture(new Rect(bx + 4f, by - 8f, 6f, 6f), tex,
+                    ScaleMode.StretchToFill, true, 0, new Color(0.1f, 0.1f, 0.1f, 1f), 0, 0);
+                // Arms: shoulder -> hand (rest hand hangs low+out; offsets are
+                // the arm-target deltas the live channel applies).
+                Vector2 shL = new Vector2(bx - 22f, by);
+                Vector2 shR = new Vector2(bx + 22f, by);
+                Vector2 hnL = new Vector2(shL.x - 14f + al.x * S, shL.y + 18f - al.y * S);
+                Vector2 hnR = new Vector2(shR.x + 14f + ar.x * S, shR.y + 18f - ar.y * S);
+                var armCol = new Color(0.95f, 0.55f, 0.20f, 1f);
+                GuiLine(shL, hnL, armCol, 5f);
+                GuiLine(shR, hnR, armCol, 5f);
+                GUI.DrawTexture(new Rect(hnL.x - 5f, hnL.y - 5f, 10f, 10f), tex,
+                    ScaleMode.StretchToFill, true, 0, armCol, 0, 0);
+                GUI.DrawTexture(new Rect(hnR.x - 5f, hnR.y - 5f, 10f, 10f), tex,
+                    ScaleMode.StretchToFill, true, 0, armCol, 0, 0);
+            }
+            catch { }
+        }
 
         private static void DrawQuickChat()
         {
             // Liveness stamp read by DrawChatInput's guardian.
             quickChatDrawStampedAt = Time.unscaledTime;
-            if (!Plugin.DataConsentGranted) { quickChatOpen = false; return; }
+            if (!Plugin.DataConsentGranted) { QcClose(); return; }
             // Same modal exclusions as the chat box, from the same shared set:
-            // Y must type into a modal's text field rather than open the popup,
+            // Q must type into a modal's text field rather than open the wheel,
             // and no hotkey may fire behind a modal that has no text field at
-            // all. An already-open popup yields to any of them. This was a
-            // hand-copied subset of AnyModalOwnsInput and had drifted the same
-            // way DrawChatInput's copy had (Aug 12 UI review) — one list now.
-            if (chatInputOpen || AnyModalOwnsInput
+            // all. An already-open wheel yields to any of them.
+            if (chatInputOpen || AnyModalOwnsInput || danceWheelOpen
                 || compareSearchFocused || lbSearchFocused
-                // Bug 263 review r1 find 2: the history search field too, or
-                // typing 'Y' into it opens quick-chat and eats the key.
                 || histSearchFocused
-                // Aug 23 r2: the Info library search field, same contract.
                 || infoSearchFocused
-                || pickerSearchFocused) { quickChatOpen = false; return; }
-            if (IsVanillaChatTyping()) { quickChatOpen = false; return; }
+                || pickerSearchFocused
+                || cardStatsSearchFocused) { QcClose(); return; }
+            if (IsVanillaChatTyping()) { QcClose(); return; }
 
             bool inRoom = false;
             try { inRoom = Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode; } catch { }
@@ -6920,53 +7309,128 @@ namespace CompetitiveRounds
 
             if (!quickChatOpen)
             {
-                if (inRoom && ev != null && ev.type == EventType.KeyDown
-                    && ev.keyCode == KeyCode.Y && !IsAnotherTextInputActive())
+                // Spectators cannot send (QuickChat.Send refuses) — don't
+                // tease them with a wheel either.
+                bool spec = false;
+                try { spec = RoomActors.LocalIsSpectator; } catch { }
+                if (inRoom && !spec && ev != null && ev.type == EventType.KeyDown
+                    && ev.keyCode == KeyCode.Q && !IsAnotherTextInputActive())
                 {
                     quickChatOpen = true;
+                    qcStage = 0; qcHighlight = -1; qcClickMode = false;
+                    qcOpenedAt = Time.unscaledTime;
                     ev.Use();
                 }
                 return;
             }
-            if (!inRoom) { quickChatOpen = false; return; }
+            if (!inRoom && !DevWheelPin) { QcClose(); return; }
 
-            if (ev != null && ev.type == EventType.KeyDown)
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { QcClose(); ev.Use(); return; }
+            // Q pressed again while in a click-mode wheel = dismiss (the main
+            // hold gesture closes on RELEASE below; a fresh KeyDown can only
+            // mean the More wheel or a tap-opened wheel).
+            if ((qcStage == 1 || qcClickMode) && ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Q)
+            { QcClose(); ev.Use(); return; }
+
+            QcEnsureStyles();
+            var ids = qcStage == 0 ? QC_MAIN : QC_MORE;
+            int n = ids.Length;
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
+            float R = Mathf.Min(Screen.width, Screen.height) * 0.26f;
+            // The 12-sector More wheel spreads on an ELLIPSE — at 30-degree
+            // steps the near-horizontal neighbours would otherwise sit one
+            // label-width apart and overlap.
+            float Rx = qcStage == 1 ? R * 1.5f : R;
+            float Ry = qcStage == 1 ? R * 0.95f : R;
+            float dead = R * 0.30f;
+
+            // Direction -> sector. IMGUI mouse Y grows downward; sector 0 sits
+            // at 12 o'clock and indices run clockwise.
+            Vector2 mouse = ev != null ? ev.mousePosition
+                                       : new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
+            Vector2 d = new Vector2(mouse.x - cx, cy - mouse.y);   // +y = up
+            if (d.magnitude < dead) qcHighlight = -1;
+            else
             {
-                if (ev.keyCode == KeyCode.Escape || ev.keyCode == KeyCode.Y)
-                {
-                    quickChatOpen = false; ev.Use(); return;
-                }
-                int sel = -1;
-                if (ev.keyCode >= KeyCode.Alpha1 && ev.keyCode <= KeyCode.Alpha9)
-                    sel = ev.keyCode - KeyCode.Alpha1;
-                else if (ev.keyCode == KeyCode.Alpha0) sel = 9;
-                if (sel >= 0 && sel < QuickChat.Phrases.Length)
-                {
-                    QuickChat.Send(sel);
-                    quickChatOpen = false; ev.Use(); return;
-                }
+                float ang = Mathf.Atan2(d.x, d.y) * Mathf.Rad2Deg;  // 0 = up, clockwise positive
+                if (ang < 0f) ang += 360f;
+                float step = 360f / n;
+                qcHighlight = Mathf.FloorToInt(((ang + step * 0.5f) % 360f) / step);
+                if (qcHighlight >= n) qcHighlight = 0;
             }
 
-            int n = QuickChat.Phrases.Length;
-            const int cols = 2;
-            int rows = (n + cols - 1) / cols;
-            float bw = 250, bh = 26, pad = 6;
-            float w = cols * bw + pad * 3, h = rows * (bh + 4) + 38;
-            float x = 20, y = Screen.height - h - 150;
-            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
-                ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.85f), 0, 0);
-            GUI.Label(new Rect(x + 8, y + 6, w - 16, 20),
-                I18n.Tr("Quick chat — click a phrase (or keys 1-0). Y/Esc closes."));
+            // CONFIRM gestures. Main wheel: releasing Q (polled via GetKey —
+            // key STATE is exactly what a hold-gesture wants, and IMGUI's
+            // KeyUp can be swallowed by focus churn) or a click. Releasing
+            // over the DEAD ZONE flips the wheel into click-mode instead of
+            // closing — so a quick tap of Q shows the wheel and clicks then
+            // confirm (tap Q again / Esc dismisses). The 0.25s grace ignores
+            // the release that belongs to the opening tap itself. More wheel:
+            // click only (the hold ended when it opened).
+            bool held = Input.GetKey(KeyCode.Q);
+            bool clicked = ev != null && ev.type == EventType.MouseDown && ev.button == 0;
+            if (clicked) ev.Use();
+            if (clicked)
+            {
+                if (qcHighlight < 0) QcClose();                    // click the center = dismiss
+                else if (qcStage == 0 && ids[qcHighlight] == -1)
+                { qcStage = 1; qcHighlight = -1; qcOpenedAt = Time.unscaledTime; qcClickMode = true; }
+                else QcSend(ids[qcHighlight]);
+                return;
+            }
+            if (qcStage == 0 && !qcClickMode && !held
+                && Time.unscaledTime - qcOpenedAt > 0.25f)
+            {
+                if (qcHighlight >= 0)
+                {
+                    if (ids[qcHighlight] == -1)
+                    { qcStage = 1; qcHighlight = -1; qcOpenedAt = Time.unscaledTime; qcClickMode = true; }
+                    else QcSend(ids[qcHighlight]);
+                    return;
+                }
+                qcClickMode = true;   // released over the dead zone: stay open, clicks confirm
+            }
+
+            // ── Paint (Repaint only — input above runs on every event) ──
+            if (ev == null || ev.type != EventType.Repaint) return;
+            // Dim backdrop disc + center hint.
+            GUI.DrawTexture(new Rect(cx - Rx * 1.45f, cy - Ry * 1.45f, Rx * 2.9f, Ry * 2.9f),
+                qcDiscTex, ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.55f), 0, 0);
+            string hint = qcStage == 0
+                ? I18n.Tr("point + release Q to send")
+                : I18n.Tr("click a phrase - Esc closes");
+            GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
+                $"<color=#AECBFF><b>{I18n.Tr("Quick chat")}</b></color>", qcHintStyle);
+            GUI.Label(new Rect(cx - 120f, cy + 2f, 240f, 20f),
+                $"<color=#8899AA>{hint}</color>", qcHintStyle);
+            // Pointer line toward the cursor while a sector is live.
+            if (qcHighlight >= 0)
+            {
+                Vector2 dirN = d.normalized;
+                GuiLine(new Vector2(cx + dirN.x * dead * 0.8f, cy - dirN.y * dead * 0.8f),
+                        new Vector2(cx + dirN.x * R * 0.72f, cy - dirN.y * R * 0.72f),
+                        new Color(0.68f, 0.8f, 1f, 0.7f), 2f);
+            }
             for (int i = 0; i < n; i++)
             {
-                int c = i % cols, r = i / cols;
-                var rect = new Rect(x + pad + c * (bw + pad), y + 30 + r * (bh + 4), bw, bh);
-                string digit = i < 10 ? $"{(i + 1) % 10}. " : "";
-                if (GUI.Button(rect, digit + I18n.Tr(QuickChat.Phrases[i])))
-                {
-                    QuickChat.Send(i);
-                    quickChatOpen = false;
-                }
+                float ang = (360f / n) * i;
+                float rad = ang * Mathf.Deg2Rad;
+                float lx = cx + Mathf.Sin(rad) * Rx;
+                float ly = cy - Mathf.Cos(rad) * Ry;
+                bool hi = i == qcHighlight;
+                if (hi)
+                    GUI.DrawTexture(new Rect(lx - 92f, ly - 20f, 184f, 40f), qcDiscTex,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.25f, 0.42f, 0.72f, 0.85f), 0, 0);
+                else
+                    GUI.DrawTexture(new Rect(lx - 80f, ly - 16f, 160f, 32f), qcDiscTex,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.08f, 0.10f, 0.16f, 0.72f), 0, 0);
+                string label = QcLabel(ids[i]);
+                string colored = ids[i] == -1
+                    ? $"<color=#FFD94D>{label}</color>"
+                    : (hi ? $"<color=#FFFFFF>{label}</color>" : $"<color=#C8D2E0>{label}</color>");
+                GUI.Label(new Rect(lx - 100f, ly - 16f, 200f, 32f), colored,
+                          hi ? qcLabelHiStyle : qcLabelStyle);
             }
         }
 

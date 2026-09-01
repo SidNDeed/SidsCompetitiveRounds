@@ -8805,10 +8805,26 @@ async def poll_tournaments():
         # Completion: grant trophies + announce
         if status == "completed" and tid not in _notified_completed:
             _notified_completed.add(tid)
-            await _grant_trophy(t, t.get("winner_signup_id"), TROPHY_ROLE_1)
-            await _grant_trophy(t, t.get("runner_up_signup_id"), TROPHY_ROLE_2)
-            await _grant_trophy(t, t.get("third_place_signup_id"), TROPHY_ROLE_3)
-            await _grant_participant(t)
+            # Aug 31 (Sid): Discord ROLE rewards only for tournaments with 16+
+            # players — smaller brackets keep prizes, achievements and the
+            # announcement, but hand out no roles (winner/runner-up/third AND
+            # participant alike). The count is the server's prize_players —
+            # the at-lock confirmed (non-speculative) count, same number the
+            # prize scaling uses — with a live non-speculative recount as the
+            # fallback for a pre-scaling API payload.
+            _role_n = int(t.get("prize_players") or 0)
+            if _role_n <= 0:
+                _role_n = sum(1 for s in t.get("signups", [])
+                              if not s.get("is_speculative"))
+            _roles_granted = _role_n >= 16
+            if _roles_granted:
+                await _grant_trophy(t, t.get("winner_signup_id"), TROPHY_ROLE_1)
+                await _grant_trophy(t, t.get("runner_up_signup_id"), TROPHY_ROLE_2)
+                await _grant_trophy(t, t.get("third_place_signup_id"), TROPHY_ROLE_3)
+                await _grant_participant(t)
+            else:
+                print(f"[TOURNAMENT-POLL] {tid}: {_role_n} players (<16) — "
+                      f"no trophy/participant roles for this bracket")
             # Build podium announcement
             name_for = {s["signup_id"]: s["display_name"] for s in t.get("signups", [])}
             winner = name_for.get(t.get("winner_signup_id"), "?")
@@ -8820,9 +8836,13 @@ async def poll_tournaments():
             pg = t.get("prize_gold") or []
             px = t.get("prize_xp") or []
             pp = t.get("prize_players") or 0
+            # Only promise trophy roles the 16-player gate actually granted
+            # (round-2 review F-low: an 8-player bracket's post said
+            # "+ trophy roles" while the gate had just skipped them).
+            _roles_txt = " + trophy roles" if _roles_granted else ""
             if len(pg) == 3 and len(px) == 3:
                 prize_txt = (f"{pg[0]}g/{px[0]}xp · {pg[1]}g/{px[1]}xp · {pg[2]}g/{px[2]}xp "
-                             f"at {pp} players + trophy roles")
+                             f"at {pp} players{_roles_txt}")
             else:
                 # Fallback amounts refreshed Aug 23 (the old 500/300/60 tiers
                 # matched no live amount): base pool at 8 players, doubling
@@ -8832,7 +8852,7 @@ async def poll_tournaments():
                 # quoting today's amounts would misstate what that server
                 # actually pays (Codex fix-batch find 6). Say so instead.
                 prize_txt = ("(cancelled)" if tier == "none"
-                             else "prizes + trophy roles (amounts unavailable from this API version)")
+                             else f"prizes{_roles_txt} (amounts unavailable from this API version)")
             await _announce_in_channel(
                 f"**Tournament complete.**  1st: **{winner}** · 2nd: {runner} · 3rd: {third}  ({prize_txt})"
             )

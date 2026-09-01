@@ -2658,6 +2658,69 @@ async def _mint_forfeit_decided_podium(db: AsyncSession, t: Tournament) -> list:
     return minted
 
 
+async def _grant_tournament_achievements(db: AsyncSession, t: Tournament) -> None:
+    """Aug 31 (Sid): the five tournament achievements, granted from inside
+    _maybe_complete_tournament's completion transaction — the exactly-once
+    site (the CAS claimed 'completed' just above, and a provenance rollback
+    retracts these rows with the prizes). Champion/Finalist come from the
+    tournament row's podium fields, split by kind (sync|async).
+
+    IRON BRACKET (spec, Sid verbatim): "played through all the way — didn't
+    forfeit any matches and wasn't forfeited; matches where the opponent was
+    forfeited still count." Encoded per the tournament data model (#recon):
+      - disqualified: any 'double_forfeit' the signup sat in, or any
+        'forfeit' where the signup was NOT the winner seat (for status
+        'forfeit', winner_signup_id IS the non-forfeiting side — this single
+        predicate covers no-shows, bans, intent-silence AND voluntary
+        concessions, which the signups.forfeited flag deliberately misses).
+      - counts as played: 'completed' either way, and 'forfeit' won by the
+        signup (the OPPONENT forfeited).
+      - byes are neutral (no opponent existed); leavers self-exclude because
+        _handle_leaving_signup deletes their signup row.
+      - the signups.forfeited belt stays as defense in depth.
+    Every grant is idempotent (_grant_achievement_inline), so a tournament
+    completed twice through some future path cannot double-pay."""
+    from main import _grant_achievement_inline  # noqa: PLC0415 — file convention
+    kind = "sync" if (t.kind or "") == "sync" else "async"
+
+    async def _pid_of(signup_id):
+        if signup_id is None:
+            return None
+        return (await db.execute(text(
+            "SELECT player_id FROM tournament_signups WHERE id = :sid"),
+            {"sid": str(signup_id)})).scalar_one_or_none()
+
+    champ = await _pid_of(t.winner_signup_id)
+    second = await _pid_of(t.runner_up_signup_id)
+    if champ is not None:
+        await _grant_achievement_inline(db, champ, f"tourn_champion_{kind}")
+    if second is not None:
+        await _grant_achievement_inline(db, second, f"tourn_second_{kind}")
+
+    iron = (await db.execute(text("""
+        SELECT s.player_id
+          FROM tournament_signups s
+         WHERE s.tournament_id = :tid
+           AND NOT s.is_speculative
+           AND s.player_id IS NOT NULL
+           AND NOT s.forfeited
+           AND EXISTS (SELECT 1 FROM tournament_matches mp
+                        WHERE mp.tournament_id = :tid
+                          AND (mp.p1_signup_id = s.id OR mp.p2_signup_id = s.id))
+           AND NOT EXISTS (
+               SELECT 1 FROM tournament_matches m
+                WHERE m.tournament_id = :tid
+                  AND (m.p1_signup_id = s.id OR m.p2_signup_id = s.id)
+                  AND (m.status = 'double_forfeit'
+                       OR (m.status = 'forfeit' AND m.winner_signup_id IS DISTINCT FROM s.id)))
+    """), {"tid": str(t.id)})).scalars().all()
+    for pid in iron:
+        await _grant_achievement_inline(db, pid, "tourn_iron_bracket")
+    if champ is not None or second is not None or iron:
+        print(f"[TOURNAMENT] {t.id} achievements: champion={champ} second={second} "
+              f"iron_bracket={len(iron)} (kind={kind})")
+
+
 async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
     """Complete tournament when the appropriate terminal matches are done.
     Sync (single-elim): final + TP.
@@ -2807,6 +2870,10 @@ async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
                           f"[TOURNAMENT] lines). Present placements ARE paid "
                           f"normally below — do NOT manually re-award those.")
             await _pay_prizes(db, t)
+            # Aug 31 (Sid): tournament achievements — same transaction as the
+            # prizes, so a _FillerProvenanceReversed rollback retracts them
+            # together with the completion claim (mint-at-completion, #411).
+            await _grant_tournament_achievements(db, t)
             if _ff_minted:
                 # Lifecycle r1 find 11: terminal notices for a forfeit-decided
                 # final/TP were enqueued by the SWEEP with final_placement

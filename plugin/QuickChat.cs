@@ -8,7 +8,7 @@ using UnityEngine;
 namespace CompetitiveRounds
 {
     /// <summary>
-    /// Key-based quick-chat (localization-design §2.6): ~14 canned phrases
+    /// Key-based quick-chat (localization-design §2.6): canned phrases
     /// carried as a Photon RaiseEvent payload {byte proto, int actor,
     /// byte phraseId} on event code 48 (PoisonSync owns 47). The KEY is sent,
     /// never the text — each recipient renders the phrase from its OWN locale
@@ -25,25 +25,41 @@ namespace CompetitiveRounds
         private const byte Protocol = 1;
 
         // English canonical phrases — these strings are catalogue KEYS
-        // (I18nCatalogues carries es/ru targets). Order is the wire id:
+        // (I18nCatalogues carries translations). Order is the wire id:
         // NEVER reorder or remove entries, only append (a mixed-version room
         // must agree on what id N says). Unknown ids render as nothing.
+        // Aug 31 wheel rework: ids 1 and 12 were REWORDED (same meaning —
+        // "Good game!" -> "GG", "Hello!" -> "Hi!", Sid's requested texts) so
+        // the wheel's most-used slots stay renderable on OLD clients; a mixed
+        // room shows each seat its own build's wording, which is the accepted
+        // cost of a text-only change (the id's MEANING never moved). Ids
+        // 14+ are new; old clients drop them silently (bounds check below).
+        // URL/emoticon entries are deliberately locale-invariant.
         internal static readonly string[] Phrases =
         {
             "Good luck, have fun!",     // 0
-            "Good game!",               // 1
+            "GG",                       // 1  (was "Good game!")
             "Well played!",             // 2
             "Nice shot!",               // 3
             "So close!",                // 4
             "Thanks!",                  // 5
             "Sorry!",                   // 6
-            "Be right back",            // 7
-            "I'm ready",                // 8
+            "Be right back",            // 7  (no longer offered by the wheel; kept for old senders)
+            "I'm ready",                // 8  (ditto)
             "Hold on!",                 // 9
             "Rematch?",                 // 10
-            "Last game for me",         // 11
-            "Hello!",                   // 12
-            "Bye!",                     // 13
+            "Last game for me",         // 11 (ditto)
+            "Hi!",                      // 12 (was "Hello!")
+            "Bye!",                     // 13 (ditto)
+            "Yeah",                     // 14
+            "Nah",                      // 15
+            "Are you good at this game?",                                        // 16
+            "You should join Competitive Rounds, it's a discord community",      // 17
+            "discord.gg/comp-rounds",                                            // 18
+            "I play with a competitive framework mod called Sid's Competitive Rounds", // 19
+            "(/°□°)/ ~ [_T_]",          // 20 table flip — ASCII arms/table: the real ╯/︵/┻ glyphs degrade in the IMGUI font (screenshot-verified #47 class); ° and □ render fine
+            ":D",                       // 21
+            "o7",                       // 22
         };
 
         private static bool _hooked;

@@ -196,6 +196,11 @@
        for auto-updated installs. NativeUI resolves it by manifest-name suffix. -->
   <ItemGroup>
     <EmbeddedResource Include="assets\logo.png" />
+    <!-- Footer link-button glyphs (white on transparent; loader matches by
+         exact trailing filename, so none of these may end in "logo.png"). -->
+    <EmbeddedResource Include="assets\icon_youtube.png" />
+    <EmbeddedResource Include="assets\icon_twitch.png" />
+    <EmbeddedResource Include="assets\icon_thunderstore.png" />
   </ItemGroup>
 
   <!-- SkipCopyToPlugins=true builds WITHOUT installing to the local BepInEx —

@@ -28,12 +28,43 @@ namespace CompetitiveRounds
     /// coroutine host (#16/#270c class).</summary>
     internal static class IdleShowcase
     {
+        // Aug 31 (Sid: "show more of / all of the compare tab"): every entry
+        // must BYTE-match NativeUI.COMPARE_METRICS (#152 — a mismatch is a
+        // silent no-op view). Deliberately excludes the per-player fetch-storm
+        // metrics (Achievements/Similar/Nemesis/Records — the 5323-5326
+        // design-review note: 12 candidates x N endpoints per view); Gold
+        // Sources and Build Types are single-fetch pie boards and safe.
         private static readonly string[] CURATED_METRICS =
-            { "Elo over games", "Hit / Block %", "Top Cards" };
+        {
+            "Elo over games", "Hit / Block %", "Top Cards", "Peak Elo",
+            "Top Streaks", "5-0s Given / Taken", "Avg Game Length",
+            "Gold Sources", "Build Types",
+        };
 
-        // View script: (kind, dwellSeconds). Kinds: 0 Home, 1 Compare-setup,
-        // 2/3 Compare metric steps, 4/5 leaderboard profiles, 6 2v2, 7 FFA.
-        private static readonly float[] DWELL = { 18f, 26f, 20f, 20f, 22f, 20f, 22f, 22f };
+        // View script, data-driven (Aug 31 rewrite — the old parallel
+        // kind-constants + DWELL arrays drifted whenever a view was added).
+        // Kinds: 0 Home, 1 Compare (Arg = CURATED_METRICS index; index 0 also
+        // does selection setup), 2 leaderboard profile (select + scroll-to-row
+        // + detail sweep), 3 2v2 tab, 4 FFA tab.
+        private struct View { public int Kind; public int Arg; public float Dwell;
+            public View(int k, int a, float d) { Kind = k; Arg = a; Dwell = d; } }
+        private static readonly View[] SCRIPT =
+        {
+            new View(0, 0, 18f),          // Home
+            new View(1, 0, 26f),          // Compare: Elo over games (+ setup)
+            new View(1, 1, 20f),          // Hit / Block %
+            new View(1, 2, 20f),          // Top Cards
+            new View(1, 3, 15f),          // Peak Elo
+            new View(1, 4, 15f),          // Top Streaks
+            new View(1, 5, 15f),          // 5-0s Given / Taken
+            new View(1, 6, 15f),          // Avg Game Length
+            new View(1, 7, 17f),          // Gold Sources
+            new View(1, 8, 17f),          // Build Types
+            new View(2, 0, 30f),          // profile A: row-scroll + sweep
+            new View(2, 1, 30f),          // profile B
+            new View(3, 0, 22f),          // 2v2
+            new View(4, 0, 22f),          // FFA
+        };
 
         private static bool opened;             // WE opened the current page
         private static bool suppressed;         // operator interfered this idle epoch
@@ -42,6 +73,8 @@ namespace CompetitiveRounds
         private static float readyWaitStart = -1f;
         private static readonly List<string> candidates = new List<string>();
         private static int profileRot;
+        // Profile sweep state: sweep starts after the hold, runs to the dwell end.
+        private const float PROFILE_HOLD_SECONDS = 8f;   // read the header/graph first
 
         internal static bool VisiblyActive
         {
@@ -136,20 +169,46 @@ namespace CompetitiveRounds
                     readyWaitStart = -1f;
                     viewStartedAt = Time.realtimeSinceStartup;
                 }
-                float dwell = viewIdx >= 0 && viewIdx < DWELL.Length ? DWELL[viewIdx] : 20f;
+                float dwell = viewIdx >= 0 && viewIdx < SCRIPT.Length ? SCRIPT[viewIdx].Dwell : 20f;
+                TickView(dwell);
                 if (Time.realtimeSinceStartup - viewStartedAt < dwell) return;
                 StartView(NextView(viewIdx));
             }
             catch { }
         }
 
+        /// <summary>Per-frame behavior INSIDE the current view. Today: the
+        /// profile detail sweep — hold PROFILE_HOLD_SECONDS at the top (header,
+        /// graph, W/L block), then glide the detail panel top-to-bottom across
+        /// the remaining dwell. Re-written every tick from this clock, so async
+        /// payloads growing the content mid-sweep just re-map the fraction
+        /// (never a jump past the end).</summary>
+        private static void TickView(float dwell)
+        {
+            if (viewIdx < 0 || viewIdx >= SCRIPT.Length || SCRIPT[viewIdx].Kind != 2) return;
+            if (!NativeUI.LbProfileLoaded) return;
+            float el = Time.realtimeSinceStartup - viewStartedAt;
+            if (el <= PROFILE_HOLD_SECONDS) { NativeUI.DevSetLbDetailScroll(0f); return; }
+            float span = Mathf.Max(1f, dwell - PROFILE_HOLD_SECONDS - 2f);   // land 2s before the cut
+            NativeUI.DevSetLbDetailScroll(Mathf.Clamp01((el - PROFILE_HOLD_SECONDS) / span));
+        }
+
         private static int NextView(int cur)
         {
             int next = cur + 1;
-            if (next > 7) next = 0;
-            // Compare/profile views need at least 2 known players.
-            if ((next >= 1 && next <= 3) && candidates.Count < 2 && next != 1) next = 4;
-            if ((next == 4 || next == 5) && candidates.Count < 1) next = 6;
+            if (next >= SCRIPT.Length || next < 0) next = 0;
+            // Skip whole view CLASSES that lack their data: Compare needs 2+
+            // candidates, profiles need 1+ (candidates refresh at view 1's
+            // setup; a cold start with nobody known degrades to Home/2v2/FFA).
+            int guard = 0;
+            while (guard++ < SCRIPT.Length)
+            {
+                int k = SCRIPT[next].Kind;
+                bool skip = (k == 1 && SCRIPT[next].Arg > 0 && candidates.Count < 2)
+                         || (k == 2 && candidates.Count < 1);
+                if (!skip) break;
+                next++; if (next >= SCRIPT.Length) next = 0;
+            }
             return next;
         }
 
@@ -157,12 +216,12 @@ namespace CompetitiveRounds
         {
             try
             {
-                switch (v)
+                if (v < 0 || v >= SCRIPT.Length) return true;
+                switch (SCRIPT[v].Kind)
                 {
                     case 0: return ApiClient.CachedOnlinePlayers != null;
-                    case 1: return candidates.Count >= 2;
-                    case 4:
-                    case 5: return ApiClient.CachedLeaderboard != null && NativeUI.LbProfileLoaded;
+                    case 1: return SCRIPT[v].Arg > 0 || candidates.Count >= 2;
+                    case 2: return ApiClient.CachedLeaderboard != null && NativeUI.LbProfileLoaded;
                     default: return true;
                 }
             }
@@ -176,35 +235,33 @@ namespace CompetitiveRounds
             readyWaitStart = Time.realtimeSinceStartup;
             try
             {
-                switch (v)
+                if (v < 0 || v >= SCRIPT.Length) return;
+                switch (SCRIPT[v].Kind)
                 {
                     case 0:
                         NativeUI.DevOpenTab(13, -1f);   // Home (SwitchTab fetches presence)
                         break;
                     case 1:
-                        GatherCandidates();
-                        if (candidates.Count < 2) { StartView(4); return; }
-                        NativeUI.DevOpenTab(9, -1f);    // Compare
-                        NativeUI.DevSetCompareSelection(candidates);
-                        NativeUI.DevSetCompareMetricByName(CURATED_METRICS[0]);
+                        if (SCRIPT[v].Arg == 0)
+                        {
+                            GatherCandidates();
+                            if (candidates.Count < 2) { StartView(NextView(v)); return; }
+                            NativeUI.DevOpenTab(9, -1f);    // Compare
+                            NativeUI.DevSetCompareSelection(candidates);
+                        }
+                        NativeUI.DevSetCompareMetricByName(CURATED_METRICS[SCRIPT[v].Arg]);
                         break;
                     case 2:
-                        NativeUI.DevSetCompareMetricByName(CURATED_METRICS[1]);
-                        break;
-                    case 3:
-                        NativeUI.DevSetCompareMetricByName(CURATED_METRICS[2]);
-                        break;
-                    case 4:
-                    case 5:
-                        if (candidates.Count == 0) { StartView(6); return; }
+                        if (candidates.Count == 0) { StartView(NextView(v)); return; }
                         NativeUI.DevOpenTab(1, -1f);    // Leaderboard
                         NativeUI.DevSelectLeaderboardPlayer(candidates[profileRot % candidates.Count]);
                         profileRot++;
+                        NativeUI.DevScrollLeaderboardToSelected();   // Aug 31: row into view
                         break;
-                    case 6:
+                    case 3:
                         NativeUI.DevOpenTab(8, -1f);    // 2v2
                         break;
-                    case 7:
+                    case 4:
                         NativeUI.DevOpenTab(12, -1f);   // FFA
                         break;
                 }

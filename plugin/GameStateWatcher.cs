@@ -70,6 +70,25 @@ namespace CompetitiveRounds
         private static int lastP2Points = 0;
         private static int lastP1Rounds = 0;
         private static int lastP2Rounds = 0;
+        // ── Bug 324: cumulative live points for the bet lock ────────────────
+        // CUMULATIVE points each side has scored in the CURRENT game, capped
+        // at 2 (= the server's RANKED_BET_POINT_LOCK). The old sender posted
+        // the RAW within-round score and only while rounds were 0-0 — but a
+        // ROUNDS round ends at 2 points and the counters reset the same
+        // instant, so a 2-0 round-1 sweep never posted its second point and
+        // the "2 points scored in game 1" lock could only ever fire when
+        // round 1 happened to reach 1-1. Production: MAX(live points) = 1 per
+        // side over every series ever recorded, and bug 324's bet was accepted
+        // 2m21s and five rounds into game 1. Tracking: observed point deltas
+        // PLUS saturation on any observed round win (winning a round proves
+        // >= 2 points were scored in it, so a poll that missed the 2-0 state
+        // still saturates one tick later on the rounds transition). Reset per
+        // game in OnMatchStarted. Cap BEFORE sending so the wire pair stays in
+        // the same 0..2 range every consumer already renders.
+        private static int liveCumP1 = 0;
+        private static int liveCumP2 = 0;
+        private static int liveSentRankedP1 = 0, liveSentRankedP2 = 0;
+        private static int liveSentTeamP1 = 0, liveSentTeamP2 = 0;
         private static int p1Points = 0;
         private static int p2Points = 0;
         private static int p1Rounds = 0;
@@ -4147,35 +4166,19 @@ namespace CompetitiveRounds
                     p2Points = curP2Points;
                     if (TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points))
                         StampPointTime();
-                    // v1.22 — report live points to the server during ranked games so betting
-                    // locks once 2 points are scored in game 1.
-                    // CADENCE, precisely (the old comment here said "only while we're in the
-                    // first match of a series", which is wrong): curP1Rounds/curP2Rounds are
-                    // rounds won in the CURRENT game, and GM_ArmsRace.ResetMatch zeroes them on
-                    // every rematch — so this re-arms at the start of EVERY game and fires only
-                    // during that game's ROUND 1, then stops for rounds 2-5. That is what caps
-                    // the stored point sum at 2 (1-1) and makes the bet lock work.
-                    // Bug 199 depends on this too: it is also the last last_activity_at stamp a
-                    // game produces, so the liveness window must cover a whole game, not a round.
-                    if (matchIsRanked && curP1Rounds == 0 && curP2Rounds == 0
-                        && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
-                        && !string.IsNullOrEmpty(LocalSteamId))
-                    {
-                        ApiClient.PostLivePoints(ApiClient.ActiveRankedSeriesId, LocalSteamId, curP1Points, curP2Points);
-                    }
-                    // Aug 9 (Sid): 2v2 closes on the SAME rule — 2 points in
-                    // game 1 — so it needs the same channel. GM_ArmsRace's
-                    // p1/p2 point fields ARE the two teams in a cr_ff room,
-                    // and team_series' slot order is the same 0/1 the game
-                    // uses, so the values map straight across. Game 1 only
-                    // (rounds still 0-0), same traffic discipline as 1v1.
-                    if (curP1Rounds == 0 && curP2Rounds == 0
-                        && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId)
-                        && !string.IsNullOrEmpty(LocalSteamId))
-                    {
-                        ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId,
-                                                     curP1Points, curP2Points);
-                    }
+                    // v1.22 / bug 324 — report live points so betting locks once 2
+                    // points are scored in game 1. CADENCE (rewritten for bug 324):
+                    // accumulate observed point deltas into per-game CUMULATIVE
+                    // counters (see the field comment) and post the capped pair
+                    // whenever it changes — MaybeSendLivePoints below. The old
+                    // round-1-only raw-score cadence could never observe a 2-0
+                    // round sweep's second point, leaving betting open for all of
+                    // game 1 whenever round 1 didn't reach 1-1 (~half of games).
+                    // Bug 199 note still holds: these posts are also last_activity_at
+                    // stamps, and the new cadence stamps at least once per game
+                    // (each game's round-1 points), same as before.
+                    if (curP1Points > lastP1Points) liveCumP1 += curP1Points - lastP1Points;
+                    if (curP2Points > lastP2Points) liveCumP2 += curP2Points - lastP2Points;
                 }
 
                 if (curP1Rounds != lastP1Rounds || curP2Rounds != lastP2Rounds)
@@ -4193,6 +4196,13 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo($"[POLL] Round: P1! Rounds: {p1Rounds}-{p2Rounds}");
                     if (curP2Rounds > lastP2Rounds)
                         Plugin.Log.LogInfo($"[POLL] Round: P2! Rounds: {p1Rounds}-{p2Rounds}");
+                    // Bug 324: winning a round proves the winner scored >= 2 points
+                    // in it — saturate the cumulative counter even when the 10 Hz
+                    // poll never saw the round's final point state (a 2-0 sweep's
+                    // second point exists for a single frame before vanilla resets
+                    // the counters; rounds transitions persist and can't be missed).
+                    if (curP1Rounds > lastP1Rounds) liveCumP1 = Math.Max(liveCumP1, 2);
+                    if (curP2Rounds > lastP2Rounds) liveCumP2 = Math.Max(liveCumP2, 2);
 
                     // Re-tint player_color cosmetic after every round
                     // transition — vanilla spawns new sprites mid-match
@@ -4221,6 +4231,14 @@ namespace CompetitiveRounds
 
                 // Achievement: poll health and death state on local player
                 PollAchievementState();
+
+                // Bug 324 / review r1 find 3: live-points CATCH-UP. Eligibility
+                // (ActiveRankedSeriesId adoption, a late matchIsRanked=true
+                // sync) can arrive with no score edge following it for minutes
+                // — the counters already hold the truth, so the sender must run
+                // on the POLL, not only on point/round changes. The sent-pair
+                // delta (plus a 20s refresh) makes the per-tick call free.
+                MaybeSendLivePoints();
             }
 
             lastP1Points = curP1Points;
@@ -4471,6 +4489,63 @@ namespace CompetitiveRounds
                 LocalMacroTimeline);
         }
 
+        /// <summary>Bug 324: post the capped cumulative live points to whichever
+        /// betting channel this room feeds, whenever the capped pair has changed
+        /// since the last post to that channel — or 20s have passed since the
+        /// last HANDOFF to the retry layer (the timer advances at send, not
+        /// at delivery — a refresh may re-post an already-delivered value,
+        /// which the server's GREATEST makes idempotent). Called once per
+        /// poll tick (review r1 H3:
+        /// per-block calls left eligibility gaps). Caps at 2 = the
+        /// server's RANKED_BET_POINT_LOCK, so the wire values stay in the 0..2
+        /// range every existing consumer renders; the server GREATESTs per column,
+        /// so out-of-order retries can never lower a stored value.</summary>
+        private static float liveResendRefreshAt;
+        private static void MaybeSendLivePoints()
+        {
+            if (!isTracking || string.IsNullOrEmpty(LocalSteamId)) return;
+            int sp1 = Math.Min(liveCumP1, 2), sp2 = Math.Min(liveCumP2, 2);
+            // Review r1 find 4 belt: the sent-latch records the HANDOFF, not
+            // delivery — the bounded retry map can still exhaust during an
+            // outage, latching a state the server never stored. Clearing the
+            // latch every 20s makes any such loss cost at most 20s (the
+            // resend is one tiny POST and the server GREATESTs, so replays
+            // are free).
+            bool force = false;
+            if (Time.realtimeSinceStartup >= liveResendRefreshAt)
+            {
+                liveResendRefreshAt = Time.realtimeSinceStartup + 20f;
+                force = sp1 > 0 || sp2 > 0;
+            }
+            if (matchIsRanked && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
+                && (force || sp1 != liveSentRankedP1 || sp2 != liveSentRankedP2))
+            {
+                liveSentRankedP1 = sp1; liveSentRankedP2 = sp2;
+                ApiClient.PostLivePoints(ApiClient.ActiveRankedSeriesId, LocalSteamId, sp1, sp2);
+            }
+            // 2v2 closes on the SAME rule — 2 points in game 1 (Sid, Aug 9).
+            // GM_ArmsRace's p1/p2 point fields ARE the two teams in a cr_ff
+            // room, and team_series' slot order is the same 0/1 the game uses,
+            // so the values map straight across. GATED ON THE ROOM (review r1
+            // find 5): a stale ActiveTeamSeriesId surviving a room change
+            // (bug 312's open class) must never receive another game's points
+            // — only a room actually carrying the cr_ff property feeds the
+            // team channel.
+            bool inCrFfRoom = false;
+            try
+            {
+                var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                inCrFfRoom = !PhotonNetwork.OfflineMode && rp != null && rp.ContainsKey("cr_ff");
+            }
+            catch { }
+            if (inCrFfRoom && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId)
+                && (force || sp1 != liveSentTeamP1 || sp2 != liveSentTeamP2))
+            {
+                liveSentTeamP1 = sp1; liveSentTeamP2 = sp2;
+                ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2);
+            }
+        }
+
         private static void OnMatchStarted()
         {
             // Spectator: never tracks a match (defense in depth — the GM
@@ -4498,6 +4573,14 @@ namespace CompetitiveRounds
             isTracking = true;
             gameOverReported = false;
             macroEvidenceDispatched = false;
+            // Bug 324: per-GAME cumulative live-point counters (rematches fire
+            // OnMatchStarted again, so this resets at every game of a sitting).
+            // The sent-pairs reset to 0-0 so the first POST of a game happens at
+            // its first scored point, not at this reset — a (0,0) post here would
+            // be a wasted request (the server GREATESTs, so it changes nothing).
+            liveCumP1 = 0; liveCumP2 = 0;
+            liveSentRankedP1 = 0; liveSentRankedP2 = 0;
+            liveSentTeamP1 = 0; liveSentTeamP2 = 0;
             // Match-scoped DC latch — must reset per GAME, not only on room leave
             // (learning #27). Rematches reuse the room, so a latch set during
             // game 1 would otherwise still be true in game 2 and let a LEAVER

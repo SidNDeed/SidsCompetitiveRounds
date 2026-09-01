@@ -3283,7 +3283,10 @@ namespace CompetitiveRounds
                 // even in the (patch-failed, flag-desynced) state where both boxes
                 // somehow ended up open. A guard that can trap the player behind a
                 // live text field is worse than the bug it fixes.
-                if ((CompetitiveUI.IsChatInputOpen || NativeUI.InputCaptureActive)
+                // The Q/E wheels own the keyboard too (round-2 review C-low:
+                // Enter with a wheel open toggled vanilla chat underneath).
+                if ((CompetitiveUI.IsChatInputOpen || NativeUI.InputCaptureActive
+                     || CompetitiveUI.IsQuickChatOpen || CompetitiveUI.IsDanceWheelOpen)
                     && !CompetitiveUI.VanillaChatBoxOnScreen)
                     return false;
             }

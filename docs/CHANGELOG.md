@@ -1,5 +1,83 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+**Quick chat is a wheel now**
+
+- Hold Q for the quick-chat wheel: point at a phrase and release to send it,
+  or pick "More..." for the full list (social lines, courtesies, emoticons —
+  including a table flip). Clicks inside the wheel never fire your gun or
+  raise your block. The old Y menu and its 1-9/0 number picks are retired,
+  and the phrase list was rebuilt (GG, Hi!, Nice shot, recruiting lines, and
+  more). Phrases still arrive in each reader's own language.
+
+**Dance emotes (new shop category)**
+
+- Hold E between rounds for the emote wheel: point at a dance you own and
+  release to play it for everyone in the room. Two launch dances — The
+  Bounce and The Wave — live in the Shop's new DANCES section, where the
+  Preview button plays the exact choreography on a puppet before you buy.
+  Dances cancel instantly when combat starts and never touch gameplay.
+
+**Silence's red X actually shows**
+
+- The Silence status X never rendered: the base game ships the indicator
+  mis-wired (its Scale animation starts at zero and nothing sets the first
+  frame), so every silenced player since launch showed only the cast
+  sparkle. The mod now rewires it on spawn — a silenced player has a clear
+  red X overhead for the whole duration. (v1.39.6's changelog claimed this
+  worked; that claim was wrong, and this is the real fix.)
+
+**Betting locks when it should (bug #324)**
+
+- Live 1v1 points now reach the server reliably: missed/failed updates
+  retry, a periodic refresh closes the gap a lost packet left, and the
+  server no longer swaps the pair's points when the non-reporter's client
+  sent them. Betting on a series now closes at 2 points scored in game 1 the
+  way the rule says — in-game and in Discord — instead of staying open
+  minutes into a decided game.
+
+**Healing you can see**
+
+- The health bar renders a blue segment for recent healing again (Leech,
+  Pristine, regen): the segment now tracks a rolling window of the last
+  ~1.2s of gained health and draws above both fill layers. It had been
+  invisible since the bar's last rework.
+
+**Tournaments**
+
+- Discord trophy + participant roles are only assigned for tournaments with
+  16 or more players.
+- New achievements: win a Sync or Async tournament, take 2nd in either, and
+  Iron Bracket — play a whole tournament without forfeiting (an opponent
+  forfeiting to you still counts as played). Backfilled for past brackets.
+- The 1v1 podium titles now read "1v1 1st Place" (etc.) in line with the
+  other modes, and podium titles are revoked when a new podium displaces
+  you.
+
+**Info library**
+
+- Nine new visual diagrams across the articles (Grow's curve, the netcode
+  map, bet windows, bracket flow, forfeit clocks, refresh flow, movement
+  windows, team formats, and when-what-counts), and the Controls board +
+  article now teach the Q/E wheels.
+
+**Compare, Cards & Shop**
+
+- Compare > Cards: two new metrics — "5-0 Sweeps" (most flawless games won
+  with a card) and "Most Stacked" (highest same-card stacks ever picked).
+- Compare > Players: "Shop Sales" — the shop's own sales board (purchases
+  and revenue per cosmetic, top sellers, totals).
+- Card Stats: a search box filters the card list, next to the sort row.
+- Twelve new trails (gradients, particle effects, and a 10k Galaxy
+  starfield).
+- SCR menu footer: YouTube, Twitch and Thunderstore buttons beside Discord
+  and GitHub; your player name moved up beside the title, styled like
+  in-game.
+- Broadcast idle showcase: the between-games tour now walks the Compare
+  metrics, scrolls the leaderboard to the featured player, and sweeps
+  through profiles.
+
 ## v1.39.6 — 2026-08-30
 
 **The menu no longer leaks into the game**

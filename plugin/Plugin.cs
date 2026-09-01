@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.39.6";   // Aug 30: menu input containment, tournament Forfeit visible, LEAVE MATCH row, Info-tab visuals, heal/DoT health bar, five faces, chat moderation
+        public const string ModVersion = "1.39.7";   // Sep 1: Q quick-chat wheel, E dance emotes + DANCES shop section, silence X fix, bug-324 betting lock, 12 trails, tournament achievements + 16+ role gate, Compare/Card metrics, footer links. 1.39.7 is the DANCES_MIN_VERSION floor — the release Sid names must be >= this.
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -139,6 +139,9 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
+        internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
+        internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
+        internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
         internal static BepInEx.Configuration.ConfigFile ConfigFileForLevers;
         // BroadcastHudOffsetX/Y retired Aug 18: the 1v1 panels moved from the
         // bottom sides to the top corners under the card bars (measured
@@ -906,6 +909,17 @@ namespace CompetitiveRounds
                 "Broadcast", "TestMapSkinTourSeconds", 0,
                 "Broadcast seat only, with a comma-separated TestMapSkin list: advance to the next skin every N seconds while a map is up (0 = stay on the first). Each advance logs [MAPCOLOR-TOUR]."
             );
+            BroadcastTestSilence = Config.Bind(
+                "Broadcast", "TestSilence", false,
+                "Broadcast seat only, OFFLINE/sandbox only: set silenceTime=3s on the last non-local player (a spawned bot; falls back to the local player) so the silence indicator can be verified with nobody at the seat. Applies once per flip to true; set false then true again to re-fire."
+            );
+            BroadcastTestQuickChatWheel = Config.Bind(
+                "Broadcast", "TestQuickChatWheel", "",
+                "Broadcast seat only: 'main' or 'more' pins the quick-chat wheel open for layout screenshots (paint-only — sends still refuse outside a room). Clear to close."
+            );
+            BroadcastTestDance = Config.Bind(
+                "Broadcast", "TestDance", "",
+                "Broadcast seat only. 'wheel' pins the dance wheel open, 'preview:<sku>' toggles the shop puppet, 'play:<idx>' dev-installs a dance on the local sandbox body (offline only). Empty closes the wheel + puppet; an installed play simply expires on its own.");
             Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
@@ -1915,13 +1929,206 @@ namespace CompetitiveRounds
             // Screenshots of specific articles need this lever since
             // synthetic clicks can't reach the overlay (#420). Other tabs
             // keep the float scroll meaning.
+            string compareMetric = null;
             if (parts.Length > 1)
             {
                 if (idx == 15) infoKey = raw.Substring(raw.IndexOf(':') + 1).Trim();
+                // Aug 31: "9:<metric name>" opens Compare on a named metric
+                // (metric names contain spaces/digits — everything after the
+                // first ':' is the name, byte-matched by DevSetCompareMetricByName).
+                else if (idx == 9) compareMetric = raw.Substring(raw.IndexOf(':') + 1).Trim();
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
-            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"}");
+            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"}");
             NativeUI.DevOpenTab(idx, scroll, infoKey);
+            if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
+        }
+
+        // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──
+        private static string _lastTestWheel = "";
+        private void TickTestQuickChatWheel()
+        {
+            if (Plugin.BroadcastTestQuickChatWheel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string v = (Plugin.BroadcastTestQuickChatWheel.Value ?? "").Trim().ToLowerInvariant();
+            if (v == _lastTestWheel) return;
+            _lastTestWheel = v;
+            if (v == "main") CompetitiveUI.DevForceQuickChatWheel(0);
+            else if (v == "more") CompetitiveUI.DevForceQuickChatWheel(1);
+            else CompetitiveUI.DevReleaseQuickChatWheel();
+        }
+
+        // ── [Broadcast] TestDance: headless dance verification (Aug 31 item 5) ──
+        // "wheel" pins the E wheel open over ALL defined dances (layout
+        // screenshot; sends still refuse unowned). "preview:<sku>" toggles
+        // the shop puppet. "play:<idx>" installs the dance on the local
+        // sandbox body via the same active-map the real receive path fills —
+        // OFFLINE ONLY, so nothing can leak into a real room.
+        private static string _lastTestDance = "";
+        private void TickTestDance()
+        {
+            if (Plugin.BroadcastTestDance == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string v = (Plugin.BroadcastTestDance.Value ?? "").Trim();   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (v == _lastTestDance) return;
+            _lastTestDance = v;
+            if (v.Length == 0)
+            {
+                CompetitiveUI.DevReleaseDanceWheel();
+                DanceEmotes.StopPreview();
+                return;
+            }
+            // Any non-"wheel" value releases the paint pin too (round-3 LOW:
+            // wheel -> preview:/play: left the pin armed past DwClose, so a
+            // later disconnect could bypass the room-loss close).
+            CompetitiveUI.DevReleaseDanceWheel();
+            if (v == "wheel") { CompetitiveUI.DevForceDanceWheel(); return; }
+            if (v.StartsWith("preview:", StringComparison.Ordinal))
+            { DanceEmotes.TogglePreview(v.Substring(8).Trim()); return; }
+            if (v.StartsWith("play:", StringComparison.Ordinal))
+            {
+                int idx;
+                if (int.TryParse(v.Substring(5).Trim(), out idx))
+                {
+                    bool ok = DanceEmotes.DevInstallLocal(idx);
+                    Plugin.Log.LogInfo($"[DANCE] TestDance play:{idx} -> {(ok ? "installed" : "refused")}");
+                    if (ok) StartCoroutine(ProbeDancePose());
+                }
+            }
+        }
+
+        // ── [Broadcast] TestSilence: headless silence-indicator verification ──
+        // Sets data.silenceTime on a sandbox bot and lets vanilla
+        // SilenceHandler.Update discover it — the same code path a real
+        // Silence-card explosion drives (RPCA_AddSilence also just raises
+        // silenceTime), so the X the screenshot shows is the X players get.
+        // OFFLINE-ONLY: this must never touch an online room's players.
+        private static bool _testSilenceArmed;
+        private void TickTestSilence()
+        {
+            if (Plugin.BroadcastTestSilence == null || !BroadcastMode.IsBroadcastIdentity) return;
+            bool want = Plugin.BroadcastTestSilence.Value;   // cfg reload rides TickTestOpenTab's 2s Reload
+            if (!want) { _testSilenceArmed = false; return; }
+            if (_testSilenceArmed) return;
+            if (!PhotonNetwork.OfflineMode) return;
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null || pm.players.Count == 0) return;
+                Player target = null;
+                for (int i = 0; i < pm.players.Count; i++)
+                {
+                    var p = pm.players[i];
+                    if (p == null || p.data == null) continue;
+                    // Review r1 find 12: never latch against a dead/inactive
+                    // candidate — SilenceHandler.Update only runs on an
+                    // active player, so silencing a corpse renders nothing
+                    // and burns the one-shot. Verification prefers the FIRST
+                    // live player (the stationary local one): sandbox bots
+                    // wander off the kill boundary and die mid-window, and a
+                    // death's RPCA_Die correctly StopSilences (trace-proven),
+                    // eating the visual before a screenshot can land.
+                    try { if (!p.gameObject.activeInHierarchy || p.data.dead) continue; } catch { continue; }
+                    target = p; break;
+                }
+                if (target == null) return;
+                _testSilenceArmed = true;
+                MaybeRigDump();   // dance-design probe rides the same sandbox session
+                target.data.silenceTime = 3f;
+                Plugin.Log.LogInfo($"[SILENCE-X] TestSilence: applied 3s silence to player id {target.PlayerID}");
+                StartCoroutine(ProbeSilenceScale(target));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SILENCE-X] TestSilence failed: {ex.Message}"); }
+        }
+
+        // Dance verification probe: samples the WOBBLE transform (the visual
+        // body the dance offsets — the physics root never moves) + one arm
+        // target for 2s, so the choreography is provable from the log even
+        // when orange-on-orange screenshots are ambiguous.
+        private System.Collections.IEnumerator ProbeDancePose()
+        {
+            Player me = null;
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm != null && pm.players != null)
+                    foreach (var p in pm.players)
+                        if (p != null && p.data != null && p.data.view != null && p.data.view.IsMine) { me = p; break; }
+            }
+            catch { }
+            if (me == null) { Plugin.Log.LogInfo("[DANCE] probe: no local player"); yield break; }
+            Transform wob = null, arm = null;
+            try
+            {
+                var w = me.GetComponentInChildren<PlayerWobblePosition>(true);
+                if (w != null) wob = w.transform;
+                var a = me.GetComponentInChildren<IKArmMove>(true);
+                if (a != null) arm = a.target;
+            }
+            catch { }
+            for (int i = 0; i < 10; i++)
+            {
+                try
+                {
+                    bool bo = false; try { bo = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+                    Plugin.Log.LogInfo($"[DANCE] probe t={i * 0.2f:F1} wobble={(wob != null ? wob.position.ToString("F2") : "-")} armTarget={(arm != null ? arm.position.ToString("F2") : "-")} win={DanceEmotes.WindowOpen()} battle={bo} active={DanceEmotes.ActiveCount} dead={DanceEmotes.WobbleChannelDead}/{DanceEmotes.ArmChannelDead}");
+                }
+                catch { }
+                yield return new WaitForSecondsRealtime(0.2f);
+            }
+        }
+
+        // ── [Broadcast] TestRigDump: one-shot player-rig hierarchy dump ──
+        // The dance design review's blocking unknown: which transforms host
+        // IKArmMove/IkLeg/PlayerWobblePosition, their targets and ancestry.
+        private static bool _rigDumped;
+        internal static void MaybeRigDump()
+        {
+            if (_rigDumped) return;
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null || pm.players.Count == 0) return;
+                var p = pm.players[0];
+                if (p == null) return;
+                _rigDumped = true;
+                var sb = new System.Text.StringBuilder("[RIG-DUMP] player 0 tree:\n");
+                void Walk(Transform t, int depth)
+                {
+                    if (t == null || depth > 6) return;
+                    var comps = t.GetComponents<Component>();
+                    var names = new System.Text.StringBuilder();
+                    foreach (var c in comps) { if (c != null) names.Append(c.GetType().Name).Append(','); }
+                    sb.Append(new string(' ', depth * 2)).Append(t.name)
+                      .Append(" [").Append(names).Append("] lp=").Append(t.localPosition.ToString("F2")).Append('\n');
+                    for (int i = 0; i < t.childCount; i++) Walk(t.GetChild(i), depth + 1);
+                }
+                Walk(p.transform, 0);
+                foreach (var arm in p.GetComponentsInChildren<IKArmMove>(true))
+                    sb.Append($"IKArmMove on {arm.transform.name}: target={(arm.target != null ? arm.target.name + "@" + arm.target.localPosition.ToString("F2") : "null")}\n");
+                foreach (var leg in p.GetComponentsInChildren<IkLeg>(true))
+                    sb.Append($"IkLeg on {leg.transform.name}: footTarget={(leg.footTarget != null ? leg.footTarget.name + "@" + leg.footTarget.localPosition.ToString("F2") : "null")}\n");
+                var wob = p.GetComponentInChildren<PlayerWobblePosition>(true);
+                sb.Append($"PlayerWobblePosition: {(wob != null ? wob.transform.name + " children=" + wob.transform.childCount : "none")}\n");
+                Plugin.Log.LogInfo(sb.ToString());
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[RIG-DUMP] failed: " + ex.Message); }
+        }
+
+        // TestSilence companion probe: the indicator's scale over the silence
+        // window, so a log alone can say whether the X actually grew.
+        private System.Collections.IEnumerator ProbeSilenceScale(Player target)
+        {
+            for (int i = 0; i < 6; i++)
+            {
+                yield return new WaitForSecondsRealtime(0.5f);
+                try
+                {
+                    var h = target != null ? target.GetComponent<SilenceHandler>() : null;
+                    var ca = h != null ? h.codeAnim : null;
+                    if (ca == null) { Plugin.Log.LogInfo("[SILENCE-X] probe: codeAnim gone"); yield break; }
+                    Plugin.Log.LogInfo($"[SILENCE-X] probe t+{(i + 1) * 0.5f:F1}s scale={ca.transform.localScale} playing={ca.isPlaying} state={ca.currentState} silenced={(target.data != null && target.data.isSilenced)}");
+                }
+                catch { }
+            }
         }
 
         private static void FpsWrite(int target)
@@ -2178,6 +2385,9 @@ namespace CompetitiveRounds
             // Map-skin test lever tour / auto-Sandbox (broadcast identity only).
             try { ArtHandlerNextArtPatch.TickTestLever(); } catch { }
             try { TickTestOpenTab(); } catch { }
+            try { TickTestSilence(); } catch { }
+            try { TickTestQuickChatWheel(); } catch { }
+            try { TickTestDance(); } catch { }
 
             // Poll ranked queue if searching
             if (ApiClient.IsQueuePolling)
@@ -2219,6 +2429,9 @@ namespace CompetitiveRounds
             // Quick-chat (§2.6) rides Photon event code 48 — same
             // EventReceived hook pattern as PoisonSync (code 47).
             try { QuickChat.Hook(); } catch { }
+            // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the
+            // combat-edge cancellation + expiry sweep every frame.
+            try { DanceEmotes.Hook(); DanceEmotes.Tick(); } catch { }
 
             // Poll 1v2 queue if searching. Must run here (not just from the
             // F5 tab ticker) — a player who queues and closes the menu would
@@ -3976,6 +4189,10 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+            // Dance emotes die with the room (round-2 review B-low: active
+            // poses and receive throttles are actor-number-keyed, and actor
+            // numbers alias across room incarnations).
+            try { DanceEmotes.OnRoomLeft(); } catch { }
             // Role/roster caches die with the room, on every client.
             try { RoomActors.Reset(); } catch { }
             try { SpectatorSync.MasterResetSpectatorState(); } catch { }

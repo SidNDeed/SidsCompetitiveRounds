@@ -572,6 +572,13 @@ namespace CompetitiveRounds
             {"rosetta",                    new[]{"Rosetta",              "Get 10 translations approved (yours, or ones you reviewed)"}},
             {"dragoman",                   new[]{"Dragoman",             "Get 100 translations approved (yours, or ones you reviewed)"}},
             {"babel",                      new[]{"Babel",                "Get 1000 translations approved (yours, or ones you reviewed)"}},
+            // Tournament achievements (Aug 31) — server-granted at tournament
+            // completion; strings mirror main.py's ACHIEVEMENT_DEFS VERBATIM.
+            {"tourn_champion_sync",        new[]{"Sync Champion",        "Win a live (sync) tournament"}},
+            {"tourn_champion_async",       new[]{"Async Champion",       "Win an async tournament"}},
+            {"tourn_second_sync",          new[]{"Sync Finalist",        "Take 2nd place in a live (sync) tournament"}},
+            {"tourn_second_async",         new[]{"Async Finalist",       "Take 2nd place in an async tournament"}},
+            {"tourn_iron_bracket",         new[]{"Iron Bracket",         "Play a tournament through to the end without forfeiting a single match"}},
         };
 
         // Cached data
@@ -1735,8 +1742,9 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Report current game-1 point counts on a live ranked series. The server uses
-        /// these to lock betting once 2+ points have been scored. Fire-and-forget; failures are
-        /// logged but don't block gameplay. HMAC over "live-points:{series}:{reporter}:{p1}:{p2}".</summary>
+        /// these to lock betting once 2+ points have been scored. Delivery is retried (bounded,
+        /// newest-value-wins via the retry map) and a 409 refusal is terminal; nothing here ever
+        /// blocks gameplay. HMAC over "live-points:{series}:{reporter}:{p1}:{p2}".</summary>
         public static void PostLivePoints(string seriesId, string reporterSteamId, int p1Points, int p2Points)
         {
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
@@ -1744,41 +1752,33 @@ namespace CompetitiveRounds
             string url = $"{baseUrl}/api/v1/series/{Escape(seriesId)}/live-points" +
                          $"?p1_points={p1Points}&p2_points={p2Points}" +
                          $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
-            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
-            {
-                Plugin.Log.LogInfo($"[LIVE-POINTS] series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {p1Points}-{p2Points} ok={ok}");
-                // Aug 9 bet audit r8: SELF-HEAL. The server can hand a new
-                // game the PREVIOUS series' id when the deciding report has
-                // not committed yet (the preflight legitimately reuses a
-                // still-active series). Once that report lands, the id we
-                // hold is completed — the server now says so explicitly
-                // ("Series is not active", added in this batch) instead of
-                // silently accepting the write. Drop it: GameStateWatcher
-                // re-arms the preflight whenever the id is empty at game
-                // start, so the next point recreates the right series and the
-                // betting window opens. Ordering-proof by construction — it
-                // reacts to the server's own verdict rather than trying to
-                // predict the race.
-                if (!ok && resp != null && resp.IndexOf("not active", StringComparison.OrdinalIgnoreCase) >= 0
-                    && string.Equals(ActiveRankedSeriesId, seriesId, StringComparison.Ordinal))
+            // Aug 31 (review r1 find 4): 1v1 was the ONE live-points channel
+            // doing a bare fire-and-forget — a transient failure was simply
+            // lost while the sender's latch said "sent". Now on the shared
+            // bounded-retry map like 2v2/FFA (newest score replaces a pending
+            // one; the server's GREATEST makes any replay safe).
+            SendLivePoints("1v1:" + seriesId, url,
+                $"1v1 series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {p1Points}-{p2Points}",
+                resp =>
                 {
-                    Plugin.Log.LogWarning("[LIVE-POINTS] held series is no longer active — clearing so the "
-                                          + "preflight re-arms for the current game");
-                    ActiveRankedSeriesId = null;
-                    // Deliberately NO eager mid-game re-arm here (r9): the
-                    // recovery poll is not bound to a live game, so between
-                    // games it would create a phantom 0-0 series that is
-                    // bettable even if nobody rematches — and a replacement
-                    // created mid-game would start 0-0 and reopen betting
-                    // after points were already scored. Clearing alone is the
-                    // safe half: it stops live points going to a finished
-                    // series, and the existing game-start re-arm
-                    // (GameStateWatcher, "no live series id") recreates the
-                    // right series at the next boundary. Residual, unchanged
-                    // from before this batch: a game that adopted a retiring
-                    // series id has no betting window until then.
-                }
-            }));
+                    // Aug 9 bet audit r8 SELF-HEAL, carried onto the retry map:
+                    // the server can hand a new game the PREVIOUS series' id
+                    // (preflight reuse before the deciding report commits).
+                    // Once it answers "Series is not active", drop the held id
+                    // — GameStateWatcher's game-start re-arm recreates the
+                    // right series at the next boundary. Reacting to the
+                    // server's own verdict, never predicting the race (#327).
+                    // Deliberately NO eager mid-game re-arm (r9) — see that
+                    // review's phantom-0-0-series rationale.
+                    if (resp != null && resp.IndexOf("not active", StringComparison.OrdinalIgnoreCase) >= 0
+                        && string.Equals(ActiveRankedSeriesId, seriesId, StringComparison.Ordinal))
+                    {
+                        Plugin.Log.LogWarning("[LIVE-POINTS] held series is no longer active — clearing so the "
+                                              + "preflight re-arms for the current game");
+                        ActiveRankedSeriesId = null;
+                    }
+                    return null;   // no URL rewrite — the refusal hook is the side effect
+                });
         }
 
         // Review HIGH: live-point delivery must survive one failed request —
@@ -1787,14 +1787,24 @@ namespace CompetitiveRounds
         // (bounded), and a newer score replaces a pending one rather than
         // queueing behind it. The server's writes are monotonic and
         // idempotent, so a resend is always safe.
-        private class LivePointRetry { public string url; public int attempts; public string tag; }
+        private class LivePointRetry
+        {
+            public string url; public int attempts; public string tag;
+            // Aug 31 (bets recon mechanism #3): optional one-shot URL rewrite
+            // consulted when the server REFUSES the write (409). FFA uses it
+            // to re-derive a drifted game_number from the 409 body — without
+            // it, one missed game report left every later live-points write
+            // refused and the betting window open for the rest of the sitting.
+            public Func<string, string> rewriteOnRefusal; public bool rewrote;
+        }
         private static readonly Dictionary<string, LivePointRetry> livePointRetries =
             new Dictionary<string, LivePointRetry>();
         private const int LIVE_POINT_MAX_ATTEMPTS = 4;
 
-        private static void SendLivePoints(string key, string url, string tag)
+        private static void SendLivePoints(string key, string url, string tag,
+                                           Func<string, string> rewriteOnRefusal = null)
         {
-            var entry = new LivePointRetry { url = url, attempts = 0, tag = tag };
+            var entry = new LivePointRetry { url = url, attempts = 0, tag = tag, rewriteOnRefusal = rewriteOnRefusal };
             livePointRetries[key] = entry;   // newest score wins outright
             SendLivePointsOnce(key, entry);
         }
@@ -1814,8 +1824,30 @@ namespace CompetitiveRounds
                     return;
                 }
                 // A 409 is the server saying the write does not apply (series
-                // over, wrong game) — retrying cannot help.
-                bool permanent = resp != null && resp.IndexOf("HTTP/1.1 409", StringComparison.Ordinal) >= 0;
+                // over, wrong game) — retrying the SAME request cannot help.
+                // BOTH token forms, like the fenced-restart matcher above:
+                // FormatRequestError emits "HTTP 409:" (the load-bearing
+                // prefix), and "HTTP/1.1 409" covers any raw-status path.
+                // Round-2 review blocker 1: the single "HTTP/1.1" form NEVER
+                // matched the formatter's output, so the refusal branch and
+                // the FFA rewrite below were unreachable (#434's exact class).
+                bool permanent = resp != null
+                    && (resp.IndexOf("HTTP 409", StringComparison.Ordinal) >= 0
+                        || resp.IndexOf("HTTP/1.1 409", StringComparison.Ordinal) >= 0);
+                // ...but a refusal the sender knows how to CORRECT gets one
+                // rewritten resend (FFA game-number drift self-heal, Aug 31).
+                if (permanent && entry.rewriteOnRefusal != null && !entry.rewrote)
+                {
+                    string nu = null;
+                    try { nu = entry.rewriteOnRefusal(resp); } catch { }
+                    if (!string.IsNullOrEmpty(nu))
+                    {
+                        entry.rewrote = true; entry.url = nu; entry.attempts = 0;
+                        Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} refused — re-deriving and resending once");
+                        SendLivePointsOnce(key, entry);
+                        return;
+                    }
+                }
                 if (permanent || entry.attempts >= LIVE_POINT_MAX_ATTEMPTS)
                 {
                     livePointRetries.Remove(key);
@@ -1837,8 +1869,9 @@ namespace CompetitiveRounds
 
         /// <summary>2v2 game-1 points, so betting locks at 2 the way 1v1 does
         /// (Sid, Aug 9: the cutoff is 2 points, never a clock). t1/t2 are in
-        /// team_series' own slot order. Fire-and-forget: a lost report costs
-        /// one tick of cutoff precision, never gameplay.</summary>
+        /// team_series' own slot order. Delivery is retried like the 1v1
+        /// channel (bounded, newest-value-wins); a persistently lost report
+        /// costs cutoff precision until the 20s refresh, never gameplay.</summary>
         public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points)
         {
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
@@ -1863,7 +1896,27 @@ namespace CompetitiveRounds
                          $"?game_number={gameNumber}&total_points={totalPoints}" +
                          $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
             SendLivePoints("ffa:" + lobbyId, url,
-                $"ffa lobby={lobbyId.Substring(0, Math.Min(8, lobbyId.Length))} g{gameNumber} total={totalPoints}");
+                $"ffa lobby={lobbyId.Substring(0, Math.Min(8, lobbyId.Length))} g{gameNumber} total={totalPoints}",
+                // Aug 31 self-heal: the server's wrong-game 409 names the game
+                // it expects ("expected_game=N"); one re-signed resend with
+                // that number closes the drifted-counter fail-open (a missed
+                // game report otherwise left betting open all sitting). The
+                // OBSERVATION is of the live game regardless of numbering, so
+                // carrying totalPoints over is correct; older-server 409s
+                // (no marker) still give up exactly as before.
+                resp =>
+                {
+                    if (string.IsNullOrEmpty(resp)) return null;
+                    int idx = resp.IndexOf("expected_game=", StringComparison.Ordinal);
+                    if (idx < 0) return null;
+                    int p = idx + 14, v = 0; bool any = false;
+                    while (p < resp.Length && resp[p] >= '0' && resp[p] <= '9') { v = v * 10 + (resp[p] - '0'); p++; any = true; }
+                    if (!any || v < 1 || v == gameNumber) return null;
+                    string sig2 = ComputeHmacHex($"ffa-live-points:{lobbyId}:{reporterSteamId}:{v}:{totalPoints}");
+                    return $"{baseUrl}/api/v1/ffa/lobbies/{Escape(lobbyId)}/live-points" +
+                           $"?game_number={v}&total_points={totalPoints}" +
+                           $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig2}";
+                });
         }
 
         /// <summary>Place a bet. HMAC over "bet:{bettor}:{series_id}:{bet_on}:{amount}".</summary>
@@ -6234,7 +6287,21 @@ namespace CompetitiveRounds
             // request per card.
             public int times_picked, times_offered;
             public float win_rate, pass_rate;
+            // Aug 31 (Compare > Cards): 5-0 wins carrying the card + builds
+            // that stacked >= 2 copies. Absent on a stale server/replica ->
+            // ExtractJsonInt defaults 0 (#422 direction is graceful).
+            public int sweeps_with_card, stacked_builds;
         }
+
+        /// <summary>Aug 31 — global shop sales board (Compare > Players 'Shop
+        /// Sales'). Parallel arrays, one row per sold cosmetic.</summary>
+        public class ShopSalesData
+        {
+            public List<string> names, kinds, artists;
+            public List<int> purchases, gifted, revenues;
+            public int totalRevenue, totalPurchases, totalItems;
+        }
+        public static ShopSalesData ShopSales;
 
         public static readonly Dictionary<string, RecordsBoardData> RecordsBoards
             = new Dictionary<string, RecordsBoardData>();
@@ -6398,6 +6465,34 @@ namespace CompetitiveRounds
                 };
                 if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.seriesCounts.Count)) return false;
                 RankedFriends[steamId] = d;
+                return true;
+            });
+        }
+
+        /// <summary>Aug 31 — global Shop Sales board (selection-independent,
+        /// the Records pattern). One fetch per session; empty boards retry via
+        /// the shared FetchCompareBoard discipline.</summary>
+        public static void FetchShopSalesBoard()
+        {
+            if (ShopSales != null) return;
+            FetchCompareBoard("shopsales",
+                $"{baseUrl}/api/v1/shop/sales-board", resp =>
+            {
+                var d = new ShopSalesData
+                {
+                    names = JsonStringArrayByKey(resp, "names"),
+                    kinds = JsonStringArrayByKey(resp, "kinds"),
+                    artists = JsonStringArrayByKey(resp, "artists"),
+                    purchases = JsonIntArrayByKey(resp, "purchases"),
+                    gifted = JsonIntArrayByKey(resp, "gifted"),
+                    revenues = JsonIntArrayByKey(resp, "revenues"),
+                    totalRevenue = ExtractJsonInt(resp, "total_revenue"),
+                    totalPurchases = ExtractJsonInt(resp, "total_purchases"),
+                    totalItems = ExtractJsonInt(resp, "total_items"),
+                };
+                if (!ArraysAligned(d.names.Count, d.kinds.Count, d.artists.Count,
+                                   d.purchases.Count, d.gifted.Count, d.revenues.Count)) return false;
+                ShopSales = d;
                 return true;
             });
         }
@@ -6599,6 +6694,8 @@ namespace CompetitiveRounds
                         times_offered = ExtractJsonInt(parts[i], "times_offered"),
                         win_rate = ExtractJsonFloat(parts[i], "win_rate"),
                         pass_rate = ExtractJsonFloat(parts[i], "pass_rate"),
+                        sweeps_with_card = ExtractJsonInt(parts[i], "sweeps_with_card"),
+                        stacked_builds = ExtractJsonInt(parts[i], "stacked_builds"),
                     });
                 }
                 /* Aug 6 review find 9: an EMPTY catalogue must not be
@@ -6719,6 +6816,13 @@ namespace CompetitiveRounds
                     var offersByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     var passByRaw = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
                     var picksByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    /* Aug 31: sweeps/stacks follow the OFFERS rule, for the same
+                     * reason — the server computes both in name-keyed CTEs and
+                     * LEFT JOINs them on card_name, so two rows sharing a raw
+                     * name repeat the SAME name-level total (count once), while
+                     * different spellings each carry their own (sum across). */
+                    var sweepsByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    var stacksByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     foreach (var r in rows)
                     {
                         string raw = r.name ?? "";
@@ -6728,6 +6832,8 @@ namespace CompetitiveRounds
                             offersByRaw[raw] = r.times_offered;
                             passByRaw[raw] = r.pass_rate;
                         }
+                        int prevSw; if (!sweepsByRaw.TryGetValue(raw, out prevSw) || r.sweeps_with_card > prevSw) sweepsByRaw[raw] = r.sweeps_with_card;
+                        int prevSt; if (!stacksByRaw.TryGetValue(raw, out prevSt) || r.stacked_builds > prevSt) stacksByRaw[raw] = r.stacked_builds;
                         int prevPicks;
                         picksByRaw.TryGetValue(raw, out prevPicks);
                         picksByRaw[raw] = prevPicks + r.times_picked;
@@ -6777,6 +6883,11 @@ namespace CompetitiveRounds
                     best.times_offered = totalOffered;
                     best.win_rate = totalPicks > 0 ? winAcc / totalPicks : best.win_rate;
                     best.pass_rate = totalOffered > 0 ? passAcc / totalOffered : best.pass_rate;
+                    int swSum = 0, stSum = 0;
+                    foreach (var kv in sweepsByRaw) swSum += kv.Value;
+                    foreach (var kv in stacksByRaw) stSum += kv.Value;
+                    best.sweeps_with_card = swSum;
+                    best.stacked_builds = stSum;
                     outp.Add(best);
                 }
 

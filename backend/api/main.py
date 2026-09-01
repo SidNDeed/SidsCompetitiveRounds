@@ -337,9 +337,10 @@ def _display_title_sync(colors: dict, sku: str | None, name: str | None,
                         podium_pos_ffa: int | None = None) -> tuple[str | None, str | None]:
     """Resolve the DISPLAYED title text/color for a player row. The dynamic
     'Current Rank' title renders as the player's live rank tier + tier color;
-    the dynamic podium titles render as 1st/2nd/3rd Place (gold/silver/
-    bronze), per ladder — or disappear entirely (None, None) when the holder is
-    no longer on that board's podium (pos=None, intended UX); every other title
+    the dynamic podium titles render as mode-prefixed 1st/2nd/3rd Place
+    ("1v1 1st Place" / "2v2 1st Place" / "FFA 1st Place", gold/silver/bronze),
+    per ladder — or disappear entirely (None, None) when the holder is no
+    longer on that board's podium (pos=None, intended UX); every other title
     passes through unchanged.
 
     The three podium params default to None so the 14 pre-existing call sites
@@ -363,14 +364,22 @@ def _display_title_sync(colors: dict, sku: str | None, name: str | None,
 # items by migration 102; kept here for the dynamic-title override path).
 TITLE_RANK_SKU = "title_rank"
 
-# Dynamic 'Podium' title (v1.32): equippable by anyone who has EVER held a
-# leaderboard top-3 spot (granted on podium entry, never revoked — render-time
-# resolution hides it while off the podium). Seeded by migration 123.
+# Dynamic 'Podium' title (v1.32): held by the CURRENT leaderboard top 3 —
+# granted on podium entry and REVOKED on falling off (bug 325: the old
+# grant-forever model left ex-podium players holding an item that rendered as
+# nothing when equipped, which reads as a broken title, not a trophy). Render
+# time still resolves position; the revoke just keeps inventories honest.
+# Seeded by migration 123.
+# Bug-324-batch rename: mode-prefixed like the 2v2/FFA podium titles so the
+# 1v1 title is unambiguous on mixed surfaces (Sid, Aug 31). The client strips
+# the "1v1 " prefix on the 1v1 board itself (PodiumTitleOnOwnBoard) exactly
+# as the other ladders do on theirs — and its IsPodiumTitle sparkle set must
+# list these EXACT strings (#152).
 TITLE_PODIUM_SKU = "title_podium"
 PODIUM_TITLES = {
-    1: ("1st Place", "#FFD700"),   # gold
-    2: ("2nd Place", "#C0C0C0"),   # silver
-    3: ("3rd Place", "#CD7F32"),   # bronze
+    1: ("1v1 1st Place", "#FFD700"),   # gold
+    2: ("1v1 2nd Place", "#C0C0C0"),   # silver
+    3: ("1v1 3rd Place", "#CD7F32"),   # bronze
 }
 
 # 60s in-process cache over the VISIBLE leaderboard's top 3 — the same CTEs +
@@ -418,12 +427,21 @@ _PODIUM_QUERY = """
 """
 
 
-async def _grant_podium_titles(player_ids: list) -> None:
-    """Idempotently grant the podium title item to the current top 3. Runs in
-    its OWN session so it can commit without touching the caller's transaction
+async def _sync_podium_holders(sku: str, player_ids: list) -> None:
+    """Make the podium title item's HOLDERS equal that board's current top 3:
+    idempotently grant to the ids given, and REVOKE from everyone else (bug
+    325 — an ex-podium holder equipping the item rendered as no title at all,
+    so the grant-forever model read as broken, not as a trophy). Runs in its
+    OWN session so it can commit without touching the caller's transaction
     (the cache refresh fires from arbitrary request contexts, including the
-    match-submit path). Grant only, never revoke — falling off the podium is
-    handled at render time by _display_title_sync."""
+    match-submit path).
+
+    Fail-safe direction: called only after a SUCCESSFUL podium SELECT, and
+    revokes nothing when the podium came back EMPTY — a transient empty read
+    (e.g. a ratings-table rebuild, #76) must cost at worst a stale holder
+    (the old status quo), never a mass revoke. A 1-2 entry podium is a real
+    young-board state and DOES revoke: the board visibly has no third seat.
+    Re-entry self-heals — the next board read re-grants."""
     if not player_ids:
         return
     if IS_REPLICA:
@@ -436,9 +454,9 @@ async def _grant_podium_titles(player_ids: list) -> None:
         # fails SILENTLY: no 500, no signal, just a log line every 60s per
         # board forever. The read-routing acceptance test was "smoke every
         # endpoint, zero 500s", which cannot see this class at all.
-        # Skipping costs nothing: the grant is idempotent and grant-only, the
-        # PRIMARY performs it from its own traffic, and display is decided at
-        # render time by _display_title_sync rather than by this row.
+        # Skipping costs nothing: the sync is idempotent, the PRIMARY performs
+        # it from its own traffic, and display is decided at render time by
+        # _display_title_sync rather than by this row.
         return
     try:
         from database import async_session
@@ -450,12 +468,64 @@ async def _grant_podium_titles(player_ids: list) -> None:
                 "JOIN shop_items si ON si.sku = :sku "
                 "WHERE p.id::text = ANY(:pids) "
                 "ON CONFLICT (player_id, item_id) DO NOTHING"
-            ), {"sku": TITLE_PODIUM_SKU, "pids": list(player_ids)})
+            ), {"sku": sku, "pids": list(player_ids)})
+            # Revoke the item from every holder no longer on this podium, and
+            # clear a dangling active_title_id in the same pass (the DELETE
+            # removes the shop row's owned state; without the clear, the
+            # players row would keep POINTING at a title it no longer owns,
+            # resolving to nothing everywhere it renders). NOTE the
+            # NOT ANY() shape is exactly why the empty-list guard above exists:
+            # with pids = [] it would match EVERY holder.
+            #
+            # SKIP LOCKED on the UPDATE's lock pass (review r1 find 1,
+            # CONFIRMED — #228's rule); the player_items DELETE takes no
+            # explicit player lock at all, because the FK direction means it
+            # can never wait on a players row: this sync is AWAITED from
+            # inside request handlers
+            # that already hold row locks. A match report holds the two
+            # players' rows FOR NO KEY UPDATE and then awaits _podium_map;
+            # if this session then WAITED on one of those very rows, the
+            # request would be waiting on itself through a second session —
+            # not a Postgres-visible deadlock, just a hang that blocks the
+            # result/rating/gold commit. A skipped row is retried by the next
+            # cache refresh (<= 60s), which is exactly the revoke's tempo.
+            # (The DELETE needs no such guard: removing a player_items row
+            # locks only that row — the FK points FROM player_items TO
+            # players, and deleting a referencing row takes no lock on the
+            # referenced player — so it can never wait on a report's locks.)
+            rev = await gdb.execute(text(
+                "DELETE FROM player_items pi "
+                "USING shop_items si "
+                "WHERE si.sku = :sku AND pi.item_id = si.id "
+                "  AND NOT (pi.player_id::text = ANY(:pids))"
+            ), {"sku": sku, "pids": list(player_ids)})
+            await gdb.execute(text(
+                "UPDATE players p SET active_title_id = NULL "
+                "FROM shop_items si "
+                "WHERE si.sku = :sku AND p.active_title_id = si.id "
+                "  AND NOT (p.id::text = ANY(:pids)) "
+                "  AND p.id IN ("
+                # FOR NO KEY UPDATE, not FOR UPDATE: the weakest mode that
+                # still conflicts with our own later write (#202) — FOR
+                # UPDATE would additionally fight every FK INSERT's KEY
+                # SHARE for no benefit.
+                "      SELECT p2.id FROM players p2 JOIN shop_items si2 ON si2.sku = :sku "
+                "       WHERE p2.active_title_id = si2.id "
+                "         AND NOT (p2.id::text = ANY(:pids)) "
+                "         FOR NO KEY UPDATE OF p2 SKIP LOCKED)"
+            ), {"sku": sku, "pids": list(player_ids)})
             await gdb.commit()
             if res.rowcount:
-                print(f"[PODIUM] granted {TITLE_PODIUM_SKU} to {res.rowcount} new podium holder(s)")
+                print(f"[PODIUM] granted {sku} to {res.rowcount} new podium holder(s)")
+            if rev.rowcount:
+                print(f"[PODIUM] revoked {sku} from {rev.rowcount} ex-podium holder(s)")
     except Exception as ex:
-        print(f"[PODIUM] title grant failed: {ex}")
+        print(f"[PODIUM] {sku} holder sync failed: {ex}")
+
+
+async def _grant_podium_titles(player_ids: list) -> None:
+    """1v1 wrapper — see _sync_podium_holders (grant + revoke)."""
+    await _sync_podium_holders(TITLE_PODIUM_SKU, player_ids)
 
 
 async def _podium_player_ids(db: AsyncSession) -> list:
@@ -530,36 +600,11 @@ _PODIUM_FFA_QUERY = """
 
 
 async def _grant_mode_podium_titles(sku: str, player_ids: list) -> None:
-    """Idempotently grant a per-mode podium title to that board's current top
-    3. Own session, exactly like _grant_podium_titles: the cache refresh fires
-    from arbitrary request contexts (including inside a match-report
-    transaction), so it must commit without touching the caller's. Grant only,
-    never revoke — falling off the podium is a render-time decision."""
-    if not player_ids:
-        return
-    if IS_REPLICA:
-        _replica_skip("mode_podium_grant")
-        # Same silent-failure class as _grant_podium_titles, same reasoning:
-        # own session, own swallow, reached from the routed mode boards
-        # (/ffa/leaderboard, /team/leaderboard, /ovt/leaderboard, /ffa/recent,
-        # /team/all-series-paged). The primary owns the grant.
-        return
-    try:
-        from database import async_session
-        async with async_session() as gdb:
-            res = await gdb.execute(text(
-                "INSERT INTO player_items (player_id, item_id, purchase_price) "
-                "SELECT p.id, si.id, 0 "
-                "FROM players p "
-                "JOIN shop_items si ON si.sku = :sku "
-                "WHERE p.id::text = ANY(:pids) "
-                "ON CONFLICT (player_id, item_id) DO NOTHING"
-            ), {"sku": sku, "pids": list(player_ids)})
-            await gdb.commit()
-            if res.rowcount:
-                print(f"[PODIUM] granted {sku} to {res.rowcount} new podium holder(s)")
-    except Exception as ex:
-        print(f"[PODIUM] {sku} grant failed: {ex}")
+    """Per-mode wrapper — see _sync_podium_holders (grant + revoke, bug 325).
+    Reached from the routed mode boards (/ffa/leaderboard, /team/leaderboard,
+    /ovt/leaderboard, /ffa/recent, /team/all-series-paged); the replica skip
+    and the own-session commit both live in the shared helper."""
+    await _sync_podium_holders(sku, player_ids)
 
 
 async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) -> dict:
@@ -3528,6 +3573,16 @@ STATS_CLEAN_MIN_VERSION = "1.34.0"
 # ...) while still excluding every build that carries the bug. Naming a guessed
 # release here would silently disarm the floor if the guess came in high.
 BULLET_STATS_CLEAN_MIN_VERSION = "1.39.4"
+
+# First client version carrying DanceEmotes (the E wheel + choreography).
+# /shop/items hides kind='dance' rows from anything older — an old client
+# could BUY a dance but has no surface to play or preview it (the #163
+# "born unusable" class, for a behavior instead of a PNG). SHIP COUPLING
+# (#294/#331): this must be <= the version the dance client actually ships
+# as — if Sid names the release 1.40.0 the gate still opens (1.40.0 >
+# 1.39.7); it must never be RAISED past the shipped version or every
+# client loses the section.
+DANCES_MIN_VERSION = "1.39.7"
 
 # Per-request mod version captured from the X-Mod-Version header by the
 # version-gate middleware. Identity-bound _mark_mod_seen callers may use it
@@ -8886,6 +8941,37 @@ async def get_card_stats(
                      (card_rarity IS NOT NULL AND card_rarity <> 'Unknown') DESC,
                      votes DESC,
                      card_rarity
+        ),
+        sweeps AS (
+            -- Aug 31 (Sid): 5-0 match wins carrying this card in the WINNER's
+            -- build (the stats endpoint's sweep predicate: winner's opponent
+            -- seat took zero rounds). COUNT(DISTINCT match_id) — stacked
+            -- copies must not count one sweep twice. Same player/ranked
+            -- filters as the main body so the number answers the same
+            -- question the row does; casual+ranked combined when unfiltered.
+            SELECT mc.card_name, COUNT(DISTINCT mc.match_id) AS sweeps_with_card
+            FROM match_cards mc
+            JOIN matches m ON m.id = mc.match_id
+            WHERE m.winner_id = mc.player_id
+              AND m.invalidated_at IS NULL
+              AND CASE WHEN m.player1_id = mc.player_id THEN m.p2_rounds_won
+                       ELSE m.p1_rounds_won END = 0
+              {player_filter} {ranked_filter}
+            GROUP BY mc.card_name
+        ),
+        stacks AS (
+            -- Aug 31 (Sid): builds that STACKED this card — >= 2 picks of the
+            -- same name by one player in one match (match_cards is one row
+            -- per pick, so the grain IS the stack; vanilla allowMultiple
+            -- makes duplicate picks legitimate, #278).
+            SELECT s.card_name, COUNT(*) AS stacked_builds
+            FROM (SELECT mc.match_id, mc.player_id, mc.card_name
+                    FROM match_cards mc
+                    JOIN matches m ON m.id = mc.match_id
+                   WHERE m.invalidated_at IS NULL {player_filter} {ranked_filter}
+                   GROUP BY mc.match_id, mc.player_id, mc.card_name
+                  HAVING COUNT(*) >= 2) s
+            GROUP BY s.card_name
         )
         SELECT
             mc.card_name,
@@ -8899,16 +8985,22 @@ async def get_card_stats(
                 / NULLIF(COUNT(*), 0), 4
             ) AS win_rate,
             COALESCE(o.times_offered, 0) AS times_offered,
-            COALESCE(o.pass_rate, 0)     AS pass_rate
+            COALESCE(o.pass_rate, 0)     AS pass_rate,
+            COALESCE(sw.sweeps_with_card, 0) AS sweeps_with_card,
+            COALESCE(st.stacked_builds, 0)   AS stacked_builds
         FROM match_cards mc
         JOIN matches m ON m.id = mc.match_id
         LEFT JOIN offers o ON o.card_name = mc.card_name
         LEFT JOIN rarity r ON r.card_name = mc.card_name
+        LEFT JOIN sweeps sw ON sw.card_name = mc.card_name
+        LEFT JOIN stacks st ON st.card_name = mc.card_name
         WHERE 1=1 {player_filter} {ranked_filter}
         -- r.card_rarity must stay in the GROUP BY: Postgres cannot infer the
         -- functional dependency through a CTE. Since `rarity` is
-        -- DISTINCT ON (card_name) it adds no extra groups.
-        GROUP BY mc.card_name, r.card_rarity, o.times_offered, o.pass_rate
+        -- DISTINCT ON (card_name) it adds no extra groups (same for the two
+        -- Aug 31 aggregates — both are GROUP BY card_name CTEs).
+        GROUP BY mc.card_name, r.card_rarity, o.times_offered, o.pass_rate,
+                 sw.sweeps_with_card, st.stacked_builds
         HAVING COUNT(*) >= :min_picks
         ORDER BY {_CARD_SORT_MAP.get(sort_by, "times_picked")} {"DESC" if order == "desc" else "ASC"}
         LIMIT :limit
@@ -8927,12 +9019,55 @@ async def get_card_stats(
             win_rate=float(r["win_rate"] or 0),
             times_offered=r["times_offered"],
             pass_rate=float(r["pass_rate"] or 0),
+            sweeps_with_card=r["sweeps_with_card"],
+            stacked_builds=r["stacked_builds"],
         )
         for r in rows
     ]
 
 
 # ── Routes: Compare-tab stat boards (Aug 6 item 1) ─────────────────────────
+
+
+@app.get("/api/v1/shop/sales-board", tags=["Shop"])
+async def shop_sales_board(db: AsyncSession = Depends(get_db)):
+    """Aug 31 (Sid — Compare > Players 'Shop Sales'): global per-cosmetic sales
+    board — how many people hold each item, what it grossed, and the shop's
+    overall take. Parallel arrays (the compare-board client convention).
+
+    Scope rules: achievement-pool items are GRANTS, not sales — excluded, or
+    every podium/trophy holder would read as a 'purchase'. Gifted copies
+    (purchase_price = 0 on a sellable item) are counted separately and add no
+    revenue. Buyer identities never leave the server — counts only. Artist
+    byline comes from the live player row (NULL for house items; a deleted
+    artist renders blank, #437-family: no identity resurrection)."""
+    rows = (await db.execute(text("""
+        SELECT si.sku, si.name, si.kind,
+               COALESCE(ap.display_name, '') AS artist,
+               COUNT(*) FILTER (WHERE pi.purchase_price > 0) AS purchases,
+               COUNT(*) FILTER (WHERE pi.purchase_price = 0) AS gifted,
+               COALESCE(SUM(pi.purchase_price), 0)::bigint    AS revenue
+          FROM player_items pi
+          JOIN shop_items si ON si.id = pi.item_id
+          LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
+                              AND ap.deleted_at IS NULL
+         WHERE si.rotation_pool IS DISTINCT FROM 'achievement'
+         GROUP BY si.sku, si.name, si.kind, ap.display_name
+         ORDER BY revenue DESC, purchases DESC, si.sku
+    """))).mappings().all()
+    top = rows[:40]
+    return {
+        "skus":      [r["sku"] for r in top],
+        "names":     [r["name"] or r["sku"] for r in top],
+        "kinds":     [r["kind"] or "" for r in top],
+        "artists":   [r["artist"] for r in top],
+        "purchases": [int(r["purchases"]) for r in top],
+        "gifted":    [int(r["gifted"]) for r in top],
+        "revenues":  [int(r["revenue"]) for r in top],
+        "total_revenue":  int(sum(r["revenue"] for r in rows)),
+        "total_purchases": int(sum(r["purchases"] for r in rows)),
+        "total_items": len(rows),
+    }
 
 # Allowlist: request value -> fixed per-seat column pair (or a marker for the
 # purpose-built boards below). Interpolating anything else into SQL is the
@@ -19167,12 +19302,15 @@ def _odds_multiplier(bet_on_rating: float, opponent_rating: float,
 # together" comments, which is the tell that a constant wants to be one
 # expression rather than a convention.
 #
-# WHY 2 AND NOT MORE: the client posts live points only while the current game
-# is 0-0 in ROUNDS, and a ROUNDS round ends at 2 points, so the counters reset
-# before a third point can exist. Measured over all 1451 series ever recorded,
-# MAX(live_p1_points + live_p2_points) = 2. A threshold above 2 is not a wider
-# betting window, it is no lock at all — do not raise this without also
-# changing what the client sends.
+# WHAT THE CLIENT SENDS (bug 324 rewrite, Aug 31): CUMULATIVE points scored in
+# the current game per side, capped client-side at 2 — so the stored pair maxes
+# at 2-2 and the sum at 4. The OLD cadence posted the raw within-round score
+# and only during round 1, which could never observe a 2-0 round sweep's second
+# point (the round-end reset beats the 10 Hz poll), so the lock only fired when
+# round 1 reached 1-1 — bug 324's bet was accepted five rounds into game 1.
+# Old clients still send the old cadence; for them the lock stays best-effort.
+# WHY 2: two points scored in game 1 is Sid's stated cutoff (#331). Do not
+# raise it — the client cap moves with this constant, in lockstep.
 RANKED_BET_POINT_LOCK = 2
 
 # The RULE (Sid, Discord Aug 16) is fixed: tax winning low-odds bets and
@@ -19371,6 +19509,17 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
         if ach_q is not None:
             rows.extend((await db.execute(ach_q.order_by(ShopItem.price))).scalars().all())
 
+    # Dance emotes are version-gated (see DANCES_MIN_VERSION): a pre-dance
+    # client would list + sell rows it can never play or preview. The header
+    # is already format-validated by the version-gate middleware; a missing/
+    # unparsable version fails CLOSED (no dances) — the harmless direction.
+    try:
+        _cv = _current_mod_version.get()
+        if not _cv or _parse_version(_cv) < _parse_version(DANCES_MIN_VERSION):
+            rows = [r for r in rows if r.kind != "dance"]
+    except Exception:
+        rows = [r for r in rows if r.kind != "dance"]
+
     # Artist annotations (v1.30): display name per artist steam id, plus a
     # sold-count per stock-limited item so the shop can render "3 of 10 left"
     # and grey out sold-out rows. Both maps are tiny (a handful of artist
@@ -19455,6 +19604,17 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
         ORDER BY COALESCE(si.released_at, si.created_at) DESC
         LIMIT :lim
     """), {"lim": limit, "batches": batches})).mappings().all()
+    # Same dance version gate as /shop/items (round-2 review H-low): a
+    # pre-dance client's Home panel would otherwise render a raw
+    # "(dance, rarity)" teaser for rows its build cannot use. Filter is
+    # post-query so the batches/limit window stays byte-identical for
+    # capable clients on the same data.
+    try:
+        _cv = _current_mod_version.get()
+        if not _cv or _parse_version(_cv) < _parse_version(DANCES_MIN_VERSION):
+            rows = [r for r in rows if r["kind"] != "dance"]
+    except Exception:
+        rows = [r for r in rows if r["kind"] != "dance"]
     return {
         "items": [
             {"sku": r["sku"], "kind": r["kind"], "name": r["name"],
@@ -20452,18 +20612,16 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         # private carve-out was removed.
         #
         # BUG 212 ROOT CAUSE. This used to read `3 if is_private else 2`, and 3
-        # is OUTSIDE THE METRIC'S RANGE, so the private lock could never fire —
-        # a private series stayed bettable until a whole game was won, which in
-        # a first-to-5 is many minutes of a visibly-decided match. That is the
-        # report ("able to bet after 4+ points scored"): series
-        # 902f5171 was is_private with live points 1-1, both players on 1.38.4.
+        # was outside the OLD metric's range, so the private lock could never
+        # fire — a private series stayed bettable until a whole game was won.
         #
-        # WHY 3 IS UNREACHABLE — the client posts live points only while
-        # curP1Rounds == 0 && curP2Rounds == 0 (GameStateWatcher), i.e. during a
-        # game's FIRST ROUND, and a ROUNDS round ends at 2 points, so the round
-        # is over (and the counters reset) before a third point can exist.
-        # Measured over all 1451 series ever recorded: MAX(live_p1_points) = 1,
-        # MAX(live_p2_points) = 1, MAX(sum) = 2. Zero rows have ever reached 3.
+        # BUG 324 (Aug 31): the old metric had a second hole — the client only
+        # posted during round 1 and could never observe a 2-0 sweep's second
+        # point, so the lock only fired when round 1 reached 1-1 (production:
+        # MAX(live point) = 1 per side over every series ever). Clients now
+        # send CUMULATIVE per-game points capped at 2, so any two points scored
+        # in game 1 — swept or split — reach the threshold. Old clients still
+        # send the old cadence (best-effort lock until they update).
         #
         # WHY REMOVING THE CARVE-OUT IS SAFE. Its stated justification was that
         # a private row is created LATE (client preflight) so game 1 might
@@ -21048,11 +21206,17 @@ async def update_live_points(
     if reporter is None or reporter.id not in (series.player1_id, series.player2_id):
         raise HTTPException(status_code=403, detail="Reporter is not in this series")
 
-    # Map reporter's p1/p2 perspective to series' p1/p2 ordering.
-    if reporter.id == series.player1_id:
-        new_p1, new_p2 = p1_points, p2_points
-    else:
-        new_p1, new_p2 = p2_points, p1_points
+    # Aug 31 (review r1 find 2, CONFIRMED): NO reporter swap. The client reads
+    # GM_ArmsRace's p1/p2 point fields, which are GLOBAL team-slot values —
+    # identical on both seats — so both reporters send the SAME pair. The old
+    # "map reporter's perspective" swap flipped player2's copy, and columnwise
+    # GREATEST of (a,b) and (b,a) is (max,max): ONE real point stored as 1-1
+    # and closed betting early whenever both seats reported (production's
+    # uniform 1-1 end-state was this bug's fingerprint, not round-1 parity).
+    # The pair's side-attribution against series.player1/player2 is GM slot
+    # order, which the server cannot know — irrelevant to the LOCK (a sum) and
+    # cosmetic for the 0..2 display pair.
+    new_p1, new_p2 = p1_points, p2_points
 
     # Monotonic: only ever increase. Prevents a stale or out-of-order report from
     # un-locking betting after the cutoff has been hit.
@@ -21239,6 +21403,23 @@ async def update_ffa_live_points(
     """), {"gn": game_number, "tp": total_points, "lid": lid, "pid": reporter.id})).first()
     if pts is None:
         await db.rollback()
+        # Aug 31 (bets recon mechanism #3): disambiguate the WRONG-GAME case so
+        # the client can self-heal a drifted game counter — its retry machinery
+        # parses "expected_game=N" and resends once, re-signed. Without this,
+        # one missed game report meant every later live-points write 409'd and
+        # the betting window stayed open for the rest of the sitting. The other
+        # two causes (dead lobby, non-member) stay terminal and keep the old
+        # opaque detail. Diagnostic read only — the transaction rolled back.
+        diag = (await db.execute(text(
+            "SELECT status, COALESCE(games_played, 0) AS gp, "
+            "       (:pid = ANY(member_ids)) AS memb "
+            "  FROM ffa_lobbies WHERE id = :lid"
+        ), {"lid": lid, "pid": reporter.id})).mappings().first()
+        if (diag is not None and diag["status"] == "active" and diag["memb"]
+                and int(diag["gp"]) + 1 != game_number):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Wrong game number; expected_game={int(diag['gp']) + 1}")
         raise HTTPException(status_code=409,
                             detail="Lobby is not live, reporter is not a member, "
                                    "or that game is not the one in progress")
@@ -21438,10 +21619,11 @@ async def place_bet(
     # "is the favorite actually going to win" mystery and prevents free-money bets
     # placed mid-game once an outcome is obvious.
     #
-    # BUG 212 — MIRRORS /series/active, which carries the full rationale. In
-    # short: this was `3 if is_private else 2`, and the client's live-points
-    # cadence caps the sum at 2, so the private branch could never fire and a
-    # room-code series stayed bettable for the whole match.
+    # BUG 212 / BUG 324 — MIRRORS /series/active, which carries the full
+    # rationale. In short: bug 212 was a threshold (3) the old metric could not
+    # reach; bug 324 was the old metric itself (round-1-only raw score) missing
+    # every 2-0 round sweep. Clients now send cumulative per-game points capped
+    # at 2, so this check fires for any two points scored in game 1.
     #
     # The threshold now lives once, in RANKED_BET_POINT_LOCK. This site tests
     # the two halves separately (rather than calling _ranked_score_locked) only
@@ -24805,6 +24987,11 @@ ACHIEVEMENT_GOLD_OVERRIDES = {
     # Translator titles — priced on the same effort ladder as everything else:
     # 10 strings is an afternoon, 1000 is the whole catalogue twice over.
     "rosetta": 100, "dragoman": 300, "babel": 1000,
+    # Tournament achievements (Aug 31). SID'S BALANCE KNOBS (#331): priced on
+    # the existing ladder — winning a bracket is master_rank-hard, a final is
+    # unstoppable-hard; Iron Bracket rides the 100g default (no entry needed).
+    "tourn_champion_sync": 500, "tourn_champion_async": 500,
+    "tourn_second_sync": 300, "tourn_second_async": 300,
     #
     # ── KNOWN TRADE-OFF, accepted deliberately ─────────────────────────────
     # These six originally shipped at 0g BECAUSE every value they read is
@@ -24941,6 +25128,20 @@ ACHIEVEMENT_DEFS = {
     "rosetta":              {"name": "Rosetta",            "desc": "Get 10 translations approved (yours, or ones you reviewed)"},
     "dragoman":             {"name": "Dragoman",           "desc": "Get 100 translations approved (yours, or ones you reviewed)"},
     "babel":                {"name": "Babel",              "desc": "Get 1000 translations approved (yours, or ones you reviewed)"},
+    # Tournament achievements (Sid, Aug 31). Granted inside
+    # _maybe_complete_tournament's completion transaction (tournaments.py) —
+    # the exactly-once site where every bracket match is terminal. Winner and
+    # runner-up come from the tournament row's podium fields; kind splits
+    # sync/async. Iron Bracket = completed the tournament having played every
+    # match: never the forfeiting side of a 'forfeit' and never in a
+    # 'double_forfeit'; matches the OPPONENT forfeited still count as played
+    # (Sid's spec, verbatim); byes are neutral. Server-granted only — none of
+    # these are in CLIENT_UNLOCK_KEYS.
+    "tourn_champion_sync":  {"name": "Sync Champion",      "desc": "Win a live (sync) tournament"},
+    "tourn_champion_async": {"name": "Async Champion",     "desc": "Win an async tournament"},
+    "tourn_second_sync":    {"name": "Sync Finalist",      "desc": "Take 2nd place in a live (sync) tournament"},
+    "tourn_second_async":   {"name": "Async Finalist",     "desc": "Take 2nd place in an async tournament"},
+    "tourn_iron_bracket":   {"name": "Iron Bracket",       "desc": "Play a tournament through to the end without forfeiting a single match"},
     # Payout: 100 / 300 / 500 / 100 / 500 / 300, in the order listed above
     # (Sid priced them 2026-08-07; they shipped at 0g for one day). The table in
     # ACHIEVEMENT_GOLD_OVERRIDES is the contract — read it, not this comment —
