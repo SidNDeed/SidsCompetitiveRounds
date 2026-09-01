@@ -121,7 +121,8 @@ namespace CompetitiveRounds
                               Segments = () => new[] { Seg.V("series-format"), Seg.T(Ranked1v1) } },
                 new Article { Key = "mode-2v2",   Title = () => I18n.Tr("2v2"),        Body = () => ModeInfoText.Team + "\n\n" + Mode2v2Ext,
                               Segments = () => new[] { Seg.V("team-format"), Seg.T(ModeInfoText.Team + "\n\n" + Mode2v2Ext) } },
-                new Article { Key = "mode-1v2",   Title = () => I18n.Tr("1v2"),        Body = () => ModeInfoText.Ovt + "\n\n" + Mode1v2Ext },
+                new Article { Key = "mode-1v2",   Title = () => I18n.Tr("1v2"),        Body = () => ModeInfoText.Ovt + "\n\n" + Mode1v2Ext,
+                              Segments = () => new[] { Seg.V("ovt-format"), Seg.T(ModeInfoText.Ovt + "\n\n" + Mode1v2Ext) } },
                 new Article { Key = "mode-ffa",   Title = () => I18n.Tr("FFA"),        Body = () => ModeInfoText.Ffa + "\n\n" + ModeFfaExt,
                               Segments = () => new[] { Seg.V("ffa-scoring"), Seg.T(ModeInfoText.Ffa + "\n\n" + ModeFfaExt) } },
                 new Article { Key = "spectating", Title = () => I18n.Tr("Spectating"), Body = () => Spectating },
@@ -145,23 +146,28 @@ namespace CompetitiveRounds
             }},
             new Category { Title = () => I18n.Tr("Tracking & Fair Play"), Color = CAT_FAIR, Articles = new[]
             {
-                new Article { Key = "tracking",     Title = () => I18n.Tr("How games are tracked"), Body = () => Tracking },
+                new Article { Key = "tracking",     Title = () => I18n.Tr("How games are tracked"), Body = () => Tracking,
+                              Segments = () => new[] { Seg.V("report-pipeline"), Seg.T(Tracking) } },
                 new Article { Key = "when-counts",  Title = () => I18n.Tr("When a game counts"),    Body = () => WhenCounts,
                               Segments = () => new[] { Seg.V("when-counts"), Seg.T(WhenCounts) } },
-                new Article { Key = "anticheat",    Title = () => I18n.Tr("Anti-cheat"),            Body = () => Anticheat },
+                new Article { Key = "anticheat",    Title = () => I18n.Tr("Anti-cheat"),            Body = () => Anticheat,
+                              Segments = () => new[] { Seg.V("anticheat-pipeline"), Seg.T(Anticheat) } },
                 new Article { Key = "stats-tracked",Title = () => I18n.Tr("How stats are tracked"), Body = () => NativeUI.StatsTrackingInfoBody },
             }},
             new Category { Title = () => I18n.Tr("The Mod & Vanilla"), Color = CAT_VANILLA, Articles = new[]
             {
                 new Article { Key = "vanilla-safety", Title = () => I18n.Tr("Vanilla stays vanilla"),    Body = () => VanillaSafety },
                 new Article { Key = "vanilla-fixes",  Title = () => I18n.Tr("Bug fixes the mod ships"),  Body = () => VanillaFixesP1 + "\n\n" + VanillaFixesP2 },
-                new Article { Key = "visibility",     Title = () => I18n.Tr("What unmodded players see"),Body = () => Visibility },
+                new Article { Key = "visibility",     Title = () => I18n.Tr("What unmodded players see"),Body = () => Visibility,
+                              Segments = () => new[] { Seg.V("visibility-seats"), Seg.T(Visibility) } },
             }},
             new Category { Title = () => I18n.Tr("Cosmetics & Identity"), Color = CAT_COSM, Articles = new[]
             {
                 new Article { Key = "titles",       Title = () => I18n.Tr("Titles"),             Body = () => Titles },
-                new Article { Key = "achievements", Title = () => I18n.Tr("Achievement guide"),  Body = () => AchievementsP1 + "\n\n" + AchievementsP2 },
-                new Article { Key = "cosmetics",    Title = () => I18n.Tr("Shop & cosmetics"),   Body = () => Cosmetics },
+                new Article { Key = "achievements", Title = () => I18n.Tr("Achievement guide"),  Body = () => AchievementsP1 + "\n\n" + AchievementsP2,
+                              Segments = () => new[] { Seg.V("achievement-tiers"), Seg.T(AchievementsP1 + "\n\n" + AchievementsP2) } },
+                new Article { Key = "cosmetics",    Title = () => I18n.Tr("Shop & cosmetics"),   Body = () => Cosmetics,
+                              Segments = () => new[] { Seg.V("cosmetics-flow"), Seg.T(Cosmetics) } },
                 new Article { Key = "colors",       Title = () => I18n.Tr("Team & body colors"), Body = () => TeamColors },
             }},
         });
@@ -176,7 +182,7 @@ namespace CompetitiveRounds
 Two rules hold everywhere, and the whole mod is designed around them:
 
 - <color=#7FE87F>A non-modded player always gets pure vanilla gameplay.</color> Whole-room changes (Grow normalization, the FFA engine features) turn themselves off unless every fighter runs a current copy of the mod - one vanilla or outdated client means vanilla rules for everyone, identically - and the poison fix follows the poisoned player, so an unmodded victim keeps vanilla poison.
-- <color=#7FE87F>The only thing a non-modded opponent can ever see of the mod is nametag styling.</color>
+- <color=#7FE87F>The only things a non-modded opponent can ever see of the mod are nametag styling and the quick-chat phrases you choose to send</color> - quick chat goes out through the game's own chat bubble, like a typed message.
 
 Two nuances, spelled out in <color=#7FD4FF>Vanilla stays vanilla</color>: crash-prevention guards are always on (they repair states vanilla never intended - a dead block, a frozen input - and change no rule), and between players who are ALL modded, current and Ranked-consenting, the poison and Grow fairness fixes apply even in quickplay and room codes.
 
@@ -198,7 +204,7 @@ F5 works everywhere - menu, lobby, mid-game. While the menu is open your inputs 
 
 Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode.
 
-Holding E between rounds opens the emote wheel: point at a dance you own and release to play it for everyone. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
+Holding E opens the emote wheel - even mid-battle: point at a dance you own and release to play it for everyone running the mod. Your own controls lock until the dance ends, and the dance stops if you get knocked around or fire. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
 
 Hold Tab during a match for the live scoreboard: score, cards, accuracy and connection info for everyone in the room, without opening the full menu.
 
@@ -630,7 +636,7 @@ The ping number (the mod shows it in the corner overlay, next to your region) is
 
 <color=#FFD94D><b>WHERE THE FIXES RUN</b></color>
 
-Crash guards and dead-state repairs run everywhere - they repair states vanilla never intended, without changing any rule. Rule changes are gated: mode logic needs its own mod-issued room, Grow normalization needs every fighter modded and consenting, and poison authority follows the poisoned player - an unmodded victim keeps vanilla poison. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> - and the only thing they can ever see of the mod is nametag styling (see <color=#7FD4FF>Vanilla stays vanilla</color>).");
+Crash guards and dead-state repairs run everywhere - they repair states vanilla never intended, without changing any rule. Rule changes are gated: mode logic needs its own mod-issued room, Grow normalization needs every fighter modded and consenting, and poison authority follows the poisoned player - an unmodded victim keeps vanilla poison. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> - and the only things they can ever see of the mod are nametag styling and quick-chat phrases you deliberately send through the game's own chat (see <color=#7FD4FF>Vanilla stays vanilla</color>).");
 
         private static string Ranked1v1 => I18n.Tr(@"Ranked 1v1 is the mod's core mode: best-of-3 series, one Glicko rating, and two ways to start a rated series - the queue, or a private room where both players run the mod. This page covers the queue from Search to room, how a private lobby becomes rated, and exactly what a disconnect does.
 
@@ -1386,7 +1392,7 @@ Playing quickplay or a room code with the mod installed, you get vanilla rules p
 
 Two fairness fixes can reach quickplay and room-code games: <color=#7FD4FF>Grow normalization</color> (every fighter current, everyone's Ranked on at connect - both sides always agree on it) and the per-victim poison sync, which follows the poisoned player wherever they play (see <color=#7FD4FF>Poison & damage over time</color> for the mixed-room details).
 
-<color=#7FE87F>And your opponent never has to know the mod is there: the only thing a non-modded player can ever see of it is nametag styling</color> (see <color=#7FD4FF>What unmodded players see</color>).");
+<color=#7FE87F>And your opponent never has to know the mod is there unless you talk to them: the only things a non-modded player can ever see of it are nametag styling and quick-chat messages you send</color> (see <color=#7FD4FF>What unmodded players see</color>).");
 
         private static string VanillaFixesP1 => I18n.Tr(@"What each vanilla bug fix does and where it applies. Gating rules are in <color=#7FD4FF>Vanilla stays vanilla</color>: crash guards run everywhere, gameplay changes only where everyone is modded and agreed.
 
@@ -1444,7 +1450,7 @@ Vanilla ROUNDS is built for exactly two teams, so FFA rooms replace the round en
 
 <color=#7FD4FF>Auto-continue</color> - mod rooms auto-confirm the rematch prompt. Room-code games deliberately keep the vanilla prompt: after one side clicks Yes, vanilla starts a 10-second timer that kicks that side to the menu if the other never answers - one-sided auto-Yes kills the player it tries to help.");
 
-        private static string Visibility => I18n.Tr(@"What other players can and cannot see of your mod. The short version is a guarantee: <color=#7FE87F>the only thing a non-modded opponent can ever see of the mod is your nametag styling.</color> Everything else either needs the mod on the viewer's side or never leaves your machine.
+        private static string Visibility => I18n.Tr(@"What other players can and cannot see of your mod. The short version is a guarantee: <color=#7FE87F>the only things a non-modded opponent can ever see of the mod are your nametag styling and the quick-chat phrases you choose to send.</color> Quick chat is chat, not a cosmetic - it goes out through the game's own chat bubble, exactly like a typed message. Everything else either needs the mod on the viewer's side or never leaves your machine.
 
 <color=#FFD94D><b>WHAT A NON-MODDED OPPONENT SEES</b></color>
 

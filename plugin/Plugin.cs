@@ -1929,19 +1929,25 @@ namespace CompetitiveRounds
             // Screenshots of specific articles need this lever since
             // synthetic clicks can't reach the overlay (#420). Other tabs
             // keep the float scroll meaning.
-            string compareMetric = null;
+            string compareMetric = null; int shopCat = -1;
             if (parts.Length > 1)
             {
                 if (idx == 15) infoKey = raw.Substring(raw.IndexOf(':') + 1).Trim();
                 // Aug 31: "9:<metric name>" opens Compare on a named metric
                 // (metric names contain spaces/digits — everything after the
-                // first ':' is the name, byte-matched by DevSetCompareMetricByName).
+                // first ':' is the name, byte-matched by DevSetCompareMetricByName;
+                // Sept 1: card metrics match too and flip the sub-tab).
                 else if (idx == 9) compareMetric = raw.Substring(raw.IndexOf(':') + 1).Trim();
+                // Sept 1: "4:cat<N>" selects a Shop category tab (e.g. 4:cat10
+                // = Dances); a bare float keeps the scroll meaning.
+                else if (idx == 4 && parts[1].Trim().StartsWith("cat", StringComparison.OrdinalIgnoreCase))
+                    int.TryParse(parts[1].Trim().Substring(3), out shopCat);
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
-            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"}");
+            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"} shopCat {shopCat}");
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
+            if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
         }
 
         // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──
@@ -1954,6 +1960,16 @@ namespace CompetitiveRounds
             _lastTestWheel = v;
             if (v == "main") CompetitiveUI.DevForceQuickChatWheel(0);
             else if (v == "more") CompetitiveUI.DevForceQuickChatWheel(1);
+            // Sept 1: "send:<id>" fires a real QuickChat.Send — the vanilla
+            // chat RPC path end to end (in the offline sandbox the RPC loops
+            // back locally and the bubble renders above the local body, so
+            // the transport swap is verifiable on one seat, #420).
+            else if (v.StartsWith("send:"))
+            {
+                int qid;
+                if (int.TryParse(v.Substring(5), out qid))
+                    Plugin.Log.LogInfo($"[QUICKCHAT] test send id {qid} -> {QuickChat.Send(qid)} refusal='{QuickChat.LastRefusal}'");
+            }
             else CompetitiveUI.DevReleaseQuickChatWheel();
         }
 
@@ -2426,9 +2442,8 @@ namespace CompetitiveRounds
             // patch covers the ordering the polling cannot).
             try { GrowNormalize.StageCapability("tick"); GrowNormalize.SyncRankedIntent("tick"); }
             catch { }
-            // Quick-chat (§2.6) rides Photon event code 48 — same
-            // EventReceived hook pattern as PoisonSync (code 47).
-            try { QuickChat.Hook(); } catch { }
+            // Quick-chat sends through the vanilla chat RPC since Sept 1 and
+            // needs no receive hook (event code 48 is retired, never shipped).
             // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the
             // combat-edge cancellation + expiry sweep every frame.
             try { DanceEmotes.Hook(); DanceEmotes.Tick(); } catch { }

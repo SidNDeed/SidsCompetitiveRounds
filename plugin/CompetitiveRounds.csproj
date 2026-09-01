@@ -201,6 +201,8 @@
     <EmbeddedResource Include="assets\icon_youtube.png" />
     <EmbeddedResource Include="assets\icon_twitch.png" />
     <EmbeddedResource Include="assets\icon_thunderstore.png" />
+    <EmbeddedResource Include="assets\icon_discord.png" />
+    <EmbeddedResource Include="assets\icon_github.png" />
   </ItemGroup>
 
   <!-- SkipCopyToPlugins=true builds WITHOUT installing to the local BepInEx —

@@ -600,6 +600,9 @@ namespace CompetitiveRounds
         // an optional floor. This is the missing piece behind "the panel won't scroll".
         public static void SetTextAutoHeight(object tmp,float minH=0f){if(tmp==null||tLE==null)return;try{var go=((Component)tmp).gameObject;var le=go.GetComponent(tLE);if(le==null)le=go.AddComponent(tLE);tLE.GetProperty("preferredHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,-1f);tLE.GetProperty("preferredWidth",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,-1f);if(minH>0f)tLE.GetProperty("minHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,minH);}catch{}}
         public static void SetOverflowMode(object t,int mode){if(t==null||pTmpOverflow==null)return;try{pTmpOverflow.SetValue(t,Enum.ToObject(pTmpOverflow.PropertyType,mode));}catch{}}
+        // Sept 1: re-align an existing TMP element (CreateButton centers its
+        // label; the Shop Sales sortable headers want the column's left edge).
+        public static void SetAlign(object t,int align){if(t==null||pTmpAlignment==null)return;try{pTmpAlignment.SetValue(t,Enum.ToObject(pTmpAlignment.PropertyType,align));}catch{}}
         /* Aug-3 item 7c (#297 family). A ONE-LINE cell whose box is under ~1.4x its
          * font size fits a pure-Gravity line but NOT a line whose glyphs come from
          * the runtime OS fallback atlas (Cyrillic/Greek — #110): the fallback face
@@ -1378,6 +1381,7 @@ namespace CompetitiveRounds
             MaybeRefreshOvtTab();
             MaybeRefreshFfaTab();
             MaybeRefreshHomeTab();
+            MaybeRefreshInfoGold();
             MaybeRefreshCompareRecords();
             TickAnimatedThumbnails();
             TickCardPreviewUpgrade();
@@ -1804,8 +1808,10 @@ namespace CompetitiveRounds
             UIFactory.CreateText("Ver",bottom.transform,$"<b>v{Plugin.ModVersion}</b>",13f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(90,22));
             txtVersionStatus=UIFactory.CreateText("VerStatus",bottom.transform,"",12f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,22));
             updateBtn=UIFactory.CreateButton("UpdateBtn",bottom.transform,"Update",14f,C_WHITE,new Color(0.6f,0.4f,0.1f,0.9f),()=>{ApiClient.StartAutoUpdate();},sizeDelta:new Vector2(75,26));updateBtn.SetActive(false);
-            UIFactory.CreateButton("Discord",bottom.transform,"Discord",14f,Color.white,new Color(0.345f,0.396f,0.949f,0.9f),()=>{Application.OpenURL("https://discord.gg/comp-rounds");},sizeDelta:new Vector2(80,26));
-            UIFactory.CreateButton("GitHub",bottom.transform,"GitHub",14f,Color.white,new Color(0.2f,0.2f,0.2f,0.9f),()=>{Application.OpenURL("https://github.com/SidNDeed/SidsCompetitiveRounds");},sizeDelta:new Vector2(75,26));
+            // Sept 1 (Sid item 7): Discord/GitHub get glyphs like the newer
+            // trio below (+22px width for the icon inset, matching YouTube's).
+            AddFooterBtnIcon(UIFactory.CreateButton("Discord",bottom.transform,"Discord",14f,Color.white,new Color(0.345f,0.396f,0.949f,0.9f),()=>{Application.OpenURL("https://discord.gg/comp-rounds");},sizeDelta:new Vector2(102,26)),"icon_discord.png");
+            AddFooterBtnIcon(UIFactory.CreateButton("GitHub",bottom.transform,"GitHub",14f,Color.white,new Color(0.2f,0.2f,0.2f,0.9f),()=>{Application.OpenURL("https://github.com/SidNDeed/SidsCompetitiveRounds");},sizeDelta:new Vector2(97,26)),"icon_github.png");
             /* Aug 31: YouTube / Twitch / Thunderstore links, brand-colored with
              * embedded white glyphs (assets/icon_*.png). YouTube handle verified
              * live 2026-09-01; Twitch login from the broadcast config; the
@@ -5446,7 +5452,11 @@ namespace CompetitiveRounds
         /// <summary>Curated-metric setter for the showcase (design review:
         /// never blindly iterate ActiveMetrics — several entries trigger
         /// per-player lazy fetch storms). Matches the EXACT label in
-        /// COMPARE_METRICS; unknown label = no-op, false.</summary>
+        /// COMPARE_METRICS, then (Sept 1, broadcast verification of the Cards
+        /// rework) in CARD_METRICS — a card-metric match flips to the Cards
+        /// sub-tab and, when nothing is selected, seeds the selection from
+        /// the catalogue's top rows exactly as ToggleCompareCard would, so
+        /// the board has something to render. Unknown label = no-op, false.</summary>
         internal static bool DevSetCompareMetricByName(string label)
         {
             try
@@ -5459,9 +5469,34 @@ namespace CompetitiveRounds
                         dirty = true;
                         return true;
                     }
+                for (int i = 0; i < CARD_METRICS.Length; i++)
+                    if (CARD_METRICS[i] == label)
+                    {
+                        compareSubTab = 1;
+                        compareCardMetric = i;
+                        if (compareCardsSelected.Count == 0 && ApiClient.CardCatalog != null)
+                            for (int c = 0; c < ApiClient.CardCatalog.Count && compareCardsSelected.Count < 4; c++)
+                                compareCardsSelected.Add(ApiClient.CardCatalog[c].name);
+                        dirty = true;
+                        return true;
+                    }
             }
             catch { }
             return false;
+        }
+
+        /// <summary>Sept 1 broadcast-verification lever: select a Shop
+        /// category tab programmatically (mirrors the tab buttons' onClick —
+        /// synthetic clicks can't reach the overlay, #420).</summary>
+        internal static void DevSetShopCategory(int idx)
+        {
+            try
+            {
+                if (idx < 0 || idx >= SHOP_TAB_NAMES.Length) return;
+                shopCategoryFilter = idx;
+                dirty = true;
+            }
+            catch { }
         }
 
         // ── Showcase page ownership (design review, Aug 30) ─────────────
@@ -9389,9 +9424,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object[] shopTabTexts;
         private static object txtShopCategoryDesc;
         // Index order MUST match the filter switch in RefreshShop:
-        // 0 All, 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other.
+        // 0 All, 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other, 10 Dances.
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
-        private static string[] SHOP_TAB_NAMES => new[] { I18n.Tr("All"), I18n.Tr("Cosmetics"), I18n.Tr("Name Styles"), I18n.Tr("Maps"), I18n.Tr("Titles"), I18n.Tr("Trails"), I18n.Tr("Body/Team Color"), I18n.Tr("Cursor"), I18n.Tr("Effects"), I18n.Tr("Other") };
+        private static string[] SHOP_TAB_NAMES => new[] { I18n.Tr("All"), I18n.Tr("Cosmetics"), I18n.Tr("Name Styles"), I18n.Tr("Maps"), I18n.Tr("Titles"), I18n.Tr("Trails"), I18n.Tr("Body/Team Color"), I18n.Tr("Cursor"), I18n.Tr("Effects"), I18n.Tr("Other"), I18n.Tr("Dances") };
         private static readonly string[] SHOP_TAB_DESCS = {
             "All cosmetics - everything available, grouped by category.",
             "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
@@ -9403,6 +9438,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             "Mouse-cursor color tint (local-only). Pick the cursor SHAPE — arrow, dot, crosshair, circle — in Settings; the tint colors whichever shape you choose.",
             "In-combat particle aura around your character. Only visible to modded players.",
             "Utility unlocks (e.g. hide your gold total on the leaderboard).",
+            "Emote dances for the hold-E wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
         };
         private static List<GameObject> shopRowPool = new List<GameObject>();
         // Per-row glow-preview state. NametagGlowRenderer.ApplyGlowToLabel caches the unmodified
@@ -10054,7 +10090,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // Apply tab filter: keep only items matching the active category. Tab 0=All
             // keeps every list; any other tab keeps ONLY its own list so the render loop
             // skips the rest and their section headers hide via the if(count>0) gate.
-            // 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other.
+            // 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other, 10 Dances.
             if (shopCategoryFilter != 0)
             {
                 if (shopCategoryFilter != 1) faces.Clear();
@@ -10066,7 +10102,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (shopCategoryFilter != 7) cursors.Clear();
                 if (shopCategoryFilter != 8) effects.Clear();
                 if (shopCategoryFilter != 9) others.Clear();
-                dances.Clear();   // v1: dances list under ALL only (no dedicated tab yet)
+                if (shopCategoryFilter != 10) dances.Clear();   // Sept 1: Dances got a real tab
             }
 
             sorted.AddRange(faces);
@@ -11009,6 +11045,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var art = InfoLibrary.Find(key);
             if (art == null) return;
             infoSelectedKey = key;
+            // Sept 1: the rewards article's gold chart draws live per-player
+            // data (viz agent contract). Kick the idempotent fetch on every
+            // select — cheap, and by the time the player reaches "XP, Gold &
+            // levels" the cache is usually warm; MaybeRefreshInfoGold (the #62
+            // ticker) re-renders the one article whose viz was waiting on it.
+            try
+            {
+                ApiClient.FetchGoldSources(MatchTracker.LocalSteamId);
+                infoGoldWasMissing = key == "rewards"
+                    && !ApiClient.GoldSources.ContainsKey(MatchTracker.LocalSteamId ?? "");
+            }
+            catch { }
             try
             {
                 // Titles/bodies are already Tr'd inside InfoLibrary's
@@ -11038,6 +11086,30 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] select '" + key + "': " + ex.Message); }
+        }
+
+        // Sept 1: true while the rewards article is up with its gold chart
+        // still waiting on the local player's /gold-sources fetch.
+        private static bool infoGoldWasMissing;
+        private static float infoGoldCheckAt;
+
+        /// <summary>#62 ticker for the rewards article's live gold chart: the
+        /// article renders its legend fallback until the fetch lands, and
+        /// nothing else would re-run RenderInfoBody — one re-select when the
+        /// cache entry appears upgrades it to the proportional bars.</summary>
+        private static void MaybeRefreshInfoGold()
+        {
+            if (!infoGoldWasMissing || infoSelectedKey != "rewards") return;
+            if (Time.unscaledTime < infoGoldCheckAt) return;
+            infoGoldCheckAt = Time.unscaledTime + 0.5f;
+            try
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || !ApiClient.GoldSources.ContainsKey(sid)) return;
+                infoGoldWasMissing = false;
+                SelectInfoArticle("rewards");
+            }
+            catch { infoGoldWasMissing = false; }
         }
 
         /// <summary>Fill the reading pane from the article's Segments (text
@@ -13870,8 +13942,13 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// English key.</summary>
         private static readonly string[] CARD_METRICS = {
             "Times Picked", "Card Win Rate", "Pass Rate", "Times Offered", "Top Pickers",
-            // Aug 31 (Sid): community-wide 5-0s with the card + duplicate-stack counts.
+            // Aug 31 (Sid): community-wide 5-0s with the card + duplicate-stack
+            // counts. Sept 1: 5-0 Sweeps re-rendered as per-card top-5 sweeper
+            // lists (Sid: "a list ... with the top 5 or so people", not a bar).
             "5-0 Sweeps", "Most Stacked",
+            // Sept 1 (Sid item 4, "general pass"): ranked-only splits of the two
+            // core boards, per-card top winners, and breadth of use.
+            "Ranked Picks", "Ranked Win Rate", "Top Winners", "Unique Players",
         };
         /// <summary>Aug-3 item 11: display-only translation for COMPARE_METRICS.
         /// The array itself must stay raw English because it doubles as the internal
@@ -13930,6 +14007,11 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 case "Pass Rate": return I18n.Tr("Pass Rate");
                 case "Times Offered": return I18n.Tr("Times Offered");
                 case "Top Pickers": return I18n.Tr("Top Pickers");
+                // Sept 1 — Cards sub-tab general pass.
+                case "Ranked Picks": return I18n.Tr("Ranked Picks");
+                case "Ranked Win Rate": return I18n.Tr("Ranked Win Rate");
+                case "Top Winners": return I18n.Tr("Top Winners");
+                case "Unique Players": return I18n.Tr("Unique Players");
                 default: return m;
             }
         }
@@ -16437,11 +16519,17 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
         }
 
-        /// <summary>Aug 31 — "Shop Sales": global per-cosmetic sales table.
+        // Shop Sales board sort column: 0=Sold, 1=Revenue, 2=Earned (default —
+        // "total sales earnings for each player" is the number Sid named).
+        private static int shopSalesSort = 2;
+
+        /// <summary>Sept 1 — "Shop Sales", reworked per Sid: one row per ARTIST
+        /// (player with items up for sale), sortable by copies sold / gross
+        /// revenue / gold actually earned, with each artist's best seller.
         /// Selection-independent (Records pattern); renders into the free-form
-        /// graph panel with absolute labels. Names/artists are server-stored
-        /// but artist names are USER-authored — angle brackets neutered before
-        /// the rich-text write (#156).</summary>
+        /// graph panel with absolute labels. Artist names and item names are
+        /// USER-authored — angle brackets neutered before the rich-text write
+        /// (#156).</summary>
         private static void BuildCompareShopSalesPanel(float W, float H)
         {
             ApiClient.FetchShopSalesBoard();
@@ -16454,39 +16542,82 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
             string San(string s) { return string.IsNullOrEmpty(s) ? "" : s.Replace("<", "(").Replace(">", ")"); }
             MakeGraphLabel("CmpShopTitle",
-                $"<color=#CCC><b>{I18n.Tr("Shop sales (community-wide)")}</b></color>",
+                $"<color=#CCC><b>{I18n.Tr("Community artist sales - who has items up for sale, and what they've earned")}</b></color>",
                 new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 32, 18), UIFactory.AlignMidLeft, 13f);
             MakeGraphLabel("CmpShopTotals",
-                I18n.TrF("<color=#FFD94D>{0}g</color> <color=#AAA>earned across</color> <color=#FFD94D>{1}</color> <color=#AAA>purchases - {2} distinct items sold</color>",
-                         d.totalRevenue, d.totalPurchases, d.totalItems),
+                I18n.TrF("<color=#FFD94D>{0}g</color> <color=#AAA>paid to</color> <color=#FFD94D>{1}</color> <color=#AAA>artists - {2} copies sold, {3}g gross</color>",
+                         d.totalEarned, d.totalArtists, d.totalSold, d.totalRevenue),
                 new Vector2(0, 1), new Vector2(16f, -26f), new Vector2(W - 32, 16), UIFactory.AlignMidLeft, 12f);
-            // Column headers, then rows. Fixed x-columns: name(+artist) | kind | sold | gifted | revenue.
-            float top = H - 66f;
-            float xName = 16f, xKind = W * 0.46f, xSold = W * 0.60f, xGift = W * 0.72f, xRev = W * 0.84f;
-            MakeGraphLabel("CmpShopH0", $"<color=#8899AA><b>{I18n.Tr("Item")}</b></color>", new Vector2(0, 0), new Vector2(xName, top), new Vector2(xKind - xName - 8f, 14), UIFactory.AlignMidLeft);
-            MakeGraphLabel("CmpShopH1", $"<color=#8899AA><b>{I18n.Tr("Kind")}</b></color>", new Vector2(0, 0), new Vector2(xKind, top), new Vector2(xSold - xKind - 8f, 14), UIFactory.AlignMidLeft);
-            MakeGraphLabel("CmpShopH2", $"<color=#8899AA><b>{I18n.Tr("Sold")}</b></color>", new Vector2(0, 0), new Vector2(xSold, top), new Vector2(70, 14), UIFactory.AlignMidLeft);
-            MakeGraphLabel("CmpShopH3", $"<color=#8899AA><b>{I18n.Tr("Gifted")}</b></color>", new Vector2(0, 0), new Vector2(xGift, top), new Vector2(70, 14), UIFactory.AlignMidLeft);
-            MakeGraphLabel("CmpShopH4", $"<color=#8899AA><b>{I18n.Tr("Revenue")}</b></color>", new Vector2(0, 0), new Vector2(xRev, top), new Vector2(90, 14), UIFactory.AlignMidLeft);
+
+            // Fixed x-columns: artist | items | sold | gifted | revenue | earned | best seller.
+            float top = H - 70f;
+            float xArtist = 16f, xItems = W * 0.24f, xSold = W * 0.33f, xGift = W * 0.41f,
+                  xRev = W * 0.49f, xEarn = W * 0.60f, xBest = W * 0.71f;
+            MakeGraphLabel("CmpShopH0", $"<color=#8899AA><b>{I18n.Tr("Artist")}</b></color>", new Vector2(0, 0), new Vector2(xArtist, top), new Vector2(xItems - xArtist - 8f, 14), UIFactory.AlignMidLeft);
+            MakeGraphLabel("CmpShopH1", $"<color=#8899AA><b>{I18n.Tr("For sale")}</b></color>", new Vector2(0, 0), new Vector2(xItems, top), new Vector2(xSold - xItems - 8f, 14), UIFactory.AlignMidLeft);
+            // The three sortable columns are BUTTONS (the active one carries a
+            // gold marker); a click re-sorts locally and repaints via dirty.
+            SortHeaderBtn("CmpShopHS", I18n.Tr("Sold"), 0, xSold, top, xGift - xSold - 8f);
+            MakeGraphLabel("CmpShopH3", $"<color=#8899AA><b>{I18n.Tr("Gifted")}</b></color>", new Vector2(0, 0), new Vector2(xGift, top), new Vector2(xRev - xGift - 8f, 14), UIFactory.AlignMidLeft);
+            SortHeaderBtn("CmpShopHR", I18n.Tr("Revenue"), 1, xRev, top, xEarn - xRev - 8f);
+            SortHeaderBtn("CmpShopHE", I18n.Tr("Earned"), 2, xEarn, top, xBest - xEarn - 8f);
+            MakeGraphLabel("CmpShopH6", $"<color=#8899AA><b>{I18n.Tr("Best seller")}</b></color>", new Vector2(0, 0), new Vector2(xBest, top), new Vector2(W - xBest - 12f, 14), UIFactory.AlignMidLeft);
+
+            // Local sort over row indexes; the server's order is just a default.
+            var idx = new List<int>();
+            for (int i = 0; i < d.artists.Count; i++) idx.Add(i);
+            idx.Sort((a, b) =>
+            {
+                int ka = shopSalesSort == 0 ? d.sold[a] : shopSalesSort == 1 ? d.revenues[a] : d.earned[a];
+                int kb = shopSalesSort == 0 ? d.sold[b] : shopSalesSort == 1 ? d.revenues[b] : d.earned[b];
+                if (ka != kb) return kb.CompareTo(ka);
+                return string.Compare(d.artists[a], d.artists[b], StringComparison.OrdinalIgnoreCase);
+            });
+
             float rowH = 22f;
             int maxRows = Mathf.Max(1, Mathf.FloorToInt((top - 12f) / rowH));
-            int n = Mathf.Min(d.names.Count, maxRows);
-            for (int i = 0; i < n; i++)
+            int n = Mathf.Min(idx.Count, maxRows);
+            for (int r = 0; r < n; r++)
             {
-                float y = top - rowH * (i + 1);
-                string nm = San(d.names[i]);
-                if (!string.IsNullOrEmpty(d.artists[i]))
-                    nm += $" <color=#8FD4C1>({San(d.artists[i])})</color>";
-                MakeGraphLabel($"CmpShopN{i}", $"<color=#EEE>{nm}</color>", new Vector2(0, 0), new Vector2(xName, y), new Vector2(xKind - xName - 8f, 14), UIFactory.AlignMidLeft);
-                MakeGraphLabel($"CmpShopK{i}", $"<color=#889>{San(d.kinds[i])}</color>", new Vector2(0, 0), new Vector2(xKind, y), new Vector2(xSold - xKind - 8f, 14), UIFactory.AlignMidLeft);
-                MakeGraphLabel($"CmpShopS{i}", $"<color=#CCC>{d.purchases[i]}</color>", new Vector2(0, 0), new Vector2(xSold, y), new Vector2(70, 14), UIFactory.AlignMidLeft);
-                MakeGraphLabel($"CmpShopG{i}", d.gifted[i] > 0 ? $"<color=#889>{d.gifted[i]}</color>" : "<color=#556>-</color>", new Vector2(0, 0), new Vector2(xGift, y), new Vector2(70, 14), UIFactory.AlignMidLeft);
-                MakeGraphLabel($"CmpShopR{i}", $"<color=#FFD94D>{d.revenues[i]}g</color>", new Vector2(0, 0), new Vector2(xRev, y), new Vector2(90, 14), UIFactory.AlignMidLeft);
+                int i = idx[r];
+                float y = top - rowH * (r + 1);
+                MakeGraphLabel($"CmpShopN{r}", $"<color=#EEE><b>{r + 1}.</b> {FfaSafeRich(San(d.artists[i]))}</color>", new Vector2(0, 0), new Vector2(xArtist, y), new Vector2(xItems - xArtist - 8f, 14), UIFactory.AlignMidLeft);
+                MakeGraphLabel($"CmpShopI{r}", $"<color=#889>{d.itemsOnSale[i]}/{d.itemsTotal[i]}</color>", new Vector2(0, 0), new Vector2(xItems, y), new Vector2(xSold - xItems - 8f, 14), UIFactory.AlignMidLeft);
+                MakeGraphLabel($"CmpShopS{r}", $"<color=#CCC>{d.sold[i]}</color>", new Vector2(0, 0), new Vector2(xSold, y), new Vector2(xGift - xSold - 8f, 14), UIFactory.AlignMidLeft);
+                MakeGraphLabel($"CmpShopG{r}", d.gifted[i] > 0 ? $"<color=#889>{d.gifted[i]}</color>" : "<color=#556>-</color>", new Vector2(0, 0), new Vector2(xGift, y), new Vector2(xRev - xGift - 8f, 14), UIFactory.AlignMidLeft);
+                MakeGraphLabel($"CmpShopR{r}", $"<color=#CCB566>{d.revenues[i]}g</color>", new Vector2(0, 0), new Vector2(xRev, y), new Vector2(xEarn - xRev - 8f, 14), UIFactory.AlignMidLeft);
+                MakeGraphLabel($"CmpShopE{r}", $"<color=#FFD94D><b>{d.earned[i]}g</b></color>", new Vector2(0, 0), new Vector2(xEarn, y), new Vector2(xBest - xEarn - 8f, 14), UIFactory.AlignMidLeft);
+                string best = string.IsNullOrEmpty(d.topNames[i]) ? "<color=#556>-</color>"
+                    : $"<color=#8FD4C1>{FfaSafeRich(San(Trunc(d.topNames[i], 22)))}</color> <color=#889>x{d.topSolds[i]}</color>";
+                MakeGraphLabel($"CmpShopB{r}", best, new Vector2(0, 0), new Vector2(xBest, y), new Vector2(W - xBest - 12f, 14), UIFactory.AlignMidLeft);
             }
-            if (d.names.Count > n)
+            if (idx.Count > n)
                 MakeGraphLabel("CmpShopMore",
-                    $"<color=#667>{I18n.TrF("+ {0} more items", d.names.Count - n)}</color>",
-                    new Vector2(0, 0), new Vector2(xName, 2f), new Vector2(300, 12), UIFactory.AlignMidLeft);
+                    $"<color=#667>{I18n.TrF("+ {0} more artists", idx.Count - n)}</color>",
+                    new Vector2(0, 0), new Vector2(xArtist, 2f), new Vector2(300, 12), UIFactory.AlignMidLeft);
+        }
+
+        /// <summary>A clickable column header in the graph panel (bottom-left
+        /// anchored, MakeGraphLabel's coordinate space). Clicking re-sorts the
+        /// Shop Sales board; the active column is marked gold.</summary>
+        private static void SortHeaderBtn(string name, string label, int sortId, float x, float y, float w)
+        {
+            bool active = shopSalesSort == sortId;
+            string txt = active ? $"<color=#FFD94D><b>{label} v</b></color>" : $"<color=#8899AA><b>{label}</b></color>";
+            var btn = UIFactory.CreateButton(name, compareGraphPanel.transform, txt, 11f, C_DIM,
+                new Color(1f, 1f, 1f, active ? 0.06f : 0.02f),
+                () => { shopSalesSort = sortId; dirty = true; },
+                sizeDelta: new Vector2(w, 16f));
+            var rt = btn.GetComponent<RectTransform>();
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.zero; rt.pivot = Vector2.zero;
+            rt.anchoredPosition = new Vector2(x, y - 2f);
+            rt.sizeDelta = new Vector2(w, 16f);
+            var le = btn.GetComponent(UIFactory.tLE);
+            if (le != null) UnityEngine.Object.Destroy(le as UnityEngine.Object);
+            // The button's child label is anchor-stretched by CreateButton; give
+            // it the same left alignment the plain headers use.
+            var t = UIFactory.GetButtonText(btn);
+            if (t != null) { UIFactory.SetAlign(t, UIFactory.AlignMidLeft); UIFactory.FitOneLine(t); }
         }
 
         /// <summary>"Records" — GLOBAL per-game record boards in a 3x2 grid.
@@ -16867,23 +16998,48 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     return;
                 }
                 if (metricName == "Top Pickers") { BuildCompareCardPickers(W, H); return; }
+                // Sept 1 (Sid item 4): the two leaders boards render per-card
+                // TOP-5 PLAYER lists (the Top Pickers layout), not bars.
+                if (metricName == "5-0 Sweeps") { BuildCompareCardLeaders(W, H, true); return; }
+                if (metricName == "Top Winners") { BuildCompareCardLeaders(W, H, false); return; }
+
+                // Ranked boards read the ranked-only catalogue twin; kick its
+                // fetch here (the combined catalogue is fetched by the tab).
+                bool ranked = metricName == "Ranked Picks" || metricName == "Ranked Win Rate";
+                var cat = ApiClient.CardCatalog;
+                if (ranked)
+                {
+                    ApiClient.FetchCardCatalogRanked();
+                    cat = ApiClient.CardCatalogRanked;
+                    if (cat == null)
+                    {
+                        MakeGraphLabel("CmpCMLoadR", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                            new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                        return;
+                    }
+                }
 
                 string title = metricName == "Times Picked" ? I18n.Tr("Times picked (all players)")
                              : metricName == "Card Win Rate" ? I18n.Tr("Win rate holding this card")
                              : metricName == "Pass Rate" ? I18n.Tr("Pass rate (offered but not taken)")
-                             : metricName == "5-0 Sweeps" ? I18n.Tr("5-0 wins carrying this card (all players, casual + ranked)")
                              : metricName == "Most Stacked" ? I18n.Tr("Builds that stacked 2+ copies (all players)")
+                             : metricName == "Ranked Picks" ? I18n.Tr("Times picked (ranked games only)")
+                             : metricName == "Ranked Win Rate" ? I18n.Tr("Win rate holding this card (ranked games only)")
+                             : metricName == "Unique Players" ? I18n.Tr("Different players who have picked this card")
                              : I18n.Tr("Times offered");
-                bool pct = metricName == "Card Win Rate" || metricName == "Pass Rate";
+                bool pct = metricName == "Card Win Rate" || metricName == "Pass Rate"
+                        || metricName == "Ranked Win Rate";
                 MakeGraphLabel("CmpCMTitle", $"<color=#CCC><b>{title}</b></color>",
                     new Vector2(0, 1), new Vector2(60f, -4f), new Vector2(W - 60, 18), UIFactory.AlignMidLeft);
 
-                // Resolve each selected card's row once.
+                // Resolve each selected card's row once. A card absent from the
+                // RANKED catalogue was only ever picked in casual — zero is the
+                // honest ranked value, so the null hit falls through to 0.
                 var names = new List<string>(); var vals = new List<float>(); var cols = new List<Color>();
                 foreach (var card in compareCardsSelected)
                 {
                     ApiClient.CardCatalogEntry hit = null;
-                    foreach (var e in ApiClient.CardCatalog)
+                    foreach (var e in cat)
                         if (string.Equals(e.name, card, StringComparison.OrdinalIgnoreCase)) { hit = e; break; }
                     names.Add(CardTextLocalizer.PrettyName(card, card) ?? card);
                     cols.Add(CardColorFor(card));
@@ -16892,8 +17048,10 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                         v = metricName == "Times Picked" ? hit.times_picked
                           : metricName == "Card Win Rate" ? hit.win_rate * 100f
                           : metricName == "Pass Rate" ? hit.pass_rate * 100f
-                          : metricName == "5-0 Sweeps" ? hit.sweeps_with_card
                           : metricName == "Most Stacked" ? hit.stacked_builds
+                          : metricName == "Ranked Picks" ? hit.times_picked
+                          : metricName == "Ranked Win Rate" ? hit.win_rate * 100f
+                          : metricName == "Unique Players" ? hit.unique_players
                           : hit.times_offered;
                     vals.Add(v);
                 }
@@ -16996,6 +17154,84 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     float wr = d.winRates.Count > r ? d.winRates[r] * 100f : 0f;
                     MakeGraphLabel($"CmpCP{k}_{r}",
                         $"<color=#CCC>{r + 1}. {FfaSafeRich(Trunc(d.names[r], 12))}</color> <color=#999>x{picks}</color> <color=#88CC99>{wr:F0}%</color>",
+                        new Vector2(0, 1), new Vector2(x, y), new Vector2(cellW - 8f, rowH), UIFactory.AlignMidLeft, 13f);
+                }
+            }
+        }
+
+        /// <summary>Sept 1 (Sid item 4) — "5-0 Sweeps" / "Top Winners": a
+        /// mini-leaderboard per selected card (the Top Pickers layout), top-5
+        /// players by sweeps or by wins carrying the card, with the card's
+        /// community total in the header. One /cards/leaders-summary fetch
+        /// covers every card. Same raw-name key space as top-pickers, with the
+        /// same accepted limitation: a merged legacy spelling's rows live
+        /// under their own raw names.</summary>
+        private static void BuildCompareCardLeaders(float W, float H, bool sweeps)
+        {
+            string title = sweeps ? I18n.Tr("Most 5-0 sweeps carrying these cards (casual + ranked)")
+                                  : I18n.Tr("Most wins carrying these cards (casual + ranked)");
+            MakeGraphLabel("CmpCLTitle", $"<color=#CCC><b>{title}</b></color>",
+                new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+
+            ApiClient.FetchCardLeaders();
+            var lead = ApiClient.CardLeaders;
+            if (lead == null)
+            {
+                MakeGraphLabel("CmpCLLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                    new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                return;
+            }
+            var map = sweeps ? lead.sweepers : lead.winners;
+
+            int n = compareCardsSelected.Count;
+            int cols = Mathf.Clamp(n, 1, 4);
+            int rows = (n + cols - 1) / cols;
+            float cellW = (W - 24f) / cols;
+            float cellH = (H - 40f) / Mathf.Max(1, rows);
+            float rowH = 18f;
+            int maxRows = Mathf.Max(1, (int)((cellH - 24f) / rowH));
+
+            for (int k = 0; k < n; k++)
+            {
+                string card = compareCardsSelected[k];
+                List<KeyValuePair<string, int>> list;
+                if (!map.TryGetValue(card, out list))
+                {
+                    // Exact key first (the common case), then a case-insensitive
+                    // scan — the catalogue's dominant spelling can differ in
+                    // case from the raw match_cards grouping key.
+                    foreach (var kv in map)
+                        if (string.Equals(kv.Key, card, StringComparison.OrdinalIgnoreCase)) { list = kv.Value; break; }
+                }
+                int total = 0;
+                if (ApiClient.CardCatalog != null)
+                    foreach (var e in ApiClient.CardCatalog)
+                        if (string.Equals(e.name, card, StringComparison.OrdinalIgnoreCase))
+                        { total = sweeps ? e.sweeps_with_card : e.wins_with_card; break; }
+                int col = k % cols, row = k / cols;
+                float x = 12f + col * cellW;
+                float yTop = -30f - row * cellH;
+                Color cc = CardColorFor(card);
+                // Header grain differs per board (r1 LOW): sweeps_with_card is
+                // DISTINCT winning matches ("total"), wins_with_card is winning
+                // PICK rows — a stacked copy counts twice — so the winners
+                // header names its own grain instead of implying match counts.
+                string totalLbl = sweeps ? I18n.TrF("{0} total", FullNum(total))
+                                         : I18n.TrF("{0} winning picks", FullNum(total));
+                MakeGraphLabel($"CmpCLH{k}",
+                    $"<b><color=#{ColorToHex(cc)}>{FfaSafeRich(Trunc(CardTextLocalizer.PrettyName(card, card) ?? card, 15))}</color></b> <color=#999>{totalLbl}</color>",
+                    new Vector2(0, 1), new Vector2(x, yTop), new Vector2(cellW - 8f, 16), UIFactory.AlignMidLeft, 14f);
+                if (list == null || list.Count == 0)
+                {
+                    MakeGraphLabel($"CmpCLNo{k}", $"<color=#888>{I18n.Tr("nobody yet")}</color>",
+                        new Vector2(0, 1), new Vector2(x, yTop - 20f), new Vector2(cellW - 8f, 14), UIFactory.AlignMidLeft, 13f);
+                    continue;
+                }
+                for (int r = 0; r < list.Count && r < maxRows; r++)
+                {
+                    float y = yTop - 20f - r * rowH;
+                    MakeGraphLabel($"CmpCL{k}_{r}",
+                        $"<color=#CCC>{r + 1}. {FfaSafeRich(Trunc(list[r].Key, 14))}</color> <color=#88CC99>x{list[r].Value}</color>",
                         new Vector2(0, 1), new Vector2(x, y), new Vector2(cellW - 8f, rowH), UIFactory.AlignMidLeft, 13f);
                 }
             }
@@ -18615,34 +18851,9 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             catch (Exception ex) { Plugin.Log.LogWarning($"[CHAT-REPORT] {ex.Message}"); }
         }
 
-        /// <summary>Quick-chat phrase line (localization-design §2.6). The
-        /// phrase arrives already rendered in THIS client's locale; the name
-        /// is Photon NickName, already bracket-neutralised by the caller.</summary>
-        internal static void AddQuickChatLine(string name, string phrase)
-        {
-            string line = $"<color=#8FC9FF>[Q]</color> <b>{Escape(name)}</b>: {Escape(phrase)}";
-            lock (chatLinesLock)
-            {
-                /* Aug-3 review find F7: SentUtc is MANDATORY on every entry. The list
-                 * is kept sorted by it (OnChatMessage INSERTS by SentUtc, it does not
-                 * append), and the insert scan walks left only while the previous
-                 * entry is GREATER — so an entry left at default(DateTime) is a floor
-                 * nothing can ever sort above. Every later arrival lands beneath it
-                 * no matter how old it really is, which is how a reconnect scrollback
-                 * ends up printing below a status line that was written after it.
-                 * ChatClient.NowUtc() rather than UtcNow so a locally-created line
-                 * sorts against server timestamps on the SERVER's clock. */
-                /* r3 find 6: NextLocalStamp, not the wall clock. These lines are
-                 * generated HERE and have no server row to correct them, so on a
-                 * skewed clock they used to file minutes into the past or future
-                 * and sit permanently out of order among real messages. "Newer
-                 * than anything already shown" is what they actually are. */
-                chatLines.Add(new ChatEntry { Line = line, AddedUtc = DateTime.UtcNow,
-                                              SentUtc = NextLocalStamp(), Seq = chatSeqNext++ });
-                while (chatLines.Count > CHAT_LOG_MAX) chatLines.RemoveAt(0);
-            }
-            MarkDirty();
-        }
+        // (AddQuickChatLine was deleted Sept 1: quick chat sends through the
+        // vanilla chat bubble now and deliberately renders nothing in the SCR
+        // chat box — see QuickChat.cs.)
 
         // Adds a local-only system line to the chat log (gold-tinted, no broadcast).
         private static void AppendSystemChatLine(string body)
@@ -18652,8 +18863,9 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             {
                 /* F7 (repro: /muted while a reconnect scrollback is still in flight —
                  * the status line landed at the tail with default(DateTime) and the
-                 * older server rows then inserted BELOW it). See AddQuickChatLine for
-                 * why every entry must carry SentUtc. */
+                 * older server rows then inserted BELOW it). SentUtc is MANDATORY on
+                 * every entry: OnChatMessage INSERTS by it, and a default(DateTime)
+                 * entry is a floor nothing can ever sort above — see NextLocalStamp. */
                 /* r3 find 6: NextLocalStamp, not the wall clock. These lines are
                  * generated HERE and have no server row to correct them, so on a
                  * skewed clock they used to file minutes into the past or future

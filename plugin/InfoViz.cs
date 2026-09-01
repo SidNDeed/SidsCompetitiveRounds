@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 
@@ -47,9 +48,20 @@ namespace CompetitiveRounds
         // switches could never clean up (r2 finding).
         private static GameObject _inFlight;
 
+        // Every label Lbl() created for the panel currently being built
+        // (Header goes through Lbl, so headers are recorded too). After a
+        // builder succeeds, Build() sends each of these to the END of its
+        // sibling list in creation order — uGUI paints in sibling order, so
+        // every label renders above every shape. Audited Aug 31: no builder
+        // deliberately paints a shape over a label, so the pass only FIXES
+        // z-order (the when-counts arrows drew over their labels). A future
+        // builder that wants a shape above text must not use Lbl for it.
+        private static readonly List<GameObject> _labels = new List<GameObject>();
+
         internal static GameObject Build(string key, Transform parent)
         {
             _inFlight = null;
+            _labels.Clear();
             try
             {
                 GameObject made = null;
@@ -73,10 +85,23 @@ namespace CompetitiveRounds
                     case "refresh-flow": made = BuildRefreshFlow(parent); break;
                     case "movement-window": made = BuildMovementWindow(parent); break;
                     case "team-format": made = BuildTeamFormat(parent); break;
+                    case "report-pipeline": made = BuildReportPipeline(parent); break;
+                    case "visibility-seats": made = BuildVisibilitySeats(parent); break;
+                    case "anticheat-pipeline": made = BuildAnticheatPipeline(parent); break;
+                    case "achievement-tiers": made = BuildAchievementTiers(parent); break;
+                    case "cosmetics-flow": made = BuildCosmeticsFlow(parent); break;
+                    case "ovt-format": made = BuildOvtFormat(parent); break;
                     default:
                         Plugin.Log.LogWarning("[INFO-VIZ] unknown viz key '" + key + "'");
                         break;
                 }
+                // Labels-last pass: send every recorded label to the end of
+                // its sibling list, in creation order, so lines/arrowheads
+                // drawn after a label can never paint over its glyphs.
+                if (made != null)
+                    for (int i = 0; i < _labels.Count; i++)
+                        if (_labels[i] != null) _labels[i].transform.SetAsLastSibling();
+                _labels.Clear();
                 // A builder that deliberately returned null (e.g. xp-curve's
                 // zero-total bail) still owns a created panel — destroy it.
                 if (made == null && _inFlight != null)
@@ -87,6 +112,7 @@ namespace CompetitiveRounds
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning("[INFO-VIZ] build '" + key + "' failed: " + ex.Message);
+                _labels.Clear();
                 if (_inFlight != null)
                 { try { UnityEngine.Object.Destroy(_inFlight); } catch { } _inFlight = null; }
                 return null;
@@ -138,6 +164,7 @@ namespace CompetitiveRounds
                 align < 0 ? UIFactory.AlignMidLeft : align, sizeDelta: new Vector2(w, h));
             var go = (t as Component)?.gameObject;
             if (go == null) return t;
+            _labels.Add(go);   // labels-last pass — see Build()
             if (UIFactory.tLE != null)
             {
                 var le = go.GetComponent(UIFactory.tLE);
@@ -280,7 +307,7 @@ namespace CompetitiveRounds
                 I18n.Tr("F5 - open / close the competitive menu"),
                 I18n.Tr("T - open in-game chat"),
                 I18n.Tr("Q (hold) - quick-chat wheel, release to send"),
-                I18n.Tr("E (hold, between rounds) - dance emote wheel"),
+                I18n.Tr("E (hold) - dance wheel; dancing locks your controls"),
                 I18n.Tr("M - cycle the chat overlay mode"),
                 I18n.Tr("TAB (hold, in a match) - live scoreboard"),
                 I18n.Tr("SHIFT - cycle your equipped map skins"),
@@ -462,16 +489,108 @@ namespace CompetitiveRounds
         }
 
         // ── gold sources ─────────────────────────────────────────────────
-        // A LEGEND, deliberately not a chart (r1 finding 4: the first cut
-        // drew bars from invented magnitudes — quantities across these
-        // sources are not comparable). Every note restates a verified server
-        // rule: SERIES_GOLD_BASE 5 x2 winner x tier; ACHIEVEMENT_GOLD 100
-        // with 300/500/1000 overrides; the FFA battles-x-players pool
-        // (v1.36.0 meter, ~45% XP / 55% gold); level_reward_for; bet payout.
+        // Two renders (Sid, Aug 31: proportional bars are wanted). When the
+        // LOCAL player's GET /players/{id}/gold-sources response is cached,
+        // this is a real bar chart of that player's lifetime gold by source —
+        // live per-player server data, so the r1-finding-4 rule (never draw
+        // bars from invented magnitudes) is satisfied rather than violated.
+        // ApiClient.GoldSources is keyed by steam id, so a Compare-tab fetch
+        // of ANOTHER player's breakdown can never be mistaken for ours: only
+        // the MatchTracker.LocalSteamId entry is read. Without local data
+        // (not fetched yet, fetch failed, or a zero total) it falls back to
+        // the qualitative legend, whose notes restate verified server rules:
+        // SERIES_GOLD_BASE 5 x2 winner x tier; ACHIEVEMENT_GOLD 100 with
+        // 300/500/1000 overrides; the FFA battles-x-players pool (v1.36.0
+        // meter, ~45% XP / 55% gold); level_reward_for; bet payout.
+
+        // Display order: the five sources the Rewards article names, first,
+        // then the remaining server buckets. An unknown future bucket still
+        // renders, last, under its raw key.
+        private static readonly string[] GOLD_BUCKET_ORDER =
+        {
+            "ranked_1v1", "achievements", "ffa", "level_ups", "betting",
+            "casual_1v1", "team_2v2", "ovt_1v2", "shop_sales", "boosters", "other",
+        };
+
+        private static string GoldBucketName(string key)
+        {
+            switch (key)
+            {
+                case "ranked_1v1": return I18n.Tr("Ranked series");
+                case "achievements": return I18n.Tr("Achievements");
+                case "ffa": return I18n.Tr("FFA games");
+                case "level_ups": return I18n.Tr("Level-ups");
+                case "betting": return I18n.Tr("Betting");
+                case "casual_1v1": return I18n.Tr("Casual games");
+                // "2v2"/"1v2" have under 3 letters, so the extractor refuses
+                // them as keys (#295c) and Tr passes them through — which is
+                // fine: mode notation reads identically in every locale.
+                case "team_2v2": return I18n.Tr("2v2");
+                case "ovt_1v2": return I18n.Tr("1v2");
+                case "shop_sales": return I18n.Tr("Shop sales");
+                case "boosters": return I18n.Tr("Boosters");
+                case "other": return I18n.Tr("Other");
+                default: return key;   // future server bucket — show the raw key
+            }
+        }
 
         private static GameObject BuildGoldSources(Transform parent)
         {
-            const float H = 220f;
+            // Only the LOCAL player's cache entry may feed the chart.
+            ApiClient.GoldSourcesData data = null;
+            string sid = MatchTracker.LocalSteamId;
+            if (!string.IsNullOrEmpty(sid) && sid != "unknown")
+                ApiClient.GoldSources.TryGetValue(sid, out data);
+            long total = 0;
+            if (data != null && data.buckets != null && data.amounts != null
+                && data.buckets.Count == data.amounts.Count)
+                for (int i = 0; i < data.amounts.Count; i++) total += data.amounts[i];
+            if (data != null && total > 0) return BuildGoldSourcesChart(parent, data);
+            return BuildGoldSourcesLegend(parent);
+        }
+
+        private static GameObject BuildGoldSourcesChart(Transform parent, ApiClient.GoldSourcesData data)
+        {
+            // Named buckets in article order, then any unknown leftovers in
+            // server order. Zero-amount buckets are skipped — an empty bar
+            // row says nothing and costs a line of panel height.
+            var keys = new List<string>();
+            var amts = new List<int>();
+            foreach (string want in GOLD_BUCKET_ORDER)
+            {
+                int at = data.buckets.IndexOf(want);
+                if (at >= 0 && data.amounts[at] > 0) { keys.Add(want); amts.Add(data.amounts[at]); }
+            }
+            for (int i = 0; i < data.buckets.Count; i++)
+                if (data.amounts[i] > 0 && Array.IndexOf(GOLD_BUCKET_ORDER, data.buckets[i]) < 0)
+                { keys.Add(data.buckets[i]); amts.Add(data.amounts[i]); }
+            if (keys.Count == 0) return BuildGoldSourcesLegend(parent);
+            int max = 0;
+            for (int i = 0; i < amts.Count; i++) if (amts[i] > max) max = amts[i];
+
+            const float H = 300f;
+            var p = Panel(parent, "VizGold", H);
+            Header(p, H, I18n.Tr("WHERE YOUR GOLD HAS COME FROM"));
+            var bar = new Color(1f, 0.78f, 0.25f, 0.85f);
+            // 11 known buckets fit exactly (H-62 - 10*20 = 38 > the caption);
+            // the cap only ever bites on servers that add a 12th bucket.
+            for (int i = 0; i < keys.Count && i < 11; i++)
+            {
+                float y = H - 62f - i * 20f;
+                var nm = Lbl(p, GoldBucketName(keys[i]), 13f, TXT_MAIN, 20f, y - 2f, 170f, 20f);
+                UIFactory.SetBold(nm, true);
+                float w = Mathf.Max(3f, amts[i] / (float)max * 560f);
+                Box(p, 200f, y + 2f, w, 13f, bar);
+                Lbl(p, amts[i] + "g", 13f, HDR_GOLD, 208f + w, y - 2f, 110f, 20f);
+            }
+            Lbl(p, I18n.Tr("Lifetime totals for your account, from the live server. The rules behind each source are in the article below."),
+                13f, TXT_DIM, 20f, 6f, 1120f, 20f);
+            return p;
+        }
+
+        private static GameObject BuildGoldSourcesLegend(Transform parent)
+        {
+            const float H = 250f;
             var p = Panel(parent, "VizGold", H);
             Header(p, H, I18n.Tr("WHERE GOLD COMES FROM"));
             string[] names =
@@ -502,6 +621,8 @@ namespace CompetitiveRounds
                 UIFactory.SetBold(nm, true);
                 Lbl(p, notes[i], 13f, TXT_DIM, 230f, y, 930f, 20f);
             }
+            Lbl(p, I18n.Tr("Your personal breakdown appears here once gold data loads."),
+                12f, TXT_DIM, 20f, 8f, 1120f, 18f);
             return p;
         }
 
@@ -768,7 +889,9 @@ namespace CompetitiveRounds
             Lbl(p, I18n.Tr("opponent has run"), 11f, TXT_MAIN, 446f, 78f, 148f, 18f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("the mod?"), 11f, TXT_MAIN, 446f, 60f, 148f, 18f, UIFactory.AlignMidCenter);
             Arrow(p, new Vector2(460f, 152f), new Vector2(520f, 120f), AXIS_COL);
-            Lbl(p, I18n.Tr("room code"), 10f, TXT_DIM, 456f, 127f, 80f, 16f);
+            // Right of the diagonal's endpoint — the old spot (456,127) had
+            // the line running straight through the glyphs.
+            Lbl(p, I18n.Tr("room code"), 10f, TXT_DIM, 525f, 140f, 80f, 16f);
             Diamond(p, 690f, 48f, 180f, 68f, TXT_DIM);
             Lbl(p, I18n.Tr("both Ranked"), 11f, TXT_MAIN, 706f, 78f, 148f, 18f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("enabled?"), 11f, TXT_MAIN, 706f, 60f, 148f, 18f, UIFactory.AlignMidCenter);
@@ -778,11 +901,24 @@ namespace CompetitiveRounds
             Box(p, 960f, 38f, 180f, 38f, new Color(0.22f, 0.34f, 0.52f, 0.90f));
             Lbl(p, I18n.Tr("RANKED"), 12f, Color.white, 960f, 103f, 180f, 20f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("CASUAL, RECORDED"), 12f, Color.white, 960f, 47f, 180f, 20f, UIFactory.AlignMidCenter);
-            Arrow(p, new Vector2(874f, 82f), new Vector2(956f, 113f), yes);
-            Arrow(p, new Vector2(780f, 44f), new Vector2(956f, 57f), no);
-            Arrow(p, new Vector2(520f, 44f), new Vector2(956f, 57f), no);
-            Lbl(p, I18n.Tr("no - casual"), 10f, no, 600f, 40f, 90f, 16f);
-            Lbl(p, I18n.Tr("no - casual"), 10f, no, 840f, 50f, 90f, 16f);
+            Arrow(p, new Vector2(874f, 82f), new Vector2(956f, 113f), yes);   // terminal x=956 < the RANKED box edge at 960
+            // The two red no-edges used to be long diagonals that ran through
+            // the label rects below and stacked both arrowheads on one point
+            // (956,57). They now take orthogonal gutters under the diamonds —
+            // drop from the bottom vertex, run right in a free lane, rise,
+            // and enter the CASUAL box's left edge at separate points. The
+            // lanes and rises are chosen so the two paths never cross each
+            // other, the caption (y<=28), or any label rect.
+            Line(p, new Vector2(520f, 48f), new Vector2(520f, 30f), no, 2f);   // from "opponent has run the mod?" bottom vertex
+            Line(p, new Vector2(520f, 30f), new Vector2(910f, 30f), no, 2f);
+            Line(p, new Vector2(910f, 30f), new Vector2(910f, 50f), no, 2f);
+            Arrow(p, new Vector2(910f, 50f), new Vector2(956f, 50f), no);
+            Line(p, new Vector2(780f, 48f), new Vector2(780f, 38f), no, 2f);   // from "both Ranked enabled?" bottom vertex
+            Line(p, new Vector2(780f, 38f), new Vector2(895f, 38f), no, 2f);
+            Line(p, new Vector2(895f, 38f), new Vector2(895f, 64f), no, 2f);
+            Arrow(p, new Vector2(895f, 64f), new Vector2(956f, 64f), no);
+            Lbl(p, I18n.Tr("no - casual"), 10f, no, 530f, 32f, 90f, 16f);
+            Lbl(p, I18n.Tr("no - casual"), 10f, no, 688f, 36f, 80f, 16f);
             Lbl(p, I18n.Tr("Casual games keep their stats and XP but never move rating."),
                 13f, TXT_DIM, 390f, 8f, 560f, 20f, UIFactory.AlignMidCenter);
             return p;
@@ -878,6 +1014,289 @@ namespace CompetitiveRounds
             Lbl(p, I18n.Tr("Team 2: blue"), 12f, Color.white, 550f, 69f, 220f, 20f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("W-L and WR count completed series. XP and Gold accrue per player slot; 1v1 rating never moves."),
                 13f, TXT_DIM, 24f, 14f, 1116f, 20f);
+            return p;
+        }
+
+        // -- match report pipeline (tracking article) -----------------------
+        // Restates the Tracking article's own claims: both clients track the
+        // whole game, the numerically lower Steam ID is elected to report,
+        // the core result is signed, and the server keeps exactly one record
+        // per game and re-checks ranked-or-casual when the report lands.
+
+        private static GameObject BuildReportPipeline(Transform parent)
+        {
+            const float H = 210f;
+            var p = Panel(parent, "VizReportPipe", H);
+            Header(p, H, I18n.Tr("ONE GAME, ONE SIGNED REPORT"));
+            Box(p, 24f, 118f, 200f, 40f, KEY_GAME);
+            Box(p, 24f, 52f, 200f, 40f, KEY_GAME);
+            var a = Lbl(p, I18n.Tr("YOUR CLIENT"), 12f, Color.white, 24f, 136f, 200f, 20f, UIFactory.AlignMidCenter);
+            var b = Lbl(p, I18n.Tr("OPPONENT'S CLIENT"), 12f, Color.white, 24f, 70f, 200f, 20f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(a, true); UIFactory.SetBold(b, true);
+            Lbl(p, I18n.Tr("tracks the whole game"), 10f, TXT_MAIN, 24f, 120f, 200f, 16f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("tracks the whole game"), 10f, TXT_MAIN, 24f, 54f, 200f, 16f, UIFactory.AlignMidCenter);
+            Box(p, 310f, 82f, 190f, 46f, KEY_BOTH);
+            var el = Lbl(p, I18n.Tr("LOWER STEAM ID"), 12f, Color.white, 310f, 104f, 190f, 18f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(el, true);
+            Lbl(p, I18n.Tr("is elected reporter"), 10f, TXT_MAIN, 310f, 86f, 190f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(228f, 138f), new Vector2(306f, 112f), AXIS_COL);
+            Arrow(p, new Vector2(228f, 72f), new Vector2(306f, 98f), AXIS_COL);
+            Box(p, 570f, 82f, 190f, 46f, KEY_MOD);
+            var sg = Lbl(p, I18n.Tr("SIGNED REPORT"), 12f, Color.white, 570f, 104f, 190f, 18f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(sg, true);
+            Lbl(p, I18n.Tr("can't be altered in transit"), 10f, TXT_MAIN, 570f, 86f, 190f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(504f, 105f), new Vector2(566f, 105f), AXIS_COL);
+            Box(p, 830f, 82f, 130f, 46f, new Color(0.20f, 0.52f, 0.32f, 0.92f));
+            var sv = Lbl(p, I18n.Tr("SERVER"), 13f, Color.white, 830f, 95f, 130f, 20f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(sv, true);
+            Arrow(p, new Vector2(764f, 105f), new Vector2(826f, 105f), AXIS_COL);
+            Box(p, 1000f, 112f, 140f, 36f, KEY_NONE);
+            Box(p, 1000f, 58f, 140f, 36f, KEY_NONE);
+            Lbl(p, I18n.Tr("recorded once"), 11f, TXT_MAIN, 1000f, 120f, 140f, 18f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("ranked or casual"), 11f, TXT_MAIN, 1000f, 66f, 140f, 18f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(964f, 112f), new Vector2(996f, 126f), AXIS_COL);
+            Arrow(p, new Vector2(964f, 98f), new Vector2(996f, 80f), AXIS_COL);
+            Lbl(p, I18n.Tr("Both clients watch everything; only the elected reporter sends. Duplicates are absorbed, and the server re-checks ranked or casual when the report lands."),
+                13f, TXT_DIM, 24f, 8f, 1116f, 20f);
+            return p;
+        }
+
+        // -- what each seat sees (visibility article) -----------------------
+        // Every cell restates the Visibility article: full catalog for modded
+        // viewers; for a non-modded opponent only nametag styling and
+        // deliberately-sent quick-chat phrases cross (styling minus glow and
+        // typeface), faces render an empty slot, everything else shows
+        // nothing/defaults, and map skins are never networked.
+
+        private static GameObject BuildVisibilitySeats(Transform parent)
+        {
+            const float H = 270f;
+            var p = Panel(parent, "VizVisibility", H);
+            Header(p, H, I18n.Tr("WHAT EACH SEAT ACTUALLY SEES"));
+            var okC = new Color(0.35f, 0.78f, 0.45f, 0.95f);
+            var noC = new Color(0.90f, 0.34f, 0.30f, 0.95f);
+            var partC = HDR_GOLD;
+            var h1 = Lbl(p, I18n.Tr("A MODDED PLAYER SEES"), 12f, TXT_MAIN, 250f, 206f, 430f, 18f);
+            var h2 = Lbl(p, I18n.Tr("A NON-MODDED PLAYER SEES"), 12f, TXT_MAIN, 690f, 206f, 450f, 18f);
+            UIFactory.SetBold(h1, true); UIFactory.SetBold(h2, true);
+            string[] rows =
+            {
+                I18n.Tr("Name styling"), I18n.Tr("Custom faces"), I18n.Tr("Trails"),
+                I18n.Tr("Body colors"), I18n.Tr("Auras"), I18n.Tr("Titles"), I18n.Tr("Map skins"),
+            };
+            string[] modded =
+            {
+                I18n.Tr("everything, glow and typeface included"),
+                I18n.Tr("the full art"),
+                I18n.Tr("your trail"),
+                I18n.Tr("your color"),
+                I18n.Tr("your aura"),
+                I18n.Tr("on the boards and in chat"),
+                I18n.Tr("nobody - your screen only, never networked"),
+            };
+            string[] vanilla =
+            {
+                I18n.Tr("the styled name - minus glow and typeface"),
+                I18n.Tr("an empty slot - no crash, no fallback"),
+                I18n.Tr("nothing"),
+                I18n.Tr("default orange / blue"),
+                I18n.Tr("nothing"),
+                I18n.Tr("nothing - vanilla has no surface for them"),
+                "",
+            };
+            // Chip colors per row: green = shows, gold = partial, red = hidden,
+            // dim = local-only (map skins render for no other player at all).
+            Color[] modC = { okC, okC, okC, okC, okC, okC, TXT_DIM };
+            Color[] vanC = { partC, noC, noC, noC, noC, noC, TXT_DIM };
+            for (int i = 0; i < rows.Length; i++)
+            {
+                float y = 180f - i * 24f;
+                var nm = Lbl(p, rows[i], 12f, TXT_MAIN, 24f, y, 210f, 18f);
+                UIFactory.SetBold(nm, true);
+                Box(p, 250f, y + 4f, 10f, 10f, modC[i]);
+                Lbl(p, modded[i], 12f, TXT_DIM, 268f, y, 412f, 18f);
+                if (vanilla[i].Length > 0)
+                {
+                    Box(p, 690f, y + 4f, 10f, 10f, vanC[i]);
+                    Lbl(p, vanilla[i], 12f, TXT_DIM, 708f, y, 432f, 18f);
+                }
+            }
+            Lbl(p, I18n.Tr("The guarantee: only your nametag styling and the quick-chat phrases you send can ever reach a non-modded opponent."),
+                13f, TXT_DIM, 24f, 6f, 1116f, 20f);
+            return p;
+        }
+
+        // -- anti-cheat pipeline --------------------------------------------
+        // Restates the Anticheat article: detectors FLAG for human review
+        // rather than auto-punishing; enforcement runs through separate admin
+        // tools; the short-match farming pattern is the one automatic penalty.
+
+        private static GameObject BuildAnticheatPipeline(Transform parent)
+        {
+            const float H = 230f;
+            var p = Panel(parent, "VizAnticheat", H);
+            Header(p, H, I18n.Tr("SIGNAL, FLAG, HUMAN REVIEW"));
+            string[] dets =
+            {
+                I18n.Tr("macro-pace input windows"),
+                I18n.Tr("AFK: zero shots, blocks, picks"),
+                I18n.Tr("impossibly fast series"),
+            };
+            for (int i = 0; i < dets.Length; i++)
+            {
+                float y = 158f - i * 40f;
+                Box(p, 24f, y, 230f, 32f, KEY_NONE);
+                Lbl(p, dets[i], 11f, TXT_MAIN, 30f, y + 7f, 218f, 18f, UIFactory.AlignMidCenter);
+            }
+            Arrow(p, new Vector2(254f, 174f), new Vector2(326f, 146f), AXIS_COL);
+            Arrow(p, new Vector2(254f, 134f), new Vector2(326f, 134f), AXIS_COL);
+            Arrow(p, new Vector2(254f, 94f), new Vector2(326f, 122f), AXIS_COL);
+            Box(p, 330f, 112f, 140f, 44f, KEY_MOD);
+            var fl = Lbl(p, I18n.Tr("FLAG"), 13f, Color.white, 330f, 132f, 140f, 18f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(fl, true);
+            Lbl(p, I18n.Tr("with exact evidence"), 10f, TXT_MAIN, 330f, 116f, 140f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(470f, 134f), new Vector2(536f, 134f), AXIS_COL);
+            Box(p, 540f, 112f, 200f, 44f, KEY_BOTH);
+            var hr = Lbl(p, I18n.Tr("HUMAN REVIEW"), 13f, Color.white, 540f, 132f, 200f, 18f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(hr, true);
+            Lbl(p, I18n.Tr("a person makes the call"), 10f, TXT_MAIN, 540f, 116f, 200f, 16f, UIFactory.AlignMidCenter);
+            Box(p, 830f, 146f, 310f, 32f, new Color(0.20f, 0.52f, 0.32f, 0.92f));
+            Box(p, 830f, 92f, 310f, 32f, new Color(0.66f, 0.24f, 0.25f, 0.92f));
+            Lbl(p, I18n.Tr("cleared - flags alone never punish"), 11f, Color.white, 836f, 153f, 298f, 18f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("confirmed - admin tools: ban, reversal"), 11f, Color.white, 836f, 99f, 298f, 18f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(740f, 140f), new Vector2(826f, 160f), AXIS_COL);
+            Arrow(p, new Vector2(740f, 128f), new Vector2(826f, 106f), AXIS_COL);
+            var fast = new Color(0.90f, 0.34f, 0.30f, 0.90f);
+            Box(p, 24f, 24f, 270f, 30f, new Color(0.58f, 0.20f, 0.22f, 0.90f));
+            Lbl(p, I18n.Tr("short-match farming pattern"), 11f, Color.white, 30f, 30f, 258f, 18f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(294f, 39f), new Vector2(534f, 39f), fast);
+            Box(p, 538f, 24f, 330f, 30f, new Color(0.58f, 0.20f, 0.22f, 0.90f));
+            Lbl(p, I18n.Tr("invalidated outright, gold and XP reversed"), 11f, Color.white, 544f, 30f, 318f, 18f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("the one automatic penalty"), 11f, TXT_DIM, 880f, 30f, 260f, 18f);
+            return p;
+        }
+
+        // -- achievement payout tiers ---------------------------------------
+        // The 50-achievement total is the article's own headline. The four
+        // tier counts are tallied from the payout stated on every line of
+        // AchievementsP1/P2 (28 + 9 + 8 + 5 = 50, cross-checked against that
+        // headline). RE-TALLY these constants whenever an achievement is
+        // added, removed or repriced — this chart and the guide text must
+        // move together (#351).
+
+        private static GameObject BuildAchievementTiers(Transform parent)
+        {
+            const float H = 190f;
+            var p = Panel(parent, "VizAchTiers", H);
+            Header(p, H, I18n.Tr("50 ACHIEVEMENTS BY PAYOUT"));
+            int[] counts = { 28, 9, 8, 5 };
+            string[] pays = { "100g", "300g", "500g", "1000g" };
+            Color[] cols =
+            {
+                new Color(0.62f, 0.50f, 0.22f, 0.95f),
+                new Color(0.78f, 0.62f, 0.22f, 0.95f),
+                new Color(0.92f, 0.74f, 0.22f, 0.95f),
+                new Color(1f, 0.85f, 0.30f, 0.98f),
+            };
+            float x = 70f, wAll = 1000f, y = 96f;
+            for (int i = 0; i < counts.Length; i++)
+            {
+                float w = counts[i] / 50f * wAll;
+                Box(p, x, y, w - 2f, 42f, cols[i]);
+                var ct = Lbl(p, counts[i].ToString(), 14f, Color.black, x, y + 12f, w - 2f, 20f, UIFactory.AlignMidCenter);
+                UIFactory.SetBold(ct, true);
+                Lbl(p, pays[i], 12f, HDR_GOLD, x, y - 26f, w - 2f, 18f, UIFactory.AlignMidCenter);
+                x += w;
+            }
+            Lbl(p, I18n.Tr("Each unlocks once per account and pays on the spot: most pay 100g; the hardest pay 300g, 500g or 1000g."),
+                13f, TXT_DIM, 24f, 8f, 1116f, 20f);
+            return p;
+        }
+
+        // -- cosmetics: player and artist lanes -----------------------------
+        // Restates the Cosmetics article: bought with gold earned by playing,
+        // no double buys, Set Active vs multi-equip; artist art is submitted
+        // in-game, reviewed, must ship inside a mod release before sales
+        // open, and pays the artist a 30% royalty (gifts pay none).
+
+        private static GameObject BuildCosmeticsFlow(Transform parent)
+        {
+            const float H = 230f;
+            var p = Panel(parent, "VizCosmFlow", H);
+            Header(p, H, I18n.Tr("HOW A COSMETIC REACHES YOUR BODY"));
+            var green = new Color(0.20f, 0.52f, 0.32f, 0.92f);
+            Box(p, 24f, 146f, 230f, 44f, KEY_GAME);
+            var b1 = Lbl(p, I18n.Tr("PLAY"), 12f, Color.white, 24f, 166f, 230f, 18f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("earn gold by playing"), 10f, TXT_MAIN, 24f, 150f, 230f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(254f, 168f), new Vector2(322f, 168f), AXIS_COL);
+            Box(p, 326f, 146f, 240f, 44f, KEY_MOD);
+            var b2 = Lbl(p, I18n.Tr("SHOP"), 12f, Color.white, 326f, 166f, 240f, 18f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("no debt, no double buys"), 10f, TXT_MAIN, 326f, 150f, 240f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(566f, 168f), new Vector2(634f, 168f), AXIS_COL);
+            Box(p, 638f, 146f, 240f, 44f, green);
+            var b3 = Lbl(p, I18n.Tr("EQUIP"), 12f, Color.white, 638f, 166f, 240f, 18f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("one active, or multi-equip"), 10f, TXT_MAIN, 638f, 150f, 240f, 16f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(b1, true); UIFactory.SetBold(b2, true); UIFactory.SetBold(b3, true);
+            var pink = new Color(0.55f, 0.28f, 0.42f, 0.92f);
+            Box(p, 24f, 52f, 210f, 40f, pink);
+            Lbl(p, I18n.Tr("ARTIST STUDIO"), 11f, Color.white, 24f, 72f, 210f, 16f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("art submitted in-game"), 10f, TXT_MAIN, 24f, 56f, 210f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(234f, 72f), new Vector2(300f, 72f), AXIS_COL);
+            Box(p, 304f, 52f, 150f, 40f, KEY_NONE);
+            Lbl(p, I18n.Tr("REVIEW"), 11f, Color.white, 304f, 64f, 150f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(454f, 72f), new Vector2(520f, 72f), AXIS_COL);
+            Box(p, 524f, 52f, 240f, 40f, pink);
+            Lbl(p, I18n.Tr("SHIPS IN A RELEASE"), 11f, Color.white, 524f, 72f, 240f, 16f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("bundled into the mod"), 10f, TXT_MAIN, 524f, 56f, 240f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(764f, 72f), new Vector2(830f, 72f), AXIS_COL);
+            Box(p, 834f, 52f, 180f, 40f, pink);
+            Lbl(p, I18n.Tr("SALES OPEN"), 11f, Color.white, 834f, 72f, 180f, 16f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("artist sets price + stock"), 10f, TXT_MAIN, 834f, 56f, 180f, 16f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(919f, 96f), new Vector2(560f, 142f), pink);
+            Lbl(p, I18n.Tr("Community artists supply a large share of the catalog and earn a 30% royalty on every sale - gifts pay no royalty."),
+                13f, TXT_DIM, 24f, 8f, 1116f, 20f);
+            return p;
+        }
+
+        // -- 1v2 format ------------------------------------------------------
+        // Restates the 1v2 article (ModeInfoText.Ovt + Mode1v2Ext): one solo
+        // vs a duo in a best-of-3, solo pay always x1.5, the optional extra
+        // opening pick, the outer-left / right-half spawn split, and the
+        // unranked-beta status (recorded, no rating yet).
+
+        private static GameObject BuildOvtFormat(Transform parent)
+        {
+            const float H = 220f;
+            var p = Panel(parent, "VizOvt", H);
+            Header(p, H, I18n.Tr("1V2: ONE AGAINST TWO"));
+            var orange = new Color(0.72f, 0.38f, 0.16f, 0.92f);
+            var blue = new Color(0.20f, 0.42f, 0.72f, 0.92f);
+            Box(p, 24f, 96f, 230f, 70f, orange);
+            var so = Lbl(p, I18n.Tr("THE SOLO"), 13f, Color.white, 24f, 144f, 230f, 18f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(so, true);
+            Lbl(p, I18n.Tr("always earns x1.5 pay"), 11f, Color.white, 24f, 124f, 230f, 16f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("optional extra opening pick"), 11f, Color.white, 24f, 104f, 230f, 16f, UIFactory.AlignMidCenter);
+            var vs = Lbl(p, I18n.Tr("VS"), 16f, HDR_GOLD, 274f, 122f, 60f, 24f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(vs, true);
+            Box(p, 350f, 96f, 230f, 70f, blue);
+            var du = Lbl(p, I18n.Tr("THE DUO"), 13f, Color.white, 350f, 144f, 230f, 18f, UIFactory.AlignMidCenter);
+            UIFactory.SetBold(du, true);
+            Lbl(p, I18n.Tr("two players, one side"), 11f, Color.white, 350f, 124f, 230f, 16f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("assigned by the server"), 11f, Color.white, 350f, 104f, 230f, 16f, UIFactory.AlignMidCenter);
+            // Spawn split sketch: solo on the outer-left point, duo owns the
+            // whole right half (Mode1v2Ext's spawn-sides section).
+            Line(p, new Vector2(640f, 90f), new Vector2(1140f, 90f), AXIS_COL, 1.5f);
+            Line(p, new Vector2(640f, 174f), new Vector2(1140f, 174f), AXIS_COL, 1.5f);
+            Line(p, new Vector2(640f, 90f), new Vector2(640f, 174f), AXIS_COL, 1.5f);
+            Line(p, new Vector2(1140f, 90f), new Vector2(1140f, 174f), AXIS_COL, 1.5f);
+            Line(p, new Vector2(890f, 94f), new Vector2(890f, 170f), new Color(0.45f, 0.48f, 0.56f, 0.35f), 1.5f);
+            Box(p, 660f, 120f, 20f, 20f, orange);
+            Box(p, 960f, 140f, 20f, 20f, blue);
+            Box(p, 1030f, 104f, 20f, 20f, blue);
+            Lbl(p, I18n.Tr("solo: the outer-left point"), 11f, TXT_DIM, 640f, 66f, 240f, 18f);
+            Lbl(p, I18n.Tr("duo: the whole right half"), 11f, TXT_DIM, 900f, 66f, 240f, 18f);
+            Lbl(p, I18n.Tr("Best-of-3: first side to 2 game wins. 1v2 is an unranked beta - every game is recorded, and no rating moves yet."),
+                13f, TXT_DIM, 24f, 8f, 1116f, 20f);
             return p;
         }
 

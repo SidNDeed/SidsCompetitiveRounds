@@ -7006,19 +7006,18 @@ namespace CompetitiveRounds
                 { fontSize = 12, alignment = TextAnchor.MiddleCenter, richText = true, clipping = TextClipping.Overflow };
         }
 
-        /// <summary>Sector label for a wheel entry: the phrase (Tr'd), long
-        /// recruiting lines shortened for the ring (the FULL phrase still
-        /// sends — receivers render the id, not this label).</summary>
+        /// <summary>Sector label for a wheel entry: the phrase (Tr'd). What
+        /// you read is what sends — the label IS the message text now (Sid,
+        /// Sept 1: the mod line must spell out the full name on the ring, not
+        /// an "SCR mod" shorthand; the pills size themselves to the text).
+        /// Only the discord-community line keeps a short ring label, since
+        /// its full sentence and the discord link occupy adjacent sectors.</summary>
         private static string QcLabel(int id)
         {
             if (id == -1) return I18n.Tr("More...");
             if (id < 0 || id >= QuickChat.Phrases.Length) return "?";
             string p = QuickChat.Phrases[id];
-            // Ring labels for the two longest recruiting lines (the wheel is a
-            // ring of short labels; a 60-char sector label overlaps its
-            // neighbours at every resolution).
             if (id == 17) return I18n.Tr("Join Competitive Rounds!");
-            if (id == 19) return I18n.Tr("I play with the SCR mod");
             return I18n.Tr(p);
         }
 
@@ -7031,9 +7030,17 @@ namespace CompetitiveRounds
         {
             if (id >= 0 && id < QuickChat.Phrases.Length)
             {
+                // Toast only the refusals the player can act on; a fence or
+                // spectator refusal stays silent (LastRefusal contract).
                 if (!QuickChat.Send(id))
-                    ShowNotification(I18n.Tr("Quick chat is on cooldown - one message every couple of seconds."),
-                                     new Color(1f, 0.8f, 0.4f), 2f);
+                {
+                    if (QuickChat.LastRefusal == "cooldown")
+                        ShowNotification(I18n.Tr("Quick chat is on cooldown - one message every couple of seconds."),
+                                         new Color(1f, 0.8f, 0.4f), 2f);
+                    else if (QuickChat.LastRefusal == "no_body")
+                        ShowNotification(I18n.Tr("Quick chat works once you are in a game with your character spawned."),
+                                         new Color(1f, 0.8f, 0.4f), 2f);
+                }
             }
             QcClose();
         }
@@ -7041,7 +7048,8 @@ namespace CompetitiveRounds
         // ── Hold-E dance wheel (Aug 31 item 5) ───────────────────────────
         // Same radial machinery as the Q wheel, over the OWNED dances only.
         // Opens only when a dance could actually play (participant seat,
-        // DanceEmotes.WindowOpen — between rounds / lobby, never mid-battle)
+        // DanceEmotes.WindowOpen — since Sept 1 that includes mid-battle; the
+        // dancer's own inputs lock for the duration, see DanceEmotes.cs)
         // and a local body exists to dance with (offline sandbox included:
         // Send() has a local install path there). Mutually exclusive with the
         // Q wheel via both wheels' exclusion lists.
@@ -7112,7 +7120,7 @@ namespace CompetitiveRounds
                 }
                 catch { }
                 if (!hasStage) return;
-                if (!DanceEmotes.WindowOpen()) return;   // never mid-battle / mid-pick
+                if (!DanceEmotes.WindowOpen()) return;   // never mid-pick / as spectator (mid-battle allowed since Sept 1)
                 var owned = DanceEmotes.OwnedDanceIndexes();
                 if (owned == null)
                 {
@@ -7419,19 +7427,59 @@ namespace CompetitiveRounds
                 float lx = cx + Mathf.Sin(rad) * Rx;
                 float ly = cy - Mathf.Cos(rad) * Ry;
                 bool hi = i == qcHighlight;
-                if (hi)
-                    GUI.DrawTexture(new Rect(lx - 92f, ly - 20f, 184f, 40f), qcDiscTex,
-                        ScaleMode.StretchToFill, true, 0, new Color(0.25f, 0.42f, 0.72f, 0.85f), 0, 0);
-                else
-                    GUI.DrawTexture(new Rect(lx - 80f, ly - 16f, 160f, 32f), qcDiscTex,
-                        ScaleMode.StretchToFill, true, 0, new Color(0.08f, 0.10f, 0.16f, 0.72f), 0, 0);
                 string label = QcLabel(ids[i]);
+                var style = hi ? qcLabelHiStyle : qcLabelStyle;
+                // Pills size themselves to the RENDERED text (Sid, Sept 1: the
+                // old fixed 160/184px ovals let long phrases spill outside the
+                // shape). CalcSize is measured on the uncolored label —
+                // rich-text color tags are added after — and cached per
+                // (style, label) so Repaint stays allocation-light (#162).
+                string display; Vector2 sz;
+                QcMeasureLabel(label, style, hi, out display, out sz);
+                float pw = sz.x + (hi ? 34f : 26f);
+                float ph = sz.y + (hi ? 14f : 8f);
+                GUI.DrawTexture(new Rect(lx - pw / 2f, ly - ph / 2f, pw, ph), qcDiscTex,
+                    ScaleMode.StretchToFill, true, 0,
+                    hi ? new Color(0.25f, 0.42f, 0.72f, 0.85f) : new Color(0.08f, 0.10f, 0.16f, 0.72f), 0, 0);
                 string colored = ids[i] == -1
-                    ? $"<color=#FFD94D>{label}</color>"
-                    : (hi ? $"<color=#FFFFFF>{label}</color>" : $"<color=#C8D2E0>{label}</color>");
-                GUI.Label(new Rect(lx - 100f, ly - 16f, 200f, 32f), colored,
-                          hi ? qcLabelHiStyle : qcLabelStyle);
+                    ? $"<color=#FFD94D>{display}</color>"
+                    : (hi ? $"<color=#FFFFFF>{display}</color>" : $"<color=#C8D2E0>{display}</color>");
+                GUI.Label(new Rect(lx - sz.x / 2f - 8f, ly - sz.y / 2f, sz.x + 16f, sz.y),
+                          colored, style);
             }
+        }
+
+        // (display string possibly two-line, measured size) per (style, label).
+        // Bounded: a few dozen phrases x 2 styles per locale; a locale switch
+        // just adds the new labels beside the old entries.
+        private static readonly Dictionary<string, KeyValuePair<string, Vector2>> qcMeasureCache
+            = new Dictionary<string, KeyValuePair<string, Vector2>>();
+
+        /// <summary>Measure a wheel label with its style; labels wider than
+        /// ~440px (the full mod-name phrase) wrap to two lines at the space
+        /// nearest the middle so the pill stays on screen at 720p.</summary>
+        private static void QcMeasureLabel(string label, GUIStyle style, bool hi,
+                                           out string display, out Vector2 size)
+        {
+            string key = (hi ? "H|" : "N|") + label;
+            KeyValuePair<string, Vector2> hit;
+            if (qcMeasureCache.TryGetValue(key, out hit)) { display = hit.Key; size = hit.Value; return; }
+            display = label;
+            Vector2 sz = style.CalcSize(new GUIContent(label));
+            if (sz.x > 440f)
+            {
+                int mid = label.Length / 2, best = -1;
+                for (int j = 1; j < label.Length - 1; j++)
+                    if (label[j] == ' ' && (best < 0 || Mathf.Abs(j - mid) < Mathf.Abs(best - mid)))
+                        best = j;
+                if (best > 0)
+                {
+                    display = label.Substring(0, best) + "\n" + label.Substring(best + 1);
+                    sz = style.CalcSize(new GUIContent(display));
+                }
+            }
+            qcMeasureCache[key] = new KeyValuePair<string, Vector2>(display, sz);
+            size = sz;
         }
 
         // ── Consent modal ────────────────────────────────────────

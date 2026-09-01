@@ -11,10 +11,10 @@ namespace CompetitiveRounds
     /// <summary>Dance emotes v1 (Sid, Aug 31: "make E an emote wheel...
     /// little dances not too dissimilar to fortnite"; design-reviewed by
     /// Codex the same day — GO-WITH-CHANGES, and this file implements the
-    /// review's CUT list, not the full design: TWO routines, arm-target +
+    /// review's CUT list, not the full design: arm-target +
     /// wobble-translation channels only (no legs, no gun/aim motion, no
-    /// particles, no audio), NO spectator rendering, hard cancellation at
-    /// the combat edge).
+    /// particles, no audio), NO spectator rendering; v1's hard combat-edge
+    /// cancellation is superseded by the v2 contract below).
     ///
     /// MECHANISM (rig-probe-proven, [RIG-DUMP] Aug 31): the visual body
     /// hangs off PlayerWobblePosition ("WobbleObjects"), which rewrites its
@@ -26,8 +26,25 @@ namespace CompetitiveRounds
     /// review confirmed free-arm state feeds back — so the arm channel uses
     /// the RESTORE-FIRST contract: a Prefix undoes the remembered delta,
     /// vanilla runs, the Postfix applies (and remembers) the new delta.
-    /// Nothing here touches physics, velocity, input, aim, or health
-    /// (#338-family: an emote must be structurally unable to affect play).
+    ///
+    /// CONTRACT v2 (Sid, Sep 1: more dances + "make it so they can't
+    /// move/shoot/block for the duration of the dance"): dances may play
+    /// MID-COMBAT, and the price is paid by the DANCER ALONE. While YOUR
+    /// dance is active, your move/jump/shoot/block inputs are scrubbed
+    /// locally — GeneralInput field clears plus owner-only Gun.Attack /
+    /// Block.TryBlock belts, the same input layer vanilla's lockInput
+    /// suppression uses (#254); never PlayerManager.SetInputActive (#75),
+    /// never playerActions.Enabled. The lock is a PURE PREDICATE over the
+    /// self-expiring `active` entry (LocalDanceActive, #255): no held flag
+    /// exists, so nothing can strand input past the dance's Duration. The
+    /// decoy hole (a modified client dancing while still playing) is closed
+    /// OBSERVABLY on every seat: an actor's dance render is cancelled the
+    /// moment that actor's player visibly moves (sustained velocity, armed
+    /// during battle only) or its gun fires, and on death/inactive/
+    /// unresolvable bodies. Every seat simulates/receives those same
+    /// movements and shots, so all seats cancel near-simultaneously; any
+    /// residual cross-seat timing divergence is rendering-only. Nothing
+    /// here touches physics, health, aim, or ANOTHER player's input.
     ///
     /// SYNC: Photon RaiseEvent code 49 (registry: 47 poison, 48 quick chat,
     /// 51/52 spectator), payload {byte proto, int actor, byte danceIdx,
@@ -60,8 +77,14 @@ namespace CompetitiveRounds
         // room must agree what id N dances. Unknown ids no-op on old clients.
         internal static readonly DanceDef[] Defs =
         {
-            new DanceDef("dance_bounce", "The Bounce", 4.0f),
-            new DanceDef("dance_wave",   "The Wave",   4.0f),
+            new DanceDef("dance_bounce",     "The Bounce",     4.0f),
+            new DanceDef("dance_wave",       "The Wave",       4.0f),
+            new DanceDef("dance_jacks",      "Jumping Jacks",  4.5f),
+            new DanceDef("dance_shimmy",     "The Shimmy",     4.0f),
+            new DanceDef("dance_disco",      "Disco Fever",    5.0f),
+            new DanceDef("dance_helicopter", "The Helicopter", 5.5f),
+            new DanceDef("dance_robot",      "The Robot",      6.0f),
+            new DanceDef("dance_floss",      "The Floss",      5.0f),
         };
 
         private const float MAX_OFFSET = 0.9f;          // hard clamp, world units
@@ -69,8 +92,9 @@ namespace CompetitiveRounds
         private const float RECV_THROTTLE_S = 2.0f;
 
         // Active dance per room actor: actorNumber -> (danceIdx, startServerTs).
-        // Bounded: one entry per actor; cleared on expiry, at the combat
-        // edge (Tick), and on the reliable room-exit callback (OnRoomLeft).
+        // Bounded: one entry per actor; cleared on expiry, by the CONTRACT v2
+        // observable cancel (Tick sweep + the bullet-birth funnel), and on
+        // the reliable room-exit callback (OnRoomLeft).
         private static readonly Dictionary<int, (int idx, int ts)> active = new Dictionary<int, (int, int)>();
         // Arm restore-first bookkeeping: per-target remembered applied delta.
         private static readonly Dictionary<Transform, Vector3> armApplied = new Dictionary<Transform, Vector3>();
@@ -94,21 +118,17 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The one shared window predicate: participant seat, no
-        /// live battle, no card pick in progress. Evaluated independently at
-        /// SEND, RECEIVE and EVERY FRAME (#352 — no patch may rely on another
-        /// patch's gate).</summary>
+        /// card pick in progress. Evaluated independently at SEND, RECEIVE
+        /// and EVERY FRAME (#352 — no patch may rely on another patch's
+        /// gate). CONTRACT v2: there is deliberately NO battle gate here —
+        /// dancing mid-combat is allowed; the dancer pays with the local
+        /// input lock (LocalDanceActive) and every seat cancels the render
+        /// on observable movement/shots (Tick + Dance_ProjectileInit_Patch).</summary>
         internal static bool WindowOpen()
         {
             try
             {
-                if (RoomActors.LocalIsSpectator) return false;   // v1: observers never render dances
-                var gm = GameManager.instance;
-                // Combat gate is ONLINE-only: sandbox (GM_Test) keeps
-                // battleOngoing TRUE for the whole session (probe-proven,
-                // [DANCE] probe win=False battle=True — Sept 1), and offline
-                // is the solo playground where owners try their dances; a
-                // mid-"battle" dance there affects nobody.
-                if (gm != null && gm.battleOngoing && !PhotonNetwork.OfflineMode) return false;
+                if (RoomActors.LocalIsSpectator) return false;   // observers never render dances
                 try
                 {
                     var cc = CardChoice.instance;
@@ -216,24 +236,17 @@ namespace CompetitiveRounds
             catch { /* malformed hostile events must never log per-event or throw */ }
         }
 
-        /// <summary>Per-frame teardown edges: the combat rising edge and the
-        /// expiry sweep. Room-exit teardown lives in OnRoomLeft (the reliable
-        /// callback), NOT here. Called from the persistent Update (Plugin.cs)
-        /// — cheap when idle.</summary>
-        private static bool _lastWindow;
+        /// <summary>Per-frame upkeep: the expiry sweep plus the CONTRACT v2
+        /// observable cancel (velocity / dead / unresolvable — the shot
+        /// cancel lives in Dance_ProjectileInit_Patch, the funnel that runs
+        /// on every seat). v1's combat-rising-edge cancel-all is gone: dances now
+        /// survive into battle and pay via the input lock instead. Room-exit
+        /// teardown lives in OnRoomLeft (the reliable callback), NOT here.
+        /// Called from the persistent Update (Plugin.cs) — cheap when idle.</summary>
         internal static void Tick()
         {
             try
             {
-                bool w = WindowOpen();
-                if (!w && _lastWindow)
-                {
-                    // Hard cancellation at the combat/pick edge (review Q4):
-                    // clear state and restore arm deltas NOW — no easing.
-                    active.Clear();
-                    RestoreAllArms();
-                }
-                _lastWindow = w;
                 // Expiry sweep (bounded dictionary hygiene).
                 if (active.Count > 0)
                 {
@@ -245,10 +258,158 @@ namespace CompetitiveRounds
                             (dead = dead ?? new List<int>()).Add(kv.Key);
                     }
                     if (dead != null) foreach (var k in dead) active.Remove(k);
-                    if (active.Count == 0) RestoreAllArms();
+                }
+                if (active.Count > 0) ObservableCancelSweep();
+                else
+                {
+                    if (_velStrikes.Count > 0) _velStrikes.Clear();
+                    if (armApplied.Count > 0) RestoreAllArms();
                 }
             }
             catch { }
+        }
+
+        // ── CONTRACT v2: input lock + observable cancel ──────────────────
+
+        /// <summary>TRUE while the LOCAL player's own dance is running. A
+        /// PURE COMPUTED predicate over the self-expiring `active` entry
+        /// (#255 — no held flag; the entry itself dies at Duration, at
+        /// observable cancel, and on room exit), using the same wrap-safe
+        /// ServerTimestamp math as TryGetPose. Works offline: Send's local
+        /// install path keys by the same LocalPlayer.ActorNumber.</summary>
+        internal static bool LocalDanceActive
+        {
+            get
+            {
+                try
+                {
+                    if (active.Count == 0) return false;
+                    int a = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
+                    (int idx, int ts) d;
+                    if (!active.TryGetValue(a, out d)) return false;
+                    if (d.idx < 0 || d.idx >= Defs.Length) return false;
+                    float t = unchecked(PhotonNetwork.ServerTimestamp - d.ts) / 1000f;
+                    return t >= 0f && t <= Defs[d.idx].Duration;
+                }
+                catch { return false; }   // fail OPEN — never lock input on an error
+            }
+        }
+
+        private const float CANCEL_VEL = 2.5f;    // world units/s; run speed is ~9-11, residual slide decays well below this
+        private const int CANCEL_STRIKES = 2;     // consecutive Tick frames over threshold (or unresolvable)
+        private const float VEL_GRACE_S = 0.35f;  // pre-dance momentum may still be bleeding off at start
+        private static readonly Dictionary<int, int> _velStrikes = new Dictionary<int, int>();
+
+        /// <summary>actor -> live Player body, mirroring TryGetPose's
+        /// resolution in reverse (data.view owner, never Player.playerID;
+        /// offline maps every IsMine body to the local install key).</summary>
+        private static Player ResolveActorPlayer(int actor)
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return null;
+                bool offline = PhotonNetwork.OfflineMode;
+                int localActor = -1;
+                if (offline)
+                    try { localActor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1; } catch { }
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.data == null || p.data.view == null) continue;
+                    if (offline)
+                    {
+                        if (actor == localActor && p.data.view.IsMine) return p;
+                    }
+                    else
+                    {
+                        int owner;
+                        try { owner = p.data.view.OwnerActorNr; } catch { continue; }
+                        if (owner == actor) return p;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>The observable cancel (CONTRACT v2), every frame for
+        /// every active entry, on EVERY seat: stop rendering an actor's
+        /// dance when their player (a) visibly moves — sustained velocity
+        /// over CANCEL_VEL for CANCEL_STRIKES consecutive ticks, armed only
+        /// during a live ONLINE battle (round-transition MovePlayers drags
+        /// bodies at speed between rounds, and the offline sandbox keeps
+        /// battleOngoing true forever — neither is the decoy window) and
+        /// only after VEL_GRACE_S; (b) is dead or inactive (immediate — an
+        /// unambiguous state, and RPCA_Die replicates to all seats); or
+        /// (c) cannot be resolved for CANCEL_STRIKES consecutive ticks (the
+        /// strike tolerance keeps a one-frame spawn/teardown gap from
+        /// killing a legitimate dance). Cancelling the LOCAL entry also
+        /// releases the input lock — being knocked around mid-dance frees
+        /// your controls instead of stranding you. Velocity reads the
+        /// publicized CharacterData.playerVel and FAILS OPEN per channel: a
+        /// read error never cancels, it just leaves that test inert.</summary>
+        private static void ObservableCancelSweep()
+        {
+            try
+            {
+                bool battle = false;
+                try
+                {
+                    var gm = GameManager.instance;
+                    battle = gm != null && gm.battleOngoing && !PhotonNetwork.OfflineMode;
+                }
+                catch { }
+                List<int> cancel = null;
+                foreach (var kv in active)
+                {
+                    int actor = kv.Key;
+                    float age = unchecked(PhotonNetwork.ServerTimestamp - kv.Value.ts) / 1000f;
+                    var p = ResolveActorPlayer(actor);
+                    if (p == null || p.data == null)
+                    {
+                        if (Strike(actor)) (cancel = cancel ?? new List<int>()).Add(actor);   // (c)
+                        continue;
+                    }
+                    bool deadOrInactive = false;
+                    try { deadOrInactive = p.data.dead || !p.gameObject.activeInHierarchy; } catch { }
+                    if (deadOrInactive)
+                    {
+                        (cancel = cancel ?? new List<int>()).Add(actor);                      // (b)
+                        continue;
+                    }
+                    bool over = false;
+                    try
+                    {
+                        var vel = p.data.playerVel;
+                        if (vel != null && vel.simulated)
+                            over = ((Vector2)vel.velocity).magnitude > CANCEL_VEL;
+                    }
+                    catch { }   // velocity channel fail-open
+                    if (battle && age >= VEL_GRACE_S && over)
+                    {
+                        if (Strike(actor)) (cancel = cancel ?? new List<int>()).Add(actor);   // (a)
+                    }
+                    else _velStrikes.Remove(actor);
+                }
+                if (cancel != null)
+                {
+                    foreach (var a in cancel) { active.Remove(a); _velStrikes.Remove(a); }
+                    if (active.Count == 0) RestoreAllArms();
+                    // Arms for still-dancing actors restore via the
+                    // restore-first Arm prefix on their next Update.
+                }
+            }
+            catch { }
+        }
+
+        private static bool Strike(int actor)
+        {
+            int n;
+            _velStrikes.TryGetValue(actor, out n);
+            n++;
+            if (n >= CANCEL_STRIKES) { _velStrikes.Remove(actor); return true; }
+            _velStrikes[actor] = n;
+            return false;
         }
 
         /// <summary>Reliable room-exit edge (Plugin.OnLeftRoom): active
@@ -263,6 +424,7 @@ namespace CompetitiveRounds
                 active.Clear();
                 RestoreAllArms();
                 _lastRecvByActor.Clear();
+                _velStrikes.Clear();
                 _throttleRoom = "";
             }
             catch { }
@@ -297,6 +459,56 @@ namespace CompetitiveRounds
                     armR = new Vector2(Mathf.Sin(t * Mathf.PI * 2.4f) * 0.45f, 1.25f);
                     armL = new Vector2(0f, 0.12f + 0.10f * Mathf.Sin(t * Mathf.PI * 3f + 1.2f));
                     break;
+                case 2:   // Jumping Jacks: 1.6Hz jack cycle (hops at double
+                {         // rate via the abs), arms SNAP down-at-sides <-> up-out
+                    float ph = Mathf.Sin(t * Mathf.PI * 3.2f);
+                    float up = ph > 0f ? 1f : 0f;               // hard snap, jack-style
+                    body = new Vector2(0f, Mathf.Abs(ph) * 0.40f);
+                    armL = Vector2.Lerp(new Vector2(-0.45f, -0.25f), new Vector2(-0.75f, 1.15f), up);
+                    armR = Vector2.Lerp(new Vector2(0.45f, -0.25f), new Vector2(0.75f, 1.15f), up);
+                    break;
+                }
+                case 3:   // The Shimmy: rapid tiny x vibration, arms out at the
+                {         // sides pulsing in counter-phase
+                    float pulse = Mathf.Sin(t * Mathf.PI * 8f);
+                    body = new Vector2(Mathf.Sin(t * Mathf.PI * 22f) * 0.10f, 0.03f * Mathf.Sin(t * Mathf.PI * 11f));
+                    armL = new Vector2(-(0.85f + 0.25f * pulse), 0.35f + 0.10f * Mathf.Sin(t * Mathf.PI * 8f + 2.6f));
+                    armR = new Vector2(0.85f - 0.25f * pulse, 0.35f + 0.10f * Mathf.Sin(t * Mathf.PI * 8f + 5.8f));
+                    break;
+                }
+                case 4:   // Disco Fever: right arm sweeps the diagonal point
+                {         // up-right / down-across, hips sway on the off-beat
+                    float k = Mathf.Sin(t * Mathf.PI * 2.5f);
+                    body = new Vector2(Mathf.Cos(t * Mathf.PI * 2.5f) * 0.22f, 0.04f + 0.04f * Mathf.Sin(t * Mathf.PI * 5f));
+                    armR = new Vector2(0.50f + 0.48f * k, 0.30f + 0.82f * k);
+                    armL = new Vector2(-0.35f - 0.20f * k, -0.10f - 0.25f * k);
+                    break;
+                }
+                case 5:   // The Helicopter: right arm circles fully overhead,
+                {         // body bobs, left arm tucked with a tiny pulse
+                    float th = t * Mathf.PI * 2f * 1.4f;        // 1.4 revolutions/s
+                    body = new Vector2(0.06f * Mathf.Sin(th), Mathf.Abs(Mathf.Sin(t * Mathf.PI * 2.8f)) * 0.18f);
+                    armR = new Vector2(Mathf.Cos(th) * 0.80f, 0.70f + Mathf.Sin(th) * 0.80f);   // peak |armR| = 1.5
+                    armL = new Vector2(-0.25f, -0.15f + 0.06f * Mathf.Sin(t * Mathf.PI * 2.8f));
+                    break;
+                }
+                case 6:   // The Robot: quantized stepped poses (floor'd time),
+                {         // arm rates deliberately mismatched so 6s never loops
+                    float tq = Mathf.Floor(t * 3f) / 3f;        // 3 poses per second
+                    body = new Vector2(0.14f * Mathf.Sin(tq * 2.9f), 0.10f * Mathf.Abs(Mathf.Cos(tq * 2.3f)));
+                    armL = new Vector2(-0.50f - 0.45f * Mathf.Sin(tq * 2.1f), 0.55f + 0.55f * Mathf.Cos(tq * 1.7f));
+                    armR = new Vector2(0.50f + 0.45f * Mathf.Cos(tq * 2.6f), 0.55f + 0.55f * Mathf.Sin(tq * 1.3f));
+                    break;
+                }
+                case 7:   // The Floss: hips sway x while both arms swing
+                {         // side-to-side as a pair in OPPOSITION across the body
+                    float s = Mathf.Sin(t * Mathf.PI * 4.4f);
+                    float armX = -s * 1.0f;                     // arms opposite the hips
+                    body = new Vector2(s * 0.30f, 0.06f + 0.06f * Mathf.Abs(Mathf.Cos(t * Mathf.PI * 4.4f)));
+                    armL = new Vector2(armX - 0.25f, 0.18f + 0.10f * Mathf.Abs(s));
+                    armR = new Vector2(armX + 0.25f, 0.18f + 0.10f * Mathf.Abs(s));
+                    break;
+                }
             }
         }
 
@@ -463,6 +675,174 @@ namespace CompetitiveRounds
                     armApplied[tgt] = d;
                 }
                 catch { _armChannelDead = true; }
+            }
+        }
+
+        // ── CONTRACT v2 input-lock patches ───────────────────────────────
+
+        /// <summary>The dancer's own input scrub (OverlayInputGate's shape:
+        /// same field list, same fire-until-neutral latch so a Fire held
+        /// across the dance's end cannot discharge a charged shot on the
+        /// first free frame). Gated on the LOCAL player only
+        /// (!controlledElseWhere + data.view.IsMine — replica fields come
+        /// from the sync stream, never local input) and on the pure
+        /// LocalDanceActive predicate, so there is no flag to strand (#255).
+        /// aimDirection is deliberately untouched (shooting is blocked;
+        /// zeroing it risks downstream normalization). Third sibling postfix
+        /// on GeneralInput.Update (#352 — each carries its own gate).
+        /// Card picks are unaffected: CardChoice.DoPlayerSelect reads
+        /// playerActions directly, not these fields (#254).</summary>
+        [HarmonyPatch(typeof(GeneralInput), "Update")]
+        internal static class Dance_GeneralInput_Patch
+        {
+            // Keyed by instance; an entry lives only while its latch is armed.
+            private static readonly Dictionary<GeneralInput, bool> fireLatch = new Dictionary<GeneralInput, bool>();
+
+            private static bool FireHeldPhysically(GeneralInput gi)
+            {
+                try
+                {
+                    var actions = gi.data != null ? gi.data.playerActions : null;
+                    var fire = actions != null ? actions.Fire : null;
+                    if (fire != null)
+                        return fire.IsPressed || fire.WasPressed || fire.WasReleased;
+                }
+                catch { }
+                return gi.shootIsPressed || gi.shootWasPressed || gi.shootWasReleased;
+            }
+
+            private static void SweepDeadKeys()
+            {
+                // Bound the dictionary across an arbitrarily long process
+                // session (destroyed Unity keys otherwise accrete).
+                if (fireLatch.Count <= 8) return;
+                var dead = new List<GeneralInput>();
+                foreach (var k in fireLatch.Keys) if (k == null) dead.Add(k);
+                foreach (var k in dead) fireLatch.Remove(k);
+            }
+
+            private static void Postfix(GeneralInput __instance)
+            {
+                try
+                {
+                    if (__instance == null || __instance.controlledElseWhere) return;
+                    var data = __instance.data;   // vanilla's own wiring (publicized)
+                    if (data == null || data.view == null || !data.view.IsMine) return;
+                    if (LocalDanceActive)
+                    {
+                        if (FireHeldPhysically(__instance)) { SweepDeadKeys(); fireLatch[__instance] = true; }
+                        __instance.direction = Vector3.zero;
+                        __instance.jumpWasPressed = false;
+                        __instance.jumpIsPressed = false;
+                        __instance.shootWasPressed = false;
+                        __instance.shootIsPressed = false;
+                        __instance.shootWasReleased = false;
+                        __instance.shieldWasPressed = false;
+                        return;
+                    }
+                    if (fireLatch.Count == 0 || !fireLatch.ContainsKey(__instance)) return;
+                    if (!FireHeldPhysically(__instance)) { fireLatch.Remove(__instance); return; }
+                    __instance.shootWasPressed = false;
+                    __instance.shootIsPressed = false;
+                    __instance.shootWasReleased = false;
+                }
+                catch { }   // fail OPEN — never strand a player unable to act
+            }
+        }
+
+        /// <summary>LOCAL dancer shoot belt (mirrors GunAttackBlockOnF5Patch):
+        /// Gun.Attack only runs on the OWNER's seat for a real shot
+        /// (WeaponHandler drives it from GeneralInput's shoot fields, which
+        /// replicas never populate — remote shots arrive as an instantiated
+        /// bullet + RPCA_Init, never as a remote Attack call; decompile-
+        /// verified, the #405 reachability check). So this prefix is purely
+        /// the owner-side belt: it covers the update-order race that can
+        /// slip a press past the input scrub on the arming frame, and any
+        /// card-driven Attack on a gun we own. Suppress WITHOUT cancelling —
+        /// a raced press must not end the dance and then fire anyway. The
+        /// observable cancel for OTHER seats lives in
+        /// Dance_ProjectileInit_Patch, the funnel that actually runs
+        /// everywhere.</summary>
+        [HarmonyPatch(typeof(Gun), "Attack")]
+        internal static class Dance_GunAttack_Patch
+        {
+            private static bool Prefix(Gun __instance)
+            {
+                try
+                {
+                    if (!LocalDanceActive) return true;
+                    var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+                    if (pv == null || !pv.IsMine) return true;   // never touch another owner's gun
+                    return false;
+                }
+                catch { return true; }   // fail OPEN — never block a shot on an error
+            }
+        }
+
+        /// <summary>Observable shot cancel at the one funnel every gun fire
+        /// passes through on EVERY seat: the bullet's birth RPC.
+        /// Gun.FireBurst sends ProjectileInit.RPCA_Init /
+        /// RPCA_Init_noAmmoUse / RPCA_Init_SeparateGun with
+        /// RpcTarget.All, and each carries the SHOOTER's actor number as
+        /// its first argument — so when a dancing actor's gun actually
+        /// fires (modified client, or any path that slipped every owner
+        /// belt), every honest seat sees the birth and stops rendering
+        /// that actor's dance. A compliant dancer never triggers this:
+        /// their Attack is suppressed at the owner, so no bullet is ever
+        /// born. Postfix + positional __0 binding (#364 — object[] __args
+        /// would box on every bullet birth), first-statement bail when
+        /// nobody dances. TargetMethods THROWS if any of the three known
+        /// overloads fails to resolve — a loud "Failed to patch" at
+        /// startup (#83/#320), degrading to velocity/death cancels only,
+        /// beats a silently absent probe.</summary>
+        [HarmonyPatch]
+        internal static class Dance_ProjectileInit_Patch
+        {
+            private static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                string[] names = { "RPCA_Init", "RPCA_Init_noAmmoUse", "RPCA_Init_SeparateGun" };
+                foreach (var n in names)
+                {
+                    var m = AccessTools.Method(typeof(ProjectileInit), n);
+                    if (m == null) throw new MissingMethodException("ProjectileInit." + n + " not found - dance shot-cancel funnel moved");
+                    yield return m;
+                }
+            }
+
+            private static void Postfix(int __0)   // senderID: the shooter's actor number, all three overloads
+            {
+                try
+                {
+                    if (active.Count == 0) return;
+                    if (active.Remove(__0))
+                    {
+                        _velStrikes.Remove(__0);
+                        if (active.Count == 0) RestoreAllArms();
+                    }
+                }
+                catch { }   // fail OPEN — a cancel miss is rendering-only
+            }
+        }
+
+        /// <summary>Owner-only block belt (mirrors Block_FfaSpawnGrace_Patch):
+        /// a skipped TryBlock never runs RPCA_DoBlock, so no BlockAction, no
+        /// RPC, no replica block anywhere (#268). Remote replicas never reach
+        /// TryBlock at all (their shieldWasPressed is never set online), so
+        /// no cancel branch is needed here — blocks cannot be observed
+        /// through this funnel for other actors.</summary>
+        [HarmonyPatch(typeof(Block), "TryBlock")]
+        internal static class Dance_BlockTryBlock_Patch
+        {
+            private static bool Prefix(Block __instance)
+            {
+                try
+                {
+                    if (!LocalDanceActive) return true;
+                    var data = __instance != null ? __instance.data : null;
+                    if (data == null || data.view == null || !data.view.IsMine) return true;
+                    return false;
+                }
+                catch { return true; }   // fail OPEN
             }
         }
     }

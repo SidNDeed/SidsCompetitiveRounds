@@ -1433,6 +1433,14 @@ class CardPickersSummaryResponse(BaseModel):
     entries: list[str] = Field(default_factory=list)
 
 
+class CardLeadersSummaryResponse(BaseModel):
+    """Per-card top players by 5-0 sweeps and by match wins, flattened as
+    'card|name|count' pipe-CSV strings (same #25/#156 rationale as
+    CardPickersSummaryResponse). Rows arrive grouped by card in rank order."""
+    sweepers: list[str] = Field(default_factory=list)
+    winners: list[str] = Field(default_factory=list)
+
+
 class RankedFriendsResponse(BaseModel):
     """Most-played ranked opponents (completed series count), pie source."""
     display_names: list[str] = Field(default_factory=list)

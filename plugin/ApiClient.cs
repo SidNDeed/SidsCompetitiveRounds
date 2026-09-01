@@ -6291,17 +6291,38 @@ namespace CompetitiveRounds
             // that stacked >= 2 copies. Absent on a stale server/replica ->
             // ExtractJsonInt defaults 0 (#422 direction is graceful).
             public int sweeps_with_card, stacked_builds;
+            // Sept 1: distinct players who ever picked the card (the /cards
+            // row always carried it; now parsed for the Unique Players board).
+            public int unique_players;
+            // Sept 1: total winning PICKS carrying the card (main-body per-row
+            // aggregate — collapses by the PICKS rule: always sum).
+            public int wins_with_card;
         }
+        public static List<CardCatalogEntry> CardCatalogRanked { get; private set; }
 
-        /// <summary>Aug 31 — global shop sales board (Compare > Players 'Shop
-        /// Sales'). Parallel arrays, one row per sold cosmetic.</summary>
+        /// <summary>Sept 1 — per-ARTIST shop sales board (Compare > Players
+        /// 'Shop Sales', reworked per Sid: rows are the players with items up
+        /// for sale, not the items). Parallel arrays; `earned` is the gold the
+        /// shop actually PAID each artist (royalty ledger, server-summed).</summary>
         public class ShopSalesData
         {
-            public List<string> names, kinds, artists;
-            public List<int> purchases, gifted, revenues;
-            public int totalRevenue, totalPurchases, totalItems;
+            public List<string> artists, topNames;
+            public List<int> itemsOnSale, itemsTotal, sold, gifted, revenues, earned, topSolds;
+            public int totalRevenue, totalSold, totalEarned, totalArtists;
         }
         public static ShopSalesData ShopSales;
+
+        /// <summary>Sept 1 — per-card top players (Compare > Cards): top-5 by
+        /// 5-0 sweeps and top-5 by match wins, keyed by RAW card name (the
+        /// server groups by the same raw names the catalog rows carry).</summary>
+        public class CardLeadersData
+        {
+            public Dictionary<string, List<KeyValuePair<string, int>>> sweepers
+                = new Dictionary<string, List<KeyValuePair<string, int>>>();
+            public Dictionary<string, List<KeyValuePair<string, int>>> winners
+                = new Dictionary<string, List<KeyValuePair<string, int>>>();
+        }
+        public static CardLeadersData CardLeaders;
 
         public static readonly Dictionary<string, RecordsBoardData> RecordsBoards
             = new Dictionary<string, RecordsBoardData>();
@@ -6469,9 +6490,13 @@ namespace CompetitiveRounds
             });
         }
 
-        /// <summary>Aug 31 — global Shop Sales board (selection-independent,
+        /// <summary>Sept 1 — per-artist Shop Sales board (selection-independent,
         /// the Records pattern). One fetch per session; empty boards retry via
-        /// the shared FetchCompareBoard discipline.</summary>
+        /// the shared FetchCompareBoard discipline. A pre-rework server's body
+        /// lacks the `artists`+`earned` pairing and fails ArraysAligned against
+        /// the new keys (its `artists` list is per-ITEM, `earned` is absent →
+        /// counts disagree), so the panel shows Loading rather than a wrong
+        /// table (#422 direction).</summary>
         public static void FetchShopSalesBoard()
         {
             if (ShopSales != null) return;
@@ -6480,21 +6505,67 @@ namespace CompetitiveRounds
             {
                 var d = new ShopSalesData
                 {
-                    names = JsonStringArrayByKey(resp, "names"),
-                    kinds = JsonStringArrayByKey(resp, "kinds"),
                     artists = JsonStringArrayByKey(resp, "artists"),
-                    purchases = JsonIntArrayByKey(resp, "purchases"),
+                    topNames = JsonStringArrayByKey(resp, "top_names"),
+                    itemsOnSale = JsonIntArrayByKey(resp, "items_on_sale"),
+                    itemsTotal = JsonIntArrayByKey(resp, "items_total"),
+                    sold = JsonIntArrayByKey(resp, "sold"),
                     gifted = JsonIntArrayByKey(resp, "gifted"),
                     revenues = JsonIntArrayByKey(resp, "revenues"),
+                    earned = JsonIntArrayByKey(resp, "earned"),
+                    topSolds = JsonIntArrayByKey(resp, "top_solds"),
                     totalRevenue = ExtractJsonInt(resp, "total_revenue"),
-                    totalPurchases = ExtractJsonInt(resp, "total_purchases"),
-                    totalItems = ExtractJsonInt(resp, "total_items"),
+                    totalSold = ExtractJsonInt(resp, "total_sold"),
+                    totalEarned = ExtractJsonInt(resp, "total_earned"),
+                    totalArtists = ExtractJsonInt(resp, "total_artists"),
                 };
-                if (!ArraysAligned(d.names.Count, d.kinds.Count, d.artists.Count,
-                                   d.purchases.Count, d.gifted.Count, d.revenues.Count)) return false;
+                if (d.artists.Count == 0) return false;   // pre-rework server or empty body
+                if (!ArraysAligned(d.artists.Count, d.topNames.Count, d.itemsOnSale.Count,
+                                   d.itemsTotal.Count, d.sold.Count, d.gifted.Count,
+                                   d.revenues.Count, d.earned.Count, d.topSolds.Count)) return false;
                 ShopSales = d;
                 return true;
             });
+        }
+
+        /// <summary>Sept 1 — per-card top sweepers/winners for the Cards
+        /// compare (one fetch covers every card; pipe-CSV rows 'card|name|n',
+        /// the #25-safe flattening pickers-summary established).</summary>
+        public static void FetchCardLeaders()
+        {
+            if (CardLeaders != null) return;
+            FetchCompareBoard("cardleaders",
+                $"{baseUrl}/api/v1/cards/leaders-summary?limit_per_card=5", resp =>
+            {
+                var d = new CardLeadersData();
+                foreach (var row in JsonStringArrayByKey(resp, "sweepers"))
+                    AddLeaderRow(d.sweepers, row);
+                foreach (var row in JsonStringArrayByKey(resp, "winners"))
+                    AddLeaderRow(d.winners, row);
+                // Empty on a pre-rework server (both keys absent) — reject so
+                // the shared plumbing retries instead of caching a blank board.
+                if (d.sweepers.Count == 0 && d.winners.Count == 0) return false;
+                CardLeaders = d;
+                return true;
+            });
+        }
+
+        private static void AddLeaderRow(Dictionary<string, List<KeyValuePair<string, int>>> map, string row)
+        {
+            if (string.IsNullOrEmpty(row)) return;
+            // card|name|count — the server strips '|' from display names, so a
+            // malformed split means a garbled body: drop the row, keep the rest.
+            var parts = row.Split('|');
+            if (parts.Length != 3) return;
+            int n;
+            if (!int.TryParse(parts[2], out n)) return;
+            List<KeyValuePair<string, int>> list;
+            if (!map.TryGetValue(parts[0], out list))
+            {
+                list = new List<KeyValuePair<string, int>>();
+                map[parts[0]] = list;
+            }
+            list.Add(new KeyValuePair<string, int>(parts[1], n));
         }
 
         public static void FetchGoldSources(string steamId)
@@ -6668,36 +6739,7 @@ namespace CompetitiveRounds
             FetchCompareBoard("cardcatalog",
                 $"{baseUrl}/api/v1/cards?limit=200&sort_by=times_picked&min_picks=1", resp =>
             {
-                var list = new List<CardCatalogEntry>();
-                /* R3 (LOW): splitting the raw body on the literal
-                 * "card_name" is not string-aware — a stored card name that
-                 * itself contains that token (escaped inside its own value)
-                 * splits its object in half and caches malformed entries with
-                 * zeroed statistics. Card names are server-stored but
-                 * originate from reported match data, so they are not a
-                 * closed set. Use the same string-aware object slicer the
-                 * other array parsers use (#156). */
-                int _cOpen = resp.IndexOf('[');
-                int _cClose = _cOpen >= 0 ? FindMatchingBracketStringAware(resp, _cOpen) : -1;
-                var parts = (_cOpen >= 0 && _cClose > _cOpen)
-                    ? SliceTopLevelObjects(resp.Substring(_cOpen + 1, _cClose - _cOpen - 1))
-                    : new List<string>();
-                for (int i = 0; i < parts.Count; i++)
-                {
-                    string nm = ExtractJsonString(parts[i], "card_name");
-                    if (string.IsNullOrEmpty(nm)) continue;
-                    list.Add(new CardCatalogEntry
-                    {
-                        name = nm,
-                        rarity = ExtractJsonString(parts[i], "card_rarity"),
-                        times_picked = ExtractJsonInt(parts[i], "times_picked"),
-                        times_offered = ExtractJsonInt(parts[i], "times_offered"),
-                        win_rate = ExtractJsonFloat(parts[i], "win_rate"),
-                        pass_rate = ExtractJsonFloat(parts[i], "pass_rate"),
-                        sweeps_with_card = ExtractJsonInt(parts[i], "sweeps_with_card"),
-                        stacked_builds = ExtractJsonInt(parts[i], "stacked_builds"),
-                    });
-                }
+                var list = ParseCardCatalogBody(resp);
                 /* Aug 6 review find 9: an EMPTY catalogue must not be
                  * cached. The guard above is `CardCatalog != null`, so a 200
                  * returning [] would pin an empty list for the session and
@@ -6709,6 +6751,59 @@ namespace CompetitiveRounds
                 CardCatalog = CollapseCardDuplicates(list);
                 return true;
             });
+        }
+
+        /// <summary>Sept 1 — RANKED-only twin of the catalogue, for the Cards
+        /// compare's ranked boards. Same shared parser/collapse (#330: one
+        /// parse operation, not a second copy that drifts). A card only ever
+        /// picked in casual is legitimately ABSENT here — render sites look
+        /// selected cards up by name and treat a miss as zero.</summary>
+        public static void FetchCardCatalogRanked()
+        {
+            if (CardCatalogRanked != null) return;
+            FetchCompareBoard("cardcatalogranked",
+                $"{baseUrl}/api/v1/cards?limit=200&sort_by=times_picked&min_picks=1&is_ranked=true", resp =>
+            {
+                var list = ParseCardCatalogBody(resp);
+                if (list.Count == 0) return false;   // same empty-reject rule as above
+                CardCatalogRanked = CollapseCardDuplicates(list);
+                return true;
+            });
+        }
+
+        /// <summary>One /cards body → entry list. Shared by the combined and
+        /// ranked catalogue fetchers so the field list cannot drift (#330).
+        /// String-aware slicing (#156): splitting the raw body on the literal
+        /// "card_name" would let a stored card name containing that token
+        /// split its own object in half — card names originate from reported
+        /// match data and are not a closed set.</summary>
+        private static List<CardCatalogEntry> ParseCardCatalogBody(string resp)
+        {
+            var list = new List<CardCatalogEntry>();
+            int _cOpen = resp.IndexOf('[');
+            int _cClose = _cOpen >= 0 ? FindMatchingBracketStringAware(resp, _cOpen) : -1;
+            var parts = (_cOpen >= 0 && _cClose > _cOpen)
+                ? SliceTopLevelObjects(resp.Substring(_cOpen + 1, _cClose - _cOpen - 1))
+                : new List<string>();
+            for (int i = 0; i < parts.Count; i++)
+            {
+                string nm = ExtractJsonString(parts[i], "card_name");
+                if (string.IsNullOrEmpty(nm)) continue;
+                list.Add(new CardCatalogEntry
+                {
+                    name = nm,
+                    rarity = ExtractJsonString(parts[i], "card_rarity"),
+                    times_picked = ExtractJsonInt(parts[i], "times_picked"),
+                    times_offered = ExtractJsonInt(parts[i], "times_offered"),
+                    win_rate = ExtractJsonFloat(parts[i], "win_rate"),
+                    pass_rate = ExtractJsonFloat(parts[i], "pass_rate"),
+                    sweeps_with_card = ExtractJsonInt(parts[i], "sweeps_with_card"),
+                    stacked_builds = ExtractJsonInt(parts[i], "stacked_builds"),
+                    unique_players = ExtractJsonInt(parts[i], "unique_players"),
+                    wins_with_card = ExtractJsonInt(parts[i], "wins_with_card"),
+                });
+            }
+            return list;
         }
 
         /// <summary>Aug 7 item 2 — collapse duplicate catalogue rows to ONE entry
@@ -6792,11 +6887,12 @@ namespace CompetitiveRounds
                     /* PICKS always SUM. Every row is a distinct server GROUP BY
                      * bucket, so no pick is represented twice — true whether the
                      * server groups by (name, rarity) or by name alone. */
-                    int totalPicks = 0;
+                    int totalPicks = 0, totalWins = 0;
                     float winAcc = 0f;
                     foreach (var r in rows)
                     {
                         totalPicks += r.times_picked;
+                        totalWins += r.wins_with_card;   // main-body per-row aggregate: PICKS rule
                         winAcc += r.win_rate * r.times_picked;
                     }
 
@@ -6823,6 +6919,12 @@ namespace CompetitiveRounds
                      * different spellings each carry their own (sum across). */
                     var sweepsByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     var stacksByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    /* Sept 1: unique_players follows the OFFERS rule too (a
+                     * name-level server aggregate). Summing across SPELLINGS
+                     * can double-count a player who picked both legacy
+                     * spellings — accepted: display-only, and the alternative
+                     * (max) undercounts every genuinely-merged pair. */
+                    var uniqByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     foreach (var r in rows)
                     {
                         string raw = r.name ?? "";
@@ -6834,6 +6936,7 @@ namespace CompetitiveRounds
                         }
                         int prevSw; if (!sweepsByRaw.TryGetValue(raw, out prevSw) || r.sweeps_with_card > prevSw) sweepsByRaw[raw] = r.sweeps_with_card;
                         int prevSt; if (!stacksByRaw.TryGetValue(raw, out prevSt) || r.stacked_builds > prevSt) stacksByRaw[raw] = r.stacked_builds;
+                        int prevUq; if (!uniqByRaw.TryGetValue(raw, out prevUq) || r.unique_players > prevUq) uniqByRaw[raw] = r.unique_players;
                         int prevPicks;
                         picksByRaw.TryGetValue(raw, out prevPicks);
                         picksByRaw[raw] = prevPicks + r.times_picked;
@@ -6880,14 +6983,17 @@ namespace CompetitiveRounds
                     }
 
                     best.times_picked = totalPicks;
+                    best.wins_with_card = totalWins;
                     best.times_offered = totalOffered;
                     best.win_rate = totalPicks > 0 ? winAcc / totalPicks : best.win_rate;
                     best.pass_rate = totalOffered > 0 ? passAcc / totalOffered : best.pass_rate;
-                    int swSum = 0, stSum = 0;
+                    int swSum = 0, stSum = 0, uqSum = 0;
                     foreach (var kv in sweepsByRaw) swSum += kv.Value;
                     foreach (var kv in stacksByRaw) stSum += kv.Value;
+                    foreach (var kv in uniqByRaw) uqSum += kv.Value;
                     best.sweeps_with_card = swSum;
                     best.stacked_builds = stSum;
+                    best.unique_players = uqSum;
                     outp.Add(best);
                 }
 

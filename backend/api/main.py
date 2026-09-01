@@ -81,6 +81,7 @@ from schemas import (
     RecordsBoardResponse,
     CardTopPickersResponse,
     CardPickersSummaryResponse,
+    CardLeadersSummaryResponse,
     RankedFriendsResponse,
     GoldSourcesResponse,
     NemesisResponse,
@@ -8899,22 +8900,38 @@ async def get_card_stats(
     # Pass-rate aggregation. Filtered to the same player when requested so the
     # number reflects "how often THIS player passes on this card." Without a
     # player filter we pool across everyone — community-wide pass rate.
-    offer_player_filter = ""
+    # Sept 1: the ranked filter now applies to offers too (via the match row —
+    # card_offers has no is_ranked column), so a ?is_ranked= call splits
+    # times_offered/pass_rate along with the pick metrics instead of silently
+    # returning the combined numbers beside ranked-only ones (#328's
+    # same-predicate rule). Unfiltered calls keep the old no-join plan.
+    # Only fixed fragments from these closed branches reach the f-string
+    # (#188 — never a request string).
+    offer_join = ""
+    offer_conds = []
     if steam_id:
-        offer_player_filter = "WHERE player_id = (SELECT id FROM players WHERE steam_id = :steam_id)"
+        offer_conds.append("co.player_id = (SELECT id FROM players WHERE steam_id = :steam_id)")
+    if is_ranked == "true":
+        offer_join = "JOIN matches mo ON mo.id = co.match_id"
+        offer_conds.append("mo.is_ranked = true")
+    elif is_ranked == "false":
+        offer_join = "JOIN matches mo ON mo.id = co.match_id"
+        offer_conds.append("mo.is_ranked = false")
+    offer_filter = ("WHERE " + " AND ".join(offer_conds)) if offer_conds else ""
 
     query = text(f"""
         WITH offers AS (
-            SELECT card_name,
+            SELECT co.card_name,
                    COUNT(*) AS times_offered,
                    ROUND(
-                       (1.0 - SUM(CASE WHEN was_picked THEN 1 ELSE 0 END)::numeric
+                       (1.0 - SUM(CASE WHEN co.was_picked THEN 1 ELSE 0 END)::numeric
                             / NULLIF(COUNT(*), 0)),
                        4
                    ) AS pass_rate
-            FROM card_offers
-            {offer_player_filter}
-            GROUP BY card_name
+            FROM card_offers co
+            {offer_join}
+            {offer_filter}
+            GROUP BY co.card_name
         ),
         rarity_votes AS (
             -- Aug 7 item 2. card_rarity is a PER-PICK SNAPSHOT written by
@@ -9031,42 +9048,88 @@ async def get_card_stats(
 
 @app.get("/api/v1/shop/sales-board", tags=["Shop"])
 async def shop_sales_board(db: AsyncSession = Depends(get_db)):
-    """Aug 31 (Sid — Compare > Players 'Shop Sales'): global per-cosmetic sales
-    board — how many people hold each item, what it grossed, and the shop's
-    overall take. Parallel arrays (the compare-board client convention).
+    """Sept 1 (Sid — Compare > Players 'Shop Sales', reworked): per-ARTIST
+    sales board. One row per living player who has authored shop items: how
+    many of their items are up for sale, copies sold/gifted, gross revenue,
+    and what the shop actually PAID them (summed 'artist_royalty' ledger rows
+    — the actual-paid figure, not a recomputed rate, so a future royalty-rate
+    change never rewrites history). Parallel arrays (compare-board client
+    convention); the client sorts locally, server order is earned DESC.
 
-    Scope rules: achievement-pool items are GRANTS, not sales — excluded, or
-    every podium/trophy holder would read as a 'purchase'. Gifted copies
-    (purchase_price = 0 on a sellable item) are counted separately and add no
-    revenue. Buyer identities never leave the server — counts only. Artist
-    byline comes from the live player row (NULL for house items; a deleted
-    artist renders blank, #437-family: no identity resurrection)."""
+    Scope rules: house items (artist_steam_id IS NULL) have no seller and are
+    excluded. Achievement-pool items are GRANTS, not sales. Gifted copies
+    (purchase_price = 0) count separately and add no revenue. Deleted artists
+    are omitted (#437-family: no identity resurrection). Fully INERT artists —
+    nothing on sale, nothing ever sold or gifted, nothing earned (an
+    unpublished-only catalogue) — are dropped (r1 LOW: "up for sale" was a
+    false claim for them), but a historical earner whose items have since
+    closed stays: their earnings row is the point of the board. Buyer
+    identities never leave the server."""
     rows = (await db.execute(text("""
-        SELECT si.sku, si.name, si.kind,
-               COALESCE(ap.display_name, '') AS artist,
-               COUNT(*) FILTER (WHERE pi.purchase_price > 0) AS purchases,
-               COUNT(*) FILTER (WHERE pi.purchase_price = 0) AS gifted,
-               COALESCE(SUM(pi.purchase_price), 0)::bigint    AS revenue
-          FROM player_items pi
-          JOIN shop_items si ON si.id = pi.item_id
-          LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
-                              AND ap.deleted_at IS NULL
-         WHERE si.rotation_pool IS DISTINCT FROM 'achievement'
-         GROUP BY si.sku, si.name, si.kind, ap.display_name
-         ORDER BY revenue DESC, purchases DESC, si.sku
+        WITH per_item AS (
+            SELECT si.artist_steam_id, si.sku, si.name,
+                   COUNT(pi.player_id) FILTER (WHERE pi.purchase_price > 0) AS sold,
+                   COUNT(pi.player_id) FILTER (WHERE pi.purchase_price = 0) AS gifted,
+                   COALESCE(SUM(pi.purchase_price), 0)::bigint AS revenue,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY si.artist_steam_id
+                       ORDER BY COALESCE(SUM(pi.purchase_price), 0) DESC,
+                                COUNT(pi.player_id) FILTER (WHERE pi.purchase_price > 0) DESC,
+                                si.sku) AS rn,
+                   (si.catalog_ready AND COALESCE(si.stock_limit, 0) >= 0) AS on_sale
+              FROM shop_items si
+              LEFT JOIN player_items pi ON pi.item_id = si.id
+             WHERE si.artist_steam_id IS NOT NULL
+               AND si.rotation_pool IS DISTINCT FROM 'achievement'
+             GROUP BY si.artist_steam_id, si.sku, si.name, si.catalog_ready, si.stock_limit
+        ),
+        per_artist AS (
+            SELECT artist_steam_id,
+                   COUNT(*) AS items_total,
+                   COUNT(*) FILTER (WHERE on_sale) AS items_on_sale,
+                   SUM(sold)::bigint AS sold,
+                   SUM(gifted)::bigint AS gifted,
+                   SUM(revenue)::bigint AS revenue
+              FROM per_item
+             GROUP BY artist_steam_id
+        ),
+        royalties AS (
+            SELECT p.steam_id, COALESCE(SUM(gt.amount), 0)::bigint AS earned
+              FROM gold_transactions gt
+              JOIN players p ON p.id = gt.player_id
+             WHERE gt.reason = 'artist_royalty' AND gt.amount > 0
+             GROUP BY p.steam_id
+        )
+        SELECT ap.display_name AS artist,
+               pa.items_on_sale, pa.items_total, pa.sold, pa.gifted, pa.revenue,
+               COALESCE(ro.earned, 0) AS earned,
+               COALESCE(ti.name, '') AS top_name,
+               COALESCE(ti.sold, 0)  AS top_sold
+          FROM per_artist pa
+          JOIN players ap ON ap.steam_id = pa.artist_steam_id
+                         AND ap.deleted_at IS NULL
+          LEFT JOIN royalties ro ON ro.steam_id = pa.artist_steam_id
+          LEFT JOIN per_item ti ON ti.artist_steam_id = pa.artist_steam_id
+                               AND ti.rn = 1
+         WHERE pa.items_on_sale > 0 OR pa.sold > 0 OR pa.gifted > 0
+            OR COALESCE(ro.earned, 0) > 0
+         ORDER BY earned DESC, pa.revenue DESC, ap.display_name
+         LIMIT 60
     """))).mappings().all()
-    top = rows[:40]
     return {
-        "skus":      [r["sku"] for r in top],
-        "names":     [r["name"] or r["sku"] for r in top],
-        "kinds":     [r["kind"] or "" for r in top],
-        "artists":   [r["artist"] for r in top],
-        "purchases": [int(r["purchases"]) for r in top],
-        "gifted":    [int(r["gifted"]) for r in top],
-        "revenues":  [int(r["revenue"]) for r in top],
-        "total_revenue":  int(sum(r["revenue"] for r in rows)),
-        "total_purchases": int(sum(r["purchases"] for r in rows)),
-        "total_items": len(rows),
+        "artists":       [r["artist"] or "" for r in rows],
+        "items_on_sale": [int(r["items_on_sale"]) for r in rows],
+        "items_total":   [int(r["items_total"]) for r in rows],
+        "sold":          [int(r["sold"]) for r in rows],
+        "gifted":        [int(r["gifted"]) for r in rows],
+        "revenues":      [int(r["revenue"]) for r in rows],
+        "earned":        [int(r["earned"]) for r in rows],
+        "top_names":     [r["top_name"] for r in rows],
+        "top_solds":     [int(r["top_sold"]) for r in rows],
+        "total_revenue": int(sum(r["revenue"] for r in rows)),
+        "total_sold":    int(sum(r["sold"] for r in rows)),
+        "total_earned":  int(sum(r["earned"] for r in rows)),
+        "total_artists": len(rows),
     }
 
 # Allowlist: request value -> fixed per-seat column pair (or a marker for the
@@ -9661,6 +9724,66 @@ async def get_card_pickers_summary(
         wr = round(int(r["wins"] or 0) / games, 4) if games > 0 else 0.0
         entries.append(f"{r['card_name']}|{name}|{int(r['picks'] or 0)}|{wr}")
     return CardPickersSummaryResponse(entries=entries)
+
+
+@app.get("/api/v1/cards/leaders-summary", response_model=CardLeadersSummaryResponse, tags=["Cards"])
+async def get_card_leaders_summary(
+    limit_per_card: int = Query(5, ge=1, le=8),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sept 1 (Sid — Compare > Cards rework): per-card top players by 5-0
+    SWEEPS and by match WINS, for every card in one call, as 'card|name|count'
+    pipe-CSV rows (pipe-flattened for the same #25 nested-array reason as
+    /cards/pickers-summary; pipes stripped from names, #156). The sweep
+    predicate is the /cards sweeps CTE's, per (card, player): a match the
+    player WON where the loser's seat took zero rounds, distinct matches,
+    invalidated matches and tombstoned players excluded BEFORE ROW_NUMBER so
+    a deleted account can't consume a top-N slot. Casual+ranked combined —
+    the client renders these beside the combined bar boards."""
+    rows = (await db.execute(text("""
+        WITH per AS (
+            SELECT mc.card_name, mc.player_id,
+                   COUNT(DISTINCT mc.match_id) FILTER (
+                       WHERE m.winner_id = mc.player_id) AS wins,
+                   COUNT(DISTINCT mc.match_id) FILTER (
+                       WHERE m.winner_id = mc.player_id
+                         AND CASE WHEN m.player1_id = mc.player_id
+                                  THEN m.p2_rounds_won
+                                  ELSE m.p1_rounds_won END = 0) AS sweeps
+              FROM match_cards mc
+              JOIN matches m ON m.id = mc.match_id
+              JOIN players pp ON pp.id = mc.player_id AND pp.deleted_at IS NULL
+             WHERE m.invalidated_at IS NULL
+             GROUP BY mc.card_name, mc.player_id
+        ),
+        sw AS (
+            SELECT per.*, ROW_NUMBER() OVER (PARTITION BY card_name
+                              ORDER BY sweeps DESC, wins DESC, player_id) AS rn
+              FROM per WHERE sweeps > 0
+        ),
+        wn AS (
+            SELECT per.*, ROW_NUMBER() OVER (PARTITION BY card_name
+                              ORDER BY wins DESC, sweeps DESC, player_id) AS rn
+              FROM per WHERE wins > 0
+        )
+        SELECT 's' AS grp, s.card_name, p.display_name, p.steam_id,
+               s.sweeps AS n, s.rn
+          FROM sw s JOIN players p ON p.id = s.player_id
+         WHERE s.rn <= :lim
+        UNION ALL
+        SELECT 'w' AS grp, w.card_name, p.display_name, p.steam_id,
+               w.wins AS n, w.rn
+          FROM wn w JOIN players p ON p.id = w.player_id
+         WHERE w.rn <= :lim
+         ORDER BY grp, card_name ASC, rn ASC
+    """), {"lim": limit_per_card})).mappings().all()
+    sweepers: list[str] = []
+    winners: list[str] = []
+    for r in rows:
+        name = (r["display_name"] or r["steam_id"] or "").replace("|", "/")
+        row = f"{r['card_name']}|{name}|{int(r['n'] or 0)}"
+        (sweepers if r["grp"] == "s" else winners).append(row)
+    return CardLeadersSummaryResponse(sweepers=sweepers, winners=winners)
 
 
 @app.get("/api/v1/players/{steam_id}/ranked-friends", response_model=RankedFriendsResponse, tags=["Players"])
@@ -19567,19 +19690,26 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
 async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
                             batches: int = Query(0, ge=0, le=4),
                             db: AsyncSession = Depends(get_db)):
-    """Most recently added shop items, for the Home tab's 'newest cosmetics'
-    panel (v1.33). Excludes achievement-pool items and unpublished community
-    art (catalog_ready = false — its PNG hasn't shipped in the client yet, so
-    it would render as a blank swatch). Shipped-but-not-yet-opened items ARE
-    included with on_sale=false so the Home panel teases them as 'coming soon'
-    (July 17 round 4 — Sid: a 'newest' panel that can't show a brand-new drop
-    until the artist opens sales is backwards; a shipped item renders fine).
-    batches > 0 restricts the result to the N most recent cosmetic-update
-    days (items ship in batches; grouping by day recovers the batch) — the
-    Home tab shows the last two. Key order is load-bearing for the mod's
-    manual parser: sku first, artist_name last within each entry."""
+    """Most recently added COSMETICS (kind='face' — the bundled-art items the
+    Shop's own "Cosmetics" category shows), for the Home tab's 'newest
+    cosmetics' panel (v1.33; narrowed to faces Sept 1 — Sid: the panel was
+    flooding with every new shop row, trails/dances/titles included, when it
+    should only show cosmetics). Excludes achievement-pool items and
+    unpublished community art (catalog_ready = false — its PNG hasn't shipped
+    in the client yet, so it would render as a blank swatch).
+    Shipped-but-not-yet-opened items ARE included with on_sale=false so the
+    Home panel teases them as 'coming soon' (July 17 round 4 — Sid: a
+    'newest' panel that can't show a brand-new drop until the artist opens
+    sales is backwards; a shipped item renders fine). batches > 0 restricts
+    the result to the N most recent cosmetic-update days (items ship in
+    batches; grouping by day recovers the batch) — the Home tab shows the
+    last two. Key order is load-bearing for the mod's manual parser: sku
+    first, artist_name last within each entry."""
     # "When it shipped" = released_at when the item was stock-gated at birth
     # (artist items open sales later; migration 131), else created_at.
+    # The kind filter appears in BOTH the outer WHERE and the recent-days
+    # subquery (#163/#164: the batch window must be computed over the same
+    # population it filters, or a trail-release day eats a face batch slot).
     rows = (await db.execute(text("""
         SELECT si.sku, si.kind, si.name, si.rarity, si.price, si.preview_color,
                si.stock_limit,
@@ -19593,28 +19723,21 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
         LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
         WHERE si.rotation_pool IS NULL
           AND si.catalog_ready
+          AND si.kind = 'face'
           AND (:batches = 0 OR COALESCE(si.released_at, si.created_at)::date IN (
                 SELECT d FROM (
                     SELECT DISTINCT COALESCE(released_at, created_at)::date AS d
                     FROM shop_items
                     WHERE rotation_pool IS NULL
                       AND catalog_ready
+                      AND kind = 'face'
                     ORDER BY d DESC LIMIT :batches
                 ) recent_days))
         ORDER BY COALESCE(si.released_at, si.created_at) DESC
         LIMIT :lim
     """), {"lim": limit, "batches": batches})).mappings().all()
-    # Same dance version gate as /shop/items (round-2 review H-low): a
-    # pre-dance client's Home panel would otherwise render a raw
-    # "(dance, rarity)" teaser for rows its build cannot use. Filter is
-    # post-query so the batches/limit window stays byte-identical for
-    # capable clients on the same data.
-    try:
-        _cv = _current_mod_version.get()
-        if not _cv or _parse_version(_cv) < _parse_version(DANCES_MIN_VERSION):
-            rows = [r for r in rows if r["kind"] != "dance"]
-    except Exception:
-        rows = [r for r in rows if r["kind"] != "dance"]
+    # (The dance version gate that used to sit here is dead under the
+    # kind='face' filter and was removed; /shop/items keeps its copy.)
     return {
         "items": [
             {"sku": r["sku"], "kind": r["kind"], "name": r["name"],
