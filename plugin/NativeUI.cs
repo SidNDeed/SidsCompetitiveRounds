@@ -8283,7 +8283,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     var row = GetOrCreateArtistRow(i++);
                     row.sku = it.sku; row.name = it.name; row.price = it.price;
                     row.stock = it.stock_limit; row.catalogReady = it.catalog_ready;
-                    if (row.stockBtn != null) row.stockBtn.SetActive(it.catalog_ready);
+                    // Batch-2 C (M2): music stock is SERVER-REJECTED (albums
+                    // sell unlimited) — hide the lever so the UI never invites
+                    // a 4xx; the server keeps the real gate. Name/Price/About/
+                    // Gift stay (the shipped music mutations).
+                    bool isMusicRow = it.kind == "music_album";
+                    if (row.stockBtn != null) row.stockBtn.SetActive(it.catalog_ready && !isMusicRow);
                     if (row.giftBtn != null) row.giftBtn.SetActive(it.catalog_ready);
                     // Item 9: cosmetic art thumbnail (face items have runtime sprites;
                     // other kinds simply hide the slot).
@@ -8302,13 +8307,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     // Item 7: Tr the status literals at assignment; the row
                     // template composes from translated parts, written Raw
                     // (it.name is artist/user data and stays raw).
-                    string stockStr = !it.catalog_ready
-                        ? I18n.Tr("<color=#FFD94D>APPROVED - awaiting mod update</color>")
-                        : it.stock_limit < 0
-                            ? I18n.Tr("<color=#FF6666>NOT OPENED - set stock to start selling!</color>")
-                            : it.stock_limit > 0
-                                ? I18n.TrF("{0} of {1} left", Math.Max(0, it.stock_limit - it.sold), it.stock_limit)
-                                : I18n.Tr("unlimited");
+                    // M2: the music branch comes FIRST — a music row's stock
+                    // column must never render the cosmetic "NOT OPENED - set
+                    // stock" prompt (that lever is server-rejected for music).
+                    string stockStr = isMusicRow
+                        ? I18n.Tr("Albums have unlimited stock")
+                        : !it.catalog_ready
+                            ? I18n.Tr("<color=#FFD94D>APPROVED - awaiting mod update</color>")
+                            : it.stock_limit < 0
+                                ? I18n.Tr("<color=#FF6666>NOT OPENED - set stock to start selling!</color>")
+                                : it.stock_limit > 0
+                                    ? I18n.TrF("{0} of {1} left", Math.Max(0, it.stock_limit - it.sold), it.stock_limit)
+                                    : I18n.Tr("unlimited");
                     UIFactory.SetTextRaw(row.txtInfo,
                         $"<b>{it.name}</b> <color=#888>({I18n.Tr(it.kind)}, {I18n.Tr(it.rarity)})</color>  " +
                         $"<color=#FFD94D>{it.price}g</color>  <color=#7FE8C3>{stockStr}</color>  " +
@@ -9627,6 +9637,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             public string sku;
             public string previewColor;
             public int previewPrice;
+            // M6: the price this row PAINTED, written in the same fill as the
+            // price cell for EVERY kind — the Buy click attests this exact
+            // value (music rows), never the live cache's, so a refresh that
+            // swaps the cache under a painted row can't change what the buyer
+            // is agreeing to. -1 = no fill has run yet.
+            public int purchasePrice = -1;
             public string kind;
             public string displayName;   // Aug 7 item 10: for the body-preview modal title
             // Item 1 previews: cosmetic art thumbnail (faces), 3-color scheme
@@ -9951,14 +9967,29 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         Plugin.Log.LogInfo("[SHOP] setting status");
                         UIFactory.SetTextRaw(txtShopStatus, I18n.TrF("Buying {0}...", r.sku));
                         Plugin.Log.LogInfo("[SHOP] calling PurchaseItem");
-                        ApiClient.PurchaseItem(id, r.sku, (ok, resp) =>
+                        Action<bool, string> pcb = (ok, resp) =>
                         {
                             Plugin.Log.LogInfo($"[SHOP] purchase complete ok={ok}");
-                            UIFactory.SetTextRaw(txtShopStatus, ok
-                                ? I18n.Tr("<color=#88FF88>Purchased!</color>")
-                                : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", resp));
+                            // M7: the machine-readable price_changed outcome gets
+                            // the honest-buyer message — the shop refetch/repaint
+                            // is PurchaseItem's own job (ApiClient side), and a
+                            // NEW click at the repainted price is required;
+                            // never auto-retry at the new price.
+                            if (!ok && resp != null && resp.Contains("price_changed"))
+                                UIFactory.SetTextRaw(txtShopStatus,
+                                    I18n.Tr("<color=#FF8888>The price changed - check the new price and buy again.</color>"));
+                            else
+                                UIFactory.SetTextRaw(txtShopStatus, ok
+                                    ? I18n.Tr("<color=#88FF88>Purchased!</color>")
+                                    : I18n.TrF("<color=#FF8888>Purchase failed: {0}</color>", resp));
                             dirty = true;
-                        });
+                        };
+                        if (r.kind == "music_album")
+                            // M6: attest the PAINTED row's price (purchasePrice is
+                            // written in the same fill that paints the price cell).
+                            ApiClient.PurchaseItem(id, r.sku, pcb, expectedPrice: r.purchasePrice);
+                        else
+                            ApiClient.PurchaseItem(id, r.sku, pcb);   // non-music: no attestation (old contract)
                         Plugin.Log.LogInfo("[SHOP] onClick EXIT normally");
                     }
                     catch (Exception ex)
@@ -10970,6 +11001,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 NametagGlowRenderer.ApplyGlowToLabel(r.txtDesc, "", shopPreviewOriginalMats, shopPreviewGlowMatCache);
             }
             UIFactory.SetText(r.txtPrice, $"{it.price}g");
+            r.purchasePrice = it.price;   // M6: bound to the PAINTED price, same statement group as the cell above
 
             bool ownsThis = it.owned;
             bool canAfford = balance >= it.price;
@@ -11103,6 +11135,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             public GameObject selBtn; public object selBtnTxt;
             public object txtTitle, txtLen;
             public GameObject playBtn;
+            // Batch-2 stars (design v4 §2): own-rating star buttons + the
+            // public aggregate text, living in the musRateSlot container.
+            // Custom albums only — vanilla/menu rows keep them hidden (M18).
+            public GameObject[] starBtns = new GameObject[5];
+            public object txtAgg;
             public string albumSku; public int trackIdx; public bool menuOnly;
         }
         private static readonly List<MusicAlbumHdrRow> musicAlbumHdrs = new List<MusicAlbumHdrRow>();
@@ -11404,14 +11441,47 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // overflow stays bounded in practice — track titles are compiled-
             // catalog authored, far shorter than the stretched box.
             UIFactory.SetFlexW(((Component)t.txtTitle).gameObject, 1f);
-            // RATING GAP — placeholder container the ratings wave fills (grep
-            // target: musRateSlot). Deliberately EMPTY this batch; fixed width
-            // so the length/Play columns don't shift when it populates.
+            // RATINGS (batch-2 §2, fills the musRateSlot placeholder): five
+            // star icon-buttons showing the caller's OWN rating + the public
+            // aggregate text. CUSTOM albums only — vanilla and menu-only rows
+            // keep every child hidden (M18: runtime-discovered vanilla indices
+            // are not durable rating identities; their slot stays EMPTY so the
+            // length/Play columns don't shift between sections). Sprites are
+            // embedded PNGs (Gravity lacks the star glyph — #30/#47); on/off
+            // sprite + tint painted per fill in FillMusicTrackRow.
             var rateSlot = new GameObject("musRateSlot");
             rateSlot.transform.SetParent(t.root.transform, false);
             rateSlot.AddComponent<RectTransform>();
             UIFactory.AddHLG(rateSlot, spacing: 4, forceExpandH: false);
+            UIFactory.SetHLGChildAlignMiddle(rateSlot);
             UIFactory.AddLE(rateSlot, prefW: 150, minW: 150, prefH: 22, flexW: 0, flexH: 0);
+            for (int si = 0; si < 5; si++)
+            {
+                int starN = si + 1;   // 1..5, captured per button
+                // Click star N = rate N; clicking your CURRENT rating clears
+                // (Rate(...,0)). Reads the row's live binding (#265); the
+                // repaint comes from the store's optimistic apply + dirty.
+                // CreateIconButton's AddClick already claims ClickGuard (#158)
+                // — never re-claim here.
+                t.starBtns[si] = UIFactory.CreateIconButton(rateSlot.transform, $"musSt{idx}_{starN}", "mus_ic_star_off.png", 16f,
+                    () =>
+                    {
+                        try
+                        {
+                            if (string.IsNullOrEmpty(t.albumSku) || t.menuOnly || t.albumSku == MusicCatalog.VANILLA_SKU) return;
+                            int own = 0;
+                            try { own = MusicRatings.GetOwn(t.albumSku, t.trackIdx); } catch { }
+                            MusicRatings.Rate(t.albumSku, t.trackIdx, starN == own ? 0 : starN);
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] rate: {ex.Message}"); }
+                        dirty = true;
+                    });
+            }
+            // Collective aggregate beside the stars: "4.2 (12)", dash before
+            // any effective rating exists, "" on non-ratable rows.
+            t.txtAgg = UIFactory.CreateText($"musTrA{idx}", rateSlot.transform, "", 10f, C_DIM,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(46, 18));
+            UIFactory.FitOneLine(t.txtAgg);
             t.txtLen = UIFactory.CreateText($"musTrL{idx}", t.root.transform, "", 12f, C_DIM,
                 UIFactory.AlignMidRight, sizeDelta: new Vector2(56, 18));
             t.playBtn = UIFactory.CreateButton($"musTrP{idx}", t.root.transform, "Play", 13f, C_WHITE,
@@ -11450,6 +11520,40 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetTextRaw(t.txtTitle, HomeSan(title ?? "") + tag);
             UIFactory.SetColor(t.txtTitle, (sel || menuOnly) ? C_WHITE : C_LABEL);
             UIFactory.SetTextRaw(t.txtLen, lenSeconds > 0f ? FmtTrackLen(lenSeconds) : "");
+            // Stars (batch-2 §2): custom albums only — vanilla + menu rows
+            // leave the whole slot empty (M18). Pooled rows: both states are
+            // asserted every fill. Filled = star_on tinted gold, empty =
+            // star_off tinted grey; the aggregate is the DELAYED public value
+            // (dash until any rating is effective).
+            bool ratable = !menuOnly && albumSku != MusicCatalog.VANILLA_SKU;
+            int own = 0;
+            if (ratable) { try { own = MusicRatings.GetOwn(albumSku, trackIdx); } catch { } }
+            for (int si = 0; si < t.starBtns.Length; si++)
+            {
+                var sb = t.starBtns[si];
+                if (sb == null) continue;
+                if (sb.activeSelf != ratable) sb.SetActive(ratable);
+                if (!ratable) continue;
+                bool fill = own >= si + 1;
+                UIFactory.SetImageSprite(sb, GetEmbeddedSprite(fill ? "mus_ic_star_on.png" : "mus_ic_star_off.png"));
+                UIFactory.SetImageColor(sb, fill ? C_GOLD : MUS_ICON_OFF);
+            }
+            if (t.txtAgg != null)
+            {
+                string agg = "";
+                if (ratable)
+                {
+                    agg = "-";
+                    try
+                    {
+                        float aAvg; int aCnt;
+                        if (MusicRatings.TryGetTrack(albumSku, trackIdx, out aAvg, out aCnt))
+                            agg = $"{aAvg.ToString("0.0", _INV)} ({aCnt})";   // #47: invariant — no locale comma
+                    }
+                    catch { }
+                }
+                UIFactory.SetTextRaw(t.txtAgg, agg);
+            }
             t.root.SetActive(true);
         }
 
@@ -11583,9 +11687,21 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // authority: authored identity is not translatable prose, and
                 // I18n.Tr(variable) is unharvestable anyway (#295a).
                 UIFactory.SetTextRaw(h.txtName, $"<color=#FFD94D>{HomeSan(alb.AlbumName ?? "")}</color>");
+                // Batch-2 §2: album aggregate "4.1 (37)" beside the artist/
+                // genre line — the delayed public value from TryGetAlbum;
+                // nothing rendered until any rating is effective. Custom
+                // albums only by construction (this loop never sees vanilla).
+                string albAgg = "";
+                try
+                {
+                    float alAvg; int alCnt;
+                    if (MusicRatings.TryGetAlbum(alb.Sku, out alAvg, out alCnt))
+                        albAgg = $"  -  <color=#FFD94D>{alAvg.ToString("0.0", _INV)} ({alCnt})</color>";   // #47: invariant
+                }
+                catch { }
                 UIFactory.SetTextRaw(h.txtMeta,
                     I18n.TrF("by {0}", HomeSan(alb.ArtistName ?? "")) + $"  -  {HomeSan(alb.Genre ?? "")}  -  "
-                    + I18n.TrF("{0} tracks", n) + $"  -  {FmtTrackLen(MusicAlbumTotalSeconds(alb))}");
+                    + I18n.TrF("{0} tracks", n) + $"  -  {FmtTrackLen(MusicAlbumTotalSeconds(alb))}" + albAgg);
                 h.root.SetActive(true);
                 h.root.transform.SetSiblingIndex(sibling++);
                 if (n > musicTrackRows.Count - rowI)
@@ -11635,6 +11751,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         {
             bool shopPreviewLive = currentTab == 4 && !string.IsNullOrEmpty(shopSelectedSku) && MusicCatalog.Get(shopSelectedSku) != null;
             if (currentTab != 16 && !shopPreviewLive) return;
+            // Batch-2 §2: ratings refresh while the Music tab is open — the
+            // store owns the throttle (60s) and flips NativeUI.MarkDirty when
+            // a fetch lands, so no sig component is needed here.
+            if (currentTab == 16) { try { MusicRatings.FetchIfStale(); } catch { } }
             // Seek-line micro-ticker: the position moves continuously, but a
             // full tab repaint for it would be #162-class waste — update just
             // the slider + time labels at 4 Hz, with no dirty flip.

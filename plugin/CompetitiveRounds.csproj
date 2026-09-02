@@ -236,6 +236,8 @@
     <EmbeddedResource Include="assets\mus_ic_shuffle.png" />
     <EmbeddedResource Include="assets\mus_ic_loop.png" />
     <EmbeddedResource Include="assets\mus_ic_volume.png" />
+    <EmbeddedResource Include="assets\mus_ic_star_on.png" />
+    <EmbeddedResource Include="assets\mus_ic_star_off.png" />
     <EmbeddedResource Include="assets\mus_ic_stop.png" />
   </ItemGroup>
 

@@ -4037,6 +4037,7 @@ namespace CompetitiveRounds
                 // the old epoch at dispatch land into the void.
                 try { ApiClient.OnLocalIdentityChanged(); } catch { }
                 try { MusicEntitlements.OnIdentityChanged(); } catch { }
+                try { MusicRatings.OnIdentityChanged(); } catch { }
                 _identityRefetchPending = true;
             }
             else if (!prevResolved && newResolved)

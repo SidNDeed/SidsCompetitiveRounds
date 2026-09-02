@@ -2210,20 +2210,47 @@ namespace CompetitiveRounds
                 }));
         }
 
-        /// <summary>Purchase. HMAC over "buy:{steam_id}:{sku}".</summary>
-        public static void PurchaseItem(string steamId, string sku, Action<bool, string> callback)
+        /// <summary>Purchase. HMAC over "buy:{steam_id}:{sku}" — FROZEN (#5
+        /// class): expected_price deliberately rides OUTSIDE the canonical
+        /// (music design v4 §1/R10 — it protects the honest buyer's PAINTED
+        /// price against a racing artist edit, not against forgery; the
+        /// session + HMAC keep authenticating the buyer).
+        ///
+        /// expectedPrice >= 0 appends &amp;expected_price= so the server can
+        /// 409 on a live mismatch [M5]; the caller must pass the price the
+        /// CLICKED row painted, never a cache re-read at click time [M6 —
+        /// NativeUI's half]. -1 (default) omits the check entirely, so every
+        /// pre-existing call site is byte-identical on the wire.
+        ///
+        /// A 409 whose body carries "price_changed" refetches the shop
+        /// (repaint — without it every later click repeats the stale
+        /// mismatch) and surfaces the literal sentinel "price_changed" to the
+        /// callback so the UI can show its own Tr'd message [M7]. NEVER
+        /// auto-retried at the new price — a fresh, informed click is the
+        /// only path to a purchase.</summary>
+        public static void PurchaseItem(string steamId, string sku, Action<bool, string> callback, int expectedPrice = -1)
         {
-            Plugin.Log.LogInfo($"[SHOP] PurchaseItem ENTRY sku={sku} steamId={steamId}");
+            Plugin.Log.LogInfo($"[SHOP] PurchaseItem ENTRY sku={sku} steamId={steamId} expectedPrice={expectedPrice}");
             try
             {
                 string sig = ComputeHmacHex($"buy:{steamId}:{sku}");
                 Plugin.Log.LogInfo($"[SHOP] sig computed ({sig?.Length ?? 0} chars)");
                 string url = $"{baseUrl}/api/v1/shop/purchase?steam_id={steamId}&sku={sku}&sig={sig}";
+                if (expectedPrice >= 0) url += $"&expected_price={expectedPrice}";
                 Plugin.Log.LogInfo($"[SHOP] POST {url.Substring(0, Math.Min(url.Length, 100))}...");
                 Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
                 {
                     Plugin.Log.LogInfo($"[SHOP] purchase callback {sku}: ok={ok} resp={(resp != null && resp.Length > 120 ? resp.Substring(0, 120) + "..." : resp)}");
-                    try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[SHOP] callback threw: {cex.Message}"); }
+                    // [M7] price-mismatch 409: repaint BEFORE the user can
+                    // click again. The raw body is already in the log line
+                    // above; the callback gets a machine-readable sentinel
+                    // (same pattern as "no-consent"/"outdated") — the UI owns
+                    // the Tr'd player-facing message.
+                    bool priceChanged = !ok && resp != null
+                        && resp.StartsWith("HTTP 409", StringComparison.Ordinal)
+                        && resp.IndexOf("price_changed", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (priceChanged) FetchShopItems(steamId);
+                    try { callback?.Invoke(ok, priceChanged ? "price_changed" : resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[SHOP] callback threw: {cex.Message}"); }
                     if (ok)
                     {
                         FetchPlayerStats(steamId);
@@ -2238,6 +2265,140 @@ namespace CompetitiveRounds
                 Plugin.Log.LogError($"[SHOP] PurchaseItem threw: {ex}");
                 try { callback?.Invoke(false, ex.Message); } catch { }
             }
+        }
+
+        // ── Music ratings (music batch 2 §2; the fenced store is MusicRatings) ──
+
+        /// <summary>GET /music/ratings — PUBLIC delayed aggregates. gen is
+        /// MusicRatings' dispatch stamp; the store's floor/committed gates
+        /// decide at landing whether the snapshot applies [M14]. Response
+        /// contract (server sibling — grep both sides, #329):
+        /// {"tracks":[{"sku","track_idx","avg","rating_count","rater_count"}...],
+        ///  "albums":[{"sku","avg","rating_count","rater_count"}...]}.</summary>
+        internal static void FetchMusicRatingAggregates(int gen)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/music/ratings", (ok, resp) =>
+            {
+                if (!ok) { Plugin.Log.LogInfo($"[MUSIC-RATE] aggregate fetch failed: {resp}"); return; }
+                List<MusicRatings.TrackAggRow> tracks;
+                List<MusicRatings.AlbumAggRow> albums;
+                ParseMusicRatingAggregates(resp, out tracks, out albums);
+                try { MusicRatings.ApplyAggregates(gen, tracks, albums); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] aggregate apply failed: {ex.Message}"); }
+            }));
+        }
+
+        /// <summary>GET /music/ratings/mine?steam_id= — the caller's PRIVATE
+        /// rows, strict-session endpoint (M17/M21: separate from the public
+        /// aggregates so an auth failure can never masquerade as own=[]; a
+        /// failure here applies NOTHING). sessionAware so a stale token's
+        /// 401 session_required re-mints instead of 401-looping until the
+        /// ~23h expiry. Response contract:
+        /// {"ratings":[{"sku","track_idx","stars"}...]}.</summary>
+        internal static void FetchMusicRatingsOwn(string steamId, int gen)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/music/ratings/mine?steam_id={Escape(steamId)}",
+                (ok, resp) =>
+                {
+                    if (!ok) { Plugin.Log.LogInfo($"[MUSIC-RATE] own fetch failed: {resp}"); return; }
+                    var rows = ParseMusicRatingsMine(resp);
+                    try { MusicRatings.ApplyOwn(steamId, gen, rows); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] own apply failed: {ex.Message}"); }
+                }, detailedErrors: false, sessionAware: true));
+        }
+
+        /// <summary>POST /music/rate — stars ride the JSON BODY, never the
+        /// query string (M21: rating values must stay out of URL logs). Rides
+        /// PostRequest so HandleSessionReject runs. Deliberately NO transport
+        /// retry (PostRequestWithRetry would resurrect superseded intents,
+        /// the #166/M16 class) — MusicRatings owns the single-retry +
+        /// latest-intent coalescing policy. stars 0 = clear.</summary>
+        internal static void PostMusicRating(string steamId, string sku, int trackIdx, int stars, Action<bool, string> callback)
+        {
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"sku\":\"{Escape(sku)}\",\"track_idx\":{trackIdx},\"stars\":{stars}}}";
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/music/rate", json, callback));
+        }
+
+        /// <summary>Slice the object array behind "prop": [...] . [#400] the
+        /// first non-whitespace char after the colon must be '[' — a null (or
+        /// absent) value must not let the scan consume the NEIGHBORING
+        /// property's array. Returns empty on any shape mismatch.</summary>
+        private static List<string> SliceNamedObjectArray(string json, string prop)
+        {
+            var none = new List<string>();
+            if (string.IsNullOrEmpty(json)) return none;
+            int at = json.IndexOf("\"" + prop + "\":", StringComparison.Ordinal);
+            if (at < 0) return none;
+            int i = at + prop.Length + 3;
+            while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+            if (i >= json.Length || json[i] != '[') return none;
+            int close = FindMatchingBracketStringAware(json, i);
+            if (close < 0) return none;
+            return SliceTopLevelObjects(json.Substring(i + 1, close - i - 1));
+        }
+
+        private static void ParseMusicRatingAggregates(string resp,
+            out List<MusicRatings.TrackAggRow> tracks, out List<MusicRatings.AlbumAggRow> albums)
+        {
+            tracks = new List<MusicRatings.TrackAggRow>();
+            albums = new List<MusicRatings.AlbumAggRow>();
+            try
+            {
+                foreach (string obj in SliceNamedObjectArray(resp, "tracks"))
+                {
+                    string sku = ExtractJsonString(obj, "sku");
+                    if (string.IsNullOrEmpty(sku)) continue;
+                    int count = ExtractJsonInt(obj, "rating_count");
+                    int raters = ExtractJsonInt(obj, "rater_count");
+                    tracks.Add(new MusicRatings.TrackAggRow
+                    {
+                        sku = sku,
+                        idx = ExtractJsonInt(obj, "track_idx"),
+                        avg = ExtractJsonFloat(obj, "avg"),
+                        count = count,
+                        // Tolerate a server that omits rater_count [M20 carries
+                        // both]; count is the honest lower-fidelity fallback.
+                        raters = raters > 0 ? raters : count,
+                    });
+                }
+                foreach (string obj in SliceNamedObjectArray(resp, "albums"))
+                {
+                    string sku = ExtractJsonString(obj, "sku");
+                    if (string.IsNullOrEmpty(sku)) continue;
+                    int count = ExtractJsonInt(obj, "rating_count");
+                    int raters = ExtractJsonInt(obj, "rater_count");
+                    albums.Add(new MusicRatings.AlbumAggRow
+                    {
+                        sku = sku,
+                        avg = ExtractJsonFloat(obj, "avg"),
+                        count = count,
+                        raters = raters > 0 ? raters : count,
+                    });
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] aggregate parse failed: {ex.Message}"); }
+        }
+
+        private static List<MusicRatings.OwnRow> ParseMusicRatingsMine(string resp)
+        {
+            var rows = new List<MusicRatings.OwnRow>();
+            try
+            {
+                foreach (string obj in SliceNamedObjectArray(resp, "ratings"))
+                {
+                    string sku = ExtractJsonString(obj, "sku");
+                    if (string.IsNullOrEmpty(sku)) continue;
+                    rows.Add(new MusicRatings.OwnRow
+                    {
+                        sku = sku,
+                        idx = ExtractJsonInt(obj, "track_idx"),
+                        stars = ExtractJsonInt(obj, "stars"),
+                    });
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] own parse failed: {ex.Message}"); }
+            return rows;
         }
 
         /// <summary>Set / clear active title. HMAC over "title:{steam_id}:{item_id or 0}".</summary>
@@ -2717,6 +2878,8 @@ namespace CompetitiveRounds
         public static void FetchArtistItems(string steamId)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            // The server strict-session-hardened this read (design-v4 M4):
+            // sessionAware so a stale token self-heals instead of 401-looping.
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/artist/{steamId}/items", (ok, resp) =>
             {
@@ -2761,7 +2924,7 @@ namespace CompetitiveRounds
                 CachedArtistItems = items;
                 CachedArtistBlocks = blocks;
                 NativeUI.MarkDirty();
-            }));
+            }, sessionAware: true));
         }
 
         // Per-purchase sales log for the Artist tab: who bought what, at what
@@ -2777,6 +2940,7 @@ namespace CompetitiveRounds
         public static void FetchArtistSales(string steamId)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            // Strict-session-hardened read (design-v4 M4) — see items fetch.
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/artist/{steamId}/sales?limit=50", (ok, resp) =>
             {
@@ -2807,7 +2971,7 @@ namespace CompetitiveRounds
                 catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] sales parse: {ex.Message}"); }
                 CachedArtistSales = sales;
                 NativeUI.MarkDirty();
-            }));
+            }, sessionAware: true));
         }
 
         public static void ArtistSetPrice(string steamId, string sku, int price, Action<bool, string> callback = null)
@@ -17445,6 +17609,9 @@ namespace CompetitiveRounds
                 // playback + reconciles to vanilla). Guarded so a music-side
                 // throw can never abort the ranked-off flip below.
                 try { MusicEntitlements.OnConsentRevoked(); } catch { }
+                // Music ratings [M14]: same revoke semantics — floor advance
+                // outranks in-flight fetches AND writes, own intent cleared.
+                try { MusicRatings.OnConsentRevoked(); } catch { }
                 CachedActiveSeries = null;
                 ChatClient.Disconnect();
                 // Flip ranked off — if the user is in queue, server rejects further polls (410)
@@ -17568,8 +17735,14 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <param name="sessionAware">Run HandleSessionReject on the response
+        /// (M21 — GETs historically stamped the token but never consumed a
+        /// 401 session_required, so a server-invalidated session 401-looped
+        /// private GET reads until the ~23h expiry). Opt-in: only private
+        /// per-identity reads (music ratings /mine) need it; the ~100
+        /// public-read callers keep their exact current behavior.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
-            bool detailedErrors = false)
+            bool detailedErrors = false, bool sessionAware = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, null, callback)) yield break;
@@ -17577,10 +17750,16 @@ namespace CompetitiveRounds
             using (var request = UnityWebRequest.Get(url))
             {
                 StampVersionHeader(request);
+                // Capture the token this request rides out with (same pattern
+                // as PostRequest): the compare inside HandleSessionReject
+                // guards the race where a slow 401 lands after a newer
+                // session was already minted.
+                string _sentTok = sessionAware ? SteamAuth.SessionToken : null;
                 request.timeout = 20;
                 yield return request.SendWebRequest();
 
                 if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                if (sessionAware) HandleSessionReject(request, _sentTok);
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
                 callback(success, success

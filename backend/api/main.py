@@ -3604,7 +3604,26 @@ MUSIC_SKU_MIN_VERSIONS: dict[str, str] = {
     # raise it past the version that actually ships the catalog entry — that
     # hides the album from the shipping client.
     "music_album_another_round": "1.39.7",
+    # SHIP COUPLING (#294/#331): 1.40.0 = the client release Sid named for
+    # music batch 2 ("ship out v1.40.0") — the first MusicCatalog carrying
+    # this album. If he renames the release LOWER than 1.40.0 the constant
+    # must follow the name; never raise it past the shipping version.
+    "music_album_clavar_la_bala": "1.40.0",
 }
+
+# First client version whose MUSIC PURCHASE flow is capability-complete:
+# sends expected_price bound to the painted shop row and refetches on the
+# price_changed 409 (design-v4-report M5/M6/M7). Purchases of kind=
+# 'music_album' from anything older get a 426-style update-required detail —
+# NOT silently accepted, because an old client would buy after a mutable-price
+# change without ever confirming the displayed price (M5's exact hole: album
+# 1's per-sku floor admits 1.39.7, which predates expected_price).
+# SHOUT (#294/#331): this MUST equal the client release that actually ships
+# the expected_price sender ("1.40.0" as named by Sid). If the release is
+# renamed, change this constant IN THE SAME DEPLOY as MUSIC_SKU_MIN_VERSIONS'
+# clavar entry — a high guess blocks every music purchase from the shipping
+# client; a low guess re-opens M5.
+MUSIC_PURCHASE_MIN_VERSION = "1.40.0"
 
 # Per-request mod version captured from the X-Mod-Version header by the
 # version-gate middleware. Identity-bound _mark_mod_seen callers may use it
@@ -3893,6 +3912,15 @@ _RL_SENSITIVE_PREFIXES = (
     # neither mutates translation state, and a 15-minute keep-alive sharing a
     # 20-per-10s bucket with reads would throttle a normal review session.
     "/api/v1/i18n/revert",
+    # Music rating writes (design-v4-report M19): a mutating, abuse-prone path
+    # — repeated writes re-arm maturation timestamps and churn the table. The
+    # per-identity 2s debounce inside the endpoint is the fine-grained guard;
+    # this bucket is the unauthenticated-flood ceiling. Does NOT sweep in the
+    # read-only siblings: "/api/v1/music/ratings" diverges at "rate"/"rati",
+    # so startswith with this prefix is False for both GET routes (verified —
+    # same class of near-miss as the /bug-reports/ trailing slash above, in
+    # the harmless direction here).
+    "/api/v1/music/rate",
 )
 _RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
 _RL_LAST_PRUNE = [0.0]
@@ -19886,10 +19914,26 @@ async def purchase_item(
     steam_id: str = Query(...),
     sku: str = Query(...),
     sig: str = Query(...),
+    expected_price: int | None = Query(None, ge=0,
+                                       description="Music only: the price the buyer's painted row showed"),
     db: AsyncSession = Depends(get_db),
 ):
     """Buy an item. HMAC signs 'buy:{steam_id}:{sku}'. Server rejects if:
-    already-owned, not enough gold, or item doesn't exist."""
+    already-owned, not enough gold, or item doesn't exist.
+
+    Music albums (kind='music_album') additionally require, since the batch-2
+    hardening (design-v4-report):
+      - a STRICT verified Steam session for the buyer (M1 — the soft helper
+        below stays for cosmetics only; that arming question is the separate
+        July-soak item and deliberately untouched here);
+      - a client >= MUSIC_PURCHASE_MIN_VERSION (M5 — older admitted clients
+        cannot attest the displayed price, so they get update-required);
+      - expected_price matching the LIVE row price read under a row share
+        lock inside this transaction (M5/M6/M7 — an artist edit racing the
+        buyer 409s with machine-readable 'price_changed' instead of debiting
+        a price the buyer never saw). expected_price is an honest-UI
+        attestation, not price authority (R10): a modified client sending the
+        live price simply performs a normal purchase."""
     await _check_steam_session(request, steam_id, db)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
@@ -19918,6 +19962,31 @@ async def purchase_item(
     # a refused buy moves nothing.
     if item.kind == "music_album" and item.sku not in _supported_music_skus(request):
         raise HTTPException(status_code=409, detail="This album requires a newer mod version")
+    is_music = (item.kind == "music_album")
+    if is_music:
+        # M1: strict, fail-closed buyer identity. The compatibility helper
+        # above soft-fails while enforcement is unarmed, which left music
+        # purchases impersonable by anyone holding the shipped client HMAC.
+        # The detail literal "session_required" is LOAD-BEARING — ApiClient
+        # .HandleSessionReject matches it to invalidate a stale token and
+        # self-heal (see /players/{id}/link-code).
+        if not await _strict_steam_session_ok(request, steam_id, db):
+            raise HTTPException(status_code=401, detail="session_required")
+        # M5: the expected_price contract only exists from 1.40.0 — older
+        # admitted clients (album 1's per-sku floor is 1.39.7) must be told
+        # to update rather than silently buying at an unconfirmed price.
+        _cv = _music_strict_version(
+            request.headers.get("X-Mod-Version") if request is not None else None
+        ) or _music_strict_version(_current_mod_version.get())
+        if _cv is None or _cv < _parse_version(MUSIC_PURCHASE_MIN_VERSION):
+            raise HTTPException(status_code=426, detail={
+                "error": "music_purchase_requires_update",
+                "required": MUSIC_PURCHASE_MIN_VERSION,
+            })
+        if expected_price is None:
+            # A >=1.40.0 client ALWAYS sends it; absence here is a modified
+            # or broken caller, not a compatibility case (M5).
+            raise HTTPException(status_code=400, detail="expected_price_required")
     # Achievement-gated items (Sid Slayer / Stan Slayer titles) can't be
     # bought — they're granted by their achievement. rotation_pool doubles as
     # the gate marker; these items are also hidden from /shop/items.
@@ -19953,14 +20022,38 @@ async def purchase_item(
     if already is not None:
         return {"status": "already_owned", "sku": sku}
 
+    # The price this purchase actually commits at. For music it is RE-READ
+    # under FOR SHARE so a concurrent /artist/set-price cannot commit between
+    # the compare and the debit (M5/M7: SHARE conflicts with the NO KEY UPDATE
+    # row lock the artist's UPDATE takes, and — unlike FOR UPDATE — stays
+    # compatible with the KEY SHARE that concurrent purchases' player_items
+    # FK inserts hold, #202). The ORM `item.price` above may be a stale
+    # snapshot; every economic statement below uses THIS variable, never
+    # item.price, so the compared and debited amounts are the same number.
+    price = item.price
+    if is_music:
+        _live = (await db.execute(text(
+            "SELECT price FROM shop_items WHERE id = :iid FOR SHARE"
+        ), {"iid": item.id})).scalar()
+        if _live is None:
+            raise HTTPException(status_code=404, detail="Item not found")
+        price = int(_live)
+        if price != expected_price:
+            # Machine-readable (M7): the client refetches + repaints and
+            # requires a NEW click — never an automatic retry at the new
+            # price. Carrying the live price lets the repaint be immediate.
+            raise HTTPException(status_code=409, detail={
+                "error": "price_changed", "price": price,
+            })
+
     balance = (player.gold_earned or 0) - (player.gold_spent or 0)
-    if balance < item.price:
-        raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {item.price}")
+    if balance < price:
+        raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {price}")
 
     # Resolve and policy-check the indirect beneficiary before the first
     # economic mutation (the buyer debit below).
     artist_player = None
-    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and item.price > 0:
+    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and price > 0:
         artist_player = (await db.execute(
             select(Player).where(Player.steam_id == item.artist_steam_id,
                                  Player.deleted_at.is_(None))
@@ -19978,20 +20071,25 @@ async def purchase_item(
          WHERE id = :pid
            AND COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0) >= :amt
         RETURNING id
-    """), {"amt": item.price, "pid": player.id})).first()
+    """), {"amt": price, "pid": player.id})).first()
     if _debit is None:
         raise HTTPException(status_code=402, detail="Insufficient gold")
-    db.add(PlayerItem(player_id=player.id, item_id=item.id, purchase_price=item.price))
+    db.add(PlayerItem(player_id=player.id, item_id=item.id, purchase_price=price))
     db.add(GoldTransaction(
-        player_id=player.id, amount=-item.price,
+        player_id=player.id, amount=-price,
         reason="purchase", reference_id=sku,
     ))
 
-    # Artist royalty (July 12 item 3): the creator earns 30% of every sale of
-    # their item. Not on gifts (price 0 never reaches here) and not on buying
-    # your own art.
-    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and item.price > 0:
-        royalty = int(item.price * 0.30)
+    # Artist royalty (July 12 item 3; music rate per the batch-2 owner ask):
+    # the creator earns 50% of a music-album sale, 30% of everything else.
+    # Not on gifts (price 0 never reaches here) and not on buying your own
+    # art. Integer arithmetic, floor semantics (M9): (price * pct) // 100
+    # equals FLOOR for non-negative operands — the same number the ledger
+    # credits and the sales view displays.
+    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and price > 0:
+        rate_pct = 50 if is_music else 30
+        royalty = (price * rate_pct) // 100
+        paid = 0
         if royalty > 0:
             if artist_player is not None:
                 # r2 find 3: atomic delta — two simultaneous sales of the same
@@ -20004,16 +20102,350 @@ async def purchase_item(
                     player_id=artist_player.id, amount=royalty,
                     reason="artist_royalty", reference_id=sku,
                 ))
-                print(f"[ARTIST] royalty {royalty}g -> {item.artist_steam_id} for {sku} (buyer {steam_id})")
+                paid = royalty
+                print(f"[ARTIST] royalty {royalty}g ({rate_pct}%) -> {item.artist_steam_id} for {sku} (buyer {steam_id})")
+        # Persist ACTUAL-paid accounting on the purchase row (M9): stored
+        # royalty_paid is what the artist really received — 0 when the
+        # beneficiary was missing/deleted, so the sales view can never
+        # display a cut that was never credited. Raw SQL because the
+        # PlayerItem model deliberately does not declare these columns
+        # (models.py is sibling-owned this wave); an undeclared-attribute
+        # ORM write would be a silent no-op (#346), a raw UPDATE is not.
+        # Savepointed (#235): migration 279 owns these columns, and this
+        # stamp must degrade to the legacy-NULL display fallback — never
+        # abort a paid purchase — if the api ever runs ahead of it.
+        await db.flush()
+        try:
+            async with db.begin_nested():
+                await db.execute(text(
+                    "UPDATE player_items SET royalty_paid = :rp, royalty_rate_pct = :rr "
+                    "WHERE player_id = :pid AND item_id = :iid"
+                ), {"rp": paid, "rr": rate_pct, "pid": player.id, "iid": item.id})
+        except Exception as ex:
+            print(f"[ARTIST] royalty accounting stamp failed (soft — migration 279 applied?): {type(ex).__name__}")
 
     await db.commit()
 
     return {
         "status": "purchased",
         "sku": sku,
-        "price": item.price,
-        "new_balance": balance - item.price,
+        "price": price,
+        "new_balance": balance - price,
     }
+
+
+# ── Routes: Music track ratings (music batch 2, design-v4-report §2) ─────────
+# Private 0-5 star track ratings with DELAYED public aggregates. The privacy
+# mechanism (owner-specified): a write matures into the public aggregate only
+# after a server-randomized 2-24h delay, so presence cannot be correlated with
+# an aggregate change. Two-phase columns (M11): pending_* holds the latest
+# un-matured intent; published_stars is the ONLY value aggregates ever count,
+# and it moves exclusively when a matured pending is folded — so a re-rate or
+# clear never produces an immediate public edge (the old contribution stands
+# until the replacement/tombstone matures). Vanilla-OST tracks are NOT ratable
+# in v1.40 (M18, owner-approved): vanilla has no shop row, so the shop-row
+# gate below excludes it by construction, and the client hides its stars.
+
+_MUSIC_RATE_DEBOUNCE_SECONDS = 2.0
+# Per-identity last SUCCESSFUL write, time.monotonic() (M19). In-memory is
+# sound under the single-worker compose override (#125). Keyed by the PROVEN
+# session identity and consulted only after _strict_steam_session_ok, so an
+# unauthenticated flood cannot lock a victim out of their own writes.
+_music_rate_last_write: dict[str, float] = {}
+
+# The "effective published" value of a row: a matured-but-not-yet-folded
+# pending counts exactly as if the fold had run (a matured clear counts as
+# nothing). Readers use THIS, never bare published_stars, so reads stay
+# correct on the replica, where the fold (a write) is skipped — replica reads
+# then match what the primary would serve to the second (#439's follow-loop
+# rule applied to lazily-folded state). Keep byte-identical to the fold
+# UPDATE's CASE below — the pair drifting is the #330 class.
+_MUSIC_EFFECTIVE_STARS_SQL = (
+    "CASE WHEN mr.pending_effective_at IS NOT NULL AND mr.pending_effective_at <= NOW() "
+    "     THEN (CASE WHEN mr.pending_is_clear THEN NULL ELSE mr.pending_stars END) "
+    "     ELSE mr.published_stars END"
+)
+
+
+async def _music_ratings_fold(db: AsyncSession, *, commit: bool) -> None:
+    """Fold matured pendings into published (M11's maturation step), then
+    prune rows left carrying nothing (a matured clear on a never-published
+    row). Lazy: called at the start of both GET endpoints and the POST —
+    cheap and bounded, since after one fold nothing matches until the next
+    maturation instant. Savepointed (#235) so a failure never poisons the
+    caller's transaction; commit=True is for GET callers, whose request
+    session otherwise never commits (#417's GET rule), while the POST folds
+    inside its own transaction and commits with the upsert. Replica-guarded
+    (#439): a fold is a WRITE, and the effective-stars CASE above keeps
+    replica reads exact without it."""
+    if IS_REPLICA:
+        _replica_skip("music_ratings_fold")
+        return
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "UPDATE music_ratings mr SET "
+                "  published_stars = (CASE WHEN mr.pending_is_clear THEN NULL "
+                "                          ELSE mr.pending_stars END), "
+                "  pending_stars = NULL, "
+                "  pending_is_clear = FALSE, "
+                "  pending_effective_at = NULL, "
+                "  updated_at = NOW() "
+                "WHERE mr.pending_effective_at IS NOT NULL "
+                "  AND mr.pending_effective_at <= NOW()"
+            ))
+            await db.execute(text(
+                "DELETE FROM music_ratings "
+                "WHERE published_stars IS NULL AND pending_effective_at IS NULL"
+            ))
+        if commit:
+            await db.commit()
+    except Exception as ex:
+        print(f"[MUSIC] ratings fold failed (soft): {type(ex).__name__}")
+
+
+@app.post("/api/v1/music/rate", tags=["Music"])
+async def music_rate(request: Request, payload: dict = Body(...),
+                     db: AsyncSession = Depends(get_db)):
+    """Rate one track 1-5 stars, or 0 to clear (JSON body {steam_id, sku,
+    track_idx, stars} — a body, not query params, so star values never sit in
+    URL logs; M21). Strict session only — the caller rates as themselves.
+
+    Acceptance gates (M12/M13): the sku must be a catalog_ready
+    kind='music_album' shop row the CALLER's version supports, track_idx must
+    be inside the server-authoritative registry (shop_items.music_track_count)
+    and the caller must own the album (shop-owner bypass matches every other
+    ownership surface). Identity fencing (M15): the same advisory identity
+    lock delete_player_data takes, acquired BEFORE session validation and the
+    live-player re-read, so a write can never interleave with the deletion
+    sweep and land on an anonymized account.
+
+    Write semantics (M11/M16): a single-row UPSERT of the LATEST intent into
+    the pending_* columns — CAS-friendly by construction (last write wins on
+    one row; there is no cross-row ordering for the server to enforce).
+    CLIENT-side serialization owns intent ordering: the client must coalesce/
+    serialize its own writes per track (M16's client half); the server half is
+    exactly these upsert semantics. published_stars is never touched here."""
+    # ── payload validation (reject before any DB work) ──
+    steam_id = str(payload.get("steam_id") or "").strip()
+    sku = str(payload.get("sku") or "").strip()
+    track_idx = payload.get("track_idx")
+    stars = payload.get("stars")
+    if (not steam_id or len(steam_id) > 32 or not sku or len(sku) > 64
+            or isinstance(track_idx, bool) or not isinstance(track_idx, int)
+            or isinstance(stars, bool) or not isinstance(stars, int)
+            or not (0 <= stars <= 5) or not (0 <= track_idx < 64)):
+        raise HTTPException(status_code=400, detail="bad_request")
+    if IS_REPLICA:
+        # A write endpoint has no business on the read replica; refuse loudly
+        # rather than half-working (#439 — the edge should never route this).
+        _replica_skip("music_rate")
+        raise HTTPException(status_code=503, detail="read_replica")
+    # Cheap pre-lock bounce: no token means no possible session, and it keeps
+    # unauthenticated spam from ever touching the advisory lock keyed by a
+    # VICTIM's steam_id.
+    try:
+        _tok = request.headers.get("X-Session-Token") if request is not None else None
+    except Exception:
+        _tok = None
+    if not _tok:
+        raise HTTPException(status_code=401, detail="session_required")
+
+    await _music_ratings_fold(db, commit=True)
+
+    # M15 fence: identity lock FIRST, then validate the session and re-read
+    # the live player UNDER it (mirrors delete_player_data's lock order — if
+    # deletion got there first, the session rows are already purged and this
+    # 401s; if we got there first, deletion waits until our commit).
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if player.deleted_at is not None:
+        raise HTTPException(status_code=410, detail="Account deleted")
+
+    # M19 debounce: keyed by the now-PROVEN identity; only successful writes
+    # arm it (below), so a rejected request cannot burn the window.
+    _nowm = time.monotonic()
+    _last = _music_rate_last_write.get(steam_id)
+    if _last is not None and (_nowm - _last) < _MUSIC_RATE_DEBOUNCE_SECONDS:
+        raise HTTPException(status_code=429, detail="rate_debounced")
+    if len(_music_rate_last_write) > 4096:
+        _cut = _nowm - 60.0
+        for _k in [k for k, v in _music_rate_last_write.items() if v < _cut]:
+            _music_rate_last_write.pop(_k, None)
+
+    # M12: server-authoritative sku + track gates. Version support first (an
+    # unsupported sku must read identically whether staged or nonexistent).
+    if sku not in _supported_music_skus(request):
+        raise HTTPException(status_code=409, detail="album_not_supported")
+    srow = (await db.execute(text(
+        "SELECT id, kind, catalog_ready, music_track_count "
+        "FROM shop_items WHERE sku = :sku"
+    ), {"sku": sku})).mappings().first()
+    if (srow is None or srow["kind"] != "music_album"
+            or not srow["catalog_ready"] or srow["music_track_count"] is None):
+        raise HTTPException(status_code=409, detail="album_not_ratable")
+    if not (0 <= track_idx < int(srow["music_track_count"])):
+        raise HTTPException(status_code=409, detail="track_out_of_range")
+    # M13: nonowners cannot rate a paid album they've never heard in full.
+    if not _is_shop_owner(steam_id):
+        _owned = (await db.execute(text(
+            "SELECT 1 FROM player_items WHERE player_id = :pid AND item_id = :iid"
+        ), {"pid": player.id, "iid": srow["id"]})).first()
+        if _owned is None:
+            raise HTTPException(status_code=403, detail="album_not_owned")
+
+    # ── two-phase write (M11) ──
+    # Server-side randomized maturation delay, uniform 2-24h. Re-rates and
+    # clears RE-ARM it (same privacy argument as the original write).
+    _delay_s = random.uniform(2 * 3600.0, 24 * 3600.0)
+    if stars == 0:
+        _exists = (await db.execute(text(
+            "SELECT 1 FROM music_ratings "
+            "WHERE player_id = :pid AND sku = :sku AND track_idx = :tidx"
+        ), {"pid": player.id, "sku": sku, "tidx": track_idx})).first()
+        if _exists is None:
+            # Clearing nothing: don't mint a pure-tombstone row.
+            await db.commit()
+            return {"status": "ok", "intent": "clear"}
+    await db.execute(text(
+        "INSERT INTO music_ratings (player_id, sku, track_idx, pending_stars, "
+        "                           pending_is_clear, pending_effective_at, updated_at) "
+        "VALUES (:pid, :sku, :tidx, :ps, :clr, "
+        "        NOW() + make_interval(secs => :dly), NOW()) "
+        "ON CONFLICT (player_id, sku, track_idx) DO UPDATE SET "
+        "  pending_stars = EXCLUDED.pending_stars, "
+        "  pending_is_clear = EXCLUDED.pending_is_clear, "
+        "  pending_effective_at = EXCLUDED.pending_effective_at, "
+        "  updated_at = NOW()"
+    ), {"pid": player.id, "sku": sku, "tidx": track_idx,
+        "ps": None if stars == 0 else stars, "clr": stars == 0,
+        "dly": _delay_s})
+    _music_rate_last_write[steam_id] = _nowm
+    await db.commit()
+    return {"status": "ok", "intent": "clear" if stars == 0 else "rate"}
+
+
+@app.get("/api/v1/music/ratings", tags=["Music"])
+async def music_ratings_public(request: Request, db: AsyncSession = Depends(get_db)):
+    """PUBLIC aggregates only — no auth, no caller-specific rows (M17/M21:
+    the private mirror is the separate strict /music/ratings/mine, so an auth
+    failure can never masquerade as empty aggregates). Only skus the
+    REQUESTER's version supports, and only catalog_ready music rows (M12 —
+    a staged album accumulates nothing visible).
+
+    Shapes (M20): per-track avg (1 decimal) + rating_count (== rater_count
+    per track, one stored slot per player/track); per-album avg is the
+    EQUAL-WEIGHT mean of the album's track averages (computed from unrounded
+    track means so sparse tracks weigh the same as popular ones), with
+    rating_count (total published rows) and rater_count (distinct people)
+    labeled separately."""
+    supported = _supported_music_skus(request)
+    if not supported:
+        return {"tracks": [], "albums": []}
+    await _music_ratings_fold(db, commit=True)
+    # GROUPING SETS: the (sku) row is the album-level aggregate — track_idx is
+    # NOT NULL in the schema, so a NULL track_idx unambiguously marks it.
+    # CAST(:skus AS varchar[]) pins the array bind (#275 class).
+    rows = (await db.execute(text(f"""
+        WITH eff AS (
+            SELECT mr.sku, mr.track_idx, mr.player_id,
+                   ({_MUSIC_EFFECTIVE_STARS_SQL}) AS stars
+              FROM music_ratings mr
+              JOIN shop_items si ON si.sku = mr.sku
+                                AND si.kind = 'music_album'
+                                AND si.catalog_ready
+             WHERE mr.sku = ANY(CAST(:skus AS varchar[]))
+        )
+        SELECT sku, track_idx,
+               ROUND(AVG(stars)::numeric, 1)::float8 AS avg_stars,
+               AVG(stars)::float8 AS raw_avg,
+               COUNT(*) AS rating_count,
+               COUNT(DISTINCT player_id) AS distinct_raters
+          FROM eff
+         WHERE stars IS NOT NULL
+         GROUP BY GROUPING SETS ((sku, track_idx), (sku))
+         ORDER BY sku, track_idx
+    """), {"skus": supported})).mappings().all()
+    # Key names are the CLIENT contract — ApiClient.ParseMusicRatingAggregates
+    # reads exactly "avg"/"rating_count"/"rater_count" on both arrays
+    # (grep-verified both sides, #329/#152). Per track, rating_count ==
+    # rater_count by construction (one stored slot per player/track), but both
+    # are emitted so the shapes match and M20's labeling stays explicit.
+    tracks = []
+    _track_raw_avgs: dict[str, list[float]] = {}
+    _album_counts: dict[str, dict] = {}
+    for r in rows:
+        if r["track_idx"] is not None:
+            tracks.append({
+                "sku": r["sku"], "track_idx": int(r["track_idx"]),
+                "avg": float(r["avg_stars"]),
+                "rating_count": int(r["rating_count"]),
+                "rater_count": int(r["distinct_raters"]),
+            })
+            _track_raw_avgs.setdefault(r["sku"], []).append(float(r["raw_avg"]))
+        else:
+            _album_counts[r["sku"]] = {
+                "rating_count": int(r["rating_count"]),
+                "rater_count": int(r["distinct_raters"]),
+            }
+    albums = []
+    for _sku, _meta in _album_counts.items():
+        # The (sku) grouping row only exists when published rows exist, and
+        # those same rows produced track rows — so _avgs is never empty; the
+        # 0.0 arm is pure defense (and parser-friendlier than null).
+        _avgs = _track_raw_avgs.get(_sku) or []
+        albums.append({
+            "sku": _sku,
+            "avg": round(sum(_avgs) / len(_avgs), 1) if _avgs else 0.0,
+            **_meta,
+        })
+    return {"tracks": tracks, "albums": albums}
+
+
+@app.get("/api/v1/music/ratings/mine", tags=["Music"])
+async def music_ratings_mine(request: Request, steam_id: str = Query(...),
+                             db: AsyncSession = Depends(get_db)):
+    """The caller's OWN ratings as CURRENT INTENT (M17/M21): the pending
+    value when one exists, else the published one; a clear intent (or a row
+    carrying nothing) is simply ABSENT — the UI renders unrated. Strict
+    session required; failure is a 401, never an empty 200 (an auth failure
+    must not masquerade as own=[]). The response is per-person private state,
+    so it is stamped Cache-Control: no-store, private — a URL-keyed
+    intermediary must never replay one caller's stars to another."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    await _music_ratings_fold(db, commit=True)
+    supported = _supported_music_skus(request)
+    ratings = []
+    if supported:
+        player = (await db.execute(
+            select(Player).where(Player.steam_id == steam_id)
+        )).scalar_one_or_none()
+        if player is not None and player.deleted_at is None:
+            rows = (await db.execute(text(
+                "SELECT mr.sku, mr.track_idx, "
+                "       CASE WHEN mr.pending_effective_at IS NOT NULL "
+                "            THEN (CASE WHEN mr.pending_is_clear THEN NULL "
+                "                       ELSE mr.pending_stars END) "
+                "            ELSE mr.published_stars END AS stars "
+                "FROM music_ratings mr "
+                "WHERE mr.player_id = :pid "
+                "  AND mr.sku = ANY(CAST(:skus AS varchar[])) "
+                "ORDER BY mr.sku, mr.track_idx"
+            ), {"pid": player.id, "skus": supported})).mappings().all()
+            ratings = [
+                {"sku": r["sku"], "track_idx": int(r["track_idx"]),
+                 "stars": int(r["stars"])}
+                for r in rows if r["stars"] is not None
+            ]
+    return JSONResponse(
+        content={"ratings": ratings},
+        headers={"Cache-Control": "no-store, private"},
+    )
 
 
 @app.post("/api/v1/players/{steam_id}/active-title", tags=["Shop"])
@@ -22384,9 +22816,16 @@ async def artist_status(steam_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/v1/artist/{steam_id}/items", tags=["Artist"])
-async def artist_items(steam_id: str, db: AsyncSession = Depends(get_db)):
+async def artist_items(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """The artist's own items with live sales/stock numbers, plus their
-    purchase-block list. Read-only, no HMAC (same trust level as /shop/items)."""
+    purchase-block list. PRIVATE (design-v4-report M4): financials + the
+    blocked-buyer list, so the caller must hold a strict verified session for
+    the PATH artist — before music attribution this endpoint was a public read
+    of per-artist finances. Public per-artist stats stay on the sales-board
+    endpoint (aggregate, identity-free earnings). "session_required" literal
+    is load-bearing for the client's stale-token self-heal."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not await _is_artist(db, steam_id):
         raise HTTPException(status_code=403, detail="Not an artist account")
     rows = (await db.execute(text(
@@ -22434,26 +22873,36 @@ async def artist_items(steam_id: str, db: AsyncSession = Depends(get_db)):
 @app.get("/api/v1/artist/{steam_id}/sales", tags=["Artist"])
 async def artist_sales(
     steam_id: str,
+    request: Request,
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
     """Per-purchase log for the Artist tab: who bought what, at what price, and
-    the artist's cut of each sale. Gifts show as price 0 / earned 0. The cut is
-    recomputed the same way purchase_item paid it (floor(price * 0.30), no
-    royalty on gifts or self-buys) rather than joined from gold_transactions —
-    the royalty tx doesn't record the buyer, so there's no per-row linkage.
-    Assumption: every artist-attributed sale postdates the royalty feature
-    (true — royalties shipped in migration 112, the first artist items in 114)
-    and the rate stays 0.30; if the rate ever changes, historical rows here
-    will show the NEW rate, not what was actually paid."""
+    the artist's cut of each sale. Gifts show as price 0 / earned 0.
+
+    PRIVATE (design-v4-report M4): a per-buyer purchase log is a reverse index
+    of who owns the artist's items — strict session for the PATH artist
+    required; public stats stay on the identity-free sales board.
+
+    DISPLAY RULE (M9): `earned` is the STORED royalty_paid whenever the
+    purchase row carries it (the hardened purchase path writes actual-paid,
+    including 0 for a missing/deleted beneficiary), and only LEGACY NULL rows
+    fall back to a recompute at the historical flat 30% — every pre-column
+    royalty was paid at 0.30 (royalties shipped in migration 112, the first
+    artist items in 114), and the only pre-attribution music sales are album
+    1's 1g rows whose 30%-floor is 0 = exactly what was paid. A future rate
+    change therefore rewrites NOTHING here: new rows store their own rate."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not await _is_artist(db, steam_id):
         raise HTTPException(status_code=403, detail="Not an artist account")
     rows = (await db.execute(text(
         "SELECT si.name AS item_name, "
         "       COALESCE(p.display_name, p.steam_id) AS buyer, "
         "       COALESCE(pi.purchase_price, 0) AS price, "
-        "       CASE WHEN COALESCE(pi.purchase_price, 0) > 0 AND p.steam_id <> :sid "
-        "            THEN FLOOR(pi.purchase_price * 0.30)::int ELSE 0 END AS earned, "
+        "       COALESCE(pi.royalty_paid, "
+        "                CASE WHEN COALESCE(pi.purchase_price, 0) > 0 AND p.steam_id <> :sid "
+        "                     THEN FLOOR(pi.purchase_price * 0.30)::int ELSE 0 END) AS earned, "
         "       to_char(pi.purchased_at, 'Mon FMDD') AS bought "
         "FROM player_items pi "
         "JOIN shop_items si ON si.id = pi.item_id "
@@ -22474,13 +22923,22 @@ async def artist_sales(
 
 @app.post("/api/v1/artist/set-price", tags=["Artist"])
 async def artist_set_price(
+    request: Request,
     steam_id: str = Query(...),
     sku: str = Query(...),
     price: int = Query(..., ge=0, le=ARTIST_PRICE_MAX),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """HMAC signs 'artist:{steam_id}:set-price:{sku}:{price}'."""
+    """HMAC signs 'artist:{steam_id}:set-price:{sku}:{price}'.
+
+    STRICT session required (design-v4-report M1/M3 disposition: GLOBAL
+    fail-closed hardening across every artist mutation, not kind-scoped —
+    the HMAC secret ships in every client DLL, so alone it lets anyone
+    mutate any artist's storefront). Same on every /artist mutation below;
+    "session_required" is the client's self-heal literal."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-price:{sku}:{price}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     item = await _artist_own_item(db, steam_id, sku)
@@ -22568,6 +23026,7 @@ def _untrusted(label: str, value: str, max_len: int = 120) -> str:
 
 @app.post("/api/v1/artist/set-name", tags=["Artist"])
 async def artist_set_name(
+    request: Request,
     steam_id: str = Query(...),
     sku: str = Query(...),
     value: str = Query(..., min_length=1, max_length=64),
@@ -22575,7 +23034,12 @@ async def artist_set_name(
     db: AsyncSession = Depends(get_db),
 ):
     """Rename the artist's own item (July 12 item 3). HMAC signs
-    'artist:{steam_id}:set-name:{sku}'."""
+    'artist:{steam_id}:set-name:{sku}'. Strict session per the global artist
+    hardening (see set-price). For music rows this mutation is STOREFRONT-
+    ONLY by design (M8, owner-approved): the compiled MusicCatalog keeps
+    serving the Music tab and now-playing names."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-name:{sku}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     item = await _artist_own_item(db, steam_id, sku)
@@ -22593,6 +23057,7 @@ async def artist_set_name(
 
 @app.post("/api/v1/artist/set-desc", tags=["Artist"])
 async def artist_set_desc(
+    request: Request,
     steam_id: str = Query(...),
     sku: str = Query(...),
     value: str = Query("", max_length=200),
@@ -22600,7 +23065,10 @@ async def artist_set_desc(
     db: AsyncSession = Depends(get_db),
 ):
     """Set the artist's own item description. HMAC signs
-    'artist:{steam_id}:set-desc:{sku}'."""
+    'artist:{steam_id}:set-desc:{sku}'. Strict session per the global artist
+    hardening (see set-price); storefront-only for music rows (M8)."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-desc:{sku}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     item = await _artist_own_item(db, steam_id, sku)
@@ -23978,6 +24446,7 @@ async def _admin_cosmetic_review_impl(
 
 @app.post("/api/v1/artist/set-stock", tags=["Artist"])
 async def artist_set_stock(
+    request: Request,
     steam_id: str = Query(...),
     sku: str = Query(...),
     stock: int = Query(..., ge=0, le=100_000, description="0 = unlimited"),
@@ -23985,10 +24454,19 @@ async def artist_set_stock(
     db: AsyncSession = Depends(get_db),
 ):
     """HMAC signs 'artist:{steam_id}:set-stock:{sku}:{stock}'. A cap below the
-    already-sold count simply reads as sold out — existing owners keep theirs."""
+    already-sold count simply reads as sold out — existing owners keep theirs.
+    Strict session per the global artist hardening (see set-price)."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-stock:{sku}:{stock}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     item = await _artist_own_item(db, steam_id, sku)
+    # M2: music albums are unlimited BY INVARIANT — an accidental (or forged)
+    # cap here would instantly "sell out" an album for everyone. The database
+    # backs this with chk_music_album_no_stock (migration 279), so even a
+    # future code path cannot write one.
+    if item.kind == "music_album":
+        raise HTTPException(status_code=409, detail="Music albums have no stock — they are unlimited by design")
     if not getattr(item, "catalog_ready", True):
         raise HTTPException(status_code=409, detail="This cosmetic has not shipped in the mod yet; stock stays closed until it does")
     old = getattr(item, "stock_limit", None) or 0
@@ -24006,6 +24484,7 @@ async def artist_set_stock(
 
 @app.post("/api/v1/artist/gift", tags=["Artist"])
 async def artist_gift(
+    request: Request,
     steam_id: str = Query(...),
     sku: str = Query(...),
     target_steam_id: str = Query(...),
@@ -24014,7 +24493,10 @@ async def artist_gift(
 ):
     """Grant a copy of the artist's item to a player, free of charge. Bypasses
     the artist's purchase blocks (an explicit gift is consent) but still
-    consumes stock. HMAC signs 'artist:{steam_id}:gift:{sku}:{target_steam_id}'."""
+    consumes stock. HMAC signs 'artist:{steam_id}:gift:{sku}:{target_steam_id}'.
+    Strict session per the global artist hardening (see set-price)."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:gift:{sku}:{target_steam_id}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     item = await _artist_own_item(db, steam_id, sku)
@@ -24052,14 +24534,22 @@ async def artist_gift(
 
 @app.post("/api/v1/artist/block", tags=["Artist"])
 async def artist_block(
+    request: Request,
     steam_id: str = Query(...),
     target_steam_id: str = Query(...),
     block: bool = Query(...),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Block/unblock a player from purchasing ANY of this artist's items.
+    """Block/unblock a player from purchasing ANY of this artist's items —
+    music albums included once attributed (M3's explicit policy decision: an
+    artist's block is artist-global; the purchase path applies it to every
+    attributed kind uniformly). Strict session per the global artist
+    hardening (see set-price) — this was the mutation kind-scoping missed:
+    HMAC-only, it let a forged request bar arbitrary players from buying.
     HMAC signs 'artist:{steam_id}:block:{target_steam_id}:{1|0}'."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:block:{target_steam_id}:{1 if block else 0}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     if not await _is_artist(db, steam_id):
@@ -24768,6 +25258,18 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # Drop purely personal rows — no cross-player impact.
     await db.execute(text("DELETE FROM player_achievements WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": pid})
+    # Music ratings (design-v4-report M15). EXPLICIT delete per the #437 audit
+    # rule: this endpoint ANONYMIZES the players row rather than deleting it,
+    # so music_ratings' ON DELETE CASCADE never fires — an ondelete clause is
+    # decorative under anonymize-in-place, and every child table must be
+    # handled by name. Removing the rows also removes any not-yet-matured
+    # pending contribution: account deletion is the deliberate immediate-
+    # publication exception to the 2-24h decorrelation (the aggregate edge it
+    # creates is indistinguishable from any matured re-rate). Serialization:
+    # /music/rate takes the same pg_advisory_xact_lock(hashtext(steam_id))
+    # before validating its session, so a write can never land between this
+    # sweep and the anonymize below.
+    await db.execute(text("DELETE FROM music_ratings WHERE player_id = :pid"), {"pid": pid})
     # This endpoint must not wait on a live decline/poll and must not discover a
     # pair, then broad-DELETE a newly re-paired row that was outside that stale
     # discovery set (#148/#150). Delete only rows the subqueries actually locked.

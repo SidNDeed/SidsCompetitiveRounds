@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+**Music: a full in-game player and the first two albums**
+
+- New MUSIC tab (F5): every album you own with per-track checkboxes, a
+  bottom-docked player — play/pause, previous/next, stop, loop, shuffle, a
+  seek line, and a volume slider — plus per-album ON/OFF switches. The vanilla
+  ROUNDS OST (by Karl Flodin) is listed there too, selected by default, and
+  the game sounds exactly like it always has until you change something.
+- Two albums by Sid in the Shop's new MUSIC section: **Another Round**
+  (7 tracks, Metal / Phonk, 1g) and **Clavar la Bala** (12 tracks, Flamenco
+  Metal, 1,000g). Click an album row to expand its track list and preview any
+  song (30s). Albums appear on the Home page like new cosmetics, with the
+  artist, genre, price, and date.
+- Your picks play in matches (card picks duck the music the way vanilla
+  does); an opt-in setting plays them at the main menu too — or silences menu
+  music entirely. Another opt-in shows a small "Now Playing" credit line.
+  Audio downloads on first use (previews are a small pack; full albums fetch
+  when you own one). Music is entirely yours-side: opponents hear their own.
+- Music artists earn 50% of album sales, manage their album's name and price,
+  and can gift copies — sales show up in the Artist tab like any other item.
+- Rate any song 0-5 stars right in the track row. Ratings are private; the
+  community average updates on a delay so nobody can tell who rated what.
+
+**Dances: actual body movement**
+
+- Dance routines now move the whole dancer — hops, bobs, leans, shimmies and
+  hip-sway alongside the arm work (the body motion was always there, it was
+  just far too subtle to see at gameplay zoom). Six more dances join the shop:
+  Jumping Jacks, The Shimmy, Disco Fever, The Helicopter, The Robot, and
+  The Floss.
+
 **Quick chat is a wheel now**
 
 - Hold Q for the quick-chat wheel: point at a phrase and release to send it,
