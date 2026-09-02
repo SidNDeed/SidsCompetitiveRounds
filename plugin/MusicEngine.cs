@@ -24,12 +24,15 @@ namespace CompetitiveRounds
     /// transition owner (Reconcile). Modes split into two OWNERSHIP CLASSES —
     /// engine-owned {Custom, MutedByChoice, Preview} and non-owned {Vanilla,
     /// Loading, Fault}. The invariant every edge honors [G5]: leaving the
-    /// engine-owned class stops the plugin sources, releases the vanilla
-    /// suppression prefixes, and RE-ENTERS vanilla music for the CURRENT
-    /// context (menu → PlayMainMenu, round → PlayIngame(false), pick →
-    /// PlayIngame(true)) — never waiting for vanilla's next natural call,
-    /// because in the menu there may be none [F11]. Loading is vanilla-audible
-    /// ALWAYS, including when reached from Custom on playable-set loss.
+    /// engine-owned class stops the plugin sources (success-checked; a
+    /// throwing Stop is hard-silenced and terminates in durable Fault),
+    /// releases the vanilla suppression prefixes, and RE-ENTERS vanilla music
+    /// for the CURRENT context (menu → PlayMainMenu, round → PlayIngame(false),
+    /// pick → PlayIngame(true)) — never waiting for vanilla's next natural
+    /// call, because in the menu there may be none [F11]; a re-entry call
+    /// that fails is retried from the tick until it lands [I1-residual].
+    /// Loading is vanilla-audible ALWAYS, including when reached from Custom
+    /// on playable-set loss.
     ///
     /// Vanilla interop facts this file depends on (scout-audio-engine.md, all
     /// decompile-verified): SoundMusicManager is SCENE-LOCAL (poll Instance
@@ -117,6 +120,11 @@ namespace CompetitiveRounds
             public volatile bool faultPending;
             public bool faultDurable;
             public string faultReason = "";
+            // [I1-residual] a failed vanilla re-entry (manager mid-scene-load,
+            // throwing Play*) is never claimed done: this flag arms a tick
+            // retry that re-issues the context call until it lands. Durable
+            // static — a durable Fault keeps retrying across host respawns.
+            public bool vanillaReentryPending;
 
             // Transport intent [F14] — no sticky boolean latch; these inputs
             // are what Reconcile recomputes the mode from.
@@ -191,6 +199,7 @@ namespace CompetitiveRounds
         private static string _reconcileQueuedReason;
         private static float _managerPollRt = -999f;
         private static float _loadingKickRt = -999f;
+        private static float _reenterRetryRt = -999f;
         private static bool _lastMenuCovered;
         private static bool _lastBroadcastPredicate;
 
@@ -296,7 +305,7 @@ namespace CompetitiveRounds
                 if (s.mode == MusicMode.Custom)
                 {
                     s.paused = !s.paused;
-                    if (s.paused) PauseMainNoThrow();
+                    if (s.paused) { if (!PauseMain()) EnterDurableFaultNoThrow("pause failed"); }   // [I1-residual]
                     else Reconcile("play-pause");
                     return;
                 }
@@ -828,6 +837,7 @@ namespace CompetitiveRounds
                     return;
                 }
                 s.suppress = true;
+                s.vanillaReentryPending = false;   // ownership acquired — a stale retry must never replay vanilla over us
                 ApplyOwnedPlayback();
             }
             else if (fromOwned && !toOwned)
@@ -836,10 +846,21 @@ namespace CompetitiveRounds
                 // release suppression, re-enter vanilla for the CURRENT
                 // context. Loading is vanilla-audible ALWAYS, including when
                 // reached from Custom on playable-set loss.
-                StopSourcesNoThrow();
+                // [I1-residual] cleanup success is load-bearing: a source
+                // whose Stop threw is hard-silenced but no longer
+                // trustworthy — durable Fault owns that terminal (it
+                // releases suppression and arms the retried re-entry).
+                if (!StopSources())
+                {
+                    s.mainPausedByUs = false; s.currentStarted = false;
+                    EnterDurableFaultNoThrow("release-stop failed");
+                    return;
+                }
                 s.mainPausedByUs = false; s.currentStarted = false;
                 s.suppress = false;
-                ReenterVanillaForContext();
+                // Re-entry may fail RIGHT NOW (scene-load window) — arm the
+                // tick retry instead of claiming it happened [I1-residual].
+                s.vanillaReentryPending = !ReenterVanillaForContext();
             }
             else if (toOwned)
             {
@@ -880,19 +901,23 @@ namespace CompetitiveRounds
         {
             var s = S;
             if (s.faultPending || s.faultDurable) return;   // [I7] never (re)start owned audio under a latched fault
+            // [I1-residual] every cleanup below reports success; a failure
+            // means the source is hard-silenced but its state is no longer
+            // trustworthy — durable Fault owns the terminal.
             switch (s.mode)
             {
                 case MusicMode.Custom:
                     StopPreviewSourceNoThrow();
-                    if (s.paused) PauseMainNoThrow();
+                    if (s.paused) { if (!PauseMain()) EnterDurableFaultNoThrow("pause failed"); }
                     else EnsureMainPlaying();
                     break;
                 case MusicMode.MutedByChoice:
-                    StopSourcesNoThrow();
+                    if (!StopSources()) { EnterDurableFaultNoThrow("mute-stop failed"); return; }
                     s.mainPausedByUs = false; s.currentStarted = false;
                     break;
                 case MusicMode.Preview:
-                    PauseMainNoThrow();     // keep position; preview machinery drives the preview source
+                    // keep position; preview machinery drives the preview source
+                    if (!PauseMain()) EnterDurableFaultNoThrow("preview-pause failed");
                     break;
             }
         }
@@ -900,21 +925,29 @@ namespace CompetitiveRounds
         /// <summary>[F11] Immediately restore vanilla music for the context the
         /// prefixes last observed — vanilla's own replay guards make this
         /// idempotent, and our prefixes pass it through because suppression is
-        /// already released when this is called.</summary>
-        private static void ReenterVanillaForContext()
+        /// already released when this is called. [I1-residual] SUCCESS IS
+        /// RETURNED, never assumed: false (manager missing, or the Play* call
+        /// threw) means vanilla was NOT restored — the caller arms
+        /// vanillaReentryPending and the tick retries until a call lands.</summary>
+        private static bool ReenterVanillaForContext()
         {
             try
             {
                 var mgr = SoundMusicManager.Instance;
-                if (mgr == null) return;
+                if (mgr == null) return false;
                 switch (S.ctx)
                 {
                     case Ctx.Menu: mgr.PlayMainMenu(); break;
                     case Ctx.Round: mgr.PlayIngame(false); break;
                     case Ctx.Pick: mgr.PlayIngame(true); break;
                 }
+                return true;
             }
-            catch (Exception ex) { LogOnce("reenter", "[MUSIC] vanilla re-entry failed: " + ex.Message, true); }
+            catch (Exception ex)
+            {
+                LogOnce("reenter", "[MUSIC] vanilla re-entry failed: " + ex.Message + " — will retry from the tick", true);
+                return false;
+            }
         }
 
         // ── suppression prefix support (called by MusicSuppressionPatch) ──
@@ -968,13 +1001,27 @@ namespace CompetitiveRounds
 
         /// <summary>Menu call passed through while we were audible (menu not
         /// covered): pause our main source in the SAME call so no frame has
-        /// both owners playing; the tick's Reconcile then parks properly.</summary>
+        /// both owners playing; the tick's Reconcile then parks properly.
+        /// [I1-residual] a FAILED pause here is the both-owners hazard — the
+        /// vanilla call we are inside resumes this same frame. PauseMain
+        /// already hard-silenced (mute + volume 0 + Stop retry); latch the
+        /// fault so the next tick publishes durable Fault. The latch (not
+        /// EnterDurableFaultNoThrow) is deliberate: vanilla is taking the
+        /// room through THIS very call, so no re-entry is needed — and
+        /// issuing one from inside PlayMainMenu's own prefix would recurse.</summary>
         internal static void NoteVanillaMenuHandoffNoThrow()
         {
             try
             {
                 var s = S;
-                if (s.mode == MusicMode.Custom && !s.paused) PauseMainNoThrow();
+                if (s.mode == MusicMode.Custom && !s.paused && !PauseMain())
+                {
+                    s.faultReason = "menu-handoff-pause failed";
+                    s.suppress = false;
+                    s.faultPending = true;
+                    if (OnceKeys.Add("handoff-fault"))
+                        Plugin.Log?.LogError("[MUSIC] menu-handoff pause failed — source hard-silenced, engine faulting");
+                }
             }
             catch { }
         }
@@ -983,10 +1030,11 @@ namespace CompetitiveRounds
         /// (durable static — survives host respawns; consumed at
         /// ReconcileCore/Tick entry, where faultDurable is published BEFORE
         /// pending clears [I7]), release suppression, stop BOTH plugin
-        /// sources via no-throw paths, and let the caller return true so
-        /// vanilla runs. Owned-playback enforcement defers while a fault is
-        /// pending, so the escaped vanilla call cannot be overplayed by a
-        /// custom restart.</summary>
+        /// sources via no-throw paths (a throwing Stop is hard-silenced in
+        /// place: mute + volume 0 + Stop retry [I1-residual]), and let the
+        /// caller return true so vanilla runs. Owned-playback enforcement
+        /// defers while a fault is pending, so the escaped vanilla call
+        /// cannot be overplayed by a custom restart.</summary>
         internal static void LatchFaultFromPrefix(string site, Exception ex)
         {
             try
@@ -1005,9 +1053,13 @@ namespace CompetitiveRounds
         /// <summary>[I1] The single durable-fault funnel for every owned
         /// playback, transition, or host failure — no-throw by construction.
         /// Publishes durable Fault (BEFORE clearing pending [I7]), silences
-        /// both plugin sources, releases suppression, and re-enters
-        /// context-correct vanilla. Recovery is ONLY the explicit user retry
-        /// (ClearFaultForUserAction) — no automatic reacquisition.</summary>
+        /// both plugin sources (a throwing Stop is hard-silenced: mute +
+        /// volume 0 + Stop retry), releases suppression, and REQUESTS
+        /// context-correct vanilla re-entry — a failed request arms
+        /// vanillaReentryPending and the tick retries it until a call lands
+        /// [I1-residual]; the fault never claims vanilla was restored once.
+        /// Recovery is ONLY the explicit user retry (ClearFaultForUserAction)
+        /// — no automatic reacquisition.</summary>
         private static void EnterDurableFaultNoThrow(string reason)
         {
             try
@@ -1020,8 +1072,8 @@ namespace CompetitiveRounds
                 s.suppress = false;
                 s.mode = MusicMode.Fault;
                 s.mainPausedByUs = false; s.currentStarted = false;
-                ReenterVanillaForContext();
-                Plugin.Log?.LogError($"[MUSIC] durable Fault ({reason}) — vanilla restored; custom music waits for an explicit retry");
+                s.vanillaReentryPending = !ReenterVanillaForContext();
+                Plugin.Log?.LogError($"[MUSIC] durable Fault ({reason}) — vanilla re-entry {(s.vanillaReentryPending ? "pending (tick retries)" : "issued")}; custom music waits for an explicit retry");
             }
             catch { }
         }
@@ -1042,6 +1094,19 @@ namespace CompetitiveRounds
                 if (s.faultPending) Reconcile("fault-latched");
 
                 if (_reconcileQueued) { _reconcileQueued = false; Reconcile(_reconcileQueuedReason ?? "queued"); }
+
+                // [I1-residual] vanilla re-entry RETRY: a release/fault whose
+                // context call failed (manager mid-scene-load, throwing Play*)
+                // is re-issued here until it lands — durable Fault included.
+                // Gated on the non-owned class with suppression released so a
+                // stale pending can never replay vanilla over custom audio;
+                // vanilla's replay guards make a redundant call a no-op.
+                if (s.vanillaReentryPending && !IsEngineOwned(s.mode) && !s.suppress
+                    && rt - _reenterRetryRt > 0.5f)
+                {
+                    _reenterRetryRt = rt;
+                    if (ReenterVanillaForContext()) s.vanillaReentryPending = false;
+                }
 
                 // Manager identity poll: SoundMusicManager is scene-local.
                 if (rt - _managerPollRt > 0.5f)
@@ -1095,14 +1160,24 @@ namespace CompetitiveRounds
             if (s.mode == MusicMode.Custom && !s.paused && !s.mainPausedByUs)
             {
                 var m = h.Main;
-                if (m != null && s.current.HasValue && s.currentStarted && !m.isPlaying
-                    && rt - s.currentStartedRt > 0.5f)
+                // [J1] A STARTED-but-silent source is judged HERE and nowhere
+                // else, and the branch comes FIRST: falling through to
+                // EnsureMainPlaying would blind-replay and re-stamp
+                // currentStartedRt, renewing the 0.5s grace forever (silent
+                // Custom under held suppression, unbounded — never Fault).
+                if (m != null && s.current.HasValue && s.currentStarted && !m.isPlaying)
                 {
-                    // [I1] premature stop vs natural completion, decided by the
-                    // last position observed while playing: well short of the
-                    // clip's end means the source died mid-track (device fault
-                    // / external teardown) — one in-place resume attempt, then
-                    // durable Fault. At/near the end → normal advance.
+                    // Grace interval: an AudioSource can report !isPlaying for
+                    // a few frames right after Play(). WAIT — no replay, no
+                    // timestamp reset — so repeated early stops still expire.
+                    if (rt - s.currentStartedRt <= 0.5f) return;
+                    // [I1][J1] grace expired — classify by the last position
+                    // observed while playing: well short of the clip's end
+                    // means the source died mid-track (device fault / external
+                    // teardown) — exactly ONE counted resume attempt
+                    // (currentPrematureRetried); any further started-but-
+                    // silent expiry is durable Fault. At/near the end →
+                    // normal advance.
                     var clip = m.clip;
                     if (clip != null && s.resumePositionSec < clip.length - 2f)
                     {
@@ -1142,6 +1217,7 @@ namespace CompetitiveRounds
                         if (e.Clip != null && p != null && gen == s.previewGen)
                         {
                             p.clip = e.Clip;
+                            try { p.mute = false; } catch { }   // undo any hard-silence fallback
                             try { p.time = 0f; } catch { }
                             p.Play();
                             s.previewStarted = true;
@@ -1228,6 +1304,10 @@ namespace CompetitiveRounds
             if (now == _lastBroadcastPredicate)
             {
                 if (now && !S.broadcastHeld) { try { S.broadcastHeld = RunInBackgroundLease.Acquire("broadcast-music"); } catch { } }
+                // [I2-residual] the falling-edge Release can fail too — this
+                // steady-state branch is what actually retries it: every tick
+                // while the predicate stays false and the flag is still held.
+                else if (!now && S.broadcastHeld) { try { if (RunInBackgroundLease.Release("broadcast-music")) S.broadcastHeld = false; } catch { } }
                 return false;
             }
             _lastBroadcastPredicate = now;
@@ -1242,8 +1322,10 @@ namespace CompetitiveRounds
             }
             else if (S.broadcastHeld)
             {
-                // I2: clear held ONLY on a successful restore — a failed release
-                // keeps the flag so this branch retries on the next tick.
+                // [I2] clear held ONLY on a successful restore — a failed
+                // release keeps the flag, and the STEADY-STATE (no-edge)
+                // branch above retries the Release on every subsequent tick
+                // until it lands (this edge branch runs only once per flip).
                 try { if (RunInBackgroundLease.Release("broadcast-music")) S.broadcastHeld = false; } catch { }
                 Plugin.Log?.LogInfo("[MUSIC] broadcast custom-music predicate OFF");
             }
@@ -1254,11 +1336,14 @@ namespace CompetitiveRounds
         /// <summary>[I8] Centralized predicate-edge repair, run on BOTH edges.
         /// A rising edge ends any preview (broadcast bootstrap must win
         /// desired-mode priority; the generation fence kills in-flight
-        /// completions). Then the current track is validated against the NEW
-        /// effective universe — a survivor from the other side of the edge
-        /// (vanilla under broadcast, or a broadcast-picked track the user
-        /// never selected) is stopped and cleared so it can neither keep
-        /// playing nor count as ready.</summary>
+        /// completions). Then the current track is kept on exactly ONE test:
+        /// STRICT membership in the NEW effective queue. Manual takeover may
+        /// keep a current across SELECTION changes, never across a predicate
+        /// edge — Skip always sets takeover, so honoring it here would let an
+        /// owned-but-deselected broadcast pick keep playing (and keep
+        /// claiming broadcast credit) after the lease fell. A non-member is
+        /// stopped and cleared so it can neither keep playing nor count as
+        /// ready.</summary>
         private static void RepairAfterBroadcastEdge(bool rising)
         {
             var s = S;
@@ -1269,12 +1354,10 @@ namespace CompetitiveRounds
             }
             EnsureQueueCurrent();
             if (!s.current.HasValue) return;
-            var t = s.current.Value;
-            bool keep = s.queueIndex >= 0;   // EnsureQueueCurrent located current in the new effective queue
-            if (!keep && s.manualTakeover)
-                keep = rising ? (!IsVanillaSku(t.Sku) && MusicCatalog.Get(t.Sku) != null)
-                              : (IsTrackKnown(t) && IsAlbumPlayable(t.Sku));
-            if (keep) return;
+            // [I8-residual] EnsureQueueCurrent just rebuilt against the new
+            // effective universe (the edge nulled queueSignature); a located
+            // index IS the strict-membership verdict — no takeover carve-out.
+            if (s.queueIndex >= 0) return;
             StopMainNoThrow();
             s.current = null; s.resumePositionSec = 0f; s.currentStarted = false;
             s.mainPausedByUs = false; s.currentPrematureRetried = false;
@@ -1525,7 +1608,7 @@ namespace CompetitiveRounds
             return false;
         }
 
-        // ── clip loading (UnityWebRequest, streamed OGG) ─────────────────
+        // ── clip loading (UnityWebRequest, buffered OGG) ─────────────────
 
         private static bool IsTrackReady(TrackRef t)
         {
@@ -1680,10 +1763,16 @@ namespace CompetitiveRounds
             var m = h.Main;
             if (m.clip != clip) { m.clip = clip; s.currentStarted = false; s.mainPausedByUs = false; s.currentPrematureRetried = false; }
             if (m.isPlaying) return;
+            // [J1] a STARTED source that is silent without being paused-by-us
+            // belongs to TickPlayback's premature-stop classifier — never
+            // blind-replay it here: Play() would re-stamp currentStartedRt
+            // and renew the classifier's grace window forever.
+            if (s.currentStarted && !s.mainPausedByUs) return;
             // [I1] every play/unpause failure funnels to durable Fault —
             // owned silence with suppression held is the forbidden state.
             if (s.mainPausedByUs && s.currentStarted)
             {
+                try { m.mute = false; } catch { }   // undo any hard-silence fallback before resuming
                 try { m.UnPause(); }
                 catch (Exception ex) { EnterDurableFaultNoThrow("main-unpause: " + ex.Message); return; }
                 s.mainPausedByUs = false;
@@ -1691,6 +1780,7 @@ namespace CompetitiveRounds
             }
             try
             {
+                try { m.mute = false; } catch { }   // undo any hard-silence fallback before (re)starting
                 float pos = s.resumePositionSec;
                 try { m.time = (pos > 0.5f && pos < clip.length - 1f) ? pos : 0f; } catch { }
                 m.Play();
@@ -1711,40 +1801,96 @@ namespace CompetitiveRounds
             return fallback;
         }
 
-        private static void PauseMainNoThrow()
+        /// <summary>[I1-residual] Pause the main source, preserving the resume
+        /// position. NO-THROW, but cleanup success is REPORTED, not assumed:
+        /// returns false when the pause threw — the source is then
+        /// hard-silenced (mute + volume 0 + Stop retry) so it cannot stay
+        /// audible beside vanilla, and the CALLER must treat the state as
+        /// untrustworthy (durable Fault, or the prefix fault latch on the
+        /// menu-handoff path).</summary>
+        private static bool PauseMain()
         {
+            var h = _host;
+            if (h == null || h.Main == null) return true;   // nothing to silence
             try
             {
-                var h = _host;
-                if (h == null || h.Main == null) return;
                 if (h.Main.isPlaying)
                 {
                     S.resumePositionSec = h.Main.time;
                     h.Main.Pause();
                     S.mainPausedByUs = true;
                 }
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                HardSilenceMainNoThrow();
+                LogOnce("pausefail", "[MUSIC] main pause failed (" + ex.Message + ") — source hard-silenced", true);
+                return false;
+            }
         }
 
-        /// <summary>Stops BOTH sources; every statement individually guarded so
-        /// this is safe from the prefix exception path (must-verify item).</summary>
-        internal static void StopSourcesNoThrow()
+        /// <summary>[I1-residual] Last-resort silencer for a source whose
+        /// Pause/Stop threw: mute, zero volume, and a Stop retry — each
+        /// individually guarded. mute is the DURABLE half (nothing else
+        /// writes it; the per-tick volume pass rewrites volume), and the
+        /// EnsureMainPlaying play/unpause paths un-mute before restarting so
+        /// a fault retry can never resume into a muted source.</summary>
+        private static void HardSilenceMainNoThrow()
         {
             var h = _host;
             if (h == null) return;
+            try { var m = h.Main; if (m != null) m.mute = true; } catch { }
+            try { var m = h.Main; if (m != null) m.volume = 0f; } catch { }
             try { var m = h.Main; if (m != null) m.Stop(); } catch { }
+        }
+
+        private static void HardSilencePreviewNoThrow()
+        {
+            var h = _host;
+            if (h == null) return;
+            try { var p = h.Preview; if (p != null) p.mute = true; } catch { }
+            try { var p = h.Preview; if (p != null) p.volume = 0f; } catch { }
             try { var p = h.Preview; if (p != null) p.Stop(); } catch { }
+        }
+
+        /// <summary>Stops BOTH sources; every statement individually guarded so
+        /// this is safe from the prefix exception path (must-verify item). A
+        /// throwing Stop is hard-silenced in place (mute + volume 0 + Stop
+        /// retry), so even the failure path leaves nothing audible — callers
+        /// that must GUARANTEE cleanup consume StopSources()'s bool instead
+        /// [I1-residual].</summary>
+        internal static void StopSourcesNoThrow()
+        {
+            StopSources();
+        }
+
+        /// <summary>[I1-residual] Returning form of the both-sources stop:
+        /// false means a Stop threw. The source is hard-silenced either way;
+        /// the caller owns the terminal (durable Fault) because the engine
+        /// can no longer trust that source's state.</summary>
+        private static bool StopSources()
+        {
+            var h = _host;
+            if (h == null) return true;
+            bool ok = true;
+            try { var m = h.Main; if (m != null) m.Stop(); }
+            catch { HardSilenceMainNoThrow(); ok = false; }
+            try { var p = h.Preview; if (p != null) p.Stop(); }
+            catch { HardSilencePreviewNoThrow(); ok = false; }
+            return ok;
         }
 
         private static void StopPreviewSourceNoThrow()
         {
-            try { var h = _host; if (h != null && h.Preview != null) h.Preview.Stop(); } catch { }
+            try { var h = _host; if (h != null && h.Preview != null) h.Preview.Stop(); }
+            catch { HardSilencePreviewNoThrow(); }
         }
 
         private static void StopMainNoThrow()
         {
-            try { var h = _host; if (h != null && h.Main != null) h.Main.Stop(); } catch { }
+            try { var h = _host; if (h != null && h.Main != null) h.Main.Stop(); }
+            catch { HardSilenceMainNoThrow(); }
         }
 
         // ── vanilla catalog + mixer acquisition ──────────────────────────

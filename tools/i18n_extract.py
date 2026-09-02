@@ -95,6 +95,13 @@ SITES = [
     (re.compile(r'(?<![.\w])QueueNotification\s*\('), (0,)),
     (re.compile(r'ShowInfoPopup\s*\('), (0, 1)),
     (re.compile(r'(?<![.\w])SettingsToggle\s*\('), (4,)),
+    # Shop section headers (impl-r2 I16 residual): the builder's own
+    # CreateText receives the label VARIABLE (Tr'd at that single funnel), so
+    # the display literal — markup included, like every markup-wrapped key —
+    # is only visible at the CreateSectionHeader CALL sites (parent, name,
+    # LABEL). The method-definition line also matches this pattern; its
+    # parameter list carries no literals, so it harvests nothing (harmless).
+    (re.compile(r'(?<![.\w])CreateSectionHeader\s*\('), (2,)),
     (re.compile(r'I18n\.Tr\s*\('), (0,), True),
     (re.compile(r'I18n\.TrF\s*\('), (0,), True),
     (re.compile(r'(?<![.\w])AppendSystemChatLine\s*\('), (0,)),
@@ -437,6 +444,20 @@ def extract():
                         s = lf(unescape(x.group(1)))
                         if looks_translatable(s):
                             found.setdefault(s, []).append(fn)
+        # Shop category descriptions (NativeUI.cs): the per-tab description
+        # lives in a string-ARRAY initializer, never at a harvested call site
+        # (both render sites pass SHOP_TAB_DESCS[i] through I18n.Tr —
+        # Tr(variable) is invisible to call-site harvesting, #295a). Harvest
+        # the initializer literals directly, the AchievementDefs pattern.
+        # Impl-r2 I16 residual: these descs and the section headers had never
+        # been translatable.
+        if fn == "NativeUI.cs":
+            block = re.search(r"SHOP_TAB_DESCS\s*=\s*\{(.*?)\n\s*\};", src, re.S)
+            if block:
+                for x in STR_LIT.finditer(block.group(1)):
+                    s = lf(unescape(x.group(1)))
+                    if looks_translatable(s):
+                        found.setdefault(s, []).append(fn)
     return found
 
 

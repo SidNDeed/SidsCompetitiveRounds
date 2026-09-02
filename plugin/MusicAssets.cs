@@ -79,10 +79,16 @@ namespace CompetitiveRounds
     /// forms (delta-seconds and HTTP-date) — a delay within the worker's sleep
     /// budget is waited exactly (no jitter); a longer one is honored on the
     /// main thread WITHOUT consuming in-worker attempts or the session
-    /// auto-retry (bounded honored waits, then the normal ladder). Capped
-    /// jittered backoff only when no valid header (bounded in-worker attempts,
-    /// then one automatic session retry, then the manual Retry control),
-    /// validated caches preserved.
+    /// auto-retry (bounded honored waits, then the normal ladder). The
+    /// deferred wait does NOT outlive its coroutine host [J5]: a destroyed
+    /// host kills the flight mid-wait with no finally, and recovery is the
+    /// stale-heartbeat reap — the next EnsureTier / TierStatusLine /
+    /// RetryAvailable query at least FLIGHT_HEARTBEAT_STALE_SECONDS after the
+    /// flight's last tick clears it, and the relaunched flight honors the
+    /// REMAINDER of the stored absolute Retry-After deadline (never restarts
+    /// the throttle from zero). Capped jittered backoff only when no valid
+    /// header (bounded in-worker attempts, then one automatic session retry,
+    /// then the manual Retry control), validated caches preserved.
     /// 404/410 and integrity failures FAIL CLOSED: status line + Retry control,
     /// cache untouched, never recreate or overwrite a revision in response.
     ///
@@ -116,6 +122,11 @@ namespace CompetitiveRounds
         private const int SAFE_WORKER_WAIT_MS = 60000; // [H2] worker Thread.Sleep ceiling
         private const int MAX_DEFERRED_WAIT_MS = 900000; // 15 min cap on one honored long Retry-After
         private const int MAX_DEFERRED_WAITS = 3;      // honored long waits per tier per session
+        // [J5] A live install coroutine stamps its heartbeat every ~1s tick;
+        // anything older than this while InFlight means the coroutine host
+        // died (or the game was suspended — the generation fence covers the
+        // suspended-not-dead case, #367) and the flight is reapable.
+        private const float FLIGHT_HEARTBEAT_STALE_SECONDS = 120f;
 
         // ── Compiled manifest — all 15 files (7 full, 7 previews, cover) [G8] ──
 
@@ -161,9 +172,21 @@ namespace CompetitiveRounds
             public bool MissingWarned;     // THUNDERSTORE: warn once per tier
             public bool DeferredWaiting;   // main thread: honoring a long Retry-After between worker runs
             public int DeferredWaitsUsed;  // bounded honored long waits per session [I13]
-            public volatile bool WorkerDone;   // worker → coroutine handoff
-            public volatile int WorkerResult;  // (int)ResultKind
-            public volatile int WorkerRetryAfterMs; // worker → coroutine: server delay past the sleep budget
+            // [J5] Flight liveness + ownership (#367's latch/token pair). The
+            // install coroutine stamps the heartbeat on EVERY tick — worker
+            // polls, auto-retry waits, and deferred Retry-After waits alike —
+            // and every consumer of flight state reaps a stale one via
+            // ReapDeadFlight. FlightGen bumps at every launch AND every reap:
+            // a coroutine resuming to a bumped gen is superseded and exits
+            // without touching the successor's state.
+            public volatile float FlightHeartbeatRt;
+            public int FlightGen;
+            // [J5]/[I13] ABSOLUTE realtime deadline of the last granted long
+            // Retry-After. Deliberately survives flight death and reaping so
+            // a rehydrated relaunch honors the REMAINDER of the server's
+            // window instead of restarting the throttle from zero (or firing
+            // a request inside it).
+            public float DeferredUntilRt;
             public bool ReadyCache;
             public bool ReadyCacheValid;
             public float ReadyCheckedAt;
@@ -446,8 +469,37 @@ namespace CompetitiveRounds
 
         // ── Ensure / retry ──
 
-        /// <summary>Idempotent tier bootstrap — no-op when ready, in flight, or
-        /// gave up (manual Retry owns that state). Main-thread only; the
+        /// <summary>[J5] Flight liveness reap. A destroyed coroutine host
+        /// kills the install coroutine with NO finally, which used to strand
+        /// InFlight as a permanent coalescer (EnsureTier no-oped forever,
+        /// GaveUp never set, Retry never shown). Instead every consumer of
+        /// flight state — EnsureTier's coalesce check, TierStatusLine, and
+        /// RetryAvailable — calls this first: a heartbeat older than
+        /// FLIGHT_HEARTBEAT_STALE_SECONDS while InFlight means the flight is
+        /// dead; clear the flight flags, bump the generation (a merely
+        /// SUSPENDED coroutine — backgrounded game, realtime kept advancing —
+        /// resumes to the bumped gen and exits silently instead of racing its
+        /// successor, #367), and let the normal trigger/Retry path relaunch.
+        /// DeferredUntilRt deliberately survives the reap so the relaunch
+        /// honors the remaining Retry-After window. Recovery is QUERY-driven,
+        /// not timer-driven: it happens at the next call into one of those
+        /// surfaces after the staleness bound, not the instant the host dies.
+        /// Logs once per death (clearing InFlight makes the condition
+        /// unrepeatable for that flight). Main-thread only (realtime read);
+        /// a no-op in THUNDERSTORE builds, where InFlight is never set.</summary>
+        private static void ReapDeadFlight(TierRuntime s, string where)
+        {
+            if (!s.InFlight) return;
+            if (Time.realtimeSinceStartup - s.FlightHeartbeatRt <= FLIGHT_HEARTBEAT_STALE_SECONDS) return;
+            s.FlightGen++;          // supersede a suspended-not-dead coroutine (#367)
+            s.InFlight = false;
+            s.DeferredWaiting = false;
+            Plugin.Log?.LogWarning($"[MUSIC] {TierDirName(s.Tier)} install flight heartbeat stale (>{(int)FLIGHT_HEARTBEAT_STALE_SECONDS}s - coroutine host destroyed?) - cleared via {where}; normal trigger/Retry relaunches (Retry-After deadline preserved)");
+        }
+
+        /// <summary>Idempotent tier bootstrap — no-op when ready, in a LIVE
+        /// flight (a flight whose heartbeat went stale is reaped first, [J5]),
+        /// or gave up (manual Retry owns that state). Main-thread only; the
         /// InFlight flag is the per-tier coalescer [G2]. Triggers (design §3):
         /// previews on first music UI render, full on entitlement/broadcast.</summary>
         internal static void EnsureTier(MusicTier t, string reason)
@@ -472,6 +524,7 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogWarning($"[MUSIC] {TierDirName(t)} assets missing/invalid (reason {reason}) - reinstall via the mod manager (Thunderstore bundles ship the music)");
             }
 #else
+            ReapDeadFlight(s, "EnsureTier");   // [J5] a dead flight must not coalesce forever
             if (s.InFlight || s.GaveUp) return;
             if (Plugin.Instance == null)
             {
@@ -479,10 +532,14 @@ namespace CompetitiveRounds
                 return;
             }
             s.InFlight = true;
+            // [J5] Stamp before launch so the pre-first-tick window can never
+            // read as stale; the gen is this flight's ownership token (#367).
+            s.FlightHeartbeatRt = Time.realtimeSinceStartup;
+            int gen = ++s.FlightGen;
             Plugin.Log?.LogInfo($"[MUSIC] ensure {TierDirName(t)} (reason {reason}) - downloading {TierUrl(t)}");
             // A throw here must not strand the coalescing latch (#367): no
             // coroutine means nothing would ever clear InFlight.
-            try { Plugin.Instance.StartCoroutine(RunTierInstall(s)); }
+            try { Plugin.Instance.StartCoroutine(RunTierInstall(s, gen)); }
             catch (Exception ex)
             {
                 s.InFlight = false;
@@ -493,9 +550,18 @@ namespace CompetitiveRounds
 
         /// <summary>True when a tier exhausted its automatic attempts and waits
         /// on the Music tab's manual Retry control. Always false in
-        /// THUNDERSTORE builds (GaveUp is never set there).</summary>
-        internal static bool RetryAvailable =>
-            (_previews.GaveUp && !_previews.InFlight) || (_full.GaveUp && !_full.InFlight);
+        /// THUNDERSTORE builds (GaveUp is never set there). Reaps dead
+        /// flights first [J5] — a stranded InFlight would otherwise pin this
+        /// false (and the status line on "Downloading...") forever.</summary>
+        internal static bool RetryAvailable
+        {
+            get
+            {
+                ReapDeadFlight(_previews, "RetryAvailable");
+                ReapDeadFlight(_full, "RetryAvailable");
+                return (_previews.GaveUp && !_previews.InFlight) || (_full.GaveUp && !_full.InFlight);
+            }
+        }
 
         /// <summary>Manual retry for every gave-up tier — one fresh attempt per
         /// press (the session's automatic retry stays consumed).</summary>
@@ -525,6 +591,8 @@ namespace CompetitiveRounds
 #else
             var p = _previews;
             var f = _full;
+            ReapDeadFlight(p, "TierStatusLine");   // [J5] never render a dead
+            ReapDeadFlight(f, "TierStatusLine");   // flight as "Downloading..."
             if (p.DeferredWaiting || f.DeferredWaiting)
                 return I18n.Tr("Music download is rate-limited - waiting to retry");
             if (p.InFlight && f.InFlight) return I18n.Tr("Downloading music...");
@@ -541,18 +609,62 @@ namespace CompetitiveRounds
 #if !THUNDERSTORE
         // ── Install pipeline (standalone builds only) ──
 
-        private static IEnumerator RunTierInstall(TierRuntime s)
+        /// <summary>Per-worker-run handoff (worker thread → polling coroutine).
+        /// A fresh box per run — never fields shared on TierRuntime — so a
+        /// worker thread orphaned by host destruction writes only into its own
+        /// box: it can neither satisfy nor clobber a rehydrated successor
+        /// flight's completion ([J5], #367's capture-handles-as-locals half).</summary>
+        private sealed class WorkerBox
+        {
+            public volatile bool Done;
+            public volatile int Result;        // (int)ResultKind
+            public volatile int RetryAfterMs;  // server delay past the sleep budget
+        }
+
+        /// <summary>[J5] Flight lifetime, stated honestly: this coroutine dies
+        /// with its host and runs NO finally when it does — every wait below
+        /// (worker poll, deferred Retry-After, auto-retry) therefore ticks at
+        /// ~1s, stamping the heartbeat and checking the ownership gen. Death
+        /// recovery is the consumers' stale-heartbeat reap (ReapDeadFlight),
+        /// bounded at FLIGHT_HEARTBEAT_STALE_SECONDS past the last tick plus
+        /// however long until the next EnsureTier/TierStatusLine/RetryAvailable
+        /// query; the relaunch then resumes any outstanding Retry-After window
+        /// from its ABSOLUTE deadline rather than from zero.</summary>
+        private static IEnumerator RunTierInstall(TierRuntime s, int myGen)
         {
             for (; ; )
             {
-                s.WorkerDone = false;
-                var th = new Thread(() => InstallWorker(s))
+                // [J5]/[I13] Honor any outstanding absolute Retry-After
+                // deadline BEFORE contacting the server. DeferredUntilRt is
+                // set by this flight's own deferral grant below OR by a
+                // predecessor flight whose host died mid-wait — a rehydrated
+                // relaunch waits out the REMAINDER of the server's window
+                // (never restarts the throttle from zero, never fires a
+                // request inside it).
+                if (Time.realtimeSinceStartup < s.DeferredUntilRt)
+                {
+                    s.DeferredWaiting = true;
+                    while (Time.realtimeSinceStartup < s.DeferredUntilRt)
+                    {
+                        s.FlightHeartbeatRt = Time.realtimeSinceStartup;
+                        yield return new WaitForSecondsRealtime(1f);
+                        if (s.FlightGen != myGen) yield break;   // superseded — successor owns all flight state (#367)
+                    }
+                    s.DeferredWaiting = false;
+                }
+                var box = new WorkerBox();
+                var th = new Thread(() => InstallWorker(s.Tier, box))
                 {
                     IsBackground = true,
                     Name = "CR_MusicDownload_" + TierDirName(s.Tier),
                 };
                 th.Start();
-                while (!s.WorkerDone) yield return new WaitForSecondsRealtime(1f);
+                while (!box.Done)
+                {
+                    s.FlightHeartbeatRt = Time.realtimeSinceStartup;
+                    yield return new WaitForSecondsRealtime(1f);
+                    if (s.FlightGen != myGen) yield break;
+                }
                 s.ReadyCacheValid = false;
                 if (TierReady(s.Tier))
                 {
@@ -566,29 +678,37 @@ namespace CompetitiveRounds
                     catch (Exception ex) { Plugin.Log?.LogWarning($"[MUSIC] post-install reconcile failed: {ex.Message}"); }
                     yield break;
                 }
-                var kind = (ResultKind)s.WorkerResult;
+                var kind = (ResultKind)box.Result;
                 if (kind == ResultKind.TransientDeferred && s.DeferredWaitsUsed < MAX_DEFERRED_WAITS)
                 {
                     // [I13] The server named a wait past the worker's sleep
-                    // budget. Honor it here WITHOUT consuming the in-worker
-                    // attempt budget or the session auto-retry; the cycle cap
-                    // keeps a perpetually throttling server from parking the
-                    // tier in-flight forever — it degrades to the normal
-                    // transient ladder (auto-retry, then manual Retry).
+                    // budget. Honored at the loop top WITHOUT consuming the
+                    // in-worker attempt budget or the session auto-retry; the
+                    // cycle cap keeps a perpetually throttling server from
+                    // parking the tier in-flight forever — it degrades to the
+                    // normal transient ladder (auto-retry, then manual Retry).
+                    // Stored as an ABSOLUTE realtime deadline so the wait
+                    // outlives this coroutine [J5]: if the host dies mid-wait
+                    // the stale-heartbeat reap frees the flight and the
+                    // relaunch resumes this same window at the loop top.
                     s.DeferredWaitsUsed++;
-                    int deferMs = Math.Min(s.WorkerRetryAfterMs, MAX_DEFERRED_WAIT_MS);
-                    s.DeferredWaiting = true;
-                    Plugin.Log?.LogInfo($"[MUSIC] {TierDirName(s.Tier)} download throttled (Retry-After {s.WorkerRetryAfterMs / 1000}s) - honoring {deferMs / 1000}s before the next attempt (attempts preserved)");
+                    int deferMs = Math.Min(box.RetryAfterMs, MAX_DEFERRED_WAIT_MS);
+                    s.DeferredUntilRt = Time.realtimeSinceStartup + deferMs / 1000f;
+                    Plugin.Log?.LogInfo($"[MUSIC] {TierDirName(s.Tier)} download throttled (Retry-After {box.RetryAfterMs / 1000}s) - honoring {deferMs / 1000}s before the next attempt (attempts preserved)");
                     try { NativeUI.MarkDirty(); } catch { }
-                    yield return new WaitForSecondsRealtime(deferMs / 1000f);
-                    s.DeferredWaiting = false;
-                    continue;
+                    continue;   // loop top marks DeferredWaiting and waits it out (same frame — continue does not yield)
                 }
                 if ((kind == ResultKind.Transient || kind == ResultKind.TransientDeferred) && !s.AutoRetryUsed)
                 {
                     s.AutoRetryUsed = true;
                     Plugin.Log?.LogInfo($"[MUSIC] {TierDirName(s.Tier)} download failed (transient) - one automatic retry in 5s");
-                    yield return new WaitForSecondsRealtime(5f);
+                    float retryAt = Time.realtimeSinceStartup + 5f;
+                    while (Time.realtimeSinceStartup < retryAt)
+                    {
+                        s.FlightHeartbeatRt = Time.realtimeSinceStartup;
+                        yield return new WaitForSecondsRealtime(1f);
+                        if (s.FlightGen != myGen) yield break;
+                    }
                     continue;
                 }
                 s.InFlight = false;
@@ -601,15 +721,15 @@ namespace CompetitiveRounds
             }
         }
 
-        private static void InstallWorker(TierRuntime s)
+        private static void InstallWorker(MusicTier t, WorkerBox box)
         {
             int result = (int)ResultKind.Transient;
             string tmpZip = null;
             try
             {
                 Directory.CreateDirectory(_musicRoot);
-                tmpZip = Path.Combine(_musicRoot, "download-" + TierDirName(s.Tier) + "-" + Guid.NewGuid().ToString("N") + ".zip.tmp");
-                result = (int)InstallWorkerCore(s, tmpZip);
+                tmpZip = Path.Combine(_musicRoot, "download-" + TierDirName(t) + "-" + Guid.NewGuid().ToString("N") + ".zip.tmp");
+                result = (int)InstallWorkerCore(t, box, tmpZip);
             }
             catch (Exception ex)
             {
@@ -617,19 +737,18 @@ namespace CompetitiveRounds
                 // deliberately TRANSIENT, not fail-closed: a truncated transfer
                 // and a corrupt source are indistinguishable here, retries are
                 // bounded either way, and the cache is untouched either way.
-                Plugin.Log?.LogWarning($"[MUSIC] {TierDirName(s.Tier)} install worker failed: {ex.Message}");
+                Plugin.Log?.LogWarning($"[MUSIC] {TierDirName(t)} install worker failed: {ex.Message}");
             }
             finally
             {
                 TryDeleteFile(tmpZip);
-                s.WorkerResult = result;
-                s.WorkerDone = true;
+                box.Result = result;
+                box.Done = true;
             }
         }
 
-        private static ResultKind InstallWorkerCore(TierRuntime s, string tmpZip)
+        private static ResultKind InstallWorkerCore(MusicTier t, WorkerBox box, string tmpZip)
         {
-            MusicTier t = s.Tier;
             // ── download, with the [H2] transient policy in-worker ──
             var rng = new System.Random();
             for (int attempt = 1; ; attempt++)
@@ -644,7 +763,7 @@ namespace CompetitiveRounds
                     // to the coroutine so it is honored without burning the
                     // remaining attempts inside a throttle window they cannot
                     // outlast.
-                    s.WorkerRetryAfterMs = retryAfterMs;
+                    box.RetryAfterMs = retryAfterMs;
                     return ResultKind.TransientDeferred;
                 }
                 if (attempt >= DOWNLOAD_ATTEMPTS) return ResultKind.Transient;

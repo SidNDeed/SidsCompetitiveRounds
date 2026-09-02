@@ -9587,6 +9587,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // 0 All, 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other, 10 Dances, 11 Music.
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
         private static string[] SHOP_TAB_NAMES => new[] { I18n.Tr("All"), I18n.Tr("Cosmetics"), I18n.Tr("Name Styles"), I18n.Tr("Maps"), I18n.Tr("Titles"), I18n.Tr("Trails"), I18n.Tr("Body/Team Color"), I18n.Tr("Cursor"), I18n.Tr("Effects"), I18n.Tr("Other"), I18n.Tr("Dances"), I18n.Tr("Music") };
+        // i18n (impl-r2 I16 residual): raw English table — BOTH render sites pass
+        // entries through I18n.Tr(variable), which call-site harvesting cannot see
+        // (#295a), so tools/i18n_extract.py harvests this initializer directly
+        // (the AchievementDefs pattern). Editing an entry re-keys its
+        // translations (#289).
         private static readonly string[] SHOP_TAB_DESCS = {
             "All cosmetics - everything available, grouped by category.",
             "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
@@ -9706,7 +9711,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             // Description of the active tab - updated on each RefreshShop.
             txtShopCategoryDesc = UIFactory.CreateText("SHDesc", panel.transform,
-                SHOP_TAB_DESCS[0], 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+                I18n.Tr(SHOP_TAB_DESCS[0]), 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
 
             var sv = UIFactory.CreateScrollView("SHSV", panel.transform, spacing: 4);
             UIFactory.AddLE(sv.scrollGO, flexH: 1);
@@ -9820,6 +9825,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return panel;
         }
 
+        // i18n (impl-r2 I16 residual): the call sites' label literal — markup
+        // included, like every other markup-wrapped key in the catalogue — IS the
+        // translation key, Tr'd here at the single render funnel. The inner
+        // CreateText receives a VARIABLE, so tools/i18n_extract.py harvests the
+        // literals at the CreateSectionHeader CALL sites instead (arg 2).
+        // Recoloring a header re-keys its translations (#289).
         private static GameObject CreateSectionHeader(Transform parent, string name, string label)
         {
             var go = new GameObject(name);
@@ -9827,7 +9838,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             go.AddComponent<RectTransform>();
             UIFactory.AddHLG(go, spacing: 0, padL: 4, padR: 4, padT: 6, padB: 2);
             UIFactory.AddLE(go, prefH: 30, flexH: 0);
-            UIFactory.CreateText(name + "_txt", go.transform, label, 18f, C_WHITE,
+            UIFactory.CreateText(name + "_txt", go.transform, I18n.Tr(label), 18f, C_WHITE,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 28));
             return go;
         }
@@ -10241,7 +10252,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (txtShopCategoryDesc != null)
             {
                 int di = Math.Max(0, Math.Min(shopCategoryFilter, SHOP_TAB_DESCS.Length - 1));
-                UIFactory.SetText(txtShopCategoryDesc, SHOP_TAB_DESCS[di]);
+                UIFactory.SetText(txtShopCategoryDesc, I18n.Tr(SHOP_TAB_DESCS[di]));
             }
 
             var rawItems = ApiClient.CachedShopItems;
