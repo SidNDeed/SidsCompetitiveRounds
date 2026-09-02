@@ -1580,6 +1580,38 @@ namespace CompetitiveRounds
                     menuClip = clip;
                     break;
                 }
+
+                // Fallback route: at the MAIN MENU the manager's event assets
+                // carry EMPTY soundContainerArray (live-probed 2026-09-02:
+                // containers=0 on both events, while the clips themselves ARE
+                // resident — Sonigon wires containers later). Enumerate the
+                // loaded AudioClips directly by the MUS_ naming convention
+                // (the scout-verified alternative); the event walk stays
+                // preferred because it is name-convention-free.
+                if (found.Count == 0 || menuClip == null)
+                {
+                    bool needCombat = found.Count == 0;   // latch BEFORE the loop — the first add must not stop the rest
+                    var all = Resources.FindObjectsOfTypeAll<AudioClip>();
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        var clip = all[i];
+                        if (clip == null) continue;
+                        string nm = clip.name ?? "";
+                        if (needCombat && nm.StartsWith("MUS_Level_", StringComparison.Ordinal) &&
+                            nm.EndsWith("_Game", StringComparison.Ordinal))
+                        {
+                            bool dup = false;
+                            for (int j = 0; j < found.Count; j++)
+                                if (ReferenceEquals(found[j].Clip, clip)) { dup = true; break; }
+                            if (!dup) found.Add(new VanillaTrack { RawName = nm, Title = PrettifyVanillaName(nm), Clip = clip });
+                        }
+                        if (menuClip == null && nm.StartsWith("MUS_Main_Menu", StringComparison.Ordinal))
+                            menuClip = clip;
+                    }
+                    found.Sort((a, b) => string.CompareOrdinal(a.RawName, b.RawName));
+                    if (found.Count > 0)
+                        LogOnce("vanilla-enum-fb", $"[MUSIC] vanilla catalog via Resources fallback: {found.Count} combat clips (event walk saw empty containers)", false);
+                }
             }
             catch (Exception ex)
             {
@@ -1598,7 +1630,39 @@ namespace CompetitiveRounds
             {
                 s.vanillaLogSignature = signature;
                 if (found.Count == 0)
+                {
                     Plugin.Log?.LogError("[MUSIC] vanilla album enumeration yielded ZERO _Game clips — vanilla OST album absent; engine fails open to vanilla behavior");
+                    // Diagnostic (#117 discipline): say what the walk actually saw,
+                    // one shot per signature, so a miss is debuggable from one log.
+                    try
+                    {
+                        object ev = AccessTools.Field(typeof(SoundMusicManager), "musicIngame")?.GetValue(mgr);
+                        if (ev == null) Plugin.Log?.LogError("[MUSIC-DIAG] musicIngame field is NULL on this manager instance");
+                        else
+                        {
+                            object arr = AccessTools.Field(ev.GetType(), "soundContainerArray")?.GetValue(ev);
+                            var en = arr as System.Collections.IEnumerable;
+                            if (arr == null) Plugin.Log?.LogError($"[MUSIC-DIAG] event type {ev.GetType().FullName} has no/null soundContainerArray");
+                            else
+                            {
+                                int nCont = 0; var names = new StringBuilder();
+                                foreach (var sc in en)
+                                {
+                                    nCont++;
+                                    if (sc == null) { names.Append("<null-sc>;"); continue; }
+                                    object clips = AccessTools.Field(sc.GetType(), "audioClip")?.GetValue(sc);
+                                    var ce = clips as System.Collections.IEnumerable;
+                                    if (ce == null) { names.Append(((UnityEngine.Object)sc).name).Append(":<no-audioClip-field>;"); continue; }
+                                    int nc = 0;
+                                    foreach (var c in ce) { nc++; var cl = c as AudioClip; if (cl != null && names.Length < 900) names.Append(cl.name).Append(';'); }
+                                    if (nc == 0 && names.Length < 900) names.Append(((UnityEngine.Object)sc).name).Append(":<0 clips>;");
+                                }
+                                Plugin.Log?.LogError($"[MUSIC-DIAG] containers={nCont} clipsSeen=[{names}]");
+                            }
+                        }
+                    }
+                    catch (Exception dx) { Plugin.Log?.LogError("[MUSIC-DIAG] walk diag threw: " + dx.Message); }
+                }
                 else
                     Plugin.Log?.LogInfo($"[MUSIC] vanilla album observed: {found.Count} combat clips [{signature}]");
                 if (menuClip == null)
