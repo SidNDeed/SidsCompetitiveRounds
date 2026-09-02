@@ -72,6 +72,11 @@ FILES = [
     "InfoViz.cs",
     # Esc-menu LEAVE MATCH row (Aug 30) — labels + honest leave copy.
     "EscLeaveRow.cs",
+    # Music feature (Sept 2) — download status lines (MusicAssets), the
+    # now-playing credit format (MusicEngine). MusicCatalog/MusicEntitlements
+    # deliberately absent: album/track/artist text stays raw (#368) and their
+    # log lines are not user-visible.
+    "MusicAssets.cs", "MusicEngine.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

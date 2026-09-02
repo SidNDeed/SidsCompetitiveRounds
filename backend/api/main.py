@@ -3585,6 +3585,20 @@ BULLET_STATS_CLEAN_MIN_VERSION = "1.39.4"
 # client loses the section.
 DANCES_MIN_VERSION = "1.39.7"
 
+# Music albums are version-gated PER SKU, not per kind: each album's floor is
+# the client version whose compiled MusicCatalog carries that album (an older
+# client cannot render, preview, or play it — the dance "born unusable" class,
+# design v3 G1). SHIP COUPLING (#294/#331): the entry for a sku must equal the
+# client version that actually ships its catalog entry, and is added ONLY
+# after Sid names that version (the 277 flip wave) — never guessed early
+# (a high guess silently hides the album from the shipping client; a low one
+# exposes it to clients that cannot play it). Ships EMPTY: {} = no music
+# exposed anywhere, double-gated by the row's catalog_ready=FALSE until
+# migration 277. Values are validated at import (below _parse_version): an
+# unparseable value EXCLUDES its sku from every supported set (fail closed,
+# never version-0) with one loud startup line.
+MUSIC_SKU_MIN_VERSIONS: dict[str, str] = {}
+
 # Per-request mod version captured from the X-Mod-Version header by the
 # version-gate middleware. Identity-bound _mark_mod_seen callers may use it
 # to stamp players.mod_version without threading the request object through.
@@ -3712,6 +3726,52 @@ def _parse_version(v: str) -> tuple[int, ...]:
         return tuple(int(x) for x in v.strip().split("."))
     except Exception:
         return (0,)
+
+
+def _music_strict_version(v: str | None) -> tuple[int, ...] | None:
+    """_parse_version's exact dotted-numeric grammar, but FAILURE IS VISIBLE:
+    _parse_version swallows to (0,), and a version-0 floor would expose a
+    music sku to every client — precisely the fail-open G1 forbids."""
+    try:
+        parts = tuple(int(x) for x in (v or "").strip().split("."))
+    except Exception:
+        return None
+    return parts or None
+
+
+def _music_validated_floors() -> dict[str, tuple[int, ...]]:
+    """Import-time validation of MUSIC_SKU_MIN_VERSIONS (design v3 G1): an
+    invalid/placeholder value ("TBD", "", "0") EXCLUDES that sku from every
+    supported set — fail closed, one loud startup line per exclusion."""
+    out: dict[str, tuple[int, ...]] = {}
+    for _sku, _val in MUSIC_SKU_MIN_VERSIONS.items():
+        _floor = _music_strict_version(_val)
+        if _floor is None or not any(_floor):
+            print(f"[MUSIC] EXCLUDED sku {_sku}: min version {_val!r} is not a "
+                  f"nonzero dotted-numeric - sku hidden from ALL clients (fail closed)")
+            continue
+        out[_sku] = _floor
+    return out
+
+
+_MUSIC_SKU_FLOORS: dict[str, tuple[int, ...]] = _music_validated_floors()
+
+
+def _supported_music_skus(request: Request) -> list[str]:
+    """Music skus this request's client version supports (>= its validated
+    floor). Fails CLOSED to [] on a missing/unparseable X-Mod-Version — the
+    harmless direction (no music), mirroring the dance gate above."""
+    if not _MUSIC_SKU_FLOORS:
+        return []
+    raw = request.headers.get("X-Mod-Version") if request is not None else None
+    if not raw:
+        # Contextvar fallback (set by the version-gate middleware) so a caller
+        # without the raw request still resolves the same header value.
+        raw = _current_mod_version.get()
+    cv = _music_strict_version(raw)
+    if cv is None:
+        return []
+    return [_sku for _sku, _floor in _MUSIC_SKU_FLOORS.items() if cv >= _floor]
 
 
 # Maintenance mode — set to True via /admin/maintenance/start. While True, all non-bypass
@@ -19590,7 +19650,7 @@ def _is_shop_owner(steam_id: str | None) -> bool:
 
 
 @app.get("/api/v1/shop/items", tags=["Shop"])
-async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession = Depends(get_db)):
+async def list_shop_items(request: Request, steam_id: str | None = Query(None), db: AsyncSession = Depends(get_db)):
     """Always-available items + (future) today's rotation pick. If steam_id is
     provided, annotates each item with 'owned' so the UI can hide Buy buttons
     for already-owned items."""
@@ -19643,6 +19703,15 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
     except Exception:
         rows = [r for r in rows if r.kind != "dance"]
 
+    # Music albums are gated PER SKU (MUSIC_SKU_MIN_VERSIONS): a client only
+    # sees albums its compiled MusicCatalog can render. Same fail-closed shape
+    # as the dance filter — any error drops every music row.
+    try:
+        _msk = set(_supported_music_skus(request))
+        rows = [r for r in rows if r.kind != "music_album" or r.sku in _msk]
+    except Exception:
+        rows = [r for r in rows if r.kind != "music_album"]
+
     # Artist annotations (v1.30): display name per artist steam id, plus a
     # sold-count per stock-limited item so the shop can render "3 of 10 left"
     # and grey out sold-out rows. Both maps are tiny (a handful of artist
@@ -19680,6 +19749,11 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
                 "artist_name": artist_names.get(getattr(r, "artist_steam_id", None) or "", ""),
                 "stock_limit": getattr(r, "stock_limit", None) or 0,
                 "stock_sold": sold_counts.get(r.id, 0) if getattr(r, "stock_limit", None) else 0,
+                # released_at ONLY, never a created_at fallback: the client
+                # sorts music rows by this and renders nulls last (design F7).
+                # Appended last — /shop/items key order is not load-bearing
+                # for the parser, but new-field-last is the safe convention.
+                "released_iso": r.released_at.date().isoformat() if r.released_at else None,
             }
             for r in rows
         ]
@@ -19687,14 +19761,17 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
 
 
 @app.get("/api/v1/shop/newest", tags=["Shop"])
-async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
+async def newest_shop_items(request: Request,
+                            limit: int = Query(6, ge=1, le=24),
                             batches: int = Query(0, ge=0, le=4),
                             db: AsyncSession = Depends(get_db)):
     """Most recently added COSMETICS (kind='face' — the bundled-art items the
     Shop's own "Cosmetics" category shows), for the Home tab's 'newest
     cosmetics' panel (v1.33; narrowed to faces Sept 1 — Sid: the panel was
     flooding with every new shop row, trails/dances/titles included, when it
-    should only show cosmetics). Excludes achievement-pool items and
+    should only show cosmetics; music albums the CALLER's version supports are
+    the deliberate exception, homepage-billed like cosmetics per the music
+    design). Excludes achievement-pool items and
     unpublished community art (catalog_ready = false — its PNG hasn't shipped
     in the client yet, so it would render as a blank swatch).
     Shipped-but-not-yet-opened items ARE included with on_sale=false so the
@@ -19710,6 +19787,13 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
     # The kind filter appears in BOTH the outer WHERE and the recent-days
     # subquery (#163/#164: the batch window must be computed over the same
     # population it filters, or a trail-release day eats a face batch slot).
+    # Music skus are resolved in Python BEFORE the SQL and bound into BOTH
+    # populations as one array param — never post-filtered after batching/
+    # limiting (design v3 G1/F5; an empty list binds as an empty varchar[]
+    # and matches nothing). CAST(:msk AS varchar[]) pins the param type so
+    # asyncpg can never mistype the bind (#275 class; PREPARE-verified
+    # 2026-09-01: parameter_types = {"character varying[]"}).
+    _msk = _supported_music_skus(request)
     rows = (await db.execute(text("""
         SELECT si.sku, si.kind, si.name, si.rarity, si.price, si.preview_color,
                si.stock_limit,
@@ -19723,19 +19807,21 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
         LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
         WHERE si.rotation_pool IS NULL
           AND si.catalog_ready
-          AND si.kind = 'face'
+          AND (si.kind = 'face'
+               OR (si.kind = 'music_album' AND si.sku = ANY(CAST(:msk AS varchar[]))))
           AND (:batches = 0 OR COALESCE(si.released_at, si.created_at)::date IN (
                 SELECT d FROM (
                     SELECT DISTINCT COALESCE(released_at, created_at)::date AS d
                     FROM shop_items
                     WHERE rotation_pool IS NULL
                       AND catalog_ready
-                      AND kind = 'face'
+                      AND (kind = 'face'
+                           OR (kind = 'music_album' AND sku = ANY(CAST(:msk AS varchar[]))))
                     ORDER BY d DESC LIMIT :batches
                 ) recent_days))
         ORDER BY COALESCE(si.released_at, si.created_at) DESC
         LIMIT :lim
-    """), {"lim": limit, "batches": batches})).mappings().all()
+    """), {"lim": limit, "batches": batches, "msk": _msk})).mappings().all()
     # (The dance version gate that used to sit here is dead under the
     # kind='face' filter and was removed; /shop/items keeps its copy.)
     return {
@@ -19813,6 +19899,13 @@ async def purchase_item(
         raise HTTPException(status_code=404, detail="Item not found")
     if not getattr(item, "catalog_ready", True):
         raise HTTPException(status_code=409, detail="This cosmetic is approved but has not shipped in the mod yet")
+    # Music albums: per-sku version gate (MUSIC_SKU_MIN_VERSIONS). The listing
+    # already hides unsupported albums, but a listing hide is a rendering
+    # suggestion, not a gate (#159/#325) — the dance kind shipped with exactly
+    # this hole (listing-only gate; scout note). Sits BEFORE the gold debit so
+    # a refused buy moves nothing.
+    if item.kind == "music_album" and item.sku not in _supported_music_skus(request):
+        raise HTTPException(status_code=409, detail="This album requires a newer mod version")
     # Achievement-gated items (Sid Slayer / Stan Slayer titles) can't be
     # bought — they're granted by their achievement. rotation_pool doubles as
     # the gate marker; these items are also hidden from /shop/items.

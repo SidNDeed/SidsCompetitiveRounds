@@ -128,6 +128,16 @@ namespace CompetitiveRounds
         // Gates ALL outbound API traffic except the mod-version probe and consent-revocation calls.
         internal static ConfigEntry<string> DataConsent;
 
+        // ── Music (ai-collab/music-feature design v3) ────────────────────
+        // Stored as the DESELECTED track set (albumSku:trackIdx, pipe-
+        // delimited) so newly shipped content defaults to selected.
+        internal static ConfigEntry<string> MusicDeselected;
+        internal static ConfigEntry<bool> MusicShuffle;
+        internal static ConfigEntry<bool> MusicLoop;
+        internal static ConfigEntry<int> MusicVolume;        // engine-local %, on top of the game's own music slider
+        internal static ConfigEntry<bool> MenuMusicEnabled;  // opt-in (§8)
+        internal static ConfigEntry<bool> MusicCreditToast;  // opt-in (§8)
+
         // ── SCR Broadcast (ai-collab/broadcast-architecture.md) ──────────
         // Enabled gates ONLY the director (§3a). The §2c service-account
         // fence and §7.1 log masking are IDENTITY-latched inside
@@ -135,6 +145,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastEnabled;
         internal static ConfigEntry<string> BroadcastStatusPath;   // §3b lease file
         internal static ConfigEntry<bool> BroadcastHideChatPane;   // broadcast seat only
+        internal static ConfigEntry<bool> BroadcastCustomMusic;    // broadcast seat only — custom album autoplay + credit (music v3 §7)
         internal static ConfigEntry<string> BroadcastTestMapSkin;  // broadcast seat only — map-skin test lever
         internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
@@ -873,6 +884,35 @@ namespace CompetitiveRounds
                 "Consent to report match data to the leaderboard. Values: \"\" (unset — you'll be asked at launch), \"granted\", or \"denied\"."
             );
 
+            // ── Music (ai-collab/music-feature design v3) ────────────────
+            // All NEW keys (#190): these defaults land in every install's
+            // cfg on first launch and are never revisited — they are final.
+            MusicDeselected = Config.Bind(
+                "Music", "MusicDeselected",
+                "",
+                "Tracks removed from your custom-music playlist, as albumSku/trackIndex pairs (comma-separated). Stored as the DESELECTED set so newly added tracks default to selected. Managed from the F5 Music tab."
+            );
+            MusicShuffle = Config.Bind(
+                "Music", "MusicShuffle", false,
+                "Shuffle the custom-music playlist (dispersion shuffle: no repeats within a cycle, cycle boundaries stay distinct)."
+            );
+            MusicLoop = Config.Bind(
+                "Music", "MusicLoop", true,
+                "Loop the custom-music playlist when it reaches the end."
+            );
+            MusicVolume = Config.Bind(
+                "Music", "MusicVolume", 100,
+                "Custom-music volume percent (10% steps via the Music tab stepper). Applied on top of the game's own music slider, which keeps working."
+            );
+            MenuMusicEnabled = Config.Bind(
+                "Music", "MenuMusicEnabled", false,
+                "Play your selected custom music in the main menu too (opt-in). Off = custom music only during games; menu music stays vanilla."
+            );
+            MusicCreditToast = Config.Bind(
+                "Music", "MusicCreditToast", false,
+                "Show a small Now Playing credit line while custom music plays (opt-in). The broadcast seat shows its credit regardless of this key."
+            );
+
             // ── SCR Broadcast (design doc §3a/§3b/§4) ────────────────────
             // Inert for every normal install: the director additionally
             // requires the broadcast account's steam id, and the §2c fence /
@@ -890,6 +930,10 @@ namespace CompetitiveRounds
                 "Broadcast", "HideChatPane", true,
                 "Hide the floating in-game chat pane on the broadcast seat so stream frames stay clean. Only consulted on the broadcast identity."
             );
+            BroadcastCustomMusic = Config.Bind(
+                "Broadcast", "BroadcastCustomMusic", true,
+                "Broadcast seat only: play the custom album pack (all custom albums, shuffle+loop) instead of vanilla music, with the permanent on-stream credit line. Only consulted on the broadcast identity; grants nothing to players."
+            );
             BroadcastTestMapSkin = Config.Bind(
                 "Broadcast", "TestMapSkin", "",
                 "Broadcast seat only: render a specific map skin without owning or equipping it, so the broadcast look can be checked outside a live spectate session. "
@@ -903,7 +947,7 @@ namespace CompetitiveRounds
             );
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
-                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
+                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
             );
             BroadcastTestMapSkinTourSeconds = Config.Bind(
                 "Broadcast", "TestMapSkinTourSeconds", 0,
@@ -942,6 +986,10 @@ namespace CompetitiveRounds
             // and several diag patches) never applied for 4 releases. With
             // per-class isolation, we lose just the broken class and keep
             // everything else.
+            // MusicSuppressionPatch (MusicEngine.cs) rides this same loop via
+            // its class-level [HarmonyPatch] — its prefixes fail open until
+            // the engine initializes and are never gated on IsCompetitiveRoom
+            // (#286); MusicEngine.Initialize verifies attachment (#83).
             try
             {
                 HarmonyInstance = new Harmony(ModId);
@@ -2540,6 +2588,11 @@ namespace CompetitiveRounds
             GameStateWatcher.Initialize();
             CardImageLoader.Initialize();
             try { CustomCosmetics.Initialize(); } catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] init failed: {ex.Message}"); }
+            // Music: assets FIRST (tier-tree resolution + stale-revision/orphan
+            // sweep must finish before the engine creates any AudioSource —
+            // MusicAssets contract), then the engine's static init/host spawn.
+            try { MusicAssets.Initialize(); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC] assets init failed: {ex.Message}"); }
+            try { MusicEngine.Initialize(); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC] engine init failed: {ex.Message}"); }
             CompetitiveUI.CacheRaycasters(); // No-op but kept for compat
             initialized = true;
 
@@ -2611,6 +2664,13 @@ namespace CompetitiveRounds
                     // Warm the shop cache so the character editor knows owned
                     // cosmetics even if the F5 page was never opened this session.
                     try { ApiClient.FetchShopItems(sid); } catch { }
+                    // Broadcast identity resolution site (music contract): the
+                    // broadcast predicate is undecidable until the steam id
+                    // resolves — kick the engine once here so the broadcast
+                    // seat's bootstrap (full-tier fetch + custom autoplay)
+                    // fires without waiting for a tab open. A no-op mode
+                    // recompute on every other seat.
+                    try { MusicEngine.Reconcile("broadcast-identity"); } catch { }
                     yield break;
                 }
                 yield return new WaitForSeconds(0.5f);

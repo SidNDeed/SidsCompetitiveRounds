@@ -2711,14 +2711,20 @@ namespace CompetitiveRounds
         //
         // Fix: while in any online Photon room, force runInBackground=true so Unity
         // keeps processing input/network events even when the player tabbed
-        // away. Restored to whatever vanilla had set on room leave.
+        // away. Restored to the captured baseline on room leave — via
+        // RunInBackgroundLease since the music batch (v3/G12), so the
+        // broadcast-music owner can extend the hold: the actual restore
+        // happens only when NO owner remains.
         //
         // Belt-and-suspenders: after 20s of being in a non-mod-issued room
         // with no match started, surface an IMGUI overlay (rendered by
         // CompetitiveUI) with a "Force exit room" button so the player
         // never needs alt+F4 to recover.
-        private static bool _runInBackgroundOverridden = false;
-        private static bool _origRunInBackground = false;
+        //
+        // This flag only tracks whether THIS file's "room" owner is
+        // currently registered (edge detection for the poll); the
+        // snapshot/restore state lives in RunInBackgroundLease.
+        private static bool _roomBgLeaseHeld = false;
         private static bool _audioMutedForFocus = false;
         private static float _preMuteAudioVolume = 1f;
         private static DateTime _stuckOverlayDismissedAt = DateTime.MinValue;
@@ -2730,36 +2736,37 @@ namespace CompetitiveRounds
             ShouldShowMatchFoundStuckOverlay = false;
         }
 
-        /// <summary>The runInBackground override, split out of PollRoomState so
+        /// <summary>The runInBackground hold, split out of PollRoomState so
         /// the SPECTATOR branch can call it too. Poll() early-returns for
-        /// spectators well before PollRoomState — which is this override's only
+        /// spectators well before PollRoomState — which is this hold's only
         /// writer — so a spectator seat never got it. That defeats the whole
         /// point of the patch on any client whose Unity default is false: a
         /// spectator alt-tabbing gets exactly the frozen seat this fix exists to
         /// prevent. (Found while diagnosing bug 210; NOT that bug's cause — the
         /// reporter's own default was already true — but a real latent gap.)
-        /// Idempotent and cheap: both arms are one-shot on a flag.</summary>
+        /// Idempotent and cheap: both arms are one-shot on a flag. The actual
+        /// Application.runInBackground snapshot/write/restore lives in
+        /// RunInBackgroundLease (v3/G12) so this room hold composes with the
+        /// broadcast-music owner instead of keeping an independent
+        /// prior-value snapshot.</summary>
         private static void TickRunInBackground()
         {
             bool inOnlineRoom = IsInOnlinePhotonRoomNow();
-            if (inOnlineRoom && !_runInBackgroundOverridden)
+            if (inOnlineRoom && !_roomBgLeaseHeld)
             {
                 try
                 {
-                    _origRunInBackground = UnityEngine.Application.runInBackground;
-                    UnityEngine.Application.runInBackground = true;
-                    _runInBackgroundOverridden = true;
-                    Plugin.Log.LogInfo($"[FOCUS] In Photon room — Application.runInBackground forced true (was {_origRunInBackground})");
+                    RunInBackgroundLease.Acquire("room");
+                    _roomBgLeaseHeld = true;
                 }
                 catch { }
             }
-            else if (!inOnlineRoom && _runInBackgroundOverridden)
+            else if (!inOnlineRoom && _roomBgLeaseHeld)
             {
                 try
                 {
-                    UnityEngine.Application.runInBackground = _origRunInBackground;
-                    _runInBackgroundOverridden = false;
-                    Plugin.Log.LogInfo($"[FOCUS] Left Photon room — runInBackground restored to {_origRunInBackground}");
+                    RunInBackgroundLease.Release("room");
+                    _roomBgLeaseHeld = false;
                 }
                 catch { }
                 // Room-exit edge, LOSSY BACKUP copy (review r4: a

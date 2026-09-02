@@ -99,6 +99,13 @@
       <HintPath>$(ManagedDir)\UnityEngine.AudioModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- UnityWebRequestMultimedia + DownloadHandlerAudioClip (streamAudio) —
+         the custom music engine streams its OGGs from disk through these.
+         Ships with the game; zero distribution cost. -->
+    <Reference Include="UnityEngine.UnityWebRequestAudioModule">
+      <HintPath>$(ManagedDir)\UnityEngine.UnityWebRequestAudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.AssetBundleModule">
       <HintPath>$(ManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath>
       <Private>false</Private>
@@ -189,6 +196,21 @@
     <!-- Custom cosmetic art (512px transparent PNGs) — CustomCosmetics.cs reads
          these from <plugin-dir>/cosmetics/ at runtime (same pipeline as cards). -->
     <CosmeticArtToCopy Include="cosmetics\*.png" />
+    <!-- Custom music pack (plugin/music/ is gitignored by name — present only
+         on seats holding the masters; empty globs make every copy a no-op
+         elsewhere). Dev-loop mirror of the v3 delivery layout: the previews
+         tier gets the 30s *_preview.ogg snippets + the cover PNG, the full
+         tier gets the full-length OGGs, the mastering manifest.json lands at
+         the revision root. NO installed.json marker is emitted here —
+         MusicAssets validates dev trees against the COMPILED manifest and
+         rewrites the marker itself for a fully-valid marker-less tree
+         (agent-A contract; the WriteLinesToFile alternative was rejected
+         because the marker format is MusicAssets-owned and a wrong-format
+         marker reads as an INVALID tree). -->
+    <MusicPreviewsToCopy Include="music\*_preview.ogg" />
+    <MusicPreviewsToCopy Include="music\*.png" />
+    <MusicFullToCopy Include="music\*.ogg" Exclude="music\*_preview.ogg" />
+    <MusicManifestToCopy Include="music\manifest.json" />
   </ItemGroup>
 
   <!-- Home-tab logo: EMBEDDED in the DLL (not a loose file) because the
@@ -223,11 +245,32 @@
     <Copy SourceFiles="@(CosmeticArtToCopy)"
           DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\cosmetics"
           SkipUnchangedFiles="true" />
+    <!-- Music tier trees (MusicAssets.ASSET_REVISION = ar1 — this literal and
+         that const must move together). MakeDirs are conditioned on the item
+         groups so a music-less checkout never plants empty tier dirs for
+         MusicAssets to judge invalid. -->
+    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\previews"
+             Condition="'@(MusicPreviewsToCopy)' != ''" />
+    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\full"
+             Condition="'@(MusicFullToCopy)' != ''" />
+    <Copy SourceFiles="@(MusicPreviewsToCopy)"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\previews"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(MusicFullToCopy)"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\full"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(MusicManifestToCopy)"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1"
+          SkipUnchangedFiles="true"
+          Condition="'@(MusicManifestToCopy)' != ''" />
     <Message Text="Copied $(AssemblyName).dll to BepInEx plugins" Importance="high" />
     <Message Text="Copied comp-rounds-fonts bundle to BepInEx plugins" Importance="high"
              Condition="Exists('$(OutputPath)comp-rounds-fonts')" />
     <Message Text="Copied @(CardArtToCopy->Count()) card art files to BepInEx plugins" Importance="high" />
     <Message Text="Copied @(CosmeticArtToCopy->Count()) cosmetic art files to BepInEx plugins" Importance="high" />
+    <Message Text="Copied @(MusicPreviewsToCopy->Count()) music preview files + @(MusicFullToCopy->Count()) full tracks to BepInEx plugins (ar1)"
+             Importance="high"
+             Condition="'@(MusicFullToCopy)' != ''" />
   </Target>
 
 </Project>

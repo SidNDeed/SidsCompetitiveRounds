@@ -2068,20 +2068,55 @@ namespace CompetitiveRounds
             public string artist_name;
             public int stock_limit;   // 0 = unlimited
             public int stock_sold;    // only populated when stock_limit > 0
+            // Music: ISO release date ("" when the server omits/nulls it) so
+            // album rows sort newest-first client-side. Flat scalar — rides
+            // the manual parser with no slicer work.
+            public string released_iso;
         }
 
         public static List<ShopItemData> CachedShopItems { get; private set; }
         public static List<ShopItemData> CachedInventory { get; private set; }
 
+        // Music entitlement snapshot generation — stamped at request DISPATCH,
+        // never at callback completion (music design R3). Completion-stamping
+        // would hand whichever response arrives LAST the highest generation,
+        // so a slow pre-revoke/pre-purchase response could overwrite fresher
+        // data; dispatch order is the truth ApplyShopSnapshot's stale-compare
+        // needs. Every shop-items fetch (startup warm fetch, tab open,
+        // post-purchase refresh, consent-grant refetch) funnels through
+        // FetchShopItems, so this is the single stamp site.
+        private static int _shopSnapshotGen;
+        /// <summary>Highest shop-snapshot generation DISPATCHED so far (not
+        /// necessarily applied). Read-only hook so MusicEntitlements'
+        /// consent-revoke invalidation can outrank generations that are
+        /// still in flight — a threshold derived only from APPLIED
+        /// generations cannot see them.</summary>
+        internal static int ShopSnapshotGenHighWater => _shopSnapshotGen;
+
         public static void FetchShopItems(string steamId = null)
         {
             string url = $"{baseUrl}/api/v1/shop/items";
             if (!string.IsNullOrEmpty(steamId)) url += $"?steam_id={Escape(steamId)}";
+            int gen = ++_shopSnapshotGen;
+            // Anonymous fetch => "" — ApplyShopSnapshot drops it (an
+            // unauthenticated response must never touch entitlements).
+            string entitlementSid = string.IsNullOrEmpty(steamId) ? "" : steamId;
             Plugin.Instance.StartCoroutine(GetRequest(url, (success, response) =>
             {
                 if (!success) { Plugin.Log.LogWarning($"[SHOP] list failed: {response}"); return; }
                 CachedShopItems = ParseShopItems(response);
                 Plugin.Log.LogInfo($"[SHOP] loaded {CachedShopItems.Count} items");
+                // Entitlements ride the same snapshot. Consent gate: a revoke
+                // that lands while this response is in flight must outrank it
+                // (G11) — GetRequest only checks consent at dispatch, so the
+                // landing side re-checks here. Guarded so a music-side throw
+                // can never break shop rendering.
+                try
+                {
+                    if (Plugin.DataConsentGranted)
+                        MusicEntitlements.ApplyShopSnapshot(entitlementSid, gen, CachedShopItems);
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC] entitlement snapshot apply failed: {ex.Message}"); }
                 NativeUI.MarkDirty();
             }));
         }
@@ -2326,6 +2361,7 @@ namespace CompetitiveRounds
                 it.artist_name = ExtractJsonString(chunk, "artist_name");
                 it.stock_limit = ExtractJsonInt(chunk, "stock_limit");
                 it.stock_sold = ExtractJsonInt(chunk, "stock_sold");
+                it.released_iso = ExtractJsonString(chunk, "released_iso");
                 if (!string.IsNullOrEmpty(it.sku) || !string.IsNullOrEmpty(it.name))
                     list.Add(it);
             }
@@ -17302,6 +17338,11 @@ namespace CompetitiveRounds
                     FetchPlayerStats(id);
                     FetchMatchHistory(id);
                     FetchAchievements(id);
+                    // Music [F16]: the startup warm fetch was consent-blocked
+                    // (or its snapshot was revoke-invalidated), so entitlements
+                    // need an authenticated snapshot NOW, not at the next
+                    // shop-tab open.
+                    FetchShopItems(id);
                 }
                 FetchLeaderboard();
                 FetchRecentSeries();
@@ -17318,6 +17359,12 @@ namespace CompetitiveRounds
                 CachedAchievements = null;
                 CachedShopItems = null;
                 CachedInventory = null;
+                // Music [G11]: revoke outranks every in-flight shop response —
+                // the store advances its generation past the dispatch high
+                // water, clears, and fires Changed (engine stops custom
+                // playback + reconciles to vanilla). Guarded so a music-side
+                // throw can never abort the ranked-off flip below.
+                try { MusicEntitlements.OnConsentRevoked(); } catch { }
                 CachedActiveSeries = null;
                 ChatClient.Disconnect();
                 // Flip ranked off — if the user is in queue, server rejects further polls (410)

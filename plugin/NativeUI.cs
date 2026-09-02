@@ -1190,7 +1190,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
+        private static void TeardownOverlaySurfaces(){try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
         public static void Close(){showcaseOwned=false;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -1383,6 +1383,7 @@ namespace CompetitiveRounds
             MaybeRefreshHomeTab();
             MaybeRefreshInfoGold();
             MaybeRefreshCompareRecords();
+            MaybeRefreshMusicTab();
             TickAnimatedThumbnails();
             TickCardPreviewUpgrade();
             TickRankedHint();
@@ -1711,6 +1712,7 @@ namespace CompetitiveRounds
             infoNavBtns.Clear();infoNavTexts.Clear();infoNavKeys.Clear();   // Info tab nav pool (#147/#149/#150)
             infoNavCatHdrs.Clear();infoNavCatOfBtn.Clear();infoNoMatchGO=null;infoSearchField=null;   // Info search pool (Aug 23 r2)
             shopRows.Clear();shopRowPool.Clear();shopArtistBtns.Clear();shopArtistBtnTexts.Clear();shopArtistBtnNames.Clear();
+            shopMusicTrackRows.Clear();musicAlbumHdrs.Clear();musicTrackRows.Clear();   // Music tab + shop expansion pools (#147/#149/#150)
             teamLBRows.Clear();teamHistRows.Clear();
             tSignupRowPool.Clear();tSignupRowTexts.Clear();tBracketRowPool.Clear();tBracketRowTexts.Clear();_tBracketRowPurposes.Clear();
             tTournBetRowPool.Clear();
@@ -1800,7 +1802,7 @@ namespace CompetitiveRounds
             tIndRow.SetActive(false);
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
-            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);
+            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);tabPanels[16]=BuildMusicTab(content.transform);
             // (The [ID] button's position is set in CreateHistoryRow itself, so
             // it cannot desync from tab-build ordering.)
 
@@ -2051,8 +2053,8 @@ namespace CompetitiveRounds
         // i18n: expression-bodied property (NOT a static readonly field) so the
         // I18n.Tr calls run at ACCESS time — after I18nCatalogues.Install() — and
         // re-evaluate after a language switch (which rebuilds the page).
-        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info")};
-        private const int NUM_TABS=16;   // Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab)
+        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info"),I18n.Tr("Music")};
+        private const int NUM_TABS=17;   // Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music (own top-level group)
         private const int TAB_HOME=13;
         private const int TAB_BANNED=14;
         private const int TAB_INFO=15;   // Aug 23 (Sid): the explainer library — Settings group sub-tab
@@ -2063,9 +2065,11 @@ namespace CompetitiveRounds
         // the landing tab when the menu is first built; Card Stats + Achievements
         // moved under My Stats as sub-tabs (Sid's item 4).
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
-        private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Admin"),I18n.Tr("Settings")};
-        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{6,14},new[]{5,15}};
-        private const int GROUP_ADMIN=6;   // GROUP_LABELS index of the admin-gated slot
+        private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Music"),I18n.Tr("Admin"),I18n.Tr("Settings")};
+        // Music sits right after Shop (buy there, listen here) rather than
+        // appended at the end — Sid's July 12 bar order keeps Settings LAST.
+        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{16},new[]{6,14},new[]{5,15}};
+        private const int GROUP_ADMIN=7;   // GROUP_LABELS index of the admin-gated slot (7 since Music took slot 6)
         private static int GroupOf(int tabIdx){for(int g=0;g<GROUP_MEMBERS.Length;g++)for(int m=0;m<GROUP_MEMBERS[g].Length;m++)if(GROUP_MEMBERS[g][m]==tabIdx)return g;return 0;}
         /* Aug 7 item 7: the Banned sub-tab is ADMIN-only (its only fetch is the
          * admin-HMAC banned list). Gating here also keeps the sub-tab bar
@@ -5651,7 +5655,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
+        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
 tournaments"): the My Match panel — Ready Up / Play Now / FORFEIT — is gated by the
 sub-tab kind fence, so a participant whose live match sits under the OTHER kind's
 sub-tab opened the tab and saw nothing concedable. On tab entry only (manual sub-tab
@@ -5660,7 +5664,7 @@ another kind does, land on that kind. Mirrors the sub-tab buttons' own switch
 statements; the branch's force fetch below is shared. Entries older than 45s are
 ignored (review MEDIUM: a failed refresh retains the previous list indefinitely,
 and switching on a stale snapshot lands on a completed match's kind — the 20s
-poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}if(idx==16){/* Music tab open = a previews-tier trigger (design §3); idempotent no-op once ready/in-flight/gave-up. Shop fetch refreshes entitlements (ApplyShopSnapshot rides it). */try{MusicAssets.EnsureTier(MusicTier.Previews,"music-tab");}catch(Exception ex){Plugin.Log.LogWarning($"[MUSIC-UI] EnsureTier: {ex.Message}");}var _muid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_muid)&&_muid!="unknown")ApiClient.FetchShopItems(_muid);}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -5956,6 +5960,14 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
                     // as a flat preview_color swatch (the "green square"). Skip it.
                     if((c.kind??"")=="face"&&CustomCosmetics.GetShopSprite(c.sku)==null)
                     {if(row.artImg!=null)TrackAnimatedThumb(row.artImg,null,0f);row.root.SetActive(false);continue;}
+                    // Music albums render only when this build's compiled catalog
+                    // knows the sku (design [F3] client half — the server already
+                    // version-gates; this is the skew defense, same shape as the
+                    // face-sprite skip above).
+                    bool isMusic=(c.kind??"")=="music_album";
+                    var musicAlb=isMusic?MusicCatalog.Get(c.sku):null;
+                    if(isMusic&&musicAlb==null)
+                    {if(row.artImg!=null)TrackAnimatedThumb(row.artImg,null,0f);row.root.SetActive(false);continue;}
                     string col=!string.IsNullOrEmpty(c.previewColor)&&c.previewColor.StartsWith("#")?c.previewColor:"#FFFFFF";
                     // kind/rarity are finite server sets — routed through the
                     // literal-switch helpers so the words are real harvested
@@ -5973,14 +5985,26 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
                     // the runtime Tr lookup (design-Q4 reversal, Aug 15
                     // item 1); a catalogue miss falls back to the raw English.
                     string nameDisp=I18n.Tr(c.name);
+                    // Music rows: genre + catalog artist credit REPLACE the
+                    // "(kind, rarity)" form — attribution renders from the
+                    // compiled catalog, never the server row (design [F1]).
+                    string line2=isMusic
+                        ?$"<color=#8FA3B8>{HomeSan(musicAlb.Genre??"")}</color>  "+I18n.TrF("<color=#888>by {0}</color>",HomeSan(musicAlb.ArtistName??""))+addedTag
+                        :$"<color=#8FA3B8>({HomeSan(kind)}, {HomeSan(TrRarity(c.rarity))})</color>{artistLine}{addedTag}";
                     UIFactory.SetTextRaw(row.txt,
-                        $"<color={col}>{HomeSan(nameDisp)}</color>  {priceTag}\n"
-                        +$"<color=#8FA3B8>({HomeSan(kind)}, {HomeSan(TrRarity(c.rarity))})</color>{artistLine}{addedTag}");
+                        $"<color={col}>{HomeSan(nameDisp)}</color>  {priceTag}\n"+line2);
                     if(row.artImg!=null)
                     {
                         var pSprite=UIFactory.tImage.GetProperty("sprite",BindingFlags.Public|BindingFlags.Instance);
                         var pColor=UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance);
                         var sp=CustomCosmetics.GetShopSprite(c.sku);
+                        if(sp==null&&isMusic)
+                        {
+                            // Cover art lives in the previews tier; a Home music
+                            // row is one of its download triggers (design §3).
+                            sp=GetMusicCoverSprite(c.sku);
+                            try{MusicAssets.EnsureTier(MusicTier.Previews,"home-row");}catch{}
+                        }
                         if(sp!=null)
                         {
                             // Real cosmetic art (face PNGs) — white tint, register
@@ -8362,7 +8386,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;}}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;case 16:RefreshMusicTab();break;}}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -9402,7 +9426,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // -- Shop Tab -------------------------------------------
         private static object txtShopBalance, txtShopStatus;
         private static GameObject shopRowsContainer, shopTitlesHeader, shopTrailsHeader, shopColorsHeader, shopNametagsHeader, shopPColorsHeader, shopDancesHeader;
-        private static GameObject shopCursorHeader, shopEffectsHeader, shopFacesHeader, shopOtherHeader;
+        private static GameObject shopCursorHeader, shopEffectsHeader, shopFacesHeader, shopOtherHeader, shopMusicHeader;
         // Bug batch item 9: artist filter for the CHARACTER COSMETICS section.
         // null = show all; otherwise the artist display name ("House" = unattributed).
         private static string shopArtistFilter = null;
@@ -9424,9 +9448,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object[] shopTabTexts;
         private static object txtShopCategoryDesc;
         // Index order MUST match the filter switch in RefreshShop:
-        // 0 All, 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other, 10 Dances.
+        // 0 All, 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other, 10 Dances, 11 Music.
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
-        private static string[] SHOP_TAB_NAMES => new[] { I18n.Tr("All"), I18n.Tr("Cosmetics"), I18n.Tr("Name Styles"), I18n.Tr("Maps"), I18n.Tr("Titles"), I18n.Tr("Trails"), I18n.Tr("Body/Team Color"), I18n.Tr("Cursor"), I18n.Tr("Effects"), I18n.Tr("Other"), I18n.Tr("Dances") };
+        private static string[] SHOP_TAB_NAMES => new[] { I18n.Tr("All"), I18n.Tr("Cosmetics"), I18n.Tr("Name Styles"), I18n.Tr("Maps"), I18n.Tr("Titles"), I18n.Tr("Trails"), I18n.Tr("Body/Team Color"), I18n.Tr("Cursor"), I18n.Tr("Effects"), I18n.Tr("Other"), I18n.Tr("Dances"), I18n.Tr("Music") };
         private static readonly string[] SHOP_TAB_DESCS = {
             "All cosmetics - everything available, grouped by category.",
             "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
@@ -9439,6 +9463,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             "In-combat particle aura around your character. Only visible to modded players.",
             "Utility unlocks (e.g. hide your gold total on the leaderboard).",
             "Emote dances for the hold-E wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
+            "Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second track previews; after buying, pick tracks and control playback in the Music tab.",
         };
         private static List<GameObject> shopRowPool = new List<GameObject>();
         // Per-row glow-preview state. NametagGlowRenderer.ApplyGlowToLabel caches the unmodified
@@ -9472,6 +9497,21 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             public GameObject artistBtn;
         }
         private static List<ShopRow> shopRows = new List<ShopRow>();
+
+        // Music click-to-expand child rows (design §6). Pooled once per page;
+        // albumSku/trackIdx are the per-fill entity binding (#265) that the
+        // Preview callback reads — a refresh can reorder the cache under a
+        // painted row, the binding cannot drift from the visible text.
+        private class MusicShopTrackRow
+        {
+            public GameObject root;
+            public object txtTitle, txtLen;
+            public GameObject previewBtn; public object previewBtnTxt;
+            public string albumSku; public int trackIdx;
+        }
+        private static readonly List<MusicShopTrackRow> shopMusicTrackRows = new List<MusicShopTrackRow>();
+        private static GameObject shopMusicStash, shopMusicTracksPanel;
+        private static object shopMusicTracksHint;
 
         private static GameObject BuildShopTab(Transform parent)
         {
@@ -9544,6 +9584,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 "<color=#A0D4FF>=  TRAILS  =</color>");
             shopDancesHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHDn",
                 "<color=#FFC8F0>=  DANCES  =</color>");
+            shopMusicHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHMu",
+                "<color=#8FB8FF>=  MUSIC  =</color>");
             shopColorsHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHC",
                 "<color=#B0FFB0>=  MAP COLORS  =</color>");
             shopNametagsHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHN",
@@ -9581,6 +9623,63 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // player report about "missing" items).
             for (int i = 0; i < 320; i++)
                 shopRows.Add(CreateShopRow(shopRowsContainer.transform, i));
+
+            // ── Music click-to-expand track panel (design §6) ──────────────
+            // ONE shared panel parked in a stash OUTSIDE the scroll content;
+            // RefreshShopMusicExpansion re-parents it into shopRowsContainer
+            // directly below the selected music row (the achievements-earners
+            // pattern adapted to the flat row pool — see that method's note).
+            // Fixed prefH inside scroll content (#63), sized per fill.
+            shopMusicStash = new GameObject("SHMusStash");
+            shopMusicStash.transform.SetParent(panel.transform, false);
+            shopMusicStash.AddComponent<RectTransform>();
+            UIFactory.AddLE(shopMusicStash, prefH: 0, minH: 0, flexH: 0);
+            shopMusicTracksPanel = UIFactory.CreatePanel("SHMusT", shopMusicStash.transform, new Color(0.10f, 0.12f, 0.17f, 0.95f));
+            UIFactory.AddVLG(shopMusicTracksPanel, spacing: 2, padL: 14, padR: 10, padT: 5, padB: 5);
+            UIFactory.AddLE(shopMusicTracksPanel, prefH: 96, minH: 34, flexH: 0);
+            shopMusicTracksHint = UIFactory.CreateText("SHMusTH", shopMusicTracksPanel.transform,
+                "", 13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 20));
+            for (int i = 0; i < 12; i++)
+            {
+                var tr = new MusicShopTrackRow();
+                tr.root = new GameObject($"shMusTr{i}");
+                tr.root.transform.SetParent(shopMusicTracksPanel.transform, false);
+                tr.root.AddComponent<RectTransform>();
+                UIFactory.AddHLG(tr.root, spacing: 8, forceExpandH: true);
+                UIFactory.AddLE(tr.root, prefH: 26, minH: 26, flexH: 0);
+                tr.txtTitle = UIFactory.CreateText($"shMusTrT{i}", tr.root.transform, "", 14f, C_WHITE,
+                    UIFactory.AlignMidLeft, sizeDelta: new Vector2(480, 20));
+                UIFactory.FitOneLine(tr.txtTitle);
+                tr.txtLen = UIFactory.CreateText($"shMusTrL{i}", tr.root.transform, "", 13f, C_DIM,
+                    UIFactory.AlignMidRight, sizeDelta: new Vector2(56, 20));
+                var trCap = tr;   // #265: callback reads the row's CURRENT binding, never a cache index
+                tr.previewBtn = UIFactory.CreateButton($"shMusTrP{i}", tr.root.transform,
+                    "Preview", 13f, C_WHITE, new Color(0.25f, 0.4f, 0.55f, 0.9f),
+                    () =>
+                    {
+                        // ClickGuard already claimed by CreateButton (#158) — never re-claim here.
+                        try
+                        {
+                            if (string.IsNullOrEmpty(trCap.albumSku)) return;
+                            if (!MusicAssets.TierReady(MusicTier.Previews))
+                            {
+                                // Not downloaded yet: the click IS the trigger (design §3).
+                                MusicAssets.EnsureTier(MusicTier.Previews, "shop-preview");
+                                dirty = true;
+                                return;
+                            }
+                            MusicEngine.TogglePreview(trCap.albumSku, trCap.trackIdx);
+                            dirty = true;   // repaint Preview <-> Stop
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[SHOP-MUSIC] preview: {ex.Message}"); }
+                    },
+                    sizeDelta: new Vector2(90, 24));
+                UIFactory.AddLE(tr.previewBtn, prefW: 90, prefH: 24, flexW: 0, flexH: 0);
+                tr.previewBtnTxt = UIFactory.GetButtonText(tr.previewBtn);
+                tr.root.SetActive(false);
+                shopMusicTrackRows.Add(tr);
+            }
+            shopMusicTracksPanel.SetActive(false);
 
             return panel;
         }
@@ -10020,6 +10119,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var effects = new List<ApiClient.ShopItemData>();
             var faces = new List<ApiClient.ShopItemData>();
             var dances = new List<ApiClient.ShopItemData>();
+            var musicAlbums = new List<ApiClient.ShopItemData>();
             var others = new List<ApiClient.ShopItemData>();
             if (rawItems != null)
             {
@@ -10037,12 +10137,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     // game's own character editor, so no Set Active button.
                     else if (it.kind == "face") faces.Add(it);
                     else if (it.kind == "dance") dances.Add(it);   // Aug 31: emote dances (server version-gates the rows to capable clients)
+                    // Music albums (Sept 2): render ONLY skus this build's compiled
+                    // MusicCatalog knows — an unknown music sku is dropped at
+                    // partition, never bucketed (design [F3]; the catch-all below
+                    // is bug #55's exact trap).
+                    else if (it.kind == "music_album") { if (MusicCatalog.Get(it.sku) != null) musicAlbums.Add(it); }
                     else if (it.kind == "utility") others.Add(it);
                     else titles.Add(it);
                 }
                 titles.Sort((a, b) => a.price.CompareTo(b.price));
                 trails.Sort((a, b) => a.price.CompareTo(b.price));
                 dances.Sort((a, b) => a.price.CompareTo(b.price));
+                // Music: newest release first. released_iso is yyyy-mm-dd, so
+                // ordinal string compare IS date order; undated rows sort last.
+                musicAlbums.Sort((a, b) =>
+                {
+                    bool na = string.IsNullOrEmpty(a.released_iso), nb = string.IsNullOrEmpty(b.released_iso);
+                    if (na != nb) return na ? 1 : -1;
+                    if (!na) { int c = string.CompareOrdinal(b.released_iso, a.released_iso); if (c != 0) return c; }
+                    return string.Compare(a.name, b.name, StringComparison.OrdinalIgnoreCase);
+                });
                 // Colors sort (July 12 item 3): the VANILLA skins (Sky, Poison,
                 // Gold, ... — presets that just reproduce a vanilla art) group
                 // together at the top, custom-designed palettes after. Price then
@@ -10103,6 +10217,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (shopCategoryFilter != 8) effects.Clear();
                 if (shopCategoryFilter != 9) others.Clear();
                 if (shopCategoryFilter != 10) dances.Clear();   // Sept 1: Dances got a real tab
+                if (shopCategoryFilter != 11) musicAlbums.Clear();
             }
 
             sorted.AddRange(faces);
@@ -10242,6 +10357,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
+            if (musicAlbums.Count > 0 && shopMusicHeader != null)
+            {
+                shopMusicHeader.SetActive(true);
+                shopMusicHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopMusicHeader != null) shopMusicHeader.SetActive(false);
+            for (int i = 0; i < musicAlbums.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], musicAlbums[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
             if (pcolors.Count > 0 && shopPColorsHeader != null)
             {
                 shopPColorsHeader.SetActive(true);
@@ -10294,11 +10421,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // not sorted.Count — the artist filter can shrink the face section,
             // and stale rows between the two counts would keep old content.
             int totalWanted = facesShown.Count + nametags.Count + colors.Count + titles.Count
-                + trails.Count + dances.Count + pcolors.Count + cursors.Count + effects.Count + others.Count;
+                + trails.Count + dances.Count + musicAlbums.Count + pcolors.Count + cursors.Count + effects.Count + others.Count;
             if (totalWanted > shopRows.Count)
                 Plugin.Log.LogWarning($"[SHOP] row pool exhausted: {totalWanted} items for {shopRows.Count} rows - trailing categories truncated (raise the pool)");
             for (int i = rowIdx; i < shopRows.Count; i++)
                 shopRows[i].root.SetActive(false);
+            // LAST, deliberately: the loops above assign sibling indices while
+            // the shared track panel may still sit inside the container, so it
+            // can only be positioned after every row holds its final index.
+            RefreshShopMusicExpansion();
         }
 
         // Bug batch item 9: pooled filter buttons. names[0] is "" (All); the rest
@@ -10402,6 +10533,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 case "player_color":  return I18n.Tr("player color");
                 case "cursor_color":  return I18n.Tr("cursor color");
                 case "player_effect": return I18n.Tr("player effect");
+                case "music_album":   return I18n.Tr("music album");
                 case "utility":       return I18n.Tr("utility");
                 default:              return I18n.Tr((kind ?? "").Replace('_', ' '));
             }
@@ -10492,6 +10624,32 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
                 TrackAnimatedThumb(r.artImg, null, 0f);   // pooled row: clear any face-frame registration
             }
+            // Music albums (Sept 2): the cover PNG rides the previews tier, so
+            // until it downloads the album's preview_color fills the slot as a
+            // swatch (a null-sprite Image renders as its color, the Home
+            // pattern). A shop music row is itself a previews-tier trigger.
+            else if (it.kind == "music_album" && r.artImg != null)
+            {
+                var spMus = GetMusicCoverSprite(it.sku);
+                var pSpriteM = UIFactory.tImage.GetProperty("sprite", BindingFlags.Public | BindingFlags.Instance);
+                var pColorM = UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance);
+                try
+                {
+                    if (spMus != null) { pSpriteM?.SetValue(r.artImg, spMus); pColorM?.SetValue(r.artImg, Color.white); }
+                    else
+                    {
+                        Color swM;
+                        string rawM = !string.IsNullOrEmpty(it.preview_color) && it.preview_color.StartsWith("#") ? it.preview_color : "#FFFFFF";
+                        if (!ColorUtility.TryParseHtmlString(rawM, out swM)) swM = new Color(0.4f, 0.42f, 0.5f);
+                        swM.a = 1f;
+                        pSpriteM?.SetValue(r.artImg, null); pColorM?.SetValue(r.artImg, swM);
+                    }
+                    showArt = true;
+                }
+                catch { }
+                TrackAnimatedThumb(r.artImg, null, 0f);
+                try { MusicAssets.EnsureTier(MusicTier.Previews, "shop-row"); } catch { }
+            }
             else if (r.artImg != null) TrackAnimatedThumb(r.artImg, null, 0f);
             if (r.artImgGO != null && r.artImgGO.activeSelf != showArt) r.artImgGO.SetActive(showArt);
             // Cosmetic art x2 (Sid, July 13 item 2): face rows get an 80x80 art
@@ -10499,7 +10657,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // base because rows are pooled and reused across kinds. The bigArt
             // split is load-bearing (July 21 item 9): body-color glyphs set
             // showArt but must NOT double every row's height.
-            bool bigArt = showArt && it.kind == "face";
+            bool bigArt = showArt && (it.kind == "face" || it.kind == "music_album");   // Sept 2: album covers get the face-size treatment (swatch fallback included — the big slot IS the row's identity)
             // Aug 7 item 10: face art 80->112 / row 88->120 ("make the preview
             // pictures bigger"). Rows live inside SHSV's flexH:1 ScrollView, so
             // taller rows only cost scroll length (#63/#199 do not bite here).
@@ -10596,6 +10754,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 NametagFontRenderer.ApplyFontToLabel(r.txtDesc, typefaceSku, shopPreviewOriginalFonts);
                 string glowSku = sub == "glow" ? it.sku : "";
                 NametagGlowRenderer.ApplyGlowToLabel(r.txtDesc, glowSku, shopPreviewOriginalMats, shopPreviewGlowMatCache);
+            }
+            else if (it.kind == "music_album")
+            {
+                // Track count / total length / genre from the COMPILED catalog
+                // (the partition already dropped unknown skus, so the server-
+                // description fallback is belt-and-suspenders only).
+                var albDesc = MusicCatalog.Get(it.sku);
+                string mdesc = albDesc != null
+                    ? I18n.TrF("{0} tracks - {1} - {2}",
+                        albDesc.Tracks != null ? albDesc.Tracks.Length : 0,
+                        FmtTrackLen(MusicAlbumTotalSeconds(albDesc)),
+                        albDesc.Genre ?? "")
+                    : I18n.Tr(it.description ?? "");
+                mdesc += "  " + I18n.Tr("<color=#888>(click the row to preview tracks)</color>");
+                UIFactory.SetTextRaw(r.txtDesc, mdesc);
+                // Recycled row: restore any glow/typeface preview, same order
+                // rule as the generic branch (font first, glow second).
+                NametagFontRenderer.ApplyFontToLabel(r.txtDesc, "", shopPreviewOriginalFonts);
+                NametagGlowRenderer.ApplyGlowToLabel(r.txtDesc, "", shopPreviewOriginalMats, shopPreviewGlowMatCache);
             }
             else
             {
@@ -10737,10 +10914,518 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             r.root.SetActive(true);
         }
 
+        // ── Music tab (index 16) — playlist + transport over MusicEngine ────
+        // The UI is a pure VIEW: every control calls the MusicEngine contract
+        // and never touches AudioSources (design §4/§5). Rows are pooled and
+        // entity-bound per fill (#265).
+        private static object txtMusicMode, txtMusicNow, txtMusicDlStatus, musicVolTxt;
+        private static GameObject musicStatusRow, musicRetryBtn;
+        private static GameObject musicPlayBtn, musicLoopBtn, musicShuffleBtn;
+        private static object musicPlayBtnTxt, musicLoopBtnTxt, musicShuffleBtnTxt;
+        private class MusicAlbumHdrRow { public GameObject root, artGO; public object artImg, txtName, txtMeta; }
+        private class MusicTrackRow
+        {
+            public GameObject root;
+            public GameObject selBtn; public object selBtnTxt;
+            public object txtTitle, txtLen;
+            public GameObject playBtn;
+            public string albumSku; public int trackIdx; public bool menuOnly;
+        }
+        private static readonly List<MusicAlbumHdrRow> musicAlbumHdrs = new List<MusicAlbumHdrRow>();
+        private static readonly List<MusicTrackRow> musicTrackRows = new List<MusicTrackRow>();
+        private static float musicTabPollAt; private static string musicTabSig;
+
+        /* Every transport control funnels here: an engine call can throw during
+         * a teardown/scene race, and a throw inside a Button callback would skip
+         * the dirty flip that repaints the bar. Never re-claims ClickGuard
+         * (#158 — CreateButton already guarded the click). */
+        private static void MusicUiCall(string what, Action a)
+        {
+            try { a(); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] {what}: {ex.Message}"); }
+            dirty = true;
+        }
+
+        private static string FmtTrackLen(float seconds)
+        { int t = Mathf.Max(0, Mathf.RoundToInt(seconds)); return $"{t / 60}:{t % 60:D2}"; }
+
+        private static float MusicAlbumTotalSeconds(MusicAlbumDef alb)
+        {
+            float t = 0f;
+            if (alb != null && alb.Tracks != null)
+                foreach (var tr in alb.Tracks) if (tr != null) t += tr.DurationSeconds;
+            return t;
+        }
+
+        /* Album covers ride the previews tier on disk; loaded once per sku and
+         * cached. A MISS is deliberately NOT cached — PathFor answers null until
+         * the tier installs, and the next refresh after the download lands must
+         * pick the art up. */
+        private static readonly Dictionary<string, Sprite> _musicCoverSprites = new Dictionary<string, Sprite>();
+        private static Sprite GetMusicCoverSprite(string albumSku)
+        {
+            if (string.IsNullOrEmpty(albumSku)) return null;
+            Sprite cached;
+            if (_musicCoverSprites.TryGetValue(albumSku, out cached)) return cached;
+            Sprite made = null;
+            try
+            {
+                var alb = MusicCatalog.Get(albumSku);
+                string path = alb != null && !string.IsNullOrEmpty(alb.CoverPngFile) ? MusicAssets.PathFor(alb.CoverPngFile) : null;
+                if (path != null && System.IO.File.Exists(path))
+                {
+                    var bytes = System.IO.File.ReadAllBytes(path);
+                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    if (tex.LoadImage(bytes))
+                    {
+                        tex.hideFlags = HideFlags.HideAndDontSave;
+                        made = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
+                        made.hideFlags = HideFlags.HideAndDontSave;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] cover load failed ({albumSku}): {ex.Message}"); }
+            if (made != null) _musicCoverSprites[albumSku] = made;
+            return made;
+        }
+
+        /* v3 G14: the menu theme is enumerated SEPARATELY by the engine and has
+         * no index in the combat-track space, so its accessor is OPTIONAL
+         * engine surface — probed by reflection so this file compiles against
+         * the frozen contract whether or not the engine ships it. Absent ->
+         * the OST menu row is omitted (G14's own fallback), logged once.
+         * Integrator grep target: TryGetVanillaMenuTheme. */
+        private static MethodInfo _musMenuThemeMi; private static bool _musMenuThemeTried;
+        private static bool TryGetVanillaMenuTheme(out string title, out float length)
+        {
+            title = null; length = 0f;
+            if (!_musMenuThemeTried)
+            {
+                _musMenuThemeTried = true;
+                try
+                {
+                    _musMenuThemeMi = typeof(MusicEngine).GetMethod("TryGetVanillaMenuTheme",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                }
+                catch { }
+                if (_musMenuThemeMi == null)
+                    Plugin.Log.LogInfo("[MUSIC-UI] engine exposes no menu-theme accessor - OST menu row omitted");
+            }
+            if (_musMenuThemeMi == null) return false;
+            try
+            {
+                var args = new object[] { null, 0f };
+                if (!(bool)_musMenuThemeMi.Invoke(null, args)) return false;
+                title = args[0] as string;
+                length = args[1] is float lf ? lf : 0f;
+                return !string.IsNullOrEmpty(title);
+            }
+            catch { return false; }
+        }
+
+        private static GameObject BuildMusicTab(Transform parent)
+        {
+            var panel = new GameObject("Music");
+            panel.transform.SetParent(parent, false);
+            panel.AddComponent<RectTransform>();
+            UIFactory.AddVLG(panel, spacing: 6, padL: 20, padR: 20, padT: 10, padB: 10);
+            UIFactory.AddLE(panel, flexH: 1);
+            // Single-member group: no MakeSubTabAnchor — the sub-tab bar never shows here.
+
+            var hdr = new GameObject("MusHdr");
+            hdr.transform.SetParent(panel.transform, false);
+            hdr.AddComponent<RectTransform>();
+            UIFactory.AddHLG(hdr, spacing: 14, forceExpandH: true);
+            UIFactory.AddLE(hdr, prefH: 32, flexH: 0);
+            UIFactory.CreateText("MusTitle", hdr.transform, "Music", 22f, C_GOLD,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 30));
+            var hsp = new GameObject("S"); hsp.transform.SetParent(hdr.transform, false); hsp.AddComponent<RectTransform>(); UIFactory.AddLE(hsp, flexW: 1);
+            txtMusicMode = UIFactory.CreateText("MusMode", hdr.transform, "", 15f, C_LABEL,
+                UIFactory.AlignMidRight, sizeDelta: new Vector2(520, 24));
+
+            // Transport bar — labels painted in RefreshMusicTab (stateful).
+            var tp = new GameObject("MusTransport");
+            tp.transform.SetParent(panel.transform, false);
+            tp.AddComponent<RectTransform>();
+            UIFactory.AddHLG(tp, spacing: 6, forceExpandH: true);
+            UIFactory.AddLE(tp, prefH: 32, minH: 32, flexH: 0);
+            musicPlayBtn = UIFactory.CreateButton("MusPlay", tp.transform, "Play", 14f, C_WHITE,
+                new Color(0.25f, 0.45f, 0.18f, 0.9f), () => MusicUiCall("play-pause", MusicEngine.PlayPause), sizeDelta: new Vector2(90, 28));
+            UIFactory.AddLE(musicPlayBtn, prefW: 90, prefH: 28, flexW: 0, flexH: 0);
+            musicPlayBtnTxt = UIFactory.GetButtonText(musicPlayBtn);
+            var musStopBtn = UIFactory.CreateButton("MusStop", tp.transform, "Stop", 14f, C_WHITE, C_BTN,
+                () => MusicUiCall("stop", MusicEngine.Stop), sizeDelta: new Vector2(70, 28));
+            UIFactory.AddLE(musStopBtn, prefW: 70, prefH: 28, flexW: 0, flexH: 0);
+            var musSkipBtn = UIFactory.CreateButton("MusSkip", tp.transform, "Skip", 14f, C_WHITE, C_BTN,
+                () => MusicUiCall("skip", MusicEngine.Skip), sizeDelta: new Vector2(70, 28));
+            UIFactory.AddLE(musSkipBtn, prefW: 70, prefH: 28, flexW: 0, flexH: 0);
+            musicLoopBtn = UIFactory.CreateButton("MusLoop", tp.transform, "", 13f, C_WHITE, C_BTN,
+                () => MusicUiCall("loop", () => MusicEngine.LoopEnabled = !MusicEngine.LoopEnabled), sizeDelta: new Vector2(110, 28));
+            UIFactory.AddLE(musicLoopBtn, prefW: 110, prefH: 28, flexW: 0, flexH: 0);
+            musicLoopBtnTxt = UIFactory.GetButtonText(musicLoopBtn);
+            musicShuffleBtn = UIFactory.CreateButton("MusShuf", tp.transform, "", 13f, C_WHITE, C_BTN,
+                () => MusicUiCall("shuffle", () => MusicEngine.ShuffleEnabled = !MusicEngine.ShuffleEnabled), sizeDelta: new Vector2(130, 28));
+            UIFactory.AddLE(musicShuffleBtn, prefW: 130, prefH: 28, flexW: 0, flexH: 0);
+            musicShuffleBtnTxt = UIFactory.GetButtonText(musicShuffleBtn);
+            // First-class reset control (design F14): clears manual takeover +
+            // returns ownership to vanilla in one click.
+            var musVanBtn = UIFactory.CreateButton("MusVan", tp.transform, "Use vanilla music", 13f, C_WHITE,
+                new Color(0.3f, 0.3f, 0.5f, 0.9f), () => MusicUiCall("use-vanilla", MusicEngine.UseVanilla), sizeDelta: new Vector2(170, 28));
+            UIFactory.AddLE(musVanBtn, prefW: 170, prefH: 28, flexW: 0, flexH: 0);
+            var tsp = new GameObject("S"); tsp.transform.SetParent(tp.transform, false); tsp.AddComponent<RectTransform>(); UIFactory.AddLE(tsp, flexW: 1);
+            // Volume: engine-local 10% stepper on top of the game's own music
+            // slider (design D1) — no slider widget exists in this codebase.
+            var musVolDn = UIFactory.CreateButton("MusVolDn", tp.transform, "-", 16f, C_WHITE, C_BTN,
+                () => MusicUiCall("vol-down", MusicEngine.VolumeDown), sizeDelta: new Vector2(32, 28));
+            UIFactory.AddLE(musVolDn, prefW: 32, prefH: 28, flexW: 0, flexH: 0);
+            musicVolTxt = UIFactory.CreateText("MusVol", tp.transform, "100%", 15f, C_WHITE,
+                UIFactory.AlignMidCenter, sizeDelta: new Vector2(56, 24));
+            var musVolUp = UIFactory.CreateButton("MusVolUp", tp.transform, "+", 16f, C_WHITE, C_BTN,
+                () => MusicUiCall("vol-up", MusicEngine.VolumeUp), sizeDelta: new Vector2(32, 28));
+            UIFactory.AddLE(musVolUp, prefW: 32, prefH: 28, flexW: 0, flexH: 0);
+
+            txtMusicNow = UIFactory.CreateText("MusNow", panel.transform, "", 15f, C_SUB,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 24));
+            UIFactory.FitOneLine(txtMusicNow);
+
+            // Download status + manual Retry (design §3: one auto retry per
+            // tier per session, then this control).
+            musicStatusRow = new GameObject("MusStatus");
+            musicStatusRow.transform.SetParent(panel.transform, false);
+            musicStatusRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(musicStatusRow, spacing: 8, forceExpandH: true);
+            UIFactory.AddLE(musicStatusRow, prefH: 26, minH: 26, flexH: 0);
+            txtMusicDlStatus = UIFactory.CreateText("MusDlSt", musicStatusRow.transform, "", 13f, C_LABEL,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(760, 22));
+            UIFactory.FitOneLine(txtMusicDlStatus);
+            musicRetryBtn = UIFactory.CreateButton("MusRetry", musicStatusRow.transform, "Retry", 13f, C_WHITE,
+                new Color(0.6f, 0.4f, 0.1f, 0.9f), () => MusicUiCall("retry", MusicAssets.RetryFailedTier), sizeDelta: new Vector2(80, 24));
+            UIFactory.AddLE(musicRetryBtn, prefW: 80, prefH: 24, flexW: 0, flexH: 0);
+            musicRetryBtn.SetActive(false);
+            musicStatusRow.SetActive(false);
+
+            var sv = UIFactory.CreateScrollView("MusSV", panel.transform, spacing: 4);
+            UIFactory.AddLE(sv.scrollGO, flexH: 1);
+            // Pools parent directly into the scroll content (shop pattern);
+            // every child carries a fixed prefH, never flexH (#63).
+            for (int i = 0; i < 8; i++) musicAlbumHdrs.Add(CreateMusicAlbumHdr(sv.content.transform, i));
+            for (int i = 0; i < 48; i++) musicTrackRows.Add(CreateMusicTrackRow(sv.content.transform, i));
+
+            return panel;
+        }
+
+        private static MusicAlbumHdrRow CreateMusicAlbumHdr(Transform parent, int idx)
+        {
+            var h = new MusicAlbumHdrRow();
+            h.root = UIFactory.CreatePanel($"musAl{idx}", parent, new Color(0.10f, 0.12f, 0.17f, 0.95f));
+            UIFactory.AddHLG(h.root, spacing: 10, padL: 8, padR: 8, padT: 6, padB: 6, forceExpandH: true);
+            UIFactory.AddLE(h.root, prefH: 64, minH: 64, flexH: 0);
+            h.artGO = new GameObject("art");
+            h.artGO.transform.SetParent(h.root.transform, false);
+            h.artGO.AddComponent<RectTransform>();
+            UIFactory.AddLE(h.artGO, prefW: 52, minW: 52, prefH: 52, flexW: 0, flexH: 0);
+            if (UIFactory.tImage != null)
+            {
+                h.artImg = h.artGO.AddComponent(UIFactory.tImage);
+                try { UIFactory.tImage.GetProperty("preserveAspect", BindingFlags.Public | BindingFlags.Instance)?.SetValue(h.artImg, true); } catch { }
+                try { UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(h.artImg, false); } catch { }
+            }
+            var col = new GameObject("info");
+            col.transform.SetParent(h.root.transform, false);
+            col.AddComponent<RectTransform>();
+            UIFactory.AddVLG(col, spacing: 1);
+            UIFactory.AddLE(col, flexW: 1);
+            h.txtName = UIFactory.CreateText($"musAlN{idx}", col.transform, "", 18f, C_WHITE,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(640, 24));
+            UIFactory.FitOneLine(h.txtName);
+            h.txtMeta = UIFactory.CreateText($"musAlM{idx}", col.transform, "", 13f, C_LABEL,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(640, 18));
+            UIFactory.FitOneLine(h.txtMeta);
+            h.root.SetActive(false);
+            return h;
+        }
+
+        private static MusicTrackRow CreateMusicTrackRow(Transform parent, int idx)
+        {
+            var t = new MusicTrackRow();
+            t.root = UIFactory.CreatePanel($"musTr{idx}", parent, C_PANEL);
+            UIFactory.AddHLG(t.root, spacing: 8, padL: 10, padR: 10, padT: 3, padB: 3, forceExpandH: true);
+            UIFactory.AddLE(t.root, prefH: 30, minH: 30, flexH: 0);
+            // Callbacks read the row OBJECT's current binding (#265) — the same
+            // rule as the achievements rows' "reads the row's CURRENT key".
+            t.selBtn = UIFactory.CreateButton($"musTrS{idx}", t.root.transform, "", 12f, C_WHITE, C_BTN,
+                () =>
+                {
+                    try
+                    {
+                        if (string.IsNullOrEmpty(t.albumSku) || t.menuOnly) return;
+                        MusicEngine.SetSelected(t.albumSku, t.trackIdx, !MusicEngine.IsSelected(t.albumSku, t.trackIdx));
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] select: {ex.Message}"); }
+                    dirty = true;
+                }, sizeDelta: new Vector2(56, 24));
+            UIFactory.AddLE(t.selBtn, prefW: 56, prefH: 24, flexW: 0, flexH: 0);
+            t.selBtnTxt = UIFactory.GetButtonText(t.selBtn);
+            t.txtTitle = UIFactory.CreateText($"musTrT{idx}", t.root.transform, "", 15f, C_WHITE,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 22));
+            UIFactory.FitOneLine(t.txtTitle);
+            t.txtLen = UIFactory.CreateText($"musTrL{idx}", t.root.transform, "", 13f, C_DIM,
+                UIFactory.AlignMidRight, sizeDelta: new Vector2(56, 20));
+            t.playBtn = UIFactory.CreateButton($"musTrP{idx}", t.root.transform, "Play", 13f, C_WHITE,
+                new Color(0.25f, 0.4f, 0.55f, 0.9f),
+                () =>
+                {
+                    try
+                    {
+                        if (string.IsNullOrEmpty(t.albumSku) || t.menuOnly) return;
+                        MusicEngine.PlayTrack(t.albumSku, t.trackIdx);
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] play: {ex.Message}"); }
+                    dirty = true;
+                }, sizeDelta: new Vector2(70, 24));
+            UIFactory.AddLE(t.playBtn, prefW: 70, prefH: 24, flexW: 0, flexH: 0);
+            t.root.SetActive(false);
+            return t;
+        }
+
+        private static void FillMusicTrackRow(MusicTrackRow t, string albumSku, int trackIdx, string title, float lenSeconds, bool menuOnly)
+        {
+            t.albumSku = albumSku; t.trackIdx = trackIdx; t.menuOnly = menuOnly;   // #265: binding written WITH the visible text
+            bool sel = false;
+            if (!menuOnly) { try { sel = MusicEngine.IsSelected(albumSku, trackIdx); } catch { } }
+            // Menu theme (D3): listed, tagged, but neither selectable nor
+            // playable into the combat playlist — both controls hide.
+            if (t.selBtn != null && t.selBtn.activeSelf == menuOnly) t.selBtn.SetActive(!menuOnly);
+            if (t.playBtn != null && t.playBtn.activeSelf == menuOnly) t.playBtn.SetActive(!menuOnly);
+            if (!menuOnly && t.selBtnTxt != null)
+            {
+                UIFactory.SetText(t.selBtnTxt, sel ? "ON" : "OFF");
+                UIFactory.SetColor(t.selBtnTxt, sel ? C_GREEN : C_DIM);
+                UIFactory.SetImageColor(t.selBtn, sel ? new Color(0.2f, 0.45f, 0.2f, 0.9f) : C_BTN);
+            }
+            string tag = menuOnly ? "  <color=#888>" + I18n.Tr("(menu only)") + "</color>" : "";
+            UIFactory.SetTextRaw(t.txtTitle, HomeSan(title ?? "") + tag);
+            UIFactory.SetColor(t.txtTitle, (sel || menuOnly) ? C_WHITE : C_LABEL);
+            UIFactory.SetTextRaw(t.txtLen, lenSeconds > 0f ? FmtTrackLen(lenSeconds) : "");
+            t.root.SetActive(true);
+        }
+
+        // i18n item 11 pattern: Tr at assignment — the mode is a finite enum
+        // rendered through literal branches so every line is a harvested key.
+        private static string MusicModeLine(MusicMode mode)
+        {
+            switch (mode)
+            {
+                case MusicMode.Vanilla:       return I18n.Tr("Mode: <color=#88CCFF>vanilla music</color>");
+                case MusicMode.Loading:       return I18n.Tr("Mode: <color=#DDDD66>loading custom music - vanilla plays meanwhile</color>");
+                case MusicMode.Custom:        return I18n.Tr("Mode: <color=#88FF88>custom music</color>");
+                case MusicMode.MutedByChoice: return I18n.Tr("Mode: <color=#FF9966>stopped - press Play or Use vanilla music</color>");
+                case MusicMode.Preview:       return I18n.Tr("Mode: <color=#FFC8F0>previewing</color>");
+                case MusicMode.Fault:         return I18n.Tr("Mode: <color=#FF8888>music error - vanilla playing (see log)</color>");
+            }
+            return "";
+        }
+
+        private static void RefreshMusicTab()
+        {
+            // Transport paints — the engine is the single source of truth (§4).
+            MusicMode mode = MusicMode.Vanilla;
+            try { mode = MusicEngine.Mode; } catch { }
+            if (txtMusicMode != null) UIFactory.SetTextRaw(txtMusicMode, MusicModeLine(mode));
+            string np = null; try { np = MusicEngine.NowPlayingLine(); } catch { }
+            if (txtMusicNow != null)
+                UIFactory.SetTextRaw(txtMusicNow, string.IsNullOrEmpty(np)
+                    ? $"<color=#888><i>{I18n.Tr("Nothing playing")}</i></color>"
+                    : np);
+            if (musicPlayBtnTxt != null)
+                UIFactory.SetText(musicPlayBtnTxt, (mode == MusicMode.Custom && !string.IsNullOrEmpty(np)) ? "Pause" : "Play");
+            bool loop = true, shuf = false;
+            try { loop = MusicEngine.LoopEnabled; shuf = MusicEngine.ShuffleEnabled; } catch { }
+            if (musicLoopBtnTxt != null)
+                UIFactory.SetText(musicLoopBtnTxt, loop
+                    ? "Loop: <color=#88FF88>ON</color>"
+                    : "Loop: <color=#FF9966>OFF</color>");
+            if (musicShuffleBtnTxt != null)
+                UIFactory.SetText(musicShuffleBtnTxt, shuf
+                    ? "Shuffle: <color=#88FF88>ON</color>"
+                    : "Shuffle: <color=#FF9966>OFF</color>");
+            int vol = 100; try { vol = MusicEngine.VolumeStepPercent; } catch { }
+            if (musicVolTxt != null) UIFactory.SetTextRaw(musicVolTxt, $"{vol}%");
+            string status = null; bool retry = false;
+            try { status = MusicAssets.TierStatusLine(); retry = MusicAssets.RetryAvailable; } catch { }
+            if (musicStatusRow != null) musicStatusRow.SetActive(!string.IsNullOrEmpty(status) || retry);
+            if (txtMusicDlStatus != null) UIFactory.SetTextRaw(txtMusicDlStatus, status ?? "");
+            if (musicRetryBtn != null) musicRetryBtn.SetActive(retry);
+
+            // Album sections — vanilla FIRST (design §5), then owned customs.
+            int sibling = 0, rowI = 0, hdrI = 0;
+            int vCount = 0; try { vCount = MusicEngine.VanillaTrackCount; } catch { }
+            if (vCount > 0 && hdrI < musicAlbumHdrs.Count)
+            {
+                var h = musicAlbumHdrs[hdrI++];
+                if (h.artGO != null && h.artGO.activeSelf) h.artGO.SetActive(false);   // the OST ships no cover art
+                float vTotal = 0f;
+                for (int i = 0; i < vCount; i++) { try { vTotal += MusicEngine.VanillaTrackLength(i); } catch { } }
+                UIFactory.SetTextRaw(h.txtName, $"<color=#A0D4FF>{I18n.Tr("ROUNDS OST")}</color>");
+                UIFactory.SetTextRaw(h.txtMeta,
+                    I18n.TrF("by {0}", "Karl Flodin") + "  -  " + I18n.TrF("{0} tracks", vCount) + $"  -  {FmtTrackLen(vTotal)}");
+                h.root.SetActive(true);
+                h.root.transform.SetSiblingIndex(sibling++);
+                for (int i = 0; i < vCount && rowI < musicTrackRows.Count; i++, rowI++)
+                {
+                    string vTitle = ""; float vLen = 0f;
+                    try { vTitle = MusicEngine.VanillaTrackTitle(i); vLen = MusicEngine.VanillaTrackLength(i); } catch { }
+                    FillMusicTrackRow(musicTrackRows[rowI], MusicCatalog.VANILLA_SKU, i, vTitle, vLen, menuOnly: false);
+                    musicTrackRows[rowI].root.transform.SetSiblingIndex(sibling++);
+                }
+                // Menu theme (D3/G14): informational row, no checkbox, no Play.
+                string mtTitle; float mtLen;
+                if (rowI < musicTrackRows.Count && TryGetVanillaMenuTheme(out mtTitle, out mtLen))
+                {
+                    FillMusicTrackRow(musicTrackRows[rowI], MusicCatalog.VANILLA_SKU, -1, mtTitle, mtLen, menuOnly: true);
+                    musicTrackRows[rowI].root.transform.SetSiblingIndex(sibling++);
+                    rowI++;
+                }
+            }
+            foreach (var alb in MusicCatalog.Albums)
+            {
+                if (alb == null) continue;
+                bool owns = false; try { owns = MusicEntitlements.Owns(alb.Sku); } catch { }
+                if (!owns) continue;
+                if (hdrI >= musicAlbumHdrs.Count)
+                { Plugin.Log.LogWarning("[MUSIC-UI] album header pool exhausted (raise the pool)"); break; }
+                var h = musicAlbumHdrs[hdrI++];
+                var spCover = GetMusicCoverSprite(alb.Sku);
+                if (h.artImg != null)
+                {
+                    var pSp = UIFactory.tImage.GetProperty("sprite", BindingFlags.Public | BindingFlags.Instance);
+                    var pCol = UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance);
+                    try
+                    {
+                        if (spCover != null) { pSp?.SetValue(h.artImg, spCover); pCol?.SetValue(h.artImg, Color.white); }
+                        else { pSp?.SetValue(h.artImg, null); pCol?.SetValue(h.artImg, new Color(0.35f, 0.30f, 0.28f, 1f)); }
+                    }
+                    catch { }
+                    if (h.artGO != null && !h.artGO.activeSelf) h.artGO.SetActive(true);
+                }
+                int n = alb.Tracks != null ? alb.Tracks.Length : 0;
+                // Album name through the live Tr lookup like every shop-item
+                // name (the shop_strings snapshot carries the key); artist +
+                // genre are identity, not prose — raw.
+                UIFactory.SetTextRaw(h.txtName, $"<color=#FFD94D>{HomeSan(I18n.Tr(alb.AlbumName ?? ""))}</color>");
+                UIFactory.SetTextRaw(h.txtMeta,
+                    I18n.TrF("by {0}", HomeSan(alb.ArtistName ?? "")) + $"  -  {HomeSan(alb.Genre ?? "")}  -  "
+                    + I18n.TrF("{0} tracks", n) + $"  -  {FmtTrackLen(MusicAlbumTotalSeconds(alb))}");
+                h.root.SetActive(true);
+                h.root.transform.SetSiblingIndex(sibling++);
+                if (n > musicTrackRows.Count - rowI)
+                    Plugin.Log.LogWarning($"[MUSIC-UI] track row pool exhausted: {n} tracks, {musicTrackRows.Count - rowI} rows left (raise the pool)");
+                for (int i = 0; i < n && rowI < musicTrackRows.Count; i++, rowI++)
+                {
+                    FillMusicTrackRow(musicTrackRows[rowI], alb.Sku, i, alb.Tracks[i] != null ? alb.Tracks[i].Title : "", alb.Tracks[i] != null ? alb.Tracks[i].DurationSeconds : 0f, menuOnly: false);
+                    musicTrackRows[rowI].root.transform.SetSiblingIndex(sibling++);
+                }
+            }
+            for (int i = rowI; i < musicTrackRows.Count; i++)
+                if (musicTrackRows[i].root != null && musicTrackRows[i].root.activeSelf) musicTrackRows[i].root.SetActive(false);
+            for (int i = hdrI; i < musicAlbumHdrs.Count; i++)
+                if (musicAlbumHdrs[i].root != null && musicAlbumHdrs[i].root.activeSelf) musicAlbumHdrs[i].root.SetActive(false);
+        }
+
+        /* Throttled ticker (#62 pattern): the engine's mode / now-playing /
+         * download status change without anything flipping `dirty`, so a cheap
+         * 2s signature poll is the flip source. Also armed while a music row
+         * is selected on the SHOP tab, so a naturally-ending 30s preview
+         * repaints its Stop label back to Preview. */
+        private static void MaybeRefreshMusicTab()
+        {
+            bool shopPreviewLive = currentTab == 4 && !string.IsNullOrEmpty(shopSelectedSku) && MusicCatalog.Get(shopSelectedSku) != null;
+            if (currentTab != 16 && !shopPreviewLive) return;
+            if (Time.unscaledTime < musicTabPollAt) return;
+            musicTabPollAt = Time.unscaledTime + 2f;
+            string sig;
+            try
+            {
+                sig = $"{MusicEngine.Mode}|{MusicEngine.NowPlayingLine()}|{MusicAssets.TierStatusLine()}|{MusicAssets.RetryAvailable}|{MusicEngine.VolumeStepPercent}|{MusicEngine.LoopEnabled}|{MusicEngine.ShuffleEnabled}";
+            }
+            catch { return; }
+            if (sig != musicTabSig) { musicTabSig = sig; dirty = true; }
+        }
+
+        /* Click-to-expand track list on shop music rows (design §6). ONE shared
+         * panel, parked in a stash OUTSIDE the scroll content and re-parented
+         * below the selected music row — the achievements-earners pattern
+         * adapted to the flat pooled row list: with no per-row wrapper the
+         * panel is inserted as a container SIBLING via SetSiblingIndex.
+         * MUST run as RefreshShop's LAST step: the render loops assign sibling
+         * indices while the panel may still sit inside the container, so
+         * positioning before they finish would drift the insertion point (the
+         * row-pool corruption class). Expansion is keyed off shopSelectedSku —
+         * one selection state, so a click on any non-music row collapses it. */
+        private static void RefreshShopMusicExpansion()
+        {
+            if (shopMusicTracksPanel == null || shopMusicStash == null) return;
+            ShopRow selRow = null;
+            var alb = !string.IsNullOrEmpty(shopSelectedSku) ? MusicCatalog.Get(shopSelectedSku) : null;
+            if (alb != null)
+                foreach (var r2 in shopRows)
+                    if (r2 != null && r2.kind == "music_album" && r2.sku == shopSelectedSku
+                        && r2.root != null && r2.root.activeSelf) { selRow = r2; break; }
+            bool show = alb != null && selRow != null;
+            // Always detach to the stash FIRST: while the panel sits inside the
+            // container, SetSiblingIndex counts it too, so an insertion behind
+            // a row the panel currently PRECEDES lands one slot too far. From
+            // the stash, the row's index is exact.
+            if (shopMusicTracksPanel.transform.parent != shopMusicStash.transform)
+                shopMusicTracksPanel.transform.SetParent(shopMusicStash.transform, false);
+            if (show)
+            {
+                shopMusicTracksPanel.transform.SetParent(shopRowsContainer.transform, false);
+                shopMusicTracksPanel.transform.SetSiblingIndex(selRow.root.transform.GetSiblingIndex() + 1);
+            }
+            shopMusicTracksPanel.SetActive(show);
+            if (!show) return;
+            // Expansion is a previews-tier trigger (design §3); idempotent.
+            try { MusicAssets.EnsureTier(MusicTier.Previews, "shop-expand"); } catch { }
+            bool ready = false; try { ready = MusicAssets.TierReady(MusicTier.Previews); } catch { }
+            if (shopMusicTracksHint != null)
+            {
+                if (ready) UIFactory.SetText(shopMusicTracksHint, "30-second previews - they stop on their own");
+                else { string st = null; try { st = MusicAssets.TierStatusLine(); } catch { } UIFactory.SetTextRaw(shopMusicTracksHint, st ?? ""); }
+            }
+            int n = alb.Tracks != null ? alb.Tracks.Length : 0;
+            for (int i = 0; i < shopMusicTrackRows.Count; i++)
+            {
+                var tr = shopMusicTrackRows[i];
+                if (tr == null || tr.root == null) continue;
+                if (i >= n) { if (tr.root.activeSelf) tr.root.SetActive(false); continue; }
+                tr.albumSku = alb.Sku; tr.trackIdx = i;   // #265 binding
+                UIFactory.SetTextRaw(tr.txtTitle, HomeSan(alb.Tracks[i] != null ? alb.Tracks[i].Title ?? "" : ""));
+                UIFactory.SetTextRaw(tr.txtLen, alb.Tracks[i] != null ? FmtTrackLen(alb.Tracks[i].DurationSeconds) : "");
+                bool previewing = false; try { previewing = MusicEngine.IsPreviewing(alb.Sku, i); } catch { }
+                if (tr.previewBtnTxt != null)
+                {
+                    if (!ready) UIFactory.SetText(tr.previewBtnTxt, "Downloading...");
+                    else UIFactory.SetText(tr.previewBtnTxt, previewing ? "Stop" : "Preview");
+                }
+                UIFactory.SetImageColor(tr.previewBtn, previewing
+                    ? new Color(0.5f, 0.3f, 0.25f, 0.9f)    // active preview = warm red (trail-row convention)
+                    : new Color(0.25f, 0.4f, 0.55f, 0.9f));
+                tr.root.SetActive(true);
+            }
+            if (n > shopMusicTrackRows.Count)
+                Plugin.Log.LogWarning($"[SHOP] music track-row pool exhausted: {n} tracks for {shopMusicTrackRows.Count} rows (raise the pool)");
+            // Sized per content (#63: fixed prefH inside scroll content):
+            // pad 5+5 + hint 20 + per-row 26 + 2 spacing each.
+            UIFactory.SetPrefH(shopMusicTracksPanel, 34f + n * 28f);
+        }
+
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
         private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn, chatTtlBtn;
+        // Music opt-ins (design §8): menu playback + credit toast.
+        private static GameObject menuMusicToggleBtn, musicCreditToggleBtn;
+        private static object menuMusicToggleTxt, musicCreditToggleTxt;
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
         private static GameObject allowSpectatorsBtn; private static object allowSpectatorsTxt;
@@ -11638,6 +12323,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "Mutes game audio while the window is unfocused during online play. The menu stays audible; sound returns the moment you tab back in.");
             muteBgToggleTxt = UIFactory.GetButtonText(muteBgToggleBtn);
+            menuMusicToggleBtn = SettingsToggle(intBox.transform, "SMenuMus", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Menu music toggled");
+                    if (Plugin.MenuMusicEnabled != null) Plugin.MenuMusicEnabled.Value = !Plugin.MenuMusicEnabled.Value;
+                    // The engine owns the transition — this only changed an input.
+                    try { MusicEngine.Reconcile("settings-menu-music"); } catch { }
+                    dirty = true;
+                },
+                "Plays your selected custom music at the main menu too. Off = the menu keeps ROUNDS' own theme; your picks still play in matches.");
+            menuMusicToggleTxt = UIFactory.GetButtonText(menuMusicToggleBtn);
+            musicCreditToggleBtn = SettingsToggle(intBox.transform, "SMusCredit", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Music credit toast toggled");
+                    if (Plugin.MusicCreditToast != null) Plugin.MusicCreditToast.Value = !Plugin.MusicCreditToast.Value;
+                    dirty = true;
+                },
+                "Shows a small bottom-left credit line naming the track and artist whenever a custom song starts.");
+            musicCreditToggleTxt = UIFactory.GetButtonText(musicCreditToggleBtn);
             pingToggleBtn = SettingsToggle(intBox.transform, "SPing", new Vector2(260, 28),
                 () =>
                 {
@@ -12164,6 +12869,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.MuteAudioInBackground.Value
                         ? "Mute audio when tabbed out: <color=#88FF88>ON</color>"
                         : "Mute audio when tabbed out: <color=#FF9966>OFF</color>");
+            if (menuMusicToggleTxt != null && Plugin.MenuMusicEnabled != null)
+                UIFactory.SetText(menuMusicToggleTxt,
+                    Plugin.MenuMusicEnabled.Value
+                        ? "Play music in main menu: <color=#88FF88>ON</color>"
+                        : "Play music in main menu: <color=#FF9966>OFF</color>");
+            if (musicCreditToggleTxt != null && Plugin.MusicCreditToast != null)
+                UIFactory.SetText(musicCreditToggleTxt,
+                    Plugin.MusicCreditToast.Value
+                        ? "Music credit toast: <color=#88FF88>ON</color>"
+                        : "Music credit toast: <color=#FF9966>OFF</color>");
             if (appearOfflineTxt != null)
             {
                 var stAo = ApiClient.CachedPlayerStats;

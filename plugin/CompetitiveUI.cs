@@ -322,6 +322,10 @@ namespace CompetitiveRounds
             // idle-time only — self-gating no-op everywhere else. Draws under
             // notifications/chat so operator-facing surfaces stay on top.
             PostSessionReport.Draw();
+            // Music credit line (bottom-left): broadcast attribution / opt-in
+            // now-playing toast. Drawn EARLY on purpose — chat input, the
+            // debug input overlay and every modal paint over it.
+            DrawMusicCredit();
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
@@ -7667,6 +7671,55 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(6, 4, fpsLabelWidth, 18), fpsLabel, fpsStyle);
         }
 
+        // ── Music credit line (music feature §7) ────────────────────────────
+        // One small grey line, bottom-left, same visual weight as DrawFPS.
+        // Two gates share it: the broadcast seat's permanent attribution
+        // (identity + the engine actually playing broadcast music) and the
+        // player opt-in now-playing toast (config + engine in Custom mode).
+        // The label is MusicEngine.NowPlayingLine() — cached, rebuilt at most
+        // 1/s, width measured only at rebuild, never per Repaint (#162).
+        // Rect registered in the avoided-rects comment above NOTIF_SET_BASE_Y.
+        private static GUIStyle musicCreditStyle;
+        private static string musicCreditLabel = "";
+        private static float musicCreditWidth = 260f;
+        private static float musicCreditNextRefresh;
+
+        private static void DrawMusicCredit()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            // Whole body guarded: DrawUI has no outer try/catch, so a throw
+            // here would starve every later overlay in the chain (#255).
+            try
+            {
+                bool broadcastHalf = BroadcastMode.IsBroadcastIdentity && MusicEngine.BroadcastMusicLive;
+                bool toastHalf = Plugin.MusicCreditToast != null && Plugin.MusicCreditToast.Value
+                                 && MusicEngine.Mode == MusicEngine.MusicMode.Custom;
+                if (!broadcastHalf && !toastHalf) { musicCreditLabel = ""; return; }
+
+                if (Time.unscaledTime >= musicCreditNextRefresh)
+                {
+                    musicCreditNextRefresh = Time.unscaledTime + 1f;
+                    if (musicCreditStyle == null)
+                    {
+                        musicCreditStyle = new GUIStyle(GUI.skin.label);
+                        musicCreditStyle.fontSize = 11;
+                        musicCreditStyle.normal.textColor = new Color(0.5f, 0.5f, 0.5f, 0.7f);
+                    }
+                    musicCreditLabel = MusicEngine.NowPlayingLine() ?? "";
+                    if (musicCreditLabel.Length > 0)
+                    {
+                        var size = musicCreditStyle.CalcSize(new GUIContent(musicCreditLabel));
+                        musicCreditWidth = Mathf.Max(60f, size.x + 8f);
+                    }
+                }
+
+                if (musicCreditLabel.Length > 0 && musicCreditStyle != null)
+                    GUI.Label(new Rect(12, Screen.height - 26, musicCreditWidth, 18),
+                        musicCreditLabel, musicCreditStyle);
+            }
+            catch { }
+        }
+
         // ── FFA spawn spotlight (Sid, Aug 3) ────────────────────────────────
         // "In game for FFAs, it's a bit confusing when you spawn in where you
         // are." With up to 10 near-identical bodies, finding yourself costs
@@ -7885,10 +7938,19 @@ namespace CompetitiveRounds
         //   spectator roster   : x Screen.width-420.., Screen.height-28 .. -6
         //   F5 menu bottom bar : a 26px row at roughly Screen.height - 30
         //   debug input overlay: Screen.height - 14
+        //   music credit line  : x 12.., Screen.height-26 .. -8 (one ~18px
+        //                        grey line, width follows the label; broadcast
+        //                        attribution / opt-in now-playing toast; drawn
+        //                        EARLY in DrawUI, so the chat input, the input
+        //                        overlay and the spectator roster all paint
+        //                        over it — deliberate: attribution loses to
+        //                        interactive surfaces. Very narrow windows can
+        //                        run it under the right-anchored roster; the
+        //                        roster wins by draw order, accepted trade.)
         // At rowH ~26 the band spans H-83 .. H-51, clear of the roster, the
-        // menu's bottom bar and the input overlay at every width, which is why
-        // it needs no horizontal constraint and can use the full screen for
-        // its width budget.
+        // menu's bottom bar, the input overlay and the music credit at every
+        // width, which is why it needs no horizontal constraint and can use
+        // the full screen for its width budget.
         private const float NOTIF_SET_BASE_Y = 80f;
         private const float NOTIF_SET_MARGIN = 24f;   // free space at each edge
         private const float NOTIF_SET_GAP = 10f;      // between cells
