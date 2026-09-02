@@ -2093,28 +2093,80 @@ namespace CompetitiveRounds
         /// generations cannot see them.</summary>
         internal static int ShopSnapshotGenHighWater => _shopSnapshotGen;
 
+        // Consent/identity/cache EPOCH for the RAW shop + inventory caches
+        // (impl review I10): advanced BEFORE the caches are cleared on a
+        // consent revoke or a resolved-identity change, and captured at
+        // request dispatch — a response whose dispatch epoch is stale lands
+        // into the void instead of repopulating a cache the revoke/identity
+        // change just emptied. MusicEntitlements has its own gates; this
+        // epoch exists because the raw caches previously had none.
+        private static int _shopCacheEpoch;
+        // Newest COMMITTED generation per raw cache: a response commits only
+        // when its dispatch generation is newer than the last committed one,
+        // so a slow pre-purchase response can never repaint an owned album
+        // as unowned after the post-purchase response landed (dispatch order
+        // is the truth, completion order is not — R3).
+        private static int _shopItemsCommittedGen;
+        private static int _inventoryFetchGen;
+        private static int _inventoryCommittedGen;
+
+        /// <summary>Impl review I11 (called by GameStateWatcher's identity-
+        /// transition hook): the resolved local steam id CHANGED, so both raw
+        /// caches carry the OLD identity's owned flags. Epoch first, clears
+        /// second (I10 ordering); the caller refetches for a valid new
+        /// identity itself.</summary>
+        internal static void OnLocalIdentityChanged()
+        {
+            _shopCacheEpoch++;
+            CachedShopItems = null;
+            CachedInventory = null;
+            NativeUI.MarkDirty();
+        }
+
         public static void FetchShopItems(string steamId = null)
         {
             string url = $"{baseUrl}/api/v1/shop/items";
             if (!string.IsNullOrEmpty(steamId)) url += $"?steam_id={Escape(steamId)}";
             int gen = ++_shopSnapshotGen;
+            int epoch = _shopCacheEpoch;
             // Anonymous fetch => "" — ApplyShopSnapshot drops it (an
             // unauthenticated response must never touch entitlements).
             string entitlementSid = string.IsNullOrEmpty(steamId) ? "" : steamId;
             Plugin.Instance.StartCoroutine(GetRequest(url, (success, response) =>
             {
                 if (!success) { Plugin.Log.LogWarning($"[SHOP] list failed: {response}"); return; }
-                CachedShopItems = ParseShopItems(response);
-                Plugin.Log.LogInfo($"[SHOP] loaded {CachedShopItems.Count} items");
-                // Entitlements ride the same snapshot. Consent gate: a revoke
-                // that lands while this response is in flight must outrank it
-                // (G11) — GetRequest only checks consent at dispatch, so the
-                // landing side re-checks here. Guarded so a music-side throw
-                // can never break shop rendering.
+                // I10: parse into a LOCAL first; the raw cache commits only
+                // while consent, identity, epoch and dispatch generation are
+                // ALL still current — a slow pre-revoke / pre-purchase /
+                // pre-identity-change response must not repaint a cache a
+                // newer event already cleared or refreshed.
+                var items = ParseShopItems(response);
+                string localNow = null;
+                try { localNow = MatchTracker.LocalSteamId; } catch { }
+                bool identityCurrent = string.IsNullOrEmpty(entitlementSid)
+                    || string.Equals(entitlementSid, localNow, StringComparison.Ordinal);
+                if (Plugin.DataConsentGranted && epoch == _shopCacheEpoch
+                    && gen > _shopItemsCommittedGen && identityCurrent)
+                {
+                    _shopItemsCommittedGen = gen;
+                    CachedShopItems = items;
+                    Plugin.Log.LogInfo($"[SHOP] loaded {items.Count} items");
+                }
+                else
+                {
+                    Plugin.Log.LogInfo($"[SHOP] stale shop snapshot dropped (gen {gen}, epoch {epoch}/{_shopCacheEpoch})");
+                }
+                // Entitlements ride the same snapshot but keep their OWN
+                // identity + generation-floor gates, so they get the parsed
+                // list whether or not the raw cache committed. Consent gate:
+                // a revoke that lands while this response is in flight must
+                // outrank it (G11) — GetRequest only checks consent at
+                // dispatch, so the landing side re-checks here. Guarded so a
+                // music-side throw can never break shop rendering.
                 try
                 {
                     if (Plugin.DataConsentGranted)
-                        MusicEntitlements.ApplyShopSnapshot(entitlementSid, gen, CachedShopItems);
+                        MusicEntitlements.ApplyShopSnapshot(entitlementSid, gen, items);
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC] entitlement snapshot apply failed: {ex.Message}"); }
                 NativeUI.MarkDirty();
@@ -2124,11 +2176,25 @@ namespace CompetitiveRounds
         public static void FetchInventory(string steamId)
         {
             if (string.IsNullOrEmpty(steamId)) return;
+            int gen = ++_inventoryFetchGen;
+            int epoch = _shopCacheEpoch;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/players/{steamId}/inventory",
                 (success, response) =>
                 {
                     if (!success) return;
+                    // I10: same commit fence as FetchShopItems — the
+                    // inventory cache must not repopulate after a consent
+                    // revoke or identity change, and completion order must
+                    // not beat dispatch order. Every caller passes the LOCAL
+                    // player's id, so identity currency is an equality test.
+                    string localNow = null;
+                    try { localNow = MatchTracker.LocalSteamId; } catch { }
+                    if (!Plugin.DataConsentGranted
+                        || epoch != _shopCacheEpoch
+                        || gen <= _inventoryCommittedGen
+                        || !string.Equals(steamId, localNow, StringComparison.Ordinal)) return;
+                    _inventoryCommittedGen = gen;
                     CachedInventory = ParseShopItems(response);
                     NativeUI.MarkDirty();
                 }));
@@ -17350,6 +17416,10 @@ namespace CompetitiveRounds
             }
             else
             {
+                // I10: epoch BEFORE the clears — an in-flight shop/inventory
+                // response captured the old epoch at dispatch, so it can
+                // never commit over the caches this revoke empties below.
+                _shopCacheEpoch++;
                 CachedLeaderboard = null;
                 CachedPlayerStats = null;
                 CachedCardStats = null;

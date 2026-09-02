@@ -2744,8 +2744,11 @@ namespace CompetitiveRounds
         /// spectator alt-tabbing gets exactly the frozen seat this fix exists to
         /// prevent. (Found while diagnosing bug 210; NOT that bug's cause — the
         /// reporter's own default was already true — but a real latent gap.)
-        /// Idempotent and cheap: both arms are one-shot on a flag. The actual
-        /// Application.runInBackground snapshot/write/restore lives in
+        /// Cheap: both arms are one-shot on a flag in the healthy case, and
+        /// the flag commits only on lease SUCCESS (impl review I2) — a failed
+        /// Unity write leaves it unchanged, so the next poll tick retries a
+        /// REAL acquire/release instead of inheriting phantom held-state. The
+        /// actual Application.runInBackground snapshot/write/restore lives in
         /// RunInBackgroundLease (v3/G12) so this room hold composes with the
         /// broadcast-music owner instead of keeping an independent
         /// prior-value snapshot.</summary>
@@ -2754,28 +2757,27 @@ namespace CompetitiveRounds
             bool inOnlineRoom = IsInOnlinePhotonRoomNow();
             if (inOnlineRoom && !_roomBgLeaseHeld)
             {
-                try
-                {
-                    RunInBackgroundLease.Acquire("room");
-                    _roomBgLeaseHeld = true;
-                }
-                catch { }
+                // I2: false = nothing committed lease-side; flag stays false
+                // and this arm retries next poll tick.
+                try { _roomBgLeaseHeld = RunInBackgroundLease.Acquire("room"); } catch { }
             }
             else if (!inOnlineRoom && _roomBgLeaseHeld)
             {
-                try
+                bool released = false;
+                try { released = RunInBackgroundLease.Release("room"); } catch { }
+                if (released)
                 {
-                    RunInBackgroundLease.Release("room");
                     _roomBgLeaseHeld = false;
+                    // Room-exit edge, LOSSY BACKUP copy (review r4: a
+                    // leave+rejoin between poll samples never shows
+                    // InRoom==false here — the authoritative reset lives in
+                    // Plugin.OnLeftRoom, the callback that cannot miss).
+                    // A failed restore (owner retained lease-side) defers
+                    // these one retry tick along with the flag clear.
+                    try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
+                    try { VanillaFixSupport.ResetDiag(RoundSoundSweep.DiagKey); } catch { }
+                    try { SpawnOnImpactFieldDiagPatch.ResetBudgets(); } catch { }
                 }
-                catch { }
-                // Room-exit edge, LOSSY BACKUP copy (review r4: a
-                // leave+rejoin between poll samples never shows
-                // InRoom==false here — the authoritative reset lives in
-                // Plugin.OnLeftRoom, the callback that cannot miss).
-                try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
-                try { VanillaFixSupport.ResetDiag(RoundSoundSweep.DiagKey); } catch { }
-                try { SpawnOnImpactFieldDiagPatch.ResetBudgets(); } catch { }
             }
 
             TickBackgroundAudio(inOnlineRoom);
@@ -3963,6 +3965,7 @@ namespace CompetitiveRounds
 
         private static void IdentifyLocalPlayer()
         {
+            string prevId = localSteamId;
             try
             {
                 CSteamID steamId = SteamUser.GetSteamID();
@@ -3978,6 +3981,7 @@ namespace CompetitiveRounds
                     // poller calls this again, so a real name lands shortly.
                     string persona = StripRichText(SteamFriends.GetPersonaName() ?? "");
                     if (!IsPlaceholderName(persona, localSteamId)) localDisplayName = persona;
+                    NoteIdentityTransition(prevId, localSteamId);
                     MaybeSyncRankedStateOnce();
                     return;
                 }
@@ -3988,12 +3992,62 @@ namespace CompetitiveRounds
             {
                 localSteamId = PhotonNetwork.LocalPlayer?.UserId ?? "unknown";
                 localDisplayName = StripRichText(PhotonNetwork.LocalPlayer?.NickName ?? "Unknown");
+                NoteIdentityTransition(prevId, localSteamId);
                 MaybeSyncRankedStateOnce();
             }
             catch
             {
                 localSteamId = "unknown";
                 localDisplayName = "Unknown";
+                NoteIdentityTransition(prevId, localSteamId);
+            }
+        }
+
+        // Set when a resolved-id change landed while the NEW id was not yet a
+        // valid identity (A→unknown): the refetch half of the hook fires on
+        // the next resolution instead, so an A→unknown→A hiccup (or
+        // A→unknown→B) re-arms entitlements without waiting for a tab open.
+        private static bool _identityRefetchPending;
+
+        /// <summary>Impl review I11: fires the identity-change hook on every
+        /// ACTUAL resolved-id transition (previous id resolved, new one
+        /// differs — a first resolution is not a change; startup flows own
+        /// its fetches). Ownership and the raw shop/inventory caches are
+        /// identity-scoped: identity B (or a back-to-unknown fallback) must
+        /// not inherit A's albums, and the entitlement floor advance makes an
+        /// A→B→A round trip reject every response dispatched before the
+        /// change — the landing-time string-equality check alone cannot see
+        /// the intervening B. Every IdentifyLocalPlayer path calls this, and
+        /// IdentifyLocalPlayer is the only writer of localSteamId, so no
+        /// transition can bypass it.</summary>
+        private static void NoteIdentityTransition(string prevId, string newId)
+        {
+            bool prevResolved = !string.IsNullOrEmpty(prevId) && prevId != "unknown";
+            bool newResolved = !string.IsNullOrEmpty(newId) && newId != "unknown";
+            if (prevResolved && !string.Equals(prevId, newId, StringComparison.Ordinal))
+            {
+                Plugin.Log?.LogWarning($"[POLL] Local resolved identity changed ({prevId} -> {(newResolved ? newId : "unknown")}) — invalidating identity-scoped state");
+                // Epoch advances happen INSIDE these, before their cache
+                // clears (I10 ordering), so in-flight responses that captured
+                // the old epoch at dispatch land into the void.
+                try { ApiClient.OnLocalIdentityChanged(); } catch { }
+                try { MusicEntitlements.OnIdentityChanged(); } catch { }
+                _identityRefetchPending = true;
+            }
+            if (_identityRefetchPending && newResolved)
+            {
+                // Consent-blocked refetches are dropped, not kept pending:
+                // OnConsentChanged refetches for the current id on grant.
+                _identityRefetchPending = false;
+                try
+                {
+                    if (Plugin.DataConsentGranted)
+                    {
+                        ApiClient.FetchShopItems(newId);
+                        ApiClient.FetchInventory(newId);
+                    }
+                }
+                catch { }
             }
         }
 

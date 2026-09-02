@@ -75,9 +75,13 @@ namespace CompetitiveRounds
         }
 
         /// <summary>One loaded (or loading) disk clip. The UnityWebRequest is
-        /// HELD for the life of the entry — DownloadHandlerAudioClip owns a
-        /// streamed clip's buffers, so disposing the request would kill a clip
-        /// mid-play. Static (survives host respawn) per the hazards list.</summary>
+        /// HELD for the life of the entry — DownloadHandlerAudioClip owns the
+        /// clip it produced, so disposing the request could kill a clip
+        /// mid-play. Clips load FULLY BUFFERED (streamAudio=false): the whole
+        /// pack is ~26MB compressed, buffering removes the disk-IO underruns
+        /// players reported as light skipping, and it makes AudioSource.time
+        /// seeks exact for the seek bar. Static (survives host respawn) per
+        /// the hazards list.</summary>
         private sealed class ClipEntry
         {
             public string Key;
@@ -105,10 +109,11 @@ namespace CompetitiveRounds
             public bool ctxDirty;
 
             // Fault machinery [G13]. faultPending is the prefix-latched flag —
-            // DURABLE by construction (a plain static field consumed only by
-            // the engine tick, never cleared by respawns or scene loads);
-            // consuming it enters faultDurable, which pins the desired mode at
-            // Fault until an explicit user transport action retries.
+            // a plain durable static field that survives respawns and scene
+            // loads. It is consumed at ReconcileCore/Tick entry (faultDurable
+            // published BEFORE pending clears [I7]) or by an explicit user
+            // transport retry; faultDurable pins the desired mode at Fault
+            // until such a retry.
             public volatile bool faultPending;
             public bool faultDurable;
             public string faultReason = "";
@@ -127,6 +132,7 @@ namespace CompetitiveRounds
             public float resumePositionSec;
             public bool currentStarted;
             public float currentStartedRt;
+            public bool currentPrematureRetried;        // [I1] one in-place resume per track; a second premature stop = durable Fault
             public bool mainPausedByUs;                 // Pause()d (menu park / preview / PlayPause) — NOT ended
             public string queueSignature;               // selection+shuffle+broadcast fingerprint; null forces rebuild
 
@@ -135,6 +141,7 @@ namespace CompetitiveRounds
             public bool selectionNonEmpty;
             public bool hasReadyTrack;
             public bool menuParked;                     // non-owned ONLY because the menu is uncovered; round entry resumes
+            public MusicMode menuParkedMode = MusicMode.Vanilla; // [I18] the ownership class parked away (Custom/MutedByChoice)
 
             // Card-phase duck (isCard edges, realtime-smoothed).
             public bool duckWanted;
@@ -243,6 +250,8 @@ namespace CompetitiveRounds
                 try { Application.quitting += () => _quitting = true; } catch { }
                 try { MusicEntitlements.Changed += OnEntitlementsChanged; } catch (Exception ex) { LogOnce("ent-sub", "[MUSIC] entitlement subscribe failed: " + ex.Message, true); }
                 SpawnHost();
+                // [I1] no host = no tick = no repair loop — never pretend.
+                if (_host == null) EnterDurableFaultNoThrow("host-spawn-failed");
                 Reconcile("initialize");
             }
             catch (Exception ex)
@@ -281,8 +290,8 @@ namespace CompetitiveRounds
             if (!_initialized) return;
             try
             {
+                ClearFaultForUserAction("PlayPause");   // [I7] preview-ending transports still retry Fault
                 if (S.previewTrack.HasValue) { StopPreviewAndRestoreInternal("transport"); return; }
-                ClearFaultForUserAction("PlayPause");
                 var s = S;
                 if (s.mode == MusicMode.Custom)
                 {
@@ -305,8 +314,8 @@ namespace CompetitiveRounds
             if (!_initialized) return;
             try
             {
+                ClearFaultForUserAction("Stop");        // [I7] preview-ending transports still retry Fault
                 if (S.previewTrack.HasValue) { StopPreviewAndRestoreInternal("stop"); return; }
-                ClearFaultForUserAction("Stop");
                 S.stopIntent = true; S.paused = false;
                 Reconcile("stop");
             }
@@ -330,6 +339,43 @@ namespace CompetitiveRounds
             catch (Exception ex) { LogOnce("skip", "[MUSIC] Skip failed: " + ex.Message, true); }
         }
 
+        /// <summary>Previous transport (wave-2 contract): more than 3s into
+        /// the current track restarts it; otherwise steps back one queue
+        /// entry (listed order, or the live dispersion cycle under shuffle),
+        /// wrapping at the top.</summary>
+        internal static void PlayPrevious()
+        {
+            if (!_initialized) return;
+            try
+            {
+                if (S.previewTrack.HasValue) StopPreviewAndRestoreInternal("transport");
+                ClearFaultForUserAction("PlayPrevious");
+                var s = S;
+                s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
+                s.manualTakeover = true;
+                float pos = s.currentStarted ? CurrentMainTimeOr(s.resumePositionSec) : s.resumePositionSec;
+                if (s.current.HasValue && pos > 3f)
+                {
+                    s.resumePositionSec = 0f;
+                    s.currentPrematureRetried = false;
+                    bool seeked = false;
+                    try
+                    {
+                        var h = _host;
+                        if (h != null && h.Main != null && h.Main.isPlaying) { h.Main.time = 0f; seeked = true; }
+                    }
+                    catch { }
+                    if (!seeked) { s.currentStarted = false; s.mainPausedByUs = false; }
+                    Reconcile("previous-restart");
+                    return;
+                }
+                EnsureQueueCurrent();
+                AdvanceToPrevious();
+                Reconcile("previous");
+            }
+            catch (Exception ex) { LogOnce("prev", "[MUSIC] PlayPrevious failed: " + ex.Message, true); }
+        }
+
         internal static void PlayTrack(string albumSku, int trackIdx)
         {
             if (!_initialized) return;
@@ -350,6 +396,7 @@ namespace CompetitiveRounds
                 var s = S;
                 s.manualTakeover = true; s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
                 s.current = t; s.resumePositionSec = 0f; s.currentStarted = false; s.mainPausedByUs = false;
+                s.currentPrematureRetried = false;
                 s.queueSignature = null;
                 Reconcile("play-track");
             }
@@ -398,10 +445,12 @@ namespace CompetitiveRounds
 
         // ── volume ───────────────────────────────────────────────────────
 
-        /// <summary>Engine-local multiplier percent, 0..100 in 10% steps. A
+        /// <summary>Engine-local multiplier percent, 0..100 — any value is
+        /// valid (the slider is continuous; VolumeUp/Down step ±10 from
+        /// wherever the config sits, without snapping to a grid [I17]). A
         /// multiplier above 100 has no physical channel (AudioSource.volume
         /// clamps at 1 and the vanilla mixer already applies its own gain), so
-        /// the stepper tops out at the vanilla-equivalent loudness.</summary>
+        /// 100 is the vanilla-equivalent loudness ceiling.</summary>
         internal static int VolumeStepPercent
         {
             get { try { return Mathf.Clamp(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100, 0, 100); } catch { return 100; } }
@@ -410,13 +459,86 @@ namespace CompetitiveRounds
         internal static void VolumeUp() { SetVolume(VolumeStepPercent + 10); }
         internal static void VolumeDown() { SetVolume(VolumeStepPercent - 10); }
 
+        /// <summary>Slider write (wave-2 contract): 0..100 clamped, persisted
+        /// to Plugin.MusicVolume; the per-frame volume pass applies it live to
+        /// both sources through the perceptual curve.</summary>
+        internal static void SetVolumePercent(int p) { SetVolume(p); }
+
         private static void SetVolume(int pct)
         {
-            try { if (Plugin.MusicVolume != null) Plugin.MusicVolume.Value = Mathf.Clamp((pct / 10) * 10, 0, 100); } catch { }
+            // [I17] clamp WITHOUT flooring to the 10-grid: an off-grid config
+            // value (e.g. 55) must step to 65/45, not 60/40.
+            try { if (Plugin.MusicVolume != null) Plugin.MusicVolume.Value = Mathf.Clamp(pct, 0, 100); } catch { }
             // Applied by the per-frame volume pass; no Reconcile needed.
         }
 
-        // ── now playing ──────────────────────────────────────────────────
+        // ── now playing / position (wave-2 transport contract) ───────────
+
+        /// <summary>True while audio is audibly sounding from the engine (a
+        /// Custom track, or a preview snippet) — drives the play/pause icon.</summary>
+        internal static bool IsPlayingNow
+        {
+            get
+            {
+                try
+                {
+                    var s = S;
+                    var h = _host;
+                    if (h == null) return false;
+                    if (s.mode == MusicMode.Preview)
+                        return s.previewStarted && h.Preview != null && h.Preview.isPlaying;
+                    return s.mode == MusicMode.Custom && !s.paused
+                        && h.Main != null && h.Main.isPlaying;
+                }
+                catch { return false; }
+            }
+        }
+
+        /// <summary>Elapsed/duration of the current custom track for the seek
+        /// line. False when no custom track is loaded on the main source
+        /// (vanilla/preview/fault surfaces render no position).</summary>
+        internal static bool TryGetPosition(out float elapsedSec, out float durationSec)
+        {
+            elapsedSec = 0f; durationSec = 0f;
+            try
+            {
+                var s = S;
+                var h = _host;
+                if (h == null || h.Main == null) return false;
+                if (s.mode != MusicMode.Custom || !s.current.HasValue || !s.currentStarted) return false;
+                var clip = h.Main.clip;
+                if (clip == null || clip.length <= 0f) return false;
+                durationSec = clip.length;
+                elapsedSec = Mathf.Clamp(h.Main.time, 0f, durationSec);
+                return true;
+            }
+            catch { elapsedSec = 0f; durationSec = 0f; return false; }
+        }
+
+        /// <summary>Seek the current track to fraction f (0..1) of its length.
+        /// No-op when nothing is playing (contract). Buffered clips make the
+        /// AudioSource.time write exact; works while paused too (the position
+        /// is kept for the resume).</summary>
+        internal static void SeekToFraction(float f01)
+        {
+            if (!_initialized) return;
+            try
+            {
+                var s = S;
+                var h = _host;
+                if (h == null || h.Main == null) return;
+                if (s.mode != MusicMode.Custom || !s.current.HasValue || !s.currentStarted) return;
+                var m = h.Main;
+                var clip = m.clip;
+                if (clip == null || clip.length <= 0f) return;
+                // Stay a hair short of the very end so a full-right drag reads
+                // as a natural completion, never a premature stop [I1].
+                float target = Mathf.Min(Mathf.Clamp01(f01) * clip.length, Mathf.Max(0f, clip.length - 0.05f));
+                try { m.time = target; } catch { }
+                s.resumePositionSec = target;
+            }
+            catch (Exception ex) { LogOnce("seek", "[MUSIC] SeekToFraction failed: " + ex.Message, true); }
+        }
 
         internal static string NowPlayingLine()
         {
@@ -585,6 +707,7 @@ namespace CompetitiveRounds
                 s.current = snap.Current;
                 s.resumePositionSec = snap.ResumePositionSec;
                 s.currentStarted = false; s.mainPausedByUs = false;
+                s.currentPrematureRetried = false;
             }
             Reconcile("preview-restore:" + why);
         }
@@ -605,19 +728,10 @@ namespace CompetitiveRounds
             try { ReconcileCore(reason); }
             catch (Exception ex)
             {
-                // A throwing reconcile must fail TOWARD vanilla: silence our
-                // sources, release suppression, restore vanilla, latch Fault.
-                try
-                {
-                    S.faultDurable = true;
-                    S.faultReason = "reconcile: " + ex.Message;
-                    StopSourcesNoThrow();
-                    S.suppress = false;
-                    S.mode = MusicMode.Fault;
-                    ReenterVanillaForContext();
-                    Plugin.Log?.LogError($"[MUSIC] Reconcile({reason}) threw — durable Fault, vanilla restored: {ex}");
-                }
-                catch { }
+                // A throwing reconcile must fail TOWARD vanilla, through the
+                // single durable-fault funnel [I1].
+                try { Plugin.Log?.LogError($"[MUSIC] Reconcile({reason}) threw: {ex}"); } catch { }
+                EnterDurableFaultNoThrow("reconcile: " + ex.Message);
             }
             finally { _inReconcile = false; }
         }
@@ -625,6 +739,18 @@ namespace CompetitiveRounds
         private static void ReconcileCore(string reason)
         {
             var s = S;
+            // [I7] Consume a prefix-latched fault FIRST — faultDurable is
+            // published BEFORE pending clears, so no callback-ordered path
+            // (settings/tier/entitlement/selection/identity) can re-enter
+            // Custom between the latch and the next tick.
+            if (s.faultPending)
+            {
+                bool wasDurable = s.faultDurable;
+                s.faultDurable = true;
+                s.faultPending = false;
+                if (!wasDurable)
+                    Plugin.Log?.LogError($"[MUSIC] entering durable Fault ({s.faultReason}) — vanilla music active until an explicit retry");
+            }
             TickBroadcastEdges();
             RefreshDerivedState();
 
@@ -636,10 +762,12 @@ namespace CompetitiveRounds
             // the engine resumes at the next in-game context. Preview is
             // exempt (shop previews happen at the menu by design).
             s.menuParked = false;
+            s.menuParkedMode = MusicMode.Vanilla;
             if ((desired == MusicMode.Custom || desired == MusicMode.MutedByChoice)
                 && s.ctx == Ctx.Menu && !MenuCovered())
             {
                 s.menuParked = true;
+                s.menuParkedMode = desired;   // [I18] retain the parked ownership class for the prefix fast path
                 desired = MusicMode.Vanilla;
             }
 
@@ -653,7 +781,7 @@ namespace CompetitiveRounds
         {
             var s = S;
             if (_patchDead) return MusicMode.Vanilla;
-            if (s.faultDurable) return MusicMode.Fault;
+            if (s.faultPending || s.faultDurable) return MusicMode.Fault;   // [I7] pending counts — never re-enter Custom under a latched fault
             if (s.previewTrack.HasValue) return MusicMode.Preview;
 
             if (BroadcastPredicate())
@@ -692,7 +820,13 @@ namespace CompetitiveRounds
                 // survives (it is keyed to the manager transform, not the
                 // music transform) and our prefixes keep mirroring it.
                 try { SoundMusicManager.Instance?.StopAllMusic(); }
-                catch (Exception ex) { LogOnce("sam", "[MUSIC] StopAllMusic failed: " + ex.Message, true); }
+                catch (Exception ex)
+                {
+                    // [I1] a failed acquisition must not proceed — both owners
+                    // would play. Durable fault; vanilla keeps the room.
+                    EnterDurableFaultNoThrow("acquire-stop: " + ex.Message);
+                    return;
+                }
                 s.suppress = true;
                 ApplyOwnedPlayback();
             }
@@ -722,14 +856,20 @@ namespace CompetitiveRounds
 
         /// <summary>Same-mode Reconcile: heal any suppress/ownership drift
         /// (e.g. a prefix fault released suppression and the fault was then
-        /// user-cleared before the tick consumed it) and keep Custom fed.</summary>
+        /// user-cleared before the tick consumed it) and keep Custom fed.
+        /// While a fault is PENDING or DURABLE this defers ENTIRELY [I7] —
+        /// consumption at ReconcileCore/Tick entry owns that path, so
+        /// enforcement can never restart custom audio over a vanilla call
+        /// that escaped through a faulted prefix.</summary>
         private static void EnforceModeInvariants()
         {
             var s = S;
+            if (s.faultPending || s.faultDurable) return;
             bool owned = IsEngineOwned(s.mode);
-            if (owned && !s.suppress && !s.faultPending && !s.faultDurable)
+            if (owned && !s.suppress)
             {
-                try { SoundMusicManager.Instance?.StopAllMusic(); } catch { }
+                try { SoundMusicManager.Instance?.StopAllMusic(); }
+                catch (Exception ex) { EnterDurableFaultNoThrow("reacquire-stop: " + ex.Message); return; }
                 s.suppress = true;
             }
             if (!owned && s.suppress) s.suppress = false;
@@ -739,6 +879,7 @@ namespace CompetitiveRounds
         private static void ApplyOwnedPlayback()
         {
             var s = S;
+            if (s.faultPending || s.faultDurable) return;   // [I7] never (re)start owned audio under a latched fault
             switch (s.mode)
             {
                 case MusicMode.Custom:
@@ -795,8 +936,18 @@ namespace CompetitiveRounds
             }
             // Parked-at-menu fast path: the first in-game call after a menu
             // park is suppressed HERE so vanilla in-game music never blips in
-            // the frame before the tick's Reconcile re-enters Custom.
-            if (!menuCall && s.menuParked && (s.stopIntent || s.hasReadyTrack)) { suppress = true; return true; }
+            // the frame before the tick's Reconcile re-takes ownership. [I18]
+            // the parked OWNERSHIP CLASS decides: parked MutedByChoice always
+            // suppresses (silence is the point — stopIntent and empty
+            // selection alike); parked Custom suppresses only while a track
+            // is still ready, so a readiness loss cannot swallow the only
+            // vanilla call of a Loading round.
+            if (!menuCall && s.menuParked)
+            {
+                suppress = s.menuParkedMode == MusicMode.MutedByChoice
+                        || (s.menuParkedMode == MusicMode.Custom && s.hasReadyTrack);
+                return true;
+            }
             return true;
         }
 
@@ -809,7 +960,10 @@ namespace CompetitiveRounds
             var s = S;
             var c = menuCall ? Ctx.Menu : (isCard ? Ctx.Pick : Ctx.Round);
             if (s.ctx != c) { s.ctx = c; s.ctxDirty = true; }
-            if (!menuCall && s.duckWanted != isCard) s.duckWanted = isCard;
+            // [I14] menu entry clears any stale pick-phase duck — a disconnect
+            // can jump Pick→Menu without ever seeing an isCard:false edge.
+            if (menuCall) { if (s.duckWanted) s.duckWanted = false; }
+            else if (s.duckWanted != isCard) s.duckWanted = isCard;
         }
 
         /// <summary>Menu call passed through while we were audible (menu not
@@ -826,10 +980,13 @@ namespace CompetitiveRounds
         }
 
         /// <summary>[G13] The prefix exception path: latch FaultPending
-        /// (durable static — survives host respawns; consumed only by the
-        /// engine tick), release suppression, stop BOTH plugin sources via
-        /// no-throw paths, and let the caller return true so vanilla runs.
-        /// No frame can end with both owners playing.</summary>
+        /// (durable static — survives host respawns; consumed at
+        /// ReconcileCore/Tick entry, where faultDurable is published BEFORE
+        /// pending clears [I7]), release suppression, stop BOTH plugin
+        /// sources via no-throw paths, and let the caller return true so
+        /// vanilla runs. Owned-playback enforcement defers while a fault is
+        /// pending, so the escaped vanilla call cannot be overplayed by a
+        /// custom restart.</summary>
         internal static void LatchFaultFromPrefix(string site, Exception ex)
         {
             try
@@ -845,6 +1002,30 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>[I1] The single durable-fault funnel for every owned
+        /// playback, transition, or host failure — no-throw by construction.
+        /// Publishes durable Fault (BEFORE clearing pending [I7]), silences
+        /// both plugin sources, releases suppression, and re-enters
+        /// context-correct vanilla. Recovery is ONLY the explicit user retry
+        /// (ClearFaultForUserAction) — no automatic reacquisition.</summary>
+        private static void EnterDurableFaultNoThrow(string reason)
+        {
+            try
+            {
+                var s = S;
+                s.faultDurable = true;
+                s.faultPending = false;
+                s.faultReason = reason;
+                StopSourcesNoThrow();
+                s.suppress = false;
+                s.mode = MusicMode.Fault;
+                s.mainPausedByUs = false; s.currentStarted = false;
+                ReenterVanillaForContext();
+                Plugin.Log?.LogError($"[MUSIC] durable Fault ({reason}) — vanilla restored; custom music waits for an explicit retry");
+            }
+            catch { }
+        }
+
         // ── engine tick (host Update — BepInEx never calls Plugin.Update) ─
 
         internal static void Tick()
@@ -855,15 +1036,10 @@ namespace CompetitiveRounds
                 var s = S;
                 float rt = Time.realtimeSinceStartup;
 
-                // FaultPending consumption → durable Fault [G13]. Custom stays
-                // ineligible until an explicit user transport action retries.
-                if (s.faultPending)
-                {
-                    s.faultPending = false;
-                    s.faultDurable = true;
-                    Plugin.Log?.LogError($"[MUSIC] entering durable Fault ({s.faultReason}) — vanilla music active until an explicit retry");
-                    Reconcile("fault-latched");
-                }
+                // FaultPending consumption [G13][I7]: ReconcileCore's first
+                // act publishes durable Fault (BEFORE clearing pending) —
+                // this call just routes there at tick entry.
+                if (s.faultPending) Reconcile("fault-latched");
 
                 if (_reconcileQueued) { _reconcileQueued = false; Reconcile(_reconcileQueuedReason ?? "queued"); }
 
@@ -902,7 +1078,11 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                LogOnce("tick", "[MUSIC] tick failed: " + ex.Message, true);
+                // [I1] an exception escaping the tick while the engine owns
+                // playback (or still holds suppression) must not leave owned
+                // silence over a suppressed vanilla — durable fault.
+                if (IsEngineOwned(S.mode) || S.suppress) EnterDurableFaultNoThrow("tick: " + ex.Message);
+                else LogOnce("tick", "[MUSIC] tick failed: " + ex.Message, true);
             }
         }
 
@@ -918,8 +1098,25 @@ namespace CompetitiveRounds
                 if (m != null && s.current.HasValue && s.currentStarted && !m.isPlaying
                     && rt - s.currentStartedRt > 0.5f)
                 {
+                    // [I1] premature stop vs natural completion, decided by the
+                    // last position observed while playing: well short of the
+                    // clip's end means the source died mid-track (device fault
+                    // / external teardown) — one in-place resume attempt, then
+                    // durable Fault. At/near the end → normal advance.
+                    var clip = m.clip;
+                    if (clip != null && s.resumePositionSec < clip.length - 2f)
+                    {
+                        if (!s.currentPrematureRetried)
+                        {
+                            s.currentPrematureRetried = true;
+                            s.currentStarted = false;   // EnsureMainPlaying resumes from resumePositionSec
+                            Plugin.Log?.LogWarning($"[MUSIC] main source stopped prematurely at {s.resumePositionSec:F1}s of {clip.length:F1}s — attempting one resume");
+                            EnsureMainPlaying();
+                        }
+                        else EnterDurableFaultNoThrow("premature-stop at " + s.resumePositionSec.ToString("F1") + "s");
+                    }
                     // Natural track end → advance (shuffle-cycle aware).
-                    if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
+                    else if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
                     else Reconcile(s.stopIntent ? "playlist-end" : "no-ready-track");
                 }
                 else
@@ -996,7 +1193,11 @@ namespace CompetitiveRounds
                 s.fallbackGain = ComputeFallbackGain();
             }
 
-            float mult = VolumeStepPercent / 100f;
+            // Perceptual volume: gain = (percent/100)² approximates
+            // equal-loudness steps, so mid-slider is audibly mid-volume
+            // instead of near-full — composes with the duck below.
+            float pctFrac = VolumeStepPercent / 100f;
+            float mult = pctFrac * pctFrac;
             float baseGain = s.mixerRouted ? 1f : s.fallbackGain;
             var m = h.Main;
             if (m != null) m.volume = mult * baseGain * Mathf.Lerp(1f, DUCK_VOLUME, s.duckLevel);
@@ -1026,7 +1227,7 @@ namespace CompetitiveRounds
             bool now = BroadcastPredicate();
             if (now == _lastBroadcastPredicate)
             {
-                if (now && !S.broadcastHeld) { try { RunInBackgroundLease.Acquire("broadcast-music"); S.broadcastHeld = true; } catch { } }
+                if (now && !S.broadcastHeld) { try { S.broadcastHeld = RunInBackgroundLease.Acquire("broadcast-music"); } catch { } }
                 return false;
             }
             _lastBroadcastPredicate = now;
@@ -1036,16 +1237,48 @@ namespace CompetitiveRounds
                 // Identity resolution: full-tier bootstrap + the background
                 // lease so menu/idle playback ticks while unfocused [F18].
                 try { if (!MusicAssets.TierReady(MusicTier.Full)) MusicAssets.EnsureTier(MusicTier.Full, "broadcast-identity"); } catch { }
-                try { RunInBackgroundLease.Acquire("broadcast-music"); S.broadcastHeld = true; } catch { }
+                try { S.broadcastHeld = RunInBackgroundLease.Acquire("broadcast-music"); } catch { }
                 Plugin.Log?.LogInfo("[MUSIC] broadcast custom-music predicate ON");
             }
             else if (S.broadcastHeld)
             {
-                try { RunInBackgroundLease.Release("broadcast-music"); } catch { }
-                S.broadcastHeld = false;
+                // I2: clear held ONLY on a successful restore — a failed release
+                // keeps the flag so this branch retries on the next tick.
+                try { if (RunInBackgroundLease.Release("broadcast-music")) S.broadcastHeld = false; } catch { }
                 Plugin.Log?.LogInfo("[MUSIC] broadcast custom-music predicate OFF");
             }
+            RepairAfterBroadcastEdge(now);
             return true;
+        }
+
+        /// <summary>[I8] Centralized predicate-edge repair, run on BOTH edges.
+        /// A rising edge ends any preview (broadcast bootstrap must win
+        /// desired-mode priority; the generation fence kills in-flight
+        /// completions). Then the current track is validated against the NEW
+        /// effective universe — a survivor from the other side of the edge
+        /// (vanilla under broadcast, or a broadcast-picked track the user
+        /// never selected) is stopped and cleared so it can neither keep
+        /// playing nor count as ready.</summary>
+        private static void RepairAfterBroadcastEdge(bool rising)
+        {
+            var s = S;
+            if (rising)
+            {
+                if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("broadcast-rising");
+                else s.previewGen++;
+            }
+            EnsureQueueCurrent();
+            if (!s.current.HasValue) return;
+            var t = s.current.Value;
+            bool keep = s.queueIndex >= 0;   // EnsureQueueCurrent located current in the new effective queue
+            if (!keep && s.manualTakeover)
+                keep = rising ? (!IsVanillaSku(t.Sku) && MusicCatalog.Get(t.Sku) != null)
+                              : (IsTrackKnown(t) && IsAlbumPlayable(t.Sku));
+            if (keep) return;
+            StopMainNoThrow();
+            s.current = null; s.resumePositionSec = 0f; s.currentStarted = false;
+            s.mainPausedByUs = false; s.currentPrematureRetried = false;
+            s.queueIndex = -1;
         }
 
         // ── selection / queue ────────────────────────────────────────────
@@ -1105,7 +1338,8 @@ namespace CompetitiveRounds
             if (BroadcastPredicate())
             {
                 // Override: ALL custom album tracks, never vanilla, deselected
-                // set ignored [F17].
+                // set ignored [F17]. Holds across predicate EDGES too —
+                // RepairAfterBroadcastEdge stops/clears any stale current [I8].
                 var albums = MusicCatalog.Albums;
                 if (albums != null)
                     for (int i = 0; i < albums.Length; i++)
@@ -1133,8 +1367,12 @@ namespace CompetitiveRounds
             return list;
         }
 
-        private static bool ShuffleEffective() => ShuffleEnabled || BroadcastPredicate();
-        private static bool LoopEffective() => LoopEnabled || BroadcastPredicate();
+        // Broadcast forces the SELECTION override only [F17] — shuffle and
+        // loop follow the persisted user settings on every seat (owner
+        // ruling: the forced broadcast shuffle made Skip appear to shuffle
+        // with shuffle off).
+        private static bool ShuffleEffective() => ShuffleEnabled;
+        private static bool LoopEffective() => LoopEnabled;
 
         private static void RefreshDerivedState()
         {
@@ -1251,11 +1489,40 @@ namespace CompetitiveRounds
                     s.resumePositionSec = 0f;
                     s.currentStarted = false;
                     s.mainPausedByUs = false;
+                    s.currentPrematureRetried = false;
                     return true;
                 }
                 KickLoad(t);
             }
             return false;   // nothing ready — Reconcile parks at Loading (vanilla audible)
+        }
+
+        /// <summary>Mirror of AdvanceToNext for the Previous transport: walk
+        /// BACKWARD through the queue (wrapping) to the nearest ready track.</summary>
+        private static bool AdvanceToPrevious()
+        {
+            var s = S;
+            EnsureQueueCurrent();
+            int n = s.queue.Count;
+            if (n == 0) return false;
+            int start = s.queueIndex < 0 ? 0 : s.queueIndex;
+            for (int step = 1; step <= n; step++)
+            {
+                int i = ((start - step) % n + n) % n;
+                var t = s.queue[i];
+                if (IsTrackReady(t))
+                {
+                    s.queueIndex = i;
+                    s.current = t;
+                    s.resumePositionSec = 0f;
+                    s.currentStarted = false;
+                    s.mainPausedByUs = false;
+                    s.currentPrematureRetried = false;
+                    return true;
+                }
+                KickLoad(t);
+            }
+            return false;
         }
 
         // ── clip loading (UnityWebRequest, streamed OGG) ─────────────────
@@ -1269,7 +1536,10 @@ namespace CompetitiveRounds
         private static bool ScanHasReadyTrack()
         {
             var s = S;
-            if (s.current.HasValue && IsTrackReady(s.current.Value)) return true;
+            // [I8] under broadcast the effective universe is custom-only — a
+            // stale vanilla current must never count as ready.
+            if (s.current.HasValue && IsTrackReady(s.current.Value)
+                && !(BroadcastPredicate() && IsVanillaSku(s.current.Value.Sku))) return true;
             var q = s.queue;
             for (int i = 0; i < q.Count; i++) if (IsTrackReady(q[i])) return true;
             return false;
@@ -1324,7 +1594,11 @@ namespace CompetitiveRounds
                 catch { url = "file:///" + path.Replace('\\', '/'); }
                 var req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
                 var dh = req.downloadHandler as DownloadHandlerAudioClip;
-                if (dh != null) dh.streamAudio = true;   // FMOD streams from disk: sub-MB resident per active stream
+                // Fully buffered, NOT streamed: disk-IO underruns on streamed
+                // playback were the reported light audio skipping, and only a
+                // buffered clip gives exact AudioSource.time seeks. The whole
+                // pack is ~26MB of compressed audio — trivially resident.
+                if (dh != null) dh.streamAudio = false;
                 req.SendWebRequest();
                 Clips[key] = new ClipEntry { Key = key, Req = req };
             }
@@ -1398,26 +1672,30 @@ namespace CompetitiveRounds
             var h = _host;
             if (h == null || h.Main == null) return;
             if (s.mode != MusicMode.Custom || s.paused) return;
+            if (s.faultPending || s.faultDurable) return;   // [I7]
             if (!s.current.HasValue && !AdvanceToNext(userSkip: false)) return;
             if (!s.current.HasValue) return;
             var clip = ResolveReadyClip(s.current.Value);
             if (clip == null) { KickLoad(s.current.Value); return; }
             var m = h.Main;
-            if (m.clip != clip) { m.clip = clip; s.currentStarted = false; s.mainPausedByUs = false; }
+            if (m.clip != clip) { m.clip = clip; s.currentStarted = false; s.mainPausedByUs = false; s.currentPrematureRetried = false; }
             if (m.isPlaying) return;
+            // [I1] every play/unpause failure funnels to durable Fault —
+            // owned silence with suppression held is the forbidden state.
             if (s.mainPausedByUs && s.currentStarted)
             {
-                try { m.UnPause(); } catch { }
+                try { m.UnPause(); }
+                catch (Exception ex) { EnterDurableFaultNoThrow("main-unpause: " + ex.Message); return; }
                 s.mainPausedByUs = false;
                 return;
             }
             try
             {
                 float pos = s.resumePositionSec;
-                m.time = (pos > 0.5f && pos < clip.length - 1f) ? pos : 0f;
+                try { m.time = (pos > 0.5f && pos < clip.length - 1f) ? pos : 0f; } catch { }
+                m.Play();
             }
-            catch { }
-            m.Play();
+            catch (Exception ex) { EnterDurableFaultNoThrow("main-play: " + ex.Message); return; }
             s.currentStarted = true;
             s.currentStartedRt = Time.realtimeSinceStartup;
         }
@@ -1484,6 +1762,7 @@ namespace CompetitiveRounds
             // preview [F13]; then reacquire mixer + vanilla catalog + rerun
             // Reconcile [F19].
             if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("scene-change");
+            s.duckWanted = false;   // [I14] a pick-phase duck cannot outlive the scene that picked
             AcquireRouting(mgr);
             AcquireVanillaCatalog(mgr);
             RouteSources();
@@ -1707,6 +1986,7 @@ namespace CompetitiveRounds
             try
             {
                 var s = S;
+                bool hadSelection = s.selectionNonEmpty;   // pre-change derived state [I9]
                 // [G10] entitlement mutations invalidate the preview
                 // generation and terminate the preview FIRST; restoration
                 // resubmits intent through Reconcile, which re-validates.
@@ -1731,6 +2011,22 @@ namespace CompetitiveRounds
                 }
                 EvictUnplayableClips();
                 s.queueSignature = null;
+                // [I9] Ownership loss must never resolve to owned silence:
+                // when the revoke just EMPTIED the effective selection while
+                // the universe stays non-empty, release takeover to vanilla
+                // explicitly — MutedByChoice stays reserved for the user's
+                // own deselect-everything choice, and the consent-revoke
+                // promise is "vanilla music comes back".
+                if (hadSelection && !s.stopIntent)
+                {
+                    EnsureQueueCurrent();
+                    if (s.queue.Count == 0 && !SelectionUniverseEmpty())
+                    {
+                        s.manualTakeover = false;
+                        s.vanillaPreferred = true;
+                        Plugin.Log?.LogInfo("[MUSIC] entitlement loss emptied the effective selection — releasing to vanilla");
+                    }
+                }
                 Reconcile("entitlements-changed");
             }
             catch (Exception ex) { LogOnce("entchg", "[MUSIC] entitlements-changed handler failed: " + ex.Message, true); }
@@ -1739,9 +2035,10 @@ namespace CompetitiveRounds
         // ── fault retry ──────────────────────────────────────────────────
 
         /// <summary>The "explicit Retry" that makes Custom eligible again after
-        /// a durable Fault: any deliberate transport action. There is no
-        /// automatic health probe — if the cause persists, the next prefix
-        /// throw re-latches within a frame.</summary>
+        /// a durable Fault: any deliberate transport action — preview-ending
+        /// ones included; they clear BEFORE returning [I7]. There is no
+        /// automatic health probe — if the cause persists, the next failure
+        /// re-latches within a frame.</summary>
         private static void ClearFaultForUserAction(string action)
         {
             var s = S;
@@ -1821,10 +2118,16 @@ namespace CompetitiveRounds
                 if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("host-respawn");
                 s.currentStarted = false;
                 s.mainPausedByUs = false;
-                if (s.broadcastHeld) { try { RunInBackgroundLease.Acquire("broadcast-music"); } catch { } }
+                s.duckWanted = false;   // [I14] rehydration re-derives the duck from the next prefix edge
+                if (s.broadcastHeld) { try { s.broadcastHeld = RunInBackgroundLease.Acquire("broadcast-music"); } catch { } }
                 Reconcile("host-respawn");
             }
-            catch (Exception ex) { LogOnce("rehydrate", "[MUSIC] rehydrate failed: " + ex.Message, true); }
+            catch (Exception ex)
+            {
+                // [I1] a failed rehydration is a host failure — durable fault
+                // (vanilla restored) instead of a half-rehydrated owner.
+                EnterDurableFaultNoThrow("host-rehydrate: " + ex.Message);
+            }
         }
 
         internal static void OnHostDestroyed(MusicEngineHost dying)
@@ -1833,6 +2136,9 @@ namespace CompetitiveRounds
             _host = null;
             if (_quitting) return;
             SpawnHost();
+            // [I1] failed respawn: nothing ticks again, so a held suppression
+            // would silence vanilla forever — durable fault releases it all.
+            if (_host == null) EnterDurableFaultNoThrow("host-respawn-failed");
         }
 
         // ── misc ─────────────────────────────────────────────────────────

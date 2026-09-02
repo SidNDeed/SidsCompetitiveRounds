@@ -129,8 +129,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> DataConsent;
 
         // ── Music (ai-collab/music-feature design v3) ────────────────────
-        // Stored as the DESELECTED track set (albumSku:trackIdx, pipe-
-        // delimited) so newly shipped content defaults to selected.
+        // Stored as the DESELECTED track set (albumSku/trackIndex pairs,
+        // comma-delimited) so newly shipped content defaults to selected.
         internal static ConfigEntry<string> MusicDeselected;
         internal static ConfigEntry<bool> MusicShuffle;
         internal static ConfigEntry<bool> MusicLoop;
@@ -902,7 +902,7 @@ namespace CompetitiveRounds
             );
             MusicVolume = Config.Bind(
                 "Music", "MusicVolume", 100,
-                "Custom-music volume percent (10% steps via the Music tab stepper). Applied on top of the game's own music slider, which keeps working."
+                "Custom-music volume percent (0-100, set with the Music tab's volume slider; any hand-edited value is used as-is, clamped). Applied on top of the game's own music slider, which keeps working."
             );
             MenuMusicEnabled = Config.Bind(
                 "Music", "MenuMusicEnabled", false,

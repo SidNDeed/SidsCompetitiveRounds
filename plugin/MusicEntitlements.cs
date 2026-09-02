@@ -10,9 +10,10 @@ namespace CompetitiveRounds
     /// generation gate so an anonymous or stale shop response can never revoke
     /// (or grant) authenticated ownership.
     ///
-    /// Writers: ApplyShopSnapshot is the ONLY grant path (called by ApiClient's
-    /// two shop-items application sites, generation stamped by the caller);
-    /// OnConsentRevoked is the only other mutation (clear + invalidate).
+    /// Writers: ApplyShopSnapshot is the ONLY grant path — called from
+    /// ApiClient.FetchShopItems, the single funnel every shop-items fetch
+    /// rides, generation stamped there at dispatch; OnConsentRevoked and
+    /// OnIdentityChanged are the only other mutations (clear + invalidate).
     /// No offline cache (design R4'): a cold-start fetch failure leaves custom
     /// albums unplayable that session; vanilla plays.
     /// </summary>
@@ -76,27 +77,39 @@ namespace CompetitiveRounds
             FireChanged();
         }
 
-        /// <summary>[G11] Consent revoked: advance the acceptance floor past
-        /// every generation this store has ever seen (invalidating in-flight
-        /// responses it can bound), clear the store, fire Changed so the engine
-        /// invalidates any live preview, stops affected playback, repairs the
-        /// selection and reconciles to vanilla.
-        ///
-        /// The floor advances past BOTH the highest generation this store has
-        /// seen AND ApiClient's dispatch high-water — a response whose request
-        /// was dispatched before the revoke but has not landed yet carries a
-        /// generation at or below that high-water, so it can never apply
-        /// ("revoke outranks every in-flight response", design R3). Never
-        /// re-arms itself: the consent-grant refetch dispatches a fresh, larger
-        /// generation and applies normally, so no wedge is possible.</summary>
-        internal static void OnConsentRevoked()
+        /// <summary>[G11] Consent revoked: clear the store and invalidate every
+        /// in-flight response (see InvalidateAndClear). Never re-arms itself:
+        /// the consent-grant refetch dispatches a fresh, larger generation and
+        /// applies normally, so no wedge is possible.</summary>
+        internal static void OnConsentRevoked() => InvalidateAndClear("consent revoke");
+
+        /// <summary>Impl review I11 (called by GameStateWatcher's identity-
+        /// transition hook): the RESOLVED local identity changed (A→B or
+        /// A→unknown). Identity B must not inherit A's local playback
+        /// authority, and an A→B→A round trip must not let an old A-era
+        /// response through ApplyShopSnapshot's landing-time equality check —
+        /// the floor advance rejects every generation dispatched before the
+        /// change. The hook's refetch for the new identity dispatches above
+        /// the floor and applies normally.</summary>
+        internal static void OnIdentityChanged() => InvalidateAndClear("identity change");
+
+        /// <summary>Shared invalidation: advance the acceptance floor past
+        /// BOTH the highest generation this store has ever seen AND
+        /// ApiClient's dispatch high-water — a response whose request was
+        /// dispatched before the invalidation but has not landed yet carries
+        /// a generation at or below that high-water, so it can never apply
+        /// ("revoke outranks every in-flight response", design R3). Then
+        /// clear the store and fire Changed so the engine invalidates any
+        /// live preview, stops affected playback, repairs the selection and
+        /// reconciles to vanilla.</summary>
+        private static void InvalidateAndClear(string reason)
         {
             int dispatchHighWater = 0;
             try { dispatchHighWater = ApiClient.ShopSnapshotGenHighWater; } catch { }
             genFloor = Math.Max(genFloor, Math.Max(maxSeenGen, dispatchHighWater) + 1);
             int had = owned.Count;
             owned.Clear();
-            Plugin.Log?.LogInfo($"[MUSIC] entitlements cleared on consent revoke ({had} album(s) dropped); acceptance floor now gen {genFloor}");
+            Plugin.Log?.LogInfo($"[MUSIC] entitlements cleared on {reason} ({had} album(s) dropped); acceptance floor now gen {genFloor}");
             FireChanged();
         }
 

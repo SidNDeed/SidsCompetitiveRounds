@@ -552,6 +552,11 @@ namespace CompetitiveRounds
         // propagates up. Only use it where every ancestor is already flexW:1
         // (or explicitly flexW:0) — otherwise a fixed column silently stretches.
         public static void SetFlexW(GameObject go,float flexW){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le!=null)pLEFlexW?.SetValue(le,flexW);}
+        /* Vertically center an HLG's children (childAlignment = MiddleLeft, TextAnchor 3).
+         * Only meaningful with forceExpandH:false — with the default force-expand every
+         * child is stretched to the row height and alignment never shows. Used by rows
+         * that mix control heights (the music dock's 20-40px icons in a 44px row). */
+        public static void SetHLGChildAlignMiddle(GameObject go){if(go==null||tHLG==null)return;var h=go.GetComponent(tHLG);if(h==null)return;try{var p=tHLG.GetProperty("childAlignment",BindingFlags.Public|BindingFlags.Instance);p?.SetValue(h,Enum.ToObject(p.PropertyType,3));}catch{}}
         /* Codex v1.36 client find 9: CreateText now pins minH=sizeDelta.y (the
          * L10n anti-compression floor), so any DYNAMIC resize site must move
          * minH along with prefH or Unity clamps the child at its build-time
@@ -700,7 +705,138 @@ namespace CompetitiveRounds
         public static void FitOneLine(object t){SetOverflowMode(t,0);SetWordWrap(t,false);}
         public static void SetCharSpacing(object t,float spacing){if(t!=null)pTmpCharSpacing?.SetValue(t,spacing);}
         public static void SetImageColor(GameObject go,Color c){if(go==null)return;var img=go.GetComponent(tImage);if(img!=null)pImgColor?.SetValue(img,c);}
+        public static void SetImageSprite(GameObject go,Sprite spr){if(go==null||tImage==null)return;var img=go.GetComponent(tImage);if(img!=null)tImage.GetProperty("sprite",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,spr);}
         public static object GetButtonText(GameObject btn){if(btn==null)return null;foreach(Transform ch in btn.transform)foreach(var co in ch.GetComponents<Component>())if(co.GetType().Name=="TextMeshProUGUI")return co;return null;}
+        /* Icon button (music transport pass): the root GO IS the Image — the
+         * embedded sprite (NativeUI's loader; deliberate consumer-ward call, the
+         * contract asked the helper to reuse that exact loader) with
+         * preserveAspect, so tinting = SetImageColor(root) and sprite swaps =
+         * SetImageSprite(root). Click wiring rides AddClick, which claims
+         * ClickGuard ONCE (#158) — callers must never re-claim. onClick null =
+         * decorative glyph: no Button, and raycastTarget off so it can't eat a
+         * neighbour's click. */
+        public static GameObject CreateIconButton(Transform parent,string name,string resourceName,float size,UnityEngine.Events.UnityAction onClick)
+        {
+            var go=new GameObject(name);
+            go.transform.SetParent(parent,false);
+            go.AddComponent<RectTransform>();
+            AddLE(go,prefW:size,prefH:size,flexW:0,flexH:0);
+            if(tImage!=null)
+            {
+                var img=go.AddComponent(tImage);
+                var spr=NativeUI.GetEmbeddedSprite(resourceName);
+                if(spr!=null)tImage.GetProperty("sprite",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,spr);
+                tImage.GetProperty("preserveAspect",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);
+                if(onClick==null)pImgRaycastTarget?.SetValue(img,false);
+            }
+            if(onClick!=null)AddClick(go,onClick);
+            return go;
+        }
+
+        /* Reflection slider over UnityEngine.UI.Slider: a thin dark track, a
+         * fill, and a small square handle ("the line with a dot").
+         * onUserChanged fires ONLY for genuine user input — SetSilent writes
+         * the position without echoing (SetValueWithoutNotify where this build
+         * has it, and a suppress flag either way), which is what lets a
+         * playback ticker repaint a seek bar without issuing seeks. */
+        public class SliderHandle{public GameObject go;public Func<float> Get;public Action<float> SetSilent;}
+        private static Type tSlider;private static bool tSliderTried;
+        public static SliderHandle CreateSlider(Transform parent,string name,float w,float h,Action<float> onUserChanged)
+        {
+            if(!tSliderTried)
+            {
+                tSliderTried=true;
+                foreach(var asm in AppDomain.CurrentDomain.GetAssemblies()){tSlider=asm.GetType("UnityEngine.UI.Slider");if(tSlider!=null)break;}
+                if(tSlider==null)Plugin.Log.LogWarning("[UI] UnityEngine.UI.Slider missing - slider controls disabled");
+            }
+            if(tSlider==null||tImage==null)return null;
+            var bf=BindingFlags.Public|BindingFlags.Instance;
+            const float hnd=12f;   // handle dot size; also the track's end padding so the dot can reach both ends
+            var root=new GameObject(name);
+            root.transform.SetParent(parent,false);
+            var rt=root.AddComponent<RectTransform>();
+            rt.sizeDelta=new Vector2(w,h);
+            AddLE(root,prefW:w,prefH:h,flexW:0,flexH:0);
+            var bg=new GameObject("BG");
+            bg.transform.SetParent(root.transform,false);
+            var bgRT=bg.AddComponent<RectTransform>();
+            bgRT.anchorMin=new Vector2(0f,0.5f);bgRT.anchorMax=new Vector2(1f,0.5f);
+            bgRT.sizeDelta=new Vector2(0f,4f);
+            var bgImg=bg.AddComponent(tImage);
+            pImgColor?.SetValue(bgImg,new Color(0.05f,0.06f,0.08f,0.95f));
+            pImgRaycastTarget?.SetValue(bgImg,true);   // clicking anywhere on the line jumps the handle
+            var fa=new GameObject("FillArea");
+            fa.transform.SetParent(root.transform,false);
+            var faRT=fa.AddComponent<RectTransform>();
+            faRT.anchorMin=new Vector2(0f,0.5f);faRT.anchorMax=new Vector2(1f,0.5f);
+            faRT.sizeDelta=new Vector2(-hnd,4f);
+            var fill=new GameObject("Fill");
+            fill.transform.SetParent(fa.transform,false);
+            var fillRT=fill.AddComponent<RectTransform>();
+            fillRT.anchorMin=new Vector2(0f,0f);fillRT.anchorMax=new Vector2(0f,1f);
+            fillRT.sizeDelta=new Vector2(hnd/2f,0f);
+            var fillImg=fill.AddComponent(tImage);
+            pImgColor?.SetValue(fillImg,new Color(0.45f,0.65f,0.95f,0.95f));
+            pImgRaycastTarget?.SetValue(fillImg,false);
+            var ha=new GameObject("HandleArea");
+            ha.transform.SetParent(root.transform,false);
+            var haRT=ha.AddComponent<RectTransform>();
+            haRT.anchorMin=Vector2.zero;haRT.anchorMax=Vector2.one;
+            haRT.offsetMin=new Vector2(hnd/2f,0f);haRT.offsetMax=new Vector2(-hnd/2f,0f);
+            var handle=new GameObject("Handle");
+            handle.transform.SetParent(ha.transform,false);
+            var hRT=handle.AddComponent<RectTransform>();
+            // The Slider drives ONLY the anchor X pair; Y stays pinned mid so
+            // the dot rides centered on the line.
+            hRT.anchorMin=new Vector2(0f,0.5f);hRT.anchorMax=new Vector2(0f,0.5f);
+            hRT.sizeDelta=new Vector2(hnd,hnd);
+            var hImg=handle.AddComponent(tImage);
+            pImgColor?.SetValue(hImg,Color.white);
+            pImgRaycastTarget?.SetValue(hImg,true);
+            var sl=root.AddComponent(tSlider);
+            try
+            {
+                tSlider.GetProperty("fillRect",bf)?.SetValue(sl,fillRT);
+                tSlider.GetProperty("handleRect",bf)?.SetValue(sl,hRT);
+                tSlider.GetProperty("targetGraphic",bf)?.SetValue(sl,hImg);
+                tSlider.GetProperty("minValue",bf)?.SetValue(sl,0f);
+                tSlider.GetProperty("maxValue",bf)?.SetValue(sl,1f);
+                /* Navigation MUST be None. A Slider is a Selectable whose OnMove
+                 * CHANGES THE VALUE — with default navigation, a slider left
+                 * selected after a click would consume the EventSystem's
+                 * Horizontal axis (arrows/A-D) and, say, crank the volume while
+                 * the player walks left in-game. Buttons only move selection on
+                 * OnMove; sliders act, so this line is load-bearing. */
+                var pNav=tSlider.GetProperty("navigation",bf);
+                var nav=pNav?.GetValue(sl);
+                if(nav!=null)
+                {
+                    var pMode=nav.GetType().GetProperty("mode",bf);
+                    if(pMode!=null){pMode.SetValue(nav,Enum.ToObject(pMode.PropertyType,0));pNav.SetValue(sl,nav);}
+                }
+            }
+            catch(Exception ex){Plugin.Log.LogWarning($"[UI] slider wiring ({name}): {ex.Message}");}
+            bool suppress=false;
+            try
+            {
+                var evt=tSlider.GetProperty("onValueChanged",bf)?.GetValue(sl);
+                var mAdd=evt?.GetType().GetMethod("AddListener",new Type[]{typeof(UnityEngine.Events.UnityAction<float>)});
+                if(mAdd!=null&&onUserChanged!=null)
+                {
+                    UnityEngine.Events.UnityAction<float> cbv=v=>{if(!suppress)onUserChanged(v);};
+                    mAdd.Invoke(evt,new object[]{cbv});
+                }
+            }
+            catch(Exception ex){Plugin.Log.LogWarning($"[UI] slider onValueChanged ({name}): {ex.Message}");}
+            var pValue=tSlider.GetProperty("value",bf);
+            MethodInfo mNoNotify=null;
+            try{mNoNotify=tSlider.GetMethod("SetValueWithoutNotify",bf,null,new Type[]{typeof(float)},null);}catch{}
+            var hRef=new SliderHandle();
+            hRef.go=root;
+            hRef.Get=()=>{try{return pValue!=null?(float)pValue.GetValue(sl):0f;}catch{return 0f;}};
+            hRef.SetSilent=v=>{suppress=true;try{if(mNoNotify!=null)mNoNotify.Invoke(sl,new object[]{v});else pValue?.SetValue(sl,v);}catch{}finally{suppress=false;}};
+            return hRef;
+        }
         public const int AlignTopLeft=257,AlignTopCenter=258,AlignTopRight=260,AlignMidLeft=513,AlignMidCenter=514,AlignMidRight=516;
     }
 
@@ -5707,7 +5843,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
          * collide with "logo.png", but a future "big_logo.png" WOULD — match
          * deliberately). */
         private static readonly Dictionary<string,Sprite> _embSprites=new Dictionary<string,Sprite>();
-        private static Sprite GetEmbeddedSprite(string suffix)
+        internal static Sprite GetEmbeddedSprite(string suffix)   // internal: UIFactory.CreateIconButton reuses this loader
         {
             Sprite cached;
             if(_embSprites.TryGetValue(suffix,out cached))return cached;
@@ -10918,10 +11054,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // The UI is a pure VIEW: every control calls the MusicEngine contract
         // and never touches AudioSources (design §4/§5). Rows are pooled and
         // entity-bound per fill (#265).
-        private static object txtMusicMode, txtMusicNow, txtMusicDlStatus, musicVolTxt;
+        private static object txtMusicMode, txtMusicNow, txtMusicDlStatus;
         private static GameObject musicStatusRow, musicRetryBtn;
         private static GameObject musicPlayBtn, musicLoopBtn, musicShuffleBtn;
-        private static object musicPlayBtnTxt, musicLoopBtnTxt, musicShuffleBtnTxt;
+        private static object musicSeekElapsed, musicSeekTotal;
+        private static UIFactory.SliderHandle musicSeekSlider, musicVolSlider;
+        private static float musicSeekPollAt;
+        private static int musicVolLastSent = -1;
+        // Enabled/disabled tint for the shuffle/loop glyphs (painted per refresh).
+        private static readonly Color MUS_ICON_ON = new Color(0.35f, 1f, 0.45f, 1f);
+        private static readonly Color MUS_ICON_OFF = new Color(0.55f, 0.55f, 0.60f, 1f);
         private class MusicAlbumHdrRow { public GameObject root, artGO; public object artImg, txtName, txtMeta; }
         private class MusicTrackRow
         {
@@ -11038,59 +11180,17 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.AddLE(hdr, prefH: 32, flexH: 0);
             UIFactory.CreateText("MusTitle", hdr.transform, "Music", 22f, C_GOLD,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 30));
-            var hsp = new GameObject("S"); hsp.transform.SetParent(hdr.transform, false); hsp.AddComponent<RectTransform>(); UIFactory.AddLE(hsp, flexW: 1);
-            txtMusicMode = UIFactory.CreateText("MusMode", hdr.transform, "", 15f, C_LABEL,
-                UIFactory.AlignMidRight, sizeDelta: new Vector2(520, 24));
 
-            // Transport bar — labels painted in RefreshMusicTab (stateful).
-            var tp = new GameObject("MusTransport");
-            tp.transform.SetParent(panel.transform, false);
-            tp.AddComponent<RectTransform>();
-            UIFactory.AddHLG(tp, spacing: 6, forceExpandH: true);
-            UIFactory.AddLE(tp, prefH: 32, minH: 32, flexH: 0);
-            musicPlayBtn = UIFactory.CreateButton("MusPlay", tp.transform, "Play", 14f, C_WHITE,
-                new Color(0.25f, 0.45f, 0.18f, 0.9f), () => MusicUiCall("play-pause", MusicEngine.PlayPause), sizeDelta: new Vector2(90, 28));
-            UIFactory.AddLE(musicPlayBtn, prefW: 90, prefH: 28, flexW: 0, flexH: 0);
-            musicPlayBtnTxt = UIFactory.GetButtonText(musicPlayBtn);
-            var musStopBtn = UIFactory.CreateButton("MusStop", tp.transform, "Stop", 14f, C_WHITE, C_BTN,
-                () => MusicUiCall("stop", MusicEngine.Stop), sizeDelta: new Vector2(70, 28));
-            UIFactory.AddLE(musStopBtn, prefW: 70, prefH: 28, flexW: 0, flexH: 0);
-            var musSkipBtn = UIFactory.CreateButton("MusSkip", tp.transform, "Skip", 14f, C_WHITE, C_BTN,
-                () => MusicUiCall("skip", MusicEngine.Skip), sizeDelta: new Vector2(70, 28));
-            UIFactory.AddLE(musSkipBtn, prefW: 70, prefH: 28, flexW: 0, flexH: 0);
-            musicLoopBtn = UIFactory.CreateButton("MusLoop", tp.transform, "", 13f, C_WHITE, C_BTN,
-                () => MusicUiCall("loop", () => MusicEngine.LoopEnabled = !MusicEngine.LoopEnabled), sizeDelta: new Vector2(110, 28));
-            UIFactory.AddLE(musicLoopBtn, prefW: 110, prefH: 28, flexW: 0, flexH: 0);
-            musicLoopBtnTxt = UIFactory.GetButtonText(musicLoopBtn);
-            musicShuffleBtn = UIFactory.CreateButton("MusShuf", tp.transform, "", 13f, C_WHITE, C_BTN,
-                () => MusicUiCall("shuffle", () => MusicEngine.ShuffleEnabled = !MusicEngine.ShuffleEnabled), sizeDelta: new Vector2(130, 28));
-            UIFactory.AddLE(musicShuffleBtn, prefW: 130, prefH: 28, flexW: 0, flexH: 0);
-            musicShuffleBtnTxt = UIFactory.GetButtonText(musicShuffleBtn);
-            // First-class reset control (design F14): clears manual takeover +
-            // returns ownership to vanilla in one click.
-            var musVanBtn = UIFactory.CreateButton("MusVan", tp.transform, "Use vanilla music", 13f, C_WHITE,
-                new Color(0.3f, 0.3f, 0.5f, 0.9f), () => MusicUiCall("use-vanilla", MusicEngine.UseVanilla), sizeDelta: new Vector2(170, 28));
-            UIFactory.AddLE(musVanBtn, prefW: 170, prefH: 28, flexW: 0, flexH: 0);
-            var tsp = new GameObject("S"); tsp.transform.SetParent(tp.transform, false); tsp.AddComponent<RectTransform>(); UIFactory.AddLE(tsp, flexW: 1);
-            // Volume: engine-local 10% stepper on top of the game's own music
-            // slider (design D1) — no slider widget exists in this codebase.
-            var musVolDn = UIFactory.CreateButton("MusVolDn", tp.transform, "-", 16f, C_WHITE, C_BTN,
-                () => MusicUiCall("vol-down", MusicEngine.VolumeDown), sizeDelta: new Vector2(32, 28));
-            UIFactory.AddLE(musVolDn, prefW: 32, prefH: 28, flexW: 0, flexH: 0);
-            musicVolTxt = UIFactory.CreateText("MusVol", tp.transform, "100%", 15f, C_WHITE,
-                UIFactory.AlignMidCenter, sizeDelta: new Vector2(56, 24));
-            var musVolUp = UIFactory.CreateButton("MusVolUp", tp.transform, "+", 16f, C_WHITE, C_BTN,
-                () => MusicUiCall("vol-up", MusicEngine.VolumeUp), sizeDelta: new Vector2(32, 28));
-            UIFactory.AddLE(musVolUp, prefW: 32, prefH: 28, flexW: 0, flexH: 0);
-
-            txtMusicNow = UIFactory.CreateText("MusNow", panel.transform, "", 15f, C_SUB,
-                UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 24));
-            UIFactory.FitOneLine(txtMusicNow);
-
+            // Albums/tracks scroll — the transport dock sits BELOW it, outside
+            // the scroll, so the controls never leave the screen. #63 rules
+            // unchanged inside the content: fixed prefH children only.
+            var sv = UIFactory.CreateScrollView("MusSV", panel.transform, spacing: 4);
+            UIFactory.AddLE(sv.scrollGO, flexH: 1);
             // Download status + manual Retry (design §3: one auto retry per
-            // tier per session, then this control).
+            // tier per session, then this control). Lives INSIDE the scroll
+            // content above the albums; RefreshMusicTab pins it at sibling 0.
             musicStatusRow = new GameObject("MusStatus");
-            musicStatusRow.transform.SetParent(panel.transform, false);
+            musicStatusRow.transform.SetParent(sv.content.transform, false);
             musicStatusRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(musicStatusRow, spacing: 8, forceExpandH: true);
             UIFactory.AddLE(musicStatusRow, prefH: 26, minH: 26, flexH: 0);
@@ -11102,13 +11202,88 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.AddLE(musicRetryBtn, prefW: 80, prefH: 24, flexW: 0, flexH: 0);
             musicRetryBtn.SetActive(false);
             musicStatusRow.SetActive(false);
-
-            var sv = UIFactory.CreateScrollView("MusSV", panel.transform, spacing: 4);
-            UIFactory.AddLE(sv.scrollGO, flexH: 1);
             // Pools parent directly into the scroll content (shop pattern);
             // every child carries a fixed prefH, never flexH (#63).
             for (int i = 0; i < 8; i++) musicAlbumHdrs.Add(CreateMusicAlbumHdr(sv.content.transform, i));
             for (int i = 0; i < 48; i++) musicTrackRows.Add(CreateMusicTrackRow(sv.content.transform, i));
+
+            // ── Transport dock (owner UX pass): standard player iconography,
+            // docked at the tab bottom, outside the scroll. Row A = now-playing
+            // + mode, row B = the seek line, row C = icon cluster + volume. ──
+            var dock = new GameObject("MusDock");
+            dock.transform.SetParent(panel.transform, false);
+            dock.AddComponent<RectTransform>();
+            UIFactory.AddVLG(dock, spacing: 4, padT: 2);
+            UIFactory.AddLE(dock, prefH: 100, minH: 100, flexH: 0);
+
+            var rowA = new GameObject("MusDockA");
+            rowA.transform.SetParent(dock.transform, false);
+            rowA.AddComponent<RectTransform>();
+            UIFactory.AddHLG(rowA, spacing: 10, forceExpandH: true);
+            UIFactory.AddLE(rowA, prefH: 20, minH: 20, flexH: 0);
+            txtMusicNow = UIFactory.CreateText("MusNow", rowA.transform, "", 14f, C_SUB,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 20));
+            UIFactory.FitOneLine(txtMusicNow);
+            var asp = new GameObject("S"); asp.transform.SetParent(rowA.transform, false); asp.AddComponent<RectTransform>(); UIFactory.AddLE(asp, flexW: 1);
+            txtMusicMode = UIFactory.CreateText("MusMode", rowA.transform, "", 14f, C_LABEL,
+                UIFactory.AlignMidRight, sizeDelta: new Vector2(460, 20));
+            UIFactory.FitOneLine(txtMusicMode);
+
+            var rowB = new GameObject("MusDockB");
+            rowB.transform.SetParent(dock.transform, false);
+            rowB.AddComponent<RectTransform>();
+            UIFactory.AddHLG(rowB, spacing: 8, forceExpandH: false);
+            UIFactory.SetHLGChildAlignMiddle(rowB);
+            UIFactory.AddLE(rowB, prefH: 24, minH: 24, flexH: 0);
+            musicSeekElapsed = UIFactory.CreateText("MusSkEl", rowB.transform, "", 12f, C_LABEL,
+                UIFactory.AlignMidRight, sizeDelta: new Vector2(46, 20));
+            musicSeekSlider = UIFactory.CreateSlider(rowB.transform, "MusSeek", 400f, 20f,
+                f => { try { MusicEngine.SeekToFraction(Mathf.Clamp01(f)); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] seek: {ex.Message}"); } });
+            if (musicSeekSlider != null) UIFactory.SetFlexW(musicSeekSlider.go, 1);   // "the line": stretch between the time labels
+            musicSeekTotal = UIFactory.CreateText("MusSkTo", rowB.transform, "", 12f, C_LABEL,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(46, 20));
+
+            var rowC = new GameObject("MusDockC");
+            rowC.transform.SetParent(dock.transform, false);
+            rowC.AddComponent<RectTransform>();
+            UIFactory.AddHLG(rowC, spacing: 8, forceExpandH: false);
+            UIFactory.SetHLGChildAlignMiddle(rowC);
+            UIFactory.AddLE(rowC, prefH: 44, minH: 44, flexH: 0);
+            // Left corner: stop, plus the first-class reset control (design
+            // F14): clears manual takeover + returns ownership to vanilla.
+            UIFactory.CreateIconButton(rowC.transform, "MusStop", "mus_ic_stop.png", 22f,
+                () => MusicUiCall("stop", MusicEngine.Stop));
+            var musVanBtn = UIFactory.CreateButton("MusVan", rowC.transform, "Use vanilla music", 13f, C_WHITE,
+                new Color(0.3f, 0.3f, 0.5f, 0.9f), () => MusicUiCall("use-vanilla", MusicEngine.UseVanilla), sizeDelta: new Vector2(170, 26));
+            UIFactory.AddLE(musVanBtn, prefW: 170, prefH: 26, flexW: 0, flexH: 0);
+            var csp1 = new GameObject("S"); csp1.transform.SetParent(rowC.transform, false); csp1.AddComponent<RectTransform>(); UIFactory.AddLE(csp1, flexW: 1);
+            // Centered cluster: shuffle | prev | play-pause | next | loop.
+            // Shuffle/loop tint (green = on) painted in RefreshMusicTab.
+            musicShuffleBtn = UIFactory.CreateIconButton(rowC.transform, "MusShuf", "mus_ic_shuffle.png", 26f,
+                () => MusicUiCall("shuffle", () => MusicEngine.ShuffleEnabled = !MusicEngine.ShuffleEnabled));
+            UIFactory.CreateIconButton(rowC.transform, "MusPrev", "mus_ic_prev.png", 26f,
+                () => MusicUiCall("prev", MusicEngine.PlayPrevious));
+            musicPlayBtn = UIFactory.CreateIconButton(rowC.transform, "MusPlay", "mus_ic_play.png", 40f,
+                () => MusicUiCall("play-pause", MusicEngine.PlayPause));
+            UIFactory.CreateIconButton(rowC.transform, "MusNext", "mus_ic_next.png", 26f,
+                () => MusicUiCall("skip", MusicEngine.Skip));
+            musicLoopBtn = UIFactory.CreateIconButton(rowC.transform, "MusLoop", "mus_ic_loop.png", 26f,
+                () => MusicUiCall("loop", () => MusicEngine.LoopEnabled = !MusicEngine.LoopEnabled));
+            var csp2 = new GameObject("S"); csp2.transform.SetParent(rowC.transform, false); csp2.AddComponent<RectTransform>(); UIFactory.AddLE(csp2, flexW: 1);
+            // Right corner: volume glyph (decorative) + the real volume slider.
+            var volIco = UIFactory.CreateIconButton(rowC.transform, "MusVolIco", "mus_ic_volume.png", 20f, null);
+            UIFactory.SetImageColor(volIco, C_LABEL);
+            musicVolSlider = UIFactory.CreateSlider(rowC.transform, "MusVolSl", 150f, 20f,
+                f =>
+                {
+                    int p = Mathf.RoundToInt(Mathf.Clamp01(f) * 100f);
+                    // A drag fires per pixel and SetVolumePercent persists the
+                    // config value, so only integer CHANGES are forwarded — and
+                    // no dirty flip: the slider already shows the new state.
+                    if (p == musicVolLastSent) return;
+                    musicVolLastSent = p;
+                    try { MusicEngine.SetVolumePercent(p); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] volume: {ex.Message}"); }
+                });
 
             return panel;
         }
@@ -11117,12 +11292,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         {
             var h = new MusicAlbumHdrRow();
             h.root = UIFactory.CreatePanel($"musAl{idx}", parent, new Color(0.10f, 0.12f, 0.17f, 0.95f));
-            UIFactory.AddHLG(h.root, spacing: 10, padL: 8, padR: 8, padT: 6, padB: 6, forceExpandH: true);
-            UIFactory.AddLE(h.root, prefH: 64, minH: 64, flexH: 0);
+            UIFactory.AddHLG(h.root, spacing: 10, padL: 8, padR: 8, padT: 4, padB: 4, forceExpandH: true);
+            UIFactory.AddLE(h.root, prefH: 52, minH: 52, flexH: 0);   // owner UX pass: slimmer album rows
             h.artGO = new GameObject("art");
             h.artGO.transform.SetParent(h.root.transform, false);
             h.artGO.AddComponent<RectTransform>();
-            UIFactory.AddLE(h.artGO, prefW: 52, minW: 52, prefH: 52, flexW: 0, flexH: 0);
+            UIFactory.AddLE(h.artGO, prefW: 42, minW: 42, prefH: 42, flexW: 0, flexH: 0);
             if (UIFactory.tImage != null)
             {
                 h.artImg = h.artGO.AddComponent(UIFactory.tImage);
@@ -11134,11 +11309,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             col.AddComponent<RectTransform>();
             UIFactory.AddVLG(col, spacing: 1);
             UIFactory.AddLE(col, flexW: 1);
-            h.txtName = UIFactory.CreateText($"musAlN{idx}", col.transform, "", 18f, C_WHITE,
-                UIFactory.AlignMidLeft, sizeDelta: new Vector2(640, 24));
+            h.txtName = UIFactory.CreateText($"musAlN{idx}", col.transform, "", 16f, C_WHITE,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(640, 20));
             UIFactory.FitOneLine(h.txtName);
-            h.txtMeta = UIFactory.CreateText($"musAlM{idx}", col.transform, "", 13f, C_LABEL,
-                UIFactory.AlignMidLeft, sizeDelta: new Vector2(640, 18));
+            h.txtMeta = UIFactory.CreateText($"musAlM{idx}", col.transform, "", 12f, C_LABEL,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(640, 16));
             UIFactory.FitOneLine(h.txtMeta);
             h.root.SetActive(false);
             return h;
@@ -11148,8 +11323,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         {
             var t = new MusicTrackRow();
             t.root = UIFactory.CreatePanel($"musTr{idx}", parent, C_PANEL);
-            UIFactory.AddHLG(t.root, spacing: 8, padL: 10, padR: 10, padT: 3, padB: 3, forceExpandH: true);
-            UIFactory.AddLE(t.root, prefH: 30, minH: 30, flexH: 0);
+            UIFactory.AddHLG(t.root, spacing: 8, padL: 10, padR: 10, padT: 2, padB: 2, forceExpandH: true);
+            UIFactory.AddLE(t.root, prefH: 28, minH: 28, flexH: 0);   // owner UX pass: slimmer track rows
             // Callbacks read the row OBJECT's current binding (#265) — the same
             // rule as the achievements rows' "reads the row's CURRENT key".
             t.selBtn = UIFactory.CreateButton($"musTrS{idx}", t.root.transform, "", 12f, C_WHITE, C_BTN,
@@ -11162,14 +11337,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] select: {ex.Message}"); }
                     dirty = true;
-                }, sizeDelta: new Vector2(56, 24));
-            UIFactory.AddLE(t.selBtn, prefW: 56, prefH: 24, flexW: 0, flexH: 0);
+                }, sizeDelta: new Vector2(56, 22));
+            UIFactory.AddLE(t.selBtn, prefW: 56, prefH: 22, flexW: 0, flexH: 0);
             t.selBtnTxt = UIFactory.GetButtonText(t.selBtn);
-            t.txtTitle = UIFactory.CreateText($"musTrT{idx}", t.root.transform, "", 15f, C_WHITE,
-                UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 22));
+            t.txtTitle = UIFactory.CreateText($"musTrT{idx}", t.root.transform, "", 14f, C_WHITE,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 20));
             UIFactory.FitOneLine(t.txtTitle);
-            t.txtLen = UIFactory.CreateText($"musTrL{idx}", t.root.transform, "", 13f, C_DIM,
-                UIFactory.AlignMidRight, sizeDelta: new Vector2(56, 20));
+            t.txtLen = UIFactory.CreateText($"musTrL{idx}", t.root.transform, "", 12f, C_DIM,
+                UIFactory.AlignMidRight, sizeDelta: new Vector2(56, 18));
             t.playBtn = UIFactory.CreateButton($"musTrP{idx}", t.root.transform, "Play", 13f, C_WHITE,
                 new Color(0.25f, 0.4f, 0.55f, 0.9f),
                 () =>
@@ -11181,8 +11356,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] play: {ex.Message}"); }
                     dirty = true;
-                }, sizeDelta: new Vector2(70, 24));
-            UIFactory.AddLE(t.playBtn, prefW: 70, prefH: 24, flexW: 0, flexH: 0);
+                }, sizeDelta: new Vector2(70, 22));
+            UIFactory.AddLE(t.playBtn, prefW: 70, prefH: 22, flexW: 0, flexH: 0);
             t.root.SetActive(false);
             return t;
         }
@@ -11227,7 +11402,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         private static void RefreshMusicTab()
         {
-            // Transport paints — the engine is the single source of truth (§4).
+            // Transport dock paints — the engine is the single source of truth (§4).
             MusicMode mode = MusicMode.Vanilla;
             try { mode = MusicEngine.Mode; } catch { }
             if (txtMusicMode != null) UIFactory.SetTextRaw(txtMusicMode, MusicModeLine(mode));
@@ -11236,20 +11411,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 UIFactory.SetTextRaw(txtMusicNow, string.IsNullOrEmpty(np)
                     ? $"<color=#888><i>{I18n.Tr("Nothing playing")}</i></color>"
                     : np);
-            if (musicPlayBtnTxt != null)
-                UIFactory.SetText(musicPlayBtnTxt, (mode == MusicMode.Custom && !string.IsNullOrEmpty(np)) ? "Pause" : "Play");
+            // Play/pause is ONE toggling icon driven by IsPlayingNow (audibly
+            // playing) — paused-in-Custom shows the play glyph again.
+            bool playing = false; try { playing = MusicEngine.IsPlayingNow; } catch { }
+            if (musicPlayBtn != null)
+                UIFactory.SetImageSprite(musicPlayBtn, GetEmbeddedSprite(playing ? "mus_ic_pause.png" : "mus_ic_play.png"));
             bool loop = true, shuf = false;
             try { loop = MusicEngine.LoopEnabled; shuf = MusicEngine.ShuffleEnabled; } catch { }
-            if (musicLoopBtnTxt != null)
-                UIFactory.SetText(musicLoopBtnTxt, loop
-                    ? "Loop: <color=#88FF88>ON</color>"
-                    : "Loop: <color=#FF9966>OFF</color>");
-            if (musicShuffleBtnTxt != null)
-                UIFactory.SetText(musicShuffleBtnTxt, shuf
-                    ? "Shuffle: <color=#88FF88>ON</color>"
-                    : "Shuffle: <color=#FF9966>OFF</color>");
-            int vol = 100; try { vol = MusicEngine.VolumeStepPercent; } catch { }
-            if (musicVolTxt != null) UIFactory.SetTextRaw(musicVolTxt, $"{vol}%");
+            if (musicLoopBtn != null) UIFactory.SetImageColor(musicLoopBtn, loop ? MUS_ICON_ON : MUS_ICON_OFF);
+            if (musicShuffleBtn != null) UIFactory.SetImageColor(musicShuffleBtn, shuf ? MUS_ICON_ON : MUS_ICON_OFF);
+            // Volume: the persisted config value IS the state (the contract's
+            // SetVolumePercent writes it); silent so the repaint can't re-seek
+            // the engine's volume path.
+            int vol = 100; try { vol = Plugin.MusicVolume != null ? Mathf.Clamp(Plugin.MusicVolume.Value, 0, 100) : 100; } catch { }
+            if (musicVolSlider != null) musicVolSlider.SetSilent(vol / 100f);
+            // Re-anchor the dedup to the PERSISTED value: without this, a
+            // config change from elsewhere followed by the user dragging back
+            // to the previously-sent number would be swallowed by the guard.
+            musicVolLastSent = vol;
+            UpdateMusicSeekRow();
             string status = null; bool retry = false;
             try { status = MusicAssets.TierStatusLine(); retry = MusicAssets.RetryAvailable; } catch { }
             if (musicStatusRow != null) musicStatusRow.SetActive(!string.IsNullOrEmpty(status) || retry);
@@ -11257,7 +11437,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (musicRetryBtn != null) musicRetryBtn.SetActive(retry);
 
             // Album sections — vanilla FIRST (design §5), then owned customs.
-            int sibling = 0, rowI = 0, hdrI = 0;
+            // Sibling 0 is pinned to the status row: it shares the scroll
+            // content with the pools, and the loops below renumber everything else.
+            if (musicStatusRow != null) musicStatusRow.transform.SetSiblingIndex(0);
+            int sibling = 1, rowI = 0, hdrI = 0;
             int vCount = 0; try { vCount = MusicEngine.VanillaTrackCount; } catch { }
             if (vCount > 0 && hdrI < musicAlbumHdrs.Count)
             {
@@ -11308,10 +11491,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     if (h.artGO != null && !h.artGO.activeSelf) h.artGO.SetActive(true);
                 }
                 int n = alb.Tracks != null ? alb.Tracks.Length : 0;
-                // Album name through the live Tr lookup like every shop-item
-                // name (the shop_strings snapshot carries the key); artist +
-                // genre are identity, not prose — raw.
-                UIFactory.SetTextRaw(h.txtName, $"<color=#FFD94D>{HomeSan(I18n.Tr(alb.AlbumName ?? ""))}</color>");
+                // Album/artist/genre metadata renders RAW — never through Tr.
+                // The compiled-catalog rule (MusicCatalog header, #368) is the
+                // authority: authored identity is not translatable prose, and
+                // I18n.Tr(variable) is unharvestable anyway (#295a).
+                UIFactory.SetTextRaw(h.txtName, $"<color=#FFD94D>{HomeSan(alb.AlbumName ?? "")}</color>");
                 UIFactory.SetTextRaw(h.txtMeta,
                     I18n.TrF("by {0}", HomeSan(alb.ArtistName ?? "")) + $"  -  {HomeSan(alb.Genre ?? "")}  -  "
                     + I18n.TrF("{0} tracks", n) + $"  -  {FmtTrackLen(MusicAlbumTotalSeconds(alb))}");
@@ -11331,6 +11515,30 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (musicAlbumHdrs[i].root != null && musicAlbumHdrs[i].root.activeSelf) musicAlbumHdrs[i].root.SetActive(false);
         }
 
+        /* Seek-line paint, ~0.25s cadence from MaybeRefreshMusicTab (and once
+         * per full refresh). Programmatic slider writes go through SetSilent so
+         * they can never echo back into MusicEngine.SeekToFraction; the write
+         * is additionally skipped while the mouse button is held so a
+         * drag-in-progress isn't yanked from under the cursor (the time labels
+         * still tick). Hidden/blank whenever TryGetPosition answers false. */
+        private static void UpdateMusicSeekRow()
+        {
+            if (musicSeekSlider == null) return;
+            float el = 0f, du = 0f; bool have = false;
+            try { have = MusicEngine.TryGetPosition(out el, out du); } catch { }
+            if (!have || du <= 0f)
+            {
+                if (musicSeekSlider.go != null && musicSeekSlider.go.activeSelf) musicSeekSlider.go.SetActive(false);
+                if (musicSeekElapsed != null) UIFactory.SetTextRaw(musicSeekElapsed, "");
+                if (musicSeekTotal != null) UIFactory.SetTextRaw(musicSeekTotal, "");
+                return;
+            }
+            if (musicSeekSlider.go != null && !musicSeekSlider.go.activeSelf) musicSeekSlider.go.SetActive(true);
+            if (!Input.GetMouseButton(0)) musicSeekSlider.SetSilent(Mathf.Clamp01(el / du));
+            if (musicSeekElapsed != null) UIFactory.SetTextRaw(musicSeekElapsed, FmtTrackLen(el));
+            if (musicSeekTotal != null) UIFactory.SetTextRaw(musicSeekTotal, FmtTrackLen(du));
+        }
+
         /* Throttled ticker (#62 pattern): the engine's mode / now-playing /
          * download status change without anything flipping `dirty`, so a cheap
          * 2s signature poll is the flip source. Also armed while a music row
@@ -11340,12 +11548,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         {
             bool shopPreviewLive = currentTab == 4 && !string.IsNullOrEmpty(shopSelectedSku) && MusicCatalog.Get(shopSelectedSku) != null;
             if (currentTab != 16 && !shopPreviewLive) return;
+            // Seek-line micro-ticker: the position moves continuously, but a
+            // full tab repaint for it would be #162-class waste — update just
+            // the slider + time labels at 4 Hz, with no dirty flip.
+            if (currentTab == 16 && Time.unscaledTime >= musicSeekPollAt)
+            {
+                musicSeekPollAt = Time.unscaledTime + 0.25f;
+                try { UpdateMusicSeekRow(); } catch { }
+            }
             if (Time.unscaledTime < musicTabPollAt) return;
             musicTabPollAt = Time.unscaledTime + 2f;
             string sig;
             try
             {
-                sig = $"{MusicEngine.Mode}|{MusicEngine.NowPlayingLine()}|{MusicAssets.TierStatusLine()}|{MusicAssets.RetryAvailable}|{MusicEngine.VolumeStepPercent}|{MusicEngine.LoopEnabled}|{MusicEngine.ShuffleEnabled}";
+                sig = $"{MusicEngine.Mode}|{MusicEngine.IsPlayingNow}|{MusicEngine.NowPlayingLine()}|{MusicAssets.TierStatusLine()}|{MusicAssets.RetryAvailable}|{(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100)}|{MusicEngine.LoopEnabled}|{MusicEngine.ShuffleEnabled}";
             }
             catch { return; }
             if (sig != musicTabSig) { musicTabSig = sig; dirty = true; }

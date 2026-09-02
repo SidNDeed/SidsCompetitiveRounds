@@ -225,6 +225,18 @@
     <EmbeddedResource Include="assets\icon_thunderstore.png" />
     <EmbeddedResource Include="assets\icon_discord.png" />
     <EmbeddedResource Include="assets\icon_github.png" />
+    <!-- Music transport glyphs (white on transparent, same loader/tinting
+         pipeline as the icon_* set): standard player iconography for the
+         Music tab's bottom transport bar. "mus_ic_" prefix keeps them out
+         of the icon_* footer-button namespace. -->
+    <EmbeddedResource Include="assets\mus_ic_play.png" />
+    <EmbeddedResource Include="assets\mus_ic_pause.png" />
+    <EmbeddedResource Include="assets\mus_ic_prev.png" />
+    <EmbeddedResource Include="assets\mus_ic_next.png" />
+    <EmbeddedResource Include="assets\mus_ic_shuffle.png" />
+    <EmbeddedResource Include="assets\mus_ic_loop.png" />
+    <EmbeddedResource Include="assets\mus_ic_volume.png" />
+    <EmbeddedResource Include="assets\mus_ic_stop.png" />
   </ItemGroup>
 
   <!-- SkipCopyToPlugins=true builds WITHOUT installing to the local BepInEx —

@@ -3589,15 +3589,22 @@ DANCES_MIN_VERSION = "1.39.7"
 # the client version whose compiled MusicCatalog carries that album (an older
 # client cannot render, preview, or play it — the dance "born unusable" class,
 # design v3 G1). SHIP COUPLING (#294/#331): the entry for a sku must equal the
-# client version that actually ships its catalog entry, and is added ONLY
-# after Sid names that version (the 277 flip wave) — never guessed early
-# (a high guess silently hides the album from the shipping client; a low one
-# exposes it to clients that cannot play it). Ships EMPTY: {} = no music
-# exposed anywhere, double-gated by the row's catalog_ready=FALSE until
-# migration 277. Values are validated at import (below _parse_version): an
-# unparseable value EXCLUDES its sku from every supported set (fail closed,
+# client version that actually ships its catalog entry — never guessed high
+# (a high guess silently hides the album from the shipping client). An empty
+# map = no music exposed anywhere; the row's catalog_ready=FALSE double-gates
+# until migration 277. Values are validated at import (below _parse_version):
+# an unparseable value EXCLUDES its sku from every supported set (fail closed,
 # never version-0) with one loud startup line.
-MUSIC_SKU_MIN_VERSIONS: dict[str, str] = {}
+MUSIC_SKU_MIN_VERSIONS: dict[str, str] = {
+    # SHIP COUPLING (#294/#331): 1.39.7 = the PENDING client release that
+    # ships this album's MusicCatalog entry. Every shipped client is <=1.39.6
+    # and stays excluded, so staging this entry now exposes nothing; if Sid
+    # names a different final version, any >=1.39.7 ship still gates
+    # correctly (same direction rule as DANCES_MIN_VERSION above). NEVER
+    # raise it past the version that actually ships the catalog entry — that
+    # hides the album from the shipping client.
+    "music_album_another_round": "1.39.7",
+}
 
 # Per-request mod version captured from the X-Mod-Version header by the
 # version-gate middleware. Identity-bound _mark_mod_seen callers may use it
@@ -3729,24 +3736,29 @@ def _parse_version(v: str) -> tuple[int, ...]:
 
 
 def _music_strict_version(v: str | None) -> tuple[int, ...] | None:
-    """_parse_version's exact dotted-numeric grammar, but FAILURE IS VISIBLE:
-    _parse_version swallows to (0,), and a version-0 floor would expose a
-    music sku to every client — precisely the fail-open G1 forbids."""
-    try:
-        parts = tuple(int(x) for x in (v or "").strip().split("."))
-    except Exception:
+    """Fail-closed music version parse: ONLY unsigned ASCII-decimal dotted
+    components (the _parse_pure_dotted_version grammar — no sign, whitespace,
+    or empty component), and never an all-zero tuple. Anything else is None:
+    _parse_version swallows garbage to (0,), and int() accepts "-1"/"+1"/
+    " 1"/"1_0", any of which would make a floor that exposes a music sku to
+    clients that cannot play it — the fail-open G1 forbids (impl-r1 I3)."""
+    if v is None:
         return None
-    return parts or None
+    parts = _parse_pure_dotted_version(v)
+    if parts is None or not any(parts):
+        return None
+    return parts
 
 
 def _music_validated_floors() -> dict[str, tuple[int, ...]]:
     """Import-time validation of MUSIC_SKU_MIN_VERSIONS (design v3 G1): an
-    invalid/placeholder value ("TBD", "", "0") EXCLUDES that sku from every
-    supported set — fail closed, one loud startup line per exclusion."""
+    invalid/placeholder value ("TBD", "", "0", "-1", "1.-40.0") EXCLUDES that
+    sku from every supported set — fail closed, one loud startup line per
+    exclusion. _music_strict_version already rejects all-zero tuples."""
     out: dict[str, tuple[int, ...]] = {}
     for _sku, _val in MUSIC_SKU_MIN_VERSIONS.items():
         _floor = _music_strict_version(_val)
-        if _floor is None or not any(_floor):
+        if _floor is None:
             print(f"[MUSIC] EXCLUDED sku {_sku}: min version {_val!r} is not a "
                   f"nonzero dotted-numeric - sku hidden from ALL clients (fail closed)")
             continue

@@ -48,28 +48,41 @@ namespace CompetitiveRounds
     /// staging → ONE atomic Directory.Move publishes the complete tier. An
     /// invalid pre-existing final tree is renamed to a quarantine path before
     /// publication and the quarantine deleted only after the new tree
-    /// revalidates. Cleanup is per-TIER and keep-until-replaced; orphan
-    /// staging/quarantine dirs and download temps are swept at Initialize,
-    /// after final-tree resolution and before the engine opens any clip.
+    /// revalidates. Cleanup is per-TIER and keep-until-replaced; Initialize
+    /// RESOLVES each tier's orphan staging/quarantine trees (publish a valid
+    /// copy when the final is absent/invalid, retain quarantine until the
+    /// same-tier final validates) and deletes only what that decision makes
+    /// redundant — all before the engine opens any clip [I12].
     ///
     /// ── Crash-convergence walk (design R3 implement-must-verify) ──
     /// crash mid-download → *.tmp swept at init, cache untouched;
-    /// crash mid-extract/verify → staging-* swept, cache untouched;
-    /// crash after marker write, before rename → staging-* swept (never final);
-    /// crash after quarantine rename, before publication → tier absent,
-    ///   staging+quarantine swept, next EnsureTier reinstalls;
+    /// crash mid-extract/verify → markerless staging (incomplete by protocol)
+    ///   swept, cache untouched;
+    /// crash after marker write, before rename → the completed staging tree
+    ///   validates at init and is PUBLISHED when the final is absent/invalid
+    ///   (redundant when a final already validates) — no re-download;
+    /// crash after quarantine rename, before publication → final absent: the
+    ///   completed staging tree is published, then the quarantine (now
+    ///   replaced) is deleted; if no orphan copy validates, the quarantine is
+    ///   RETAINED and EnsureTier reinstalls;
     /// crash between publication and quarantine delete → final valid,
-    ///   quarantine orphan swept;
+    ///   quarantine now redundant and swept;
     /// crash mid stale-revision delete → partial stale tree re-deleted next
     ///   init (current tier still validates).
     /// Every path converges to a valid current tier or a clean re-download with
     /// no manual deletion; a stale revision's tier is never deleted without a
-    /// validated current replacement.
+    /// validated current replacement, and no orphan copy is deleted while it is
+    /// the only tree of its tier that validates.
     ///
     /// ── HTTP policy [H2] ──
-    /// 403/429/5xx/timeouts are TRANSIENT: honor Retry-After else capped
-    /// jittered backoff (bounded in-worker attempts, then one automatic session
-    /// retry, then the manual Retry control), validated caches preserved.
+    /// 403/429/5xx/timeouts are TRANSIENT: honor Retry-After in BOTH RFC 7231
+    /// forms (delta-seconds and HTTP-date) — a delay within the worker's sleep
+    /// budget is waited exactly (no jitter); a longer one is honored on the
+    /// main thread WITHOUT consuming in-worker attempts or the session
+    /// auto-retry (bounded honored waits, then the normal ladder). Capped
+    /// jittered backoff only when no valid header (bounded in-worker attempts,
+    /// then one automatic session retry, then the manual Retry control),
+    /// validated caches preserved.
     /// 404/410 and integrity failures FAIL CLOSED: status line + Retry control,
     /// cache untouched, never recreate or overwrite a revision in response.
     ///
@@ -100,6 +113,9 @@ namespace CompetitiveRounds
 
         private const int DOWNLOAD_ATTEMPTS = 4;       // in-worker transient attempts
         private const float READY_TTL_SECONDS = 5f;    // TierReady revalidation throttle
+        private const int SAFE_WORKER_WAIT_MS = 60000; // [H2] worker Thread.Sleep ceiling
+        private const int MAX_DEFERRED_WAIT_MS = 900000; // 15 min cap on one honored long Retry-After
+        private const int MAX_DEFERRED_WAITS = 3;      // honored long waits per tier per session
 
         // ── Compiled manifest — all 15 files (7 full, 7 previews, cover) [G8] ──
 
@@ -143,14 +159,17 @@ namespace CompetitiveRounds
             public bool GaveUp;            // terminal until RetryFailedTier()
             public bool FailedIntegrity;   // flavor for the status line
             public bool MissingWarned;     // THUNDERSTORE: warn once per tier
+            public bool DeferredWaiting;   // main thread: honoring a long Retry-After between worker runs
+            public int DeferredWaitsUsed;  // bounded honored long waits per session [I13]
             public volatile bool WorkerDone;   // worker → coroutine handoff
             public volatile int WorkerResult;  // (int)ResultKind
+            public volatile int WorkerRetryAfterMs; // worker → coroutine: server delay past the sleep budget
             public bool ReadyCache;
             public bool ReadyCacheValid;
             public float ReadyCheckedAt;
         }
 
-        private enum ResultKind { Ok = 0, Transient = 1, FailClosedHttp = 2, FailClosedIntegrity = 3 }
+        private enum ResultKind { Ok = 0, Transient = 1, FailClosedHttp = 2, FailClosedIntegrity = 3, TransientDeferred = 4 }
         private enum DlOutcome { Ok, Transient, FailClosedHttp, CapExceeded }
 
         private static readonly TierRuntime _previews = new TierRuntime { Tier = MusicTier.Previews };
@@ -205,25 +224,27 @@ namespace CompetitiveRounds
                     TryRepairUnmarkedTier(MusicTier.Previews);
                     TryRepairUnmarkedTier(MusicTier.Full);
 
-                    // 1. Final-tree resolution FIRST — the sweep and the stale
-                    //    cleanup below both key on it [H1].
-                    bool prevOk = TierReady(MusicTier.Previews);
-                    bool fullOk = TierReady(MusicTier.Full);
+                    // 1. Per-tier orphan RESOLUTION [I12]: decide which valid
+                    //    copy of each tier survives BEFORE deleting anything. A
+                    //    crash between quarantine rename and publication leaves
+                    //    the final absent beside a marker-complete staging tree
+                    //    — that tree is published here instead of re-downloaded,
+                    //    and a quarantine tree is retained until the same-tier
+                    //    final validates.
+                    int swept = ResolveTierOrphans(MusicTier.Previews)
+                              + ResolveTierOrphans(MusicTier.Full);
 
-                    // 2. Orphan sweep: staging is unpublished by definition and
-                    //    quarantine only ever holds trees that failed validation,
-                    //    so deleting either is always safe. Leftover *.tmp files
-                    //    are crashed downloads.
-                    int swept = 0;
+                    // 2. Residual sweep: orphan dirs matching NEITHER tier name
+                    //    carry nothing resolvable; leftover *.tmp files are
+                    //    crashed downloads.
                     foreach (var d in Directory.GetDirectories(_musicRoot))
                     {
                         string leaf = Path.GetFileName(d);
-                        if (leaf.StartsWith("staging-", StringComparison.Ordinal) ||
-                            leaf.StartsWith("quarantine-", StringComparison.Ordinal))
-                        {
-                            TryDeleteDir(d);
-                            swept++;
-                        }
+                        if (!leaf.StartsWith("staging-", StringComparison.Ordinal) &&
+                            !leaf.StartsWith("quarantine-", StringComparison.Ordinal)) continue;
+                        if (IsTierOrphanName(leaf)) continue;   // resolved above; survivors are deliberate
+                        TryDeleteDir(d);
+                        swept++;
                     }
                     foreach (var f in Directory.GetFiles(_musicRoot, "*.tmp"))
                     {
@@ -231,7 +252,12 @@ namespace CompetitiveRounds
                         swept++;
                     }
 
-                    // 3. Stale revision cleanup, per-TIER, keep-until-replaced: a
+                    // 3. Final readiness AFTER resolution — publication above can
+                    //    have restored a tier the pre-resolution state lacked.
+                    bool prevOk = TierReady(MusicTier.Previews);
+                    bool fullOk = TierReady(MusicTier.Full);
+
+                    // 4. Stale revision cleanup, per-TIER, keep-until-replaced: a
                     //    stale revision's tier is deleted ONLY after the current
                     //    revision's SAME tier validates; the parent dir goes only
                     //    when empty [H1][G3].
@@ -271,6 +297,110 @@ namespace CompetitiveRounds
             if (_musicRoot != null && (!TierReady(MusicTier.Previews) || !TierReady(MusicTier.Full)))
                 Plugin.Log?.LogWarning("[MUSIC] bundled music trees missing/invalid - reinstall via the mod manager (Thunderstore bundles ship the music)");
 #endif
+        }
+
+        private static bool IsTierOrphanName(string leaf)
+        {
+            foreach (var t in new[] { MusicTier.Previews, MusicTier.Full })
+            {
+                string td = TierDirName(t);
+                if (leaf.StartsWith("staging-" + td + "-", StringComparison.Ordinal) ||
+                    leaf.StartsWith("quarantine-" + td + "-", StringComparison.Ordinal)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>[I12] Init-time orphan resolution for one tier: decide which
+        /// valid copy survives FIRST, delete only what that decision makes
+        /// redundant. When the final tree does not validate, a validated orphan
+        /// copy (completed staging first — newest bytes by protocol — then a
+        /// quarantine that still validates) is PUBLISHED in its place, so a
+        /// crash between quarantine rename and publication never costs a
+        /// re-download. Quarantine trees are retained until the same-tier final
+        /// validates; a staging tree survives only while it is the sole valid
+        /// copy. Main thread (TierReady), runs in BOTH build variants — local
+        /// recovery needs no network. Returns orphan dirs deleted.</summary>
+        private static int ResolveTierOrphans(MusicTier t)
+        {
+            int removed = 0;
+            try
+            {
+                string stagingPrefix = "staging-" + TierDirName(t) + "-";
+                string quarantinePrefix = "quarantine-" + TierDirName(t) + "-";
+                var stagingDirs = new List<string>();
+                var quarantineDirs = new List<string>();
+                foreach (var d in Directory.GetDirectories(_musicRoot))
+                {
+                    string leaf = Path.GetFileName(d);
+                    if (leaf.StartsWith(stagingPrefix, StringComparison.Ordinal)) stagingDirs.Add(d);
+                    else if (leaf.StartsWith(quarantinePrefix, StringComparison.Ordinal)) quarantineDirs.Add(d);
+                }
+                var s = St(t);
+                s.ReadyCacheValid = false;
+                bool finalOk = TierReady(t);
+                if (!finalOk && (stagingDirs.Count > 0 || quarantineDirs.Count > 0))
+                {
+                    var candidates = new List<string>(stagingDirs.Count + quarantineDirs.Count);
+                    candidates.AddRange(stagingDirs);
+                    candidates.AddRange(quarantineDirs);
+                    foreach (var cand in candidates)
+                    {
+                        if (!Directory.Exists(cand) || !ValidateTierTree(cand, t)) continue;
+                        if (PublishOrphan(cand, t, quarantineDirs)) { finalOk = true; break; }
+                    }
+                }
+                foreach (var d in stagingDirs)
+                {
+                    if (!Directory.Exists(d)) continue;               // consumed by publication
+                    if (!finalOk && ValidateTierTree(d, t)) continue; // sole valid copy — keep
+                    TryDeleteDir(d);
+                    removed++;
+                }
+                foreach (var d in quarantineDirs)
+                {
+                    if (!finalOk) break;                              // retained until the final validates
+                    if (!Directory.Exists(d)) continue;
+                    TryDeleteDir(d);
+                    removed++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning($"[MUSIC] orphan resolution failed for {TierDirName(t)}: {ex.Message}");
+            }
+            return removed;
+        }
+
+        /// <summary>Move a validated orphan tree into the final tier position,
+        /// quarantining a present-but-invalid final first (the new quarantine
+        /// joins this pass's retention/deletion decision via the list). True
+        /// only when the published tree revalidates in place.</summary>
+        private static bool PublishOrphan(string cand, MusicTier t, List<string> quarantineDirs)
+        {
+            try
+            {
+                string final = TierDir(t);
+                Directory.CreateDirectory(Path.Combine(_musicRoot, ASSET_REVISION));
+                if (Directory.Exists(final))
+                {
+                    string q = Path.Combine(_musicRoot, "quarantine-" + TierDirName(t) + "-" + Guid.NewGuid().ToString("N"));
+                    Directory.Move(final, q);
+                    quarantineDirs.Add(q);
+                }
+                Directory.Move(cand, final);
+                var s = St(t);
+                s.ReadyCacheValid = false;
+                bool ok = TierReady(t);
+                Plugin.Log?.LogInfo(ok
+                    ? $"[MUSIC] published recovered {TierDirName(t)} tree from '{Path.GetFileName(cand)}' - no re-download needed"
+                    : $"[MUSIC] recovered {TierDirName(t)} tree from '{Path.GetFileName(cand)}' failed revalidation after publish");
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning($"[MUSIC] publish of recovered {TierDirName(t)} tree failed: {ex.Message}");
+                return false;
+            }
         }
 
         // ── Readiness / lookup ──
@@ -395,6 +525,8 @@ namespace CompetitiveRounds
 #else
             var p = _previews;
             var f = _full;
+            if (p.DeferredWaiting || f.DeferredWaiting)
+                return I18n.Tr("Music download is rate-limited - waiting to retry");
             if (p.InFlight && f.InFlight) return I18n.Tr("Downloading music...");
             if (p.InFlight) return I18n.Tr("Downloading music previews...");
             if (f.InFlight) return I18n.Tr("Downloading full album...");
@@ -435,7 +567,24 @@ namespace CompetitiveRounds
                     yield break;
                 }
                 var kind = (ResultKind)s.WorkerResult;
-                if (kind == ResultKind.Transient && !s.AutoRetryUsed)
+                if (kind == ResultKind.TransientDeferred && s.DeferredWaitsUsed < MAX_DEFERRED_WAITS)
+                {
+                    // [I13] The server named a wait past the worker's sleep
+                    // budget. Honor it here WITHOUT consuming the in-worker
+                    // attempt budget or the session auto-retry; the cycle cap
+                    // keeps a perpetually throttling server from parking the
+                    // tier in-flight forever — it degrades to the normal
+                    // transient ladder (auto-retry, then manual Retry).
+                    s.DeferredWaitsUsed++;
+                    int deferMs = Math.Min(s.WorkerRetryAfterMs, MAX_DEFERRED_WAIT_MS);
+                    s.DeferredWaiting = true;
+                    Plugin.Log?.LogInfo($"[MUSIC] {TierDirName(s.Tier)} download throttled (Retry-After {s.WorkerRetryAfterMs / 1000}s) - honoring {deferMs / 1000}s before the next attempt (attempts preserved)");
+                    try { NativeUI.MarkDirty(); } catch { }
+                    yield return new WaitForSecondsRealtime(deferMs / 1000f);
+                    s.DeferredWaiting = false;
+                    continue;
+                }
+                if ((kind == ResultKind.Transient || kind == ResultKind.TransientDeferred) && !s.AutoRetryUsed)
                 {
                     s.AutoRetryUsed = true;
                     Plugin.Log?.LogInfo($"[MUSIC] {TierDirName(s.Tier)} download failed (transient) - one automatic retry in 5s");
@@ -460,7 +609,7 @@ namespace CompetitiveRounds
             {
                 Directory.CreateDirectory(_musicRoot);
                 tmpZip = Path.Combine(_musicRoot, "download-" + TierDirName(s.Tier) + "-" + Guid.NewGuid().ToString("N") + ".zip.tmp");
-                result = (int)InstallWorkerCore(s.Tier, tmpZip);
+                result = (int)InstallWorkerCore(s, tmpZip);
             }
             catch (Exception ex)
             {
@@ -478,8 +627,9 @@ namespace CompetitiveRounds
             }
         }
 
-        private static ResultKind InstallWorkerCore(MusicTier t, string tmpZip)
+        private static ResultKind InstallWorkerCore(TierRuntime s, string tmpZip)
         {
+            MusicTier t = s.Tier;
             // ── download, with the [H2] transient policy in-worker ──
             var rng = new System.Random();
             for (int attempt = 1; ; attempt++)
@@ -488,9 +638,20 @@ namespace CompetitiveRounds
                 if (oc == DlOutcome.Ok) break;
                 if (oc == DlOutcome.FailClosedHttp) return ResultKind.FailClosedHttp;
                 if (oc == DlOutcome.CapExceeded) return ResultKind.FailClosedIntegrity;
+                if (retryAfterMs > SAFE_WORKER_WAIT_MS)
+                {
+                    // [I13] Longer than this thread may sleep — hand the delay
+                    // to the coroutine so it is honored without burning the
+                    // remaining attempts inside a throttle window they cannot
+                    // outlast.
+                    s.WorkerRetryAfterMs = retryAfterMs;
+                    return ResultKind.TransientDeferred;
+                }
                 if (attempt >= DOWNLOAD_ATTEMPTS) return ResultKind.Transient;
-                int waitMs = retryAfterMs > 0
-                    ? Math.Min(retryAfterMs, 60000)
+                // [I13] A valid Retry-After (either RFC 7231 form) is waited
+                // exactly; capped jitter only when no valid header (-1).
+                int waitMs = retryAfterMs >= 0
+                    ? retryAfterMs
                     : Math.Min(30000, (1000 << attempt) + rng.Next(0, 1000));
                 Plugin.Log?.LogInfo($"[MUSIC] {TierDirName(t)} download attempt {attempt} failed (transient) - retrying in {waitMs}ms");
                 Thread.Sleep(waitMs);
@@ -512,7 +673,7 @@ namespace CompetitiveRounds
 
         private static DlOutcome DownloadWithCap(string url, string tmpPath, long capBytes, out int retryAfterMs)
         {
-            retryAfterMs = 0;
+            retryAfterMs = -1;   // -1 = no valid Retry-After; >= 0 = the server's delay
             bool capHit = false;
             try
             {
@@ -575,15 +736,30 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>[I13] Both RFC 7231 Retry-After forms. -1 = absent/invalid
+        /// (caller may jitter); >= 0 = the server's requested delay in ms
+        /// (0 = retry immediately). Delta-seconds are unsigned digits only;
+        /// an HTTP-date in the past means no further delay.</summary>
         private static int ParseRetryAfterMs(System.Net.HttpWebResponse resp)
         {
             try
             {
                 string h = resp.Headers?["Retry-After"];
-                if (!string.IsNullOrEmpty(h) && int.TryParse(h.Trim(), out int sec) && sec > 0) return sec * 1000;
+                if (string.IsNullOrEmpty(h)) return -1;
+                h = h.Trim();
+                if (int.TryParse(h, System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int sec))
+                    return sec > int.MaxValue / 1000 ? int.MaxValue : sec * 1000;
+                if (DateTimeOffset.TryParse(h, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out var when))
+                {
+                    double ms = (when - DateTimeOffset.UtcNow).TotalMilliseconds;
+                    if (ms <= 0) return 0;
+                    return ms >= int.MaxValue ? int.MaxValue : (int)ms;
+                }
             }
             catch { }
-            return 0;
+            return -1;
         }
 
         /// <summary>Verify every zip entry against the compiled manifest for the
@@ -729,14 +905,16 @@ namespace CompetitiveRounds
             File.WriteAllText(Path.Combine(dir, MARKER_FILE), sb.ToString());
         }
 
-        /// <summary>Dev-loop / pack-source repair: a final tier tree whose FILES
-        /// all match the compiled manifest (size + full SHA-256) but which
-        /// carries no ready marker gets the marker written in place. This is how
-        /// CopyToPlugins dev trees become valid — the csproj deliberately emits
-        /// no marker because the format is owned HERE, and a hand-rolled MSBuild
-        /// marker that drifted would read as an invalid tree (quarantine risk).
-        /// Hash-validating first preserves the marker's integrity guarantee: we
-        /// only ever attest bytes we verified.</summary>
+        /// <summary>Dev-loop / pack-source repair: a final tier tree whose
+        /// ACTUAL contents are exactly the expected tier files (no extras,
+        /// subdirectories, or reparse points) and whose files all match the
+        /// compiled manifest (size + full SHA-256) but which carries no ready
+        /// marker gets the marker written in place. This is how CopyToPlugins
+        /// dev trees become valid — the csproj deliberately emits no marker
+        /// because the format is owned HERE, and a hand-rolled MSBuild marker
+        /// that drifted would read as an invalid tree (quarantine risk).
+        /// Verifying first preserves the marker's integrity guarantee: we only
+        /// ever attest a tree we verified COMPLETELY [I15].</summary>
         private static void TryRepairUnmarkedTier(MusicTier t)
         {
             try
@@ -744,6 +922,7 @@ namespace CompetitiveRounds
                 string dir = TierDir(t);
                 if (!Directory.Exists(dir)) return;
                 if (File.Exists(Path.Combine(dir, MARKER_FILE))) return;
+                if (!TreeEntriesExact(dir, t, expectMarker: false)) return;
                 using (var sha = System.Security.Cryptography.SHA256.Create())
                 {
                     for (int i = 0; i < Manifest.Length; i++)
@@ -771,10 +950,12 @@ namespace CompetitiveRounds
 
         /// <summary>Marker CONTENT validation, not just presence: revision +
         /// tier + the exact per-file name/size/sha set must equal the COMPILED
-        /// manifest, and every file must exist with the exact byte length. A
-        /// marker from a different manifest generation therefore never
-        /// validates. No hashing here (contract: full hashes at install/pack
-        /// time only). Safe from any thread — pure IO.</summary>
+        /// manifest, every file must exist with the exact byte length, and the
+        /// directory's ACTUAL entries must be exactly those files + the marker
+        /// (extras, subdirectories, and reparse points reject) [I15]. A marker
+        /// from a different manifest generation therefore never validates. No
+        /// hashing here (contract: full hashes at install/pack time only).
+        /// Safe from any thread — pure IO.</summary>
         private static bool ValidateTierTree(string dir, MusicTier t)
         {
             try
@@ -782,6 +963,7 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
                 string markerPath = Path.Combine(dir, MARKER_FILE);
                 if (!File.Exists(markerPath)) return false;
+                if (!TreeEntriesExact(dir, t, expectMarker: true)) return false;
                 string json;
                 try { json = File.ReadAllText(markerPath); }
                 catch { return false; }
@@ -804,6 +986,32 @@ namespace CompetitiveRounds
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>[I15] The exact-tree gate shared by marker repair and marker
+        /// validation: the directory's ACTUAL entries must be exactly the
+        /// tier's expected regular files (plus installed.json when
+        /// expectMarker) — any subdirectory, reparse point (symlink/junction),
+        /// or extra file rejects, so a marker never attests a tree it does not
+        /// fully describe. Throws propagate to the callers' catch-alls
+        /// (both fail closed).</summary>
+        private static bool TreeEntriesExact(string dir, MusicTier t, bool expectMarker)
+        {
+            var allowed = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < Manifest.Length; i++)
+                if (Manifest[i].Tier == t) allowed.Add(Manifest[i].Name);
+            if (expectMarker) allowed.Add(MARKER_FILE);
+            int seen = 0;
+            foreach (var path in Directory.GetFileSystemEntries(dir))
+            {
+                var attrs = File.GetAttributes(path);
+                if ((attrs & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) return false;
+                if (!allowed.Contains(Path.GetFileName(path))) return false;
+                seen++;
+            }
+            // Names within one directory are unique and each counted entry is a
+            // distinct allowed regular file, so count equality = set equality.
+            return seen == allowed.Count;
         }
 
         private static bool TryParseMarker(string json, out string revision, out string tier,
