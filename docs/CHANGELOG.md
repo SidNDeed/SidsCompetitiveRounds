@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.40.0 — 2026-09-02
 
 **Music: a full in-game player and the first two albums**
 
@@ -22,7 +22,8 @@
 - Music artists earn 50% of album sales, manage their album's name and price,
   and can gift copies — sales show up in the Artist tab like any other item.
 - Rate any song 0-5 stars right in the track row. Ratings are private; the
-  community average updates on a delay so nobody can tell who rated what.
+  community average updates on a random 2-24h delay so a change can't easily
+  be matched to whoever was just online.
 
 **Dances: actual body movement**
 

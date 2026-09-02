@@ -141,6 +141,7 @@ namespace CompetitiveRounds
             public bool currentStarted;
             public float currentStartedRt;
             public bool currentPrematureRetried;        // [I1] one in-place resume per track; a second premature stop = durable Fault
+            public bool currentEnded;                   // [N6c] current's clip FINISHED — it is a queue cursor, not a playable: readiness must not count it and EnsureMainPlaying advances off it, never replays
             public bool mainPausedByUs;                 // Pause()d (menu park / preview / PlayPause) — NOT ended
             public string queueSignature;               // selection+shuffle+broadcast fingerprint; null forces rebuild
 
@@ -238,6 +239,15 @@ namespace CompetitiveRounds
                 }
                 catch { return false; }
             }
+        }
+
+        /// <summary>[N21] Exact truth for the Music tab's mode line: is the
+        /// current MutedByChoice specifically the menu-silent rule (Reconcile's
+        /// menu branch), as opposed to a user Stop? Lets NativeUI point at
+        /// Settings only when Settings is actually the cause.</summary>
+        internal static bool MenuSilencedNow
+        {
+            get { try { return S.menuSilenced; } catch { return false; } }
         }
 
         /// <summary>Bootstrap (Plugin.DoInitialize, after MusicAssets.Initialize
@@ -363,6 +373,11 @@ namespace CompetitiveRounds
                 }
                 s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
                 s.manualTakeover = true;
+                // [N6c] resuming onto an ENDED current (loop-off run-out, or
+                // a load-gap park) is a transport intent: walk on Skip-style —
+                // wrap/fresh-cycle allowed — so Play after a playlist end
+                // restarts the playlist instead of instantly re-running out.
+                if (s.currentEnded) AdvanceToNext(userSkip: true);
                 Reconcile("play");
             }
             catch (Exception ex) { LogOnce("pp", "[MUSIC] PlayPause failed: " + ex.Message, true); }
@@ -419,6 +434,7 @@ namespace CompetitiveRounds
                 {
                     s.resumePositionSec = 0f;
                     s.currentPrematureRetried = false;
+                    s.currentEnded = false;   // [N6c] deliberate restart of a finished track
                     bool seeked = false;
                     try
                     {
@@ -458,6 +474,7 @@ namespace CompetitiveRounds
                 s.manualTakeover = true; s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
                 s.current = t; s.resumePositionSec = 0f; s.currentStarted = false; s.mainPausedByUs = false;
                 s.currentPrematureRetried = false;
+                s.currentEnded = false;   // [N6c] explicit selection — this current is a playable again
                 s.queueSignature = null;
                 Reconcile("play-track");
             }
@@ -606,6 +623,7 @@ namespace CompetitiveRounds
                 float target = Mathf.Min(Mathf.Clamp01(f01) * clip.length, Mathf.Max(0f, clip.length - 0.05f));
                 try { m.time = target; } catch { }
                 s.resumePositionSec = target;
+                s.currentEnded = false;   // [N6c] a seek onto a finished track is a deliberate replay-from-position
             }
             catch (Exception ex) { LogOnce("seek", "[MUSIC] SeekToFraction failed: " + ex.Message, true); }
         }
@@ -797,6 +815,9 @@ namespace CompetitiveRounds
                 s.resumePositionSec = snap.ResumePositionSec;
                 s.currentStarted = false; s.mainPausedByUs = false;
                 s.currentPrematureRetried = false;
+                // [N6c] currentEnded is deliberately PRESERVED across the
+                // preview: a snapshot whose current had already finished must
+                // ADVANCE on restore, never replay the finished clip.
             }
             Reconcile("preview-restore:" + why);
         }
@@ -1305,8 +1326,18 @@ namespace CompetitiveRounds
                         else EnterDurableFaultNoThrow("premature-stop at " + s.resumePositionSec.ToString("F1") + "s");
                     }
                     // Natural track end → advance (shuffle-cycle aware).
-                    else if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
-                    else Reconcile(s.stopIntent ? "playlist-end" : "no-ready-track");
+                    // [N6c] Mark the end BEFORE the advance: when nothing is
+                    // ready yet, the finished clip must read as a cursor, not
+                    // a "ready" track — counting it kept desired-mode at
+                    // Custom with nothing playing (suppressed silence = dead
+                    // air on the broadcast stream) until another load landed.
+                    // A successful advance clears the flag in AdoptCurrent.
+                    else
+                    {
+                        s.currentEnded = true;
+                        if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
+                        else Reconcile(s.stopIntent ? "playlist-end" : "no-ready-track");
+                    }
                 }
                 else
                 {
@@ -1479,6 +1510,7 @@ namespace CompetitiveRounds
             StopMainNoThrow();
             s.current = null; s.resumePositionSec = 0f; s.currentStarted = false;
             s.mainPausedByUs = false; s.currentPrematureRetried = false;
+            s.currentEnded = false;
             s.queueIndex = -1;
         }
 
@@ -1698,57 +1730,70 @@ namespace CompetitiveRounds
             return result;
         }
 
-        /// <summary>Advance to the next READY track. At the cycle boundary:
+        /// <summary>Advance to the next READY track. At a TRUE cycle boundary:
         /// loop off → run-out (deliberate MutedByChoice via stopIntent); loop
         /// on + shuffle → a fresh cycle (dispersion, or broadcast album
-        /// blocks) that never opens with what just played.</summary>
+        /// blocks) that never opens with what just played. [N6a] A boundary
+        /// reached only because later entries are still LOADING is NOT a
+        /// cycle boundary: the walk HOLDS the current cycle — no rebuild, no
+        /// wrap, no run-out — and reports nothing-ready, so Reconcile parks
+        /// at Loading (vanilla audible) and the readiness flip resumes THIS
+        /// cycle at the same position once a load lands. The old
+        /// rebuild-on-any-boundary destroyed the broadcast album-block order
+        /// on every cold start (and could false-end a loop-off playlist whose
+        /// tail merely wasn't decoded yet).</summary>
         private static bool AdvanceToNext(bool userSkip)
         {
             var s = S;
             EnsureQueueCurrent();
             int n = s.queue.Count;
-            if (n == 0) { s.current = null; return false; }
-            int start = s.queueIndex;
-            for (int step = 1; step <= n; step++)
+            if (n == 0) { s.current = null; s.currentEnded = false; return false; }
+            // Pass 1: the REMAINDER of the current cycle (queueIndex -1 → all).
+            bool pendingSkipped = false;
+            for (int i = s.queueIndex + 1; i < n; i++)
             {
-                int i = start + step;
-                if (i >= n)
-                {
-                    if (!LoopEffective() && !userSkip)
-                    {
-                        s.stopIntent = true;
-                        Plugin.Log?.LogInfo("[MUSIC] playlist ended (loop off)");
-                        return false;
-                    }
-                    if (i == n && ShuffleEffective())
-                    {
-                        // Fresh cycle: broadcast reshuffles the ALBUM BLOCK
-                        // order, every other seat re-disperses per track
-                        // [Batch-2 item 3] — BuildQueueOrder picks the builder.
-                        s.queue = BuildQueueOrder(BuildEffectiveSelection(), s.current);
-                        n = s.queue.Count;
-                        if (n == 0) { s.current = null; return false; }
-                    }
-                    i %= n;
-                }
                 var t = s.queue[i];
-                if (IsTrackReady(t))
-                {
-                    s.queueIndex = i;
-                    s.current = t;
-                    s.resumePositionSec = 0f;
-                    s.currentStarted = false;
-                    s.mainPausedByUs = false;
-                    s.currentPrematureRetried = false;
-                    return true;
-                }
+                if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
+                KickLoad(t);
+                if (IsTrackLoadPending(t)) pendingSkipped = true;
+            }
+            // [N6a] unplayed entries of THIS cycle are inbound — hold it.
+            if (pendingSkipped) return false;
+            // Run-out needs a LOCATED cursor: with queueIndex -1 nothing ever
+            // played, so an all-unready queue parks at Loading (the old walk
+            // could not reach its boundary from -1 either — same semantics).
+            if (!LoopEffective() && !userSkip && s.queueIndex >= 0)
+            {
+                s.stopIntent = true;
+                Plugin.Log?.LogInfo("[MUSIC] playlist ended (loop off)");
+                return false;
+            }
+            if (ShuffleEffective())
+            {
+                // Fresh cycle: broadcast reshuffles the ALBUM BLOCK order,
+                // every other seat re-disperses per track [Batch-2 item 3] —
+                // BuildQueueOrder picks the builder. [N6d] rebind queueIndex
+                // to the NEW order immediately: a no-ready fall-through must
+                // never leave an index addressed against the old list.
+                s.queue = BuildQueueOrder(BuildEffectiveSelection(), s.current);
+                n = s.queue.Count;
+                if (n == 0) { s.current = null; s.currentEnded = false; return false; }
+                s.queueIndex = s.current.HasValue ? s.queue.FindIndex(x => x.Equals(s.current.Value)) : -1;
+            }
+            // Pass 2: the fresh cycle (or the listed-order wrap) from the top.
+            for (int i = 0; i < n; i++)
+            {
+                var t = s.queue[i];
+                if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
                 KickLoad(t);
             }
             return false;   // nothing ready — Reconcile parks at Loading (vanilla audible)
         }
 
         /// <summary>Mirror of AdvanceToNext for the Previous transport: walk
-        /// BACKWARD through the queue (wrapping) to the nearest ready track.</summary>
+        /// BACKWARD through the queue (wrapping) to the nearest ready track.
+        /// Backward never rebuilds, so it needs no held-cycle logic — the
+        /// wrap stays inside the live cycle order.</summary>
         private static bool AdvanceToPrevious()
         {
             var s = S;
@@ -1760,19 +1805,61 @@ namespace CompetitiveRounds
             {
                 int i = ((start - step) % n + n) % n;
                 var t = s.queue[i];
-                if (IsTrackReady(t))
-                {
-                    s.queueIndex = i;
-                    s.current = t;
-                    s.resumePositionSec = 0f;
-                    s.currentStarted = false;
-                    s.mainPausedByUs = false;
-                    s.currentPrematureRetried = false;
-                    return true;
-                }
+                if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
                 KickLoad(t);
             }
             return false;
+        }
+
+        /// <summary>Adopt queue[i] as the current track (shared by both
+        /// transports). Clears the ended cursor [N6c] and prefetches the
+        /// remainder of the entered album block [N6b].</summary>
+        private static void AdoptCurrent(int i, TrackRef t)
+        {
+            var s = S;
+            s.queueIndex = i;
+            s.current = t;
+            s.currentEnded = false;
+            s.resumePositionSec = 0f;
+            s.currentStarted = false;
+            s.mainPausedByUs = false;
+            s.currentPrematureRetried = false;
+            PrefetchCurrentAlbumBlock();
+        }
+
+        /// <summary>[N6a] An unready CUSTOM entry that can still become ready:
+        /// load in flight, or not yet kicked / awaiting the tier install. A
+        /// FAILED decode is terminal — never pending — so an all-failed cycle
+        /// still reaches the boundary rules instead of deadlocking the walk
+        /// (and the readiness scan) forever.</summary>
+        private static bool IsTrackLoadPending(TrackRef t)
+        {
+            if (IsVanillaSku(t.Sku) || !IsTrackKnown(t)) return false;
+            if (!Clips.TryGetValue(t.ToString(), out var e)) return true;
+            return e.Clip == null && !e.Failed;
+        }
+
+        /// <summary>[N6b] Prefetch the REMAINDER of the current album block —
+        /// every consecutive same-album entry ahead of the queue cursor —
+        /// plus the NEXT block's opening entry. Cold broadcast playback
+        /// previously kept only ~2 loads in flight, so a block's later tracks
+        /// were still undecoded when their turn came and the walk abandoned
+        /// the block; the extra head keeps a cold block TRANSITION from
+        /// detouring through Loading (a vanilla blip on the stream). Called
+        /// on the adoption/start edges only — a no-op walk of dictionary
+        /// lookups when the block is already resident.</summary>
+        private static void PrefetchCurrentAlbumBlock()
+        {
+            var s = S;
+            if (s.queueIndex < 0 || s.queueIndex >= s.queue.Count) return;
+            string sku = s.queue[s.queueIndex].Sku;
+            int i = s.queueIndex + 1;
+            for (; i < s.queue.Count; i++)
+            {
+                if (!string.Equals(s.queue[i].Sku, sku, StringComparison.Ordinal)) break;
+                KickLoad(s.queue[i]);
+            }
+            if (i < s.queue.Count) KickLoad(s.queue[i]);   // next block's head
         }
 
         // ── clip loading (UnityWebRequest, buffered OGG) ─────────────────
@@ -1787,11 +1874,31 @@ namespace CompetitiveRounds
         {
             var s = S;
             // [I8] under broadcast the effective universe is custom-only — a
-            // stale vanilla current must never count as ready.
-            if (s.current.HasValue && IsTrackReady(s.current.Value)
+            // stale vanilla current must never count as ready. [N6c] an ENDED
+            // current is a cursor, not a playable: counting it held
+            // desired-mode at Custom with nothing to play — owned SILENCE
+            // under suppression, dead air on the broadcast stream.
+            if (s.current.HasValue && !s.currentEnded && IsTrackReady(s.current.Value)
                 && !(BroadcastPredicate() && IsVanillaSku(s.current.Value.Sku))) return true;
             var q = s.queue;
-            for (int i = 0; i < q.Count; i++) if (IsTrackReady(q[i])) return true;
+            // [N6a-coherence] readiness must mirror what AdvanceToNext can
+            // actually REACH. While unplayed entries of the current cycle are
+            // still loading, the walk HOLDS the cycle (no wrap, no rebuild),
+            // so already-played entries BEHIND the cursor are unreachable and
+            // must not count — a cached earlier track would otherwise pin
+            // desired-mode at Custom with nothing playable ahead (the same
+            // dead-air state through a second door). With nothing pending
+            // ahead the boundary IS reachable (wrap or rebuild preserves
+            // membership), so any ready entry counts.
+            bool pendingAhead = false;
+            for (int i = s.queueIndex < 0 ? 0 : s.queueIndex + 1; i < q.Count; i++)
+            {
+                if (IsTrackReady(q[i])) return true;
+                if (IsTrackLoadPending(q[i])) pendingAhead = true;
+            }
+            if (pendingAhead) return false;
+            for (int i = 0; i < q.Count && i <= s.queueIndex; i++)
+                if (IsTrackReady(q[i])) return true;
             return false;
         }
 
@@ -1925,6 +2032,12 @@ namespace CompetitiveRounds
             if (s.faultPending || s.faultDurable) return;   // [I7]
             if (!s.current.HasValue && !AdvanceToNext(userSkip: false)) return;
             if (!s.current.HasValue) return;
+            // [N6c] an ENDED current is a queue cursor, not a playable —
+            // advance off it, never (re)start it: after a Loading detour the
+            // release cleared currentStarted, so the start branch below would
+            // otherwise replay the finished clip from zero when readiness
+            // returns. AdvanceToNext clears the flag when it adopts.
+            if (s.currentEnded && !AdvanceToNext(userSkip: false)) return;
             var clip = ResolveReadyClip(s.current.Value);
             if (clip == null) { KickLoad(s.current.Value); return; }
             var m = h.Main;
@@ -1986,6 +2099,9 @@ namespace CompetitiveRounds
             catch (Exception ex) { EnterDurableFaultNoThrow("main-play: " + ex.Message); return; }
             s.currentStarted = true;
             s.currentStartedRt = Time.realtimeSinceStartup;
+            // [N6b] block prefetch rides the start edge too — covers the
+            // PlayTrack direct-assignment path, which never runs AdoptCurrent.
+            PrefetchCurrentAlbumBlock();
         }
 
         private static float CurrentMainTimeOr(float fallback)
@@ -2352,6 +2468,7 @@ namespace CompetitiveRounds
                 {
                     StopMainNoThrow();
                     s.current = null; s.resumePositionSec = 0f; s.currentStarted = false; s.mainPausedByUs = false;
+                    s.currentEnded = false;
                 }
                 EvictUnplayableClips();
                 s.queueSignature = null;

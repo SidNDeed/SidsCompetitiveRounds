@@ -2293,8 +2293,11 @@ namespace CompetitiveRounds
         /// aggregates so an auth failure can never masquerade as own=[]; a
         /// failure here applies NOTHING). sessionAware so a stale token's
         /// 401 session_required re-mints instead of 401-looping until the
-        /// ~23h expiry. Response contract:
-        /// {"ratings":[{"sku","track_idx","stars"}...]}.</summary>
+        /// ~23h expiry — and N17's replica-lag worry about that is REFUTED:
+        /// the live edge allowlist routes only leaderboards/records/
+        /// histories to the standby, every /music path hits the primary.
+        /// Response contract:
+        /// {"ratings":[{"sku","track_idx","stars","intent_rev"}...]}.</summary>
         internal static void FetchMusicRatingsOwn(string steamId, int gen)
         {
             Plugin.Instance.StartCoroutine(GetRequest(
@@ -2302,7 +2305,14 @@ namespace CompetitiveRounds
                 (ok, resp) =>
                 {
                     if (!ok) { Plugin.Log.LogInfo($"[MUSIC-RATE] own fetch failed: {resp}"); return; }
-                    var rows = ParseMusicRatingsMine(resp);
+                    List<MusicRatings.OwnRow> rows;
+                    if (!ParseMusicRatingsMine(resp, out rows))
+                    {
+                        // [N14] malformed 200: NOT an authoritative empty —
+                        // keep the prior own-rating state.
+                        Plugin.Log.LogWarning("[MUSIC-RATE] own fetch returned a malformed body — keeping prior state");
+                        return;
+                    }
                     try { MusicRatings.ApplyOwn(steamId, gen, rows); }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] own apply failed: {ex.Message}"); }
                 }, detailedErrors: false, sessionAware: true));
@@ -2313,10 +2323,17 @@ namespace CompetitiveRounds
         /// PostRequest so HandleSessionReject runs. Deliberately NO transport
         /// retry (PostRequestWithRetry would resurrect superseded intents,
         /// the #166/M16 class) — MusicRatings owns the single-retry +
-        /// latest-intent coalescing policy. stars 0 = clear.</summary>
-        internal static void PostMusicRating(string steamId, string sku, int trackIdx, int stars, Action<bool, string> callback)
+        /// latest-intent coalescing policy. stars 0 = clear.
+        /// [N5] intent_rev is the per-(player,track) monotonic revision the
+        /// server compares against its stored floor (reject-not-newer, so a
+        /// delayed old request can never resurrect a superseded intent);
+        /// op_id is the idempotency key (a duplicate landing twice must not
+        /// re-arm the maturation delay). Server sibling reads exactly
+        /// "intent_rev"/"op_id" (grep both sides, #329).</summary>
+        internal static void PostMusicRating(string steamId, string sku, int trackIdx, int stars,
+            int intentRev, string opId, Action<bool, string> callback)
         {
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"sku\":\"{Escape(sku)}\",\"track_idx\":{trackIdx},\"stars\":{stars}}}";
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"sku\":\"{Escape(sku)}\",\"track_idx\":{trackIdx},\"stars\":{stars},\"intent_rev\":{intentRev},\"op_id\":\"{Escape(opId ?? "")}\"}}";
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/music/rate", json, callback));
         }
 
@@ -2326,6 +2343,19 @@ namespace CompetitiveRounds
         /// property's array. Returns empty on any shape mismatch.</summary>
         private static List<string> SliceNamedObjectArray(string json, string prop)
         {
+            bool _;
+            return SliceNamedObjectArray(json, prop, out _);
+        }
+
+        /// <summary>[N14] wellFormed reports whether the property EXISTS and
+        /// its value is structurally an array. A missing / null / non-array
+        /// value returns the same empty list either way, so a PRIVATE
+        /// consumer must read wellFormed to tell "authoritative empty" from
+        /// "malformed 200" — the two are indistinguishable by the list
+        /// alone, and treating the latter as the former clears state.</summary>
+        private static List<string> SliceNamedObjectArray(string json, string prop, out bool wellFormed)
+        {
+            wellFormed = false;
             var none = new List<string>();
             if (string.IsNullOrEmpty(json)) return none;
             int at = json.IndexOf("\"" + prop + "\":", StringComparison.Ordinal);
@@ -2335,6 +2365,7 @@ namespace CompetitiveRounds
             if (i >= json.Length || json[i] != '[') return none;
             int close = FindMatchingBracketStringAware(json, i);
             if (close < 0) return none;
+            wellFormed = true;
             return SliceTopLevelObjects(json.Substring(i + 1, close - i - 1));
         }
 
@@ -2380,12 +2411,22 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] aggregate parse failed: {ex.Message}"); }
         }
 
-        private static List<MusicRatings.OwnRow> ParseMusicRatingsMine(string resp)
+        /// <summary>[N14] Success/failure is DISTINCT from emptiness: returns
+        /// false (rows left empty) when the 200 body is structurally
+        /// malformed — "ratings" absent, null, or not an array, or the scan
+        /// throws. Only a true return may reach MusicRatings.ApplyOwn; a
+        /// malformed success handed over would read as an authoritative
+        /// "you have no ratings" and clear the user's confirmed stars.
+        /// A genuinely empty array is true + zero rows (a cleared-everything
+        /// state MUST still apply). Malformed ROWS inside a well-formed
+        /// array stay skip-tolerant, matching every sibling parser.</summary>
+        private static bool ParseMusicRatingsMine(string resp, out List<MusicRatings.OwnRow> rows)
         {
-            var rows = new List<MusicRatings.OwnRow>();
+            rows = new List<MusicRatings.OwnRow>();
             try
             {
-                foreach (string obj in SliceNamedObjectArray(resp, "ratings"))
+                bool wellFormed;
+                foreach (string obj in SliceNamedObjectArray(resp, "ratings", out wellFormed))
                 {
                     string sku = ExtractJsonString(obj, "sku");
                     if (string.IsNullOrEmpty(sku)) continue;
@@ -2394,11 +2435,19 @@ namespace CompetitiveRounds
                         sku = sku,
                         idx = ExtractJsonInt(obj, "track_idx"),
                         stars = ExtractJsonInt(obj, "stars"),
+                        // [N5] the row's server-stored revision; 0 when the
+                        // server predates the field (seed no-op).
+                        rev = ExtractJsonInt(obj, "intent_rev"),
                     });
                 }
+                return wellFormed;
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] own parse failed: {ex.Message}"); }
-            return rows;
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[MUSIC-RATE] own parse failed: {ex.Message}");
+                rows.Clear();
+                return false;
+            }
         }
 
         /// <summary>Set / clear active title. HMAC over "title:{steam_id}:{item_id or 0}".</summary>
@@ -3539,6 +3588,12 @@ namespace CompetitiveRounds
             return list;
         }
 
+        // [N1 client half] sessionAware: this is a PRIVATE per-artist read the
+        // server now strict-session-gates (review notes, quota state), so a
+        // stale token's 401 session_required must re-mint instead of
+        // 401-looping until the ~23h expiry. N17's replica-lag worry is
+        // REFUTED: /artist paths are never edge-routed to the standby (the
+        // live allowlist routes only leaderboards/records/histories).
         public static void FetchMySubmissions(string steamId, Action<bool> callback = null)
         {
             string sig = ComputeHmacHex($"artist:{steamId}:my-submissions");
@@ -3556,7 +3611,7 @@ namespace CompetitiveRounds
                         NativeUI.MarkDirty();
                     }
                     callback?.Invoke(ok);
-                }));
+                }, sessionAware: true));
         }
 
         public static void FetchCosmeticSubmissionsAdmin(string adminSteamId, Action<bool, List<CosmeticSubmission>> callback)
@@ -3579,6 +3634,8 @@ namespace CompetitiveRounds
                 }));
         }
 
+        // [N1 client half] sessionAware — private artist read (unreleased
+        // preview art), same reasoning as FetchMySubmissions above.
         public static void FetchCosmeticSubmissionPreview(string steamId, int submissionId,
             Action<bool, CosmeticSubmission, string> callback)
         {
@@ -3594,7 +3651,7 @@ namespace CompetitiveRounds
                     catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] preview parse: {ex.Message}"); ok = false; }
                 }
                 callback?.Invoke(ok && sub != null && sub.id > 0, sub, resp);
-            }));
+            }, sessionAware: true));
         }
 
         public static void ArtistUpdateCosmeticPlacement(string steamId, int submissionId,
@@ -17739,8 +17796,9 @@ namespace CompetitiveRounds
         /// (M21 — GETs historically stamped the token but never consumed a
         /// 401 session_required, so a server-invalidated session 401-looped
         /// private GET reads until the ~23h expiry). Opt-in: only private
-        /// per-identity reads (music ratings /mine) need it; the ~100
-        /// public-read callers keep their exact current behavior.</param>
+        /// per-identity reads need it — music ratings /mine, and the artist
+        /// private reads (my-submissions, cosmetic-preview; N1) — while the
+        /// ~100 public-read callers keep their exact current behavior.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
             bool detailedErrors = false, bool sessionAware = false)
         {

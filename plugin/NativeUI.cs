@@ -7765,6 +7765,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             public string sku, name;
             public int price, stock;
             public bool catalogReady;
+            public bool isMusic;   // N16: music rows re-label the Name modal (storefront-only boundary)
         }
         private class ArtistBlockRow
         {
@@ -8288,6 +8289,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     // a 4xx; the server keeps the real gate. Name/Price/About/
                     // Gift stay (the shipped music mutations).
                     bool isMusicRow = it.kind == "music_album";
+                    row.isMusic = isMusicRow;   // N16: the Name modal labels music renames storefront-only
                     if (row.stockBtn != null) row.stockBtn.SetActive(it.catalog_ready && !isMusicRow);
                     if (row.giftBtn != null) row.giftBtn.SetActive(it.catalog_ready);
                     // Item 9: cosmetic art thumbnail (face items have runtime sprites;
@@ -8447,7 +8449,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // July 12: artists control the NAME + DESCRIPTION of their art too.
                 UIFactory.CreateButton("nm", row.root.transform, "Name", 13f, C_WHITE, C_BTN, () =>
                 {
-                    CompetitiveUI.OpenArtistInput($"Rename - {r.name}", "New display name (max 64 chars)",
+                    // N16/M8: a music rename is STOREFRONT-ONLY — the server
+                    // rewrites the shop_items row while every client's Music
+                    // tab and now-playing keep the COMPILED album name
+                    // (MusicCatalog is immutable per build). The modal says
+                    // that boundary out loud instead of implying the whole
+                    // album renames.
+                    string nmTitle = r.isMusic
+                        ? I18n.TrF("Shop listing name - {0}", r.name ?? "")
+                        : $"Rename - {r.name}";
+                    string nmHint = r.isMusic
+                        ? I18n.Tr("Shop listing name only - the Music tab and now-playing keep the compiled album name (max 64 chars)")
+                        : "New display name (max 64 chars)";
+                    CompetitiveUI.OpenArtistInput(nmTitle, nmHint,
                         r.name ?? "", v =>
                         {
                             if (string.IsNullOrEmpty(v)) { ShowArtistResult(false, "{\"detail\":\"name can't be empty\"}"); return; }
@@ -11585,6 +11599,17 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetImageColor(h.selBtn, on ? new Color(0.2f, 0.45f, 0.2f, 0.9f) : C_BTN);
         }
 
+        /// <summary>N21 probe: is the menu-silent SETTING what owns a
+        /// MutedByChoice right now? Reads the engine's exact truth
+        /// (MusicEngine.MenuSilencedNow, set only by Reconcile's menu-silent
+        /// branch) — so a user Stop pressed anywhere paints press-Play, and
+        /// only the Settings-caused mute paints the Settings pointer.</summary>
+        private static bool MusicMenuSilentConfigured()
+        {
+            try { return MusicEngine.MenuSilencedNow; }
+            catch { return false; }
+        }
+
         // i18n item 11 pattern: Tr at assignment — the mode is a finite enum
         // rendered through literal branches so every line is a harvested key.
         private static string MusicModeLine(MusicMode mode)
@@ -11594,7 +11619,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 case MusicMode.Vanilla:       return I18n.Tr("Mode: <color=#88CCFF>vanilla music</color>");
                 case MusicMode.Loading:       return I18n.Tr("Mode: <color=#DDDD66>loading custom music - vanilla plays meanwhile</color>");
                 case MusicMode.Custom:        return I18n.Tr("Mode: <color=#88FF88>custom music</color>");
-                case MusicMode.MutedByChoice: return I18n.Tr("Mode: <color=#FF9966>stopped - press Play or Use vanilla music</color>");
+                case MusicMode.MutedByChoice:
+                    // N21: under menu-silent, "press Play or Use vanilla
+                    // music" is an IMPOSSIBLE instruction — Reconcile
+                    // overrides both straight back to menu silence — so the
+                    // line must name the setting that actually recovers.
+                    if (MusicMenuSilentConfigured())
+                        return I18n.Tr("Mode: <color=#FF9966>menu music is set to None - change it in Settings</color>");
+                    return I18n.Tr("Mode: <color=#FF9966>stopped - press Play or Use vanilla music</color>");
                 case MusicMode.Preview:       return I18n.Tr("Mode: <color=#FFC8F0>previewing</color>");
                 case MusicMode.Fault:         return I18n.Tr("Mode: <color=#FF8888>music error - vanilla playing (see log)</color>");
             }
@@ -11703,16 +11735,22 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // authority: authored identity is not translatable prose, and
                 // I18n.Tr(variable) is unharvestable anyway (#295a).
                 UIFactory.SetTextRaw(h.txtName, $"<color=#FFD94D>{HomeSan(alb.AlbumName ?? "")}</color>");
-                // Batch-2 §2: album aggregate "4.1 (37)" beside the artist/
-                // genre line — the delayed public value from TryGetAlbum;
-                // nothing rendered until any rating is effective. Custom
-                // albums only by construction (this loop never sees vanilla).
+                // Batch-2 §2: album aggregate beside the artist/genre line —
+                // the delayed public value from TryGetAlbum; nothing rendered
+                // until any rating is effective. Custom albums only by
+                // construction (this loop never sees vanilla).
+                // N12/M20: BOTH counts, labeled — one listener rating all 12
+                // tracks must not read like 12 listeners, so the bare "(12)"
+                // is out and the rating/listener split is explicit.
                 string albAgg = "";
                 try
                 {
-                    float alAvg; int alCnt;
-                    if (MusicRatings.TryGetAlbum(alb.Sku, out alAvg, out alCnt))
-                        albAgg = $"  -  <color=#FFD94D>{alAvg.ToString("0.0", _INV)} ({alCnt})</color>";   // #47: invariant
+                    float alAvg; int alCnt, alRaters;
+                    if (MusicRatings.TryGetAlbum(alb.Sku, out alAvg, out alCnt, out alRaters))
+                        albAgg = "  -  <color=#FFD94D>"
+                            + I18n.TrF("{0} ({1} ratings, {2} listeners)",
+                                alAvg.ToString("0.0", _INV), alCnt, alRaters)   // #47: invariant avg
+                            + "</color>";
                 }
                 catch { }
                 UIFactory.SetTextRaw(h.txtMeta,
@@ -13272,16 +13310,37 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return outer;
         }
 
+        /// <summary>N20: THE one normalization for MenuMusicMode reads — trim
+        /// + case-fold to the canonical lowercase value, unknown -> "vanilla"
+        /// — matching the engine's own MenuModeSetting (MusicEngine.cs, which
+        /// already trims and compares OrdinalIgnoreCase). Without this, a
+        /// hand-edited "Silent"/whitespace-padded value silenced the menu
+        /// (engine) while Settings painted Default and the first click cycled
+        /// vanilla->custom instead of silent->vanilla. Identity strings, never
+        /// translated (#295a inverse) — both callers keep them outside every
+        /// harvested call span.</summary>
+        private static string NormalizeMenuMusicMode(string raw)
+        {
+            string v = raw != null ? raw.Trim() : null;
+            if (string.IsNullOrEmpty(v)) return "vanilla";
+            if (string.Equals(v, "custom", StringComparison.OrdinalIgnoreCase)) return "custom";
+            if (string.Equals(v, "silent", StringComparison.OrdinalIgnoreCase)) return "silent";
+            return "vanilla";
+        }
+
         /// <summary>Cycle MenuMusicMode vanilla -> custom -> silent -> vanilla.
         /// Lives OUTSIDE the SettingsToggle call span so the i18n extractor's
         /// argument-position walker cannot harvest the mode VALUE literals as
         /// translatable keys — a translated identity would break the compares.
-        /// Branched on the VALUE, never the label; an unknown hand-edited value
-        /// cycles as vanilla (-> custom), matching how it paints (Default).</summary>
+        /// Branched on the NORMALIZED value (N20 — the paint site and the
+        /// engine read through the same normalization), never the label; an
+        /// unknown hand-edited value cycles as vanilla (-> custom), matching
+        /// how it paints (Default). Writes are canonical lowercase, so one
+        /// click also heals a hand-edited spelling on disk.</summary>
         private static void CycleMenuMusicMode()
         {
             if (Plugin.MenuMusicMode == null) return;
-            string cur = Plugin.MenuMusicMode.Value ?? "vanilla";
+            string cur = NormalizeMenuMusicMode(Plugin.MenuMusicMode.Value);
             Plugin.MenuMusicMode.Value =
                 cur == "custom" ? "silent"
                 : cur == "silent" ? "vanilla"
@@ -13340,13 +13399,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // Sept 2: 3-state paint, branched on the config VALUE (a
                 // display string is not a state — the chatTtl rule). An
                 // unknown hand-edited value renders as Default, matching the
-                // engine's fallback for it.
+                // engine's fallback for it. N20: read through the SAME
+                // normalization as the cycle site and the engine, so a
+                // hand-edited "Silent"/padded value can never silence the
+                // menu while this paints Default.
                 // Mode compares hoisted OUT of the SetText span: the extractor
                 // harvests every literal in the TEXT argument position, and the
                 // identity values must never become catalogue keys (a translated
                 // "custom" breaks the compare). The three LABELS stay inside the
                 // call so they remain harvestable.
-                string mmv = Plugin.MenuMusicMode.Value ?? "vanilla";
+                string mmv = NormalizeMenuMusicMode(Plugin.MenuMusicMode.Value);
                 int mmSel = mmv == "custom" ? 1 : mmv == "silent" ? 2 : 0;
                 UIFactory.SetText(menuMusicToggleTxt,
                     mmSel == 1

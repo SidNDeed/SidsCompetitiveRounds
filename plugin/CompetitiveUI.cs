@@ -7247,6 +7247,8 @@ namespace CompetitiveRounds
         // ── Dance shop preview puppet (Aug 31 item 5) ────────────────────
         // Driven by DanceEmotes.TryGetPreviewPose — the SAME Evaluate() that
         // moves real bodies, so what the buyer sees is what they get.
+        // N15: the full FIVE-output pose, body tilt included — a Floss buyer
+        // must see the same ±12° lean the purchased live dance applies.
         // Repaint-only, display-only, no input (#162).
         private static void DrawDancePreview()
         {
@@ -7254,8 +7256,8 @@ namespace CompetitiveRounds
             {
                 var ev = Event.current;
                 if (ev == null || ev.type != EventType.Repaint) return;
-                string name; Vector2 body, al, ar;
-                if (!DanceEmotes.TryGetPreviewPose(out name, out body, out al, out ar)) return;
+                string name; Vector2 body, al, ar; float rot;
+                if (!DanceEmotes.TryGetPreviewPose(out name, out body, out rot, out al, out ar)) return;
                 QcEnsureStyles();
                 var tex = Texture2D.whiteTexture;
                 const float S = 55f;   // px per world unit
@@ -7275,12 +7277,26 @@ namespace CompetitiveRounds
                 GuiLine(new Vector2(x + 30f, py0 + 30f), new Vector2(x + w - 30f, py0 + 30f),
                         new Color(0.35f, 0.38f, 0.45f, 0.8f), 2f);   // ground
                 float bx = px + body.x * S, by = py0 - body.y * S;
-                GUI.DrawTexture(new Rect(bx - 22f, by - 22f, 44f, 44f), tex,
-                    ScaleMode.StretchToFill, true, 0, new Color(0.95f, 0.55f, 0.20f, 1f), 0, 0);   // orange-team body
-                GUI.DrawTexture(new Rect(bx - 10f, by - 8f, 6f, 6f), tex,
-                    ScaleMode.StretchToFill, true, 0, new Color(0.1f, 0.1f, 0.1f, 1f), 0, 0);      // eyes
-                GUI.DrawTexture(new Rect(bx + 4f, by - 8f, 6f, 6f), tex,
-                    ScaleMode.StretchToFill, true, 0, new Color(0.1f, 0.1f, 0.1f, 1f), 0, 0);
+                // N15: body tilt, mirroring the live channel split exactly —
+                // Wobble_DancePatch rotates only the BODY transform, while the
+                // arm channel adds world-anchored position deltas, so the
+                // shoulders/hands deliberately do NOT ride the tilt here
+                // either. Clamp is upstream (TryGetPreviewPose). World +Z is
+                // CCW in ROUNDS' y-up frame; IMGUI y points down, hence the
+                // sign flip. try/finally so a throw can never leak a rotated
+                // GUI.matrix into later draws this OnGUI pass (#255).
+                Matrix4x4 guiM = GUI.matrix;
+                try
+                {
+                    if (rot != 0f) GUIUtility.RotateAroundPivot(-rot, new Vector2(bx, by));
+                    GUI.DrawTexture(new Rect(bx - 22f, by - 22f, 44f, 44f), tex,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.95f, 0.55f, 0.20f, 1f), 0, 0);   // orange-team body
+                    GUI.DrawTexture(new Rect(bx - 10f, by - 8f, 6f, 6f), tex,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.1f, 0.1f, 0.1f, 1f), 0, 0);      // eyes
+                    GUI.DrawTexture(new Rect(bx + 4f, by - 8f, 6f, 6f), tex,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.1f, 0.1f, 0.1f, 1f), 0, 0);
+                }
+                finally { GUI.matrix = guiM; }
                 // Arms: shoulder -> hand (rest hand hangs low+out; offsets are
                 // the arm-target deltas the live channel applies).
                 Vector2 shL = new Vector2(bx - 22f, by);

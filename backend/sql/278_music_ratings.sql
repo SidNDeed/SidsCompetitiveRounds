@@ -20,12 +20,21 @@
 -- release that ships the album (#294-class ship coupling, asserted per-album by
 -- the release migrations).
 --
+-- b2-impl-r1 hardening additions: intent_rev (N5 — server-enforced write
+-- ordering, see /music/rate), the full pending-state XOR CHECK (N13 — the
+-- original two-constraint pair admitted eff-set/stars-null/clear-false, which
+-- folds as an unintended clear), the partial maturation index (N11), and the
+-- generic deploy_markers table (N3's machine-enforced activation gate,
+-- consumed by 280/281).
+--
 -- Idempotent statement-by-statement (#243: the migrate verb's || retry re-runs
 -- the whole file). Explicit BEGIN/COMMIT (#340). v_ prefixed PL/pgSQL vars,
 -- never bare column names (#442). Dry-run 2026-09-02 against prod (#313):
 -- music_ratings absent, shop_items.music_track_count absent, exactly one
 -- kind='music_album' row (music_album_another_round, live, 7 tracks in the
--- shipped MusicCatalog).
+-- shipped MusicCatalog); XOR CHECK expression dry-run over all five pending
+-- states (folded/rate/clear-tombstone pass, malformed/both-set reject);
+-- deploy_markers absent.
 
 BEGIN;
 
@@ -47,17 +56,28 @@ CREATE TABLE IF NOT EXISTS music_ratings (
     pending_stars        SMALLINT NULL CHECK (pending_stars BETWEEN 1 AND 5),
     pending_is_clear     BOOLEAN NOT NULL DEFAULT FALSE,
     pending_effective_at TIMESTAMPTZ NULL,
+    -- N5: monotonic per-(player, sku, track) client intent revision. The
+    -- /music/rate UPSERT only applies a write whose rev is STRICTLY greater
+    -- than the stored one, so a delayed older request can never resurrect a
+    -- superseded intent and an identical duplicate is a no-op that does not
+    -- re-arm the maturation delay. DEFAULT 0: clients start at 1, so any
+    -- first write wins against a legacy/fresh row.
+    intent_rev           INT NOT NULL DEFAULT 0,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- One stored slot per player/track (M19's rewording): the UPSERT target.
     UNIQUE (player_id, sku, track_idx),
-    -- Coherence: a pending payload cannot exist without its maturation stamp,
-    -- and a clear-intent row cannot also carry pending stars.
+    -- N13: the FULL pending-state XOR. Either no pending exists (all three
+    -- columns at rest) or a pending exists and carries EXACTLY ONE of a star
+    -- payload / a clear intent. The earlier two-constraint pair admitted
+    -- (eff set, stars NULL, clear FALSE), which the fold would have applied
+    -- as an unintended clear. Dry-run over all five states (#313).
     CONSTRAINT chk_music_ratings_pending_coherent
-        CHECK (pending_effective_at IS NOT NULL
-               OR (pending_stars IS NULL AND pending_is_clear = FALSE)),
-    CONSTRAINT chk_music_ratings_clear_exclusive
-        CHECK (NOT (pending_is_clear AND pending_stars IS NOT NULL))
+        CHECK ((pending_effective_at IS NULL
+                AND pending_stars IS NULL
+                AND NOT pending_is_clear)
+               OR (pending_effective_at IS NOT NULL
+                   AND (pending_stars IS NOT NULL) <> pending_is_clear))
 );
 
 -- Aggregate reads group by (sku, track_idx); the UNIQUE above already serves
@@ -65,9 +85,31 @@ CREATE TABLE IF NOT EXISTS music_ratings (
 CREATE INDEX IF NOT EXISTS idx_music_ratings_sku_track
     ON music_ratings (sku, track_idx);
 
+-- N11: the fold's driving predicate (pending_effective_at <= NOW()) runs on
+-- every rating read/write; a partial index keeps it a fraction-of-the-table
+-- probe as rows accumulate (pendings are a small transient minority).
+CREATE INDEX IF NOT EXISTS idx_music_ratings_pending_due
+    ON music_ratings (pending_effective_at)
+    WHERE pending_effective_at IS NOT NULL;
+
+-- N3: generic operator-gate marker table. A row here is written by a
+-- dedicated marker migration ONLY after its header's external probes have
+-- been verified by the operator; later migrations ASSERT the row inside
+-- their transaction, turning prose rollout gates into executable fences.
+-- Deliberately tiny and generic for future activation waves.
+CREATE TABLE IF NOT EXISTS deploy_markers (
+    key        VARCHAR(64) PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Track registry column (M12). SMALLINT NULL: NULL = no registry = not
 -- ratable. No CHECK here — the api validates 1..64 bounds on write, and the
 -- release migrations pin each album's exact value.
+-- FROZEN TRACK ORDER (M12 disposition): track_idx is a durable identity, not
+-- a display position. It holds because MusicCatalog album track arrays are
+-- APPEND-ONLY/FROZEN — reordering or removing tracks within a shipped album
+-- is forbidden (the client catalog carries the same rule); a same-count
+-- reorder would silently reassign every stored rating to a different song.
 ALTER TABLE shop_items ADD COLUMN IF NOT EXISTS music_track_count SMALLINT;
 
 -- Register the live album's track count: 7 (the shipped MusicCatalog entry
@@ -104,16 +146,24 @@ BEGIN
        AND column_name IN ('id', 'player_id', 'sku', 'track_idx',
                            'published_stars', 'pending_stars',
                            'pending_is_clear', 'pending_effective_at',
-                           'created_at', 'updated_at');
-    IF v_cols <> 10 THEN
-        RAISE EXCEPTION 'post-check FAILED: music_ratings has %/10 expected columns', v_cols;
+                           'intent_rev', 'created_at', 'updated_at');
+    IF v_cols <> 11 THEN
+        RAISE EXCEPTION 'post-check FAILED: music_ratings has %/11 expected columns', v_cols;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                     WHERE table_name = 'shop_items'
                       AND column_name = 'music_track_count') THEN
         RAISE EXCEPTION 'post-check FAILED: shop_items.music_track_count missing';
     END IF;
-    RAISE NOTICE 'post-check OK: music_ratings table + shop_items.music_track_count in place';
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes
+                    WHERE tablename = 'music_ratings'
+                      AND indexname = 'idx_music_ratings_pending_due') THEN
+        RAISE EXCEPTION 'post-check FAILED: idx_music_ratings_pending_due missing';
+    END IF;
+    IF to_regclass('deploy_markers') IS NULL THEN
+        RAISE EXCEPTION 'post-check FAILED: deploy_markers table missing';
+    END IF;
+    RAISE NOTICE 'post-check OK: music_ratings (11 cols, XOR check, maturation index) + shop_items.music_track_count + deploy_markers in place';
 END $$;
 
 COMMIT;

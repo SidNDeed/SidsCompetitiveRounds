@@ -1,37 +1,26 @@
--- 280: ACTIVATION migration (music batch 2 ship wave, design-v4-report M10):
+-- 281: ACTIVATION migration (music batch 2 ship wave, design-v4-report M10):
 --      attribute BOTH albums to the artist and flip Clavar la Bala live.
 --
--- DO-NOT-APPLY-UNTIL ALL FIVE HOLD (the report's Required order, steps 1-4 —
--- this file IS step 4; step 5's probes follow it):
---   1. Migrations 278 + 279 are applied on the PRIMARY and the standby has
---      replayed them (sql-readonly on .90: music_ratings exists,
---      shop_items.music_track_count populated, chk_music_album_no_stock
---      present).
---   2. The HARDENED api is live on BOTH boxes (#422/#429): strict-session
---      artist mutations + private artist reads, /artist/set-stock 409 for
---      music, strict-session music purchases with the MUSIC_PURCHASE_MIN_
---      VERSION floor + expected_price compare, 50% music royalty WITH
---      royalty_paid/royalty_rate_pct persistence, /music/rate + ratings
---      endpoints, and music_ratings deletion coverage in delete_player_data.
---      Applying this file against the OLD api exposes historical buyers via
---      the unauthenticated artist reads, activates HMAC-only stock/block
---      authority over a live album, and pays 30% on a 1000g album (M10's
---      exact scenario).
---   3. The v1.40.0 client release EXISTS on GitHub (its MusicCatalog carries
---      music_album_clavar_la_bala with 12 tracks, sends expected_price from
---      the painted row, and handles the price_changed 409 by refetching).
---   4. MUSIC_SKU_MIN_VERSIONS on BOTH boxes carries
---      music_album_clavar_la_bala = the version Sid actually named (staged
---      "1.40.0"; if he names differently, fix the constant FIRST — #294).
---   5. The immutable music-ar2 asset release EXISTS and
---      scripts/verify_music_release.py passes for BOTH albums' zips at the
---      exact public client URLs.
+-- MACHINE-GATED (b2-impl-r1 N3): the first block asserts the
+-- 'music_activation_v1400_ready' deploy_markers row that migration 280
+-- writes — 280's header carries the five external probes the operator must
+-- verify BEFORE setting it, so applying this file out of order aborts on the
+-- assertion instead of attributing albums under an unhardened api. The old
+-- prose "DO NOT APPLY UNTIL ALL FIVE HOLD" header is now 280's job.
 --
 -- Attribution consequences (deliberate, owner-authorized): the artist gains
 -- set-name/set-price/set-desc/gift over both rows through the now
 -- strict-session-guarded endpoints; music purchases start paying the 50%
 -- royalty to the attributed artist. Album 1's price stays 1g until the artist
 -- changes it in-game (this file changes no price).
+--
+-- The artist steam id appears as a LITERAL below (b2-impl-r1 N4, REFUTED by
+-- the integrator): SHOP_OWNER_STEAM_IDS in tracked main.py is the standing
+-- public precedent for a steam id in this repo — a steam id is a public
+-- platform handle already shown on the artist's own shop rows, not a private
+-- identity value, and an indirection table would only move the same literal
+-- one file over. It stays inline so the migration is self-contained and
+-- auditable.
 --
 -- Both writes are guarded on the exact pre-state (277 pattern: ROW_COUNT
 -- assert on first application, a SEPARATELY-IDENTIFIED rerun branch, full
@@ -43,6 +32,37 @@
 -- player_items FK insert holds KEY SHARE on these rows).
 
 BEGIN;
+
+-- ── Gate: operator marker (N3) + live attributable target (N18) ─────────────
+DO $$
+DECLARE
+    v_live_players INT;
+BEGIN
+    -- N3: the executable rollout fence. Migration 280 writes this row only
+    -- after its header's five external probes pass.
+    IF NOT EXISTS (SELECT 1 FROM deploy_markers dm
+                    WHERE dm.key = 'music_activation_v1400_ready') THEN
+        RAISE EXCEPTION 'gate FAILED: deploy_markers row music_activation_v1400_ready is absent - apply migration 280 (after verifying its five external probes) before this activation';
+    END IF;
+
+    -- N18: attribution needs a live beneficiary with the artist role — a
+    -- revoked role or an anonymized/deleted account before this point would
+    -- otherwise satisfy every row-shape post-check while leaving both albums
+    -- unmanageable and royalties with no live recipient.
+    SELECT COUNT(*) INTO v_live_players
+      FROM players p
+     WHERE p.steam_id = '76561198040410653'
+       AND p.deleted_at IS NULL;
+    IF v_live_players <> 1 THEN
+        RAISE EXCEPTION 'gate FAILED: expected exactly 1 live non-deleted players row for the target artist, found % - refusing to attribute',
+                        v_live_players;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM artist_users au
+                    WHERE au.steam_id = '76561198040410653') THEN
+        RAISE EXCEPTION 'gate FAILED: target has no artist_users role row - grant the artist role before attribution';
+    END IF;
+    RAISE NOTICE 'gate OK: activation marker present; target is a live player with the artist role';
+END $$;
 
 -- ── Album 1: attribute music_album_another_round ────────────────────────────
 DO $$

@@ -4,15 +4,22 @@
 -- Requires 278 (shop_items.music_track_count). ADDITIVE + invariant-only —
 -- safe to apply before the hardened api deploys (Required order step 1); the
 -- new row is catalog_ready = FALSE and artist NULL, so it is invisible,
--- unpurchasable and has no artist mutation surface until migration 280 (the
--- ACTIVATION migration) attributes + flips it at the ship wave.
+-- unpurchasable and has no artist mutation surface until migration 281 (the
+-- ACTIVATION migration, gated by 280's operator marker) attributes + flips
+-- it at the ship wave.
 --
 -- Three parts:
---   (a) player_items.royalty_paid / royalty_rate_pct — persisted actual-paid
---       royalty accounting (M9). NULL = legacy row (pre-column purchase or
---       gift/self-buy/no-royalty purchase); the hardened purchase path writes
---       both for every royalty-branch purchase, and /artist/{id}/sales
---       prefers the stored value over any recompute.
+--   (a) player_items.royalty_paid / royalty_rate_pct /
+--       royalty_artist_steam_id — persisted actual-paid royalty accounting
+--       (M9) plus the BENEFICIARY the sale belonged to (N8: without it, an
+--       admin reassignment moves historical /sales rows to the new artist
+--       while the money went to the old one). NULL = legacy row (pre-column
+--       purchase or gift/self-buy/no-royalty purchase); the hardened
+--       purchase path writes all three IN THE PURCHASE TRANSACTION with no
+--       savepoint swallow (this file deploys before that api per the
+--       Required order, so the api-ahead window is gone), and
+--       /artist/{id}/sales attributes rows by the stored beneficiary,
+--       falling back to live item attribution only for legacy NULL rows.
 --   (b) CHECK: music albums can never carry a stock cap (M2). NOT VALID +
 --       VALIDATE so the ADD never rewrites the table; dry-run 2026-09-02
 --       against prod (#313): 0 music rows with stock_limit set, so VALIDATE
@@ -25,15 +32,19 @@
 --       inherits DEFAULT TRUE — the 276 lesson).
 --
 -- Idempotent statement-by-statement (#243). Explicit BEGIN/COMMIT (#340).
--- v_ prefixed PL/pgSQL vars (#442). Rerun-safe only UNTIL 280 attributes/
+-- v_ prefixed PL/pgSQL vars (#442). Rerun-safe only UNTIL 281 attributes/
 -- flips the row: after that a rerun RAISES on artist/catalog_ready by design
 -- (a loud abort beats tolerating drift — 276's rule).
 
 BEGIN;
 
--- (a) actual-paid royalty accounting (M9)
+-- (a) actual-paid royalty accounting (M9) + beneficiary link (N8)
 ALTER TABLE player_items ADD COLUMN IF NOT EXISTS royalty_paid INTEGER;
 ALTER TABLE player_items ADD COLUMN IF NOT EXISTS royalty_rate_pct SMALLINT;
+-- Who the sale's royalty belonged to (the item's attributed artist at
+-- purchase time — stored even when the credit could not land, with
+-- royalty_paid = 0, so the sales log never migrates to a later assignee).
+ALTER TABLE player_items ADD COLUMN IF NOT EXISTS royalty_artist_steam_id VARCHAR(20);
 
 -- (b) music stock invariant (M2)
 DO $$
@@ -107,8 +118,9 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                     WHERE table_name = 'player_items'
-                      AND column_name IN ('royalty_paid', 'royalty_rate_pct')
-                   HAVING COUNT(*) = 2) THEN
+                      AND column_name IN ('royalty_paid', 'royalty_rate_pct',
+                                          'royalty_artist_steam_id')
+                   HAVING COUNT(*) = 3) THEN
         RAISE EXCEPTION 'post-check FAILED: player_items royalty columns missing';
     END IF;
 

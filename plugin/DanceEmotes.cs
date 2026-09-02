@@ -655,15 +655,9 @@ namespace CompetitiveRounds
 
         /// <summary>Looping preview pose for the toggled sku, clamped by the
         /// same rules as the live channels. False = no preview active.
-        /// The 4-out form is the pre-tilt surface (CompetitiveUI's puppet);
-        /// it stays so the sibling file keeps compiling — the puppet just
-        /// renders translation-only until it adopts the 5-out overload.</summary>
-        internal static bool TryGetPreviewPose(out string name, out Vector2 body, out Vector2 armL, out Vector2 armR)
-        {
-            float rotUnused;
-            return TryGetPreviewPose(out name, out body, out rotUnused, out armL, out armR);
-        }
-
+        /// [N15] The puppet (CompetitiveUI.DrawDancePreview) consumes the full
+        /// five-output pose — bodyRotDeg included — so the pre-tilt 4-out
+        /// overload left with its last caller.</summary>
         internal static bool TryGetPreviewPose(out string name, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
         {
             name = null; body = armL = armR = Vector2.zero; bodyRotDeg = 0f;

@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.39.7";   // Sep 1: Q quick-chat wheel, E dance emotes + DANCES shop section, silence X fix, bug-324 betting lock, 12 trails, tournament achievements + 16+ role gate, Compare/Card metrics, footer links. 1.39.7 is the DANCES_MIN_VERSION floor — the release Sid names must be >= this.
+        public const string ModVersion = "1.40.0";   // Sep 2: MUSIC (player tab, two albums, previews, ratings, 50% artist royalties, broadcast album blocks) + dance body motion + the Sep 1 batch (Q/E wheels, dances, betting lock, trails). Floors riding this release: DANCES_MIN_VERSION=1.39.7, MUSIC_PURCHASE_MIN_VERSION=1.40.0 — both satisfied.
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
