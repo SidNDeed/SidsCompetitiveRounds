@@ -11561,6 +11561,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
          * the track-checkbox convention scaled to the header. Reads the
          * engine's album-level selection (IsAlbumEnabled — sibling contract,
          * paired with SetAlbumSelected in the click callback). */
+        /// <summary>Header height follows art: 96px fits the 84px cover, but an
+        /// artless header (the OST) at 96 is a mostly-empty band — keep it 52.</summary>
+        private static void SetMusicAlbumHdrHeight(MusicAlbumHdrRow h, bool hasArt)
+        {
+            // SetPrefH/SetMinH update the EXISTING LayoutElement — AddLE here
+            // would stack a new component on every repaint (its own doc says so).
+            try
+            {
+                UIFactory.SetPrefH(h.root, hasArt ? 96 : 52);
+                UIFactory.SetMinH(h.root, hasArt ? 96 : 52);
+            }
+            catch { }
+        }
+
         private static void PaintMusicAlbumToggle(MusicAlbumHdrRow h)
         {
             if (h == null || h.selBtnTxt == null) return;
@@ -11633,6 +11647,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 var h = musicAlbumHdrs[hdrI++];
                 if (h.artGO != null && h.artGO.activeSelf) h.artGO.SetActive(false);   // the OST ships no cover art
+                SetMusicAlbumHdrHeight(h, hasArt: false);
                 h.albumSku = MusicCatalog.VANILLA_SKU;   // #265 binding — the master switch covers the vanilla album too
                 PaintMusicAlbumToggle(h);
                 float vTotal = 0f;
@@ -11681,6 +11696,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     catch { }
                     if (h.artGO != null && !h.artGO.activeSelf) h.artGO.SetActive(true);
                 }
+                SetMusicAlbumHdrHeight(h, hasArt: true);
                 int n = alb.Tracks != null ? alb.Tracks.Length : 0;
                 // Album/artist/genre metadata renders RAW — never through Tr.
                 // The compiled-catalog rule (MusicCatalog header, #368) is the
