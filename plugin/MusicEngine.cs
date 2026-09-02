@@ -1748,14 +1748,25 @@ namespace CompetitiveRounds
             EnsureQueueCurrent();
             int n = s.queue.Count;
             if (n == 0) { s.current = null; s.currentEnded = false; return false; }
-            // [P5] Broadcast traversal is ORDER-FAITHFUL: the first pending
-            // ordered entry blocks everything after it (park at Loading until
-            // it decodes or fails) — a later track overtaking a pending one
-            // both breaks the album-block order the mode promises and can
-            // orphan the overtaken track behind the cursor for good. Personal
-            // seats keep skip-ahead (play something NOW; loop-on wrap plays
-            // the skipped track next cycle) but share the run-out guard below.
-            bool strictOrder = BroadcastPredicate();
+            // [P5 REVERTED — do not re-add strict ordering here without
+            // redesigning the traversal contract first.] Wave 4 made broadcast
+            // traversal order-faithful by parking AT the first pending entry
+            // instead of skipping it. Review r3 confirmed that mechanism
+            // produces INDEFINITE DEAD AIR on the live stream by three routes
+            // (Q1/Q2/Q3): a terminally-failed current is not an ENDED current,
+            // so parking leaves it current-and-unplayable while the scan sees a
+            // later ready entry, acquires Custom, holds suppression, and
+            // EnsureMainPlaying's `clip == null` early-return spins forever;
+            // the loop-off pending-behind hold reacquires Custom before
+            // stopIntent is published; and a Skip blocked by a pending
+            // successor is silently discarded. What it BOUGHT was cosmetic —
+            // a cold-start album block can interleave once, or a track appears
+            // a cycle late (never lost: this seat runs MusicLoop = true).
+            // Dead air is strictly worse than an ordering blemish (#280), and
+            // patching a mechanism whose fix produced two HIGHs is the pattern
+            // #310 exists to stop. The real fix is ONE authoritative traversal
+            // returning ready-target / pending / exhausted, consumed BEFORE
+            // Custom ownership is acquired — a redesign, not a condition.
             // Pass 1: the REMAINDER of the current cycle (queueIndex -1 → all).
             bool pendingSkipped = false;
             for (int i = s.queueIndex + 1; i < n; i++)
@@ -1763,26 +1774,15 @@ namespace CompetitiveRounds
                 var t = s.queue[i];
                 if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
                 KickLoad(t);
-                if (IsTrackLoadPending(t))
-                {
-                    if (strictOrder) return false;   // [P5] hold AT the entry
-                    pendingSkipped = true;
-                }
+                if (IsTrackLoadPending(t)) pendingSkipped = true;
             }
             // [N6a] unplayed entries of THIS cycle are inbound — hold it.
             if (pendingSkipped) return false;
             // Run-out needs a LOCATED cursor: with queueIndex -1 nothing ever
             // played, so an all-unready queue parks at Loading (the old walk
             // could not reach its boundary from -1 either — same semantics).
-            // [P5] And run-out must find NOTHING inbound anywhere: an entry
-            // skipped earlier (or parked BEHIND the cursor by a past skip)
-            // would be orphaned — declared "playlist ended" while its decode
-            // was seconds away. Hold instead; it plays or fails, then this
-            // boundary re-decides.
             if (!LoopEffective() && !userSkip && s.queueIndex >= 0)
             {
-                for (int i = 0; i < n; i++)
-                    if (IsTrackLoadPending(s.queue[i])) return false;
                 s.stopIntent = true;
                 Plugin.Log?.LogInfo("[MUSIC] playlist ended (loop off)");
                 return false;
@@ -1805,7 +1805,6 @@ namespace CompetitiveRounds
                 var t = s.queue[i];
                 if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
                 KickLoad(t);
-                if (strictOrder && IsTrackLoadPending(t)) return false;   // [P5]
             }
             return false;   // nothing ready — Reconcile parks at Loading (vanilla audible)
         }
@@ -1902,32 +1901,23 @@ namespace CompetitiveRounds
                 && !(BroadcastPredicate() && IsVanillaSku(s.current.Value.Sku))) return true;
             var q = s.queue;
             // [N6a-coherence] readiness must mirror what AdvanceToNext can
-            // actually REACH — a scan-true the walk refuses is owned silence
-            // (dead air on stream), the exact state r2 closed. Per-branch
-            // mirror of the walk:
-            //   broadcast [P5]: order-faithful — the first pending entry
-            //   blocks everything after it, in the current order AND in any
-            //   rebuilt one (the rebuild randomizes block order, so any
-            //   pending could land first) — pending anywhere => false.
-            //   personal: skip-ahead — ready ahead counts; pending ahead
-            //   holds the cycle; at the boundary a pending ANYWHERE holds
-            //   (the walk's [P5] run-out guard), else behind-cursor ready is
-            //   reachable via wrap/rebuild (loop off reaches stopIntent,
-            //   which overrides the mode anyway).
-            bool strictOrder = BroadcastPredicate();
+            // actually REACH. While unplayed entries of the current cycle are
+            // still loading, the walk HOLDS the cycle (no wrap, no rebuild),
+            // so already-played entries BEHIND the cursor are unreachable and
+            // must not count — a cached earlier track would otherwise pin
+            // desired-mode at Custom with nothing playable ahead (the same
+            // dead-air state through a second door). With nothing pending
+            // ahead the boundary IS reachable (wrap or rebuild preserves
+            // membership), so any ready entry counts.
+            // (The wave-4 per-branch strict-order mirror was reverted with the
+            // walk's strict ordering — see the [P5 REVERTED] note there.)
             bool pendingAhead = false;
             for (int i = s.queueIndex < 0 ? 0 : s.queueIndex + 1; i < q.Count; i++)
             {
                 if (IsTrackReady(q[i])) return true;
-                if (IsTrackLoadPending(q[i]))
-                {
-                    if (strictOrder) return false;   // [P5] walk holds here
-                    pendingAhead = true;
-                }
+                if (IsTrackLoadPending(q[i])) pendingAhead = true;
             }
             if (pendingAhead) return false;
-            for (int i = 0; i < q.Count && i <= s.queueIndex; i++)
-                if (IsTrackLoadPending(q[i])) return false;   // [P5] boundary holds
             for (int i = 0; i < q.Count && i <= s.queueIndex; i++)
                 if (IsTrackReady(q[i])) return true;
             return false;

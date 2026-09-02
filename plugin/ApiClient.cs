@@ -2438,12 +2438,25 @@ namespace CompetitiveRounds
                 if (!SliceStrictNamedObjectArray(resp, "ratings", out objs)) return false;
                 foreach (string obj in objs)
                 {
-                    string sku = ExtractJsonString(obj, "sku");
+                    // [Q4] Every required field must be a DIRECT member of the
+                    // row object, present exactly once, holding a bare scalar
+                    // of the right type. The old per-key IndexOf was
+                    // depth-blind and delimiter-loose, so a nested substitute
+                    // ({"row":{...}}) and a malformed literal ("stars":5 xyz)
+                    // both validated — and either one reaches ApplyOwn, which
+                    // REPLACES the player's whole confirmed rating state.
+                    Dictionary<string, string> mem;
+                    string sku;
                     int idx, stars, rev;
-                    if (string.IsNullOrEmpty(sku) || sku.Length > 64
-                        || !TryExtractJsonInt(obj, "track_idx", out idx) || idx < 0 || idx > 63
-                        || !TryExtractJsonInt(obj, "stars", out stars) || stars < 0 || stars > 5
-                        || !TryExtractJsonInt(obj, "intent_rev", out rev) || rev < 1)
+                    if (!TryTopLevelMembers(obj, out mem)
+                        || !mem.ContainsKey("sku") || !TryStrictJsonString(mem["sku"], out sku)
+                        || string.IsNullOrEmpty(sku) || sku.Length > 64
+                        || !mem.ContainsKey("track_idx") || !TryStrictJsonInt(mem["track_idx"], out idx)
+                        || idx < 0 || idx > 63
+                        || !mem.ContainsKey("stars") || !TryStrictJsonInt(mem["stars"], out stars)
+                        || stars < 0 || stars > 5
+                        || !mem.ContainsKey("intent_rev") || !TryStrictJsonInt(mem["intent_rev"], out rev)
+                        || rev < 1)
                     {
                         rows.Clear();
                         return false;
@@ -2500,40 +2513,140 @@ namespace CompetitiveRounds
             return true;
         }
 
-        /// <summary>[P6] Presence- and type-strict int read: false when the
-        /// key is absent or its value is not a bare JSON integer (null,
-        /// string, float/exponent and digit-prefixed garbage all refuse).
-        /// ExtractJsonInt's 0-on-anything default cannot distinguish
-        /// "stars":0 from a missing field, and strict snapshot validation
-        /// needs that distinction.</summary>
-        private static bool TryExtractJsonInt(string json, string key, out int val)
+        /// <summary>[Q4] End index of the JSON string starting at
+        /// <paramref name="openQuote"/> (the index of its closing quote), or
+        /// -1. Escape-aware, matching the brace/bracket scanners.</summary>
+        private static int FindJsonStringEnd(string s, int openQuote)
+        {
+            if (openQuote < 0 || openQuote >= s.Length || s[openQuote] != '"') return -1;
+            for (int i = openQuote + 1; i < s.Length; i++)
+            {
+                if (s[i] == '\\') { i++; continue; }
+                if (s[i] == '"') return i;
+            }
+            return -1;
+        }
+
+        /// <summary>[Q4] Depth-aware member map for ONE JSON object: every
+        /// key at the object's TOP LEVEL mapped to its RAW value span, with
+        /// duplicate keys, trailing commas, junk between members and any
+        /// non-whitespace after the closing brace all rejected. The point is
+        /// that a required field can only be satisfied by a DIRECT member —
+        /// the old per-key IndexOf matched the same key nested arbitrarily
+        /// deep, so a wrong-schema row passed validation and authorized a
+        /// wholesale replacement of private state (r3 find Q4).</summary>
+        private static bool TryTopLevelMembers(string obj, out Dictionary<string, string> members)
+        {
+            members = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (string.IsNullOrEmpty(obj)) return false;
+            int i = 0;
+            while (i < obj.Length && char.IsWhiteSpace(obj[i])) i++;
+            if (i >= obj.Length || obj[i] != '{') return false;
+            int end = FindMatchingBraceStringAware(obj, i);
+            if (end < 0) return false;
+            for (int t = end + 1; t < obj.Length; t++)
+                if (!char.IsWhiteSpace(obj[t])) return false;   // trailing junk
+            int p = i + 1;
+            while (true)
+            {
+                while (p < end && char.IsWhiteSpace(obj[p])) p++;
+                if (p >= end) return true;                       // clean finish
+                if (obj[p] != '"') return false;                 // members are quoted keys
+                int keyEnd = FindJsonStringEnd(obj, p);
+                if (keyEnd < 0 || keyEnd >= end) return false;
+                string key = obj.Substring(p + 1, keyEnd - p - 1);
+                p = keyEnd + 1;
+                while (p < end && char.IsWhiteSpace(obj[p])) p++;
+                if (p >= end || obj[p] != ':') return false;
+                p++;
+                while (p < end && char.IsWhiteSpace(obj[p])) p++;
+                if (p >= end) return false;
+                int valStart = p, valEnd;
+                char c = obj[p];
+                if (c == '{' || c == '[')
+                {
+                    valEnd = (c == '{') ? FindMatchingBraceStringAware(obj, p)
+                                        : FindMatchingBracketStringAware(obj, p);
+                    if (valEnd < 0 || valEnd >= end) return false;
+                }
+                else if (c == '"')
+                {
+                    valEnd = FindJsonStringEnd(obj, p);
+                    if (valEnd < 0 || valEnd >= end) return false;
+                }
+                else
+                {
+                    int q = p;
+                    while (q < end && obj[q] != ',' && obj[q] != '}') q++;
+                    valEnd = q - 1;
+                    while (valEnd > p && char.IsWhiteSpace(obj[valEnd])) valEnd--;
+                    if (valEnd < p) return false;
+                }
+                if (members.ContainsKey(key)) return false;      // duplicate member
+                members[key] = obj.Substring(valStart, valEnd - valStart + 1);
+                p = valEnd + 1;
+                while (p < end && char.IsWhiteSpace(obj[p])) p++;
+                if (p >= end) return true;
+                if (obj[p] != ',') return false;                 // junk between members
+                p++;
+                while (p < end && char.IsWhiteSpace(obj[p])) p++;
+                if (p >= end) return false;                      // trailing comma
+            }
+        }
+
+        /// <summary>[Q4] A member's raw span must be a BARE JSON integer —
+        /// the whole span, nothing else. Rejects null/string/float/exponent,
+        /// digit-prefixed garbage, and the "5 xyz" shape the old
+        /// whitespace-tolerant terminator accepted.</summary>
+        private static bool TryStrictJsonInt(string raw, out int val)
         {
             val = 0;
-            try
+            if (string.IsNullOrEmpty(raw)) return false;
+            int i = (raw[0] == '-') ? 1 : 0;
+            if (i >= raw.Length) return false;
+            for (int k = i; k < raw.Length; k++)
+                if (raw[k] < '0' || raw[k] > '9') return false;  // ASCII only (#405)
+            return int.TryParse(raw, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out val);
+        }
+
+        /// <summary>[Q4] A member's raw span must be a quoted JSON string;
+        /// returns it unescaped.</summary>
+        private static bool TryStrictJsonString(string raw, out string val)
+        {
+            val = null;
+            if (string.IsNullOrEmpty(raw) || raw.Length < 2
+                || raw[0] != '"' || raw[raw.Length - 1] != '"') return false;
+            if (FindJsonStringEnd(raw, 0) != raw.Length - 1) return false;   // must be ONE string
+            var sb = new System.Text.StringBuilder(raw.Length);
+            for (int i = 1; i < raw.Length - 1; i++)
             {
-                string search = "\"" + key + "\":";
-                int start = json.IndexOf(search, StringComparison.Ordinal);
-                if (start < 0) return false;
-                start += search.Length;
-                while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
-                int end = start;
-                if (end < json.Length && json[end] == '-') end++;
-                int digitsFrom = end;
-                while (end < json.Length && char.IsDigit(json[end])) end++;
-                if (end == digitsFrom) return false;   // no digits: null/string/absent value
-                if (end < json.Length)
+                char c = raw[i];
+                if (c != '\\') { sb.Append(c); continue; }
+                if (i + 1 >= raw.Length - 1) return false;
+                char n = raw[++i];
+                switch (n)
                 {
-                    // The integer must terminate the value: only a JSON
-                    // delimiter or whitespace may follow ("1.5", "1e3" and
-                    // "12abc" all refuse).
-                    char nx = json[end];
-                    if (nx != ',' && nx != '}' && nx != ']' && !char.IsWhiteSpace(nx)) return false;
+                    case 'n': sb.Append('\n'); break;
+                    case 'r': sb.Append('\r'); break;
+                    case 't': sb.Append('\t'); break;
+                    case 'b': sb.Append('\b'); break;
+                    case 'f': sb.Append('\f'); break;
+                    case '"': sb.Append('"'); break;
+                    case '\\': sb.Append('\\'); break;
+                    case '/': sb.Append('/'); break;
+                    case 'u':
+                        if (i + 4 >= raw.Length - 1) return false;
+                        int code;
+                        if (!int.TryParse(raw.Substring(i + 1, 4),
+                                System.Globalization.NumberStyles.HexNumber,
+                                System.Globalization.CultureInfo.InvariantCulture, out code)) return false;
+                        sb.Append((char)code); i += 4; break;
+                    default: return false;                        // invalid escape
                 }
-                return int.TryParse(json.Substring(start, end - start),
-                    System.Globalization.NumberStyles.Integer,
-                    System.Globalization.CultureInfo.InvariantCulture, out val);
             }
-            catch { return false; }
+            val = sb.ToString();
+            return true;
         }
 
         /// <summary>Set / clear active title. HMAC over "title:{steam_id}:{item_id or 0}".</summary>
