@@ -150,6 +150,7 @@ namespace CompetitiveRounds
             public bool hasReadyTrack;
             public bool menuParked;                     // non-owned ONLY because the menu is uncovered; round entry resumes
             public MusicMode menuParkedMode = MusicMode.Vanilla; // [I18] the ownership class parked away (Custom/MutedByChoice)
+            public bool menuSilenced;                   // [Batch-2 §3] menu-scoped MutedByChoice via MenuMusicMode="silent" (diagnostic)
 
             // Card-phase duck (isCard edges, realtime-smoothed).
             public bool duckWanted;
@@ -201,6 +202,7 @@ namespace CompetitiveRounds
         private static float _loadingKickRt = -999f;
         private static float _reenterRetryRt = -999f;
         private static bool _lastMenuCovered;
+        private static string _lastMenuModeSetting;
         private static bool _lastBroadcastPredicate;
 
         /// <summary>Set by MusicSuppressionPatch's [HarmonyCleanup] once the
@@ -292,6 +294,56 @@ namespace CompetitiveRounds
             catch (Exception ex) { LogOnce("setsel", "[MUSIC] SetSelected failed: " + ex.Message, true); }
         }
 
+        /// <summary>[Batch-2 item 2] Album master toggle read: true when ANY of
+        /// the album's tracks is selected (vanilla album = the combat tracks
+        /// only; the menu theme is never selectable [G14]).</summary>
+        internal static bool IsAlbumEnabled(string sku)
+        {
+            try
+            {
+                RefreshDeselectedCache();
+                var s = S;
+                int n = AlbumTrackCount(sku);
+                for (int i = 0; i < n; i++)
+                    if (!s.deselected.Contains(sku + "/" + i)) return true;
+                return false;
+            }
+            catch { return true; }
+        }
+
+        /// <summary>[Batch-2 item 2] Album master toggle write: batch
+        /// select/deselect EVERY track of the album — one persistence write +
+        /// one Reconcile, never per-track (the per-track path would fire an
+        /// engine transition per row).</summary>
+        internal static void SetAlbumSelected(string sku, bool on)
+        {
+            try
+            {
+                RefreshDeselectedCache();
+                var s = S;
+                int n = AlbumTrackCount(sku);
+                if (n <= 0) return;   // unknown sku / vanilla album not yet enumerated
+                bool changed = false;
+                for (int i = 0; i < n; i++)
+                {
+                    string key = sku + "/" + i;
+                    if (on ? s.deselected.Remove(key) : s.deselected.Add(key)) changed = true;
+                }
+                if (!changed) return;
+                PersistDeselected();
+                s.queueSignature = null;
+                Reconcile("album-toggle");
+            }
+            catch (Exception ex) { LogOnce("setalb", "[MUSIC] SetAlbumSelected failed: " + ex.Message, true); }
+        }
+
+        private static int AlbumTrackCount(string sku)
+        {
+            if (IsVanillaSku(sku)) return S.vanillaTracks.Count;
+            var a = MusicCatalog.Get(sku);
+            return (a != null && a.Tracks != null) ? a.Tracks.Length : 0;
+        }
+
         // ── transport ────────────────────────────────────────────────────
 
         internal static void PlayPause()
@@ -350,8 +402,8 @@ namespace CompetitiveRounds
 
         /// <summary>Previous transport (wave-2 contract): more than 3s into
         /// the current track restarts it; otherwise steps back one queue
-        /// entry (listed order, or the live dispersion cycle under shuffle),
-        /// wrapping at the top.</summary>
+        /// entry (listed order, or the live shuffle cycle — dispersion, or
+        /// broadcast album blocks), wrapping at the top.</summary>
         internal static void PlayPrevious()
         {
             if (!_initialized) return;
@@ -504,8 +556,12 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Elapsed/duration of the current custom track for the seek
-        /// line. False when no custom track is loaded on the main source
-        /// (vanilla/preview/fault surfaces render no position).</summary>
+        /// line. TRUE only while the track is audibly playing or deliberately
+        /// paused-with-current (PlayPause) — a STOPPED engine (MutedByChoice /
+        /// Vanilla / Fault, all failing the mode gate) and a silently-dead
+        /// source (the [J1] premature-stop window) return false even though
+        /// resumePositionSec is retained for the resume, so the seek row
+        /// blanks whenever "Nothing playing" would show [Batch-2 item 4].</summary>
         internal static bool TryGetPosition(out float elapsedSec, out float durationSec)
         {
             elapsedSec = 0f; durationSec = 0f;
@@ -515,10 +571,15 @@ namespace CompetitiveRounds
                 var h = _host;
                 if (h == null || h.Main == null) return false;
                 if (s.mode != MusicMode.Custom || !s.current.HasValue || !s.currentStarted) return false;
-                var clip = h.Main.clip;
+                var m = h.Main;
+                var clip = m.clip;
                 if (clip == null || clip.length <= 0f) return false;
+                // [Batch-2 item 4] the audibility gate: not sounding and not
+                // deliberately paused = no position (a paused source keeps a
+                // valid AudioSource.time, so the paused row still ticks).
+                if (!m.isPlaying && !s.paused) return false;
                 durationSec = clip.length;
-                elapsedSec = Mathf.Clamp(h.Main.time, 0f, durationSec);
+                elapsedSec = Mathf.Clamp(m.time, 0f, durationSec);
                 return true;
             }
             catch { elapsedSec = 0f; durationSec = 0f; return false; }
@@ -549,18 +610,29 @@ namespace CompetitiveRounds
             catch (Exception ex) { LogOnce("seek", "[MUSIC] SeekToFraction failed: " + ex.Message, true); }
         }
 
+        /// <summary>"" contract [Batch-2 item 4]: empty EXACTLY when the seek
+        /// row is hidden too (TryGetPosition false) so the UI can never render
+        /// "Nothing playing" beside a live position — paused-with-current
+        /// therefore names its track ("Paused: ..."). Preview stays the
+        /// deliberate exception the other way (named, no seek row).</summary>
         internal static string NowPlayingLine()
         {
             try
             {
-                if (!TryGetNowPlaying(out var track, out var artist, out _)) return "";
-                return I18n.TrF("Now Playing: {0} - {1}", track, artist);
+                if (TryGetNowPlaying(out var track, out var artist, out _))
+                    return I18n.TrF("Now Playing: {0} - {1}", track, artist);
+                var s = S;
+                if (s.mode == MusicMode.Custom && s.paused && s.current.HasValue && s.currentStarted
+                    && TryDescribeTrack(s.current.Value, out var ptrack, out var partist, out _))
+                    return I18n.TrF("Paused: {0} - {1}", ptrack, partist);
+                return "";
             }
             catch { return ""; }
         }
 
         /// <summary>True while a track is actually sounding (Custom playing, or
-        /// a preview snippet). Silent modes report false.</summary>
+        /// a preview snippet). Silent modes — paused included — report false;
+        /// NowPlayingLine layers the paused-with-current naming on top.</summary>
         internal static bool TryGetNowPlaying(out string track, out string artist, out string album)
         {
             track = ""; artist = ""; album = "";
@@ -571,19 +643,27 @@ namespace CompetitiveRounds
                 if (s.mode == MusicMode.Preview && s.previewTrack.HasValue && s.previewStarted) audible = s.previewTrack;
                 else if (s.mode == MusicMode.Custom && !s.paused && s.current.HasValue && s.currentStarted) audible = s.current;
                 if (!audible.HasValue) return false;
-                var t = audible.Value;
-                if (IsVanillaSku(t.Sku))
-                {
-                    if (t.Idx < 0 || t.Idx >= s.vanillaTracks.Count) return false;
-                    track = s.vanillaTracks[t.Idx].Title; artist = VANILLA_ARTIST; album = VANILLA_ALBUM;
-                    return true;
-                }
-                var a = MusicCatalog.Get(t.Sku);
-                if (a == null || a.Tracks == null || t.Idx < 0 || t.Idx >= a.Tracks.Length) return false;
-                track = a.Tracks[t.Idx].Title; artist = a.ArtistName; album = a.AlbumName;
-                return true;
+                return TryDescribeTrack(audible.Value, out track, out artist, out album);
             }
             catch { return false; }
+        }
+
+        /// <summary>Name resolution for one track ref (vanilla or catalog) —
+        /// shared by the audible and paused-with-current display paths.</summary>
+        private static bool TryDescribeTrack(TrackRef t, out string track, out string artist, out string album)
+        {
+            track = ""; artist = ""; album = "";
+            if (IsVanillaSku(t.Sku))
+            {
+                var s = S;
+                if (t.Idx < 0 || t.Idx >= s.vanillaTracks.Count) return false;
+                track = s.vanillaTracks[t.Idx].Title; artist = VANILLA_ARTIST; album = VANILLA_ALBUM;
+                return true;
+            }
+            var a = MusicCatalog.Get(t.Sku);
+            if (a == null || a.Tracks == null || t.Idx < 0 || t.Idx >= a.Tracks.Length) return false;
+            track = a.Tracks[t.Idx].Title; artist = a.ArtistName; album = a.AlbumName;
+            return true;
         }
 
         // ── vanilla album introspection (UI) ─────────────────────────────
@@ -765,25 +845,43 @@ namespace CompetitiveRounds
 
             MusicMode desired = ComputeDesiredMode();
 
-            // Menu-cover rule: engine-owned playback covers the menu only when
-            // (MenuMusicEnabled && selection non-empty) or the broadcast
-            // predicate holds; otherwise PARK — vanilla menu music plays and
-            // the engine resumes at the next in-game context. Preview is
-            // exempt (shop previews happen at the menu by design).
+            // Menu rule, 3-state [Batch-2 item 1]: MenuMusicMode "custom"
+            // covers the menu with the playlist (MenuCovered — the legacy
+            // MenuMusicEnabled=true behavior); "vanilla" PARKS engine-owned
+            // playback — vanilla menu music plays and the engine resumes at
+            // the next in-game context; "silent" is a menu-scoped
+            // MutedByChoice — the engine OWNS the menu with NOTHING playing
+            // (the setting IS the deliberate intent, so the owned-silence
+            // invariant holds), and leaving the menu re-derives the real mode,
+            // releasing per [G5] when that mode is non-owned. The broadcast
+            // predicate still covers the menu outright; Preview is exempt
+            // (shop previews happen at the menu by design) and Fault/patch-
+            // dead always fail open to audible vanilla, "silent" included.
             s.menuParked = false;
             s.menuParkedMode = MusicMode.Vanilla;
-            if ((desired == MusicMode.Custom || desired == MusicMode.MutedByChoice)
-                && s.ctx == Ctx.Menu && !MenuCovered())
+            s.menuSilenced = false;
+            if (s.ctx == Ctx.Menu && !MenuCovered())
             {
-                s.menuParked = true;
-                s.menuParkedMode = desired;   // [I18] retain the parked ownership class for the prefix fast path
-                desired = MusicMode.Vanilla;
+                if (!_patchDead && MenuSilent()
+                    && (desired == MusicMode.Custom || desired == MusicMode.MutedByChoice
+                        || desired == MusicMode.Loading || desired == MusicMode.Vanilla))
+                {
+                    s.menuSilenced = true;
+                    desired = MusicMode.MutedByChoice;
+                }
+                else if (desired == MusicMode.Custom || desired == MusicMode.MutedByChoice)
+                {
+                    s.menuParked = true;
+                    s.menuParkedMode = desired;   // [I18] retain the parked ownership class for the prefix fast path
+                    desired = MusicMode.Vanilla;
+                }
             }
 
             if (desired != s.mode) TransitionTo(desired, reason);
             else EnforceModeInvariants();
 
             _lastMenuCovered = MenuCovered();
+            _lastMenuModeSetting = MenuModeSetting();
         }
 
         private static MusicMode ComputeDesiredMode()
@@ -872,7 +970,7 @@ namespace CompetitiveRounds
                 s.suppress = false;         // non-owned → non-owned: vanilla already audible
             }
 
-            Plugin.Log?.LogInfo($"[MUSIC] mode {prev} -> {desired} ({reason}, ctx={s.ctx}{(s.menuParked ? ", parked" : "")})");
+            Plugin.Log?.LogInfo($"[MUSIC] mode {prev} -> {desired} ({reason}, ctx={s.ctx}{(s.menuParked ? ", parked" : s.menuSilenced ? ", menu-silent" : "")})");
         }
 
         /// <summary>Same-mode Reconcile: heal any suppress/ownership drift
@@ -963,10 +1061,21 @@ namespace CompetitiveRounds
             if (s.faultPending || s.faultDurable) return true;   // fault = vanilla runs
             if (IsEngineOwned(s.mode))
             {
-                if (menuCall && s.mode != MusicMode.Preview && !MenuCovered()) return true; // park: vanilla menu plays
+                // Park pass-through: vanilla menu plays — unless the menu mode
+                // is "silent", which keeps suppression through menu calls (the
+                // engine owns the menu with nothing playing) [Batch-2 item 1].
+                if (menuCall && s.mode != MusicMode.Preview && !MenuCovered() && !MenuSilent()) return true;
                 suppress = s.suppress;   // normally true; a mid-fault window reads false and lets vanilla through
                 return true;
             }
+            // [Batch-2 item 1] "silent" pre-ownership fast path: a menu call
+            // can arrive before the tick's Reconcile has formalized the
+            // menu-scoped MutedByChoice (startup, or a context change into the
+            // menu while non-owned) — suppress it HERE so vanilla menu music
+            // never blips in. Fault and patch-dead returned above, so a
+            // suppressed call is always followed by the owning Reconcile
+            // (NotePrefixContext just marked ctxDirty for the tick).
+            if (menuCall && !MenuCovered() && MenuSilent()) { suppress = true; return true; }
             // Parked-at-menu fast path: the first in-game call after a menu
             // park is suppressed HERE so vanilla in-game music never blips in
             // the frame before the tick's Reconcile re-takes ownership. [I18]
@@ -1114,8 +1223,13 @@ namespace CompetitiveRounds
                     _managerPollRt = rt;
                     PollManagerIdentity();
                     // Menu-cover inputs can change outside Reconcile (config
-                    // edit / cfg-lever reload); re-evaluate on the edge.
+                    // edit / cfg-lever reload); re-evaluate on the edge. The
+                    // 3-state menu mode gets its OWN edge — a vanilla→silent
+                    // flip at a parked menu changes neither MenuCovered nor
+                    // any other reconcile input [Batch-2 item 1].
                     if (MenuCovered() != _lastMenuCovered) Reconcile("menu-cover-change");
+                    else if (!string.Equals(MenuModeSetting(), _lastMenuModeSetting, StringComparison.Ordinal))
+                        Reconcile("menu-mode-change");
                 }
 
                 if (TickBroadcastEdges()) Reconcile("broadcast-edge");
@@ -1478,7 +1592,7 @@ namespace CompetitiveRounds
             if (s.queueSignature == sig) return;
             s.queueSignature = sig;
             var sel = BuildEffectiveSelection();
-            s.queue = ShuffleEffective() ? BuildDispersionCycle(sel, s.current) : sel;
+            s.queue = BuildQueueOrder(sel, s.current);
             s.queueIndex = s.current.HasValue ? s.queue.FindIndex(t => t.Equals(s.current.Value)) : -1;
         }
 
@@ -1494,6 +1608,52 @@ namespace CompetitiveRounds
                 for (int i = 0; i < albums.Length; i++)
                     if (albums[i] != null && IsAlbumPlayable(albums[i].Sku)) sb.Append('|').Append(albums[i].Sku);
             return sb.ToString();
+        }
+
+        /// <summary>Queue order for one cycle from the effective selection.
+        /// Shuffle off = the selection's own order (album-major, catalog
+        /// album order — BuildEffectiveSelection iterates albums then track
+        /// indices). Shuffle on: the BROADCAST queue plays ALBUM-MAJOR BLOCKS
+        /// (owner: albums have different vibes — never intermingle them), so
+        /// only the block ORDER shuffles; every other seat keeps the
+        /// per-track dispersion cycle [Batch-2 item 3]. Skip/Previous walk
+        /// whatever order this built; loop wraps it.</summary>
+        private static List<TrackRef> BuildQueueOrder(List<TrackRef> sel, TrackRef? avoid)
+        {
+            if (!ShuffleEffective()) return sel;
+            return BroadcastPredicate() ? BuildAlbumBlockCycle(sel, avoid) : BuildDispersionCycle(sel, avoid);
+        }
+
+        /// <summary>[Batch-2 item 3] Album-major block cycle for the broadcast
+        /// queue: tracks keep their in-album order (grouping preserves the
+        /// selection's relative order, which IS the album order); the block
+        /// order is Fisher-Yates-shuffled per cycle, and a fresh cycle never
+        /// opens with the album that just finished (when more than one album
+        /// is in play — mirrors the dispersion cycle's avoidFirst rule).</summary>
+        private static List<TrackRef> BuildAlbumBlockCycle(List<TrackRef> sel, TrackRef? avoidFirstAlbum)
+        {
+            var result = new List<TrackRef>(sel.Count);
+            if (sel.Count == 0) return result;
+            var groups = new Dictionary<string, List<TrackRef>>(StringComparer.Ordinal);
+            var order = new List<string>();
+            foreach (var t in sel)
+            {
+                if (!groups.TryGetValue(t.Sku, out var g)) { g = new List<TrackRef>(); groups[t.Sku] = g; order.Add(t.Sku); }
+                g.Add(t);
+            }
+            for (int i = order.Count - 1; i > 0; i--)       // Fisher-Yates over the BLOCKS
+            {
+                int j = Rng.Next(i + 1);
+                var tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+            }
+            if (order.Count > 1 && avoidFirstAlbum.HasValue
+                && string.Equals(order[0], avoidFirstAlbum.Value.Sku, StringComparison.Ordinal))
+            {
+                int mid = order.Count / 2;
+                var tmp = order[0]; order[0] = order[mid]; order[mid] = tmp;
+            }
+            foreach (var sku in order) result.AddRange(groups[sku]);
+            return result;
         }
 
         /// <summary>Spotify-style dispersion shuffle: per cycle, each album's
@@ -1540,8 +1700,8 @@ namespace CompetitiveRounds
 
         /// <summary>Advance to the next READY track. At the cycle boundary:
         /// loop off → run-out (deliberate MutedByChoice via stopIntent); loop
-        /// on + shuffle → a fresh dispersion cycle whose first track differs
-        /// from the one just played.</summary>
+        /// on + shuffle → a fresh cycle (dispersion, or broadcast album
+        /// blocks) that never opens with what just played.</summary>
         private static bool AdvanceToNext(bool userSkip)
         {
             var s = S;
@@ -1562,7 +1722,10 @@ namespace CompetitiveRounds
                     }
                     if (i == n && ShuffleEffective())
                     {
-                        s.queue = BuildDispersionCycle(BuildEffectiveSelection(), s.current);
+                        // Fresh cycle: broadcast reshuffles the ALBUM BLOCK
+                        // order, every other seat re-disperses per track
+                        // [Batch-2 item 3] — BuildQueueOrder picks the builder.
+                        s.queue = BuildQueueOrder(BuildEffectiveSelection(), s.current);
                         n = s.queue.Count;
                         if (n == 0) { s.current = null; return false; }
                     }
@@ -2262,12 +2425,44 @@ namespace CompetitiveRounds
             try { if (Plugin.MusicDeselected != null) Plugin.MusicDeselected.Value = s.deselectedRaw; } catch { }
         }
 
-        // ── menu-cover rule ──────────────────────────────────────────────
+        // ── menu-music rule (3-state, Batch-2 item 1) ────────────────────
+
+        private const string MENU_MODE_VANILLA = "vanilla";
+        private const string MENU_MODE_CUSTOM = "custom";
+        private const string MENU_MODE_SILENT = "silent";
+
+        /// <summary>Resolved MenuMusicMode: "vanilla" | "custom" | "silent".
+        /// The legacy MenuMusicEnabled bool is read (null-guarded) ONLY while
+        /// MenuMusicMode is null/unbound — an old cfg mid-migration (#190,
+        /// the bind + one-shot migration are Plugin.cs's). An unknown
+        /// spelling fails open to "vanilla" (the bind default's behavior).</summary>
+        private static string MenuModeSetting()
+        {
+            try
+            {
+                var e = Plugin.MenuMusicMode;
+                string v = e != null ? e.Value : null;
+                if (!string.IsNullOrWhiteSpace(v))
+                {
+                    v = v.Trim();
+                    if (string.Equals(v, MENU_MODE_CUSTOM, StringComparison.OrdinalIgnoreCase)) return MENU_MODE_CUSTOM;
+                    if (string.Equals(v, MENU_MODE_SILENT, StringComparison.OrdinalIgnoreCase)) return MENU_MODE_SILENT;
+                    return MENU_MODE_VANILLA;
+                }
+            }
+            catch { }
+            try { return (Plugin.MenuMusicEnabled != null && Plugin.MenuMusicEnabled.Value) ? MENU_MODE_CUSTOM : MENU_MODE_VANILLA; }
+            catch { return MENU_MODE_VANILLA; }
+        }
+
+        /// <summary>Side-effect-free (prefix-safe): pure config read.</summary>
+        private static bool MenuSilent()
+            => string.Equals(MenuModeSetting(), MENU_MODE_SILENT, StringComparison.Ordinal);
 
         private static bool MenuCovered()
         {
             if (BroadcastPredicate()) return true;
-            try { return Plugin.MenuMusicEnabled != null && Plugin.MenuMusicEnabled.Value && S.selectionNonEmpty; }
+            try { return string.Equals(MenuModeSetting(), MENU_MODE_CUSTOM, StringComparison.Ordinal) && S.selectionNonEmpty; }
             catch { return false; }
         }
 

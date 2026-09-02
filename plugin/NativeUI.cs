@@ -10707,7 +10707,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // inviting the work). A catalogue miss falls back to the raw
             // English, so untranslated items render exactly as before. The
             // artist HANDLE stays raw — it is identity, not prose.
-            string artistRaw = it.artist_name ?? "";
+            // Sept 2: music credit lives on the DESC line (mirroring the Music
+            // tab's meta line) — zeroing it here keeps the name-line byline
+            // from doubling it once the server attributes music rows (round 3
+            // item 1 precedent: twice per row was noise). Zeroed BEFORE
+            // FitTwoParts so the shared budget excludes it too.
+            string artistRaw = it.kind == "music_album" ? "" : (it.artist_name ?? "");
             string nameRaw = I18n.Tr(it.name);
             string rarityDisp = TrRarity(it.rarity);
             /* Aug-3 review find F5 (audit of the FitOneLine sweep). r.txtName now
@@ -10914,6 +10919,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         FmtTrackLen(MusicAlbumTotalSeconds(albDesc)),
                         albDesc.Genre ?? "")
                     : I18n.Tr(it.description ?? "");
+                // Sept 2 feedback ("shop lacks artist credit"): the SERVER's
+                // attribution wins when present (music rows become attributed
+                // this batch); the compiled catalog is the fallback for
+                // un-attributed rows. The handle is identity — raw, never Tr'd.
+                // "<color=#888>by {0}</color>" is the existing Home-row key.
+                string musArtist = !string.IsNullOrEmpty(it.artist_name)
+                    ? it.artist_name
+                    : (albDesc != null ? albDesc.ArtistName ?? "" : "");
+                if (!string.IsNullOrEmpty(musArtist))
+                    mdesc += "  " + I18n.TrF("<color=#888>by {0}</color>", HomeSan(musArtist));
                 mdesc += "  " + I18n.Tr("<color=#888>(click the row to preview tracks)</color>");
                 UIFactory.SetTextRaw(r.txtDesc, mdesc);
                 // Recycled row: restore any glow/typeface preview, same order
@@ -11075,7 +11090,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Enabled/disabled tint for the shuffle/loop glyphs (painted per refresh).
         private static readonly Color MUS_ICON_ON = new Color(0.35f, 1f, 0.45f, 1f);
         private static readonly Color MUS_ICON_OFF = new Color(0.55f, 0.55f, 0.60f, 1f);
-        private class MusicAlbumHdrRow { public GameObject root, artGO; public object artImg, txtName, txtMeta; }
+        private class MusicAlbumHdrRow
+        {
+            public GameObject root, artGO; public object artImg, txtName, txtMeta;
+            // Sept 2 feedback: album MASTER switch — binding written WITH the
+            // visible text at fill time (#265), vanilla album included.
+            public GameObject selBtn; public object selBtnTxt; public string albumSku;
+        }
         private class MusicTrackRow
         {
             public GameObject root;
@@ -11260,18 +11281,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.AddHLG(rowC, spacing: 8, forceExpandH: false);
             UIFactory.SetHLGChildAlignMiddle(rowC);
             UIFactory.AddLE(rowC, prefH: 44, minH: 44, flexH: 0);
-            // Left corner: stop, plus the first-class reset control (design
-            // F14): clears manual takeover + returns ownership to vanilla.
-            UIFactory.CreateIconButton(rowC.transform, "MusStop", "mus_ic_stop.png", 22f,
-                () => MusicUiCall("stop", MusicEngine.Stop));
+            // Left corner: the first-class reset control (design F14) ALONE —
+            // clears manual takeover + returns ownership to vanilla. (Sept 2
+            // feedback: the far-left stop square read as a mystery checkbox;
+            // stop now lives in the center cluster with the other icons.)
             var musVanBtn = UIFactory.CreateButton("MusVan", rowC.transform, "Use vanilla music", 13f, C_WHITE,
                 new Color(0.3f, 0.3f, 0.5f, 0.9f), () => MusicUiCall("use-vanilla", MusicEngine.UseVanilla), sizeDelta: new Vector2(170, 26));
             UIFactory.AddLE(musVanBtn, prefW: 170, prefH: 26, flexW: 0, flexH: 0);
             var csp1 = new GameObject("S"); csp1.transform.SetParent(rowC.transform, false); csp1.AddComponent<RectTransform>(); UIFactory.AddLE(csp1, flexW: 1);
-            // Centered cluster: shuffle | prev | play-pause | next | loop.
+            // Centered cluster: shuffle | stop | prev | play-pause | next | loop.
             // Shuffle/loop tint (green = on) painted in RefreshMusicTab.
             musicShuffleBtn = UIFactory.CreateIconButton(rowC.transform, "MusShuf", "mus_ic_shuffle.png", 26f,
                 () => MusicUiCall("shuffle", () => MusicEngine.ShuffleEnabled = !MusicEngine.ShuffleEnabled));
+            UIFactory.CreateIconButton(rowC.transform, "MusStop", "mus_ic_stop.png", 26f,
+                () => MusicUiCall("stop", MusicEngine.Stop));
             UIFactory.CreateIconButton(rowC.transform, "MusPrev", "mus_ic_prev.png", 26f,
                 () => MusicUiCall("prev", MusicEngine.PlayPrevious));
             musicPlayBtn = UIFactory.CreateIconButton(rowC.transform, "MusPlay", "mus_ic_play.png", 40f,
@@ -11304,11 +11327,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var h = new MusicAlbumHdrRow();
             h.root = UIFactory.CreatePanel($"musAl{idx}", parent, new Color(0.10f, 0.12f, 0.17f, 0.95f));
             UIFactory.AddHLG(h.root, spacing: 10, padL: 8, padR: 8, padT: 4, padB: 4, forceExpandH: true);
-            UIFactory.AddLE(h.root, prefH: 52, minH: 52, flexH: 0);   // owner UX pass: slimmer album rows
+            // Sept 2 feedback: album art 2x (42 -> 84) — the header grows to
+            // fit the thumb; font sizes deliberately unchanged.
+            UIFactory.AddLE(h.root, prefH: 96, minH: 96, flexH: 0);
             h.artGO = new GameObject("art");
             h.artGO.transform.SetParent(h.root.transform, false);
             h.artGO.AddComponent<RectTransform>();
-            UIFactory.AddLE(h.artGO, prefW: 42, minW: 42, prefH: 42, flexW: 0, flexH: 0);
+            UIFactory.AddLE(h.artGO, prefW: 84, minW: 84, prefH: 84, flexW: 0, flexH: 0);
             if (UIFactory.tImage != null)
             {
                 h.artImg = h.artGO.AddComponent(UIFactory.tImage);
@@ -11326,6 +11351,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             h.txtMeta = UIFactory.CreateText($"musAlM{idx}", col.transform, "", 12f, C_LABEL,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(640, 16));
             UIFactory.FitOneLine(h.txtMeta);
+            // Sept 2 feedback: album MASTER switch, right edge (the info col's
+            // flexW:1 pushes it there — which also keeps the header spanning
+            // the full content width). Engine contract: IsAlbumEnabled /
+            // SetAlbumSelected (sibling adds them this batch). The callback
+            // reads the row's CURRENT binding (#265) and never re-claims
+            // ClickGuard (#158 — CreateButton already guarded the click).
+            h.selBtn = UIFactory.CreateButton($"musAlS{idx}", h.root.transform, "", 13f, C_WHITE, C_BTN,
+                () =>
+                {
+                    try
+                    {
+                        if (string.IsNullOrEmpty(h.albumSku)) return;
+                        MusicEngine.SetAlbumSelected(h.albumSku, !MusicEngine.IsAlbumEnabled(h.albumSku));
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] album toggle: {ex.Message}"); }
+                    dirty = true;
+                }, sizeDelta: new Vector2(64, 26));
+            UIFactory.AddLE(h.selBtn, prefW: 64, prefH: 26, flexW: 0, flexH: 0);
+            h.selBtnTxt = UIFactory.GetButtonText(h.selBtn);
             h.root.SetActive(false);
             return h;
         }
@@ -11354,6 +11398,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             t.txtTitle = UIFactory.CreateText($"musTrT{idx}", t.root.transform, "", 14f, C_WHITE,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 20));
             UIFactory.FitOneLine(t.txtTitle);
+            // Sept 2 feedback ("the right ~55% of the rows is dead space"):
+            // the title is the row's ONE flex member, so the row spans the full
+            // content width and length + Play land on the RIGHT edge. FitOneLine
+            // overflow stays bounded in practice — track titles are compiled-
+            // catalog authored, far shorter than the stretched box.
+            UIFactory.SetFlexW(((Component)t.txtTitle).gameObject, 1f);
+            // RATING GAP — placeholder container the ratings wave fills (grep
+            // target: musRateSlot). Deliberately EMPTY this batch; fixed width
+            // so the length/Play columns don't shift when it populates.
+            var rateSlot = new GameObject("musRateSlot");
+            rateSlot.transform.SetParent(t.root.transform, false);
+            rateSlot.AddComponent<RectTransform>();
+            UIFactory.AddHLG(rateSlot, spacing: 4, forceExpandH: false);
+            UIFactory.AddLE(rateSlot, prefW: 150, minW: 150, prefH: 22, flexW: 0, flexH: 0);
             t.txtLen = UIFactory.CreateText($"musTrL{idx}", t.root.transform, "", 12f, C_DIM,
                 UIFactory.AlignMidRight, sizeDelta: new Vector2(56, 18));
             t.playBtn = UIFactory.CreateButton($"musTrP{idx}", t.root.transform, "Play", 13f, C_WHITE,
@@ -11393,6 +11451,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetColor(t.txtTitle, (sel || menuOnly) ? C_WHITE : C_LABEL);
             UIFactory.SetTextRaw(t.txtLen, lenSeconds > 0f ? FmtTrackLen(lenSeconds) : "");
             t.root.SetActive(true);
+        }
+
+        /* Album master switch paint (Sept 2 feedback): ON/OFF + green tint,
+         * the track-checkbox convention scaled to the header. Reads the
+         * engine's album-level selection (IsAlbumEnabled — sibling contract,
+         * paired with SetAlbumSelected in the click callback). */
+        private static void PaintMusicAlbumToggle(MusicAlbumHdrRow h)
+        {
+            if (h == null || h.selBtnTxt == null) return;
+            bool on = false;
+            try { on = MusicEngine.IsAlbumEnabled(h.albumSku); } catch { }
+            UIFactory.SetText(h.selBtnTxt, on ? "ON" : "OFF");
+            UIFactory.SetColor(h.selBtnTxt, on ? C_GREEN : C_DIM);
+            UIFactory.SetImageColor(h.selBtn, on ? new Color(0.2f, 0.45f, 0.2f, 0.9f) : C_BTN);
         }
 
         // i18n item 11 pattern: Tr at assignment — the mode is a finite enum
@@ -11457,6 +11529,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 var h = musicAlbumHdrs[hdrI++];
                 if (h.artGO != null && h.artGO.activeSelf) h.artGO.SetActive(false);   // the OST ships no cover art
+                h.albumSku = MusicCatalog.VANILLA_SKU;   // #265 binding — the master switch covers the vanilla album too
+                PaintMusicAlbumToggle(h);
                 float vTotal = 0f;
                 for (int i = 0; i < vCount; i++) { try { vTotal += MusicEngine.VanillaTrackLength(i); } catch { } }
                 UIFactory.SetTextRaw(h.txtName, $"<color=#A0D4FF>{I18n.Tr("ROUNDS OST")}</color>");
@@ -11488,6 +11562,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (hdrI >= musicAlbumHdrs.Count)
                 { Plugin.Log.LogWarning("[MUSIC-UI] album header pool exhausted (raise the pool)"); break; }
                 var h = musicAlbumHdrs[hdrI++];
+                h.albumSku = alb.Sku;   // #265 binding for the master switch
+                PaintMusicAlbumToggle(h);
                 var spCover = GetMusicCoverSprite(alb.Sku);
                 if (h.artImg != null)
                 {
@@ -12553,13 +12629,24 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             menuMusicToggleBtn = SettingsToggle(intBox.transform, "SMenuMus", new Vector2(260, 28),
                 () =>
                 {
-                    Plugin.Log.LogInfo("[SETTINGS] Menu music toggled");
-                    if (Plugin.MenuMusicEnabled != null) Plugin.MenuMusicEnabled.Value = !Plugin.MenuMusicEnabled.Value;
+                    Plugin.Log.LogInfo("[SETTINGS] Menu music mode cycled");
+                    // Sept 2 feedback: 3-state cycler (the cursorShapeBtn /
+                    // date-format pattern) over MenuMusicMode — vanilla ->
+                    // custom -> silent -> vanilla. Branched on the VALUE,
+                    // never the label. An unknown hand-edited value PAINTS as
+                    // Default, so it cycles as vanilla too (-> custom) —
+                    // paint and cycle can never disagree.
+                    // Cycle logic hoisted OUT of this harvested call span —
+                    // the extractor's argument-position walker otherwise
+                    // harvests the mode VALUE literals as translatable keys,
+                    // and a translated identity breaks the compare (#295a
+                    // inverse: identity strings must never enter the catalog).
+                    CycleMenuMusicMode();
                     // The engine owns the transition — this only changed an input.
                     try { MusicEngine.Reconcile("settings-menu-music"); } catch { }
                     dirty = true;
                 },
-                "Plays your selected custom music at the main menu too. Off = the menu keeps ROUNDS' own theme; your picks still play in matches.");
+                "Main menu music: Default = ROUNDS' own theme, My playlist = your selected custom music, None = silence. Matches always use your picks.");
             menuMusicToggleTxt = UIFactory.GetButtonText(menuMusicToggleBtn);
             musicCreditToggleBtn = SettingsToggle(intBox.transform, "SMusCredit", new Vector2(260, 28),
                 () =>
@@ -13049,6 +13136,22 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return outer;
         }
 
+        /// <summary>Cycle MenuMusicMode vanilla -> custom -> silent -> vanilla.
+        /// Lives OUTSIDE the SettingsToggle call span so the i18n extractor's
+        /// argument-position walker cannot harvest the mode VALUE literals as
+        /// translatable keys — a translated identity would break the compares.
+        /// Branched on the VALUE, never the label; an unknown hand-edited value
+        /// cycles as vanilla (-> custom), matching how it paints (Default).</summary>
+        private static void CycleMenuMusicMode()
+        {
+            if (Plugin.MenuMusicMode == null) return;
+            string cur = Plugin.MenuMusicMode.Value ?? "vanilla";
+            Plugin.MenuMusicMode.Value =
+                cur == "custom" ? "silent"
+                : cur == "silent" ? "vanilla"
+                : "custom";
+        }
+
         private static void RefreshSettings()
         {
             if (txtConsentStatus != null)
@@ -13096,11 +13199,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.MuteAudioInBackground.Value
                         ? "Mute audio when tabbed out: <color=#88FF88>ON</color>"
                         : "Mute audio when tabbed out: <color=#FF9966>OFF</color>");
-            if (menuMusicToggleTxt != null && Plugin.MenuMusicEnabled != null)
+            if (menuMusicToggleTxt != null && Plugin.MenuMusicMode != null)
+            {
+                // Sept 2: 3-state paint, branched on the config VALUE (a
+                // display string is not a state — the chatTtl rule). An
+                // unknown hand-edited value renders as Default, matching the
+                // engine's fallback for it.
+                // Mode compares hoisted OUT of the SetText span: the extractor
+                // harvests every literal in the TEXT argument position, and the
+                // identity values must never become catalogue keys (a translated
+                // "custom" breaks the compare). The three LABELS stay inside the
+                // call so they remain harvestable.
+                string mmv = Plugin.MenuMusicMode.Value ?? "vanilla";
+                int mmSel = mmv == "custom" ? 1 : mmv == "silent" ? 2 : 0;
                 UIFactory.SetText(menuMusicToggleTxt,
-                    Plugin.MenuMusicEnabled.Value
-                        ? "Play music in main menu: <color=#88FF88>ON</color>"
-                        : "Play music in main menu: <color=#FF9966>OFF</color>");
+                    mmSel == 1
+                        ? "Menu music: <color=#88FF88>My playlist</color>"
+                        : mmSel == 2
+                            ? "Menu music: <color=#FF9966>None</color>"
+                            : "Menu music: <color=#88CCFF>Default</color>");
+            }
             if (musicCreditToggleTxt != null && Plugin.MusicCreditToast != null)
                 UIFactory.SetText(musicCreditToggleTxt,
                     Plugin.MusicCreditToast.Value

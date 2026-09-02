@@ -108,7 +108,7 @@ namespace CompetitiveRounds
         /// SHIP COUPLING: the immutable GitHub release "music-{ASSET_REVISION}"
         /// must exist and verify (scripts/verify_music_release.py) BEFORE any
         /// DLL referencing this constant ships [G3]/[H2].</summary>
-        internal const string ASSET_REVISION = "ar1";
+        internal const string ASSET_REVISION = "ar2";
 
         /// <summary>Byte-scannable build probe (impl-r3 K4, the #306 pattern:
         /// a probe must exist for no other purpose). Referenced from the init
@@ -165,6 +165,13 @@ namespace CompetitiveRounds
                 Tier = MusicTier.Previews,
                 Size = 132956L,
                 Sha256 = "6a6813b96a5fadf60621f912724f53a7fa68fe70c62e33c40cb23f94fda17a9b",
+            });
+            list.Add(new MusicManifestEntry
+            {
+                Name = "music_album_clavar_la_bala.png",
+                Tier = MusicTier.Previews,
+                Size = 110316L,
+                Sha256 = "2eedb255ea96b2979094d3b81d2bef0a014ddde9a0d27ece21094b6179fe03c9",
             });
             return list.ToArray();
         }

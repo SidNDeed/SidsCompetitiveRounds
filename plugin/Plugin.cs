@@ -135,7 +135,9 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> MusicShuffle;
         internal static ConfigEntry<bool> MusicLoop;
         internal static ConfigEntry<int> MusicVolume;        // engine-local %, on top of the game's own music slider
-        internal static ConfigEntry<bool> MenuMusicEnabled;  // opt-in (§8)
+        internal static ConfigEntry<bool> MenuMusicEnabled;  // legacy bool (§8) — superseded by MenuMusicMode, kept per #190
+        internal static ConfigEntry<string> MenuMusicMode;   // "vanilla" / "custom" / "silent" (Sept 2 feedback)
+        internal static ConfigEntry<bool> MenuMusicModeMigrated; // one-shot marker for the MenuMusicEnabled→MenuMusicMode migration
         internal static ConfigEntry<bool> MusicCreditToast;  // opt-in (§8)
 
         // ── SCR Broadcast (ai-collab/broadcast-architecture.md) ──────────
@@ -906,8 +908,36 @@ namespace CompetitiveRounds
             );
             MenuMusicEnabled = Config.Bind(
                 "Music", "MenuMusicEnabled", false,
-                "Play your selected custom music in the main menu too (opt-in). Off = custom music only during games; menu music stays vanilla."
+                "Superseded by MenuMusicMode - value migrated once, no longer consulted except as a pre-migration fallback."
             );
+            MenuMusicMode = Config.Bind(
+                "Music", "MenuMusicMode", "vanilla",
+                "What plays in the main menu. Values: \"vanilla\" (ROUNDS' own menu music), \"custom\" (your selected custom-music playlist), \"silent\" (no menu music at all)."
+            );
+            // One-shot MenuMusicEnabled -> MenuMusicMode migration (the
+            // HttpsMigrationDone pattern): Config.Bind never revisits a
+            // written default (#190), so an existing opt-in install would
+            // otherwise stay on "vanilla" forever. Gated on its own marker
+            // key, not the value comparison, so a player who later hand-sets
+            // the mode back to "vanilla" is never re-migrated on next launch.
+            MenuMusicModeMigrated = Config.Bind(
+                "Music", "MenuMusicModeMigrated", false,
+                "Internal: set once the one-time MenuMusicEnabled -> MenuMusicMode migration has run. " +
+                "Clear it only if you also want MenuMusicMode re-derived from MenuMusicEnabled on next launch."
+            );
+            try
+            {
+                if (!MenuMusicModeMigrated.Value)
+                {
+                    if (MenuMusicEnabled.Value)
+                    {
+                        MenuMusicMode.Value = "custom";
+                        Log.LogInfo("[MUSIC] MenuMusicMode migrated from legacy MenuMusicEnabled=true: custom");
+                    }
+                    MenuMusicModeMigrated.Value = true;
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[MUSIC] MenuMusicMode migration skipped: {ex.Message}"); }
             MusicCreditToast = Config.Bind(
                 "Music", "MusicCreditToast", false,
                 "Show a small Now Playing credit line while custom music plays (opt-in). The broadcast seat shows its credit regardless of this key."

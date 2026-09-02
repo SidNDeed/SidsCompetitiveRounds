@@ -16,16 +16,33 @@ namespace CompetitiveRounds
     /// particles, no audio), NO spectator rendering; v1's hard combat-edge
     /// cancellation is superseded by the v2 contract below).
     ///
+    /// BODY MOTION v3 (Sid, Sep 2: "I'm not sure there's any leg/body
+    /// movement, it appears to just be arms ... can it not be?"): the body
+    /// channel was ALWAYS emitting, but at gameplay zoom (orthoSize ~15 =
+    /// 30 world units of screen height, so 1 unit ~ 36px at 1080p) the v1
+    /// amplitudes (0.03-0.40) rendered at 1-14px while arm offsets
+    /// (0.65-1.5) rendered at 23-54px — sub-perceptual next to the arms.
+    /// v3 cranks body translation on all eight routines (hops 0.55-0.62,
+    /// sways 0.20-0.48, all under the reviewed MAX_OFFSET clamp) and adds
+    /// a third channel: BODY TILT (Z rotation of the wobble transform) on
+    /// the six routines where it musically fits, capped at MAX_TILT_DEG.
+    ///
     /// MECHANISM (rig-probe-proven, [RIG-DUMP] Aug 31): the visual body
     /// hangs off PlayerWobblePosition ("WobbleObjects"), which rewrites its
-    /// transform ABSOLUTELY every Update from the physics spring — so an
-    /// additive offset applied in a Postfix needs no persistence and
-    /// self-heals the instant we stop. The arms are IKArmMove components on
-    /// Limbs/ArmStuff/Arm_Left|Right whose `target` transforms
-    /// (TargetLeftArm/TargetRightArm) are NOT absolutely rewritten — the
-    /// review confirmed free-arm state feeds back — so the arm channel uses
-    /// the RESTORE-FIRST contract: a Prefix undoes the remembered delta,
-    /// vanilla runs, the Postfix applies (and remembers) the new delta.
+    /// transform POSITION absolutely every Update from the physics spring —
+    /// so an additive position offset applied in a Postfix needs no
+    /// persistence and self-heals the instant we stop. Its ROTATION,
+    /// however, vanilla never reads nor writes (decompile: Update touches
+    /// only position), so the tilt channel uses the RESTORE-FIRST contract
+    /// instead: the Prefix undoes the remembered tilt, vanilla runs, the
+    /// Postfix applies (and remembers) the new one — plus the same hard
+    /// restores as the arms on every teardown path. The arms are IKArmMove
+    /// components on Limbs/ArmStuff/Arm_Left|Right whose `target`
+    /// transforms (TargetLeftArm/TargetRightArm) are NOT absolutely
+    /// rewritten — the review confirmed free-arm state feeds back — so the
+    /// arm channel uses the same RESTORE-FIRST contract: a Prefix undoes
+    /// the remembered delta, vanilla runs, the Postfix applies (and
+    /// remembers) the new delta.
     ///
     /// CONTRACT v2 (Sid, Sep 1: more dances + "make it so they can't
     /// move/shoot/block for the duration of the dance"): dances may play
@@ -88,6 +105,8 @@ namespace CompetitiveRounds
         };
 
         private const float MAX_OFFSET = 0.9f;          // hard clamp, world units
+        private const float MAX_TILT_DEG = 30f;         // hard clamp, body Z tilt — bounded so no
+                                                        // dance can flip a face or spin a gun visual
         private const float SEND_THROTTLE_S = 2.5f;
         private const float RECV_THROTTLE_S = 2.0f;
 
@@ -98,6 +117,10 @@ namespace CompetitiveRounds
         private static readonly Dictionary<int, (int idx, int ts)> active = new Dictionary<int, (int, int)>();
         // Arm restore-first bookkeeping: per-target remembered applied delta.
         private static readonly Dictionary<Transform, Vector3> armApplied = new Dictionary<Transform, Vector3>();
+        // Body-tilt restore-first bookkeeping: per-wobble-transform remembered
+        // applied Z degrees (vanilla never writes wobble rotation, so an
+        // applied tilt would otherwise outlive the dance).
+        private static readonly Dictionary<Transform, float> bodyRotApplied = new Dictionary<Transform, float>();
 
         private static bool _hooked;
         private static float _lastSendAt = -999f;
@@ -263,7 +286,7 @@ namespace CompetitiveRounds
                 else
                 {
                     if (_velStrikes.Count > 0) _velStrikes.Clear();
-                    if (armApplied.Count > 0) RestoreAllArms();
+                    if (armApplied.Count > 0 || bodyRotApplied.Count > 0) RestoreAllApplied();
                 }
             }
             catch { }
@@ -394,9 +417,9 @@ namespace CompetitiveRounds
                 if (cancel != null)
                 {
                     foreach (var a in cancel) { active.Remove(a); _velStrikes.Remove(a); }
-                    if (active.Count == 0) RestoreAllArms();
-                    // Arms for still-dancing actors restore via the
-                    // restore-first Arm prefix on their next Update.
+                    if (active.Count == 0) RestoreAllApplied();
+                    // Arms/tilts for still-dancing actors restore via the
+                    // restore-first Arm/Wobble prefixes on their next Update.
                 }
             }
             catch { }
@@ -422,7 +445,7 @@ namespace CompetitiveRounds
             try
             {
                 active.Clear();
-                RestoreAllArms();
+                RestoreAllApplied();
                 _lastRecvByActor.Clear();
                 _velStrikes.Clear();
                 _throttleRoom = "";
@@ -430,7 +453,12 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        private static void RestoreAllArms()
+        /// <summary>Hard restore of every remembered restore-first delta —
+        /// arm positions AND body tilts. Each channel is independently
+        /// guarded so one failing cannot strand the other. `kv.Key != null`
+        /// is the UnityEngine.Object overload: a destroyed transform reads
+        /// null and is skipped (its delta died with the object).</summary>
+        private static void RestoreAllApplied()
         {
             try
             {
@@ -439,72 +467,103 @@ namespace CompetitiveRounds
                 armApplied.Clear();
             }
             catch { armApplied.Clear(); }
+            try
+            {
+                foreach (var kv in bodyRotApplied)
+                    if (kv.Key != null) kv.Key.rotation = Quaternion.Euler(0f, 0f, -kv.Value) * kv.Key.rotation;
+                bodyRotApplied.Clear();
+            }
+            catch { bodyRotApplied.Clear(); }
         }
 
-        /// <summary>Deterministic choreography: offsets for (danceIdx, t).
-        /// Pure math — same inputs, same pose on every seat. All outputs
-        /// clamped by the caller.</summary>
-        private static void Evaluate(int idx, float t, out Vector2 body, out Vector2 armL, out Vector2 armR)
+        /// <summary>Deterministic choreography: offsets + body Z tilt for
+        /// (danceIdx, t). Pure math — same inputs, same pose on every seat.
+        /// All outputs clamped by the caller. Body amplitudes are sized for
+        /// gameplay zoom (see BODY MOTION v3 in the header): hops over half
+        /// a body diameter, sways a third — anything under ~0.15 is
+        /// sub-perceptual at orthoSize 15 and exists only as texture.</summary>
+        private static void Evaluate(int idx, float t, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
         {
-            body = Vector2.zero; armL = Vector2.zero; armR = Vector2.zero;
+            body = Vector2.zero; bodyRotDeg = 0f; armL = Vector2.zero; armR = Vector2.zero;
             switch (idx)
             {
-                case 0:   // The Bounce: body hops at 2Hz, arms pump alternately
-                    body = new Vector2(0f, Mathf.Abs(Mathf.Sin(t * Mathf.PI * 2f)) * 0.30f);
+                case 0:   // The Bounce: body hops at 2Hz (no tilt — a pure
+                          // upright hop IS this dance), arms pump alternately
+                    body = new Vector2(0f, Mathf.Abs(Mathf.Sin(t * Mathf.PI * 2f)) * 0.55f);
                     armL = new Vector2(0f, Mathf.Max(0f, Mathf.Sin(t * Mathf.PI * 4f)) * 0.65f);
                     armR = new Vector2(0f, Mathf.Max(0f, -Mathf.Sin(t * Mathf.PI * 4f)) * 0.65f);
                     break;
-                case 1:   // The Wave: body sways, right arm waves overhead
-                    body = new Vector2(Mathf.Sin(t * Mathf.PI * 3f) * 0.14f, 0.05f + 0.05f * Mathf.Sin(t * Mathf.PI * 6f));
+                case 1:   // The Wave: body sways wide and LEANS into the sway
+                          // (negative Z = top tips right in Unity 2D, so the
+                          // sign opposes x to lean into motion), right arm
+                          // waves overhead
+                    body = new Vector2(Mathf.Sin(t * Mathf.PI * 3f) * 0.32f, 0.08f + 0.08f * Mathf.Sin(t * Mathf.PI * 6f));
+                    bodyRotDeg = -Mathf.Sin(t * Mathf.PI * 3f) * 9f;
                     armR = new Vector2(Mathf.Sin(t * Mathf.PI * 2.4f) * 0.45f, 1.25f);
                     armL = new Vector2(0f, 0.12f + 0.10f * Mathf.Sin(t * Mathf.PI * 3f + 1.2f));
                     break;
                 case 2:   // Jumping Jacks: 1.6Hz jack cycle (hops at double
-                {         // rate via the abs), arms SNAP down-at-sides <-> up-out
+                {         // rate via the abs), arms SNAP down-at-sides <-> up-out;
+                          // body stays upright — jacks are a vertical exercise
                     float ph = Mathf.Sin(t * Mathf.PI * 3.2f);
                     float up = ph > 0f ? 1f : 0f;               // hard snap, jack-style
-                    body = new Vector2(0f, Mathf.Abs(ph) * 0.40f);
+                    body = new Vector2(0f, Mathf.Abs(ph) * 0.62f);
                     armL = Vector2.Lerp(new Vector2(-0.45f, -0.25f), new Vector2(-0.75f, 1.15f), up);
                     armR = Vector2.Lerp(new Vector2(0.45f, -0.25f), new Vector2(0.75f, 1.15f), up);
                     break;
                 }
-                case 3:   // The Shimmy: rapid tiny x vibration, arms out at the
-                {         // sides pulsing in counter-phase
+                case 3:   // The Shimmy: rapid lateral vibration + fast shoulder
+                {         // wiggle (small tilt at the vibration rate), arms out
+                          // at the sides pulsing in counter-phase
                     float pulse = Mathf.Sin(t * Mathf.PI * 8f);
-                    body = new Vector2(Mathf.Sin(t * Mathf.PI * 22f) * 0.10f, 0.03f * Mathf.Sin(t * Mathf.PI * 11f));
+                    body = new Vector2(Mathf.Sin(t * Mathf.PI * 22f) * 0.20f, 0.05f * Mathf.Sin(t * Mathf.PI * 11f));
+                    bodyRotDeg = Mathf.Sin(t * Mathf.PI * 22f + 1.0f) * 7f;
                     armL = new Vector2(-(0.85f + 0.25f * pulse), 0.35f + 0.10f * Mathf.Sin(t * Mathf.PI * 8f + 2.6f));
                     armR = new Vector2(0.85f - 0.25f * pulse, 0.35f + 0.10f * Mathf.Sin(t * Mathf.PI * 8f + 5.8f));
                     break;
                 }
                 case 4:   // Disco Fever: right arm sweeps the diagonal point
-                {         // up-right / down-across, hips sway on the off-beat
+                {         // up-right / down-across; body tilts hard on the beat
+                          // (the Travolta lean, counter-sign to the point so the
+                          // hip juts away from the arm) and bobs on the off-beat
                     float k = Mathf.Sin(t * Mathf.PI * 2.5f);
-                    body = new Vector2(Mathf.Cos(t * Mathf.PI * 2.5f) * 0.22f, 0.04f + 0.04f * Mathf.Sin(t * Mathf.PI * 5f));
+                    body = new Vector2(Mathf.Cos(t * Mathf.PI * 2.5f) * 0.34f, 0.08f + 0.10f * Mathf.Sin(t * Mathf.PI * 5f));
+                    bodyRotDeg = -k * 16f;
                     armR = new Vector2(0.50f + 0.48f * k, 0.30f + 0.82f * k);
                     armL = new Vector2(-0.35f - 0.20f * k, -0.10f - 0.25f * k);
                     break;
                 }
                 case 5:   // The Helicopter: right arm circles fully overhead,
-                {         // body bobs, left arm tucked with a tiny pulse
+                {         // body bobs and BANKS in a circle with the rotor —
+                          // a lean that orbits (cos term) around a small
+                          // steady tilt, reading as the body being dragged
+                          // around by the arm
                     float th = t * Mathf.PI * 2f * 1.4f;        // 1.4 revolutions/s
-                    body = new Vector2(0.06f * Mathf.Sin(th), Mathf.Abs(Mathf.Sin(t * Mathf.PI * 2.8f)) * 0.18f);
+                    body = new Vector2(0.14f * Mathf.Sin(th), Mathf.Abs(Mathf.Sin(t * Mathf.PI * 2.8f)) * 0.30f);
+                    bodyRotDeg = Mathf.Cos(th) * 14f - 5f;
                     armR = new Vector2(Mathf.Cos(th) * 0.80f, 0.70f + Mathf.Sin(th) * 0.80f);   // peak |armR| = 1.5
                     armL = new Vector2(-0.25f, -0.15f + 0.06f * Mathf.Sin(t * Mathf.PI * 2.8f));
                     break;
                 }
-                case 6:   // The Robot: quantized stepped poses (floor'd time),
-                {         // arm rates deliberately mismatched so 6s never loops
+                case 6:   // The Robot: quantized stepped poses (floor'd time)
+                {         // including stepped body tilts — the tilt SNAPS
+                          // between held angles like everything else; arm/tilt
+                          // rates deliberately mismatched so 6s never loops
                     float tq = Mathf.Floor(t * 3f) / 3f;        // 3 poses per second
-                    body = new Vector2(0.14f * Mathf.Sin(tq * 2.9f), 0.10f * Mathf.Abs(Mathf.Cos(tq * 2.3f)));
+                    body = new Vector2(0.26f * Mathf.Sin(tq * 2.9f), 0.20f * Mathf.Abs(Mathf.Cos(tq * 2.3f)));
+                    bodyRotDeg = Mathf.Sin(tq * 3.7f) * 12f;
                     armL = new Vector2(-0.50f - 0.45f * Mathf.Sin(tq * 2.1f), 0.55f + 0.55f * Mathf.Cos(tq * 1.7f));
                     armR = new Vector2(0.50f + 0.45f * Mathf.Cos(tq * 2.6f), 0.55f + 0.55f * Mathf.Sin(tq * 1.3f));
                     break;
                 }
-                case 7:   // The Floss: hips sway x while both arms swing
-                {         // side-to-side as a pair in OPPOSITION across the body
+                case 7:   // The Floss: hips sway WIDE while both arms swing
+                {         // side-to-side as a pair in OPPOSITION across the
+                          // body; the tilt follows the hip push (so hips and
+                          // tilt move together, both counter to the arms)
                     float s = Mathf.Sin(t * Mathf.PI * 4.4f);
                     float armX = -s * 1.0f;                     // arms opposite the hips
-                    body = new Vector2(s * 0.30f, 0.06f + 0.06f * Mathf.Abs(Mathf.Cos(t * Mathf.PI * 4.4f)));
+                    body = new Vector2(s * 0.48f, 0.09f + 0.08f * Mathf.Abs(Mathf.Cos(t * Mathf.PI * 4.4f)));
+                    bodyRotDeg = s * 12f;
                     armL = new Vector2(armX - 0.25f, 0.18f + 0.10f * Mathf.Abs(s));
                     armR = new Vector2(armX + 0.25f, 0.18f + 0.10f * Mathf.Abs(s));
                     break;
@@ -515,9 +574,9 @@ namespace CompetitiveRounds
         /// <summary>Active dance offsets for the player owning `anyChild`, or
         /// false. Resolves the actor via the PhotonView owner — never
         /// Player.playerID, never cached across respawns (review Q3).</summary>
-        private static bool TryGetPose(Component anyChild, out Vector2 body, out Vector2 armL, out Vector2 armR)
+        private static bool TryGetPose(Component anyChild, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
         {
-            body = armL = armR = Vector2.zero;
+            body = armL = armR = Vector2.zero; bodyRotDeg = 0f;
             if (active.Count == 0) return false;
             try
             {
@@ -535,11 +594,12 @@ namespace CompetitiveRounds
                 if (!active.TryGetValue(actor, out d)) return false;
                 float t = unchecked(PhotonNetwork.ServerTimestamp - d.ts) / 1000f;
                 if (t < 0f || t > Defs[d.idx].Duration) return false;
-                Evaluate(d.idx, t, out body, out armL, out armR);
+                Evaluate(d.idx, t, out body, out bodyRotDeg, out armL, out armR);
                 // NaN/bounds discipline (#434): reject anything non-finite,
                 // clamp everything else.
-                if (!IsFinite(body) || !IsFinite(armL) || !IsFinite(armR)) return false;
+                if (!IsFinite(body) || !IsFinite(armL) || !IsFinite(armR) || !IsFinite(bodyRotDeg)) return false;
                 body = Vector2.ClampMagnitude(body, MAX_OFFSET);
+                bodyRotDeg = Mathf.Clamp(bodyRotDeg, -MAX_TILT_DEG, MAX_TILT_DEG);
                 armL = Vector2.ClampMagnitude(armL, 1.6f);
                 armR = Vector2.ClampMagnitude(armR, 1.6f);
                 return true;
@@ -549,6 +609,9 @@ namespace CompetitiveRounds
 
         private static bool IsFinite(Vector2 v)
             => !(float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsInfinity(v.x) || float.IsInfinity(v.y));
+
+        private static bool IsFinite(float f)
+            => !(float.IsNaN(f) || float.IsInfinity(f));
 
         // ── Shop preview ─────────────────────────────────────────────────
         // "Accurate like the other items" (Sid's spec) is delivered by
@@ -591,10 +654,19 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Looping preview pose for the toggled sku, clamped by the
-        /// same rules as the live channels. False = no preview active.</summary>
+        /// same rules as the live channels. False = no preview active.
+        /// The 4-out form is the pre-tilt surface (CompetitiveUI's puppet);
+        /// it stays so the sibling file keeps compiling — the puppet just
+        /// renders translation-only until it adopts the 5-out overload.</summary>
         internal static bool TryGetPreviewPose(out string name, out Vector2 body, out Vector2 armL, out Vector2 armR)
         {
-            name = null; body = armL = armR = Vector2.zero;
+            float rotUnused;
+            return TryGetPreviewPose(out name, out body, out rotUnused, out armL, out armR);
+        }
+
+        internal static bool TryGetPreviewPose(out string name, out Vector2 body, out float bodyRotDeg, out Vector2 armL, out Vector2 armR)
+        {
+            name = null; body = armL = armR = Vector2.zero; bodyRotDeg = 0f;
             var sku = PreviewSku;
             if (string.IsNullOrEmpty(sku)) return false;
             int idx = -1;
@@ -603,9 +675,10 @@ namespace CompetitiveRounds
             if (idx < 0) { PreviewSku = null; return false; }   // unknown sku (version skew) — self-clear
             name = Defs[idx].Name;
             float t = (Time.unscaledTime - _previewStartedAt) % Defs[idx].Duration;
-            Evaluate(idx, t, out body, out armL, out armR);
-            if (!IsFinite(body) || !IsFinite(armL) || !IsFinite(armR)) return false;
+            Evaluate(idx, t, out body, out bodyRotDeg, out armL, out armR);
+            if (!IsFinite(body) || !IsFinite(armL) || !IsFinite(armR) || !IsFinite(bodyRotDeg)) return false;
             body = Vector2.ClampMagnitude(body, MAX_OFFSET);
+            bodyRotDeg = Mathf.Clamp(bodyRotDeg, -MAX_TILT_DEG, MAX_TILT_DEG);
             armL = Vector2.ClampMagnitude(armL, 1.6f);
             armR = Vector2.ClampMagnitude(armR, 1.6f);
             return true;
@@ -613,22 +686,52 @@ namespace CompetitiveRounds
 
         // ── Frame channels ────────────────────────────────────────────────
 
-        /// <summary>Body bounce: PlayerWobblePosition rewrites its transform
-        /// ABSOLUTELY each Update (decompile: transform.position = physicsPos
-        /// spring), so an additive Postfix self-heals with zero bookkeeping.</summary>
+        /// <summary>Body channel, two halves with two contracts. POSITION:
+        /// PlayerWobblePosition rewrites its transform position ABSOLUTELY
+        /// each Update (decompile: transform.position = physicsPos spring),
+        /// so the additive Postfix offset self-heals with zero bookkeeping.
+        /// TILT: vanilla never writes the wobble transform's rotation, so an
+        /// applied tilt would persist forever — the Prefix restores the
+        /// remembered tilt (restore-first, the arm contract) and the Postfix
+        /// applies + remembers the new one; teardown paths that can outrun
+        /// the next Update (room exit, dance-end sweep) hard-restore via
+        /// RestoreAllApplied. World-Z pre-multiply composition so restore is
+        /// the exact inverse regardless of what else composes rotation.</summary>
         [HarmonyPatch(typeof(PlayerWobblePosition), "Update")]
         internal static class Wobble_DancePatch
         {
+            private static void Prefix(PlayerWobblePosition __instance)
+            {
+                if (_wobbleChannelDead || bodyRotApplied.Count == 0) return;
+                try
+                {
+                    var tr = __instance != null ? __instance.transform : null;
+                    float deg;
+                    if (tr != null && bodyRotApplied.TryGetValue(tr, out deg))
+                    {
+                        tr.rotation = Quaternion.Euler(0f, 0f, -deg) * tr.rotation;
+                        bodyRotApplied.Remove(tr);
+                    }
+                }
+                catch { _wobbleChannelDead = true; }
+            }
+
             private static void Postfix(PlayerWobblePosition __instance)
             {
                 if (_wobbleChannelDead || active.Count == 0) return;
                 try
                 {
                     if (!WindowOpen()) return;
-                    Vector2 body, al, ar;
-                    if (!TryGetPose(__instance, out body, out al, out ar)) return;
-                    if (body == Vector2.zero) return;
-                    __instance.transform.position += new Vector3(body.x, body.y, 0f);
+                    Vector2 body, al, ar; float rot;
+                    if (!TryGetPose(__instance, out body, out rot, out al, out ar)) return;
+                    if (body != Vector2.zero)
+                        __instance.transform.position += new Vector3(body.x, body.y, 0f);
+                    if (rot != 0f)
+                    {
+                        var tr = __instance.transform;
+                        tr.rotation = Quaternion.Euler(0f, 0f, rot) * tr.rotation;
+                        bodyRotApplied[tr] = rot;
+                    }
                 }
                 catch { _wobbleChannelDead = true; }   // fail closed, vanilla pose stands
             }
@@ -665,8 +768,8 @@ namespace CompetitiveRounds
                     if (!WindowOpen()) return;
                     var tgt = __instance != null ? __instance.target : null;
                     if (tgt == null) return;
-                    Vector2 body, al, ar;
-                    if (!TryGetPose(__instance, out body, out al, out ar)) return;
+                    Vector2 body, al, ar; float rotUnused;
+                    if (!TryGetPose(__instance, out body, out rotUnused, out al, out ar)) return;
                     bool left = tgt.name.IndexOf("Left", StringComparison.OrdinalIgnoreCase) >= 0;
                     Vector2 off = left ? al : ar;
                     if (off == Vector2.zero) return;
@@ -817,7 +920,7 @@ namespace CompetitiveRounds
                     if (active.Remove(__0))
                     {
                         _velStrikes.Remove(__0);
-                        if (active.Count == 0) RestoreAllArms();
+                        if (active.Count == 0) RestoreAllApplied();
                     }
                 }
                 catch { }   // fail OPEN — a cancel miss is rendering-only
