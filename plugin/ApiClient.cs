@@ -2486,13 +2486,34 @@ namespace CompetitiveRounds
         {
             objs = new List<string>();
             if (string.IsNullOrEmpty(json)) return false;
-            int at = json.IndexOf("\"" + prop + "\":", StringComparison.Ordinal);
-            if (at < 0) return false;
-            int i = at + prop.Length + 3;
+            // [R4] ANCHOR THE ENVELOPE. The old IndexOf found the property at
+            // ANY depth and validated nothing after the array, so
+            // {"error":{"ratings":[]}} and {"ratings":[]}junk both read as a
+            // valid EMPTY snapshot — and an empty snapshot authorizes clearing
+            // the player's confirmed private ratings. The root must be one
+            // object that parses completely, carrying the property as a DIRECT
+            // member exactly once (TryTopLevelMembers rejects duplicates,
+            // trailing commas, junk between members and trailing text), and
+            // the array is then validated from that member's own span.
+            Dictionary<string, string> root;
+            if (!TryTopLevelMembers(json, out root)) return false;
+            string arr;
+            if (!root.TryGetValue(prop, out arr) || string.IsNullOrEmpty(arr)) return false;
+            return SliceStrictObjectArraySpan(arr, out objs);
+        }
+
+        /// <summary>[R4] The array half of the strict slice, over a span that
+        /// is already known to be ONE complete JSON value.</summary>
+        private static bool SliceStrictObjectArraySpan(string json, out List<string> objs)
+        {
+            objs = new List<string>();
+            int i = 0;
             while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
             if (i >= json.Length || json[i] != '[') return false;
             int close = FindMatchingBracketStringAware(json, i);
             if (close < 0) return false;
+            for (int t = close + 1; t < json.Length; t++)
+                if (!char.IsWhiteSpace(json[t])) return false;   // junk after the array
             int p = i + 1;
             while (p < close)
             {
@@ -2597,7 +2618,21 @@ namespace CompetitiveRounds
         /// <summary>[Q4] A member's raw span must be a BARE JSON integer —
         /// the whole span, nothing else. Rejects null/string/float/exponent,
         /// digit-prefixed garbage, and the "5 xyz" shape the old
-        /// whitespace-tolerant terminator accepted.</summary>
+        /// whitespace-tolerant terminator accepted.
+        ///
+        /// ACCEPTED RESIDUAL (r4 R5, deliberate): this validates the value is
+        /// an integer, not that it obeys JSON's integer GRAMMAR — "05" parses
+        /// as 5. The same class covers escaped-but-semantically-duplicate keys
+        /// (stored raw, so "stars" reads as an unrelated extra member and
+        /// the real "stars" still governs), lone surrogate escapes in sku (a
+        /// garbage sku matches no catalogue album and renders nothing), and
+        /// unknown members whose spans are sliced but not syntax-checked.
+        /// Every one of them requires OUR OWN server to emit malformed JSON —
+        /// r4 confirmed no legitimate response is affected — and the worst
+        /// outcome is a local own-ratings view that clears and self-heals on
+        /// the next fetch. Tightening to full JSON grammar means a real
+        /// tokenizer; that is the right fix if this parser ever consumes a
+        /// third-party body, and unjustified while it consumes only ours.</summary>
         private static bool TryStrictJsonInt(string raw, out int val)
         {
             val = 0;

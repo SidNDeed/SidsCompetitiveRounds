@@ -143,6 +143,7 @@ namespace CompetitiveRounds
             public bool currentPrematureRetried;        // [I1] one in-place resume per track; a second premature stop = durable Fault
             public bool currentEnded;                   // [N6c] current's clip FINISHED — it is a queue cursor, not a playable: readiness must not count it and EnsureMainPlaying advances off it, never replays
             public bool mainPausedByUs;                 // Pause()d (menu park / preview / PlayPause) — NOT ended
+            public float customSilentSinceRt = -1f;     // [R1/R2] realtime the engine entered "Custom, unpaused, nothing audible"; -1 = not in it. Bounds the forbidden state (see TickPlayback).
             public string queueSignature;               // selection+shuffle+broadcast fingerprint; null forces rebuild
 
             // Derived, refreshed by Reconcile (read by the side-effect-free
@@ -218,6 +219,13 @@ namespace CompetitiveRounds
         private const float DUCK_VOLUME = 0.5f;
         private const float DUCK_SMOOTH_TAU = 0.2f;
         private const float PREVIEW_MAX_SECONDS = 45f;  // snippets are 30s; hard cap so a stalled stream can't hold Preview forever
+        // [R1/R2] How long Custom may hold suppression with nothing audible
+        // before the engine dislodges whatever is stuck. The legitimate window
+        // is sub-frame (Custom is entered only with a ready track, and
+        // EnsureMainPlaying starts it in the same call), so this is pure
+        // headroom — generous enough that no healthy start can trip it, short
+        // enough that an unattended broadcast seat never sits in silence.
+        private const float CUSTOM_SILENCE_BOUND_SEC = 8f;
 
         // ── public contract surface ──────────────────────────────────────
 
@@ -1292,6 +1300,13 @@ namespace CompetitiveRounds
             var h = _host;
             if (h == null) return;
 
+            // [R1/R2] The silence bound is armed ONLY while Custom actually
+            // holds suppression. Clearing it on every other mode (and while
+            // paused) means a stale stamp from an earlier Custom stretch can
+            // never fire the moment Custom is re-entered.
+            if (s.mode != MusicMode.Custom || s.paused || s.mainPausedByUs)
+                s.customSilentSinceRt = -1f;
+
             if (s.mode == MusicMode.Custom && !s.paused && !s.mainPausedByUs)
             {
                 var m = h.Main;
@@ -1342,7 +1357,47 @@ namespace CompetitiveRounds
                 else
                 {
                     EnsureMainPlaying();
-                    if (m != null && m.isPlaying) s.resumePositionSec = m.time;
+                    if (m != null && m.isPlaying)
+                    {
+                        s.resumePositionSec = m.time;
+                        s.customSilentSinceRt = -1f;
+                    }
+                    else
+                    {
+                        // [R1/R2] BOUNDED SILENT OWNERSHIP — the guarantee this
+                        // subsystem was missing. Custom mode SUPPRESSES vanilla,
+                        // so "Custom, unpaused, nothing audible" is the forbidden
+                        // state the design names outright; the preview path
+                        // already bounds its own version of it (12s
+                        // preview-load-timeout above) and this path did not.
+                        //
+                        // Normally this window is sub-frame: Custom is only
+                        // entered when a ready track exists, and EnsureMainPlaying
+                        // starts it inside the very call above. It persists only
+                        // when the current entry can NEVER resolve — a terminally
+                        // failed current that traversal will not move off (r4 R1),
+                        // or an exhaustion that published stopIntent without a
+                        // mode recompute (r4 R2) — and in both the readiness scan
+                        // stays true, so no edge ever fires again and the silence
+                        // is unbounded on an unattended broadcast seat.
+                        //
+                        // Four review rounds each found a NEW route into this one
+                        // state, so this bounds the STATE instead of enumerating
+                        // routes (#389): mark the stuck entry ended so traversal
+                        // must move off it, then force a mode recompute. Worst
+                        // case it costs one track; it cannot hold silence.
+                        if (s.customSilentSinceRt < 0f) s.customSilentSinceRt = rt;
+                        else if (rt - s.customSilentSinceRt > CUSTOM_SILENCE_BOUND_SEC)
+                        {
+                            s.customSilentSinceRt = -1f;
+                            Plugin.Log?.LogWarning(
+                                $"[MUSIC] Custom held with no audio for {CUSTOM_SILENCE_BOUND_SEC:F0}s — dislodging"
+                                + $" (current={(s.current.HasValue ? s.current.Value.ToString() : "none")}, stopIntent={s.stopIntent})");
+                            if (s.current.HasValue) s.currentEnded = true;
+                            if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
+                            else Reconcile(s.stopIntent ? "playlist-end" : "custom-silence-bound");
+                        }
+                    }
                 }
             }
             else if (s.mode == MusicMode.Preview && s.previewTrack.HasValue)
