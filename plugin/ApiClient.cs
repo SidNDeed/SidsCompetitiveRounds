@@ -2308,8 +2308,9 @@ namespace CompetitiveRounds
                     List<MusicRatings.OwnRow> rows;
                     if (!ParseMusicRatingsMine(resp, out rows))
                     {
-                        // [N14] malformed 200: NOT an authoritative empty —
-                        // keep the prior own-rating state.
+                        // [N14]/[P6] malformed 200 — bad shell OR any bad
+                        // element: NOT an authoritative empty, keep the prior
+                        // own-rating state (this is the single rejection log).
                         Plugin.Log.LogWarning("[MUSIC-RATE] own fetch returned a malformed body — keeping prior state");
                         return;
                     }
@@ -2411,36 +2412,45 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-RATE] aggregate parse failed: {ex.Message}"); }
         }
 
-        /// <summary>[N14] Success/failure is DISTINCT from emptiness: returns
-        /// false (rows left empty) when the 200 body is structurally
-        /// malformed — "ratings" absent, null, or not an array, or the scan
-        /// throws. Only a true return may reach MusicRatings.ApplyOwn; a
-        /// malformed success handed over would read as an authoritative
-        /// "you have no ratings" and clear the user's confirmed stars.
-        /// A genuinely empty array is true + zero rows (a cleared-everything
-        /// state MUST still apply). Malformed ROWS inside a well-formed
-        /// array stay skip-tolerant, matching every sibling parser.</summary>
+        /// <summary>[N14]/[P6] Success/failure is DISTINCT from emptiness:
+        /// returns false (rows left empty) when the 200 body is malformed.
+        /// Only a true return may reach MusicRatings.ApplyOwn; a malformed
+        /// success handed over would read as an authoritative "you have no
+        /// ratings" and clear the user's confirmed stars.
+        /// [P6] Strictness is PER ELEMENT, not just the array shell: every
+        /// element must be an OBJECT carrying a nonempty sku (&lt;= 64 chars),
+        /// int track_idx 0..63, int stars 0..5 (0 = pending clear) and int
+        /// intent_rev &gt;= 1 (/mine is new in v1.40, so every server that can
+        /// answer it stores a revision — no legacy-absent tolerance). ANY
+        /// malformed element rejects the ENTIRE snapshot — the sibling
+        /// parsers' skip-a-bad-row tolerance is wrong HERE because this list
+        /// authorizes wholesale replacement of private state: a partially
+        /// valid body (e.g. {"ratings":[42]} slicing to zero objects) must
+        /// keep prior state, never apply as a clear. A genuinely empty array
+        /// is true + zero rows (a cleared-everything state MUST still
+        /// apply). The caller logs the rejection once.</summary>
         private static bool ParseMusicRatingsMine(string resp, out List<MusicRatings.OwnRow> rows)
         {
             rows = new List<MusicRatings.OwnRow>();
             try
             {
-                bool wellFormed;
-                foreach (string obj in SliceNamedObjectArray(resp, "ratings", out wellFormed))
+                List<string> objs;
+                if (!SliceStrictNamedObjectArray(resp, "ratings", out objs)) return false;
+                foreach (string obj in objs)
                 {
                     string sku = ExtractJsonString(obj, "sku");
-                    if (string.IsNullOrEmpty(sku)) continue;
-                    rows.Add(new MusicRatings.OwnRow
+                    int idx, stars, rev;
+                    if (string.IsNullOrEmpty(sku) || sku.Length > 64
+                        || !TryExtractJsonInt(obj, "track_idx", out idx) || idx < 0 || idx > 63
+                        || !TryExtractJsonInt(obj, "stars", out stars) || stars < 0 || stars > 5
+                        || !TryExtractJsonInt(obj, "intent_rev", out rev) || rev < 1)
                     {
-                        sku = sku,
-                        idx = ExtractJsonInt(obj, "track_idx"),
-                        stars = ExtractJsonInt(obj, "stars"),
-                        // [N5] the row's server-stored revision; 0 when the
-                        // server predates the field (seed no-op).
-                        rev = ExtractJsonInt(obj, "intent_rev"),
-                    });
+                        rows.Clear();
+                        return false;
+                    }
+                    rows.Add(new MusicRatings.OwnRow { sku = sku, idx = idx, stars = stars, rev = rev });
                 }
-                return wellFormed;
+                return true;
             }
             catch (Exception ex)
             {
@@ -2448,6 +2458,82 @@ namespace CompetitiveRounds
                 rows.Clear();
                 return false;
             }
+        }
+
+        /// <summary>[P6] Strict twin of SliceNamedObjectArray for snapshots
+        /// that authorize wholesale state replacement: the named array's TOP
+        /// LEVEL must hold nothing but comma-separated objects (whitespace
+        /// tolerated; a trailing comma or any non-object element rejects).
+        /// SliceNamedObjectArray harvests whatever balanced objects appear
+        /// and silently ignores everything else, so {"ratings":[42]} reads
+        /// as well-formed + zero rows there — here it is false. False also
+        /// for an absent / null / non-array value, exactly like the tolerant
+        /// helper's wellFormed out.</summary>
+        private static bool SliceStrictNamedObjectArray(string json, string prop, out List<string> objs)
+        {
+            objs = new List<string>();
+            if (string.IsNullOrEmpty(json)) return false;
+            int at = json.IndexOf("\"" + prop + "\":", StringComparison.Ordinal);
+            if (at < 0) return false;
+            int i = at + prop.Length + 3;
+            while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+            if (i >= json.Length || json[i] != '[') return false;
+            int close = FindMatchingBracketStringAware(json, i);
+            if (close < 0) return false;
+            int p = i + 1;
+            while (p < close)
+            {
+                while (p < close && char.IsWhiteSpace(json[p])) p++;
+                if (p >= close) break;
+                if (json[p] != '{') { objs.Clear(); return false; }
+                int objClose = FindMatchingBraceStringAware(json, p);
+                if (objClose < 0 || objClose >= close) { objs.Clear(); return false; }
+                objs.Add(json.Substring(p, objClose - p + 1));
+                p = objClose + 1;
+                while (p < close && char.IsWhiteSpace(json[p])) p++;
+                if (p >= close) break;                             // clean end after an object
+                if (json[p] != ',') { objs.Clear(); return false; }
+                p++;                                               // a comma must introduce another element...
+                while (p < close && char.IsWhiteSpace(json[p])) p++;
+                if (p >= close) { objs.Clear(); return false; }    // ...so a trailing comma rejects
+            }
+            return true;
+        }
+
+        /// <summary>[P6] Presence- and type-strict int read: false when the
+        /// key is absent or its value is not a bare JSON integer (null,
+        /// string, float/exponent and digit-prefixed garbage all refuse).
+        /// ExtractJsonInt's 0-on-anything default cannot distinguish
+        /// "stars":0 from a missing field, and strict snapshot validation
+        /// needs that distinction.</summary>
+        private static bool TryExtractJsonInt(string json, string key, out int val)
+        {
+            val = 0;
+            try
+            {
+                string search = "\"" + key + "\":";
+                int start = json.IndexOf(search, StringComparison.Ordinal);
+                if (start < 0) return false;
+                start += search.Length;
+                while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
+                int end = start;
+                if (end < json.Length && json[end] == '-') end++;
+                int digitsFrom = end;
+                while (end < json.Length && char.IsDigit(json[end])) end++;
+                if (end == digitsFrom) return false;   // no digits: null/string/absent value
+                if (end < json.Length)
+                {
+                    // The integer must terminate the value: only a JSON
+                    // delimiter or whitespace may follow ("1.5", "1e3" and
+                    // "12abc" all refuse).
+                    char nx = json[end];
+                    if (nx != ',' && nx != '}' && nx != ']' && !char.IsWhiteSpace(nx)) return false;
+                }
+                return int.TryParse(json.Substring(start, end - start),
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out val);
+            }
+            catch { return false; }
         }
 
         /// <summary>Set / clear active title. HMAC over "title:{steam_id}:{item_id or 0}".</summary>

@@ -59,9 +59,11 @@ namespace CompetitiveRounds
         // ── row shapes handed over by ApiClient's parsers ──
         internal sealed class TrackAggRow { public string sku; public int idx; public float avg; public int count; public int raters; }
         internal sealed class AlbumAggRow { public string sku; public float avg; public int count; public int raters; }
-        // rev = the row's server-stored intent_rev ([N5] seed; 0 = absent).
-        // A row may be rev-seed-only (stars outside 1..5, e.g. a pending
-        // clear) — it still carries the floor a fresh session must clear.
+        // rev = the row's server-stored intent_rev ([N5] seed). The [P6]
+        // strict /mine parser hands over only rows with rev >= 1 — ApplyOwn's
+        // rev > 0 guard is defense in depth, not a supported "absent" path.
+        // A row may be rev-seed-only (stars 0 = a pending clear) — it still
+        // carries the floor a fresh session must clear.
         internal sealed class OwnRow { public string sku; public int idx; public int stars; public int rev; }
 
         private struct Agg { public float avg; public int count; public int raters; }
@@ -89,6 +91,16 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, PendingOp> latestIntent = new Dictionary<string, PendingOp>(StringComparer.Ordinal);
         private static readonly HashSet<string> inFlight = new HashSet<string>(StringComparer.Ordinal);
         private static readonly HashSet<string> retried = new HashSet<string>(StringComparer.Ordinal);
+
+        // [P4] One-shot stale-floor adoption latch, per standing intent —
+        // deliberately SEPARATE from the transport retry-once budget above.
+        // Sharing `retried` for both meant a transport-failed stale response
+        // consumed the budget and the follow-up REAL 409 then rolled back
+        // instead of floor-adopting (and, mirrored, a floor adoption burned
+        // the adopted resend's only transport retry). Cleared everywhere a
+        // standing intent ends or a fresh user intent is minted, exactly
+        // like `retried`.
+        private static readonly HashSet<string> floorAdopted = new HashSet<string>(StringComparer.Ordinal);
 
         // [N5] Per-key monotonic intent revision — the highest rev this
         // session has SEEN (server-stored via /mine seeding, max-merged so it
@@ -323,6 +335,7 @@ namespace CompetitiveRounds
                 opId = Guid.NewGuid().ToString("N"),
             };
             retried.Remove(key);      // a fresh user intent gets a fresh single-retry budget
+            floorAdopted.Remove(key); // [P4] ...and a fresh one-shot floor-adopt latch
             deferred429.Remove(key);  // [N10] ...and a fresh pacing budget
             NativeUI.MarkDirty();
             // [N10]/#270c: a 429-deferred resend holds the key via inFlight.
@@ -354,6 +367,7 @@ namespace CompetitiveRounds
                 // which clears everything) — hygiene rollback, not a path.
                 latestIntent.Remove(key);
                 retried.Remove(key);
+                floorAdopted.Remove(key);
                 int conf0;
                 if (ownConfirmed.TryGetValue(key, out conf0)) ownShown[key] = conf0; else ownShown.Remove(key);
                 NativeUI.MarkDirty();
@@ -394,13 +408,15 @@ namespace CompetitiveRounds
                 PendingOp cur;
                 if (latestIntent.TryGetValue(key, out cur) && cur.stars != sentStars)
                 {
-                    retried.Remove(key);   // the newer coalesced intent gets its own retry budget
+                    retried.Remove(key);      // the newer coalesced intent gets its own retry budget
+                    floorAdopted.Remove(key); // [P4] ...and its own floor-adopt latch
                     SendLoop(key);
                 }
                 else
                 {
                     latestIntent.Remove(key);
                     retried.Remove(key);
+                    floorAdopted.Remove(key);
                 }
                 return;
             }
@@ -432,7 +448,10 @@ namespace CompetitiveRounds
                     return;
                 }
             }
-            // [N5] stale_intent 409: the server already stores a rev >= ours,
+            // [N5] stale_intent 409: the server already stores a rev >= ours
+            // ([P1] server half: an EQUAL rev whose op_id/payload differs
+            // 409s too, with server_rev == our rev — SeedRev then no-ops and
+            // NextRev mints rev+1, so the contested rev is never re-sent),
             // so re-sending THIS rev is a guaranteed loop. If a newer local
             // intent coalesced meanwhile, send that; else adopt the server's
             // floor once (server_rev in the body — covers rating before the
@@ -447,13 +466,18 @@ namespace CompetitiveRounds
                 if (curOp != null && curOp.rev != sentRev)
                 {
                     retried.Remove(key);
+                    floorAdopted.Remove(key);
                     SendLoop(key);
                     return;
                 }
                 int serverRev = (int)ExtractNumberAfter(resp, "server_rev", 0f);
-                if (curOp != null && serverRev > 0 && !retried.Contains(key))
+                // [P4] gated on the DEDICATED latch, not the transport retry
+                // budget — a stale response whose first delivery was lost as
+                // a transport failure has already consumed `retried`, and the
+                // follow-up real 409 must still get its one floor adoption.
+                if (curOp != null && serverRev > 0 && !floorAdopted.Contains(key))
                 {
-                    retried.Add(key);   // one floor-adopt recovery per op
+                    floorAdopted.Add(key);   // one floor-adopt recovery per op
                     SeedRev(key, serverRev);
                     curOp.rev = NextRev(key);
                     Plugin.Log?.LogInfo($"[MUSIC-RATE] rating rev stale — adopting server floor {serverRev} and resending");
@@ -461,6 +485,7 @@ namespace CompetitiveRounds
                     return;
                 }
                 retried.Remove(key);
+                floorAdopted.Remove(key);
                 latestIntent.Remove(key);
                 deferred429.Remove(key);
                 int confS;
@@ -481,6 +506,7 @@ namespace CompetitiveRounds
                 return;
             }
             retried.Remove(key);
+            floorAdopted.Remove(key);
             latestIntent.Remove(key);
             deferred429.Remove(key);
             int conf;
@@ -589,6 +615,7 @@ namespace CompetitiveRounds
             latestIntent.Clear();
             inFlight.Clear();
             retried.Clear();
+            floorAdopted.Clear();
             // [N5] rev counters are per-IDENTITY: the new identity's /mine
             // reseeds them, and the stale-409 floor-adopt covers the window
             // before that snapshot lands. [N10] clearing deferUntil also

@@ -462,9 +462,13 @@ async def _sync_podium_holders(sku: str, player_ids: list) -> None:
     try:
         from database import async_session
         async with async_session() as gdb:
+            # P2: system grants are resolved-house provenance (beneficiary
+            # NULL, paid/rate 0) so they can never fall into a future
+            # artist's legacy live-attribution fallback.
             res = await gdb.execute(text(
-                "INSERT INTO player_items (player_id, item_id, purchase_price) "
-                "SELECT p.id, si.id, 0 "
+                "INSERT INTO player_items (player_id, item_id, purchase_price, "
+                "        royalty_paid, royalty_rate_pct, royalty_resolved) "
+                "SELECT p.id, si.id, 0, 0, 0, TRUE "
                 "FROM players p "
                 "JOIN shop_items si ON si.sku = :sku "
                 "WHERE p.id::text = ANY(:pids) "
@@ -4320,9 +4324,11 @@ async def _mark_mod_seen(db: AsyncSession, player: Player, *,
         )).scalar()
         if rank_id is None:
             return
+        # P2: resolved-house provenance (see the podium-grant sibling).
         await db.execute(
-            text("INSERT INTO player_items (player_id, item_id, purchase_price) "
-                 "VALUES (:pid, :iid, 0) "
+            text("INSERT INTO player_items (player_id, item_id, purchase_price, "
+                 "        royalty_paid, royalty_rate_pct, royalty_resolved) "
+                 "VALUES (:pid, :iid, 0, 0, 0, TRUE) "
                  "ON CONFLICT (player_id, item_id) DO NOTHING"),
             {"pid": player.id, "iid": rank_id},
         )
@@ -19969,6 +19975,29 @@ async def purchase_item(
     if item.kind == "music_album" and item.sku not in _supported_music_skus(request):
         raise HTTPException(status_code=409, detail="This album requires a newer mod version")
     is_music = (item.kind == "music_album")
+
+    # P3 (b2-impl-r2): ONE row-locked read of every artist-mutable field,
+    # taken BEFORE any attribution-dependent decision, for EVERY kind. The
+    # old shape locked price only, music only, and late — so a reassignment
+    # or a NULL->artist activation committing between the ORM snapshot and
+    # the lock could route royalty gold to the stale artist, bypass the
+    # 1.40/expected_price gate, or debit an unattested new price. FOR SHARE
+    # (not FOR UPDATE) is deliberate: it conflicts with the NO KEY UPDATE
+    # the artist's set-price/reassignment UPDATE takes, while staying
+    # compatible with the KEY SHARE concurrent purchases' player_items FK
+    # inserts hold (#202). Every decision below reads THIS tuple; the ORM
+    # `item` is only trusted for fields no endpoint mutates (kind, sku,
+    # rotation_pool, catalog_ready).
+    _locked = (await db.execute(text(
+        "SELECT price, artist_steam_id, stock_limit "
+        "FROM shop_items WHERE id = :iid FOR SHARE"
+    ), {"iid": item.id})).mappings().first()
+    if _locked is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    live_price = int(_locked["price"])
+    live_artist = _locked["artist_steam_id"]
+    live_stock = _locked["stock_limit"]
+
     # N2 (b2-impl-r1): the price-attestation contract keys on ATTRIBUTION,
     # not on this api deploy. An UNattributed music row (artist_steam_id
     # NULL) has immutable house pricing — nothing can change its price
@@ -19978,7 +20007,7 @@ async def purchase_item(
     # becomes artist-mutable and the full 1.40.0 floor + required
     # attestation apply. This is the review's staged activation: deploying
     # this api before the 1.40.0 release exists blocks nobody.
-    music_attributed = is_music and bool(getattr(item, "artist_steam_id", None))
+    music_attributed = is_music and bool(live_artist)
     if is_music:
         # M1: strict, fail-closed buyer identity. The compatibility helper
         # above soft-fails while enforcement is unarmed, which left music
@@ -20015,23 +20044,23 @@ async def purchase_item(
     # their items, and can cap how many copies exist. Gifts from the artist
     # bypass the block (the artist explicitly chose the recipient) but still
     # consume stock — both enforced in the /artist/gift endpoint.
-    if getattr(item, "artist_steam_id", None):
+    if live_artist:
         blocked = (await db.execute(text(
             "SELECT 1 FROM artist_item_blocks "
             "WHERE artist_steam_id = :a AND blocked_steam_id = :b"
-        ), {"a": item.artist_steam_id, "b": steam_id})).first()
+        ), {"a": live_artist, "b": steam_id})).first()
         if blocked is not None:
             raise HTTPException(status_code=403, detail="This artist has restricted you from buying their items")
-    if getattr(item, "stock_limit", None):
+    if live_stock:
         # Round 3 item 2: -1 = the artist hasn't opened sales yet (every new
         # community cosmetic is born this way so nobody sneaks a purchase in
         # before the artist sets price/stock).
-        if item.stock_limit < 0:
+        if live_stock < 0:
             raise HTTPException(status_code=409, detail="Not for sale yet — the artist hasn't opened sales")
         sold = (await db.execute(
             select(func.count()).select_from(PlayerItem).where(PlayerItem.item_id == item.id)
         )).scalar() or 0
-        if sold >= item.stock_limit:
+        if sold >= live_stock:
             raise HTTPException(status_code=409, detail="Sold out")
 
     already = (await db.execute(
@@ -20040,22 +20069,12 @@ async def purchase_item(
     if already is not None:
         return {"status": "already_owned", "sku": sku}
 
-    # The price this purchase actually commits at. For music it is RE-READ
-    # under FOR SHARE so a concurrent /artist/set-price cannot commit between
-    # the compare and the debit (M5/M7: SHARE conflicts with the NO KEY UPDATE
-    # row lock the artist's UPDATE takes, and — unlike FOR UPDATE — stays
-    # compatible with the KEY SHARE that concurrent purchases' player_items
-    # FK inserts hold, #202). The ORM `item.price` above may be a stale
-    # snapshot; every economic statement below uses THIS variable, never
-    # item.price, so the compared and debited amounts are the same number.
-    price = item.price
+    # The price this purchase actually commits at: the P3 locked tuple's,
+    # for every kind (M5/M7 — the lock was taken above, before any
+    # attribution decision; the ORM `item.price` is never consulted for
+    # money, so the compared and debited amounts are the same number).
+    price = live_price
     if is_music:
-        _live = (await db.execute(text(
-            "SELECT price FROM shop_items WHERE id = :iid FOR SHARE"
-        ), {"iid": item.id})).scalar()
-        if _live is None:
-            raise HTTPException(status_code=404, detail="Item not found")
-        price = int(_live)
         # N2: compare whenever the caller attested a price (attributed rows
         # are REQUIRED to above; an unattributed row's optional attestation
         # is still honored — its price only moves by migration, so a
@@ -20073,11 +20092,12 @@ async def purchase_item(
         raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {price}")
 
     # Resolve and policy-check the indirect beneficiary before the first
-    # economic mutation (the buyer debit below).
+    # economic mutation (the buyer debit below). live_artist is the P3
+    # locked tuple's — a reassignment cannot commit under our FOR SHARE.
     artist_player = None
-    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and price > 0:
+    if live_artist and live_artist != steam_id and price > 0:
         artist_player = (await db.execute(
-            select(Player).where(Player.steam_id == item.artist_steam_id,
+            select(Player).where(Player.steam_id == live_artist,
                                  Player.deleted_at.is_(None))
         )).scalar_one_or_none()
         if artist_player is not None:
@@ -20108,47 +20128,47 @@ async def purchase_item(
     # art. Integer arithmetic, floor semantics (M9): (price * pct) // 100
     # equals FLOOR for non-negative operands — the same number the ledger
     # credits and the sales view displays.
-    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and price > 0:
+    rate_pct = 0
+    paid = 0
+    if live_artist and live_artist != steam_id and price > 0:
         rate_pct = 50 if is_music else 30
         royalty = (price * rate_pct) // 100
-        paid = 0
-        if royalty > 0:
-            if artist_player is not None:
-                # r2 find 3: atomic delta — two simultaneous sales of the same
-                # artist's items each wrote an absolute total, so one royalty
-                # silently vanished while both ledger rows persisted.
-                await db.execute(text(
-                    "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
-                ), {"amt": royalty, "pid": artist_player.id})
-                db.add(GoldTransaction(
-                    player_id=artist_player.id, amount=royalty,
-                    reason="artist_royalty", reference_id=sku,
-                ))
-                paid = royalty
-                print(f"[ARTIST] royalty {royalty}g ({rate_pct}%) -> {item.artist_steam_id} for {sku} (buyer {steam_id})")
-        # Persist ACTUAL-paid accounting on the purchase row (M9 + N8):
-        # stored royalty_paid is what the artist really received — 0 when
-        # the beneficiary was missing/deleted, so the sales view can never
-        # display a cut that was never credited — and
-        # royalty_artist_steam_id pins WHOSE sale this was at purchase time,
-        # so an admin reassignment can never migrate historical /sales rows
-        # to an artist who was never paid for them. Raw SQL because the
-        # PlayerItem model deliberately does not declare these columns
-        # (models.py is sibling-owned this wave); an undeclared-attribute
-        # ORM write would be a silent no-op (#346), a raw UPDATE is not.
-        # FAIL-CLOSED, no savepoint (N8): migration 279 deploys BEFORE this
-        # api per the Required order, so the columns exist; if this stamp
-        # ever fails the whole purchase transaction aborts rather than
-        # committing a credit whose accounting row lies (the earlier
-        # savepoint swallow committed paid=NULL rows that /sales then
-        # displayed at the legacy 30% fallback).
-        await db.flush()
-        await db.execute(text(
-            "UPDATE player_items SET royalty_paid = :rp, royalty_rate_pct = :rr, "
-            "       royalty_artist_steam_id = :ra "
-            "WHERE player_id = :pid AND item_id = :iid"
-        ), {"rp": paid, "rr": rate_pct, "ra": item.artist_steam_id,
-            "pid": player.id, "iid": item.id})
+        if royalty > 0 and artist_player is not None:
+            # r2 find 3: atomic delta — two simultaneous sales of the same
+            # artist's items each wrote an absolute total, so one royalty
+            # silently vanished while both ledger rows persisted.
+            await db.execute(text(
+                "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id = :pid"
+            ), {"amt": royalty, "pid": artist_player.id})
+            db.add(GoldTransaction(
+                player_id=artist_player.id, amount=royalty,
+                reason="artist_royalty", reference_id=sku,
+            ))
+            paid = royalty
+            print(f"[ARTIST] royalty {royalty}g ({rate_pct}%) -> {live_artist} for {sku} (buyer {steam_id})")
+
+    # Persist acquisition provenance on EVERY purchase row (M9 + N8 + P2),
+    # not just royalty-bearing ones. royalty_resolved=TRUE marks a MODERN
+    # row whose beneficiary/paid/rate were pinned at acquisition time —
+    # without it a self-buy/house purchase leaves NULLs indistinguishable
+    # from legacy rows, and a later artist reassignment would pull it into
+    # the new artist's private buyer list via the legacy live-attribution
+    # fallback (and fabricate an earning the artist never received, r2 find
+    # P2). Beneficiary = the P3 LOCKED tuple's artist (may be NULL = house;
+    # equals the buyer on a self-buy); paid/rate 0 for self-buys and house.
+    # Raw SQL because the PlayerItem model deliberately does not declare
+    # these columns (an undeclared-attribute ORM write is a silent no-op,
+    # #346). FAIL-CLOSED, no savepoint (N8): migration 279 deploys BEFORE
+    # this api per the Required order, so the columns exist; if this stamp
+    # ever fails the whole purchase transaction aborts rather than
+    # committing a credit whose accounting row lies.
+    await db.flush()
+    await db.execute(text(
+        "UPDATE player_items SET royalty_paid = :rp, royalty_rate_pct = :rr, "
+        "       royalty_artist_steam_id = :ra, royalty_resolved = TRUE "
+        "WHERE player_id = :pid AND item_id = :iid"
+    ), {"rp": paid, "rr": rate_pct, "ra": live_artist,
+        "pid": player.id, "iid": item.id})
 
     await db.commit()
 
@@ -20212,7 +20232,7 @@ async def _music_ratings_fold(db: AsyncSession, *, commit: bool) -> None:
         return
     try:
         async with db.begin_nested():
-            await db.execute(text(
+            folded = (await db.execute(text(
                 "UPDATE music_ratings mr SET "
                 "  published_stars = (CASE WHEN mr.pending_is_clear THEN NULL "
                 "                          ELSE mr.pending_stars END), "
@@ -20221,12 +20241,22 @@ async def _music_ratings_fold(db: AsyncSession, *, commit: bool) -> None:
                 "  pending_effective_at = NULL, "
                 "  updated_at = NOW() "
                 "WHERE mr.pending_effective_at IS NOT NULL "
-                "  AND mr.pending_effective_at <= NOW()"
-            ))
-            await db.execute(text(
-                "DELETE FROM music_ratings "
-                "WHERE published_stars IS NULL AND pending_effective_at IS NULL"
-            ))
+                "  AND mr.pending_effective_at <= NOW() "
+                "RETURNING mr.id"
+            ))).scalars().all()
+            # P7: prune ONLY rows this fold just matured (a matured clear on a
+            # never-published row folds to all-NULL). The old unconditional
+            # DELETE was a full-table scan on every public GET — the partial
+            # index covers pending_effective_at IS NOT NULL, which is exactly
+            # what a folded-empty row no longer has. id = ANY over the
+            # RETURNING set is index-only and empty-skipped.
+            if folded:
+                await db.execute(text(
+                    "DELETE FROM music_ratings "
+                    "WHERE id = ANY(CAST(:ids AS bigint[])) "
+                    "  AND published_stars IS NULL "
+                    "  AND pending_effective_at IS NULL"
+                ), {"ids": [int(i) for i in folded]})
         if commit:
             await db.commit()
     except Exception as ex:
@@ -20252,31 +20282,37 @@ async def music_rate(request: Request, payload: dict = Body(...),
     session first (an attacker with junk tokens never reaches the victim's
     advisory lock or the fold), then lock + re-validation, then fold.
 
-    Write semantics (M11/M16/N5): a single-row UPSERT of the LATEST intent
-    into the pending_* columns, ordered by intent_rev — a monotonic
-    per-track client revision. The UPSERT applies only when the carried rev
-    is STRICTLY newer than the stored one, so a delayed older request can
-    never resurrect a superseded intent. On rejection the stored rev is read
-    under the same advisory lock and the two cases split (client contract,
-    #329): rev == stored is the SAME op replayed by a transport retry — the
-    stored state already reflects it, so it confirms 200 ok (idempotent,
-    nothing written, delay/debounce not re-armed; op_id in the body is
-    deliberately unused — rev equality IS the duplicate test, same op = same
-    rev); rev < stored is a superseded intent — 409 whose body carries
-    "stale_intent" + "server_rev" so the client can one-shot floor-adopt and
-    resend its standing op. published_stars is never touched here."""
+    Write semantics (M11/M16/N5/P1): a single-row UPSERT of the LATEST
+    intent into the pending_* columns, ordered by intent_rev — a monotonic
+    per-track client revision — with last_op_id stamped alongside. The
+    UPSERT applies only when the carried rev is STRICTLY newer than the
+    stored one, so a delayed older request can never resurrect a superseded
+    intent. On rejection the stored row is read under the same advisory
+    lock and the cases split (client contract, #329/P1): it is a DUPLICATE
+    (200 ok, nothing written, delay/debounce not re-armed) only when rev,
+    op_id AND payload all match the stored state — revision equality alone
+    is NOT operation equality: two sessions seeding the same floor can mint
+    the same rev for different intents, and confirming the loser would
+    silently discard its stars (r2 find P1). Every other rejection — lower
+    rev, equal rev with a different/absent op or payload — is a 409 whose
+    body carries "stale_intent" + "server_rev" so the client floor-adopts
+    (mints server_rev + 1) and resends its standing op. published_stars is
+    never touched here."""
     # ── payload validation (reject before any DB work) ──
     steam_id = str(payload.get("steam_id") or "").strip()
     sku = str(payload.get("sku") or "").strip()
     track_idx = payload.get("track_idx")
     stars = payload.get("stars")
     intent_rev = payload.get("intent_rev")
+    op_id = str(payload.get("op_id") or "").strip().lower()
     if (not steam_id or len(steam_id) > 32 or not sku or len(sku) > 64
             or isinstance(track_idx, bool) or not isinstance(track_idx, int)
             or isinstance(stars, bool) or not isinstance(stars, int)
             or isinstance(intent_rev, bool) or not isinstance(intent_rev, int)
             or not (0 <= stars <= 5) or not (0 <= track_idx < 64)
-            or not (1 <= intent_rev <= 2_000_000_000)):
+            or not (1 <= intent_rev <= 2_000_000_000)
+            or len(op_id) > 32
+            or any(c not in "0123456789abcdef" for c in op_id)):
         raise HTTPException(status_code=400, detail="bad_request")
     if IS_REPLICA:
         # A write endpoint has no business on the read replica; refuse loudly
@@ -20378,38 +20414,57 @@ async def music_rate(request: Request, payload: dict = Body(...),
     _accepted = (await db.execute(text(
         "INSERT INTO music_ratings (player_id, sku, track_idx, pending_stars, "
         "                           pending_is_clear, pending_effective_at, "
-        "                           intent_rev, updated_at) "
+        "                           intent_rev, last_op_id, updated_at) "
         "VALUES (:pid, :sku, :tidx, :ps, :clr, "
-        "        NOW() + make_interval(secs => :dly), :rev, NOW()) "
+        "        NOW() + make_interval(secs => :dly), :rev, :op, NOW()) "
         "ON CONFLICT (player_id, sku, track_idx) DO UPDATE SET "
         "  pending_stars = EXCLUDED.pending_stars, "
         "  pending_is_clear = EXCLUDED.pending_is_clear, "
         "  pending_effective_at = EXCLUDED.pending_effective_at, "
         "  intent_rev = EXCLUDED.intent_rev, "
+        "  last_op_id = EXCLUDED.last_op_id, "
         "  updated_at = NOW() "
         "WHERE music_ratings.intent_rev < EXCLUDED.intent_rev "
         "RETURNING id"
     ), {"pid": player.id, "sku": sku, "tidx": track_idx,
         "ps": None if stars == 0 else stars, "clr": stars == 0,
-        "dly": _delay_s, "rev": intent_rev})).first()
+        "dly": _delay_s, "rev": intent_rev, "op": op_id})).first()
     if _accepted is None:
         # rev <= stored: nothing was written, the delay was not re-armed.
-        # Split duplicate from stale under the advisory lock (race-free for
-        # this player's writers; a CONCURRENT GET-triggered fold committing a
-        # tombstone prune between the upsert and this read can leave no row —
-        # degrade to server_rev 0, which the client floor-adopt handles).
-        _stored = (await db.execute(text(
-            "SELECT intent_rev FROM music_ratings "
+        # P1: split DUPLICATE from STALE under the advisory lock. Duplicate
+        # requires rev AND op_id AND payload to match — rev equality alone is
+        # two sessions seeding one floor and minting the same rev for
+        # DIFFERENT intents, and a false 200 would confirm stars the server
+        # never stored. op_id must be non-empty on both sides (an empty pair
+        # proves nothing). Payload match accepts either shape of "the stored
+        # state reflects this exact op": still-pending (pending fields carry
+        # it) or already-folded by a concurrent GET's fold (published carries
+        # it, pending gone). A concurrent tombstone prune can leave no row —
+        # degrade to server_rev 0, which the client floor-adopt handles.
+        _srow = (await db.execute(text(
+            "SELECT intent_rev, last_op_id, pending_stars, pending_is_clear, "
+            "       pending_effective_at, published_stars "
+            "FROM music_ratings "
             "WHERE player_id = :pid AND sku = :sku AND track_idx = :tidx"
-        ), {"pid": player.id, "sku": sku, "tidx": track_idx})).scalar_one_or_none()
+        ), {"pid": player.id, "sku": sku, "tidx": track_idx})).mappings().first()
         await db.commit()  # keep the fold work above
-        if _stored is not None and int(_stored) == intent_rev:
-            # The same op's transport retry: stored state already reflects it.
-            return {"status": "ok", "duplicate": True,
-                    "intent": "clear" if stars == 0 else "rate"}
+        if _srow is not None and int(_srow["intent_rev"]) == intent_rev:
+            _same_op = bool(op_id) and (_srow["last_op_id"] or "") == op_id
+            if _srow["pending_effective_at"] is not None:
+                _payload_match = (bool(_srow["pending_is_clear"]) == (stars == 0)
+                                  and (stars == 0
+                                       or _srow["pending_stars"] == stars))
+            else:
+                _folded = _srow["published_stars"]
+                _payload_match = ((_folded is None and stars == 0)
+                                  or (_folded is not None and _folded == stars))
+            if _same_op and _payload_match:
+                # The same op's transport retry: stored state reflects it.
+                return {"status": "ok", "duplicate": True,
+                        "intent": "clear" if stars == 0 else "rate"}
         raise HTTPException(status_code=409, detail={
             "error": "stale_intent",
-            "server_rev": int(_stored) if _stored is not None else 0})
+            "server_rev": int(_srow["intent_rev"]) if _srow is not None else 0})
     _music_rate_last_write[_dkey] = _nowm
     await db.commit()
     return {"status": "ok", "intent": "clear" if stars == 0 else "rate"}
@@ -22992,12 +23047,14 @@ async def artist_sales(
     1's 1g rows whose 30%-floor is 0 = exactly what was paid. A future rate
     change therefore rewrites NOTHING here: new rows store their own rate.
 
-    ATTRIBUTION RULE (N8): a row belongs to the STORED beneficiary
-    (royalty_artist_steam_id, pinned at purchase time) whenever it carries
-    one — an admin reassignment of the item never migrates historical sales
-    to an artist who was not paid for them. Only legacy NULL-beneficiary
-    rows follow the item's live attribution (pre-column behavior, where the
-    two never diverged)."""
+    ATTRIBUTION RULE (N8 + P2): a RESOLVED row (royalty_resolved, stamped by
+    every modern acquisition path) belongs STRICTLY to its stored
+    beneficiary — an admin reassignment of the item never migrates
+    historical sales to an artist who was not paid for them, and a modern
+    house/self-buy/gift row (beneficiary NULL or another artist) never
+    surfaces in a later assignee's private buyer list at all. Only
+    UNRESOLVED rows (genuinely legacy, pre-column) follow the item's live
+    attribution — pre-column behavior, where the two never diverged."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     if not await _is_artist(db, steam_id):
@@ -23013,8 +23070,8 @@ async def artist_sales(
         "FROM player_items pi "
         "JOIN shop_items si ON si.id = pi.item_id "
         "JOIN players p ON p.id = pi.player_id "
-        "WHERE (pi.royalty_artist_steam_id = :sid "
-        "       OR (pi.royalty_artist_steam_id IS NULL AND si.artist_steam_id = :sid)) "
+        "WHERE ((pi.royalty_resolved AND pi.royalty_artist_steam_id = :sid) "
+        "       OR (NOT pi.royalty_resolved AND si.artist_steam_id = :sid)) "
         "ORDER BY pi.purchased_at DESC LIMIT :lim"
     ), {"sid": steam_id, "lim": limit})).mappings().all()
     return {
@@ -24670,7 +24727,19 @@ async def artist_gift(
         )).scalar() or 0
         if sold >= item.stock_limit:
             raise HTTPException(status_code=409, detail="Sold out — raise the stock cap first")
-    db.add(PlayerItem(player_id=target.id, item_id=item.id, purchase_price=0))
+    # P2: gifts carry acquisition provenance like purchases — beneficiary is
+    # the GIFTING artist (ownership verified by _artist_own_item above), paid
+    # and rate 0. Without the stamp a gift row is NULL-indistinguishable from
+    # a legacy row, and a later reassignment would surface the recipient in
+    # the NEW artist's private buyer list via the legacy fallback. Raw INSERT
+    # because the PlayerItem model deliberately omits these columns (#346).
+    await db.execute(text(
+        "INSERT INTO player_items (player_id, item_id, purchase_price, "
+        "        royalty_paid, royalty_rate_pct, royalty_artist_steam_id, "
+        "        royalty_resolved) "
+        "VALUES (:pid, :iid, 0, 0, 0, :ra, TRUE) "
+        "ON CONFLICT (player_id, item_id) DO NOTHING"
+    ), {"pid": target.id, "iid": item.id, "ra": steam_id})
     await _artist_audit(db, steam_id, "gift", sku, f"to {target_steam_id} ({target.display_name})")
     await db.commit()
     print(f"[ARTIST] {steam_id} gifted {sku} to {target_steam_id}")
@@ -26269,7 +26338,14 @@ async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
         select(PlayerItem).where(PlayerItem.player_id == player_id,
                                  PlayerItem.item_id == item_id))).scalar_one_or_none()
     if owned is None:
-        db.add(PlayerItem(player_id=player_id, item_id=item_id, purchase_price=0))
+        # P2: resolved-house provenance; raw INSERT because the PlayerItem
+        # model deliberately omits the royalty columns (#346).
+        await db.execute(text(
+            "INSERT INTO player_items (player_id, item_id, purchase_price, "
+            "        royalty_paid, royalty_rate_pct, royalty_resolved) "
+            "VALUES (:pid, :iid, 0, 0, 0, TRUE) "
+            "ON CONFLICT (player_id, item_id) DO NOTHING"
+        ), {"pid": player_id, "iid": item_id})
         print(f"[ACHIEVEMENT] granted title item {sku} to {player_id}")
 
 

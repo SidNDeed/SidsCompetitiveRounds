@@ -19,8 +19,10 @@
   music entirely. Another opt-in shows a small "Now Playing" credit line.
   Audio downloads on first use (previews are a small pack; full albums fetch
   when you own one). Music is entirely yours-side: opponents hear their own.
-- Music artists earn 50% of album sales, manage their album's name and price,
-  and can gift copies — sales show up in the Artist tab like any other item.
+- Music artists earn 50% of album sales, manage their album's shop listing
+  name and price (the Music tab and now-playing keep the compiled album
+  name), and can gift copies — sales show up in the Artist tab like any
+  other item.
 - Rate any song 0-5 stars right in the track row. Ratings are private; the
   community average updates on a random 2-24h delay so a change can't easily
   be matched to whoever was just online.
@@ -108,6 +110,15 @@
 - Broadcast idle showcase: the between-games tour now walks the Compare
   metrics, scrolls the leaderboard to the featured player, and sweeps
   through profiles.
+
+**Schema changes:** migrations **276** (Another Round album row), **277**
+(album release), **278** (`music_ratings` + `deploy_markers` +
+`shop_items.music_track_count`), **279** (Clavar la Bala row + royalty
+columns on `player_items`), **280** (music activation marker — operator
+gate), **281** (Clavar activation + artist attribution; requires 280's
+marker), **282** (i18n client keys, +356), **283** (v1.40.0 release notes
+x5). Deploy order is load-bearing: 278 -> 279 -> api -> 280 -> 281 (the
+purchase royalty stamp is fail-closed on 279's columns).
 
 ## v1.39.6 — 2026-08-30
 

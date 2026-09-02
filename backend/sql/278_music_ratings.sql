@@ -26,6 +26,10 @@
 -- folds as an unintended clear), the partial maturation index (N11), and the
 -- generic deploy_markers table (N3's machine-enforced activation gate,
 -- consumed by 280/281).
+-- b2-impl-r2 addition: last_op_id (P1 — revision equality is NOT operation
+-- equality; two sessions can seed from the same stored rev and independently
+-- mint the same next rev with different payloads, so the duplicate test on
+-- /music/rate is rev AND op_id AND pending payload, never rev alone).
 --
 -- Idempotent statement-by-statement (#243: the migrate verb's || retry re-runs
 -- the whole file). Explicit BEGIN/COMMIT (#340). v_ prefixed PL/pgSQL vars,
@@ -63,6 +67,14 @@ CREATE TABLE IF NOT EXISTS music_ratings (
     -- re-arm the maturation delay. DEFAULT 0: clients start at 1, so any
     -- first write wins against a legacy/fresh row.
     intent_rev           INT NOT NULL DEFAULT 0,
+    -- P1 (b2-impl-r2): the accepted intent's client idempotency key — a
+    -- 1.40.0 client mints Guid.ToString("N") (32 lowercase hex) per USER
+    -- intent and reuses it across transport retries and floor-adopted
+    -- re-revisions of that same intent; '' = the write carried none (old or
+    -- degraded caller). Stored so /music/rate's duplicate branch can tell "the
+    -- same op replayed" from "a different session that independently minted
+    -- the same rev" — rev equality alone cannot (P1's two-session scenario).
+    last_op_id           VARCHAR(32) NOT NULL DEFAULT '',
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- One stored slot per player/track (M19's rewording): the UPSERT target.
@@ -146,9 +158,10 @@ BEGIN
        AND column_name IN ('id', 'player_id', 'sku', 'track_idx',
                            'published_stars', 'pending_stars',
                            'pending_is_clear', 'pending_effective_at',
-                           'intent_rev', 'created_at', 'updated_at');
-    IF v_cols <> 11 THEN
-        RAISE EXCEPTION 'post-check FAILED: music_ratings has %/11 expected columns', v_cols;
+                           'intent_rev', 'last_op_id', 'created_at',
+                           'updated_at');
+    IF v_cols <> 12 THEN
+        RAISE EXCEPTION 'post-check FAILED: music_ratings has %/12 expected columns', v_cols;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                     WHERE table_name = 'shop_items'
@@ -163,7 +176,7 @@ BEGIN
     IF to_regclass('deploy_markers') IS NULL THEN
         RAISE EXCEPTION 'post-check FAILED: deploy_markers table missing';
     END IF;
-    RAISE NOTICE 'post-check OK: music_ratings (11 cols, XOR check, maturation index) + shop_items.music_track_count + deploy_markers in place';
+    RAISE NOTICE 'post-check OK: music_ratings (12 cols, XOR check, maturation index) + shop_items.music_track_count + deploy_markers in place';
 END $$;
 
 COMMIT;

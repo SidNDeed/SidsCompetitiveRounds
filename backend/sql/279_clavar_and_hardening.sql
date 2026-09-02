@@ -10,16 +10,25 @@
 --
 -- Three parts:
 --   (a) player_items.royalty_paid / royalty_rate_pct /
---       royalty_artist_steam_id — persisted actual-paid royalty accounting
---       (M9) plus the BENEFICIARY the sale belonged to (N8: without it, an
---       admin reassignment moves historical /sales rows to the new artist
---       while the money went to the old one). NULL = legacy row (pre-column
---       purchase or gift/self-buy/no-royalty purchase); the hardened
---       purchase path writes all three IN THE PURCHASE TRANSACTION with no
---       savepoint swallow (this file deploys before that api per the
---       Required order, so the api-ahead window is gone), and
---       /artist/{id}/sales attributes rows by the stored beneficiary,
---       falling back to live item attribution only for legacy NULL rows.
+--       royalty_artist_steam_id / royalty_resolved — persisted actual-paid
+--       royalty accounting (M9) plus the BENEFICIARY the sale belonged to
+--       (N8: without it, an admin reassignment moves historical /sales rows
+--       to the new artist while the money went to the old one).
+--       royalty_resolved (P2, b2-impl-r2) is the explicit provenance marker:
+--       NULL beneficiary is AMBIGUOUS on its own — it means both "legacy row,
+--       attribution unknown" and "modern row, known house/no-beneficiary
+--       (self-buy, gift, house purchase)" — and only the former may follow
+--       live item attribution. EVERY new acquisition path (purchase in all
+--       its branches, artist gift, system title grants) stamps
+--       royalty_resolved = TRUE with the beneficiary pinned at acquisition
+--       time (may be NULL = house) and paid/rate (0 for self-buys, gifts,
+--       house), IN THE ACQUISITION TRANSACTION with no savepoint swallow
+--       (this file deploys before that api per the Required order, so the
+--       api-ahead window is gone). /artist/{id}/sales attributes resolved
+--       rows STRICTLY by the stored beneficiary and falls back to live item
+--       attribution only for royalty_resolved = FALSE (genuinely legacy)
+--       rows — so a self-buy/gift can never surface in a REASSIGNED artist's
+--       private buyer list or fabricate an earning. Legacy rows stay FALSE.
 --   (b) CHECK: music albums can never carry a stock cap (M2). NOT VALID +
 --       VALIDATE so the ADD never rewrites the table; dry-run 2026-09-02
 --       against prod (#313): 0 music rows with stock_limit set, so VALIDATE
@@ -45,6 +54,11 @@ ALTER TABLE player_items ADD COLUMN IF NOT EXISTS royalty_rate_pct SMALLINT;
 -- purchase time — stored even when the credit could not land, with
 -- royalty_paid = 0, so the sales log never migrates to a later assignee).
 ALTER TABLE player_items ADD COLUMN IF NOT EXISTS royalty_artist_steam_id VARCHAR(20);
+-- P2 (b2-impl-r2): provenance marker. FALSE = legacy row (live-attribution
+-- fallback allowed); TRUE = modern row whose beneficiary/paid/rate were
+-- pinned at acquisition time and govern strictly. NOT NULL DEFAULT FALSE is
+-- a PG11+ fast default — no table rewrite.
+ALTER TABLE player_items ADD COLUMN IF NOT EXISTS royalty_resolved BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- (b) music stock invariant (M2)
 DO $$
@@ -119,12 +133,13 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                     WHERE table_name = 'player_items'
                       AND column_name IN ('royalty_paid', 'royalty_rate_pct',
-                                          'royalty_artist_steam_id')
-                   HAVING COUNT(*) = 3) THEN
+                                          'royalty_artist_steam_id',
+                                          'royalty_resolved')
+                   HAVING COUNT(*) = 4) THEN
         RAISE EXCEPTION 'post-check FAILED: player_items royalty columns missing';
     END IF;
 
-    RAISE NOTICE 'post-check OK: royalty columns + music-stock invariant in place; music_album_clavar_la_bala seeded, born gated (catalog_ready = FALSE, 12 tracks)';
+    RAISE NOTICE 'post-check OK: royalty columns (incl. royalty_resolved) + music-stock invariant in place; music_album_clavar_la_bala seeded, born gated (catalog_ready = FALSE, 12 tracks)';
 END $$;
 
 COMMIT;
