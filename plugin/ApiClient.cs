@@ -2456,7 +2456,15 @@ namespace CompetitiveRounds
                         || !mem.ContainsKey("stars") || !TryStrictJsonInt(mem["stars"], out stars)
                         || stars < 0 || stars > 5
                         || !mem.ContainsKey("intent_rev") || !TryStrictJsonInt(mem["intent_rev"], out rev)
-                        || rev < 1)
+                        // [S2] Mirror the SERVER's accepted range (main.py's
+                        // 1..2e9 payload gate). Seeding a revision at or above
+                        // that ceiling means the next mint exceeds what the
+                        // server will accept, and the client's counter is
+                        // max-merged so no later fetch can lower it — that
+                        // track's rating would be wedged until the row is
+                        // repaired server-side. Rejecting the snapshot keeps
+                        // the prior state instead.
+                        || rev < 1 || rev > 2000000000)
                     {
                         rows.Clear();
                         return false;
@@ -2620,19 +2628,28 @@ namespace CompetitiveRounds
         /// digit-prefixed garbage, and the "5 xyz" shape the old
         /// whitespace-tolerant terminator accepted.
         ///
-        /// ACCEPTED RESIDUAL (r4 R5, deliberate): this validates the value is
-        /// an integer, not that it obeys JSON's integer GRAMMAR — "05" parses
-        /// as 5. The same class covers escaped-but-semantically-duplicate keys
-        /// (stored raw, so "stars" reads as an unrelated extra member and
-        /// the real "stars" still governs), lone surrogate escapes in sku (a
-        /// garbage sku matches no catalogue album and renders nothing), and
-        /// unknown members whose spans are sliced but not syntax-checked.
-        /// Every one of them requires OUR OWN server to emit malformed JSON —
-        /// r4 confirmed no legitimate response is affected — and the worst
-        /// outcome is a local own-ratings view that clears and self-heals on
-        /// the next fetch. Tightening to full JSON grammar means a real
-        /// tokenizer; that is the right fix if this parser ever consumes a
-        /// third-party body, and unjustified while it consumes only ours.</summary>
+        /// ACCEPTED RESIDUAL (r4 R5 / r5 S2, deliberate): this validates the
+        /// value is an integer, not that it obeys JSON's integer GRAMMAR —
+        /// "05" parses as 5. The same class covers escaped-but-semantically-
+        /// duplicate keys (member names are compared RAW, so "stars"
+        /// reads as an unrelated extra member while the literal "stars" still
+        /// governs), lone surrogate escapes in sku (a garbage sku matches no
+        /// catalogue album and renders nothing), and unknown members whose
+        /// spans are sliced but not syntax-checked.
+        ///
+        /// Precise impact, corrected per r5 S2 — these bodies are NONCANONICAL
+        /// or contract-violating rather than merely malformed, and the earlier
+        /// claim that everything "self-heals on the next fetch" was too
+        /// generous: a raw-duplicate revision key could once seed a value near
+        /// the server's ceiling, and the client's counter is max-merged, so no
+        /// later fetch could lower it. That specific wedge is closed by the
+        /// explicit 1..2e9 range check at the row validation (S2). What
+        /// remains cannot cross the integrity bar: it needs OUR OWN server to
+        /// emit a body its fixed-key serializer cannot produce, touches only
+        /// the caller's own rating view, and r4/r5 both confirmed no
+        /// legitimate response is rejected. Full JSON grammar means a real
+        /// tokenizer — the right fix if this ever consumes a third-party
+        /// body, unjustified while it consumes only ours.</summary>
         private static bool TryStrictJsonInt(string raw, out int val)
         {
             val = 0;

@@ -1954,6 +1954,24 @@ namespace CompetitiveRounds
             // under suppression, dead air on the broadcast stream.
             if (s.current.HasValue && !s.currentEnded && IsTrackReady(s.current.Value)
                 && !(BroadcastPredicate() && IsVanillaSku(s.current.Value.Sku))) return true;
+            // [S1] An EXPLICITLY chosen current that is still LOADING outranks
+            // global readiness: report NOT ready so the engine parks at Loading
+            // with vanilla audible, and let the target's own decode produce the
+            // readiness edge that starts it. Without this, a ready entry
+            // ELSEWHERE in the queue authorized Custom while the requested
+            // track was legitimately mid-download — suppression on, nothing
+            // playable — and the silence bound below then "recovered" by
+            // killing the healthy request (at the queue tail with loop off
+            // that lands in sticky stopIntent, i.e. permanent silence: the
+            // bound defeating its own purpose).
+            // Deliberately scoped to manualTakeover: every non-manual current
+            // is adopted through AdoptCurrent, which only ever adopts a READY
+            // track, so this is the one way a pending entry becomes current.
+            // A terminally FAILED entry is NOT pending (IsTrackLoadPending is
+            // false for it), so the bound still recovers the failed-current
+            // route it was built for.
+            if (s.manualTakeover && s.current.HasValue && !s.currentEnded
+                && IsTrackLoadPending(s.current.Value)) return false;
             var q = s.queue;
             // [N6a-coherence] readiness must mirror what AdvanceToNext can
             // actually REACH. While unplayed entries of the current cycle are
