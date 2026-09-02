@@ -4511,7 +4511,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA)
 
 
-LATEST_MOD_VERSION = "1.39.6"
+LATEST_MOD_VERSION = "1.40.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
