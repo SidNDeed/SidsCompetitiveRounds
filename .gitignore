@@ -15,6 +15,10 @@ installer/bin/
 installer/obj/
 thunderstore/build/
 dist/
+# Mastered music pack OGGs + cover: shipped via the music.zip release asset, never
+# committed (public repo, ~26MB per re-master would be permanent history — #191).
+# Masters live in C:\shared\suno-masters; sources in \\192.168.72.60\shared\from-desktop.
+plugin/music/
 
 # Log captures and one-off drops
 logs-snapshot/
