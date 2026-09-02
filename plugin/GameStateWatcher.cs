@@ -4034,6 +4034,18 @@ namespace CompetitiveRounds
                 try { MusicEntitlements.OnIdentityChanged(); } catch { }
                 _identityRefetchPending = true;
             }
+            else if (!prevResolved && newResolved)
+            {
+                // [impl-r3 I10] FIRST resolution is an identity edge too: an
+                // anonymous shop response dispatched pre-resolution must not
+                // survive as the resolved user's view (it carries owned=false
+                // for everything). Advance the cache epoch so any such
+                // in-flight landing is dropped, and refetch authenticated.
+                // MusicEntitlements needs no clear here — its identity gate
+                // already rejects anonymous snapshots outright.
+                try { ApiClient.OnLocalIdentityChanged(); } catch { }
+                _identityRefetchPending = true;
+            }
             if (_identityRefetchPending && newResolved)
             {
                 // Consent-blocked refetches are dropped, not kept pending:

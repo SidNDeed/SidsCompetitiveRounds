@@ -110,6 +110,15 @@ namespace CompetitiveRounds
         /// DLL referencing this constant ships [G3]/[H2].</summary>
         internal const string ASSET_REVISION = "ar1";
 
+        /// <summary>Byte-scannable build probe (impl-r3 K4, the #306 pattern:
+        /// a probe must exist for no other purpose). Referenced from the init
+        /// log line below so the literal lands in the DLL's UTF-16 #US heap;
+        /// pack/release tooling scans the PACKAGED DLL for
+        /// "SCR_MUSIC_REVISION=&lt;rev&gt;" to prove the DLL and the bundled/
+        /// released payload agree on the revision. Never reuse this string
+        /// for anything user-visible.</summary>
+        internal const string BUILD_REVISION_MARKER = "SCR_MUSIC_REVISION=" + ASSET_REVISION;
+
         private const string MARKER_FILE = "installed.json";
         private const string PREVIEWS_ZIP = "music-previews.zip";
         private const string FULL_ZIP = "music.zip";
@@ -303,7 +312,9 @@ namespace CompetitiveRounds
                         }
                         catch { }
                     }
-                    Plugin.Log?.LogInfo($"[MUSIC] init rev={ASSET_REVISION}: previews={(prevOk ? "ready" : "absent")} full={(fullOk ? "ready" : "absent")} (swept {swept} orphan(s), removed {stale} stale revision dir(s))");
+                    // BUILD_REVISION_MARKER reference is load-bearing: an unreferenced
+                    // const is folded away and never reaches the string heap (#306).
+                    Plugin.Log?.LogInfo($"[MUSIC] init {BUILD_REVISION_MARKER}: previews={(prevOk ? "ready" : "absent")} full={(fullOk ? "ready" : "absent")} (swept {swept} orphan(s), removed {stale} stale revision dir(s))");
                 }
                 else
                 {

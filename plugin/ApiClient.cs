@@ -2143,8 +2143,16 @@ namespace CompetitiveRounds
                 var items = ParseShopItems(response);
                 string localNow = null;
                 try { localNow = MatchTracker.LocalSteamId; } catch { }
+                // [impl-r3 I10] an ANONYMOUS dispatch is identity-current only
+                // while the local identity is STILL unresolved at landing — an
+                // anonymous body landing after resolution would repaint the
+                // resolved user's view with owned=false rows. (The first-
+                // resolution epoch advance in GameStateWatcher also drops the
+                // in-flight case; this closes the never-advanced-epoch path.)
+                bool localResolved = !string.IsNullOrEmpty(localNow) && localNow != "unknown";
                 bool identityCurrent = string.IsNullOrEmpty(entitlementSid)
-                    || string.Equals(entitlementSid, localNow, StringComparison.Ordinal);
+                    ? !localResolved
+                    : string.Equals(entitlementSid, localNow, StringComparison.Ordinal);
                 if (Plugin.DataConsentGranted && epoch == _shopCacheEpoch
                     && gen > _shopItemsCommittedGen && identityCurrent)
                 {

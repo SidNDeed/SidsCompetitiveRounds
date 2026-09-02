@@ -1347,11 +1347,15 @@ namespace CompetitiveRounds
         private static void RepairAfterBroadcastEdge(bool rising)
         {
             var s = S;
-            if (rising)
-            {
-                if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("broadcast-rising");
-                else s.previewGen++;
-            }
+            // [K3] BOTH edges end any live preview before the strict repair:
+            // the preview snapshot carries a saved current that its completion
+            // would otherwise restore AFTER this one-shot repair has passed —
+            // e.g. a broadcast-only track surviving into the post-broadcast
+            // queue. Restoration submits intent through Reconcile, which
+            // re-validates against the post-edge universe, so ending the
+            // preview here is sufficient to fence the snapshot.
+            if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal(rising ? "broadcast-rising" : "broadcast-falling");
+            else s.previewGen++;
             EnsureQueueCurrent();
             if (!s.current.HasValue) return;
             // [I8-residual] EnsureQueueCurrent just rebuilt against the new
@@ -1762,7 +1766,26 @@ namespace CompetitiveRounds
             if (clip == null) { KickLoad(s.current.Value); return; }
             var m = h.Main;
             if (m.clip != clip) { m.clip = clip; s.currentStarted = false; s.mainPausedByUs = false; s.currentPrematureRetried = false; }
-            if (m.isPlaying) return;
+            if (m.isPlaying && s.currentStarted)
+            {
+                // [K2] steady state — but the source may still carry the
+                // hard-silence mute from a failed Stop (fault retry path):
+                // recover it here or a "recovered" engine stays inaudible.
+                try { if (m.mute) m.mute = false; }
+                catch (Exception ex) { EnterDurableFaultNoThrow("main-unmute: " + ex.Message); }
+                return;
+            }
+            if (m.isPlaying)
+            {
+                // [K2] playing WITHOUT started-state = a deliberate restart
+                // intent (PlayTrack/Skip/Previous landed on the entry already
+                // audible and reset currentStarted). The old early-return here
+                // orphaned the state: Now Playing/seek blank, natural end
+                // restarted instead of advancing. Stop and fall through to the
+                // explicit (re)start below.
+                try { m.Stop(); }
+                catch (Exception ex) { EnterDurableFaultNoThrow("main-restart-stop: " + ex.Message); return; }
+            }
             // [J1] a STARTED source that is silent without being paused-by-us
             // belongs to TickPlayback's premature-stop classifier — never
             // blind-replay it here: Play() would re-stamp currentStartedRt
@@ -1776,6 +1799,11 @@ namespace CompetitiveRounds
                 try { m.UnPause(); }
                 catch (Exception ex) { EnterDurableFaultNoThrow("main-unpause: " + ex.Message); return; }
                 s.mainPausedByUs = false;
+                // [K9] fresh grace window: Unity can report isPlaying=false for a
+                // beat after UnPause; without a re-stamp the premature classifier
+                // would spend its one counted retry (or Fault) on that beat.
+                // Deliberately does NOT reset currentPrematureRetried.
+                s.currentStartedRt = Time.realtimeSinceStartup;
                 return;
             }
             try

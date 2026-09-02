@@ -932,7 +932,7 @@ namespace CompetitiveRounds
             );
             BroadcastCustomMusic = Config.Bind(
                 "Broadcast", "BroadcastCustomMusic", true,
-                "Broadcast seat only: play the custom album pack (all custom albums, shuffle+loop) instead of vanilla music, with the permanent on-stream credit line. Only consulted on the broadcast identity; grants nothing to players."
+                "Broadcast seat only: play the custom album pack instead of vanilla music, with the permanent on-stream credit line. Overrides SELECTION and ownership only - the seat's normal Music shuffle/loop settings still apply. Only consulted on the broadcast identity; grants nothing to players."
             );
             BroadcastTestMapSkin = Config.Bind(
                 "Broadcast", "TestMapSkin", "",
