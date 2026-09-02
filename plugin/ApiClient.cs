@@ -2110,11 +2110,13 @@ namespace CompetitiveRounds
         private static int _inventoryFetchGen;
         private static int _inventoryCommittedGen;
 
-        /// <summary>Impl review I11 (called by GameStateWatcher's identity-
-        /// transition hook): the resolved local steam id CHANGED, so both raw
-        /// caches carry the OLD identity's owned flags. Epoch first, clears
-        /// second (I10 ordering); the caller refetches for a valid new
-        /// identity itself.</summary>
+        /// <summary>Impl review I11 + r3 I10 (called by GameStateWatcher's
+        /// identity-transition hook): the resolved local steam id CHANGED —
+        /// or resolved for the FIRST time, which is equally an epoch edge (an
+        /// anonymous pre-resolution response must not survive as the resolved
+        /// user's view). Both raw caches may carry stale identity data. Epoch
+        /// first, clears second (I10 ordering); the caller refetches for a
+        /// valid new identity itself.</summary>
         internal static void OnLocalIdentityChanged()
         {
             _shopCacheEpoch++;

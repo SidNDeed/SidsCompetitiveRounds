@@ -242,6 +242,13 @@
   <!-- SkipCopyToPlugins=true builds WITHOUT installing to the local BepInEx —
        a compile-verify of in-progress work must not live-deploy to this
        machine (every Release build otherwise IS an install; learning #269). -->
+  <PropertyGroup>
+    <!-- impl-r4 K4: the dev-copy destination derives from the SAME source
+         authority runtime compiles (MusicAssets.ASSET_REVISION) - a revision
+         bump can no longer strand dev seats copying into a tree the DLL never
+         searches. MSBuild property functions parse it straight from source. -->
+    <MusicAssetRevision>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\MusicAssets.cs')), 'ASSET_REVISION\s*=\s*&quot;([a-z0-9]+)&quot;').Groups[1].Value)</MusicAssetRevision>
+  </PropertyGroup>
   <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(SkipCopyToPlugins)' != 'true'">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cards" />
@@ -257,22 +264,22 @@
     <Copy SourceFiles="@(CosmeticArtToCopy)"
           DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\cosmetics"
           SkipUnchangedFiles="true" />
-    <!-- Music tier trees (MusicAssets.ASSET_REVISION = ar1 — this literal and
-         that const must move together). MakeDirs are conditioned on the item
-         groups so a music-less checkout never plants empty tier dirs for
-         MusicAssets to judge invalid. -->
-    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\previews"
+    <!-- Music tier trees: the revision segment is $(MusicAssetRevision),
+         parsed from MusicAssets.cs above (impl-r4 K4). MakeDirs are
+         conditioned on the item groups so a music-less checkout never plants
+         empty tier dirs for MusicAssets to judge invalid. -->
+    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\music\$(MusicAssetRevision)\previews"
              Condition="'@(MusicPreviewsToCopy)' != ''" />
-    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\full"
+    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\music\$(MusicAssetRevision)\full"
              Condition="'@(MusicFullToCopy)' != ''" />
     <Copy SourceFiles="@(MusicPreviewsToCopy)"
-          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\previews"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\$(MusicAssetRevision)\previews"
           SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(MusicFullToCopy)"
-          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1\full"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\$(MusicAssetRevision)\full"
           SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(MusicManifestToCopy)"
-          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\ar1"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\music\$(MusicAssetRevision)"
           SkipUnchangedFiles="true"
           Condition="'@(MusicManifestToCopy)' != ''" />
     <Message Text="Copied $(AssemblyName).dll to BepInEx plugins" Importance="high" />
@@ -280,7 +287,7 @@
              Condition="Exists('$(OutputPath)comp-rounds-fonts')" />
     <Message Text="Copied @(CardArtToCopy->Count()) card art files to BepInEx plugins" Importance="high" />
     <Message Text="Copied @(CosmeticArtToCopy->Count()) cosmetic art files to BepInEx plugins" Importance="high" />
-    <Message Text="Copied @(MusicPreviewsToCopy->Count()) music preview files + @(MusicFullToCopy->Count()) full tracks to BepInEx plugins (ar1)"
+    <Message Text="Copied @(MusicPreviewsToCopy->Count()) music preview files + @(MusicFullToCopy->Count()) full tracks to BepInEx plugins ($(MusicAssetRevision))"
              Importance="high"
              Condition="'@(MusicFullToCopy)' != ''" />
   </Target>

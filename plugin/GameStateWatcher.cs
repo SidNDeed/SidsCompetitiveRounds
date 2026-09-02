@@ -4009,10 +4009,15 @@ namespace CompetitiveRounds
         // A→unknown→B) re-arms entitlements without waiting for a tab open.
         private static bool _identityRefetchPending;
 
-        /// <summary>Impl review I11: fires the identity-change hook on every
-        /// ACTUAL resolved-id transition (previous id resolved, new one
-        /// differs — a first resolution is not a change; startup flows own
-        /// its fetches). Ownership and the raw shop/inventory caches are
+        /// <summary>Impl review I11 + r3 I10: fires the identity-change hook on
+        /// every ACTUAL resolved-id transition (previous id resolved, new one
+        /// differs), AND — deliberately, r4 L1: do not "simplify" this away as
+        /// duplicate startup work — treats FIRST resolution (unknown→resolved)
+        /// as an epoch edge too: the cache epoch advances and an authenticated
+        /// refetch fires, so an anonymous pre-resolution shop response can
+        /// never survive as the resolved user's raw-cache view. First
+        /// resolution clears no entitlements (anonymous snapshots never enter
+        /// the store). Ownership and the raw shop/inventory caches are
         /// identity-scoped: identity B (or a back-to-unknown fallback) must
         /// not inherit A's albums, and the entitlement floor advance makes an
         /// A→B→A round trip reject every response dispatched before the

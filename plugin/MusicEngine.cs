@@ -1795,7 +1795,11 @@ namespace CompetitiveRounds
             // owned silence with suppression held is the forbidden state.
             if (s.mainPausedByUs && s.currentStarted)
             {
-                try { m.mute = false; } catch { }   // undo any hard-silence fallback before resuming
+                // [K2 condition] the unmute is REQUIRED, not best-effort: a
+                // swallowed throw here would publish Custom ownership with a
+                // hard-silenced source — the forbidden muted-owned state.
+                try { m.mute = false; }
+                catch (Exception ex) { EnterDurableFaultNoThrow("main-resume-unmute: " + ex.Message); return; }
                 try { m.UnPause(); }
                 catch (Exception ex) { EnterDurableFaultNoThrow("main-unpause: " + ex.Message); return; }
                 s.mainPausedByUs = false;
@@ -1806,9 +1810,12 @@ namespace CompetitiveRounds
                 s.currentStartedRt = Time.realtimeSinceStartup;
                 return;
             }
+            // [K2 condition] required unmute, same rule as the resume branch:
+            // fault and return rather than start a source that may be muted.
+            try { m.mute = false; }
+            catch (Exception ex) { EnterDurableFaultNoThrow("main-start-unmute: " + ex.Message); return; }
             try
             {
-                try { m.mute = false; } catch { }   // undo any hard-silence fallback before (re)starting
                 float pos = s.resumePositionSec;
                 try { m.time = (pos > 0.5f && pos < clip.length - 1f) ? pos : 0f; } catch { }
                 m.Play();
