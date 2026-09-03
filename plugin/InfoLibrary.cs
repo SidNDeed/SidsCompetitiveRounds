@@ -1254,7 +1254,7 @@ A refund returns exactly your stake:
 
 - Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.
 - Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.
-- Spectator seats track nothing and report nothing.
+- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)
 
 <color=#FFD94D><b>RANKED OR CASUAL</b></color>
 

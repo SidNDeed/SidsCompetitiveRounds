@@ -5517,6 +5517,27 @@ namespace CompetitiveRounds
         /// on a tab and optionally scroll the Shop list, so a seat with nobody at
         /// it can screenshot every tab. Gated by the caller on the broadcast
         /// identity; no state beyond what a click would set.</summary>
+        /// <summary>lag-332 W6-A test lever (broadcast seat only, via
+        /// [Broadcast] TestOpenTab "16:click:&lt;what&gt;:&lt;process nonce&gt;" — the
+        /// nonce is logged once at startup and a value present at startup never
+        /// replays): replays one Music-tab click through MusicUiCall — the
+        /// identical path a real click takes, so the engine's admission snapshot
+        /// and click-decode rule apply.</summary>
+        internal static void DevMusicClick(string what)
+        {
+            if (!BroadcastMode.IsBroadcastIdentity) return;
+            switch (what)
+            {
+                case "prepare": MusicUiCall("prepare", () => { }); break;
+                case "play-pause": MusicUiCall("play-pause", MusicEngine.PlayPause); break;
+                case "skip": MusicUiCall("skip", MusicEngine.Skip); break;
+                case "prev": MusicUiCall("prev", MusicEngine.PlayPrevious); break;
+                case "stop": MusicUiCall("stop", MusicEngine.Stop); break;
+                case "use-vanilla": MusicUiCall("use-vanilla", MusicEngine.UseVanilla); break;
+                default: Plugin.Log.LogInfo($"[MUSIC-UI] DevMusicClick: unknown '{what}'"); break;
+            }
+        }
+
         internal static void DevOpenTab(int idx, float shopScroll, string infoArticleKey = null)
         {
             try
@@ -9839,7 +9860,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                                 dirty = true;
                                 return;
                             }
+                            // Key-bound (r2 MEDIUM 10 / r3 MEDIUM 1): this click may decode ONLY its own preview.
+                            var token = MusicEngine.BeginClickAdmission("shop-preview", "p:" + trCap.albumSku + "/" + trCap.trackIdx);   // entry admission (r2 MEDIUM 11)
                             MusicEngine.TogglePreview(trCap.albumSku, trCap.trackIdx);
+                            MusicEngine.ClickDecodeOpportunity(token);
                             dirty = true;   // repaint Preview <-> Stop
                         }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[SHOP-MUSIC] preview: {ex.Message}"); }
@@ -11129,6 +11153,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object txtMusicMode, txtMusicNow, txtMusicDlStatus;
         private static GameObject musicStatusRow, musicRetryBtn;
         private static GameObject musicPlayBtn, musicLoopBtn, musicShuffleBtn;
+        private static GameObject musicPrepareBtn;       // v6 §2.1 explicit decode affordance
+        private static object musicPrepareBtnTxt;
         private static object musicSeekElapsed, musicSeekTotal;
         private static UIFactory.SliderHandle musicSeekSlider, musicVolSlider;
         private static float musicSeekPollAt;
@@ -11166,7 +11192,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
          * (#158 — CreateButton already guarded the click). */
         private static void MusicUiCall(string what, Action a)
         {
+            // lag-332 v6 §2.1 + impl-review r2 MEDIUM 10/11: the admission decision
+            // is taken at ENTRY (before the action mutates selection/playback),
+            // and only PREPARATION actions may decode (the engine's allowlist).
+            var token = MusicEngine.BeginClickAdmission(what);   // r3 MEDIUM 1: action-bound, one-shot
             try { a(); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] {what}: {ex.Message}"); }
+            try { MusicEngine.ClickDecodeOpportunity(token); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] decode after {what}: {ex.Message}"); }
             dirty = true;
         }
 
@@ -11339,6 +11370,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var musVanBtn = UIFactory.CreateButton("MusVan", rowC.transform, "Use vanilla music", 13f, C_WHITE,
                 new Color(0.3f, 0.3f, 0.5f, 0.9f), () => MusicUiCall("use-vanilla", MusicEngine.UseVanilla), sizeDelta: new Vector2(170, 26));
             UIFactory.AddLE(musVanBtn, prefW: 170, prefH: 26, flexW: 0, flexH: 0);
+            // lag-332 v6 §2.1: the Prepare affordance. Decoding a downloaded
+            // track is a 320-700 ms main-thread stall and happens ONLY inside an
+            // explicit menu click (a Music-tab control, or the Shop's music
+            // Preview — v6.1 note 1); this button is the explicit one.
+            // Hidden when every desired track is resident (RefreshMusicTab).
+            musicPrepareBtn = UIFactory.CreateButton("MusPrep", rowC.transform, "Prepare music", 13f, C_WHITE,
+                new Color(0.55f, 0.4f, 0.2f, 0.95f), () => MusicUiCall("prepare", () => { }), sizeDelta: new Vector2(230, 26));
+            UIFactory.AddLE(musicPrepareBtn, prefW: 230, prefH: 26, flexW: 0, flexH: 0);
+            musicPrepareBtnTxt = UIFactory.GetButtonText(musicPrepareBtn);
+            musicPrepareBtn.SetActive(false);
             var csp1 = new GameObject("S"); csp1.transform.SetParent(rowC.transform, false); csp1.AddComponent<RectTransform>(); UIFactory.AddLE(csp1, flexW: 1);
             // Centered cluster: shuffle | stop | prev | play-pause | next | loop.
             // Shuffle/loop tint (green = on) painted in RefreshMusicTab.
@@ -11414,6 +11455,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     try
                     {
                         if (string.IsNullOrEmpty(h.albumSku)) return;
+                        // r3 MEDIUM 1: selection toggles never decode (v6.1 note 12 amended) — Prepare/Play do.
                         MusicEngine.SetAlbumSelected(h.albumSku, !MusicEngine.IsAlbumEnabled(h.albumSku));
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] album toggle: {ex.Message}"); }
@@ -11439,6 +11481,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     try
                     {
                         if (string.IsNullOrEmpty(t.albumSku) || t.menuOnly) return;
+                        // r3 MEDIUM 1: selection toggles never decode (v6.1 note 12 amended) — Prepare/Play do.
                         MusicEngine.SetSelected(t.albumSku, t.trackIdx, !MusicEngine.IsSelected(t.albumSku, t.trackIdx));
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] select: {ex.Message}"); }
@@ -11505,7 +11548,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     try
                     {
                         if (string.IsNullOrEmpty(t.albumSku) || t.menuOnly) return;
+                        // Key-bound (r2 MEDIUM 10 / r3 MEDIUM 1): Play prepares exactly the track it plays.
+                        var token = MusicEngine.BeginClickAdmission("play-track", t.albumSku + "/" + t.trackIdx);   // entry admission (r2 MEDIUM 11)
                         MusicEngine.PlayTrack(t.albumSku, t.trackIdx);
+                        MusicEngine.ClickDecodeOpportunity(token);
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] play: {ex.Message}"); }
                     dirty = true;
@@ -11653,6 +11699,21 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             try { loop = MusicEngine.LoopEnabled; shuf = MusicEngine.ShuffleEnabled; } catch { }
             if (musicLoopBtn != null) UIFactory.SetImageColor(musicLoopBtn, loop ? MUS_ICON_ON : MUS_ICON_OFF);
             if (musicShuffleBtn != null) UIFactory.SetImageColor(musicShuffleBtn, shuf ? MUS_ICON_ON : MUS_ICON_OFF);
+            // v6 §2.1 Prepare affordance: shown while a desired track is
+            // downloading or downloaded-undecoded; clickable only when a
+            // decode is actually possible on the next click.
+            if (musicPrepareBtn != null)
+            {
+                string prep = null; bool prepClickable = false;
+                try { prep = MusicEngine.PrepareStateLine(out prepClickable); } catch { }
+                musicPrepareBtn.SetActive(!string.IsNullOrEmpty(prep));
+                if (!string.IsNullOrEmpty(prep))
+                {
+                    if (musicPrepareBtnTxt != null) UIFactory.SetTextRaw(musicPrepareBtnTxt, prep);
+                    UIFactory.SetImageColor(musicPrepareBtn, prepClickable ? new Color(0.55f, 0.4f, 0.2f, 0.95f) : new Color(0.3f, 0.3f, 0.3f, 0.9f));
+                    SetButtonInteractable(musicPrepareBtn, prepClickable);   // r6 LOW 4: the tint is not a promise — the button really disables
+                }
+            }
             // Volume: the persisted config value IS the state (the contract's
             // SetVolumePercent writes it); silent so the repaint can't re-seek
             // the engine's volume path.
@@ -11822,7 +11883,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             string sig;
             try
             {
-                sig = $"{MusicEngine.Mode}|{MusicEngine.IsPlayingNow}|{MusicEngine.NowPlayingLine()}|{MusicAssets.TierStatusLine()}|{MusicAssets.RetryAvailable}|{(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100)}|{MusicEngine.LoopEnabled}|{MusicEngine.ShuffleEnabled}";
+                sig = $"{MusicEngine.Mode}|{MusicEngine.IsPlayingNow}|{MusicEngine.NowPlayingLine()}|{MusicAssets.TierStatusLine()}|{MusicAssets.RetryAvailable}|{(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100)}|{MusicEngine.LoopEnabled}|{MusicEngine.ShuffleEnabled}|{MusicEngine.ClipStateGeneration}";   // r5 LOW 9: Prepare affordance follows clip state
             }
             catch { return; }
             if (sig != musicTabSig) { musicTabSig = sig; dirty = true; }
@@ -14549,7 +14610,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         // uses the matching red, mirroring how each side reads in the cards/opp panel.
         private static string BuildFpsTag(ApiClient.MatchHistoryEntry m){if(m==null)return"";int p=m.player_fps_avg,o=m.opponent_fps_avg;if(p<=0&&o<=0)return"";string pStr=p>0?p.ToString():"-";string oStr=o>0?o.ToString():"-";return$"<color=#888>FPS:</color> <color=#99B3E6>{pStr}</color> <color=#888>/</color> <color=#E69988>{oStr}</color>";}
         // July 22 item 3: latency is its OWN tag (separate hover graph).
-        private static string BuildPingTag(ApiClient.MatchHistoryEntry m){if(m==null)return"";int pp=m.player_ping_avg,op=m.opponent_ping_avg;if(pp<=0&&op<=0)return"";string a=pp>0?pp.ToString():"-";string b=op>0?op.ToString():"-";return$"<color=#888>Ping:</color> <color=#99B3E6>{a}</color> <color=#888>/</color> <color=#E69988>{b}</color><color=#888>ms</color>";}
+        private static string BuildPingTag(ApiClient.MatchHistoryEntry m){if(m==null)return"";int pp=m.player_ping_avg,op=m.opponent_ping_avg;if(pp<=0&&op<=0)return"";string a=pp>0?pp.ToString():"-";string b=op>0?op.ToString():"-";/* lag-332 W3-a (v6 §3): stored-pair one-way estimate ONLY when BOTH stored inputs are independently 1..3000 (the request schema admits up to 30000, which would print a plausible-looking nonsense estimate); checked arithmetic; labelled as peer-reported input. */string est="";if(pp>=1&&pp<=3000&&op>=1&&op<=3000){long e=checked(((long)pp+op)/2);est=$" <color=#888>{I18n.TrF("replica age est. {0} ms (peer-reported)", e)}</color>";}return$"<color=#888>Ping:</color> <color=#99B3E6>{a}</color> <color=#888>/</color> <color=#E69988>{b}</color><color=#888>ms</color>{est}";}
 
         /// <summary>Aug 6 item 4 — turn a CUMULATIVE damage timeline into a
         /// per-interval DPS series the hover-graph parser can plot.
@@ -21411,6 +21472,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 var property = UIFactory.tButton?.GetProperty(
                     "interactable", BindingFlags.Public | BindingFlags.Instance);
                 property?.SetValue(component, interactable);
+                // r7 LOW 2: CreateButton also installs the raw-polling ClickHandler
+                // (#141), which never consults Button.interactable — disable it too,
+                // or a "disabled" control stays clickable through the second path.
+                var raw = button?.GetComponent<ClickHandler>();
+                if (raw != null) raw.enabled = interactable;
             }
             catch { }
         }

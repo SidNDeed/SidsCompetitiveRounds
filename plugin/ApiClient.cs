@@ -5600,6 +5600,12 @@ namespace CompetitiveRounds
             sb.Append($"\"local_ping_timeline\":\"{Escape(ClampTimeline(localPingTimeline))}\",");
             sb.Append($"\"opp_ping_timeline\":\"{Escape(ClampTimeline(oppPingTimeline))}\",");
             sb.Append($"\"opp_ping_avg\":{oppPingAvg},");
+            // lag-332 W1 (design v6 §1.4) — the reporter seat's 24 net integers
+            // + worst-frame tag (advisory, NOT in the HMAC canonical, which
+            // stays exactly 7 fields). Reporter-only: the server stores them on
+            // the authenticated reporter's seat and leaves the other seat NULL.
+            try { NetworkSeatTelemetry.AppendReportFields(sb, Escape); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[NET-SEAT] report fields skipped: {ex.Message}"); }
             // July 22 item 1 — hit/block pair timelines (1024-char columns) +
             // point-time stamps (512). Same digit/comma/colon-only wire shape.
             sb.Append($"\"local_hit_timeline\":\"{Escape(ClampTimeline(localHitTimeline, 1024))}\",");
@@ -8293,6 +8299,10 @@ namespace CompetitiveRounds
                     NativeUI.MarkDirty();
                 }));
         }
+
+        /// <summary>The report builder's JSON string escape, exposed for the
+        /// seat instrument's frozen report fragment (NetworkSeatTelemetry).</summary>
+        internal static string EscapeForJson(string s) => Escape(s ?? "");
 
         /// <summary>Split a `[{..},{..}]` history response into per-match object
         /// slices, STRING-AWARE (learning #156): opponent display names are
@@ -19997,6 +20007,12 @@ namespace CompetitiveRounds
         {
             queueRequestInFlightUntil = Time.realtimeSinceStartup + 25f;
         }
+
+        /// <summary>lag-332 design v6 §2.1: the same 25 s enrollment window,
+        /// exposed read-only for the music admission snapshot — a queue/lobby
+        /// JOIN POST is join intent from the moment it is sent, several ticks
+        /// before any status flag flips on the response.</summary>
+        internal static bool EnrollmentTransportActive => queueRequestInFlightUntil > Time.realtimeSinceStartup;
 
         /// <summary>True when the client holds ANY fighter commitment a
         /// spectate session would race: an in-flight queue lock, a pending

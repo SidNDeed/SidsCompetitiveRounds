@@ -90,6 +90,14 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>lag-332 design v6 §2.1: the director is past Idle or holds
+        /// an acquisition ticket — broadcast join intent for the music
+        /// admission snapshot. Read-only; the state machine is untouched.</summary>
+        internal static bool AcquisitionBusy
+        {
+            get { try { return _state != State.Idle || _ticket != null; } catch { return true; } }
+        }
+
         // ── §2c fence (b): fighter-path funnels ──────────────────────────
 
         /// <summary>One identity check for every fighter-path funnel (§2c):

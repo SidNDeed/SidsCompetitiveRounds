@@ -152,6 +152,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
+        internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
@@ -978,6 +979,10 @@ namespace CompetitiveRounds
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
                 "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
+            );
+            BroadcastTestGstatsSentinel = Config.Bind(
+                "Broadcast", "TestGstatsSentinel", "",
+                "Broadcast seat only: set to any NEW value to run the cr_gstats W1-sentinel self-test once (design v6 section 1); the result is logged as [GSTATS-SENTINEL] PASS/FAIL. A value present at startup never runs."
             );
             BroadcastTestMapSkinTourSeconds = Config.Bind(
                 "Broadcast", "TestMapSkinTourSeconds", 0,
@@ -1974,14 +1979,39 @@ namespace CompetitiveRounds
             return 0;
         }
 
+        // design v6 §1 / r7 LOW 9: [Broadcast] TestGstatsSentinel — one run per
+        // distinct NEW value; the value present at startup is the baseline and
+        // never runs (the same rule as the click directive). Reads the cfg the
+        // TestOpenTab tick reloads every 2 s.
+        private static string _lastTestGstatsSentinel;
+        private void TickTestGstatsSentinel()
+        {
+            if (Plugin.BroadcastTestGstatsSentinel == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestGstatsSentinel.Value ?? "").Trim();
+            if (_lastTestGstatsSentinel == null) { _lastTestGstatsSentinel = raw; return; }
+            if (raw == _lastTestGstatsSentinel) return;
+            _lastTestGstatsSentinel = raw;
+            if (raw.Length == 0) return;
+            try { GameStateWatcher.DevGstatsSentinelTest(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[GSTATS-SENTINEL] FAIL: lever threw {ex.Message}"); }
+        }
+
         // Broadcast-seat UI verification lever: "tab[:shopScroll]". Applied once
         // per distinct value (re-applied after a change), identity-gated.
         private static string _lastTestOpenTab;
         private static float _testOpenTabAt = -1f;
         private static float _testOpenTabCfgReloadAt = -1f;
+        // Per-process nonce for the click directive (impl-review r1 HIGH 1).
+        private static readonly string _testLeverNonce = Guid.NewGuid().ToString("N").Substring(0, 6);
+        private static bool _testLeverNonceLogged;
+        // r6 LOW 9: the cfg value present when this process first looked is the
+        // STARTUP BASELINE — a click directive equal to it is inert whatever nonce
+        // it carries (a 6-hex nonce collides 1 in 16.7M; the baseline closes even that).
+        private static string _testLeverBaseline;
         private void TickTestOpenTab()
         {
             if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;
+            if (!_testLeverNonceLogged) { _testLeverNonceLogged = true; Plugin.Log.LogInfo($"[UI] TestOpenTab click nonce for this process: {_testLeverNonce}"); }
             // Re-read the cfg file every 2s so the lever can be driven without
             // a relaunch (Config.Bind values never track disk edits, #190).
             if (Time.realtimeSinceStartup - _testOpenTabCfgReloadAt > 2f)
@@ -1990,6 +2020,7 @@ namespace CompetitiveRounds
                 try { Plugin.ConfigFileForLevers?.Reload(); } catch { }
             }
             string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
+            if (_testLeverBaseline == null) _testLeverBaseline = raw;
             if (raw == _lastTestOpenTab) return;
             if (Time.realtimeSinceStartup < 6f) return;   // let the menu and the overlay's page build settle
             if (_testOpenTabAt < 0f) { _testOpenTabAt = Time.realtimeSinceStartup; return; }
@@ -2022,10 +2053,45 @@ namespace CompetitiveRounds
                     int.TryParse(parts[1].Trim().Substring(3), out shopCat);
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
-            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"} shopCat {shopCat}");
+            // lag-332 W6-A verification: "16:click:<what>:<process nonce>" replays
+            // ONE Music-tab click (prepare / play-pause / skip / prev / stop /
+            // use-vanilla) through the same callback path a real click uses —
+            // the engine's menu-admission snapshot still gates any decode. Tab 16
+            // only; the nonce is logged once at startup; a value present at
+            // startup is the baseline and never replays.
+            // Broadcast seat only, like every lever here: synthetic mouse input
+            // cannot reach the overlay (#420), so this is how the seat proves
+            // the click-decode rule with nobody at it.
+            string musicClick = null;
+            if (idx == 16 && parts.Length > 2 && string.Equals(parts[1].Trim(), "click", StringComparison.OrdinalIgnoreCase))
+            {
+                // r5 LOW 11: a Music click replays only on the Music tab (16) — the
+                // Shop's real Preview callback is the only other decode path.
+                // r6 LOW 9: exact token, and a pre-start value never replays.
+                if (string.Equals(raw, _testLeverBaseline, StringComparison.Ordinal))
+                {
+                    Plugin.Log.LogInfo("[UI] TestOpenTab click directive ignored: present at startup (baseline)");
+                    parts = new string[] { parts[0] };
+                }
+                // impl-review r1 HIGH 1: a PERSISTED click directive fired at the
+                // bot's relaunch and decoded a track with nobody at the seat —
+                // the exact "config value consumed after startup" hazard the
+                // design forbids. A click replay now requires THIS process's
+                // nonce as the 4th field ("16:click:prepare:<nonce>"), logged
+                // once at startup; a value written before launch cannot carry
+                // it (1-in-16.7M collision aside), and the startup baseline
+                // above makes any pre-start directive inert regardless.
+                string nonce = parts.Length > 3 ? parts[3].Trim() : "";
+                if (string.Equals(nonce, _testLeverNonce, StringComparison.Ordinal))
+                    musicClick = parts[2].Trim().ToLowerInvariant();
+                else
+                    Plugin.Log.LogInfo($"[UI] TestOpenTab click directive ignored: nonce mismatch (this process: {_testLeverNonce})");
+            }
+            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"} shopCat {shopCat} musicClick {musicClick ?? "-"}");
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
+            if (!string.IsNullOrEmpty(musicClick)) NativeUI.DevMusicClick(musicClick);
         }
 
         // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──
@@ -2479,6 +2545,7 @@ namespace CompetitiveRounds
             // Map-skin test lever tour / auto-Sandbox (broadcast identity only).
             try { ArtHandlerNextArtPatch.TickTestLever(); } catch { }
             try { TickTestOpenTab(); } catch { }
+            try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }
@@ -3698,6 +3765,11 @@ namespace CompetitiveRounds
         public void OnConnectedToMaster() { }
         public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
         {
+            // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
+            // OnLeftRoom must still close the room/game telemetry — first
+            // statement, before any early return below. Idempotent: with no
+            // room active it only re-bases per-room state.
+            try { NetworkReplicaDiagnostics.OnRoomLeft(); } catch { }
             // Broadcast r2 find 1: a full disconnect terminally resolves any
             // in-flight spectate JoinRoom op (the socket is gone; nothing can
             // deliver it). Must run before the diag early-return below.

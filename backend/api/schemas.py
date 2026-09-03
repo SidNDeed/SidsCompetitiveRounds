@@ -197,6 +197,35 @@ class MatchReport(BaseModel):
     opp_deaths_boundary: int | None = Field(None, ge=0, le=1000)
     opp_deaths_own_bullet: int | None = Field(None, ge=0, le=1000)
 
+    # Reporter-seat network observations (Release A W1). These are advisory,
+    # outside every frozen HMAC canonical, and absent on older clients. The
+    # submit path stores them only on the authenticated reporter's p1/p2 seat.
+    local_net_writes: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_unchanged: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_move_raise_attempted: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_move_raise_accepted: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_resent_reliable: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_discarded: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_crc_loss: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_queued_out_max: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_queued_in_max: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_fragment_cmds: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_view_update_faults: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_hitch50: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_hitch200: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_worst_frame_ms: int | None = Field(None, ge=0, le=3_600_000)
+    local_obs_gap300: int | None = Field(None, ge=0, le=1_000_000)
+    local_obs_gap750: int | None = Field(None, ge=0, le=1_000_000)
+    local_obs_gap1500: int | None = Field(None, ge=0, le=1_000_000)
+    local_obs_max_gap_ms: int | None = Field(None, ge=0, le=3_600_000)
+    local_obs_excess150: int | None = Field(None, ge=0, le=1_000_000)
+    local_obs_max_excess_ms: int | None = Field(None, ge=0, le=3_600_000)
+    local_obs_payload_equal_gaps: int | None = Field(None, ge=0, le=1_000_000)
+    local_obs_receiver_frame_gaps: int | None = Field(None, ge=0, le=1_000_000)
+    local_obs_phoenix_intervals: int | None = Field(None, ge=0, le=1_000_000)
+    local_obs_batches: int | None = Field(None, ge=0, le=1_000_000)
+    local_net_worst_frame_tags: str | None = Field(None, max_length=48)
+
 
 # ── Responses ──────────────────────────────────────────────────
 

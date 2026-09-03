@@ -4370,6 +4370,47 @@ def verify_hmac(report: MatchReport) -> bool:
     return match
 
 
+_MATCH_NET_SEAT_FIELD_MAP = (
+    ("net_writes", "local_net_writes"),
+    ("net_unchanged", "local_net_unchanged"),
+    ("net_move_raise_attempted", "local_net_move_raise_attempted"),
+    ("net_move_raise_accepted", "local_net_move_raise_accepted"),
+    ("net_resent_reliable", "local_net_resent_reliable"),
+    ("net_discarded", "local_net_discarded"),
+    ("net_crc_loss", "local_net_crc_loss"),
+    ("net_queued_out_max", "local_net_queued_out_max"),
+    ("net_queued_in_max", "local_net_queued_in_max"),
+    ("net_fragment_cmds", "local_net_fragment_cmds"),
+    ("net_view_update_faults", "local_net_view_update_faults"),
+    ("net_hitch50", "local_net_hitch50"),
+    ("net_hitch200", "local_net_hitch200"),
+    ("net_worst_frame_ms", "local_net_worst_frame_ms"),
+    ("obs_gap300", "local_obs_gap300"),
+    ("obs_gap750", "local_obs_gap750"),
+    ("obs_gap1500", "local_obs_gap1500"),
+    ("obs_max_gap_ms", "local_obs_max_gap_ms"),
+    ("obs_excess150", "local_obs_excess150"),
+    ("obs_max_excess_ms", "local_obs_max_excess_ms"),
+    ("obs_payload_equal_gaps", "local_obs_payload_equal_gaps"),
+    ("obs_receiver_frame_gaps", "local_obs_receiver_frame_gaps"),
+    ("obs_phoenix_intervals", "local_obs_phoenix_intervals"),
+    ("obs_batches", "local_obs_batches"),
+    ("net_worst_frame_tags", "local_net_worst_frame_tags"),
+)
+
+
+def _match_net_seat_values(report: MatchReport, reporter_is_p1: bool) -> dict:
+    """Orient W1's reporter-local values without inventing peer evidence."""
+    reporter_seat = "p1" if reporter_is_p1 else "p2"
+    values = {}
+    for seat in ("p1", "p2"):
+        for column_suffix, request_field in _MATCH_NET_SEAT_FIELD_MAP:
+            values[f"{seat}_{column_suffix}"] = (
+                getattr(report, request_field) if seat == reporter_seat else None
+            )
+    return values
+
+
 # ── XP System ──────────────────────────────────────────────────
 
 def xp_for_level(level: int) -> int:
@@ -5786,6 +5827,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # ADVISORY, outside the frozen 7-field HMAC canonical (hard rule #5).
         p1_end_stats=_clean_end_stats(report.player1.end_stats),
         p2_end_stats=_clean_end_stats(report.player2.end_stats),
+        **_match_net_seat_values(report, reporter_is_p1),
     )
     db.add(match)
     await db.flush()  # Get match.id
@@ -6736,6 +6778,62 @@ async def search_players(
     ]}
 
 
+async def _viewer_h2h_counts(db, viewer_id, player_id):
+    """Viewer-vs-player head-to-head counters for GET /api/v1/players/{steam_id} (the stats endpoint).
+
+    Its own function so the semantics are BEHAVIOURALLY testable (lag-332
+    r1 MEDIUM 17 / LOW 18 / r7 LOW 7): an admin-invalidated match never
+    counts, nor does a historical team_/ovt_/ffa_ misroute (a NULL room
+    counts); a series counts only when completed, not invalidated and DECIDED
+    (>= 2 wins on a side), and a completed tie counts for neither side;
+    everything is oriented to the VIEWER. Returns
+    (ranked_w, ranked_l, casual_w, casual_l, series_w, series_l).
+    """
+    h2h_q = text("""
+        SELECT
+            COUNT(*) FILTER (WHERE m.is_ranked AND m.winner_id = :vid) AS ranked_w,
+            COUNT(*) FILTER (WHERE m.is_ranked AND m.winner_id = :pid) AS ranked_l,
+            COUNT(*) FILTER (WHERE NOT m.is_ranked AND m.winner_id = :vid) AS casual_w,
+            COUNT(*) FILTER (WHERE NOT m.is_ranked AND m.winner_id = :pid) AS casual_l
+          FROM matches m
+         WHERE ((m.player1_id = :vid AND m.player2_id = :pid)
+             OR (m.player1_id = :pid AND m.player2_id = :vid))
+           AND m.invalidated_at IS NULL
+           AND (m.photon_room_id IS NULL OR (
+                   LEFT(m.photon_room_id, 5) <> 'team_'
+               AND LEFT(m.photon_room_id, 4) <> 'ovt_'
+               AND LEFT(m.photon_room_id, 4) <> 'ffa_'))
+    """)
+    ranked_w = ranked_l = casual_w = casual_l = 0
+    r = (await db.execute(h2h_q, {"vid": viewer_id, "pid": player_id})).mappings().first()
+    if r:
+        ranked_w = int(r["ranked_w"] or 0)
+        ranked_l = int(r["ranked_l"] or 0)
+        casual_w = int(r["casual_w"] or 0)
+        casual_l = int(r["casual_l"] or 0)
+    # Completed BO3 ranked series between the pair. p1_series_wins/p2 are
+    # stored in player1/player2 order; map to the viewer side.
+    sq = text("""
+        SELECT rs.player1_id AS p1, rs.p1_series_wins AS p1w, rs.p2_series_wins AS p2w
+          FROM ranked_series rs
+         WHERE rs.status = 'completed'
+           AND rs.invalidated_at IS NULL
+           AND ((rs.player1_id = :vid AND rs.player2_id = :pid)
+             OR (rs.player1_id = :pid AND rs.player2_id = :vid))
+           AND (rs.p1_series_wins >= 2 OR rs.p2_series_wins >= 2)
+    """)
+    series_w = series_l = 0
+    for s in (await db.execute(sq, {"vid": viewer_id, "pid": player_id})).mappings().all():
+        # r1 LOW 18: ties (a completed 2-2 row) count for neither side.
+        vw = s["p1w"] if s["p1"] == viewer_id else s["p2w"]
+        pw = s["p2w"] if s["p1"] == viewer_id else s["p1w"]
+        if vw > pw:
+            series_w += 1
+        elif vw < pw:
+            series_l += 1
+    return ranked_w, ranked_l, casual_w, casual_l, series_w, series_l
+
+
 @app.get("/api/v1/players/{steam_id}", response_model=PlayerStatsResponse, tags=["Players"])
 async def get_player_stats(
     steam_id: str,
@@ -7208,39 +7306,8 @@ async def get_player_stats(
             select(Player.id).where(Player.steam_id == viewer_steam_id)
         )).scalar_one_or_none()
         if viewer_row is not None:
-            h2h_q = text("""
-                SELECT
-                    COUNT(*) FILTER (WHERE m.is_ranked AND m.winner_id = :vid) AS ranked_w,
-                    COUNT(*) FILTER (WHERE m.is_ranked AND m.winner_id = :pid) AS ranked_l,
-                    COUNT(*) FILTER (WHERE NOT m.is_ranked AND m.winner_id = :vid) AS casual_w,
-                    COUNT(*) FILTER (WHERE NOT m.is_ranked AND m.winner_id = :pid) AS casual_l
-                  FROM matches m
-                 WHERE ((m.player1_id = :vid AND m.player2_id = :pid)
-                     OR (m.player1_id = :pid AND m.player2_id = :vid))
-            """)
-            r = (await db.execute(h2h_q, {"vid": viewer_row, "pid": player.id})).mappings().first()
-            if r:
-                h2h_ranked_w = int(r["ranked_w"] or 0)
-                h2h_ranked_l = int(r["ranked_l"] or 0)
-                h2h_casual_w = int(r["casual_w"] or 0)
-                h2h_casual_l = int(r["casual_l"] or 0)
-            # Completed BO3 ranked series between the pair. p1_series_wins/p2
-            # are stored in player1/player2 order; map to the viewer side.
-            sq = text("""
-                SELECT rs.player1_id AS p1, rs.p1_series_wins AS p1w, rs.p2_series_wins AS p2w
-                  FROM ranked_series rs
-                 WHERE rs.status = 'completed'
-                   AND ((rs.player1_id = :vid AND rs.player2_id = :pid)
-                     OR (rs.player1_id = :pid AND rs.player2_id = :vid))
-                   AND (rs.p1_series_wins >= 2 OR rs.p2_series_wins >= 2)
-            """)
-            for s in (await db.execute(sq, {"vid": viewer_row, "pid": player.id})).mappings().all():
-                if s["p1"] == viewer_row:
-                    if s["p1w"] > s["p2w"]: h2h_series_w += 1
-                    else: h2h_series_l += 1
-                else:
-                    if s["p1w"] > s["p2w"]: h2h_series_l += 1
-                    else: h2h_series_w += 1
+            (h2h_ranked_w, h2h_ranked_l, h2h_casual_w, h2h_casual_l,
+             h2h_series_w, h2h_series_l) = await _viewer_h2h_counts(db, viewer_row, player.id)
 
     # v1.29 Compare-tab additions: input rate, average game length, betting
     # record, and the player's rank tier.

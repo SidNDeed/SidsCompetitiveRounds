@@ -63,11 +63,23 @@ namespace CompetitiveRounds
         /// combat album.</summary>
         private struct TrackRef : IEquatable<TrackRef>
         {
-            public string Sku;
-            public int Idx;
-            public TrackRef(string sku, int idx) { Sku = sku; Idx = idx; }
+            public readonly string Sku;
+            public readonly int Idx;
+            public readonly string Key;   // r3 LOW 16: "sku/idx" built ONCE — ToString allocates nothing on the Waiting hot path
+            public TrackRef(string sku, int idx) { Sku = sku; Idx = idx; Key = sku + "/" + idx; }
             public bool Equals(TrackRef o) => Idx == o.Idx && string.Equals(Sku, o.Sku, StringComparison.Ordinal);
-            public override string ToString() => Sku + "/" + Idx;
+            public override string ToString() => Key;
+            /// <summary>Inverse of ToString for the residency key set ("sku/idx").</summary>
+            public static bool TryParse(string key, out TrackRef t)
+            {
+                t = default;
+                if (string.IsNullOrEmpty(key)) return false;
+                int slash = key.LastIndexOf('/');
+                if (slash <= 0 || slash >= key.Length - 1) return false;
+                if (!int.TryParse(key.Substring(slash + 1), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int idx)) return false;
+                t = new TrackRef(key.Substring(0, slash), idx);
+                return true;
+            }
         }
 
         private sealed class VanillaTrack
@@ -77,12 +89,17 @@ namespace CompetitiveRounds
             public AudioClip Clip;
         }
 
-        /// <summary>One loaded (or loading) disk clip. The UnityWebRequest is
-        /// HELD for the life of the entry — DownloadHandlerAudioClip owns the
-        /// clip it produced, so disposing the request could kill a clip
-        /// mid-play. Clips load FULLY BUFFERED (streamAudio=false): the whole
-        /// pack is ~26MB compressed, buffering removes the disk-IO underruns
-        /// players reported as light skipping, and it makes AudioSource.time
+        /// <summary>One loaded (or loading) disk clip. Lifecycle (lag-332 v6
+        /// §2.1/§2.2): request → Downloaded (completed, undecoded, held) →
+        /// clip (decoded inside an explicit menu click — Music tab or Shop
+        /// Preview; the request is released in
+        /// that handoff through the counted quarantine — a throwing Dispose
+        /// keeps it counted beside its clip until the sweep succeeds) →
+        /// destroyed when
+        /// the key leaves the residency window. Clips load FULLY BUFFERED
+        /// (streamAudio=false): the whole pack is ~26MB compressed, buffering
+        /// removes the disk-IO underruns players reported as light skipping,
+        /// and it makes AudioSource.time
         /// seeks exact for the seek bar. Static (survives host respawn) per
         /// the hazards list.</summary>
         private sealed class ClipEntry
@@ -91,6 +108,22 @@ namespace CompetitiveRounds
             public UnityWebRequest Req;
             public AudioClip Clip;
             public bool Failed;
+            // lag-332 v6 §2.1: the request finished downloading but the OGG is
+            // NOT decoded — decoding is a 320-700 ms main-thread stall and
+            // happens only inside an explicit menu click (Music tab or Shop
+            // Preview — ClickDecodeOpportunity).
+            public bool Downloaded;
+            public int RequestedFrame;
+        }
+
+        /// <summary>lag-332 v6 §2.2: a displaced clip counts against the
+        /// physical residency bound until the frame AFTER its Destroy.</summary>
+        private struct PendingDestroyEntry
+        {
+            public string Key;
+            public int Frame;
+            public AudioClip Clip;     // retained so a failed Destroy can be retried
+            public bool Destroyed;     // false = quarantined (destroy threw), retried by the sweep
         }
 
         private sealed class PreviewSnapshot
@@ -132,6 +165,8 @@ namespace CompetitiveRounds
             public bool paused;                         // PlayPause toggle while Custom
             public bool vanillaPreferred;               // the "Use vanilla music" first-class control
             public bool manualTakeover;                 // set by Play/Skip/PlayTrack, cleared by UseVanilla/session end
+            public string takeoverKey;                  // r3 MEDIUM 3: the ONE explicitly PlayTrack'd key that may play while deselected (null = none)
+            public string takeoverSelectionSig;         // the queue signature that PlayTrack was made against — a later selection mutation supersedes it
 
             // Queue / playback position.
             public List<TrackRef> queue = new List<TrackRef>();
@@ -186,10 +221,60 @@ namespace CompetitiveRounds
             public HashSet<string> deselected = new HashSet<string>(StringComparer.Ordinal);
 
             public bool everHosted;
+
+            // ── lag-332 design v6 (W6-A) ──────────────────────────────────
+            // WaitingForNext [v4 §2.3, CONFIRMED d4/d5]: the current track
+            // loops on itself because its successor is not resident; every
+            // exit clears Main.loop (ExitWaiting is the ONLY writer of
+            // waiting=false — StopSources and host respawn call it too).
+            public bool waiting;
+            // Fade-in envelope [v4 §2.5]: progress-based, advances only while
+            // Main is audibly playing; armed right after a successful Play().
+            public bool fadeActive;
+            public float fadeProgress = 1f;
+            public int fadeArmFrame = -1;
+            // previewSlot Pending bookkeeping (r1 MEDIUM 9): a pending preview
+            // that never becomes resident is dropped after this many seconds.
+            public float previewPendingRt = -1f;
+            // Persisted next shuffle cycle [v6 §2.2]: built ONCE at the tail
+            // of a shuffled cycle so residency (the successor key) and
+            // traversal (the wrap) consume the same order. Bound to the queue
+            // signature it was built under.
+            public List<TrackRef> nextCycle;
+            public string nextCycleSignature;
+            // previewSlot [v6 §2.2]: Pending (clicked, not yet resident),
+            // Active (= previewTrack), Retained (last finished preview stays
+            // resident and playable anywhere until replaced).
+            public TrackRef? previewPending;
+            public TrackRef? previewRetained;
+            // Once-per-session "not prepared" toast [v6 §2.1].
+            public bool preparedToastShown;
+            // Vanilla re-entry verification attempts [v4 §2.5 oracle].
+            public int reentryAttempts;
         }
 
         private static readonly EngineState S = new EngineState();
         private static readonly Dictionary<string, ClipEntry> Clips = new Dictionary<string, ClipEntry>(StringComparer.Ordinal);
+        // lag-332 v6 §2.2: displaced clips awaiting Unity's end-of-frame destroy.
+        private static readonly List<PendingDestroyEntry> PendingDestroy = new List<PendingDestroyEntry>();
+        // The physical residency bound [v6 §2.2, amended r5/r6]: decoded clips +
+        // live requests + pending-destroy clips + quarantined request disposals
+        // total at most PHYSICAL_CAP (= RESIDENT_KEY_CAP + one handoff transient).
+        /// <summary>r5 LOW 9: bumped on every request/clip state transition so
+        /// the Music tab's 2 s repaint signature sees Downloaded/Failed/decoded
+        /// changes (the Prepare affordance repaints without a click).</summary>
+        internal static int ClipStateGeneration;
+        private const int RESIDENT_KEY_CAP = 3;
+        /// <summary>r5 MEDIUM 3 / r6 LOW 2-3: the physical bound is an OBJECT
+        /// COUNT — clips + live requests + pending destroys + quarantined
+        /// disposals total at most PHYSICAL_CAP, the RESIDENT_KEY_CAP window
+        /// plus one handoff transient. The transient is one OBJECT, not one
+        /// key: quarantined requests can belong to several former keys while
+        /// the sweep retries them. Requests are admitted against
+        /// RESIDENT_KEY_CAP; a decode is refused at PHYSICAL_CAP. It is NOT a
+        /// byte ceiling: a decoded clip is samples x channels x 4 bytes — up to
+        /// ~110 MiB for the longest catalogue track (300 s, stereo, 48 kHz).</summary>
+        private const int PHYSICAL_CAP = RESIDENT_KEY_CAP + 1;
         private static readonly HashSet<string> OnceKeys = new HashSet<string>(StringComparer.Ordinal);
         private static readonly System.Random Rng = new System.Random();
 
@@ -211,6 +296,10 @@ namespace CompetitiveRounds
         /// class patched without exception (the PoisonSync.PatchesLive
         /// pattern). Initialize verifies it (#83).</summary>
         internal static bool SuppressionPatchLive;
+
+        /// <summary>[MUSIC-DECODE] measurement: key of the clip whose request completed
+        /// on the previous tick, so the following frame's dt can be logged too.</summary>
+        private static string _decodeLogNextFrame;
 
         private const string VANILLA_ARTIST = "Karl Flodin";
         private const string VANILLA_ALBUM = "ROUNDS OST";
@@ -374,6 +463,10 @@ namespace CompetitiveRounds
                 var s = S;
                 if (s.mode == MusicMode.Custom)
                 {
+                    // Pause/resume continues the SAME intent on the SAME track — an
+                    // explicit PlayTrack takeover survives it (impl note 19 as amended
+                    // after r4 LOW 8); Skip/Previous/adoption/Use vanilla/a selection
+                    // change end it.
                     s.paused = !s.paused;
                     if (s.paused) { if (!PauseMain()) EnterDurableFaultNoThrow("pause failed"); }   // [I1-residual]
                     else Reconcile("play-pause");
@@ -381,6 +474,7 @@ namespace CompetitiveRounds
                 }
                 s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
                 s.manualTakeover = true;
+                s.takeoverKey = null;   // r3 MEDIUM 3: an ordinary transport ends an explicit takeover
                 // [N6c] resuming onto an ENDED current (loop-off run-out, or
                 // a load-gap park) is a transport intent: walk on Skip-style —
                 // wrap/fresh-cycle allowed — so Play after a playlist end
@@ -416,6 +510,7 @@ namespace CompetitiveRounds
                 var s = S;
                 s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
                 s.manualTakeover = true;
+                s.takeoverKey = null;   // r3 MEDIUM 3
                 EnsureQueueCurrent();
                 AdvanceToNext(userSkip: true);
                 Reconcile("skip");
@@ -437,6 +532,7 @@ namespace CompetitiveRounds
                 var s = S;
                 s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
                 s.manualTakeover = true;
+                s.takeoverKey = null;   // r3 MEDIUM 3
                 float pos = s.currentStarted ? CurrentMainTimeOr(s.resumePositionSec) : s.resumePositionSec;
                 if (s.current.HasValue && pos > 3f)
                 {
@@ -455,7 +551,29 @@ namespace CompetitiveRounds
                     return;
                 }
                 EnsureQueueCurrent();
-                AdvanceToPrevious();
+                int r = TryPrevious(out int predIndex, out var pred);
+                if (r == 0)
+                {
+                    // v6 §2.2: an unresident predecessor. At the admissible menu
+                    // it becomes the explicit desired target (parks at Loading
+                    // per [S1]; the click that brought us here decodes it once
+                    // downloaded). In a room the current track keeps playing
+                    // and the UI says so — never a silent forward wrap.
+                    if (MusicAdmission.AtAdmissibleMenu)
+                    {
+                        ExitWaiting("previous-target");
+                        s.queueIndex = predIndex;
+                        s.current = pred;
+                        s.resumePositionSec = 0f; s.currentStarted = false; s.mainPausedByUs = false;
+                        s.currentPrematureRetried = false; s.currentEnded = false;
+                        ReconcileResidency();
+                    }
+                    else
+                    {
+                        try { CompetitiveUI.ShowNotification(I18n.Tr("Previous track is not prepared — open the Music tab at the main menu"), new Color(1f, 0.85f, 0.4f), 4f); } catch { }
+                        return;
+                    }
+                }
                 Reconcile("previous");
             }
             catch (Exception ex) { LogOnce("prev", "[MUSIC] PlayPrevious failed: " + ex.Message, true); }
@@ -473,17 +591,18 @@ namespace CompetitiveRounds
                 ClearFaultForUserAction("PlayTrack");
                 // An explicit request is also an explicit retry for a clip
                 // that previously failed to decode.
-                if (!IsVanillaSku(albumSku))
-                {
-                    string key = t.ToString();
-                    if (Clips.TryGetValue(key, out var e) && e.Failed) { DisposeEntry(e); Clips.Remove(key); }
-                }
+                if (!IsVanillaSku(albumSku)) ClearTombstone(t.ToString());   // r3 MEDIUM 2: explicit retry of THIS key
                 var s = S;
+                ExitWaiting("play-track");   // v6 §2.3
                 s.manualTakeover = true; s.stopIntent = false; s.vanillaPreferred = false; s.paused = false;
+                // r3 MEDIUM 3: the takeover binds to THIS key and to the selection
+                // it was made against (see EnsureQueueCurrent).
+                s.takeoverKey = IsVanillaSku(albumSku) ? null : t.ToString();
                 s.current = t; s.resumePositionSec = 0f; s.currentStarted = false; s.mainPausedByUs = false;
                 s.currentPrematureRetried = false;
                 s.currentEnded = false;   // [N6c] explicit selection — this current is a playable again
                 s.queueSignature = null;
+                s.takeoverSelectionSig = ComputeQueueSignature();
                 Reconcile("play-track");
             }
             catch (Exception ex) { LogOnce("pt", "[MUSIC] PlayTrack failed: " + ex.Message, true); }
@@ -503,6 +622,7 @@ namespace CompetitiveRounds
                 var s = S;
                 s.vanillaPreferred = true;
                 s.manualTakeover = false; s.stopIntent = false; s.paused = false;
+                s.takeoverKey = null;
                 Reconcile("use-vanilla");
             }
             catch (Exception ex) { LogOnce("uv", "[MUSIC] UseVanilla failed: " + ex.Message, true); }
@@ -514,6 +634,9 @@ namespace CompetitiveRounds
             set
             {
                 try { if (Plugin.MusicLoop != null) Plugin.MusicLoop.Value = value; } catch { }
+                // impl-review r1 MEDIUM 10: Waiting exists only under loop-on; turning
+                // loop off must release the looped current immediately.
+                if (!value) ExitWaiting("loop-off");
                 Reconcile("loop-toggle");
             }
         }
@@ -749,6 +872,67 @@ namespace CompetitiveRounds
                     Plugin.Log?.LogInfo($"[MUSIC] TogglePreview: no preview for {albumSku}/{trackIdx}");
                     return;
                 }
+                // lag-332 v6 §2.2/§2.4 previewSlot: ownership changes ONLY once
+                // the preview clip is RESIDENT. An uncached preview becomes the
+                // Pending slot (its request starts; the click that brought us
+                // here decodes it if already downloaded via
+                // ClickDecodeOpportunity → StartPendingPreviewOwnership);
+                // outside the admissible menu it is refused outright (v3 §2.4).
+                string pkey = "p:" + t;
+                bool resident = Clips.TryGetValue(pkey, out var pe) && pe.Clip != null;
+                if (!resident)
+                {
+                    if (!MusicAdmission.AtAdmissibleMenu)
+                    {
+                        try { CompetitiveUI.ShowNotification(I18n.Tr("Previews load at the main menu"), new Color(1f, 0.85f, 0.4f), 3f); } catch { }
+                        return;
+                    }
+                    // r3 MEDIUM 5 / r4 MEDIUM 5: clicking the SAME Pending preview again
+                    // is a no-op that keeps its original admission time — rewriting it
+                    // reset the 30 s timer to "never started".
+                    if (s.previewPending.HasValue && s.previewPending.Value.Equals(t) && !IsFailedKey(pkey))
+                    {
+                        Plugin.Log?.LogInfo($"[MUSIC] preview {t} still pending (unchanged)");
+                        return;
+                    }
+                    // An explicit Preview click on a tombstoned key is its retry (r3 MEDIUM 2).
+                    ClearTombstone(pkey);
+                    // r1 MEDIUM 9 / r2 MEDIUM 12 (transactional replacement): an
+                    // ACTIVE preview P keeps playing and keeps its slot; Q is
+                    // recorded as the Pending intent and P AND Q are BOTH desired
+                    // for the duration (the successor yields — DesiredKeys); Q's
+                    // request starts now; P is displaced only after Q decoded and
+                    // took ownership. A Pending Q that fails or times out is
+                    // dropped (Tick) and the slot falls back to whatever is retained.
+                    s.previewPending = t;
+                    s.previewPendingRt = -1f;   // the 30 s timer starts when Q's request is actually admitted (r2 MEDIUM 12)
+                    ReconcileResidency();       // the transaction {current, P, Q} requests Q now; the successor yields meanwhile
+                    Plugin.Log?.LogInfo($"[MUSIC] preview pending {t} — click again once downloaded");
+                    return;
+                }
+                if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("preview-replace");   // Q is resident: atomic swap
+                StartPreviewOwnership(t);
+            }
+            catch (Exception ex) { LogOnce("tp", "[MUSIC] TogglePreview failed: " + ex.Message, true); }
+        }
+
+        /// <summary>Called by the click decode when the Pending preview's clip
+        /// just became resident inside the same click.</summary>
+        private static void StartPendingPreviewOwnership()
+        {
+            var s = S;
+            if (!s.previewPending.HasValue) return;
+            var t = s.previewPending.Value;
+            if (!(Clips.TryGetValue("p:" + t, out var pe) && pe.Clip != null)) return;
+            StartPreviewOwnership(t);
+        }
+
+        private static void StartPreviewOwnership(TrackRef t)
+        {
+            try
+            {
+                var s = S;
+                s.previewPending = null;
                 s.previewGen++;
                 if (!s.previewTrack.HasValue)
                 {
@@ -769,14 +953,39 @@ namespace CompetitiveRounds
                 s.previewStarted = false;
                 s.previewStartedRt = Time.realtimeSinceStartup;   // arm stamp: bounds the not-yet-started wait too
                 StopPreviewSourceNoThrow();
-                // Previews tier trigger (idempotent) + start the snippet load.
-                string path = null;
-                try { path = MusicAssets.PathFor(album.Tracks[trackIdx].PreviewFile); } catch { }
-                if (path == null) { try { MusicAssets.EnsureTier(MusicTier.Previews, "preview"); } catch { } }
-                else EnsureClipLoading("p:" + t, path);
                 Reconcile("preview-start");
             }
-            catch (Exception ex) { LogOnce("tp", "[MUSIC] TogglePreview failed: " + ex.Message, true); }
+            catch (Exception ex) { LogOnce("tp", "[MUSIC] preview ownership failed: " + ex.Message, true); }
+        }
+
+        /// <summary>lag-332 v6 §2.1: once per session, at the first
+        /// menu→in-game context edge, tell an album owner whose engine is
+        /// parked at Loading that nothing was prepared. Fires ONLY for
+        /// Loading with an unresolved desired custom key (never for Vanilla /
+        /// MutedByChoice / Preview / Fault / Stop / vanilla preference / an
+        /// empty selection — d5: those are deliberate choices, not failures).</summary>
+        private static void MaybeShowNotPreparedToast()
+        {
+            try
+            {
+                var s = S;
+                if (s.preparedToastShown || _patchDead) return;
+                if (s.mode != MusicMode.Loading) return;
+                if (s.stopIntent || s.vanillaPreferred || s.faultDurable || s.faultPending) return;
+                if (!s.selectionNonEmpty || SelectionUniverseEmpty() || SelectionIsPureFullVanilla()) return;
+                var keys = _desiredScratch;
+                int n = DesiredKeys(keys);
+                bool unresolved = false;
+                for (int i = 0; i < n; i++)
+                {
+                    if (keys[i].StartsWith("p:", StringComparison.Ordinal)) continue;
+                    if (!(Clips.TryGetValue(keys[i], out var e) && e.Clip != null)) { unresolved = true; break; }
+                }
+                if (!unresolved) return;
+                s.preparedToastShown = true;
+                CompetitiveUI.ShowNotification(I18n.Tr("Custom music is not prepared — open F5 > Music at the main menu"), new Color(1f, 0.85f, 0.4f), 6f);
+            }
+            catch { }
         }
 
         internal static bool IsPreviewing(string albumSku, int trackIdx)
@@ -805,7 +1014,13 @@ namespace CompetitiveRounds
             var s = S;
             s.previewGen++;                      // invalidates every in-flight completion
             StopPreviewSourceNoThrow();
+            // r2 MEDIUM 12: tab/overlay teardown clears a Pending intent too, or
+            // a Pending Q outlives the surface that asked for it.
+            if (s.previewPending.HasValue) { s.previewPending = null; ReconcileResidency(); }
             if (!s.previewTrack.HasValue) return;
+            // v6 §2.2 previewSlot: the finished preview is RETAINED (resident,
+            // playable anywhere) until another preview replaces it.
+            s.previewRetained = s.previewTrack;
             s.previewTrack = null;
             s.previewStarted = false;
             var snap = s.previewSnapshot;
@@ -909,6 +1124,11 @@ namespace CompetitiveRounds
             if (desired != s.mode) TransitionTo(desired, reason);
             else EnforceModeInvariants();
 
+            // v6 §2.2: every reconcile is a desired-set checkpoint — selection,
+            // shuffle/loop, entitlement, broadcast predicate and transport
+            // changes all route through here.
+            ReconcileResidency();
+
             _lastMenuCovered = MenuCovered();
             _lastMenuModeSetting = MenuModeSetting();
         }
@@ -931,9 +1151,13 @@ namespace CompetitiveRounds
 
             if (s.stopIntent) return MusicMode.MutedByChoice;
             if (s.vanillaPreferred) return MusicMode.Vanilla;
-            if (s.manualTakeover) return s.hasReadyTrack ? MusicMode.Custom : MusicMode.Loading;
             if (SelectionUniverseEmpty()) return MusicMode.Vanilla;          // nothing to manage — fail open
+            // r3 MEDIUM 3: an explicit PlayTrack takeover plays its ONE track
+            // regardless of the selection; ordinary transport history never
+            // overrides "deselected everything" (deliberate silence).
+            if (s.takeoverKey != null) return s.hasReadyTrack ? MusicMode.Custom : MusicMode.Loading;
             if (!s.selectionNonEmpty) return MusicMode.MutedByChoice;        // user deselected everything: deliberate silence
+            if (s.manualTakeover) return s.hasReadyTrack ? MusicMode.Custom : MusicMode.Loading;
             if (SelectionIsPureFullVanilla()) return MusicMode.Vanilla;      // engine output would be byte-identical vanilla
             return s.hasReadyTrack ? MusicMode.Custom : MusicMode.Loading;
         }
@@ -960,6 +1184,10 @@ namespace CompetitiveRounds
                 {
                     // [I1] a failed acquisition must not proceed — both owners
                     // would play. Durable fault; vanilla keeps the room.
+                    // v4 §2.5 compensation: the wrapper's play guards may be
+                    // left asserting a music that was partly stopped — clear
+                    // both so the fail-open re-entry is not a no-op.
+                    ClearVanillaGuardsNoThrow();
                     EnterDurableFaultNoThrow("acquire-stop: " + ex.Message);
                     return;
                 }
@@ -977,6 +1205,9 @@ namespace CompetitiveRounds
                 // whose Stop threw is hard-silenced but no longer
                 // trustworthy — durable Fault owns that terminal (it
                 // releases suppression and arms the retried re-entry).
+                // v6 §2.3: a parked/released Waiting source restarts at zero
+                // when ownership returns (resume position cleared).
+                if (s.waiting) { s.resumePositionSec = 0f; ExitWaiting("release"); }
                 if (!StopSources())
                 {
                     s.mainPausedByUs = false; s.currentStarted = false;
@@ -987,6 +1218,7 @@ namespace CompetitiveRounds
                 s.suppress = false;
                 // Re-entry may fail RIGHT NOW (scene-load window) — arm the
                 // tick retry instead of claiming it happened [I1-residual].
+                s.reentryAttempts = 0;
                 s.vanillaReentryPending = !ReenterVanillaForContext();
             }
             else if (toOwned)
@@ -1045,6 +1277,9 @@ namespace CompetitiveRounds
                 case MusicMode.Preview:
                     // keep position; preview machinery drives the preview source
                     if (!PauseMain()) EnterDurableFaultNoThrow("preview-pause failed");
+                    // v6 §2.3: preview OWNERSHIP is a Waiting exit; a parked
+                    // Waiting source restarts at zero when Custom resumes.
+                    if (s.waiting) { s.resumePositionSec = 0f; ExitWaiting("preview"); }
                     break;
             }
         }
@@ -1056,25 +1291,142 @@ namespace CompetitiveRounds
         /// RETURNED, never assumed: false (manager missing, or the Play* call
         /// threw) means vanilla was NOT restored — the caller arms
         /// vanillaReentryPending and the tick retries until a call lands.</summary>
+        /// <summary>Re-enter vanilla music for the current context and VERIFY
+        /// it (lag-332 v4 §2.5, d4-confirmed oracle): the wrapper's own
+        /// guard flags are set BEFORE it calls Sonigon and prove nothing
+        /// (SoundMusicManager.cs:33-79), so certification requires Sonigon's
+        /// GetSoundEventState(event, musicOwner) == Playing. Delayed = still
+        /// pending (retry, guard kept). NotPlaying / a throw / a missing
+        /// oracle = the guard this attempt set is CLEARED so the next retry
+        /// is not a wrapper no-op; after REENTRY_MAX_ATTEMPTS the engine
+        /// fails open and logs UNVERIFIED rather than certifying.</summary>
+        private const int REENTRY_MAX_ATTEMPTS = 20;
         private static bool ReenterVanillaForContext()
         {
+            var s = S;
+            SoundMusicManager mgr;
+            try { mgr = SoundMusicManager.Instance; } catch { return false; }
+            if (mgr == null) return false;
+            bool menu = s.ctx == Ctx.Menu;
+            s.reentryAttempts++;
             try
             {
-                var mgr = SoundMusicManager.Instance;
-                if (mgr == null) return false;
-                switch (S.ctx)
+                switch (s.ctx)
                 {
                     case Ctx.Menu: mgr.PlayMainMenu(); break;
                     case Ctx.Round: mgr.PlayIngame(false); break;
                     case Ctx.Pick: mgr.PlayIngame(true); break;
                 }
-                return true;
             }
             catch (Exception ex)
             {
-                LogOnce("reenter", "[MUSIC] vanilla re-entry failed: " + ex.Message + " — will retry from the tick", true);
-                return false;
+                ClearVanillaGuard(mgr, menu);
+                LogOnce("reenter", "[MUSIC] vanilla re-entry threw: " + ex.Message + " — will retry from the tick", true);
+                return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "threw");
             }
+            var state = VanillaMusicState(mgr, menu);
+            switch (state)
+            {
+                case OracleState.Playing:
+                    Plugin.Log?.LogInfo($"[MUSIC-WD] vanilla re-entered ctx={s.ctx} (verified Playing, attempt {s.reentryAttempts})");
+                    s.reentryAttempts = 0;
+                    return true;
+                case OracleState.Delayed:
+                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "still Delayed");
+                case OracleState.NotPlaying:
+                    ClearVanillaGuard(mgr, menu);
+                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "NotPlaying");
+                default:
+                    // Oracle unavailable: never certify from the flag — and clear
+                    // the guard this attempt set so the next retry is not a
+                    // wrapper no-op (r1 MEDIUM 11).
+                    ClearVanillaGuard(mgr, menu);
+                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "oracle unavailable");
+            }
+        }
+
+        private static bool FailOpenUnverified(SoundMusicManager mgr, bool menu, string why)
+        {
+            // Failing open must not strand a set-but-silent wrapper guard: clear
+            // it so vanilla's own next Play* call is a real call (r1 MEDIUM 11).
+            ClearVanillaGuard(mgr, menu);
+            LogOnce("reenter-unverified", $"[MUSIC-WD] vanilla re-entry UNVERIFIED ({why}) after {REENTRY_MAX_ATTEMPTS} attempts — failing open", true);
+            return true;
+        }
+
+        private enum OracleState { Unavailable, NotPlaying, Delayed, Playing }
+
+        // Sonigon is deliberately unreferenced by the csproj; the oracle is
+        // reached by reflection (cached), all failure → Unavailable.
+        private static Type _sonigonMgrType;
+        private static System.Reflection.PropertyInfo _sonigonInstanceProp;
+        private static System.Reflection.MethodInfo _sonigonGetMusicTransform, _sonigonGetState;
+        private static System.Reflection.FieldInfo _wrapperMenuEvent, _wrapperIngameEvent, _wrapperMenuGuard, _wrapperIngameGuard;
+        private static bool _oracleResolved;
+
+        private static void ResolveOracle()
+        {
+            if (_oracleResolved) return;
+            _oracleResolved = true;
+            try
+            {
+                _sonigonMgrType = AccessTools.TypeByName("Sonigon.SoundManager");
+                if (_sonigonMgrType != null)
+                {
+                    _sonigonInstanceProp = AccessTools.Property(_sonigonMgrType, "Instance");
+                    _sonigonGetMusicTransform = AccessTools.Method(_sonigonMgrType, "GetMusicTransform");
+                    _sonigonGetState = AccessTools.Method(_sonigonMgrType, "GetSoundEventState");
+                }
+                _wrapperMenuEvent = AccessTools.Field(typeof(SoundMusicManager), "musicMainMenu");
+                _wrapperIngameEvent = AccessTools.Field(typeof(SoundMusicManager), "musicIngame");
+                _wrapperMenuGuard = AccessTools.Field(typeof(SoundMusicManager), "musicMainMenuPlaying");
+                _wrapperIngameGuard = AccessTools.Field(typeof(SoundMusicManager), "musicIngamePlaying");
+            }
+            catch (Exception ex) { LogOnce("oracle", "[MUSIC-WD] oracle resolve failed: " + ex.Message, true); }
+        }
+
+        private static OracleState VanillaMusicState(SoundMusicManager mgr, bool menu)
+        {
+            try
+            {
+                ResolveOracle();
+                if (_sonigonInstanceProp == null || _sonigonGetMusicTransform == null || _sonigonGetState == null) return OracleState.Unavailable;
+                var evField = menu ? _wrapperMenuEvent : _wrapperIngameEvent;
+                if (evField == null) return OracleState.Unavailable;
+                object snd = _sonigonInstanceProp.GetValue(null, null);
+                if (snd == null) return OracleState.Unavailable;
+                object ev = evField.GetValue(mgr);
+                if (ev == null) return OracleState.Unavailable;
+                object owner = _sonigonGetMusicTransform.Invoke(snd, null);
+                object st = _sonigonGetState.Invoke(snd, new object[] { ev, owner });
+                int v = Convert.ToInt32(st);
+                // Sonigon.SoundEventState: NotPlaying=0, Delayed=1, Playing=2.
+                return v == 2 ? OracleState.Playing : v == 1 ? OracleState.Delayed : OracleState.NotPlaying;
+            }
+            catch { return OracleState.Unavailable; }
+        }
+
+        private static void ClearVanillaGuard(SoundMusicManager mgr, bool menu)
+        {
+            try
+            {
+                ResolveOracle();
+                var f = menu ? _wrapperMenuGuard : _wrapperIngameGuard;
+                if (f != null && mgr != null) f.SetValue(mgr, false);
+            }
+            catch { }
+        }
+
+        private static void ClearVanillaGuardsNoThrow()
+        {
+            try
+            {
+                var mgr = SoundMusicManager.Instance;
+                if (mgr == null) return;
+                ClearVanillaGuard(mgr, true);
+                ClearVanillaGuard(mgr, false);
+            }
+            catch { }
         }
 
         // ── suppression prefix support (called by MusicSuppressionPatch) ──
@@ -1130,7 +1482,17 @@ namespace CompetitiveRounds
         {
             var s = S;
             var c = menuCall ? Ctx.Menu : (isCard ? Ctx.Pick : Ctx.Round);
-            if (s.ctx != c) { s.ctx = c; s.ctxDirty = true; }
+            if (s.ctx != c)
+            {
+                bool leavingMenu = s.ctx == Ctx.Menu && c != Ctx.Menu;
+                s.ctx = c; s.ctxDirty = true;
+                if (leavingMenu)
+                {
+                    // v6 §2.2: a Pending preview intent does not survive the menu.
+                    if (s.previewPending.HasValue) { s.previewPending = null; }
+                    MaybeShowNotPreparedToast();
+                }
+            }
             // [I14] menu entry clears any stale pick-phase duck — a disconnect
             // can jump Pick→Menu without ever seeing an isCard:false edge.
             if (menuCall) { if (s.duckWanted) s.duckWanted = false; }
@@ -1160,6 +1522,8 @@ namespace CompetitiveRounds
                     if (OnceKeys.Add("handoff-fault"))
                         Plugin.Log?.LogError("[MUSIC] menu-handoff pause failed — source hard-silenced, engine faulting");
                 }
+                // v6 §2.3: the menu park is a Waiting exit (restart at zero on resume).
+                if (s.waiting) { s.resumePositionSec = 0f; ExitWaiting("menu-park"); }
             }
             catch { }
         }
@@ -1210,6 +1574,7 @@ namespace CompetitiveRounds
                 s.suppress = false;
                 s.mode = MusicMode.Fault;
                 s.mainPausedByUs = false; s.currentStarted = false;
+                s.reentryAttempts = 0;   // r1 MEDIUM 11: every independent re-entry arc starts its own attempt budget
                 s.vanillaReentryPending = !ReenterVanillaForContext();
                 Plugin.Log?.LogError($"[MUSIC] durable Fault ({reason}) — vanilla re-entry {(s.vanillaReentryPending ? "pending (tick retries)" : "issued")}; custom music waits for an explicit retry");
             }
@@ -1232,6 +1597,11 @@ namespace CompetitiveRounds
                 if (s.faultPending) Reconcile("fault-latched");
 
                 if (_reconcileQueued) { _reconcileQueued = false; Reconcile(_reconcileQueuedReason ?? "queued"); }
+
+                // r7 MEDIUM 1: a current whose REQUEST START failed inside a
+                // residency pass recovers here, first, before any readiness edge
+                // below could acquire Custom around the dead current.
+                DrainFailedCurrent();
 
                 // [I1-residual] vanilla re-entry RETRY: a release/fault whose
                 // context call failed (manager mid-scene-load, throwing Play*)
@@ -1265,17 +1635,47 @@ namespace CompetitiveRounds
 
                 if (s.ctxDirty) { s.ctxDirty = false; Reconcile("context-change"); }
 
-                // Loading is edge-poor: a tier that finishes installing fires
-                // no event, so the load kicks are re-polled until readiness
-                // flips (which IS an edge and reconciles below).
-                if (s.mode == MusicMode.Loading && rt - _loadingKickRt > 1f)
+                // lag-332 v6 §2.1: the admission snapshot is observed every
+                // frame so a click can require two identical PRIOR frames.
+                MusicAdmission.Tick();
+                SweepPendingDestroy();
+                // r1 MEDIUM 9: a Pending preview whose request failed or that
+                // never became resident within 30 s returns the slot to Empty
+                // (the retained preview, if any, is desired again).
+                if (s.previewPending.HasValue)
+                {
+                    string ppk = "p:" + s.previewPending.Value;
+                    bool failed = Clips.TryGetValue(ppk, out var ppe) && ppe.Failed;
+                    if (failed || (s.previewPendingRt >= 0f && rt - s.previewPendingRt > 30f))
+                    {
+                        Plugin.Log?.LogInfo($"[MUSIC] preview pending {s.previewPending.Value} dropped ({(failed ? "request failed" : "timeout")})");
+                        s.previewPending = null;
+                        if (failed) { Clips.Remove(ppk); DisposeEntry(ppe); }
+                        ReconcileResidency();
+                    }
+                }
+
+                // Requests (network transfer only — never a decode) for the
+                // desired keys, re-polled because a tier that finishes
+                // installing fires no event. Bounded by the residency window.
+                if (rt - _loadingKickRt > 1f)
                 {
                     _loadingKickRt = rt;
                     EnsureQueueCurrent();
-                    KickLoadsForQueueHead();
+                    KickDesiredLoads();
                 }
 
-                PumpClipLoads();
+                if (_decodeLogNextFrame != null)
+                {
+                    // Second half of the [MUSIC-DECODE] measurement: the frame AFTER a
+                    // click decode (its unscaledDeltaTime is the click frame's wall
+                    // length, which includes the decode).
+                    try { Plugin.Log?.LogInfo($"[MUSIC-DECODE-NEXT] key={_decodeLogNextFrame} nextFrameDtMs={(Time.unscaledDeltaTime * 1000f).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}"); } catch { }
+                    _decodeLogNextFrame = null;
+                }
+                // Completion polling ONLY: marks Downloaded / Failed. The single
+                // GetContent site is ClickDecodeOpportunity (design v6 §2.1).
+                PollClipLoads();
 
                 // Readiness-only changes still reconcile [G5].
                 bool ready = ScanHasReadyTrack();
@@ -1310,12 +1710,29 @@ namespace CompetitiveRounds
             if (s.mode == MusicMode.Custom && !s.paused && !s.mainPausedByUs)
             {
                 var m = h.Main;
+                // ── lag-332 v6 §2.3 WaitingForNext ──────────────────────
+                // Successor readiness EXITS Waiting immediately: loop clears,
+                // the current plays to its natural end, the natural-end branch
+                // below then adopts the successor (no truncation).
+                if (s.waiting && SuccessorResident()) ExitWaiting("successor-ready");
+                // Central enforcement (r1 MEDIUM 10): Waiting cannot outlive loop-on.
+                if (s.waiting && (!LoopEffective() || s.stopIntent)) ExitWaiting("loop-off");
+                // Arm: inside the last 2 s of a playing current whose successor
+                // is not resident, loop it BEFORE it stops so there is no gap.
+                if (!s.waiting && m != null && m.isPlaying && s.currentStarted && s.current.HasValue
+                    && LoopEffective() && !s.stopIntent && m.clip != null
+                    && (m.clip.length - m.time) < 2f && !SuccessorResident())
+                    EnterWaiting("near-end");
+                // A Waiting source that went silent is a device fault, not a
+                // natural end: skip the premature-end classifier and let the
+                // 8 s silence bound (else-branch below) own it.
+                bool waitingSilent = s.waiting && m != null && !m.isPlaying;
                 // [J1] A STARTED-but-silent source is judged HERE and nowhere
                 // else, and the branch comes FIRST: falling through to
                 // EnsureMainPlaying would blind-replay and re-stamp
                 // currentStartedRt, renewing the 0.5s grace forever (silent
                 // Custom under held suppression, unbounded — never Fault).
-                if (m != null && s.current.HasValue && s.currentStarted && !m.isPlaying)
+                if (!waitingSilent && m != null && s.current.HasValue && s.currentStarted && !m.isPlaying)
                 {
                     // Grace interval: an AudioSource can report !isPlaying for
                     // a few frames right after Play(). WAIT — no replay, no
@@ -1351,12 +1768,16 @@ namespace CompetitiveRounds
                     {
                         s.currentEnded = true;
                         if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
+                        // v6 §2.3: no resident successor with loop on → Waiting
+                        // (restart the finished current at zero and loop it)
+                        // instead of a Loading detour into vanilla.
+                        else if (LoopEffective() && !s.stopIntent && s.current.HasValue && IsTrackReady(s.current.Value)) EnterWaiting("natural-end");
                         else Reconcile(s.stopIntent ? "playlist-end" : "no-ready-track");
                     }
                 }
                 else
                 {
-                    EnsureMainPlaying();
+                    if (!waitingSilent) EnsureMainPlaying();
                     if (m != null && m.isPlaying)
                     {
                         s.resumePositionSec = m.time;
@@ -1476,7 +1897,23 @@ namespace CompetitiveRounds
             float mult = pctFrac * pctFrac;
             float baseGain = s.mixerRouted ? 1f : s.fallbackGain;
             var m = h.Main;
-            if (m != null) m.volume = mult * baseGain * Mathf.Lerp(1f, DUCK_VOLUME, s.duckLevel);
+            // v4 §2.5 fade-in: progress-based (0.6 s), advancing ONLY while
+            // Main is audibly playing (never while paused / paused-by-us). A
+            // RESUME re-arms it (impl note 45, r9 LOW 2 — accepted): the track
+            // comes back with a fresh 0.6 s fade-in rather than at its frozen
+            // gain; a short fade, never a gap or a pop.
+            float fade = 1f;
+            if (s.fadeActive)
+            {
+                bool audible = m != null && m.isPlaying && !s.mainPausedByUs && !s.paused;
+                // Skip the arming frame AND the one after it: frame N+1's
+                // unscaledDeltaTime is frame N's wall time, which carried the
+                // synchronous decode that preceded Play() (r1 LOW 20 / r2 LOW 18).
+                if (audible && dt > 0f && Time.frameCount > s.fadeArmFrame + 1) s.fadeProgress += Mathf.Min(dt, 0.1f) / 0.6f;
+                if (s.fadeProgress >= 1f) { s.fadeProgress = 1f; s.fadeActive = false; }
+                fade = Mathf.Clamp01(s.fadeProgress);
+            }
+            if (m != null) m.volume = mult * baseGain * Mathf.Lerp(1f, DUCK_VOLUME, s.duckLevel) * fade;
             var p = h.Preview;
             if (p != null) p.volume = mult * baseGain;
             var lpf = h.Lpf;
@@ -1668,33 +2105,88 @@ namespace CompetitiveRounds
             EnsureQueueCurrent();
             s.selectionNonEmpty = s.queue.Count > 0;
             s.hasReadyTrack = ScanHasReadyTrack();
-            // Tier triggers for a selection that wants files we don't hold.
-            if (s.selectionNonEmpty && !s.hasReadyTrack) KickLoadsForQueueHead();
+            // Tier triggers + residency-window requests for a selection that
+            // wants files we don't hold (requests only — never a decode).
+            if (s.selectionNonEmpty && !s.hasReadyTrack) KickDesiredLoads();
         }
 
         private static void EnsureQueueCurrent()
         {
             var s = S;
+            // r3 LOW 16: the no-change path allocates NOTHING — the signature
+            // string is rebuilt only when one of its inputs actually moved
+            // (Waiting calls this every gameplay frame through SuccessorRef).
+            RefreshDeselectedCache();
+            if (s.queueSignature != null && QueueInputsUnchanged()) return;
             string sig = ComputeQueueSignature();
             if (s.queueSignature == sig) return;
+            // r3 MEDIUM 3: a selection mutation AFTER an explicit PlayTrack
+            // supersedes that takeover — it was bound to the selection it was
+            // made against, not to transport history.
+            if (s.takeoverKey != null && s.takeoverSelectionSig != null && !string.Equals(sig, s.takeoverSelectionSig, StringComparison.Ordinal))
+            {
+                Plugin.Log?.LogInfo($"[MUSIC] takeover of {s.takeoverKey} released (selection changed)");
+                s.takeoverKey = null;
+            }
             s.queueSignature = sig;
             var sel = BuildEffectiveSelection();
             s.queue = BuildQueueOrder(sel, s.current);
             s.queueIndex = s.current.HasValue ? s.queue.FindIndex(t => t.Equals(s.current.Value)) : -1;
+            // r2 MEDIUM 15: a current that the selection no longer contains must
+            // not keep playing (or Waiting-looping) — it becomes an ended cursor
+            // so readiness stops counting it and playback advances off it. An
+            // explicit PlayTrack takeover of a deselected track stays allowed.
+            bool takeover = s.takeoverKey != null && s.current.HasValue
+                && string.Equals(s.takeoverKey, s.current.Value.ToString(), StringComparison.Ordinal);
+            if (s.current.HasValue && s.queueIndex < 0 && !takeover)
+            {
+                ExitWaiting("deselected");
+                s.currentEnded = true;
+                s.hasReadyTrack = false;   // readiness is re-derived by the caller's reconcile
+            }
         }
 
         private static string ComputeQueueSignature()
         {
             var s = S;
             RefreshDeselectedCache();
+            bool broadcast = BroadcastPredicate(), shuffle = ShuffleEffective();
+            int mask = PlayableAlbumMask();
             var sb = new StringBuilder();
-            sb.Append(BroadcastPredicate() ? "B|" : "n|").Append(ShuffleEffective() ? "S|" : "l|");
+            sb.Append(broadcast ? "B|" : "n|").Append(shuffle ? "S|" : "l|");
             sb.Append(s.vanillaTracks.Count).Append('|').Append(s.deselectedRaw ?? "");
             var albums = MusicCatalog.Albums;
             if (albums != null)
                 for (int i = 0; i < albums.Length; i++)
                     if (albums[i] != null && IsAlbumPlayable(albums[i].Sku)) sb.Append('|').Append(albums[i].Sku);
+            // Input cache for the allocation-free unchanged test (r3 LOW 16).
+            _sigBroadcast = broadcast; _sigShuffle = shuffle; _sigVanilla = s.vanillaTracks.Count;
+            _sigAlbumMask = mask; _sigDeselected = s.deselectedRaw;
             return sb.ToString();
+        }
+
+        // r3 LOW 16: the signature's inputs, cached at the last rebuild so the
+        // per-frame check compares scalars and one string REFERENCE
+        // (RefreshDeselectedCache replaces deselectedRaw only when it changed).
+        private static bool _sigBroadcast, _sigShuffle;
+        private static int _sigVanilla, _sigAlbumMask;
+        private static string _sigDeselected;
+        private static bool QueueInputsUnchanged()
+        {
+            var s = S;
+            if (!ReferenceEquals(_sigDeselected, s.deselectedRaw)) return false;
+            if (_sigBroadcast != BroadcastPredicate() || _sigShuffle != ShuffleEffective()) return false;
+            if (_sigVanilla != s.vanillaTracks.Count) return false;
+            return _sigAlbumMask == PlayableAlbumMask();
+        }
+        private static int PlayableAlbumMask()
+        {
+            int mask = 0;
+            var albums = MusicCatalog.Albums;
+            if (albums == null) return 0;
+            for (int i = 0; i < albums.Length && i < 31; i++)
+                if (albums[i] != null && IsAlbumPlayable(albums[i].Sku)) mask |= 1 << i;
+            return mask;
         }
 
         /// <summary>Queue order for one cycle from the effective selection.
@@ -1823,12 +2315,13 @@ namespace CompetitiveRounds
             // returning ready-target / pending / exhausted, consumed BEFORE
             // Custom ownership is acquired — a redesign, not a condition.
             // Pass 1: the REMAINDER of the current cycle (queueIndex -1 → all).
+            // v6 §2.2: the scans INSPECT readiness only — requests exist for
+            // the residency window alone (KickDesiredLoads).
             bool pendingSkipped = false;
             for (int i = s.queueIndex + 1; i < n; i++)
             {
                 var t = s.queue[i];
                 if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
-                KickLoad(t);
                 if (IsTrackLoadPending(t)) pendingSkipped = true;
             }
             // [N6a] unplayed entries of THIS cycle are inbound — hold it.
@@ -1849,7 +2342,12 @@ namespace CompetitiveRounds
                 // BuildQueueOrder picks the builder. [N6d] rebind queueIndex
                 // to the NEW order immediately: a no-ready fall-through must
                 // never leave an index addressed against the old list.
-                s.queue = BuildQueueOrder(BuildEffectiveSelection(), s.current);
+                // v6 §2.2: promote the PERSISTED next cycle (the one the
+                // residency successor was drawn from) so traversal and
+                // residency agree; build fresh only when none is bound.
+                var next = EnsureNextCycle();
+                s.queue = next ?? BuildQueueOrder(BuildEffectiveSelection(), s.current);
+                s.nextCycle = null; s.nextCycleSignature = null;
                 n = s.queue.Count;
                 if (n == 0) { s.current = null; s.currentEnded = false; return false; }
                 s.queueIndex = s.current.HasValue ? s.queue.FindIndex(x => x.Equals(s.current.Value)) : -1;
@@ -1859,30 +2357,35 @@ namespace CompetitiveRounds
             {
                 var t = s.queue[i];
                 if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
-                KickLoad(t);
             }
-            return false;   // nothing ready — Reconcile parks at Loading (vanilla audible)
+            return false;   // nothing ready — caller decides: Waiting (loop on) or Loading
         }
 
         /// <summary>Mirror of AdvanceToNext for the Previous transport: walk
         /// BACKWARD through the queue (wrapping) to the nearest ready track.
         /// Backward never rebuilds, so it needs no held-cycle logic — the
         /// wrap stays inside the live cycle order.</summary>
-        private static bool AdvanceToPrevious()
+        /// <summary>v6 §2.2 (d5 #4): Previous addresses ONLY the logical
+        /// immediate predecessor — it must never wrap forward to the resident
+        /// successor ("Previous acting as Next"). Returns: 1 = adopted a
+        /// resident predecessor; 0 = predecessor exists but is not resident
+        /// (index in predIndex); -1 = no predecessor (loop off at the top).</summary>
+        private static int TryPrevious(out int predIndex, out TrackRef pred)
         {
             var s = S;
+            predIndex = -1; pred = default;
             EnsureQueueCurrent();
             int n = s.queue.Count;
-            if (n == 0) return false;
-            int start = s.queueIndex < 0 ? 0 : s.queueIndex;
-            for (int step = 1; step <= n; step++)
-            {
-                int i = ((start - step) % n + n) % n;
-                var t = s.queue[i];
-                if (IsTrackReady(t)) { AdoptCurrent(i, t); return true; }
-                KickLoad(t);
-            }
-            return false;
+            if (n == 0) return -1;
+            int cur = s.queueIndex < 0 ? 0 : s.queueIndex;
+            int i;
+            if (cur > 0) i = cur - 1;
+            else if (LoopEffective()) i = n - 1;
+            else return -1;
+            if (i == cur) return -1;
+            predIndex = i; pred = s.queue[i];
+            if (IsTrackReady(pred)) { AdoptCurrent(i, pred); return 1; }
+            return 0;
         }
 
         /// <summary>Adopt queue[i] as the current track (shared by both
@@ -1891,14 +2394,20 @@ namespace CompetitiveRounds
         private static void AdoptCurrent(int i, TrackRef t)
         {
             var s = S;
+            ExitWaiting("adopt");   // v6 §2.3: successor adoption is a Waiting exit
             s.queueIndex = i;
             s.current = t;
+            s.takeoverKey = null;   // r3 MEDIUM 3: adoption ends an explicit takeover
             s.currentEnded = false;
             s.resumePositionSec = 0f;
             s.currentStarted = false;
             s.mainPausedByUs = false;
             s.currentPrematureRetried = false;
-            PrefetchCurrentAlbumBlock();
+            Plugin.Log?.LogInfo($"[MUSIC] adopt {t} (queue {i + 1}/{s.queue.Count})");
+            // v6 §2.2: the desired set moved (new current/successor) — swap
+            // residency synchronously; the displaced clip is destroyed before
+            // the new successor may be requested.
+            ReconcileResidency();
         }
 
         /// <summary>[N6a] An unready CUSTOM entry that can still become ready:
@@ -1913,27 +2422,77 @@ namespace CompetitiveRounds
             return e.Clip == null && !e.Failed;
         }
 
-        /// <summary>[N6b] Prefetch the REMAINDER of the current album block —
-        /// every consecutive same-album entry ahead of the queue cursor —
-        /// plus the NEXT block's opening entry. Cold broadcast playback
-        /// previously kept only ~2 loads in flight, so a block's later tracks
-        /// were still undecoded when their turn came and the walk abandoned
-        /// the block; the extra head keeps a cold block TRANSITION from
-        /// detouring through Loading (a vanilla blip on the stream). Called
-        /// on the adoption/start edges only — a no-op walk of dictionary
-        /// lookups when the block is already resident.</summary>
-        private static void PrefetchCurrentAlbumBlock()
+        // [N6b] PrefetchCurrentAlbumBlock was REMOVED by lag-332 design v6
+        // §2.2: residency is exactly {current, successor, preview}; a block
+        // prefetch is a fourth-key request by construction. An unprepared
+        // successor at a track end means WaitingForNext (loop the current),
+        // never a Loading detour — see TickPlayback.
+
+        // ── lag-332 v6 §2.3: WaitingForNext ──────────────────────────────
+
+        /// <summary>The ONLY entry into Waiting: loop the current track on
+        /// itself because its successor is not resident. An already-stopped
+        /// source restarts at zero with fresh classifier stamps and WITHOUT
+        /// consuming currentPrematureRetried.</summary>
+        private static void EnterWaiting(string why)
         {
             var s = S;
-            if (s.queueIndex < 0 || s.queueIndex >= s.queue.Count) return;
-            string sku = s.queue[s.queueIndex].Sku;
-            int i = s.queueIndex + 1;
-            for (; i < s.queue.Count; i++)
+            var h = _host;
+            if (h == null || h.Main == null || !s.current.HasValue) return;
+            var m = h.Main;
+            try
             {
-                if (!string.Equals(s.queue[i].Sku, sku, StringComparison.Ordinal)) break;
-                KickLoad(s.queue[i]);
+                m.loop = true;
+                if (!m.isPlaying)
+                {
+                    try { m.time = 0f; } catch { }
+                    try { m.volume = 0f; } catch { }   // r1 LOW 20: silent before EVERY Play
+                    m.Play();
+                    s.currentStarted = true;
+                    s.currentStartedRt = Time.realtimeSinceStartup;
+                    s.resumePositionSec = 0f;
+                    ArmFade();
+                }
+                s.currentEnded = false;
+                if (!s.waiting)
+                {
+                    s.waiting = true;
+                    Plugin.Log?.LogInfo($"[MUSIC] waiting for next ({why}) — looping {s.current.Value}");
+                }
             }
-            if (i < s.queue.Count) KickLoad(s.queue[i]);   // next block's head
+            catch (Exception ex) { EnterDurableFaultNoThrow("enter-waiting: " + ex.Message); }
+        }
+
+        /// <summary>The ONLY exit from Waiting (the only writer of
+        /// waiting=false): clears Main.loop. Called from successor
+        /// readiness/adoption, Stop/UseVanilla/PlayTrack (all via
+        /// TransitionTo's release + AdoptCurrent), park, preview ownership,
+        /// fault, StopSources, host replacement and shutdown.</summary>
+        private static void ExitWaiting(string why)
+        {
+            var s = S;
+            try { var h = _host; if (h != null && h.Main != null) h.Main.loop = false; } catch { }
+            if (!s.waiting) return;
+            s.waiting = false;
+            Plugin.Log?.LogInfo($"[MUSIC] waiting ended ({why})");
+        }
+
+        private static bool SuccessorResident()
+        {
+            var succ = SuccessorRef();
+            return succ.HasValue && IsTrackReady(succ.Value);
+        }
+
+        // ── lag-332 v4 §2.5: fade-in envelope ────────────────────────────
+
+        private static void ArmFade()
+        {
+            var s = S;
+            s.fadeActive = true;
+            s.fadeProgress = 0f;
+            // r1 LOW 20: the frame that called Play() may have carried a
+            // 350-630 ms decode; its delta must not be counted as audible time.
+            s.fadeArmFrame = Time.frameCount;
         }
 
         // ── clip loading (UnityWebRequest, buffered OGG) ─────────────────
@@ -2003,13 +2562,353 @@ namespace CompetitiveRounds
             return Clips.TryGetValue(t.ToString(), out var e) ? e.Clip : null;
         }
 
-        private static void KickLoadsForQueueHead()
+        // ── lag-332 v6 §2.2: residency window ────────────────────────────
+
+        /// <summary>The ONLY keys that may hold a request or a clip: the
+        /// current track, its immediate successor, and the preview slot.
+        /// Vanilla entries are never keys (their clips are the game's).
+        /// Recomputed synchronously wherever the desired set can change
+        /// (ReconcileResidency is called from ReconcileCore, AdoptCurrent and
+        /// the transports) — never cached across a mutation.</summary>
+        private static int DesiredKeys(string[] into)
         {
             var s = S;
-            int kicked = 0;
-            if (s.current.HasValue && KickLoad(s.current.Value)) kicked++;
-            for (int i = 0; i < s.queue.Count && kicked < 2; i++)
-                if (KickLoad(s.queue[i])) kicked++;
+            int n = 0;
+            // r2 MEDIUM 12 — the preview TRANSACTION: while a replacement Q is
+            // Pending, the slot holds BOTH the fallback P (active or retained)
+            // and Q, and the SUCCESSOR yields for the duration so the physical
+            // bound still holds; P is displaced only once Q has decoded and
+            // taken ownership (previewPending cleared by StartPreviewOwnership).
+            bool transaction = s.previewPending.HasValue;
+            TrackRef? fallback = s.previewTrack ?? s.previewRetained;
+            // r5 MEDIUM 4: an ENDED current is a traversal cursor, not a playable.
+            // It stays desired only while it is already resident (a Previous
+            // restart may still need its clip); an ended current that never
+            // decoded is dropped from the window so no click ever spends a
+            // decode on it.
+            bool currentDesired = s.current.HasValue && !IsVanillaSku(s.current.Value.Sku)
+                && (!s.currentEnded || IsTrackReady(s.current.Value));
+            if (currentDesired) into[n++] = s.current.Value.ToString();
+            else if (!s.current.HasValue && s.queue.Count > 0 && !IsVanillaSku(s.queue[0].Sku))
+            {
+                // No current yet (Loading before the first adoption): the head of
+                // the queue IS the track that will become current, so the window
+                // is {queue[0], queue[1]} — "prepare 0 of 2", not a one-key window
+                // that grows to two after the first click (seen in the Sept 2
+                // verification screenshot).
+                into[n++] = s.queue[0].ToString();
+                if (!transaction && s.queue.Count > 1 && !IsVanillaSku(s.queue[1].Sku)) into[n++] = s.queue[1].ToString();
+                if (transaction)
+                {
+                    if (fallback.HasValue) into[n++] = "p:" + fallback.Value;
+                    into[n++] = "p:" + s.previewPending.Value;
+                }
+                else if (fallback.HasValue) into[n++] = "p:" + fallback.Value;
+                return n;
+            }
+            if (!transaction)
+            {
+                var succ = SuccessorRef();
+                if (succ.HasValue && !IsVanillaSku(succ.Value.Sku))
+                {
+                    string k = succ.Value.ToString();
+                    bool dup = false;
+                    for (int i = 0; i < n; i++) if (into[i] == k) { dup = true; break; }
+                    if (!dup) into[n++] = k;
+                }
+                if (fallback.HasValue) into[n++] = "p:" + fallback.Value;
+            }
+            else
+            {
+                if (fallback.HasValue) into[n++] = "p:" + fallback.Value;
+                into[n++] = "p:" + s.previewPending.Value;
+            }
+            return n;
+        }
+
+        private static bool IsDesiredKey(string key)
+        {
+            var keys = _desiredScratch;
+            int n = DesiredKeys(keys);
+            for (int i = 0; i < n; i++) if (keys[i] == key) return true;
+            return false;
+        }
+        private static readonly string[] _desiredScratch = new string[6];
+
+        /// <summary>r3 MEDIUM 2: LOGICAL failure state lives HERE, separate from
+        /// physical residency — reconciliation may release a failed entry's
+        /// native resources, but that never clears the tombstone; only an
+        /// explicit retry does (the Prepare click, a PlayTrack of that key, a
+        /// Preview click of that key).</summary>
+        private static readonly HashSet<string> Tombstones = new HashSet<string>(StringComparer.Ordinal);
+
+        private static bool IsFailedKey(string key)
+        {
+            if (key == null) return false;
+            return Tombstones.Contains(key) || (Clips.TryGetValue(key, out var e) && e.Failed);
+        }
+
+        /// <summary>r7 MEDIUM 1: EVERY failure of the CURRENT key — request start,
+        /// download, decode — recovers through THIS path and nowhere else: an
+        /// optional advance to a ready successor, then a mandatory Reconcile (a
+        /// readiness edge may already have been consumed, and EnsureMainPlaying
+        /// returns while the mode is Loading). Sites that fail INSIDE a residency
+        /// pass (request start) must not reconcile re-entrantly: they park the
+        /// key in _failedCurrentPending and Tick drains it FIRST, before any
+        /// readiness transition can acquire Custom around a dead current.</summary>
+        private static void RecoverFailedCurrent(string key, string why)
+        {
+            var s = S;
+            if (!s.current.HasValue || !string.Equals(s.current.Value.ToString(), key, StringComparison.Ordinal)) return;
+            if (!AdvanceToNext(userSkip: false))
+            {
+                // r8 MEDIUM 2: nothing is ready NOW. The failed current must not
+                // stay a live cursor: a LATER readiness mutation (a track becomes
+                // resident, the vanilla OST is re-enabled) would otherwise acquire
+                // Custom around a dead current and EnsureMainPlaying would address
+                // it and return — owned silence until the watchdog. As an ENDED
+                // cursor [N6c] it is excluded from readiness and EnsureMainPlaying
+                // advances off it the moment anything becomes playable.
+                s.currentEnded = true;
+                s.hasReadyTrack = false;
+                Plugin.Log?.LogInfo($"[MUSIC] failed current {key} parked as an ended cursor ({why}) — no successor is ready yet");
+            }
+            Reconcile("current-failed:" + why);
+        }
+        private static string _failedCurrentPending, _failedCurrentPendingWhy;
+        private static void NoteKeyFailedDeferred(ClipEntry e, string why)
+        {
+            MarkFailed(e);
+            var s = S;
+            if (s.current.HasValue && string.Equals(s.current.Value.ToString(), e.Key, StringComparison.Ordinal))
+            { _failedCurrentPending = e.Key; _failedCurrentPendingWhy = why; }
+        }
+        private static void DrainFailedCurrent()
+        {
+            if (_failedCurrentPending == null) return;
+            string k = _failedCurrentPending, why = _failedCurrentPendingWhy;
+            _failedCurrentPending = null; _failedCurrentPendingWhy = null;
+            RecoverFailedCurrent(k, why);
+        }
+
+        private static void MarkFailed(ClipEntry e)
+        {
+            e.Failed = true;
+            ClipStateGeneration++;
+            if (e.Key != null && Tombstones.Add(e.Key)) Plugin.Log?.LogInfo($"[MUSIC] tombstone {e.Key} (failed — retry only by an explicit click)");
+        }
+
+        private static void ClearTombstone(string key)
+        {
+            if (key == null) return;
+            if (Tombstones.Remove(key)) Plugin.Log?.LogInfo($"[MUSIC] retry {key} (tombstone cleared by an explicit click)");
+            if (Clips.TryGetValue(key, out var e) && e.Failed) { Clips.Remove(key); DisposeEntry(e); }
+        }
+
+        /// <summary>The logical immediate successor of the current track
+        /// under the live loop/shuffle policy — the ONLY forward entry that
+        /// may be resident. At a shuffled tail the next cycle is generated
+        /// once (EnsureNextCycle) so traversal wraps into the same order.</summary>
+        private static TrackRef? SuccessorRef()
+        {
+            var s = S;
+            EnsureQueueCurrent();
+            int n = s.queue.Count;
+            if (n == 0) return null;
+            // r2 MEDIUM 13: a FAILED entry is not a viable successor — skip past
+            // it to the next candidate (the explicit Prepare click retries the
+            // failed download), so Waiting never pins on a dead key.
+            int start = s.queueIndex < 0 ? 0 : s.queueIndex + 1;
+            for (int i = start; i < n; i++)
+            {
+                if (IsVanillaSku(s.queue[i].Sku) || !IsFailedKey(s.queue[i].ToString())) return s.queue[i];
+            }
+            if (!LoopEffective()) return null;
+            List<TrackRef> wrap = ShuffleEffective() ? EnsureNextCycle() : s.queue;
+            if (wrap == null) return null;
+            for (int i = 0; i < wrap.Count; i++)
+            {
+                if (s.current.HasValue && wrap[i].Equals(s.current.Value) && wrap.Count > 1) continue;
+                if (IsVanillaSku(wrap[i].Sku) || !IsFailedKey(wrap[i].ToString())) return wrap[i];
+            }
+            return null;
+        }
+
+        private static List<TrackRef> EnsureNextCycle()
+        {
+            var s = S;
+            string sig = s.queueSignature;
+            if (s.nextCycle != null && string.Equals(s.nextCycleSignature, sig, StringComparison.Ordinal)) return s.nextCycle;
+            s.nextCycle = BuildQueueOrder(BuildEffectiveSelection(), s.current);
+            s.nextCycleSignature = sig;
+            return s.nextCycle;
+        }
+
+        /// <summary>Decoded clips + live requests + pending-destroy clips +
+        /// quarantined request disposals — the physical count the residency
+        /// bound is stated over (four categories, PHYSICAL_CAP).</summary>
+        private static int LiveObjectCount()
+        {
+            int c = PendingDestroy.Count + PendingDisposeRequests.Count;
+            foreach (var kv in Clips)
+            {
+                var e = kv.Value;
+                if (e.Clip != null) c++;
+                else if (e.Req != null) c++;
+            }
+            return c;
+        }
+
+        /// <summary>Reconcile the resident set against DesiredKeys: displaced
+        /// keys are aborted/disposed (clip destroyed, counted as
+        /// pending-destroy until next frame); missing desired keys get a
+        /// REQUEST only when a physical slot is free and nothing is pending
+        /// destruction (v6 §2.2: A is destroyed before C may be requested).</summary>
+        private static void ReconcileResidency()
+        {
+            try
+            {
+                var keys = _desiredScratch;
+                int n = DesiredKeys(keys);
+                List<string> drop = null;
+                foreach (var kv in Clips)
+                {
+                    bool keep = false;
+                    for (int i = 0; i < n; i++) if (keys[i] == kv.Key) { keep = true; break; }
+                    if (!keep) (drop ?? (drop = new List<string>())).Add(kv.Key);
+                }
+                if (drop != null)
+                {
+                    foreach (var k in drop) { var e = Clips[k]; Clips.Remove(k); DisposeEntry(e); }
+                    ClipStateGeneration++;
+                    // Audit line for the physical bound (design v6 §2.2 gate 7):
+                    // what was displaced and what is resident right after.
+                    Plugin.Log?.LogInfo($"[MUSIC-RESIDENCY] displaced={string.Join(",", drop)} desired={string.Join(",", keys, 0, n)} live={LiveObjectCount()} pendingDestroy={PendingDestroy.Count}");
+                }
+                KickDesiredLoads();
+            }
+            catch (Exception ex) { LogOnce("resid", "[MUSIC] residency reconcile failed: " + ex.Message, true); }
+        }
+
+        /// <summary>Request (never decode) each desired key that holds no
+        /// entry, honouring the physical bound and the pending-destroy hold.</summary>
+        private static void KickDesiredLoads()
+        {
+            var keys = _desiredScratch;
+            int n = DesiredKeys(keys);
+            for (int i = 0; i < n; i++)
+            {
+                string key = keys[i];
+                if (Clips.ContainsKey(key)) continue;
+                if (Tombstones.Contains(key)) continue;               // r3 MEDIUM 2: a failed key is never auto-requested
+                if (PendingDestroy.Count > 0) return;                 // wait for the displaced clip to die first
+                if (LiveObjectCount() >= RESIDENT_KEY_CAP) return;
+                if (key.StartsWith("p:", StringComparison.Ordinal)) KickPreviewLoad(key.Substring(2));
+                else if (TrackRef.TryParse(key, out var t)) KickLoad(t);
+            }
+        }
+
+        private static void KickPreviewLoad(string trackKey)
+        {
+            if (!TrackRef.TryParse(trackKey, out var t)) return;
+            var album = MusicCatalog.Get(t.Sku);
+            if (album == null || album.Tracks == null || t.Idx < 0 || t.Idx >= album.Tracks.Length) return;
+            string path = null;
+            try { path = MusicAssets.PathFor(album.Tracks[t.Idx].PreviewFile); } catch { }
+            if (path == null) { try { MusicAssets.EnsureTier(MusicTier.Previews, "preview"); } catch { } return; }
+            EnsureClipLoading("p:" + t, path);
+        }
+
+        /// <summary>End-of-frame destroy bookkeeping: an entry stays counted
+        /// until the frame after its Destroy was issued.</summary>
+        private static float _quarantineRetryRt = -1f;
+        private static void SweepPendingDestroy()
+        {
+            // r7 LOW 13: quarantined RETRIES (a Dispose/Destroy that threw) run at
+            // most twice a second — a persistently faulting object must not cost
+            // every rendered frame. The normal next-frame release is not throttled.
+            float now = Time.realtimeSinceStartup;
+            bool retry = now - _quarantineRetryRt >= 0.5f;
+            if (retry) _quarantineRetryRt = now;
+            // Quarantined request disposals: retried until they succeed, counted meanwhile.
+            if (retry)
+                for (int i = PendingDisposeRequests.Count - 1; i >= 0; i--)
+                {
+                    try { PendingDisposeRequests[i].Dispose(); PendingDisposeRequests.RemoveAt(i); ClipStateGeneration++; }   // r7 LOW 4: the physical count moved
+                    catch { }
+                }
+            if (PendingDestroy.Count == 0) return;
+            int f = Time.frameCount;
+            for (int i = PendingDestroy.Count - 1; i >= 0; i--)
+            {
+                var pd = PendingDestroy[i];
+                if (!pd.Destroyed)
+                {
+                    if (!retry) continue;
+                    // Quarantined: retry the destroy; stays counted until it lands.
+                    try { if (pd.Clip != null) UnityEngine.Object.Destroy(pd.Clip); pd.Destroyed = true; pd.Frame = f; PendingDestroy[i] = pd; }
+                    catch { }
+                    continue;
+                }
+                if (pd.Frame < f) { PendingDestroy.RemoveAt(i); ClipStateGeneration++; }   // r7 LOW 4: the physical count moved
+            }
+        }
+
+        /// <summary>Music-tab state line for the Prepare affordance:
+        /// how many desired custom keys are resident vs downloaded-undecoded
+        /// vs still downloading. Returns null when nothing needs preparing.</summary>
+        internal static string PrepareStateLine(out bool clickable)
+        {
+            clickable = false;
+            try
+            {
+                var keys = _desiredScratch;
+                int n = DesiredKeys(keys);
+                int total = 0, ready = 0, downloaded = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    if (keys[i].StartsWith("p:", StringComparison.Ordinal)) continue;
+                    total++;
+                    if (Clips.TryGetValue(keys[i], out var e))
+                    {
+                        if (e.Clip != null) ready++;
+                        else if (!e.Failed && e.Downloaded) downloaded++;
+                    }
+                }
+                // r3 MEDIUM 2 / r5 MEDIUM 6: EVERY failed non-preview key counts
+                // exactly once — tombstoned or holding a Failed entry, desired or
+                // skipped by the successor walk — so the retry affordance never
+                // disappears while a failure exists.
+                var failedKeys = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var tk in Tombstones) if (!tk.StartsWith("p:", StringComparison.Ordinal)) failedKeys.Add(tk);
+                foreach (var kv in Clips) if (kv.Value.Failed && !kv.Key.StartsWith("p:", StringComparison.Ordinal)) failedKeys.Add(kv.Key);
+                int failed = failedKeys.Count;
+                // r6 LOW 4: "clickable" means the NEXT click will actually act —
+                // the same non-consuming gates the decode path applies (menu
+                // admission across the last frames, no clip pending destruction,
+                // the physical bound), never the download count alone.
+                bool admissible = false;
+                try { admissible = MusicAdmission.ClickAdmissible(out _, out _); } catch { }
+                bool physicalOk = PendingDestroy.Count == 0 && LiveObjectCount() < PHYSICAL_CAP;
+                if (failed > 0)
+                {
+                    // r7 LOW 3: the retry click runs behind the same physical gates.
+                    clickable = admissible && physicalOk;
+                    if (clickable) return I18n.TrF("Music download failed ({0}) — click to retry", failed);
+                    if (!admissible) return I18n.TrF("Music download failed ({0}) — retry at the main menu", failed);
+                    return I18n.TrF("Music download failed ({0}) — retry in a moment", failed);
+                }
+                if (total == 0 || ready == total) return null;
+                if (downloaded > 0)
+                {
+                    clickable = admissible && physicalOk;
+                    if (clickable) return I18n.TrF("Prepare music ({0} of {1} ready)", ready, total);
+                    if (!admissible) return I18n.TrF("Prepare music at the main menu ({0} of {1} ready)", ready, total);
+                    return I18n.TrF("Preparing music ({0} of {1} ready)", ready, total);
+                }
+                return I18n.TrF("Downloading music ({0} of {1} ready)", ready, total);
+            }
+            catch { return null; }
         }
 
         /// <summary>Start (or re-check) a custom track's clip load. Returns
@@ -2038,12 +2937,25 @@ namespace CompetitiveRounds
         private static void EnsureClipLoading(string key, string path)
         {
             if (Clips.ContainsKey(key)) return;
+            // lag-332 v6 §2.2: one of the two chokepoints — a request may only
+            // exist for a desired key, and only inside the physical bound.
+            if (!IsDesiredKey(key)) return;
+            if (PendingDestroy.Count > 0 || LiveObjectCount() >= RESIDENT_KEY_CAP) return;
+            // r1 MEDIUM 12: ownership is established in the counted set BEFORE
+            // any throwing operation, so a request that throws mid-construction
+            // can never exist uncounted; the local handle is disposed in the
+            // failure path.
+            var entry = new ClipEntry { Key = key, RequestedFrame = Time.frameCount };
+            Clips[key] = entry;
+            UnityWebRequest req = null;
             try
             {
                 string url;
                 try { url = new Uri(path).AbsoluteUri; }
                 catch { url = "file:///" + path.Replace('\\', '/'); }
-                var req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
+                req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
+                entry.Req = req;   // counted from this point on (LiveObjectCount)
+                ClipStateGeneration++;
                 var dh = req.downloadHandler as DownloadHandlerAudioClip;
                 // Fully buffered, NOT streamed: disk-IO underruns on streamed
                 // playback were the reported light audio skipping, and only a
@@ -2051,53 +2963,375 @@ namespace CompetitiveRounds
                 // pack is ~26MB of compressed audio — trivially resident.
                 if (dh != null) dh.streamAudio = false;
                 req.SendWebRequest();
-                Clips[key] = new ClipEntry { Key = key, Req = req };
+                // A Pending preview's timeout starts only once its request could
+                // progress (r2 MEDIUM 12).
+                if (S.previewPending.HasValue && key == "p:" + S.previewPending.Value) S.previewPendingRt = Time.realtimeSinceStartup;
+                Plugin.Log?.LogInfo($"[MUSIC-RESIDENCY] request {key} live={LiveObjectCount()} pendingDestroy={PendingDestroy.Count}");
             }
             catch (Exception ex)
             {
-                Clips[key] = new ClipEntry { Key = key, Failed = true };
+                // r3 MEDIUM 4 / r4 MEDIUM 4: every request release is COUNTED (quarantined
+                // on a throwing Dispose) — the reference is never dropped first.
+                if (ReferenceEquals(entry.Req, req)) entry.Req = null;
+                DisposeRequestCountedRaw(req);
+                NoteKeyFailedDeferred(entry, "request-start");   // r7 MEDIUM 1: the current recovers at the next Tick entry
                 LogOnce("load:" + key, $"[MUSIC] clip load start failed for {key}: {ex.Message}", true);
             }
         }
 
-        /// <summary>Polls in-flight requests (no coroutines: a host respawn
-        /// would kill them; the request objects are static and survive).</summary>
-        private static void PumpClipLoads()
+        /// <summary>Polls in-flight requests for COMPLETION only (no
+        /// coroutines: a host respawn would kill them; the request objects
+        /// are static and survive). A completed download is marked
+        /// Downloaded and stays UNDECODED: DownloadHandlerAudioClip.GetContent
+        /// is a 320-700 ms main-thread stall (measured, lag-332 evidence
+        /// addendum 3) and runs only inside ClickDecodeOpportunity.</summary>
+        private static void PollClipLoads()
         {
             List<string> failedNow = null;
             foreach (var kv in Clips)
             {
                 var e = kv.Value;
-                if (e.Req == null || !e.Req.isDone || e.Clip != null || e.Failed) continue;
-                if (e.Req.result == UnityWebRequest.Result.Success)
-                {
-                    AudioClip clip = null;
-                    try { clip = DownloadHandlerAudioClip.GetContent(e.Req); } catch { }
-                    if (clip != null && clip.length > 0.1f)
-                    {
-                        e.Clip = clip;   // static ref held: scene-transition asset unloads can't collect it
-                        continue;
-                    }
-                }
-                e.Failed = true;
+                if (e.Req == null || !e.Req.isDone || e.Clip != null || e.Failed || e.Downloaded) continue;
+                if (e.Req.result == UnityWebRequest.Result.Success) { e.Downloaded = true; ClipStateGeneration++; continue; }
                 (failedNow ?? (failedNow = new List<string>())).Add(e.Key);
-                LogOnce("clipfail:" + e.Key, $"[MUSIC] clip decode failed for {e.Key}: {(e.Req.result != UnityWebRequest.Result.Success ? e.Req.error : "empty clip")}", true);
-                try { e.Req.Dispose(); } catch { }
-                e.Req = null;
+                LogOnce("clipfail:" + e.Key, $"[MUSIC] clip download failed for {e.Key}: {e.Req.error}", true);
+                DisposeRequestCounted(e);   // r3 MEDIUM 4 / r4 MEDIUM 4: counted release
+                NoteKeyFailedDeferred(e, "download");   // r3 MEDIUM 2 tombstone + r7 MEDIUM 1 recovery (drained below, outside the enumeration)
             }
-            if (failedNow != null && S.current.HasValue && failedNow.Contains(S.current.Value.ToString()))
+            // Current track died: the ONE recovery path (r7 MEDIUM 1) — optional
+            // advance, mandatory Reconcile; parks at Loading if the playable set
+            // is gone [F12].
+            DrainFailedCurrent();
+        }
+
+        /// <summary>lag-332 design v6 §2.1 — THE single GetContent site.
+        /// Called by the Music-tab click callbacks (NativeUI.MusicUiCall, the
+        /// track Play button, the shop Preview button) AFTER their action:
+        /// re-checks the full menu admission snapshot against the two prior
+        /// distinct-frame observations, recomputes the desired keys, and
+        /// decodes AT MOST ONE downloaded desired key synchronously before
+        /// returning. Nothing is retained: a request that completes later
+        /// needs another click. Returns true when a decode happened.</summary>
+        /// <summary>impl-review r2 MEDIUM 11: the admission decision is taken
+        /// at callback ENTRY, before the action mutates anything, and carried
+        /// into the decode as an immutable one-shot token.</summary>
+        /// <summary>r3 MEDIUM 1: a SERIAL, CONSUMABLE token bound to the semantic
+        /// action and — after the action ran — to exactly one target key.
+        /// Issued at callback ENTRY (before the action mutates anything);
+        /// consumed by the FIRST ClickDecodeOpportunity attempt regardless of
+        /// outcome; any token but the most recently issued one is refused.</summary>
+        internal struct ClickToken
+        {
+            public int Serial;
+            public string Action;
+            public string Key;              // explicit target (play-track / shop-preview), else null
+            public string PreCurrentKey;    // S.current at entry — skip/prev must MOVE the cursor to decode
+            public bool PrePlaying;         // Custom & unpaused at entry — play-pause decodes only when it PLAYED
+            public bool PrePreview;         // a preview was sounding at entry — a preview-ending transport decodes nothing (r4 LOW 7)
+            public bool Admissible;
+            public MusicAdmission.Snapshot Snap;
+            public string Why;
+        }
+        private static int _clickSerial, _consumedClickSerial;
+
+        internal static ClickToken BeginClickAdmission(string what, string key = null)
+        {
+            var t = new ClickToken();
+            t.Serial = ++_clickSerial;
+            t.Action = what ?? "";
+            t.Key = key;
+            try
             {
-                // Current track died: try the next; Reconcile parks at Loading
-                // if the playable set is gone [F12].
-                if (AdvanceToNext(userSkip: false)) EnsureMainPlaying();
-                else Reconcile("current-clip-failed");
+                var s = S;
+                t.PreCurrentKey = s.current.HasValue ? s.current.Value.ToString() : null;
+                t.PrePlaying = s.mode == MusicMode.Custom && !s.paused;
+                t.PrePreview = s.previewTrack.HasValue;
+            }
+            catch { }
+            try { t.Admissible = MusicAdmission.ClickAdmissible(out t.Snap, out t.Why); }
+            catch (Exception ex) { t.Admissible = false; t.Why = "entry admission threw: " + ex.Message; }
+            return t;
+        }
+
+        /// <summary>r2 MEDIUM 10 / r3 MEDIUM 1: the ONE key this action may decode.
+        /// Prepare is the single unbound preparation click (current, then
+        /// successor). Play (row) and Preview name their track. Skip/Previous
+        /// decode only the track the cursor MOVED to (a restart-style Previous
+        /// decodes nothing). Play-pause decodes only when the click PLAYED —
+        /// never on its pause half. Selection toggles, Stop, Use vanilla,
+        /// Loop, Shuffle and Retry never decode.</summary>
+        private static bool BoundDecodeKey(ClickToken t, out string key, out bool unbound)
+        {
+            key = null; unbound = false;
+            var s = S;
+            // r5 MEDIUM 4: an ended current is never a decode target.
+            string cur = (s.current.HasValue && !s.currentEnded) ? s.current.Value.ToString() : null;
+            switch (t.Action)
+            {
+                case "prepare": unbound = true; return true;
+                case "play-track": case "shop-preview": key = t.Key; return key != null;
+                case "skip": case "prev":
+                    if (cur != null && !string.Equals(cur, t.PreCurrentKey, StringComparison.Ordinal)) { key = cur; return true; }
+                    return false;
+                case "play-pause":
+                    // r4 LOW 7: the preview-ending branch of PlayPause is not a Play.
+                    if (t.PrePreview) return false;
+                    if (!t.PrePlaying && !s.paused && !s.stopIntent && cur != null) { key = cur; return true; }
+                    return false;
+                default: return false;
             }
         }
 
+        internal static bool ClickDecodeOpportunity(ClickToken entry)
+        {
+            if (!_initialized) return false;
+            try
+            {
+                // Consumed FIRST, whatever happens next: one attempt per token,
+                // and only the latest issued token is valid.
+                if (entry.Serial == 0 || entry.Serial != _clickSerial || _consumedClickSerial >= entry.Serial)
+                {
+                    Plugin.Log?.LogInfo($"[MUSIC-DECODE] click '{entry.Action}' — token refused (serial {entry.Serial}, latest {_clickSerial}, consumed {_consumedClickSerial})");
+                    return false;
+                }
+                _consumedClickSerial = entry.Serial;
+                string what = entry.Action;
+                string preferredKey; bool unbound;
+                if (!BoundDecodeKey(entry, out preferredKey, out unbound)) return false;
+                if (!entry.Admissible)
+                {
+                    Plugin.Log?.LogInfo($"[MUSIC-DECODE] click '{what}' — no decode (entry: {entry.Why})");
+                    return false;
+                }
+                // Re-check at decode time too: the action itself may have changed
+                // an input (both decisions must agree — one-shot, not retained).
+                if (!MusicAdmission.ClickAdmissible(out var snap, out var why))
+                {
+                    Plugin.Log?.LogInfo($"[MUSIC-DECODE] click '{what}' — no decode (post-action: {why})");
+                    return false;
+                }
+                if (PendingDestroy.Count > 0)
+                {
+                    Plugin.Log?.LogInfo($"[MUSIC-DECODE] click '{what}' — no decode (displaced clip pending destruction)");
+                    return false;
+                }
+                // r5 MEDIUM 3: the request→clip handoff briefly holds BOTH objects
+                // for one key, and a throwing Dispose keeps the request in the
+                // counted quarantine beside the retained clip. That transient is
+                // the ONE extra physical slot the bound allows (PHYSICAL_CAP =
+                // RESIDENT_KEY_CAP + 1); while it is occupied no further decode
+                // may start — the sweep retries the release at most twice a second
+                // (r7 LOW 13); an object that keeps faulting keeps blocking decodes
+                // for as long as it faults (fail-closed by design, r9 LOW 3).
+                if (LiveObjectCount() >= PHYSICAL_CAP)
+                {
+                    Plugin.Log?.LogInfo($"[MUSIC-DECODE] click '{what}' — no decode (physical bound: a quarantined release is still pending, live={LiveObjectCount()})");
+                    return false;
+                }
+                if (_lastClickDecodeFrame == Time.frameCount) return false;   // one decode per frame, duplicate hosts included
+                EnsureQueueCurrent();
+                // "prepare" is also the explicit RETRY of a failed desired download
+                // (r2 MEDIUM 13): the Failed entries are dropped so they re-request.
+                if (what == "prepare")
+                {
+                    RetryFailedDesired();
+                    // r8 LOW 3: the retry reconciles residency synchronously and can
+                    // move a displaced clip into pending destruction — both physical
+                    // gates are evaluated AGAIN on the post-retry state.
+                    if (PendingDestroy.Count > 0)
+                    {
+                        Plugin.Log?.LogInfo($"[MUSIC-DECODE] click '{what}' — no decode (retry displaced a clip; pending destruction)");
+                        return false;
+                    }
+                    if (LiveObjectCount() >= PHYSICAL_CAP)
+                    {
+                        Plugin.Log?.LogInfo($"[MUSIC-DECODE] click '{what}' — no decode (physical bound after retry, live={LiveObjectCount()})");
+                        return false;
+                    }
+                }
+                var keys = _desiredScratch;
+                int n = DesiredKeys(keys);
+                ClipEntry target = null;
+                if (preferredKey != null)
+                {
+                    // Key-bound (r2 MEDIUM 10): the action names exactly what it prepares.
+                    bool desired = false;
+                    for (int i = 0; i < n; i++) if (keys[i] == preferredKey) { desired = true; break; }
+                    if (desired && Clips.TryGetValue(preferredKey, out var pe) && pe.Downloaded && pe.Clip == null && !pe.Failed && pe.Req != null) target = pe;
+                }
+                else
+                {
+                    // Preparation order: current, then successor — never a preview,
+                    // never an ENDED current (r5 MEDIUM 4).
+                    string endedCur = (S.current.HasValue && S.currentEnded) ? S.current.Value.ToString() : null;
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (keys[i].StartsWith("p:", StringComparison.Ordinal)) continue;
+                        if (endedCur != null && keys[i] == endedCur) continue;
+                        if (Clips.TryGetValue(keys[i], out var e) && e.Downloaded && e.Clip == null && !e.Failed && e.Req != null)
+                        { target = e; break; }
+                    }
+                }
+                if (target == null) return false;
+                _lastClickDecodeFrame = Time.frameCount;
+                MusicAdmission.InClickDecode = true;
+                try { DecodeEntryNow(target, what, snap); }
+                finally { MusicAdmission.InClickDecode = false; }
+                if (target.Clip != null)
+                {
+                    if (s_previewPendingIs(target.Key)) StartPendingPreviewOwnership();
+                    bool ready = ScanHasReadyTrack();
+                    if (ready != S.hasReadyTrack) S.hasReadyTrack = ready;
+                    Reconcile("click-decode");
+                    return true;
+                }
+                // r5 MEDIUM 5: a FAILED decode is handled exactly like a failed
+                // download (PollClipLoads): a failed CURRENT advances to a ready
+                // successor or parks at Loading — never "Custom with nothing to
+                // play" until the silence watchdog fires.
+                bool readyAfterFail = ScanHasReadyTrack();
+                if (readyAfterFail != S.hasReadyTrack) S.hasReadyTrack = readyAfterFail;
+                if (S.current.HasValue && string.Equals(S.current.Value.ToString(), target.Key, StringComparison.Ordinal))
+                    RecoverFailedCurrent(target.Key, "decode");   // r6 MEDIUM 1 / r7 MEDIUM 1: the one recovery path
+                else
+                    Reconcile("click-decode-failed");
+                return false;
+            }
+            catch (Exception ex) { LogOnce("clickdecode", "[MUSIC] click decode failed: " + ex.Message, true); return false; }
+        }
+        private static int _lastClickDecodeFrame = -1;
+
+        /// <summary>The Prepare click is the explicit retry of EVERY failed key
+        /// (r2 MEDIUM 13 / r3 MEDIUM 2): tombstones are cleared, failed entries
+        /// released, and the successor recomputed so a previously skipped key
+        /// is viable again.</summary>
+        private static void RetryFailedDesired()
+        {
+            bool any = Tombstones.Count > 0;
+            Tombstones.Clear();
+            List<string> drop = null;
+            foreach (var kv in Clips) if (kv.Value.Failed) (drop ?? (drop = new List<string>())).Add(kv.Key);
+            if (drop != null) { any = true; foreach (var k in drop) { var e = Clips[k]; Clips.Remove(k); DisposeEntry(e); } }
+            if (any) { Plugin.Log?.LogInfo("[MUSIC] retrying failed downloads (explicit Prepare)"); S.queueSignature = null; ReconcileResidency(); }
+        }
+
+        private static bool s_previewPendingIs(string key)
+        {
+            var p = S.previewPending;
+            return p.HasValue && key == "p:" + p.Value;
+        }
+
+        /// <summary>The decode itself. Guarded by the call-stack flag: any
+        /// caller outside ClickDecodeOpportunity is refused (logged), which
+        /// is the design's "no Tick/poll caller" gate in executable form.</summary>
+        private static void DecodeEntryNow(ClipEntry e, string what, MusicAdmission.Snapshot snap)
+        {
+            if (!MusicAdmission.InClickDecode)
+            {
+                LogOnce("decode-outside-click", "[MUSIC] decode requested outside a click callback — refused", true);
+                return;
+            }
+            AudioClip clip = null;
+            long decodeT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            try { clip = DownloadHandlerAudioClip.GetContent(e.Req); } catch { }
+            try
+            {
+                double decodeMs = (System.Diagnostics.Stopwatch.GetTimestamp() - decodeT0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                try { NetworkSeatTelemetry.NoteDecodeMs(decodeMs); } catch { }   // frame-component ledger (bundle-only)
+                // Exact PCM bytes (samples x channels x 4): Profiler.GetRuntimeMemorySizeLong
+                // reports 0 in a non-development player, so it was never honest here.
+                double pcmMb = clip != null ? (double)clip.samples * clip.channels * 4.0 / 1048576.0 : 0.0;
+                // r7 LOW 5: `live=` is the PEAK of this handoff — the clip just
+                // decoded (not yet assigned to the entry) counts beside its request.
+                Plugin.Log?.LogInfo($"[MUSIC-DECODE] click='{what}' key={e.Key} getContentMs={decodeMs.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} samples={(clip != null ? clip.samples : 0)} ch={(clip != null ? clip.channels : 0)} hz={(clip != null ? clip.frequency : 0)} pcmMB={pcmMb.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} live={LiveObjectCount() + (clip != null ? 1 : 0)} admission[{snap.Describe()}]");
+                _decodeLogNextFrame = e.Key;
+            }
+            catch { }
+            if (clip != null && clip.length > 0.1f)
+            {
+                // The static reference keeps the MANAGED clip object reachable
+                // across scene transitions. Whether the NATIVE audio data
+                // survives disposing its DownloadHandlerAudioClip request is
+                // NOT proven by that reference (r1 LOW 22) — the in-game
+                // playback of a track decoded in an earlier click, seeked and
+                // played after the request was disposed, is the test.
+                e.Clip = clip;
+                ClipStateGeneration++;
+                // Request → clip handoff: the request is released through the
+                // counted quarantine (r3/r4 MEDIUM 4) — a throwing Dispose keeps it
+                // COUNTED beside its clip (the one handoff transient) until the
+                // sweep's retry succeeds.
+                DisposeRequestCounted(e);
+                e.Downloaded = false;
+                return;
+            }
+            MarkFailed(e);   // r3 MEDIUM 2: logical tombstone
+            LogOnce("clipfail:" + e.Key, $"[MUSIC] clip decode failed for {e.Key}: empty clip", true);
+            // r2 MEDIUM 14: a rejected NON-null clip is a native object — it goes
+            // through the counted destroy quarantine like any other.
+            if (clip != null) QuarantineClipDestroy(e.Key, clip);
+            DisposeRequestCounted(e);
+            e.Downloaded = false;
+        }
+
+        // r2 MEDIUM 14: disposal failures stay COUNTED. A request whose Dispose
+        // threw is retried by the sweep; a clip whose Destroy threw likewise.
+        private static readonly List<UnityWebRequest> PendingDisposeRequests = new List<UnityWebRequest>();
+
+        private static void DisposeRequestCounted(ClipEntry e)
+        {
+            var req = e.Req;
+            e.Req = null;
+            DisposeRequestCountedRaw(req);
+        }
+
+        /// <summary>The ONLY request-release primitive (r3/r4 MEDIUM 4): a throwing
+        /// Dispose moves ownership into the counted quarantine — the object is
+        /// never unreferenced while its disposal is unproven.</summary>
+        private static void DisposeRequestCountedRaw(UnityWebRequest req)
+        {
+            if (req == null) return;
+            try { req.Dispose(); }
+            catch (Exception ex)
+            {
+                PendingDisposeRequests.Add(req);
+                LogOnce("reqdispose", "[MUSIC] request dispose failed (quarantined, will retry): " + ex.Message, true);
+            }
+        }
+
+        private static void QuarantineClipDestroy(string key, AudioClip clip)
+        {
+            var pd = new PendingDestroyEntry { Key = key, Frame = Time.frameCount, Clip = clip };
+            PendingDestroy.Add(pd);
+            try
+            {
+                var h = _host;
+                if (h != null)
+                {
+                    if (h.Main != null && h.Main.clip == clip) { try { h.Main.Stop(); } catch { } h.Main.clip = null; }
+                    if (h.Preview != null && h.Preview.clip == clip) { try { h.Preview.Stop(); } catch { } h.Preview.clip = null; }
+                }
+                UnityEngine.Object.Destroy(clip);
+                pd.Destroyed = true;
+                PendingDestroy[PendingDestroy.Count - 1] = pd;
+            }
+            catch (Exception ex) { LogOnce("destroyclip", "[MUSIC] clip destroy failed (quarantined, will retry): " + ex.Message, true); }
+        }
+
+        /// <summary>Abort/dispose an entry and DESTROY its native clip; the
+        /// clip is counted as pending-destroy until the next frame (v6 §2.2).
+        /// A clip still bound to a source is detached first.</summary>
         private static void DisposeEntry(ClipEntry e)
         {
-            try { e.Req?.Dispose(); } catch { }
-            e.Req = null; e.Clip = null;
+            DisposeRequestCounted(e);
+            e.Downloaded = false;
+            var clip = e.Clip;
+            e.Clip = null;
+            if (clip == null) return;
+            // r1 MEDIUM 12: the clip is counted as pending-destroy BEFORE the
+            // destroy is attempted; a failed destroy stays counted (quarantine)
+            // and is retried by the sweep instead of vanishing from the ledger.
+            QuarantineClipDestroy(e.Key, clip);
         }
 
         private static void EvictUnplayableClips()
@@ -2133,7 +3367,7 @@ namespace CompetitiveRounds
             // returns. AdvanceToNext clears the flag when it adopts.
             if (s.currentEnded && !AdvanceToNext(userSkip: false)) return;
             var clip = ResolveReadyClip(s.current.Value);
-            if (clip == null) { KickLoad(s.current.Value); return; }
+            if (clip == null) { KickDesiredLoads(); return; }
             var m = h.Main;
             if (m.clip != clip) { m.clip = clip; s.currentStarted = false; s.mainPausedByUs = false; s.currentPrematureRetried = false; }
             if (m.isPlaying && s.currentStarted)
@@ -2170,9 +3404,13 @@ namespace CompetitiveRounds
                 // hard-silenced source — the forbidden muted-owned state.
                 try { m.mute = false; }
                 catch (Exception ex) { EnterDurableFaultNoThrow("main-resume-unmute: " + ex.Message); return; }
+                // v4 §2.5 fade: zero gain BEFORE the source becomes audible,
+                // envelope armed right after the successful call.
+                try { m.volume = 0f; } catch { }
                 try { m.UnPause(); }
                 catch (Exception ex) { EnterDurableFaultNoThrow("main-unpause: " + ex.Message); return; }
                 s.mainPausedByUs = false;
+                ArmFade();
                 // [K9] fresh grace window: Unity can report isPlaying=false for a
                 // beat after UnPause; without a re-stamp the premature classifier
                 // would spend its one counted retry (or Fault) on that beat.
@@ -2188,14 +3426,19 @@ namespace CompetitiveRounds
             {
                 float pos = s.resumePositionSec;
                 try { m.time = (pos > 0.5f && pos < clip.length - 1f) ? pos : 0f; } catch { }
+                // v4 §2.5 fade: volume 0 and the current duck/LPF state are
+                // applied BEFORE Play (TickDuckAndVolume keeps the LPF in
+                // step every frame); the envelope baseline is stamped after.
+                try { m.volume = 0f; } catch { }
                 m.Play();
             }
             catch (Exception ex) { EnterDurableFaultNoThrow("main-play: " + ex.Message); return; }
             s.currentStarted = true;
             s.currentStartedRt = Time.realtimeSinceStartup;
-            // [N6b] block prefetch rides the start edge too — covers the
-            // PlayTrack direct-assignment path, which never runs AdoptCurrent.
-            PrefetchCurrentAlbumBlock();
+            ArmFade();
+            // v6 §2.2: the start edge covers the PlayTrack direct-assignment
+            // path, which never runs AdoptCurrent — request the successor now.
+            KickDesiredLoads();
         }
 
         private static float CurrentMainTimeOr(float fallback)
@@ -2282,6 +3525,9 @@ namespace CompetitiveRounds
             var h = _host;
             if (h == null) return true;
             bool ok = true;
+            // v6 §2.3 backstop: no stopped source may keep a Waiting loop.
+            try { var m = h.Main; if (m != null) m.loop = false; } catch { }
+            ExitWaiting("stop-sources");   // r6 LOW 9: the one writer of waiting=false
             try { var m = h.Main; if (m != null) m.Stop(); }
             catch { HardSilenceMainNoThrow(); ok = false; }
             try { var p = h.Preview; if (p != null) p.Stop(); }
@@ -2708,6 +3954,7 @@ namespace CompetitiveRounds
             {
                 Plugin.Log?.LogInfo($"[MUSIC] host respawned — rehydrating (mode={s.mode})");
                 if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("host-respawn");
+                ExitWaiting("host-respawn");   // v6 §2.3: the new Main starts loop-off; Waiting re-arms from TickPlayback if still needed
                 s.currentStarted = false;
                 s.mainPausedByUs = false;
                 s.duckWanted = false;   // [I14] rehydration re-derives the duck from the next prefix edge

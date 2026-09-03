@@ -178,6 +178,60 @@ namespace CompetitiveRounds
         private static readonly DecimatedList<int> oppFpsTimeline = new DecimatedList<int>();     // decimates at cap
         private static readonly DecimatedList<int> oppPingTimeline = new DecimatedList<int>();    // July 22 item 3: opp ping via gstats field 12
         private static int lastOppGstatsSeq = -1;
+        // lag-332 W3-a freshness (v6 §3): baseline-then-transition, actor-bound.
+        private static bool oppSeqBaselineTaken = false;
+        private static bool oppSeqTransitionSeen = false;
+        private static int oppSeqActor = 0;
+        private static int oppRttCurrent = 0;
+
+        /// <summary>impl-review r1 MEDIUM 15: the "opp" of the W3-a estimate is
+        /// only well-defined in a plain two-fighter 1v1 — in 2v2 the first
+        /// non-local fighter may be the TEAMMATE, in 1v2/FFA it is an arbitrary
+        /// participant. Everything else renders n/a.</summary>
+        internal static bool IsPlainOneVOneForHud()
+        {
+            try
+            {
+                if (!oneVOneMatchAtStart || RoomActors.LocalIsSpectator) return false;
+                var room = PhotonNetwork.CurrentRoom;
+                if (room == null) return false;
+                string n = room.Name ?? "";
+                if (n.StartsWith("team_", StringComparison.Ordinal) || n.StartsWith("ovt_", StringComparison.Ordinal)
+                    || n.StartsWith("ffa_", StringComparison.Ordinal)) return false;
+                if (room.CustomProperties != null && room.CustomProperties.ContainsKey("cr_ff")) return false;
+                return RoomActors.ActiveFighterCount() == 2;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The opponent's self-reported RTT, ONLY when a heartbeat
+        /// sequence transition (not the retained pre-match value) landed within
+        /// the last 10 s (unscaled) and the value is 1..3000, in a plain 1v1.
+        /// Peer-reported input: every consumer labels it as such.</summary>
+        internal static bool TryGetPeerRttFresh(out int rtt)
+        {
+            rtt = oppRttCurrent;
+            if (!IsPlainOneVOneForHud()) return false;
+            if (!oppSeqTransitionSeen || rtt < 1 || rtt > 3000 || lastOppSeqAdvanceTime < 0f) return false;
+            return Time.unscaledTime - lastOppSeqAdvanceTime <= 10f;
+        }
+
+        /// <summary>One-way replica-age ESTIMATE = (local RTT + peer RTT) / 2,
+        /// checked 64-bit, both inputs 1..3000 and fresh; -1 = n/a.</summary>
+        internal static int ReplicaAgeEstimateMs()
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return -1;
+                long mine = PhotonNetwork.GetPing();
+                if (mine < 1 || mine > 3000) return -1;
+                int peer;
+                if (!TryGetPeerRttFresh(out peer)) return -1;
+                long est = checked((mine + peer) / 2);
+                return est > int.MaxValue ? -1 : (int)est;
+            }
+            catch { return -1; }
+        }
         private static float lastOppSeqAdvanceTime = -1f;
         private static int localFreezeCount = 0;
         private static int localFreezeFocusedCount = 0;   // resumed WITH focus = window-drag signature
@@ -1775,6 +1829,15 @@ namespace CompetitiveRounds
                     NetworkReplicaDiagnostics.SetBattleActive(battleNow);
             }
             catch { }
+            // lag-332 W1: per-frame hitch accounting + 1 s window close for the
+            // reporter-seat instrument. Spectator seats sample FRAMES too (r1
+            // MEDIUM 8: their stalls are part of the bundle) but never sender
+            // counters — the sender hooks are view-gated inside the instrument.
+            try
+            {
+                NetworkSeatTelemetry.TickFrame(battleNow, inPickPhase, RoomActors.LocalIsSpectator);
+            }
+            catch { }
             if (battleNow && !_lastBattleForPoisonEdge)
             {
                 try { PoisonSync.NoteBattleResumed(); } catch { }
@@ -2080,6 +2143,81 @@ namespace CompetitiveRounds
             return sb.ToString();
         }
 
+        /// <summary>design v6 §1 / impl-review r7 LOW 9 — [Broadcast] TestGstatsSentinel.
+        /// Proves the cr_gstats payload carries NO W1 value: every writable numeric
+        /// static of the seat instrument and the replica observer is loaded with a
+        /// unique 9-digit sentinel (string statics get a SENTINEL_ token — the
+        /// frozen report fragment included), BuildGstatsPayload(0,
+        /// advanceSequence:false) is called DIRECTLY (never BroadcastGstatsImmediate
+        /// / BroadcastFps / SetCustomProperties), absence of every sentinel AND of
+        /// the report serializer's clamp values is asserted, and every field is
+        /// restored in finally — run twice, the second time through an injected
+        /// exception so the restore path is exercised too. Logs [GSTATS-SENTINEL]
+        /// PASS/FAIL. Synchronous: no frame runs while the sentinels are loaded.
+        /// Stated blind spot (r8 LOW 6 / r9 LOW 6): the per-actor TimingWindow
+        /// counters live inside NetworkReplicaDiagnostics.Actors and are NOT
+        /// seeded. They reach a serialized report through the frozen fragment
+        /// (seeded) OR through the LIVE serializer (AppendLiveReportFields, not
+        /// seeded) — a future direct call of the live serializer from this
+        /// payload builder would therefore not be caught by this test.</summary>
+        internal static void DevGstatsSentinelTest()
+        {
+            var types = new[] { typeof(NetworkSeatTelemetry), typeof(NetworkReplicaDiagnostics) };
+            var saved = new List<KeyValuePair<System.Reflection.FieldInfo, object>>();
+            var sentinels = new List<string>();
+            int seqBefore = gstatsSeq;
+            bool pass = true; string detail = "";
+            for (int run = 0; run < 2; run++)
+            {
+                saved.Clear(); sentinels.Clear();
+                try
+                {
+                    long next = 880000001L;
+                    foreach (var t in types)
+                        foreach (var f in t.GetFields(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public))
+                        {
+                            if (f.IsInitOnly || f.IsLiteral) continue;
+                            // r8 LOW 6: string statics too — the frozen report fragment
+                            // (_frozenReportFields) is a serialized W1 payload that a wrong
+                            // AppendReportFields call could emit verbatim.
+                            if (f.FieldType == typeof(string))
+                            {
+                                saved.Add(new KeyValuePair<System.Reflection.FieldInfo, object>(f, f.GetValue(null)));
+                                string ss = "SENTINEL_" + (next++).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                                f.SetValue(null, ss);
+                                sentinels.Add(ss);
+                                continue;
+                            }
+                            if (f.FieldType != typeof(int) && f.FieldType != typeof(long)) continue;
+                            saved.Add(new KeyValuePair<System.Reflection.FieldInfo, object>(f, f.GetValue(null)));
+                            long sv = next++;
+                            if (f.FieldType == typeof(int)) f.SetValue(null, (int)sv); else f.SetValue(null, sv);
+                            sentinels.Add(sv.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        }
+                    if (run == 1) throw new InvalidOperationException("injected");
+                    string payload = BuildGstatsPayload(0, advanceSequence: false);
+                    foreach (var sv in sentinels) if (payload.Contains(sv)) { pass = false; detail += " leaked:" + sv; }
+                    // r8 LOW 6: the live report serializer CLAMPS counters to 1,000,000
+                    // / 3,600,000 — a sentinel that reached the payload through that
+                    // path would appear as the clamp, so the clamp values are leaks too.
+                    if (payload.Contains("1000000") || payload.Contains("3600000")) { pass = false; detail += " leaked:clamped-sentinel"; }
+                }
+                catch (Exception ex) { if (run != 1) { pass = false; detail += " threw:" + ex.Message; } }
+                finally
+                {
+                    for (int i = saved.Count - 1; i >= 0; i--)
+                    {
+                        try { saved[i].Key.SetValue(null, saved[i].Value); }
+                        catch { pass = false; detail += " restore-failed:" + saved[i].Key.Name; }
+                    }
+                }
+                foreach (var kv in saved)
+                    if (!Equals(kv.Key.GetValue(null), kv.Value)) { pass = false; detail += " not-restored:" + kv.Key.Name; }
+            }
+            if (gstatsSeq != seqBefore) { pass = false; detail += " seq-advanced"; }
+            Plugin.Log.LogInfo($"[GSTATS-SENTINEL] {(pass ? "PASS" : "FAIL")}: {sentinels.Count} sentinels x 2 runs (success + injected exception){detail}");
+        }
+
         private static string BuildGstatsPayload(int recentFps, bool advanceSequence)
         {
             if (advanceSequence) gstatsSeq++;
@@ -2224,17 +2362,36 @@ namespace CompetitiveRounds
                                 if (parts.Length >= 11)
                                 {
                                     int seq = int.Parse(parts[7]);
-                                    if (seq != lastOppGstatsSeq)
+                                    // lag-332 W3-a (design v6 §3): Photon RETAINS a peer's
+                                    // custom properties across a same-room rematch, so the
+                                    // first value seen after the per-match reset is a
+                                    // BASELINE, never an advance — freshness needs a later
+                                    // DISTINCT value (!=, so integer wrap still counts) from
+                                    // the SAME actor. An actor change re-baselines.
+                                    if (!oppSeqBaselineTaken || oppSeqActor != p.ActorNumber)
+                                    {
+                                        oppSeqBaselineTaken = true;
+                                        oppSeqActor = p.ActorNumber;
+                                        oppSeqTransitionSeen = false;
+                                        lastOppGstatsSeq = seq;
+                                        oppRttCurrent = 0;
+                                    }
+                                    else if (seq != lastOppGstatsSeq)
                                     {
                                         lastOppGstatsSeq = seq;
                                         lastOppSeqAdvanceTime = Time.unscaledTime;
+                                        oppSeqTransitionSeen = true;
                                         int rf = int.Parse(parts[6]);
                                         if (rf > 0) oppFpsTimeline.Add(rf);
                                         // Field 12 (July 22 item 3) — absent on 11-field clients.
                                         if (parts.Length >= 12)
                                         {
-                                            int op = int.Parse(parts[11]);
+                                            int op;
+                                            if (!int.TryParse(parts[11], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out op)) op = 0;
                                             if (op > 0) oppPingTimeline.Add(op);
+                                            // Bounded 1..3000 for the replica-age estimate; anything
+                                            // else renders n/a (a modified peer cannot force a number).
+                                            oppRttCurrent = (op >= 1 && op <= 3000) ? op : 0;
                                         }
                                         // Aug 6 item 4: opp cumulative damage-dealt series
                                         // (22-field clients), one sample per seq advance.
@@ -3081,6 +3238,12 @@ namespace CompetitiveRounds
                 catch { }
                 playersIdentified = false;
                 opponentSteamIdResolved = false;
+                // impl-review r1 MEDIUM 14: the opponent IDENTITY is per-room
+                // too — a fresh room must never carry the previous opponent's
+                // steam id into ANY per-room consumer (match-start hooks,
+                // the HUD, cosmetics) before TryResolveOpponent has replaced it.
+                opponentSteamId = "";
+                opponentDisplayName = "";
                 opponentRankChecked = false;
                 opponentIsRanked = false;
                 matchIsRanked = false;
@@ -4631,6 +4794,7 @@ namespace CompetitiveRounds
             // lifecycle that fires this is suppressed on a spectator).
             if (RoomActors.LocalIsSpectator) return;
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
+            try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1
             // Freeze the fighter roster at match start (design §3.2, Codex r1
             // find 1): from here, a later actor is a spectator (role prop) or
             // unauthorized — never a new fighter. Competitive rooms only; a
@@ -4944,6 +5108,9 @@ namespace CompetitiveRounds
             gameOverReported = true;
             sessionMatchCount++;
             try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
+            // lag-332 W1: close the seat instrument BEFORE the report below
+            // reads its aggregates (windows flushed, peer deltas sampled).
+            try { NetworkSeatTelemetry.OnMatchEnded("game-over"); } catch { }
 
             // FIRST statement after the one-shot latch: snapshot every seat's
             // BUILD while the live objects still hold it (#171 — finalise from
@@ -5929,7 +6096,7 @@ namespace CompetitiveRounds
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
-            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
+            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
@@ -5985,6 +6152,7 @@ namespace CompetitiveRounds
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: no tracking
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
+            try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1 (bundle-only in FFA)
             // Roster freeze — same rule as OnMatchStarted (r1 find 1). Re-run
             // per game: FFA leavers shrink the roster between games.
             try
@@ -6176,6 +6344,7 @@ namespace CompetitiveRounds
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
             sessionMatchCount++;
             try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
+            try { NetworkSeatTelemetry.OnMatchEnded("ffa-game-over"); } catch { }   // lag-332 W1
 
             // Same rule as OnGameOver: build snapshot first, in this frame.
             // FfaMode calls this synchronously from its point resolution, so
@@ -7603,7 +7772,7 @@ namespace CompetitiveRounds
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
-            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
+            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
             oppHbGapCount = 0; _oppHbGapOpen = false;
@@ -7670,6 +7839,18 @@ namespace CompetitiveRounds
         public static string LocalDisplayName => localDisplayName;
         public static string OpponentDisplayName => opponentDisplayName;
         public static string OpponentSteamId => opponentSteamId;
+
+        /// <summary>lag-332 W3-a: the corner HUD's net segment renders only
+        /// while this seat is tracking a live online match (never for a
+        /// spectator, never offline).</summary>
+        internal static bool IsInCompetitiveMatchForHud
+        {
+            get
+            {
+                try { return isTracking && !RoomActors.LocalIsSpectator && !PhotonNetwork.OfflineMode && PhotonNetwork.InRoom; }
+                catch { return false; }
+            }
+        }
         public static int P1Rounds => p1Rounds;
         public static int P2Rounds => p2Rounds;
         public static int P1Points => p1Points;

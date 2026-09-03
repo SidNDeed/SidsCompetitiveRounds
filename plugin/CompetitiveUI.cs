@@ -7677,6 +7677,35 @@ namespace CompetitiveRounds
                             string pingPart = $"{ping}ms  {region}";
                             fpsLabel = showFps ? $"{fpsLabel}  |  {pingPart}" : pingPart;
                             fpsLabelWidth = 200f;
+                            // lag-332 W3-a/W2-a (design v6 §3): passive, self-attributed
+                            // HUD facts only — the one-way replica-age ESTIMATE from the
+                            // two RTTs (peer-reported input, fresh + bounded or n/a),
+                            // this seat's RECENT worst frame and reliable resends.
+                            // Never a leg attribution (learning #446).
+                            if (GameStateWatcher.IsInCompetitiveMatchForHud)
+                            {
+                                // r1 MEDIUM 15/16 / r5 LOW 14: the estimate exists only in a
+                                // plain 1v1 (n/a otherwise) and carries the exact attribution
+                                // label; the seat facts are the windows CLOSED within the last
+                                // 10 s plus the live partial one (a long stall's window carries
+                                // older activity), labelled `recent:` — never game-lifetime
+                                // totals presented as current health.
+                                int est = GameStateWatcher.ReplicaAgeEstimateMs();
+                                int peerRtt;
+                                bool peerFresh = GameStateWatcher.TryGetPeerRttFresh(out peerRtt);
+                                string estPart = est >= 0
+                                    ? I18n.TrF("replica age est. {0} ms one-way (peer-reported input)", est)
+                                    : I18n.Tr("replica age est. n/a");
+                                string oppPart = peerFresh
+                                    ? I18n.TrF("{0}ms opp (peer-reported)", peerRtt)
+                                    : I18n.Tr("opp n/a");
+                                int worst10, resends10, discards10;
+                                NetworkSeatTelemetry.RecentWindowStats(out worst10, out resends10, out discards10);
+                                string seatPart = I18n.TrF("recent: worst frame {0} ms  resends {1}  discards {2}",
+                                    worst10, resends10, discards10);
+                                fpsLabel = $"{fpsLabel}  |  {oppPart}  |  {estPart}  |  {seatPart}";
+                                fpsLabelWidth = 860f;
+                            }
                         }
                     }
                     catch { }
