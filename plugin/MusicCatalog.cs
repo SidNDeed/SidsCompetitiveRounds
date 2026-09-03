@@ -46,7 +46,8 @@ namespace CompetitiveRounds
         internal const string VANILLA_SKU = "vanilla_ost";
 
         // ── Catalog — APPEND ONLY. Sizes/hashes are the mastering pipeline's
-        // ground truth (plugin/music/manifest.json, revision ar1); regenerate on
+        // ground truth (plugin/music/manifest.json — ar1 = album 1, ar2 = album 2
+        // tracks 1-12, ar3 = album 2 tracks 13-14 appended); regenerate on
         // any re-master and bump MusicAssets.ASSET_REVISION in the same change —
         // changed bytes are a NEW immutable asset release, never a re-upload.
         internal static readonly MusicAlbumDef[] Albums = new[]
@@ -147,6 +148,14 @@ namespace CompetitiveRounds
                     DurationSeconds = 239.8f, PreviewStartSeconds = 188.1f,
                     OggSize = 4602250L, OggSha256 = "32d3ccfd48559de4f80059a57b79ad85d13b1f83e9df38a678b792fb73978319",
                     PreviewSize = 392007L, PreviewSha256 = "4f99707da918fe006f21c2b546cf3c18b25e0015bfa6b5e243e3b85588bd0e74" },
+                    new MusicTrackDef { Title = "Principio de Ronda", OggFile = "mus_cb_13_principio_de_ronda.ogg", PreviewFile = "mus_cb_13_principio_de_ronda_preview.ogg",
+                    DurationSeconds = 239.4f, PreviewStartSeconds = 53.3f,
+                    OggSize = 4920551L, OggSha256 = "df4b2a8ce5e5452cfeb84c3db3d6dfa5f672335358ab794fdd5c4e432cb2abcf",
+                    PreviewSize = 376831L, PreviewSha256 = "6c4a18f951150dd6128de359c6ca1bbe58e8762ed45a3699eeca4961cac29146" },
+                    new MusicTrackDef { Title = "Nube Tóxica", OggFile = "mus_cb_14_nube_toxica.ogg", PreviewFile = "mus_cb_14_nube_toxica_preview.ogg",
+                    DurationSeconds = 239.8f, PreviewStartSeconds = 95.1f,
+                    OggSize = 4856138L, OggSha256 = "173c51a68f18467b5819c59b34568b2d9433bc836bde8985256d333120f393dd",
+                    PreviewSize = 374493L, PreviewSha256 = "648ed11bf36542c943b4cff6346b05798095ff7ac93ee1d84da755dbd65b5cda" },
                 },
             },
         };

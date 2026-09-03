@@ -11072,6 +11072,101 @@ async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids) -> 
         )
 
 
+# ── v1.40.1: reciprocal 1v1 pair predicates (one writer for every site) ──────
+#
+# The 1v1 room-issuing writers — queue_poll's matched branch and queue_ready —
+# decide from one fact through the helpers below: under the ordered locks, the
+# two rows name EACH OTHER as a pre-room matched pair. queue_decline validates
+# only the CALLER's row under the same locks (its block writes are decided from
+# that row alone — the previous release's shape) and touches the partner only
+# through the conditional reset helper. _evict_other_queue_searching is a FIFTH pair writer that does
+# NOT use these helpers: a SKIP LOCKED sweep with its own bespoke conditional,
+# non-RETURNING partner reset and weaker predicates (unchanged from the previous
+# release; the tests named below do not cover it). queue_leave deletes only the
+# leaver's row (the partner is released by its own next accepted poll once that
+# delete has committed; see the comment there).
+# Before this release each writer trusted its own row's matched_with and wrote
+# the partner unconditionally, so a partner row that had moved on (re-paired,
+# reset, or never pointing back) could be stamped into a room or reset by a
+# stranger. Every partner write below is CONDITIONAL on reciprocity in the SQL
+# itself; the resets, the delete and the room stamp are RETURNING-proven (a
+# short count means "dissolved" and the caller touches only its own row), and
+# queue_ready's partner matched_at refresh is conditional without RETURNING
+# (its outcome carries no decision). Tests: backend/tests/test_queue_pair_writers.py.
+
+def _queue_pair_reciprocal(entry, opp) -> bool:
+    """True when the two locked 1v1 queue rows form a reciprocal matched pair:
+    entry is 'matched' with matched_with == opp.player_id, and opp is 'matched'
+    with matched_with == entry.player_id. Pure; both rows must have been
+    re-read under the ordered locks (never the unlocked discovery read)."""
+    try:
+        return (entry is not None and opp is not None
+                and entry["status"] == "matched"
+                and entry["matched_with"] is not None
+                and entry["matched_with"] == opp["player_id"]
+                and opp["status"] == "matched"
+                and opp["matched_with"] == entry["player_id"])
+    except (KeyError, TypeError):
+        return False
+
+
+async def _queue_reset_to_searching(db: AsyncSession, pid) -> None:
+    """Reset the CALLER's own row to searching (the dissolution write every
+    reciprocity failure performs on exactly one row: its own)."""
+    await db.execute(text("""
+        UPDATE ranked_queue
+           SET status = 'searching', matched_with = NULL,
+               room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
+         WHERE player_id = :pid"""), {"pid": pid})
+
+
+async def _queue_reset_partner_if_reciprocal(db: AsyncSession, my_pid, partner_pid) -> bool:
+    """Reset the PARTNER row to searching only while it is still a pre-room
+    matched row pointing back at the caller (status 'matched', matched_with =
+    caller, room_name IS NULL). Both rows must be held under the ordered locks.
+    Returns True when the partner row was reset."""
+    if partner_pid is None:
+        return False
+    res = await db.execute(text("""
+        UPDATE ranked_queue
+           SET status = 'searching', matched_with = NULL,
+               room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
+         WHERE player_id = :partner AND status = 'matched'
+           AND matched_with = :me AND room_name IS NULL
+         RETURNING player_id"""), {"partner": partner_pid, "me": my_pid})
+    return res.first() is not None
+
+
+async def _queue_delete_partner_if_reciprocal(db: AsyncSession, my_pid, partner_pid) -> bool:
+    """Delete the PARTNER row (ban dissolution) only while it is a matched row
+    pointing back at the caller. Returns True when a row was deleted."""
+    if partner_pid is None:
+        return False
+    res = await db.execute(text("""
+        DELETE FROM ranked_queue
+         WHERE player_id = :partner AND status = 'matched' AND matched_with = :me
+         RETURNING player_id"""), {"partner": partner_pid, "me": my_pid})
+    return res.first() is not None
+
+
+async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_name, region) -> bool:
+    """Stamp the issued room on BOTH rows of a reciprocal, both-ready, room-less
+    pair in ONE conditional statement and prove it with RETURNING: exactly the
+    two expected player_ids updated = the pair was intact under the locks.
+    Anything else = dissolved; the caller resets only its own row in the same
+    transaction (which also undoes a one-row partial stamp)."""
+    res = await db.execute(text("""
+        UPDATE ranked_queue
+           SET room_name = :room, room_region = :region
+         WHERE player_id IN (:a, :b)
+           AND status = 'matched' AND ready = true AND room_name IS NULL
+           AND ((player_id = :a AND matched_with = :b)
+             OR (player_id = :b AND matched_with = :a))
+         RETURNING player_id"""), {"room": room_name, "region": region, "a": my_pid, "b": opp_pid})
+    updated = {r[0] for r in res.fetchall()}
+    return updated == {my_pid, opp_pid}
+
+
 _CROSS_QUEUE_TABLES = ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")
 
 
@@ -11760,6 +11855,21 @@ async def queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSes
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if player:
+        # The leaver's row only — DELIBERATELY not the partner's (Codex r13
+        # finding 4, a regression against the previous release caught in
+        # review). A pre-room partner whose row still points at the leaver is
+        # released by ITS OWN next ACCEPTED poll once this DELETE has committed:
+        # the matched branch finds no opponent row, resets that row to searching
+        # and answers "searching" — and that answer is what the partner's client
+        # needs to leave ReadySent before it can be re-matched. Boundaries (r14
+        # finding 8): a poll the session gate refuses performs no reset, and a
+        # ready/poll already past the pair locks before this commit still sees
+        # the old row (the lease above is released BEFORE this delete — that
+        # ordering predates this release and is tracked separately). Resetting
+        # the partner here instead let its next poll run the candidate scan at
+        # once and hand a ReadySent seat a "matched" it cannot act on until the
+        # ready timeout. The partner typically stays unmatchable for one poll
+        # interval (~3 s); a refused or absent poll delays its release.
         await db.execute(
             text("DELETE FROM ranked_queue WHERE player_id = :pid"),
             {"pid": player.id},
@@ -12263,15 +12373,33 @@ async def queue_recent_joins(seconds: int = Query(20, ge=1, le=86400), db: Async
 
 
 @app.get("/api/v1/queue/poll/{steam_id}", response_model=QueuePollResponse, tags=["Queue"])
-async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
+async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """
     Poll queue status. Handles searching, matching, mutual ready-up, and timeouts.
     Uses SELECT FOR UPDATE SKIP LOCKED for race-safe matching.
     Elo range: ±100 / ±200@30s / ±400@60s / ±800@120s.
-    Ready timeout: 30s — if both players don't ready up, match is canceled.
+    Ready timeout: READY_TIMEOUT_SECONDS (90 s) — if both players don't ready
+    up, the match is canceled.
+
+    v1.40.1: requires the caller's OWN valid Steam session (fail-closed —
+    _strict_steam_session_ok, the same gate the link-code and artist
+    endpoints use; _check_steam_session is a compatibility gate keyed on the
+    client-supplied X-Mod-Version and is not a boundary). The poll answers with
+    this seat's own pairing and, at ready-up, the issued room name and region,
+    so it is served only to the seat that owns the row. The 401 detail literal
+    is LOAD-BEARING: ApiClient.HandleSessionReject matches "session_required"
+    to re-mint; the client leaves the queue once its polls have been refused
+    for 30 s straight (at least three, spanning a session re-mint cycle;
+    refusals of a superseded credential do not count). Every live client
+    (>= 1.40.0) stamps its token on every request WHILE IT HOLDS ONE — a seat
+    before its first mint, or whose session was refused, is refused here until
+    the heartbeat re-mints (impl note 65). Presence is touched only AFTER the
+    gate — an unaccepted request must not count as an online seat.
     """
     import uuid as uuid_mod
 
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
     _presence_touch(steam_id)
     # Clean up expired blocks opportunistically without waiting on a concurrent
     # decline/account cleanup that is touching another block row.
@@ -12283,6 +12411,13 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             FOR UPDATE SKIP LOCKED
         )
     """))
+    # r11 finding 4: COMMIT the sweep in its own transaction BEFORE any
+    # ranked_queue lock. A deleted-but-uncommitted block row is a lock a
+    # concurrent queue_decline's INSERT ... ON CONFLICT waits on while it holds
+    # the pair's ranked rows — the poll would then take queue_blocks -> ranked
+    # while decline takes ranked -> queue_blocks (an ABBA across two tables).
+    # Committed first, the sweep holds nothing when the pair locks are taken.
+    await db.commit()
 
     # Discovery read — deliberately UNLOCKED. Its only job is to learn our
     # player_id and who we are matched with, so the pair can then be locked in a
@@ -12408,7 +12543,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         opp_result = await db.execute(
             text("""
                 SELECT player_id, steam_id, display_name, rating, ready, room_name,
-                       region, home_region
+                       region, home_region, status, matched_with
                 FROM ranked_queue WHERE player_id = :oid
             """),
             {"oid": entry["matched_with"]},
@@ -12417,15 +12552,17 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
         if not opp:
             # Opponent left queue entirely — go back to searching
-            await db.execute(
-                text("""
-                    UPDATE ranked_queue
-                    SET status = 'searching', matched_with = NULL,
-                        room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
-                    WHERE player_id = :pid
-                """),
-                {"pid": my_pid},
-            )
+            await _queue_reset_to_searching(db, my_pid)
+            await db.commit()
+            return QueuePollResponse(status="searching", wait_time=wait_seconds)
+        # v1.40.1: the pair must be RECIPROCAL under the locks — the opponent
+        # row is 'matched' and points back at us. A partner that was re-paired,
+        # reset, or never pointed back is not our match: reset only OUR row and
+        # answer searching (the client prints "Match canceled" and keeps polling).
+        if not _queue_pair_reciprocal(entry, opp):
+            print(f"[QUEUE-POLL] {steam_id} pair not reciprocal (opp status={opp['status']} "
+                  f"matched_with={opp['matched_with']}) — resetting own row")
+            await _queue_reset_to_searching(db, my_pid)
             await db.commit()
             return QueuePollResponse(status="searching", wait_time=wait_seconds)
         await _assert_no_service_subject(
@@ -12443,16 +12580,10 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 print(f"[QUEUE-CANCEL] {steam_id} vs opp={opp['steam_id']} "
                       f"timed out at match_age={match_age}s "
                       f"my_ready={my_ready} opp_ready={opp_ready}")
-                for pid in [my_pid, opp["player_id"]]:
-                    await db.execute(
-                        text("""
-                            UPDATE ranked_queue
-                            SET status = 'searching', matched_with = NULL,
-                                room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
-                            WHERE player_id = :pid
-                        """),
-                        {"pid": pid},
-                    )
+                # v1.40.1: our row unconditionally; the partner's only while it
+                # still points back at us (conditional in the SQL, RETURNING-proven).
+                await _queue_reset_to_searching(db, my_pid)
+                await _queue_reset_partner_if_reciprocal(db, my_pid, opp["player_id"])
                 await db.commit()
                 return QueuePollResponse(status="searching", wait_time=wait_seconds)
 
@@ -12480,16 +12611,18 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 _banned_pids = [p for p, s in _pair
                                 if (await _is_banned(db, s)) is not None]
                 if _banned_pids:
-                    for _pp, _ps in _pair:
-                        if _pp in _banned_pids:
-                            await db.execute(text(
-                                "DELETE FROM ranked_queue WHERE player_id = :pid"), {"pid": _pp})
-                        else:
-                            await db.execute(text("""
-                                UPDATE ranked_queue
-                                SET status = 'searching', matched_with = NULL,
-                                    room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
-                                WHERE player_id = :pid"""), {"pid": _pp})
+                    # v1.40.1: our own row unconditionally; the partner's row only
+                    # while it points back at us (reciprocity was verified above,
+                    # and the SQL re-checks it).
+                    if my_pid in _banned_pids:
+                        await db.execute(text(
+                            "DELETE FROM ranked_queue WHERE player_id = :pid"), {"pid": my_pid})
+                    else:
+                        await _queue_reset_to_searching(db, my_pid)
+                    if opp["player_id"] in _banned_pids:
+                        await _queue_delete_partner_if_reciprocal(db, my_pid, opp["player_id"])
+                    else:
+                        await _queue_reset_partner_if_reciprocal(db, my_pid, opp["player_id"])
                     await db.commit()
                     return QueuePollResponse(
                         status="not_in_queue" if my_pid in _banned_pids else "searching",
@@ -12501,11 +12634,23 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                     entry["region"], entry["home_region"],
                     opp["region"], opp["home_region"], room_name)
                 _region_out = chosen_region
-                for pid in [my_pid, opp["player_id"]]:
-                    await db.execute(
-                        text("UPDATE ranked_queue SET room_name = :room, room_region = :region WHERE player_id = :pid"),
-                        {"room": room_name, "region": chosen_region, "pid": pid},
-                    )
+                # v1.40.1: ONE conditional stamp over both rows, proven by
+                # RETURNING — both 'matched', both ready, both room-less, each
+                # pointing at the other. A short count = the pair dissolved under
+                # us: reset only our row (the same transaction undoes any one-row
+                # partial stamp) and answer searching.
+                if not await _queue_stamp_room_reciprocal(db, my_pid, opp["player_id"], room_name, chosen_region):
+                    print(f"[QUEUE-POLL] {steam_id} room stamp not reciprocal — dissolving own row")
+                    await _queue_reset_to_searching(db, my_pid)
+                    await db.commit()
+                    return QueuePollResponse(status="searching", wait_time=wait_seconds)
+            elif opp["room_name"] != room_name:
+                # Replay of an already-issued room whose partner row carries a
+                # different (or no) room: not the same match — dissolve our row.
+                print(f"[QUEUE-POLL] {steam_id} replay room mismatch (ours={room_name} theirs={opp['room_name']}) — dissolving own row")
+                await _queue_reset_to_searching(db, my_pid)
+                await db.commit()
+                return QueuePollResponse(status="searching", wait_time=wait_seconds)
             # Find-or-create the series row so this poll path matches /queue/ready's
             # both_ready branch — previously this branch created the ROOM but no
             # series, so the row was born at first match report (already 1-0 →
@@ -12723,6 +12868,17 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     """
     Mark player as ready for their matched game.
     If opponent is also ready, generates a room immediately.
+
+    v1.40.1: the pair is re-read under the ordered locks BEFORE any write. A
+    non-reciprocal pair, a failed reciprocal room stamp, or a replay room
+    mismatch resets the caller's OWN row to searching and answers 200
+    `dissolved`; a banned participant at room issuance dissolves the pair and
+    answers 409 as before. The 1.40.1 ReadyUp callback returns to Searching on
+    `dissolved` / `not_matched`; a 1.40.0 client treats them as "waiting" and
+    heals when its next poll answers searching. RESIDUAL (impl note 78,
+    pre-existing): a seat parked in ReadySent that is re-matched before it
+    sees a searching answer — after a partner-driven reset, or a 1.40.0 seat
+    after `dissolved` — stays ReadySent until the ready timeout.
     """
     import uuid as uuid_mod
 
@@ -12763,11 +12919,13 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
 
     # Same re-pair race as queue_poll. It MUST NOT be answered with HTTP 200:
     # PostRequestWithRetry treats any 200 as success and stops retrying
-    # (ApiClient.cs), the callback treats every status except both_ready as
-    # "waiting", and ReadyUp refuses to fire again unless state is Matched — so a
-    # 200 here strands the player in ReadySent, never actually ready, until the
-    # match times out. That is strictly worse than the deadlock this fix removes.
-    # A 5xx is what the client's retry loop is built for.
+    # (ApiClient.cs); the 1.40.1 callback acts on both_ready / dissolved /
+    # not_matched and treats every OTHER status as "waiting" (1.40.0 treats all
+    # but both_ready so), and ReadyUp refuses to fire again unless state is
+    # Matched — so a 200 here would strand the player in ReadySent until the
+    # match times out. A 5xx is what the client's retry loop is built for; the
+    # retry re-discovers and readies whatever pair then holds — the same
+    # opponent, or a re-paired one (pre-existing behaviour, impl note 78).
     if entry["matched_with"] != (disc["matched_with"] if disc else None):
         print(f"[QUEUE-READY] {steam_id} re-paired during lock acquisition; returning 503 for client retry")
         await db.commit()
@@ -12776,73 +12934,100 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     await _assert_no_service_subject(
         db, affected_player_ids=[player.id, entry["matched_with"]])
 
-    # Set ourselves as ready.
-    await db.execute(
-        text("UPDATE ranked_queue SET ready = true WHERE player_id = :pid"),
-        {"pid": player.id},
-    )
-
     # Opponent row is already held by the ordered lock above (that is what keeps
-    # the matched_at reset below from letting polls see a half-state) — plain read.
+    # the matched_at reset below from letting polls see a half-state) — plain
+    # read, BEFORE any write of ours, so a non-reciprocal pair is answered
+    # without the caller having marked itself ready.
     opp_result = await db.execute(
         text("""
-            SELECT player_id, steam_id, ready, room_name, region, home_region
+            SELECT player_id, steam_id, ready, room_name, region, home_region,
+                   status, matched_with
             FROM ranked_queue WHERE player_id = :oid
         """),
         {"oid": entry["matched_with"]},
     )
     opp = opp_result.mappings().first()
 
-    # Refresh matched_at on BOTH rows so the opponent's ready timeout window
-    # resets from NOW. Their normal 90s starts the moment anyone clicks Ready,
-    # not whatever is left from the original pairing. Fixes the "both readied
-    # but match canceled" race where the slower player clicked Ready at T=85s
-    # and their partner's poll timed out at T=90s from the OLD matched_at.
+    # v1.40.1: every partner write below is conditional on the pair being
+    # RECIPROCAL under the locks (the opponent row is 'matched' and points back
+    # at us). A partner that moved on is not our match: our own row is reset
+    # (matched_at NULL, immediately matchable) and the client goes back to
+    # searching on the "dissolved" answer.
+    reciprocal = _queue_pair_reciprocal(entry, opp)
+    if not reciprocal:
+        print(f"[QUEUE-READY] {steam_id} pair not reciprocal — resetting own row")
+        await _queue_reset_to_searching(db, player.id)
+        await db.commit()
+        return {"status": "dissolved", "message": "Match dissolved - searching again"}
+
+    # Set ourselves as ready.
     await db.execute(
-        text("UPDATE ranked_queue SET matched_at = NOW() WHERE player_id = ANY(:pids)"),
-        {"pids": [player.id, entry["matched_with"]]},
+        text("UPDATE ranked_queue SET ready = true WHERE player_id = :pid"),
+        {"pid": player.id},
     )
 
-    print(f"[QUEUE-READY] {steam_id} ready=true, opp={entry['matched_with']} opp_ready="
-          f"{opp['ready'] if opp else 'opp_row_missing'}")
+    # Refresh matched_at so the opponent's ready timeout window resets from
+    # NOW. Their normal 90s starts the moment anyone clicks Ready, not whatever
+    # is left from the original pairing. Fixes the "both readied but match
+    # canceled" race where the slower player clicked Ready at T=85s and their
+    # partner's poll timed out at T=90s from the OLD matched_at. Our row
+    # unconditionally; the partner's only when reciprocal (in the SQL).
+    await db.execute(
+        text("UPDATE ranked_queue SET matched_at = NOW() WHERE player_id = :pid"),
+        {"pid": player.id},
+    )
+    await db.execute(
+        text("UPDATE ranked_queue SET matched_at = NOW() "
+             "WHERE player_id = :partner AND status = 'matched' AND matched_with = :me"),
+        {"partner": opp["player_id"], "me": player.id},
+    )
 
-    if opp and opp["ready"]:
+    print(f"[QUEUE-READY] {steam_id} ready=true, opp={entry['matched_with']} opp_ready={opp['ready']} reciprocal=True")
+
+    if opp["ready"]:
         # Both ready — generate room if not already done
         room_name = entry["room_name"] or opp["room_name"]
         room_generated = False
         if not room_name:
             # ALL-member ban recheck at room issuance (round-17 find 2) —
             # same dissolution as the poll's both-ready branch, under the
-            # pair locks this endpoint already ordered.
+            # pair locks this endpoint already ordered. v1.40.1: our own row
+            # unconditionally, the partner's only while it points back at us.
             _pair = [(player.id, steam_id), (opp["player_id"], opp["steam_id"])]
             _banned_pids = [p for p, s in _pair
                             if (await _is_banned(db, s)) is not None]
             if _banned_pids:
-                for _pp, _ps in _pair:
-                    if _pp in _banned_pids:
-                        await db.execute(text(
-                            "DELETE FROM ranked_queue WHERE player_id = :pid"), {"pid": _pp})
-                    else:
-                        await db.execute(text("""
-                            UPDATE ranked_queue
-                            SET status = 'searching', matched_with = NULL,
-                                room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
-                            WHERE player_id = :pid"""), {"pid": _pp})
+                if player.id in _banned_pids:
+                    await db.execute(text(
+                        "DELETE FROM ranked_queue WHERE player_id = :pid"), {"pid": player.id})
+                else:
+                    await _queue_reset_to_searching(db, player.id)
+                if opp["player_id"] in _banned_pids:
+                    await _queue_delete_partner_if_reciprocal(db, player.id, opp["player_id"])
+                else:
+                    await _queue_reset_partner_if_reciprocal(db, player.id, opp["player_id"])
                 await db.commit()
                 raise HTTPException(409, "match dissolved (participant banned)")
             room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
-            room_generated = True
             # Aug 15 item 5: agreeing home regions beat the readier's live
             # snapshot (see _pick_room_region). opp is non-None in this
             # branch (the both-ready gate above).
             chosen_region = _pick_room_region(
                 entry["region"], entry["home_region"],
                 opp["region"], opp["home_region"], room_name)
-            for pid in [player.id, opp["player_id"]]:
-                await db.execute(
-                    text("UPDATE ranked_queue SET room_name = :room, room_region = :region WHERE player_id = :pid"),
-                    {"room": room_name, "region": chosen_region, "pid": pid},
-                )
+            # v1.40.1: ONE conditional stamp over both rows, RETURNING-proven —
+            # same helper and same dissolution rule as the poll's both-ready branch.
+            if not await _queue_stamp_room_reciprocal(db, player.id, opp["player_id"], room_name, chosen_region):
+                print(f"[QUEUE-READY] {steam_id} room stamp not reciprocal — dissolving own row")
+                await _queue_reset_to_searching(db, player.id)
+                await db.commit()
+                return {"status": "dissolved", "message": "Match dissolved - searching again"}
+            room_generated = True
+        elif opp["room_name"] != room_name:
+            print(f"[QUEUE-READY] {steam_id} replay room mismatch (ours={room_name} theirs={opp['room_name']}) — dissolving own row")
+            await _queue_reset_to_searching(db, player.id)
+            await db.commit()
+            return {"status": "dissolved", "message": "Match dissolved - searching again"}
         else:
             chosen_region = entry["room_region"] or entry["region"] or "us"
 
@@ -12913,7 +13098,8 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
 async def queue_decline(req: QueueDeclineRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """
     Decline a matched opponent. Blocks re-matching for 5 minutes.
-    Both players are reset to searching (stay in queue).
+    The caller is reset to searching; the partner only while its row still
+    points back at the caller (v1.40.1: the partner write is SQL-conditional).
     """
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
     await _check_steam_session(request, req.steam_id, db)
@@ -12973,17 +13159,12 @@ async def queue_decline(req: QueueDeclineRequest, request: Request, db: AsyncSes
             {"b": blocker, "bl": blocked, "ex": expires},
         )
 
-    # Reset BOTH players back to searching (stay in queue, find other opponents).
-    for pid in [p1.id, p2.id]:
-        await db.execute(
-            text("""
-                UPDATE ranked_queue
-                SET status = 'searching', matched_with = NULL,
-                    room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
-                WHERE player_id = :pid
-            """),
-            {"pid": pid},
-        )
+    # Reset both players back to searching (stay in queue, find other
+    # opponents): our own row unconditionally, the partner's only while it is
+    # still a pre-room matched row pointing back at us (v1.40.1 — the same
+    # conditional partner write every other 1v1 pair writer uses).
+    await _queue_reset_to_searching(db, p1.id)
+    await _queue_reset_partner_if_reciprocal(db, p1.id, p2.id)
 
     await db.commit()
     return {"status": "declined", "message": f"Declined match. Blocked for {QUEUE_BLOCK_MINUTES} minutes."}

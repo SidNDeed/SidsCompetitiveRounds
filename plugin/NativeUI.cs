@@ -9831,7 +9831,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.AddLE(shopMusicTracksPanel, prefH: 96, minH: 34, flexH: 0);
             shopMusicTracksHint = UIFactory.CreateText("SHMusTH", shopMusicTracksPanel.transform,
                 "", 13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 20));
-            for (int i = 0; i < 12; i++)
+            // r11 finding 6: the pool is sized from the CATALOG (the longest album),
+            // never a literal — 12 rows hid Clavar la Bala's tracks 13/14.
+            int shopTrackRows = 12;
+            try
+            {
+                var albums = MusicCatalog.Albums;
+                if (albums != null)
+                    foreach (var alb in albums)
+                        if (alb != null && alb.Tracks != null && alb.Tracks.Length > shopTrackRows) shopTrackRows = alb.Tracks.Length;
+            }
+            catch { }
+            for (int i = 0; i < shopTrackRows; i++)
             {
                 var tr = new MusicShopTrackRow();
                 tr.root = new GameObject($"shMusTr{i}");

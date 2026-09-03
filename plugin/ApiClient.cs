@@ -9162,6 +9162,25 @@ namespace CompetitiveRounds
         // lifecycle can auto-join a dead room after a rejoin. One counter per
         // queue; int overflow is a non-issue at click cadence.
         private static int queueGen = 0;
+        // v1.40.1: refused-poll accounting for the 1v1 queue poll, which now
+        // requires the caller's own Steam session. One 401 self-heals through
+        // HandleSessionReject (the token is dropped; SteamAuthLoop retries
+        // without a token about every 3 s and the presence loop can refresh
+        // too, so a fresh token MAY land before the next poll — nothing about
+        // the following polls is certain). A raw "three in a row" was a
+        // one-strike eviction (r10): strike one drops the token and later
+        // polls can go out token-less. The rule is therefore TIME-based: leave
+        // only when EVERY poll has been refused for QUEUE_POLL_401_WINDOW_SEC
+        // straight and at least three were counted — and refusals that are
+        // artefacts of the re-mint (a stale response for a superseded token, a
+        // token-less request refused after a newer token arrived) are excluded
+        // by comparing the token SENT with the token now held, never by
+        // counting polls. A success or a non-401 outcome resets, and every
+        // queue lifecycle edge resets.
+        private static int queuePoll401Count = 0;
+        private static float queuePoll401Since = -1f;
+        private const float QUEUE_POLL_401_WINDOW_SEC = 30f;
+        private static void ResetQueuePoll401() { queuePoll401Count = 0; queuePoll401Since = -1f; }
 
         /// <summary>Stuck-Leaving watchdog (Codex verify finding 1) — ticked
         /// from the persistent poll loop, NOT from the join buttons: the
@@ -9592,6 +9611,7 @@ namespace CompetitiveRounds
                     if (success)
                     {
                         CurrentQueueState = QueueState.Searching;
+                        ResetQueuePoll401();   // v1.40.1: every queue lifecycle edge resets the refused-poll accounting
                         IsQueuePolling = true;
                         queuePollTimer = 0f;
                         Plugin.Log.LogInfo("[QUEUE] Joined ranked queue");
@@ -9621,6 +9641,7 @@ namespace CompetitiveRounds
             CurrentQueueState = QueueState.Leaving;
             rankedLeavingSince = Time.realtimeSinceStartup;
             IsQueuePolling = false;
+            ResetQueuePoll401();
             LastPollData = null;
             NativeUI.MarkDirty();
 
@@ -9648,8 +9669,9 @@ namespace CompetitiveRounds
         }
 
         /// <summary>
-        /// Decline a matched opponent. Blocks re-matching for 5 minutes.
-        /// Both players are reset to searching (stay in queue).
+        /// Decline a matched opponent. Blocks re-matching for 5 minutes. The
+        /// caller is reset to searching; the partner only while its row still
+        /// points back at the caller (v1.40.1 reciprocal writers).
         /// </summary>
         public static void DeclineMatch(string steamId)
         {
@@ -9742,6 +9764,21 @@ namespace CompetitiveRounds
                                 NativeUI.MarkDirty();
                             }
                         }
+                        else if (status == "dissolved" || status == "not_matched")
+                        {
+                            // v1.40.1: the server judged the pair gone (dissolved = our row was
+                            // reset; not_matched = we were no longer matched when the click
+                            // landed) — back to Searching HERE, never "waiting": a ReadySent
+                            // seat that is re-matched before a searching poll heals it would
+                            // otherwise never see MATCH FOUND. (Partner-driven resets that
+                            // re-match a seat parked in ReadySent after a "waiting" answer
+                            // remain the pre-existing residual — impl note 78.)
+                            Plugin.Log.LogInfo($"[QUEUE] ready answered {status} — back to searching");
+                            CompetitiveUI.ShowNotification(I18n.Tr("Match dissolved — searching again..."), Color.yellow, 5f);
+                            CurrentQueueState = QueueState.Searching;
+                            LastPollData = null;
+                            NativeUI.MarkDirty();
+                        }
                         else
                         {
                             // Echo the server response so if a "canceled despite both ready"
@@ -9777,6 +9814,7 @@ namespace CompetitiveRounds
             queuePollTimer = 0f;
 
             int gen = queueGen;
+            string sentTok = SteamAuth.SessionToken;   // the credential THIS poll rides out with
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/queue/poll/{steamId}",
                 (success, response) =>
@@ -9785,7 +9823,46 @@ namespace CompetitiveRounds
                     // reusable boolean — a 20s-delayed response from a PREVIOUS
                     // lifecycle passes it after a leave+rejoin and could
                     // auto-join a dissolved room. The generation cannot be reused.
-                    if (!success || !IsQueuePolling || gen != queueGen) return;
+                    if (!IsQueuePolling || gen != queueGen) return;
+                    if (!success)
+                    {
+                        // v1.40.1: GET /queue/poll requires the caller's own Steam
+                        // session (401 session_required otherwise). detailedErrors
+                        // carries the "HTTP <code>:" prefix; sessionAware already
+                        // invalidated the token so the next heartbeat re-mints.
+                        if (response != null && response.StartsWith("HTTP 401", StringComparison.Ordinal))
+                        {
+                            // A refusal of a SUPERSEDED credential (a newer token is
+                            // current) is a stale overlapping response, not evidence
+                            // about the current session (r10 finding 10).
+                            string curTok = SteamAuth.SessionToken;
+                            if (!string.IsNullOrEmpty(sentTok) && !string.IsNullOrEmpty(curTok)
+                                && !string.Equals(sentTok, curTok, StringComparison.Ordinal)) return;
+                            // r11 finding 9: a TOKEN-LESS refusal that lands after a
+                            // replacement session was minted is equally stale — the
+                            // current credential has not been refused yet.
+                            if (string.IsNullOrEmpty(sentTok) && !string.IsNullOrEmpty(curTok)) return;
+                            float now = Time.realtimeSinceStartup;
+                            if (queuePoll401Since < 0f) queuePoll401Since = now;
+                            queuePoll401Count++;
+                            if (queuePoll401Count >= 3 && now - queuePoll401Since >= QUEUE_POLL_401_WINDOW_SEC)
+                            {
+                                ResetQueuePoll401();
+                                // r16 finding 5: the leave POST below rides the same
+                                // refused session, so "left the queue" is a promise this
+                                // client cannot make — polling STOPS; the leave is
+                                // attempted, and either it succeeds (logged) or the
+                                // server's non-polling sweep drops the seat shortly
+                                // (LeaveQueue's own failure notice says so).
+                                Plugin.Log.LogWarning($"[QUEUE] poll refused for {QUEUE_POLL_401_WINDOW_SEC:F0}s straight (session) — polling stopped, leaving the queue (best effort)");
+                                CompetitiveUI.ShowNotification(I18n.Tr("Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment."), new Color(1f, 0.6f, 0.2f), 7f);
+                                LeaveQueue(steamId);
+                            }
+                        }
+                        else ResetQueuePoll401();   // "consecutive" means uninterrupted by any other outcome
+                        return;
+                    }
+                    ResetQueuePoll401();
 
                     try
                     {
@@ -9884,7 +9961,8 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogWarning($"[QUEUE] Poll parse error: {ex.Message}");
                     }
-                }
+                },
+                detailedErrors: true, sessionAware: true
             ));
         }
 
@@ -9893,6 +9971,7 @@ namespace CompetitiveRounds
             CurrentQueueState = QueueState.Idle;
             IsQueuePolling = false;
             LastPollData = null;
+            ResetQueuePoll401();
         }
 
         // ── Queue Count (lightweight, always-on when page open) ──
@@ -18057,9 +18136,10 @@ namespace CompetitiveRounds
         /// (M21 — GETs historically stamped the token but never consumed a
         /// 401 session_required, so a server-invalidated session 401-looped
         /// private GET reads until the ~23h expiry). Opt-in: only private
-        /// per-identity reads need it — music ratings /mine, and the artist
-        /// private reads (my-submissions, cosmetic-preview; N1) — while the
-        /// ~100 public-read callers keep their exact current behavior.</param>
+        /// per-identity reads need it — music ratings /mine, the artist
+        /// private reads (my-submissions, cosmetic-preview; N1), and since
+        /// v1.40.1 the 1v1 queue poll (session-required; UpdateQueuePoll) —
+        /// while the ~100 public-read callers keep their exact current behavior.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
             bool detailedErrors = false, bool sessionAware = false)
         {

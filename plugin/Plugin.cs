@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.40.0";   // Sep 2: MUSIC (player tab, two albums, previews, ratings, 50% artist royalties, broadcast album blocks) + dance body motion + the Sep 1 batch (Q/E wheels, dances, betting lock, trails). Floors riding this release: DANCES_MIN_VERSION=1.39.7, MUSIC_PURCHASE_MIN_VERSION=1.40.0 — both satisfied.
+        public const string ModVersion = "1.40.1";   // Sep 3: Clavar la Bala tracks 13-14 (music ar3), 1v1 queue poll session requirement + reciprocal pair writers, Release A network diagnostics + click-time music preparation at the main menu. (The bug #334 music change is HELD.) Previous (1.40.0, Sep 2): MUSIC (player tab, two albums, previews, ratings, 50% artist royalties, broadcast album blocks) + dance body motion + the Sep 1 batch (Q/E wheels, dances, betting lock, trails). Floors riding this release: DANCES_MIN_VERSION=1.39.7, MUSIC_PURCHASE_MIN_VERSION=1.40.0 — both satisfied.
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string

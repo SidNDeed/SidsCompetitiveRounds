@@ -108,7 +108,7 @@ namespace CompetitiveRounds
         /// SHIP COUPLING: the immutable GitHub release "music-{ASSET_REVISION}"
         /// must exist and verify (scripts/verify_music_release.py) BEFORE any
         /// DLL referencing this constant ships [G3]/[H2].</summary>
-        internal const string ASSET_REVISION = "ar2";
+        internal const string ASSET_REVISION = "ar3";
 
         /// <summary>Byte-scannable build probe (impl-r3 K4, the #306 pattern:
         /// a probe must exist for no other purpose). Referenced from the init

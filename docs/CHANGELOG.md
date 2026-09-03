@@ -1,5 +1,71 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.40.1 — 2026-09-03
+
+**Clavar la Bala: two more tracks**
+
+- "Principio de Ronda" and "Nube Tóxica" join the album as tracks 13 and 14
+  (a new immutable music asset revision, ar3; existing tracks are unchanged
+  and keep their ratings). The shop listing says 14 tracks.
+
+**Queue**
+
+- The 1v1 queue poll now requires the caller's own Steam session; a seat
+  whose polls are refused for 30 seconds straight (long enough for the
+  session to be re-minted, at least three polls) stops polling and says so,
+  attempts to leave,
+  and otherwise lets the server's non-polling sweep clear the seat shortly. Pair writes are reciprocal: declining a pre-room match releases
+  the partner only while the partner's row still points back at the caller,
+  the room is issued through one conditional write that
+  requires both rows to name each other (ready, room-less), and a pair that
+  no longer matches dissolves only the caller's row (the ready-up answers
+  "dissolved" and the client returns to searching by itself). Leaving the
+  queue deletes only the leaver's row; once that deletion is recorded, a
+  pre-room partner is released by its own next accepted poll, which is what
+  tells that client to start searching again.
+
+**Network diagnostics** (carried over from the reviewed-but-unshipped Release A
+work of 2026-09-03; first shipped here)
+
+- The 1v1 match report carries 25 optional per-seat network fields from the
+  reporting seat only (sender counters, Photon resend/discard/CRC counts and
+  queue depths, frame-hitch counters — the full histogram stays in the bug
+  bundle — and observer tags that mark gaps a still opponent, a Phoenix charge
+  or a receiver-side frame can explain: evidence for review, not a verdict on
+  the cause). They live outside every match HMAC canonical, are never public
+  response data, and need migration 284.
+- Bug bundles gain versioned `[NET-*]` lines with per-view evidence; the
+  corner HUD shows a labelled one-way replica-age estimate (peer-reported
+  input, 1v1 only) and the recent frame/resend facts; the broadcast seat runs
+  a gstats sentinel self-test.
+
+**Music: preparation at the main menu** (Release A, first shipped here)
+
+- Downloaded tracks are decoded only inside an explicit main-menu click (a
+  Music-tab control such as Prepare or a track's Play, or the Shop's
+  Preview), one track per click, and never while this seat is itself joining
+  a game. v1.40.0 could decode several just-downloaded tracks together around
+  the first card pick (320-700 ms each) — the hitch some players felt there.
+  The Music tab's Prepare button shows what is still pending; with Loop on
+  (the default) a track that ends before the next one is prepared repeats
+  instead of going quiet; a failed decode is retried only by a click.
+
+**Held from this release:** the bug #334 music change (silence instead of
+vanilla while nothing is prepared, between-round clicks) did not pass its
+certification rounds and is not in v1.40.1. Against v1.40.0 the music engine
+changes by the Release A playback work above (the main-menu preparation rule
+and a short fade on start and resume) and by the new tracks. The report stays
+open.
+
+**Schema changes:** migrations **284** (Release A: 50 nullable per-seat
+network columns on `matches` — required before the v1.40.1 API, whose model
+maps them), **285** (Clavar la Bala 12 -> 14 tracks; deploys with the API
+because `/music/rate` validates `track_idx` against `music_track_count`),
+**286** (i18n client keys), **287** (v1.40.1 release notes x5). Deploy order:
+284 -> 285 -> 286 -> 287 on the primary (standby replay confirmed after the
+migration phase) -> API on both boxes -> client release + Thunderstore ->
+LATEST bump.
+
 ## v1.40.0 — 2026-09-02
 
 **Music: a full in-game player and the first two albums**
