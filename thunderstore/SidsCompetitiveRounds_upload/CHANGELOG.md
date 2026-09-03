@@ -1,3 +1,189 @@
+## v1.40.1 — 2026-09-03
+
+**Clavar la Bala: two more tracks**
+
+- "Principio de Ronda" and "Nube Tóxica" join the album as tracks 13 and 14
+  (a new immutable music asset revision, ar3; existing tracks are unchanged
+  and keep their ratings). The shop listing says 14 tracks.
+
+**Queue**
+
+- The 1v1 queue poll now requires the caller's own Steam session; a seat
+  whose polls are refused for 30 seconds straight (long enough for the
+  session to be re-minted, at least three polls) stops polling and says so,
+  attempts to leave,
+  and otherwise lets the server's non-polling sweep clear the seat shortly. Pair writes are reciprocal: declining a pre-room match releases
+  the partner only while the partner's row still points back at the caller,
+  the room is issued through one conditional write that
+  requires both rows to name each other (ready, room-less), and a pair that
+  no longer matches dissolves only the caller's row (the ready-up answers
+  "dissolved" and the client returns to searching by itself). Leaving the
+  queue deletes only the leaver's row; once that deletion is recorded, a
+  pre-room partner is released by its own next accepted poll, which is what
+  tells that client to start searching again.
+
+**Network diagnostics** (carried over from the reviewed-but-unshipped Release A
+work of 2026-09-03; first shipped here)
+
+- The 1v1 match report carries 25 optional per-seat network fields from the
+  reporting seat only (sender counters, Photon resend/discard/CRC counts and
+  queue depths, frame-hitch counters — the full histogram stays in the bug
+  bundle — and observer tags that mark gaps a still opponent, a Phoenix charge
+  or a receiver-side frame can explain: evidence for review, not a verdict on
+  the cause). They live outside every match HMAC canonical, are never public
+  response data, and need migration 284.
+- Bug bundles gain versioned `[NET-*]` lines with per-view evidence; the
+  corner HUD shows a labelled one-way replica-age estimate (peer-reported
+  input, 1v1 only) and the recent frame/resend facts; the broadcast seat runs
+  a gstats sentinel self-test.
+
+**Music: preparation at the main menu** (Release A, first shipped here)
+
+- Downloaded tracks are decoded only inside an explicit main-menu click (a
+  Music-tab control such as Prepare or a track's Play, or the Shop's
+  Preview), one track per click, and never while this seat is itself joining
+  a game. v1.40.0 could decode several just-downloaded tracks together around
+  the first card pick (320-700 ms each) — the hitch some players felt there.
+  The Music tab's Prepare button shows what is still pending; with Loop on
+  (the default) a track that ends before the next one is prepared repeats
+  instead of going quiet; a failed decode is retried only by a click.
+
+**Held from this release:** the bug #334 music change (silence instead of
+vanilla while nothing is prepared, between-round clicks) did not pass its
+certification rounds and is not in v1.40.1. Against v1.40.0 the music engine
+changes by the Release A playback work above (the main-menu preparation rule
+and a short fade on start and resume) and by the new tracks. The report stays
+open.
+
+**Schema changes:** migrations **284** (Release A: 50 nullable per-seat
+network columns on `matches` — required before the v1.40.1 API, whose model
+maps them), **285** (Clavar la Bala 12 -> 14 tracks; deploys with the API
+because `/music/rate` validates `track_idx` against `music_track_count`),
+**286** (i18n client keys), **287** (v1.40.1 release notes x5). Deploy order:
+284 -> 285 -> 286 -> 287 on the primary (standby replay confirmed after the
+migration phase) -> API on both boxes -> client release + Thunderstore ->
+LATEST bump.
+
+## v1.40.0 — 2026-09-02
+
+**Music: a full in-game player and the first two albums**
+
+- New MUSIC tab (F5): every album you own with per-track checkboxes, a
+  bottom-docked player — play/pause, previous/next, stop, loop, shuffle, a
+  seek line, and a volume slider — plus per-album ON/OFF switches. The vanilla
+  ROUNDS OST (by Karl Flodin) is listed there too, selected by default, and
+  the game sounds exactly like it always has until you change something.
+- Two albums by Sid in the Shop's new MUSIC section: **Another Round**
+  (7 tracks, Metal / Phonk, 1g) and **Clavar la Bala** (12 tracks, Flamenco
+  Metal, 1,000g). Click an album row to expand its track list and preview any
+  song (30s). Albums appear on the Home page like new cosmetics, with the
+  artist, genre, price, and date.
+- Your picks play in matches (card picks duck the music the way vanilla
+  does); an opt-in setting plays them at the main menu too — or silences menu
+  music entirely. Another opt-in shows a small "Now Playing" credit line.
+  Audio downloads on first use (previews are a small pack; full albums fetch
+  when you own one). Music is entirely yours-side: opponents hear their own.
+- Music artists earn 50% of album sales, manage their album's shop listing
+  name and price (the Music tab and now-playing keep the compiled album
+  name), and can gift copies — sales show up in the Artist tab like any
+  other item.
+- Rate any song 0-5 stars right in the track row. Ratings are private; the
+  community average updates on a random 2-24h delay so a change can't easily
+  be matched to whoever was just online.
+
+**Dances: actual body movement**
+
+- Dance routines now move the whole dancer — hops, bobs, leans, shimmies and
+  hip-sway alongside the arm work (the body motion was always there, it was
+  just far too subtle to see at gameplay zoom). Six more dances join the shop:
+  Jumping Jacks, The Shimmy, Disco Fever, The Helicopter, The Robot, and
+  The Floss.
+
+**Quick chat is a wheel now**
+
+- Hold Q for the quick-chat wheel: point at a phrase and release to send it,
+  or pick "More..." for the full list (social lines, courtesies, emoticons —
+  including a table flip). Clicks inside the wheel never fire your gun or
+  raise your block. The old Y menu and its 1-9/0 number picks are retired,
+  and the phrase list was rebuilt (GG, Hi!, Nice shot, recruiting lines, and
+  more). Phrases still arrive in each reader's own language.
+
+**Dance emotes (new shop category)**
+
+- Hold E between rounds for the emote wheel: point at a dance you own and
+  release to play it for everyone in the room. Two launch dances — The
+  Bounce and The Wave — live in the Shop's new DANCES section, where the
+  Preview button plays the exact choreography on a puppet before you buy.
+  Dances cancel instantly when combat starts and never touch gameplay.
+
+**Silence's red X actually shows**
+
+- The Silence status X never rendered: the base game ships the indicator
+  mis-wired (its Scale animation starts at zero and nothing sets the first
+  frame), so every silenced player since launch showed only the cast
+  sparkle. The mod now rewires it on spawn — a silenced player has a clear
+  red X overhead for the whole duration. (v1.39.6's changelog claimed this
+  worked; that claim was wrong, and this is the real fix.)
+
+**Betting locks when it should (bug #324)**
+
+- Live 1v1 points now reach the server reliably: missed/failed updates
+  retry, a periodic refresh closes the gap a lost packet left, and the
+  server no longer swaps the pair's points when the non-reporter's client
+  sent them. Betting on a series now closes at 2 points scored in game 1 the
+  way the rule says — in-game and in Discord — instead of staying open
+  minutes into a decided game.
+
+**Healing you can see**
+
+- The health bar renders a blue segment for recent healing again (Leech,
+  Pristine, regen): the segment now tracks a rolling window of the last
+  ~1.2s of gained health and draws above both fill layers. It had been
+  invisible since the bar's last rework.
+
+**Tournaments**
+
+- Discord trophy + participant roles are only assigned for tournaments with
+  16 or more players.
+- New achievements: win a Sync or Async tournament, take 2nd in either, and
+  Iron Bracket — play a whole tournament without forfeiting (an opponent
+  forfeiting to you still counts as played). Backfilled for past brackets.
+- The 1v1 podium titles now read "1v1 1st Place" (etc.) in line with the
+  other modes, and podium titles are revoked when a new podium displaces
+  you.
+
+**Info library**
+
+- Nine new visual diagrams across the articles (Grow's curve, the netcode
+  map, bet windows, bracket flow, forfeit clocks, refresh flow, movement
+  windows, team formats, and when-what-counts), and the Controls board +
+  article now teach the Q/E wheels.
+
+**Compare, Cards & Shop**
+
+- Compare > Cards: two new metrics — "5-0 Sweeps" (most flawless games won
+  with a card) and "Most Stacked" (highest same-card stacks ever picked).
+- Compare > Players: "Shop Sales" — the shop's own sales board (purchases
+  and revenue per cosmetic, top sellers, totals).
+- Card Stats: a search box filters the card list, next to the sort row.
+- Twelve new trails (gradients, particle effects, and a 10k Galaxy
+  starfield).
+- SCR menu footer: YouTube, Twitch and Thunderstore buttons beside Discord
+  and GitHub; your player name moved up beside the title, styled like
+  in-game.
+- Broadcast idle showcase: the between-games tour now walks the Compare
+  metrics, scrolls the leaderboard to the featured player, and sweeps
+  through profiles.
+
+**Schema changes:** migrations **276** (Another Round album row), **277**
+(album release), **278** (`music_ratings` + `deploy_markers` +
+`shop_items.music_track_count`), **279** (Clavar la Bala row + royalty
+columns on `player_items`), **280** (music activation marker — operator
+gate), **281** (Clavar activation + artist attribution; requires 280's
+marker), **282** (i18n client keys, +356), **283** (v1.40.0 release notes
+x5). Deploy order is load-bearing: 278 -> 279 -> api -> 280 -> 281 (the
+purchase royalty stamp is fail-closed on 279's columns).
+
 ## v1.39.6 — 2026-08-30
 
 **The menu no longer leaks into the game**
@@ -1091,220 +1277,5 @@ catalog this release.
 - **Block stat graph uses one y-axis** (bug #182, Stan): the activated and
   successful lines share a scale like the shots graph; only legacy
   damage-vs-blocks rows keep dual axes.
-
-## v1.38.0 — 2026-08-08 — Hosted lobbies, alerts, chat moderation, animated cosmetics
-
-Schema: migrations **202—œ206** (202 LFP modes, 203 admin alerts, 204 cosmetic
-animation frames, 205 lobby kicks, 206 team/FFA colour identity — all must
-apply BEFORE the API deploy). Deploy notes: the
-GIF-split endpoint needs **Pillow added to the server-side API Dockerfile**
-(fetch the live copy per #192, add `pip install Pillow`, push back — until
-then it answers 503 and the multi-PNG path is unaffected); ship step 11 now
-also POSTs the ENGLISH release notes (`en` accepted; the Home tab's primary
-source is the new uncut `/release-notes/full/{locale}` — post v1.37.0's
-English body retroactively at deploy so the current notes uncut too); an es/ru
-seed migration for the new i18n keys is a ship-time step.
-
-### Added
-
-- **Hosted lobbies are THE way to play custom 2v2s and 1v2s** (Sid's follow-up:
-  the old blind manual queue and the 1v2 consent queue are gone from the
-  tabs). v1.37.0 shipped only the server half — no client UI existed. Now:
-  FFA Create Private + password prompts + [PRIVATE] browser markers; full
-  hosted-lobby panels on the 2v2 and 1v2 tabs (create, browse/join with
-  password, member list, host-only Start, Leave) whose state poll keeps the
-  seat lease alive even with the menu closed. **Hosts can kick** members
-  before start (admins are unkickable, and a kicked player cannot rejoin that
-  lobby); the 1v2 solo-extra-pick is the **host's setting** now; and every
-  lobby browser shows **who is inside before you join — names, titles and
-  elo**, with 2v2/FFA elos shown only once established (10+ rated
-  series/games; 1v1 elo otherwise). Start hands off to the normal
-  ready-up/room flow with a match-found alert for idle members; a closed
-  lobby never strands or conscripts anyone. *Multi-player flows are
-  first-playtest.*
-- **Standing server alerts.** Admins broadcast a notice (outage / issue /
-  update / info) from the Admin tab; every player gets a one-time toast (also
-  for players coming online later) and a persistent banner on every menu tab
-  showing category, message, admin and time. Echoed to the admin Discord
-  channel. Revocable; optional expiry.
-- **Automatic chat moderation.** A hard-slur filter on both chat paths removes
-  the message before it exists anywhere, auto-mutes the sender in all channels
-  for 15 minutes (doubling per repeat offense in 90 days, 7-day cap), logs a
-  system action, posts who/what/action to the admin channel, and tells the
-  sender why their line vanished.
-- **Animated cosmetic uploads in-game.** Multi-PNG sets (name.png +
-  name__f2.png + ... — the picker explains the convention and validates every
-  frame) with an artist-set frame-rate slider in the live preview, or a GIF
-  the server splits at the GIF's own speed. Admin review shows the animation
-  actually moving before approval.
-- **Max card draw unlocked (FFA).** Hosts set 1-5 cards offered per draw in
-  the lobby settings row; non-default values show in the load-in banner and
-  history.
-- **Watch from the mode tabs.** WATCH buttons on the 2v2 live strip, a new
-  Live 1v2 Games panel, and live FFA lobbies — same eligibility rules as the
-  Leaderboard panel, which keeps its buttons. *FFA/1v2 spectating is
-  first-playtest; a server-side per-mode switch can pull a mode back without a
-  client update.*
-- **RLFP ping upgrades.** Pick any of 1v1 / 2v2 / FFA under the duration
-  selector — the Discord ping reads "LFP: ranked 1v1+FFA for 30min" — and
-  `:emojiname:` in the optional message renders as real server emojis.
-- **Deep idle.** After 60s unfocused outside any room/battle/match-found, the
-  engine drops to 15 FPS (on top of the existing 120 cap), waking instantly on
-  focus or a match. Toggleable in Settings.
-- **Shop: New chip + on-body preview.** A New filter beside All shows the
-  newest cosmetics; face thumbnails grew 80Ã¢â€ â€™112; every face row has a Preview
-  button showing the item on the player body at its real shipped placement —
-  animated items animate.
-- **Body-color team identity (server half).** A 2v2 team is named after its
-  color holder's equipped body color — sole holder wins, two holders coin-flip
-  — decided once at series creation, frozen for the series (rematches inherit
-  the sitting's identity, sides swapped when the split flips; mirror matches
-  leave team 2 vanilla). FFA games stamp each player's color at report time.
-  The stamp rides the series state/live/recent feeds and `/ffa/recent`, ready
-  for the client tinting pass (points, card shading, Recent panels).
-  Migration 206; actual body colors are never changed.
-
-### Changed
-
-- **Release notes are uncut and formatted on both surfaces.** Discord posts the
-  full notes as multiple messages instead of cutting at 2000 chars
-  mid-sentence; the Home tab renders the complete notes with gold headings,
-  colored bullets, bold/underline/code — and stops wrapping at the author's
-  column width (the actual bug-160 regression).
-- **Admin tab restructure.** Banned users moved to a dedicated admin-only
-  Banned sub-tab (full height + search); the Action Log now lives in-panel
-  where the bans sat, with the searchable full log one click away. Banning 5+
-  players inside 5 minutes blocks further bans and flags the admin channel;
-  ban failures now surface instead of silently logging.
-- **Compare tab.** The < > metric cycling arrows are back beside the dropdown
-  (both stay in sync); Ranked Friends pie slices are guaranteed distinct
-  colors with an honest legend (tail folds into a grey Other); labels like
-  Bullet Speed size to the cell instead of a hard 10-char cut.
-- **Chat is visible on every menu tab** (except Home, where the pane lives),
-  anchored bottom-left as everywhere else.
-- **Body-color identity polish.** The point/win animation's balls and fills
-  tint to each team's equipped color; card-bar boxes fill with the player's
-  color (outline back to vanilla) and the box letters are always a readable
-  deep version of that same color (pale version on near-black colors) — the
-  first cut only darkened past a threshold and missed the HUD bar's labels
-  entirely, which is why light colors read as blank white squares.
-- The FFA host Start button says "Start unlocks in Ns (settings changed)"
-  instead of a countdown that read as an auto-start.
-
-### Fixed
-
-- **FFA: Radiance no longer damages its own caster.** The FFA targeting
-  replacement excluded the shooter by position, so a moving player became
-  their own sun wave's nearest target — one self-hit per wave, which also
-  suppressed lifesteal (the "Parasite not healing" half of the report).
-- **"Leftover parasite stacks" at round start.** End-of-round projectiles
-  could register hits after the victim respawned; every client now despawns
-  its own bullets the moment the round is decided.
-- The 2v2 live-series and team-history parsers survive display names
-  containing brackets (they blanked the Live panel, 2v2 tab and spectator
-  HUD line).
-- The unfocused-FPS cap can no longer stick if the mod disables itself during
-  an unfocused launch.
-- The FFA "GET READY" banner no longer clips its text top and bottom — the
-  banner box now sizes to the rendered text instead of a fixed 260px slot.
-
-### Stan's feature requests (#178—œ181, all accepted)
-
-- **Discord FFA results show every player's beforeÃ¢â€ â€™after rating** (stamped at
-  match time, so later games never rewrite history), and **every ranked
-  result post carries its `/game` codes** — inspect a game from Discord
-  without opening ROUNDS.
-- **"How stats are tracked"** — a Settings-tab page stating the verified
-  mechanics: what counts as a shot, why one block absorbing three bullets is
-  one success, which cards do and don't count as attempts, what Rage Quit %
-  vs Leave actually measure, when the game-length clock runs, and which
-  modes feed which lifetime stats.
-- **Stat hover graphs redesigned**: two-line headers with the legend colored
-  as the lines (distinct hues), real x-axis time ticks scaled to the game's
-  actual length, the block graph now charts **activations vs successful
-  blocks** (older games keep their honest damage-taken labels), and the
-  marker footer is replaced by a real green/red "point won / point lost"
-  legend that only appears when markers do.
-- **The graph-vs-summary discrepancy Stan caught was real and is fixed at the
-  root**: every stat timeline stopped recording at 6 minutes 24 seconds (a
-  128-sample cap) while the totals kept counting — nearly every 2v2 and FFA
-  game overran it. Timelines now compress as they grow and always span the
-  whole game. Also found in the same audit: FFA spawn-grace right-clicks
-  were counting as block attempts that could never block — no longer.
-
-### Review hardening (Codex adversarial rounds 3—œ8 — 40 further findings fixed)
-
-- **Authenticated requests refuse plaintext transport.** If the secure
-  connection ever fails and the client falls back to the legacy endpoint,
-  your Steam session is no longer exchanged or attached, and admin actions
-  and lobby passwords are refused outright rather than sent in the clear.
-  (LAN/loopback addresses are exempt so local setups keep working.)
-- **Nothing can drop you into a match you didn't consent to.** Joining the
-  public 2v2 queue can no longer overwrite a live locked match; a seat in a
-  closed hosted lobby is released instead of being recycled into public
-  matchmaking; leave requests are bound to the exact match they were issued
-  for, so a delayed retry can't dissolve a newer one.
-- **Preference clicks land in order** — the last thing you clicked is what
-  the server stores, and Start waits for it.
-- Assorted: DPS graphs no longer halve short games; the card-letter outline
-  can't leak materials; live-column and bets-ledger rows share one height
-  budget; release announcements resume correctly after a crash, restart, or
-  partial post.
-
-### Review hardening (Codex adversarial round 2 — 12 confirmed findings fixed)
-
-- Hosted-lobby groups are released (never recycled into public matchmaking)
-  by EVERY dissolution path now — ready timeouts, dead-lock resets, ban
-  evictions, account deletion — via one shared disposition authority; queue
-  leaves are incarnation-fenced so a delayed retry can't tear down a newer
-  enrollment, and joining is blocked while a leave is still settling.
-- The chat auth token is never sent over the plaintext fallback socket — a
-  downgraded session stays unverified (censored without strikes) instead of
-  exposing the session bearer.
-- Preference writes serialize one-at-a-time with Start disabled until the
-  host's last change is acknowledged; recovery rejoins re-send the current
-  preferences, not a stale join-time snapshot; "Team: Any" clears server-side.
-- The team-color coin flip distributes to every seat and spectator via a
-  room property (the continuation response only ever reached one client);
-  an all-vanilla decision is now explicitly frozen so a mid-series color
-  equip can't re-open it; spectators never repaint a watched room with their
-  own previous series' colors.
-- The Leaderboard live column enforces a single row budget across all modes
-  so it can never overpaint the bet ledger; release announcements survive
-  bot restarts mid-post and the manual command can no longer mark a partial
-  announcement complete.
-
-### Review hardening (Codex adversarial round 1 — 16 confirmed findings fixed)
-
-- **Hosted lobbies:** survivors of a dissolved hosted 2v2/1v2 start are
-  released outright instead of being recycled into public matchmaking; the
-  client's start-vs-disband recovery uses a new read-only resolve endpoint
-  (the old probe could lock you with strangers); an explicit Leave that races
-  Start now reports "started" and completes through the proper queue-leave;
-  seated preferences are patched one field at a time through a dedicated
-  endpoint (racing Start via re-join could orphan a seat), hydrate from the
-  server, and "Team: Any" actually clears a previous claim; a full kick list
-  refuses new kicks rather than quietly re-admitting the earliest-kicked
-  player.
-- **Chat moderation:** the censor's auto-mute only fires on a socket whose
-  Steam identity is session-verified — an unauthenticated socket could
-  previously mute an arbitrary victim by forging their ID. Unverified hits
-  are still censored, just not persisted as strikes.
-- **Admin/ops:** the ban-velocity gate is race-proof (advisory lock — parallel
-  bans could previously slip past it); admin alert banners expire client-side
-  when timed alerts lapse; the release announcer resumes from the failed
-  chunk instead of marking a partial announcement complete; the Home tab's
-  release feed anchors on ship-time order so editing an old translation can't
-  hoist it above newer releases.
-- **Animated cosmetics:** abandoned half-uploads free their submission slot
-  even at the cap; admin frame review pages one frame per request (a 16-frame
-  submission could exceed the fetch timeout and become unreviewable); GIFs
-  outside the supported 0.5—œ15 fps band are rejected with the measured rate
-  instead of silently retimed; the release-candidates feed and ship runbook
-  carry frame counts + fps so an approved animation can never ship as a
-  static frame 1.
-- **Spectating:** pulling a mode from the server's watchable set now also
-  evicts existing viewers (heartbeat + fighter validation), not just new
-  grants.
 
 _(older entries trimmed - full history on GitHub)_
