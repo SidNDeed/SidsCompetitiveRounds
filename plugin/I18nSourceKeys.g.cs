@@ -1329,7 +1329,6 @@ namespace CompetitiveRounds
             "Max cards:",
             "Max {0} cards",
             "Max {0} players",
-            "Menu closes in 15 s - move the mouse to keep it open",
             "Menu music: <color=#88CCFF>Default</color>",
             "Menu music: <color=#88FF88>My playlist</color>",
             "Menu music: <color=#FF9966>None</color>",

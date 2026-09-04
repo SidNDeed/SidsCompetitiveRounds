@@ -5523,24 +5523,24 @@ namespace CompetitiveRounds
         /// it can screenshot every tab. Gated by the caller on the broadcast
         /// identity; no state beyond what a click would set.</summary>
         /// <summary>lag-332 W6-A test lever (broadcast seat only, via
-        /// [Broadcast] TestOpenTab "16:click:&lt;what&gt;:&lt;process nonce&gt;" — the
-        /// nonce is logged once at startup and a value present at startup never
-        /// replays): replays one Music-tab click through MusicUiCall — the
-        /// identical path a real click takes, so the engine's admission snapshot
-        /// and click-decode rule apply.</summary>
-        internal static void DevMusicClick(string what)
+        /// [Broadcast] TestOpenTab "16:click:prepare:&lt;process nonce&gt;[:&lt;tag&gt;]" —
+        /// the nonce is logged once at startup and a value present at startup is
+        /// inert): runs the Music-tab preparation click through MusicUiCall in
+        /// the tick the lever is read — the identical path a real click takes,
+        /// so the engine's admission snapshot and click-decode rule apply. r4
+        /// cut: transport actions are not lever-driven.</summary>
+        internal static bool DevMusicClick(string what)
         {
-            if (!BroadcastMode.IsBroadcastIdentity) return;
-            switch (what)
-            {
-                case "prepare": MusicUiCall("prepare", () => { }); break;
-                case "play-pause": MusicUiCall("play-pause", MusicEngine.PlayPause); break;
-                case "skip": MusicUiCall("skip", MusicEngine.Skip); break;
-                case "prev": MusicUiCall("prev", MusicEngine.PlayPrevious); break;
-                case "stop": MusicUiCall("stop", MusicEngine.Stop); break;
-                case "use-vanilla": MusicUiCall("use-vanilla", MusicEngine.UseVanilla); break;
-                default: Plugin.Log.LogInfo($"[MUSIC-UI] DevMusicClick: unknown '{what}'"); break;
-            }
+            if (!BroadcastMode.IsBroadcastIdentity) return false;
+            // r4 cut: only the PREPARATION click is lever-driven. It has no
+            // transport action of its own — MusicUiCall's admission token is the
+            // engine's click-decode gate, which refuses to decode in every
+            // joining / acquiring / spectating state. The transport actions
+            // (play-pause, skip, prev, stop, use-vanilla) mutate playback
+            // outside that gate and are not exposed to the lever.
+            if (what == "prepare") { MusicUiCall("prepare", () => { }); return true; }
+            Plugin.Log.LogInfo($"[MUSIC-UI] DevMusicClick: '{what}' is not a lever action (only 'prepare' is)");
+            return false;
         }
 
         // Deferred Info-article body scroll for the lever (see DevOpenTab).

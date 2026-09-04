@@ -2020,7 +2020,10 @@ namespace CompetitiveRounds
         // reads it or not at all, with every admission predicate read at the
         // instant of the call (MusicClickRefusal), and it requires the page to be
         // ALREADY open on the Music tab from an earlier lever open — the
-        // operator issues the open, then the click with a fresh nonce.
+        // operator issues the open, then the click again with a different
+        // 5th-field tag (the process nonce stays; the tag only makes the cfg
+        // value distinct so the lever re-applies). r4 cut: only 'prepare' is
+        // a lever action — see NativeUI.DevMusicClick.
 
         private void TickTestOpenTab()
         {
@@ -2067,9 +2070,9 @@ namespace CompetitiveRounds
                     int.TryParse(parts[1].Trim().Substring(3), out shopCat);
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
-            // lag-332 W6-A verification: "16:click:<what>:<process nonce>" replays
-            // ONE Music-tab click (prepare / play-pause / skip / prev / stop /
-            // use-vanilla) through the same callback path a real click uses —
+            // lag-332 W6-A verification: "16:click:prepare:<process nonce>[:<tag>]"
+            // runs ONE Music-tab preparation click (r4 cut: transport actions are
+            // not lever-driven) through the same callback path a real click uses —
             // the engine's menu-admission snapshot still gates any decode. Tab 16
             // only; the nonce is logged once at startup; a value present at
             // startup is the baseline and never replays.
@@ -2111,8 +2114,10 @@ namespace CompetitiveRounds
                 {
                     try
                     {
-                        NativeUI.DevMusicClick(musicClick);
-                        Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' applied");
+                        bool ran = NativeUI.DevMusicClick(musicClick);
+                        Plugin.Log.LogInfo(ran
+                            ? $"[UI] TestOpenTab: music click '{musicClick}' applied"
+                            : $"[UI] TestOpenTab: music click '{musicClick}' not applied: not a lever action");
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestOpenTab music click '{musicClick}' failed: {ex.Message}"); }
                     return;
@@ -2141,7 +2146,7 @@ namespace CompetitiveRounds
             try
             {
                 if (!NativeUI.IsOpen || NativeUI.CurrentTab != 16)
-                    return "the page is not open on the Music tab (opening it now - re-issue the directive with a new nonce once it is)";
+                    return "the page is not open on the Music tab (opening it now - re-issue the directive with the same nonce and a different 5th-field tag once it is)";
                 if (PhotonNetwork.InRoom) return "the seat is inside a room";
                 if (BroadcastMode.AcquisitionBusy) return "a spectator acquisition is in progress";
                 if (SpectatorSession.IsLocalSpectator) return "the seat is a spectator";
@@ -2602,8 +2607,8 @@ namespace CompetitiveRounds
             // Map-skin test lever tour / auto-Sandbox (broadcast identity only).
             try { ArtHandlerNextArtPatch.TickTestLever(); } catch { }
             try { TickTestOpenTab(); } catch { }
-            // Overlay left open with nobody at the seat (every identity; the
-            // player branch only acts inside an online room).
+            // Overlay left open with nobody at the seat (broadcast identity only;
+            // the player-seat branch was cut in review — see the class comment).
             try { OverlayIdleClose.Tick(); } catch { }
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
