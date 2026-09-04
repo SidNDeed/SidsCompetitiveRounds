@@ -77,7 +77,9 @@ FILES = [
     # deliberately absent: album/track/artist text stays raw (#368) and their
     # log lines are not user-visible.
     "MusicAssets.cs", "MusicEngine.cs",
-    # Overlay idle-close (Sept 4) — the 15 s warning toast.
+    # Overlay idle-close (Sept 4) — broadcast-only since review r4, so it has
+    # no translation sites today; listed so a future player-seat variant
+    # (which would need a toast) is harvested the moment it appears.
     "OverlayIdleClose.cs",
 ]
 

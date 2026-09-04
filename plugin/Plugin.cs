@@ -2017,8 +2017,9 @@ namespace CompetitiveRounds
         // next unbound transition inside the previous repair (a spectator
         // acquisition entering Granting changes none of them). r3 cut: there is
         // no armed state any more. A click directive runs in the tick that
-        // reads it or not at all, with every admission predicate read at the
-        // instant of the call (MusicClickRefusal), and it requires the page to be
+        // reads it or not at all, with the lever's own refusal checks read at the
+        // instant of the call (MusicClickRefusal — a coarse operator filter; the
+        // engine's click admission is the decode gate), and it requires the page to be
         // ALREADY open on the Music tab from an earlier lever open — the
         // operator issues the open, then the click again with a different
         // 5th-field tag (the process nonce stays; the tag only makes the cfg
@@ -2133,14 +2134,19 @@ namespace CompetitiveRounds
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
         }
 
-        /// <summary>Why a lever Music click may not run RIGHT NOW, or null when it
-        /// may. Read at the instant of the call — there is no armed state to
-        /// bind, so no transition can slip between the check and the click. The
-        /// page must already be open on the Music tab (the engine's admission
-        /// wants it open on the preceding frames), the seat must be at the menu
-        /// (no room of any kind), and no spectator acquisition, spectator session
-        /// or join operation may be under way (r3 MEDIUM 1: an acquisition
-        /// entering Granting changes neither the room nor the client state).</summary>
+        /// <summary>Why the lever refuses a Music click RIGHT NOW, or null when
+        /// its OWN checks pass. Read at the instant of the call — there is no
+        /// armed state to bind, so no transition can slip between the check and
+        /// the click. This is a coarse operator-facing filter, not the admission:
+        /// it looks at the page (open on the Music tab, which the engine's
+        /// admission wants on the preceding frames), any room, the director's
+        /// acquisition, a local spectator session and an unsettled spectator
+        /// join. It does NOT look at public WATCH grants or the Steam-lobby
+        /// latch; the engine's own click admission (BeginClickAdmission /
+        /// ClickDecodeOpportunity) does, and that is what gates the decode — a
+        /// `prepare` this filter lets through still decodes nothing in those
+        /// states (r5 LOW 1). r3 MEDIUM 1 context: an acquisition entering
+        /// Granting changes neither the room nor the client state.</summary>
         private static string MusicClickRefusal()
         {
             try

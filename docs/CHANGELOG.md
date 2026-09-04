@@ -1,5 +1,42 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — 2026-09-04 (version to be named at the bump)
+
+**In-game library: Spirit's charts**
+
+- The "On Damage Types and Buff Activation" article now carries five drawn
+  charts redrawn from Spirit's diagrams: the damage interaction matrix, the
+  RefreshValid Silence sequences, the 0.35 s window sequences, the Refresh
+  gate, and the full damage flow. The text tables they replace are removed,
+  the article is split into shorter pages, and library search still finds the
+  chart contents. Card names inside the charts stay English in every language.
+
+**Diagnostics and small fixes**
+
+- The music watchdog's "vanilla re-entry UNVERIFIED" line now records what it
+  saw (the mod's guard flags and the game's own menu/in-game music flags) so
+  the next occurrence can be diagnosed from the log.
+- The footer's version comparison is ordered: a local build newer than the
+  advertised version no longer reads as outdated.
+- The Phoenix sound fix no longer attempts an exact-method lookup that always
+  missed (it produced 46 HarmonyX warnings per session and patched nothing).
+
+**Broadcast seat only**
+
+- The overlay closes itself when left open with nobody at the seat: after
+  30 s without input inside a room, after 60 s at the menu; showcase-owned
+  pages are left to the showcase; an open prompt counts as presence. Player
+  seats are not affected (a player version was reviewed and deferred).
+- The `TestOpenTab` lever accepts a click form that runs the Music tab's
+  Prepare click in the tick that reads it, only with the page already open
+  on the Music tab and the seat idle at the menu; anything else is refused
+  with a logged reason, and transport actions are not lever-driven.
+
+**Schema changes:** migrations **288** (client i18n keys for the new library
+strings) and **289** (machine-translation proposals for es/ru/uk/sv for those
+keys; the same translations ship bundled in the client). Apply both AFTER the
+API deploy; 288 before 289.
+
 ## v1.40.1 — 2026-09-03
 
 **Clavar la Bala: two more tracks**
