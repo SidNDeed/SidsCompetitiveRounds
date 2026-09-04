@@ -987,7 +987,7 @@ namespace CompetitiveRounds
                     case "damage-matrix":
                     {
                         string yes = I18n.Tr("Yes"), no = I18n.Tr("No"), cond = I18n.Tr("Conditional");
-                        sb.Append(I18n.Tr("TABLE OF DAMAGE INTERACTIONS")).Append(" - Scavenger / Brawler / Taste of Blood / Lifesteal / Refresh\n");
+                        sb.Append(I18n.Tr("TABLE OF DAMAGE INTERACTIONS")).Append(" - Scavenger / Brawler / Taste of Blood / ").Append(I18n.Tr("Lifesteal")).Append(" / Refresh\n");
                         for (int i = 0; i < DMG_MATRIX.Length; i++)
                         {
                             string[] parts = DMG_MATRIX[i].Split('|');
@@ -1043,7 +1043,9 @@ namespace CompetitiveRounds
             float H = TOP + DMG_MATRIX.Length * ROW + 44f;
             var p = Panel(parent, "VizDamageMatrix", H);
             Header(p, H, I18n.Tr("TABLE OF DAMAGE INTERACTIONS"));
-            string[] cols = { "Scavenger", "Brawler", "Taste of Blood", "Lifesteal", "Refresh" };
+            // Card identities stay English (the translated article keeps them);
+            // "Lifesteal" is a character stat, translated everywhere else (r2 LOW 1).
+            string[] cols = { "Scavenger", "Brawler", "Taste of Blood", I18n.Tr("Lifesteal"), "Refresh" };
             const float NAME_X = 16f, NAME_W = 296f, CELL_X0 = 322f, CELL_W = 156f, CELL_GAP = 8f;
             float titleY = H - TOP + 2f;
             for (int c = 0; c < cols.Length; c++)

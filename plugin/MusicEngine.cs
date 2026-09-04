@@ -1320,11 +1320,16 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
+                // Snapshot BEFORE the clear (dV2 MEDIUM 6): the dump must show
+                // the guard as the wrapper left it, or it settles nothing.
+                string dumpT = s.reentryAttempts >= REENTRY_MAX_ATTEMPTS ? OracleDump(mgr) : null;
                 ClearVanillaGuard(mgr, menu);
                 LogOnce("reenter", "[MUSIC] vanilla re-entry threw: " + ex.Message + " — will retry from the tick", true);
-                return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "threw");
+                return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "threw", dumpT);
             }
             var state = VanillaMusicState(mgr, menu);
+            // Same rule for the oracle paths: the snapshot precedes every clear.
+            string dump = s.reentryAttempts >= REENTRY_MAX_ATTEMPTS ? OracleDump(mgr) : null;
             switch (state)
             {
                 case OracleState.Playing:
@@ -1332,26 +1337,51 @@ namespace CompetitiveRounds
                     s.reentryAttempts = 0;
                     return true;
                 case OracleState.Delayed:
-                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "still Delayed");
+                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "still Delayed", dump);
                 case OracleState.NotPlaying:
                     ClearVanillaGuard(mgr, menu);
-                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "NotPlaying");
+                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "NotPlaying", dump);
                 default:
                     // Oracle unavailable: never certify from the flag — and clear
                     // the guard this attempt set so the next retry is not a
                     // wrapper no-op (r1 MEDIUM 11).
                     ClearVanillaGuard(mgr, menu);
-                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "oracle unavailable");
+                    return s.reentryAttempts >= REENTRY_MAX_ATTEMPTS && FailOpenUnverified(mgr, menu, "oracle unavailable", dump);
             }
         }
 
-        private static bool FailOpenUnverified(SoundMusicManager mgr, bool menu, string why)
+        private static bool FailOpenUnverified(SoundMusicManager mgr, bool menu, string why, string dump)
         {
             // Failing open must not strand a set-but-silent wrapper guard: clear
             // it so vanilla's own next Play* call is a real call (r1 MEDIUM 11).
+            // The dump was taken by the caller BEFORE its own clear
+            // (music-v7-design.md §2.4): a Sept 3 desktop log carried
+            // "UNVERIFIED (NotPlaying)" at the first card pick with nothing to
+            // say whether the oracle watched the wrong Sonigon event or the pick
+            // music really stayed silent.
+            if (dump == null) dump = OracleDump(mgr);
             ClearVanillaGuard(mgr, menu);
-            LogOnce("reenter-unverified", $"[MUSIC-WD] vanilla re-entry UNVERIFIED ({why}) after {REENTRY_MAX_ATTEMPTS} attempts — failing open", true);
+            LogOnce("reenter-unverified", $"[MUSIC-WD] vanilla re-entry UNVERIFIED ({why}) after {REENTRY_MAX_ATTEMPTS} attempts — failing open; ctx={S.ctx} {dump}", true);
             return true;
+        }
+
+        /// <summary>Diagnostic snapshot for the UNVERIFIED line: the wrapper's
+        /// two guard flags and Sonigon's state for BOTH music events (menu and
+        /// ingame), whichever the context expects. Best-effort; a missing piece
+        /// prints '?' rather than throwing.</summary>
+        private static string OracleDump(SoundMusicManager mgr)
+        {
+            try
+            {
+                ResolveOracle();
+                string gMenu = "?", gIngame = "?", sMenu = "?", sIngame = "?";
+                try { if (_wrapperMenuGuard != null && mgr != null) gMenu = (_wrapperMenuGuard.GetValue(mgr) is bool b1 && b1) ? "1" : "0"; } catch { }
+                try { if (_wrapperIngameGuard != null && mgr != null) gIngame = (_wrapperIngameGuard.GetValue(mgr) is bool b2 && b2) ? "1" : "0"; } catch { }
+                try { sMenu = VanillaMusicState(mgr, true).ToString(); } catch { }
+                try { sIngame = VanillaMusicState(mgr, false).ToString(); } catch { }
+                return "guard_menu=" + gMenu + " guard_ingame=" + gIngame + " sonigon_menu=" + sMenu + " sonigon_ingame=" + sIngame;
+            }
+            catch (Exception ex) { return "dump_failed=" + ex.GetType().Name; }
         }
 
         private enum OracleState { Unavailable, NotPlaying, Delayed, Playing }

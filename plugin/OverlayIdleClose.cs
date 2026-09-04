@@ -73,10 +73,10 @@ namespace CompetitiveRounds
                 || (mouse - lastMouse).sqrMagnitude > 4f
                 || Input.mouseScrollDelta.sqrMagnitude > 0f;
             lastMouse = mouse;
-            if (present) { lastPresenceRt = now; warned = false; return; }
+            if (present) { lastPresenceRt = now; ResetWarning(); return; }
             bool prompt;
             try { prompt = NativeUI.HasOpenPrompt; } catch { prompt = false; }
-            if (prompt) { lastPresenceRt = now; warned = false; return; }
+            if (prompt) { lastPresenceRt = now; ResetWarning(); return; }
 
             bool inRoom = InLiveOnlineRoom;
             bool broadcast;
@@ -92,16 +92,33 @@ namespace CompetitiveRounds
                 if (idle >= BROADCAST_MENU_CLOSE_SEC) CloseIdle("broadcast-menu", idle);
                 return;
             }
-            if (!inRoom) { lastPresenceRt = now; warned = false; return; }
+            if (!inRoom) { lastPresenceRt = now; ResetWarning(); return; }
             if (!warned)
             {
                 if (idle >= PLAYER_WARN_SEC && now >= nextWarnTryRt)
                 {
                     nextWarnTryRt = now + 1f;
+                    if (warnAttempts >= WARN_MAX_ATTEMPTS)
+                    {
+                        // Every warning so far was overwritten before the player
+                        // could read it (a busy toast surface). Failure direction:
+                        // the page stays open — never close on a warning nobody saw.
+                        if (!undeliverableLogged)
+                        {
+                            undeliverableLogged = true;
+                            Plugin.Log?.LogInfo("[NATIVE] idle-close: the warning toast was replaced " + WARN_MAX_ATTEMPTS + " times before it was readable - player page left open");
+                        }
+                        return;
+                    }
                     bool delivered = false;
                     try { delivered = CompetitiveUI.ShowNotification(I18n.Tr("Menu closes in 15 s - move the mouse to keep it open"), Color.yellow, 6f); }
                     catch { }
-                    if (delivered) { warned = true; warnedAt = now; }
+                    if (delivered)
+                    {
+                        warned = true; warnedAt = now; warnAttempts++;
+                        warnVisibleSec = 0f; lastTickRt = now;
+                        try { warnSeq = CompetitiveUI.NotificationSeq; } catch { warnSeq = -1; }
+                    }
                     else if (!undeliverableLogged)
                     {
                         bool notifOff = false;
@@ -115,14 +132,44 @@ namespace CompetitiveRounds
                 }
                 return;
             }
+            // r2 MEDIUM 2: ShowNotification grants no ownership of the slot — an
+            // ordinary toast (an FFA auto-pick, say) can overwrite the warning
+            // before it was ever rendered. The grace period therefore counts
+            // only once the warning has been ON SCREEN for WARN_MIN_VISIBLE_SEC
+            // (same sequence number, timer still running, sampled per tick); a
+            // warning replaced before that is re-issued, bounded by
+            // WARN_MAX_ATTEMPTS, and an unread warning never closes the page.
+            bool visible = false;
+            try { visible = CompetitiveUI.NotificationVisible(warnSeq); } catch { }
+            if (visible) warnVisibleSec += Mathf.Max(0f, now - lastTickRt);
+            lastTickRt = now;
+            if (warnVisibleSec < WARN_MIN_VISIBLE_SEC)
+            {
+                if (!visible) { warned = false; nextWarnTryRt = now + 1f; }
+                return;
+            }
             if (now - warnedAt >= PLAYER_GRACE_SEC) CloseIdle("player-room", idle);
+        }
+
+        /// <summary>The warning must be readable before it counts: this many
+        /// seconds with the warning toast actually occupying the slot.</summary>
+        private const float WARN_MIN_VISIBLE_SEC = 3f;
+        /// <summary>Re-issues of a warning that was overwritten early, per idle
+        /// episode; past this the page is left open (logged once per session).</summary>
+        private const int WARN_MAX_ATTEMPTS = 3;
+        private static int warnSeq = -1, warnAttempts;
+        private static float warnVisibleSec, lastTickRt;
+
+        private static void ResetWarning()
+        {
+            warned = false; warnAttempts = 0; warnVisibleSec = 0f; warnSeq = -1;
         }
 
         private static void CloseIdle(string why, float idle)
         {
             Plugin.Log?.LogInfo($"[NATIVE] idle-close ({why}) after {idle:F0}s without input");
             try { NativeUI.Close(); } catch { }
-            wasOpen = false; warned = false;
+            wasOpen = false; ResetWarning();
         }
     }
 }

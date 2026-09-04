@@ -938,6 +938,10 @@ namespace CompetitiveRounds
         // rects from a previous My Stats refresh keep painting tooltips
         // over Shop/Admin/Settings tabs at the same screen positions.
         public static int CurrentTab => currentTab;
+        /// <summary>Bumped on every Open, Close and tab switch (Sept 4 r2 MEDIUM 1):
+        /// a deferred action armed against one page instance compares this so a
+        /// rebuild back to the same tab, or a close/reopen, never replays it.</summary>
+        internal static int PageGeneration;
         private static Component listMenu;
         private static GameObject[] tabPanels;
         // (item 7 reorg) Two-row navigation: 9 top-level GROUP buttons + a sub-tab
@@ -1309,7 +1313,7 @@ namespace CompetitiveRounds
             // SetActive(true) re-open lays out through Unity's normal end-of-frame pass.
             if(builtThisOpen)
                 try{UIFactory.tCanvas?.GetMethod("ForceUpdateCanvases",BindingFlags.Public|BindingFlags.Static)?.Invoke(null,null);}catch{}
-            isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();try{EventSystemGuard.OnCaptureStart();}catch{}/* nav-submit ownership taken WITH the page (Aug 30 r2 HIGH: a hidden selected button behind the overlay executed on Space) */Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
+            isOpen=true;PageGeneration++;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();try{EventSystemGuard.OnCaptureStart();}catch{}/* nav-submit ownership taken WITH the page (Aug 30 r2 HIGH: a hidden selected button behind the overlay executed on Space) */Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
             // L10n D2 ask-once: fires only while ModLanguage is the unset
             // sentinel; any choice writes the config and it never asks again.
             try { MaybeShowLanguagePrompt(); } catch { }
@@ -1328,7 +1332,7 @@ namespace CompetitiveRounds
         /// live combat).</summary>
         private static void TeardownOverlaySurfaces(){try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
-        public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;PageGeneration++;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
         /// <summary>Sid2's screenshot shows the page title/footer over live
         /// gameplay on his 16:10 monitor while 16:9 machines never see it.
@@ -5860,7 +5864,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
+        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
 tournaments"): the My Match panel — Ready Up / Play Now / FORFEIT — is gated by the
 sub-tab kind fence, so a participant whose live match sits under the OTHER kind's
 sub-tab opened the tab and saw nothing concedable. On tab entry only (manual sub-tab
@@ -12389,7 +12393,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || !ApiClient.GoldSources.ContainsKey(sid)) return;
                 infoGoldWasMissing = false;
+                // r2 LOW 2: this re-select is a RERENDER of the article the
+                // reader is already in, not a navigation — SelectInfoArticle
+                // snaps to the top, so the live offset (a lever scroll or the
+                // reader's own) is captured first and re-armed for the frames
+                // after the rebuild, exactly like the lever's deferred scroll.
+                float keep = -1f;
+                try
+                {
+                    if (infoBodyScrollGO != null && UIFactory.tScrollRect != null)
+                    {
+                        var sr = infoBodyScrollGO.GetComponent(UIFactory.tScrollRect);
+                        var p = UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition", BindingFlags.Public | BindingFlags.Instance);
+                        if (sr != null && p != null) keep = 1f - Mathf.Clamp01((float)p.GetValue(sr));
+                    }
+                }
+                catch { keep = -1f; }
                 SelectInfoArticle("rewards");
+                if (keep > 0.001f && pendingInfoScroll < 0f)
+                { pendingInfoScroll = keep; pendingInfoScrollFrame = Time.frameCount + 3; pendingInfoScrollKey = "rewards"; }
             }
             catch { infoGoldWasMissing = false; }
         }

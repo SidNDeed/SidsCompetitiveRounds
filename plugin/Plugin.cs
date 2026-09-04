@@ -2025,6 +2025,8 @@ namespace CompetitiveRounds
         private static float _pendingMusicClickAt;
         private static int _pendingMusicClickFrame;
         private static object _pendingMusicClickRoom;   // the Room object at arm time (r1 MEDIUM 3)
+        private static int _pendingMusicClickGen;       // NativeUI.PageGeneration at arm time (r2 MEDIUM 1)
+        private static string _pendingMusicClickNetState; // PhotonNetwork.NetworkClientState at arm time (r2 MEDIUM 1)
 
         private void TickTestOpenTab()
         {
@@ -2035,6 +2037,7 @@ namespace CompetitiveRounds
                 string click = _pendingMusicClick;
                 _pendingMusicClick = null;
                 object armedRoom = _pendingMusicClickRoom; _pendingMusicClickRoom = null;
+                int armedGen = _pendingMusicClickGen; string armedNet = _pendingMusicClickNetState ?? "";
                 // r1 MEDIUM 3: the replay is bound to the page and the room
                 // incarnation that armed it — the Music tab must still be the
                 // open page and the seat must hold the same Room object (or
@@ -2044,7 +2047,12 @@ namespace CompetitiveRounds
                 {
                     object roomNow = null;
                     try { roomNow = PhotonNetwork.CurrentRoom; } catch { }
-                    sameContext = NativeUI.IsOpen && NativeUI.CurrentTab == 16 && ReferenceEquals(roomNow, armedRoom);
+                    string netNow = "";
+                    try { netNow = PhotonNetwork.NetworkClientState.ToString(); } catch { }
+                    sameContext = NativeUI.IsOpen && NativeUI.CurrentTab == 16 && ReferenceEquals(roomNow, armedRoom)
+                        && NativeUI.PageGeneration == armedGen
+                        && string.Equals(netNow, armedNet, StringComparison.Ordinal)
+                        && !SpectatorJoiner.JoinOpUnsettled;
                 }
                 catch { }
                 if (!sameContext)
@@ -2152,6 +2160,12 @@ namespace CompetitiveRounds
                 _pendingMusicClick = musicClick;
                 _pendingMusicClickAt = Time.realtimeSinceStartup + 0.75f;
                 try { _pendingMusicClickRoom = PhotonNetwork.CurrentRoom; } catch { _pendingMusicClickRoom = null; }
+                // r2 MEDIUM 1: bind to the page INSTANCE (generation bumps on
+                // open/close/tab switch) and to the Photon client state, so a
+                // rebuild back to tab 16 or a roomless transition (null room at
+                // arm AND replay, e.g. a spectator join starting) drops the click.
+                _pendingMusicClickGen = NativeUI.PageGeneration;
+                try { _pendingMusicClickNetState = PhotonNetwork.NetworkClientState.ToString(); } catch { _pendingMusicClickNetState = ""; }
                 _pendingMusicClickFrame = Time.frameCount + 6;
                 Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' armed for a later tick");
             }

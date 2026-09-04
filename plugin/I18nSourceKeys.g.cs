@@ -1257,6 +1257,7 @@ namespace CompetitiveRounds
             "Level {0}",
             "Level-ups",
             "Life steal",
+            "Lifesteal",
             "Lifetime totals for your account, from the live server. The rules behind each source are in the article below.",
             "Lifts your nametag a fraction above its baseline so it appears to hover.",
             "Lime",
