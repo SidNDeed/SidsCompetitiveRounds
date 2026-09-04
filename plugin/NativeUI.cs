@@ -1452,6 +1452,7 @@ namespace CompetitiveRounds
         public static void Tick()
         {
             if(!isOpen||!pageBuilt)return;
+            ApplyPendingInfoScroll();
             if(pageGO==null||!pageGO.activeInHierarchy)
             {
                 // Page host destroyed under us (scene change / UI-host
@@ -5538,6 +5539,23 @@ namespace CompetitiveRounds
             }
         }
 
+        // Deferred Info-article body scroll for the lever (see DevOpenTab).
+        private static float pendingInfoScroll = -1f;
+        private static int pendingInfoScrollFrame;
+        private static void ApplyPendingInfoScroll()
+        {
+            if (pendingInfoScroll < 0f || Time.frameCount < pendingInfoScrollFrame) return;
+            float s = pendingInfoScroll; pendingInfoScroll = -1f;
+            try
+            {
+                if (infoBodyScrollGO == null || UIFactory.tScrollRect == null) return;
+                var sr = infoBodyScrollGO.GetComponent(UIFactory.tScrollRect);
+                var p = UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition", BindingFlags.Public | BindingFlags.Instance);
+                if (sr != null && p != null) p.SetValue(sr, 1f - s);   // 0 = top of the article
+            }
+            catch { }
+        }
+
         internal static void DevOpenTab(int idx, float shopScroll, string infoArticleKey = null)
         {
             try
@@ -5556,7 +5574,19 @@ namespace CompetitiveRounds
                     else if (string.Equals(infoArticleKey, "linktest", StringComparison.OrdinalIgnoreCase))
                         InfoLinkSelfTest();
                     else
-                        SelectInfoArticle(infoArticleKey);
+                    {
+                        // Sept 4: "15:<key>:<scroll 0..1>" also scrolls the article
+                        // body (0 = top) — applied a few frames later, once the
+                        // freshly built article has been laid out, so the seat can
+                        // screenshot charts further down a long article.
+                        string key = infoArticleKey; float bodyScroll = -1f;
+                        int colon = infoArticleKey.IndexOf(':');
+                        if (colon > 0 && float.TryParse(infoArticleKey.Substring(colon + 1).Trim(),
+                                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out bodyScroll))
+                            key = infoArticleKey.Substring(0, colon).Trim();
+                        SelectInfoArticle(key);
+                        if (bodyScroll >= 0f) { pendingInfoScroll = Mathf.Clamp01(bodyScroll); pendingInfoScrollFrame = Time.frameCount + 3; }
+                    }
                 }
                 if (idx == 4 && shopScroll >= 0f && shopScrollGO != null && UIFactory.tScrollRect != null)
                 {

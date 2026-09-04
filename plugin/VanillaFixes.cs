@@ -985,9 +985,13 @@ namespace CompetitiveRounds
                 // 2-arg lookup misses them. Match by prefix (SoundEvent-
                 // compatible, Transform) with every remaining parameter
                 // optional, and invoke with their declared defaults.
-                MethodInfo m = AccessTools.Method(smType, name,
-                    new Type[] { evt.GetType(), typeof(Transform) });
-                if (m == null)
+                // Sept 4: the exact 2-arg AccessTools lookup MISSES Stop (its
+                // third parameter is optional) and HarmonyX logs a warning for
+                // every miss — 46 per session, two per Phoenix stop, on every
+                // seat — before the scan below found the right overload each
+                // time. Go straight to the scan; it is the only path that ever
+                // resolved Stop.
+                MethodInfo m = null;
                 {
                     foreach (var cand in smType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
                     {

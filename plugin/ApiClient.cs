@@ -1046,8 +1046,17 @@ namespace CompetitiveRounds
                 if (!string.IsNullOrEmpty(ver))
                 {
                     LatestModVersion = ver;
-                    if (ver != Plugin.ModVersion)
+                    // Sept 4: ordered compare, like the auto-fire below. A seat
+                    // running a build NEWER than the advertised latest (the
+                    // desktop drop, the broadcast VM before the LATEST bump)
+                    // logged "Update available: v1.40.1 -> v1.40.0" — a downgrade
+                    // offer that was only ever a log line, but it reads as a bug
+                    // report in every such log.
+                    int cmp = CompareVersion(Plugin.ModVersion, ver);
+                    if (cmp < 0)
                         Plugin.Log.LogWarning($"[VERSION] Update available: v{Plugin.ModVersion} → v{ver}");
+                    else if (cmp > 0)
+                        Plugin.Log.LogInfo($"[VERSION] Mod is ahead of the advertised latest (v{Plugin.ModVersion} > v{ver})");
                     else
                         Plugin.Log.LogInfo($"[VERSION] Mod is up to date (v{ver})");
                 }

@@ -83,6 +83,10 @@ namespace CompetitiveRounds
                     case "forfeit-clock": made = BuildForfeitClock(parent); break;
                     case "when-counts": made = BuildWhenCounts(parent); break;
                     case "refresh-flow": made = BuildRefreshFlow(parent); break;
+                    case "damage-matrix": made = BuildDamageMatrix(parent); break;
+                    case "refresh-gate": made = BuildRefreshGate(parent); break;
+                    case "refresh-sequences": made = BuildRefreshSequences(parent); break;
+                    case "refresh-window-sequences": made = BuildRefreshWindowSequences(parent); break;
                     case "movement-window": made = BuildMovementWindow(parent); break;
                     case "team-format": made = BuildTeamFormat(parent); break;
                     case "report-pipeline": made = BuildReportPipeline(parent); break;
@@ -924,35 +928,217 @@ namespace CompetitiveRounds
             return p;
         }
 
-        // -- RefreshValid state machine (Spirit) ----------------------------
+        // ── Spirit's charts (community research, redrawn) ───────────────────
+        // Every value below restates 'On Damage Types and Buff Activation'
+        // (Spirit, University of Rounds — attributed in the article) exactly as
+        // his tables and flow charts state it; nothing here is re-derived from
+        // the decompile (#351: these are HIS findings, presented as such). Card
+        // names stay in English as in his table — the translated article body
+        // kept them in English too.
+        private static readonly Color CELL_YES = new Color(0.20f, 0.58f, 0.32f, 0.92f);
+        private static readonly Color CELL_NO = new Color(0.62f, 0.25f, 0.28f, 0.92f);
+        private static readonly Color CELL_COND = new Color(0.72f, 0.52f, 0.14f, 0.92f);
+        private static readonly Color CELL_NEUTRAL = new Color(0.20f, 0.23f, 0.30f, 0.92f);
+        private static readonly Color CELL_REFRESH = new Color(0.62f, 0.50f, 0.14f, 0.95f);
+        private static readonly Color FLOW_BLUE = new Color(0.22f, 0.38f, 0.56f, 0.90f);
+        private static readonly Color ROW_ALT = new Color(1f, 1f, 1f, 0.035f);
 
+        // Table 1: name | Scavenger Brawler TasteOfBlood Lifesteal Refresh
+        // (Y = Yes, N = No, C = Conditional) — 31 rows, the PDF's order.
+        private static readonly string[] DMG_MATRIX = {
+            "Bullet damage|YYYYY", "Bullet damage (self)|YNNNN", "Abyssal Countdown|NNNNN",
+            "Bombs Away|YYYYC", "Bombs Away (self)|YNNNN", "Decay|YYYYC", "Decay (self)|YNNNN",
+            "Demonic Pact (self)|YNNNN", "Demonic Pact (AoE)|YYYYC", "EMP|YYYYC", "EMP (self)|YNNNN",
+            "Explosive Bullet|YYYYC", "Explosive Bullet (self)|YNNNN", "Frost Slam|YYYYN",
+            "Lifestealer|YYYYC", "Overpower|YYYYY", "Parasite|YYYYC", "Parasite (self)|YNNNN",
+            "Poison|YYYYC", "Poison (self)|YNNNN", "Radiance|YYYYC", "Saw|YYYYC", "Shield Charge|YYYYY",
+            "Silence|YYYYC", "Shockwave|YYYYN", "Static Field|YYYYC", "Supernova|YYYYY",
+            "Timed Detonation|YYYYC", "Timed Detonation (self)|YNNNN", "Toxic Cloud|YYYYC", "Toxic Cloud (self)|YNNNN",
+        };
+
+        private static GameObject BuildDamageMatrix(Transform parent)
+        {
+            const float ROW = 17f;
+            const float TOP = 32f + 22f;   // header + column-title row
+            float H = TOP + DMG_MATRIX.Length * ROW + 44f;
+            var p = Panel(parent, "VizDamageMatrix", H);
+            Header(p, H, I18n.Tr("TABLE OF DAMAGE INTERACTIONS"));
+            string[] cols = { "Scavenger", "Brawler", "Taste of Blood", "Lifesteal", "Refresh" };
+            const float NAME_X = 16f, NAME_W = 296f, CELL_X0 = 322f, CELL_W = 156f, CELL_GAP = 8f;
+            float titleY = H - TOP + 2f;
+            for (int c = 0; c < cols.Length; c++)
+                Lbl(p, cols[c], 12f, HDR_GOLD, CELL_X0 + c * (CELL_W + CELL_GAP), titleY, CELL_W, 18f, UIFactory.AlignMidCenter);
+            string yes = I18n.Tr("Yes"), no = I18n.Tr("No"), cond = I18n.Tr("Conditional");
+            for (int i = 0; i < DMG_MATRIX.Length; i++)
+            {
+                string[] parts = DMG_MATRIX[i].Split('|');
+                float y = H - TOP - ROW * (i + 1);
+                if ((i & 1) == 1) Box(p, 10f, y, 1130f, ROW, ROW_ALT);
+                Lbl(p, parts[0], 12f, TXT_MAIN, NAME_X, y, NAME_W, ROW);
+                for (int c = 0; c < 5 && c < parts[1].Length; c++)
+                {
+                    char code = parts[1][c];
+                    Color col = code == 'Y' ? CELL_YES : code == 'C' ? CELL_COND : CELL_NO;
+                    string txt = code == 'Y' ? yes : code == 'C' ? cond : no;
+                    float x = CELL_X0 + c * (CELL_W + CELL_GAP);
+                    Box(p, x, y + 1f, CELL_W, ROW - 2f, col);
+                    Lbl(p, txt, 11f, Color.white, x, y, CELL_W, ROW, UIFactory.AlignMidCenter);
+                }
+            }
+            const float LY = 10f;
+            Box(p, 16f, LY + 2f, 14f, 14f, CELL_YES);
+            Lbl(p, I18n.Tr("triggers"), 11f, TXT_MAIN, 36f, LY, 130f, 18f);
+            Box(p, 176f, LY + 2f, 14f, 14f, CELL_NO);
+            Lbl(p, I18n.Tr("does not trigger"), 11f, TXT_MAIN, 196f, LY, 190f, 18f);
+            Box(p, 396f, LY + 2f, 14f, 14f, CELL_COND);
+            Lbl(p, I18n.Tr("Conditional - every other time; see RefreshValid below"), 11f, TXT_MAIN, 416f, LY, 720f, 18f);
+            return p;
+        }
+
+        /// <summary>One of Spirit's sequence tables: three rows (RefreshValid
+        /// before the action / the action / whether a Refresh was produced)
+        /// across five columns plus the trailing "...". Returns the next
+        /// table's top edge.</summary>
+        private static float SeqTable(GameObject p, float top, string caption, string valid, string[] action, string refresh)
+        {
+            const float ROW = 20f, LBL_W = 150f, CELL_W = 150f, GAP = 10f, X0 = 180f;
+            Lbl(p, caption, 12f, HDR_GOLD, 16f, top - 18f, 1100f, 18f);
+            string[] labels = { "RefreshValid", I18n.Tr("Action"), I18n.Tr("Refresh?") };
+            string tTrue = I18n.Tr("True"), tFalse = I18n.Tr("False"), tRef = I18n.Tr("Refresh"), tNone = I18n.Tr("No Refresh");
+            for (int r = 0; r < 3; r++)
+            {
+                float y = top - 18f - ROW * (r + 1);
+                Lbl(p, labels[r], 12f, TXT_MAIN, 16f, y, LBL_W, ROW);
+                for (int c = 0; c < 5; c++)
+                {
+                    float x = X0 + c * (CELL_W + GAP);
+                    Color col; string txt;
+                    if (r == 0) { bool t = valid[c] == 'T'; col = t ? CELL_YES : CELL_NO; txt = t ? tTrue : tFalse; }
+                    else if (r == 1) { col = CELL_NEUTRAL; txt = action[c]; }
+                    else { bool t = refresh[c] == 'Y'; col = t ? CELL_REFRESH : KEY_NONE; txt = t ? tRef : tNone; }
+                    Box(p, x, y + 1f, CELL_W, ROW - 2f, col);
+                    Lbl(p, txt, 11f, Color.white, x, y, CELL_W, ROW, UIFactory.AlignMidCenter);
+                }
+                Lbl(p, "...", 12f, TXT_DIM, X0 + 5 * (CELL_W + GAP), y, 40f, ROW, UIFactory.AlignMidCenter);
+            }
+            return top - 18f - ROW * 3f - 14f;
+        }
+
+        // Spirit's three Silence sequences (section 2.3 of the PDF).
+        private static GameObject BuildRefreshSequences(Transform parent)
+        {
+            const float H = 320f;
+            var p = Panel(parent, "VizRefreshSeq", H);
+            Header(p, H, I18n.Tr("REFRESHVALID IN PLAY: SILENCE SEQUENCES"));
+            float top = H - 36f;
+            top = SeqTable(p, top, I18n.Tr("Silence only: every other Silence produces a Refresh"),
+                "FTFTF", new[] { "Silence", "Silence", "Silence", "Silence", "Silence" }, "NYNYN");
+            top = SeqTable(p, top, I18n.Tr("A shot placed second: the shot Refreshes and resets the flag"),
+                "FTFTF", new[] { "Silence", "Shoot", "Silence", "Silence", "Silence" }, "NYNYN");
+            SeqTable(p, top, I18n.Tr("A shot placed third: an extra Refresh"),
+                "FTFFT", new[] { "Silence", "Silence", "Shoot", "Silence", "Silence" }, "NYYNY");
+            return p;
+        }
+
+        // Spirit's two 0.35-second-window sequences (QShoot = a quick follow-up shot).
+        private static GameObject BuildRefreshWindowSequences(Transform parent)
+        {
+            const float H = 230f;
+            var p = Panel(parent, "VizRefreshWindowSeq", H);
+            Header(p, H, I18n.Tr("QUICK SHOTS INSIDE THE 0.35 SECOND WINDOW"));
+            float top = H - 36f;
+            top = SeqTable(p, top, I18n.Tr("A quick follow-up shot (QShoot) counts as Conditional damage"),
+                "FFTFT", new[] { "Shoot", "QShoot", "Silence", "QShoot", "Silence" }, "YNYNY");
+            SeqTable(p, top, I18n.Tr("The same actions in a different order"),
+                "FFTFT", new[] { "Shoot", "Silence", "QShoot", "Silence", "QShoot" }, "YNYNY");
+            return p;
+        }
+
+        // Spirit's first flow chart (section 2.3): what one Conditional hit does.
+        private static GameObject BuildRefreshGate(Transform parent)
+        {
+            const float H = 190f;
+            var p = Panel(parent, "VizRefreshGate", H);
+            Header(p, H, I18n.Tr("ONE CONDITIONAL HIT"));
+            Box(p, 30f, 80f, 210f, 44f, KEY_NONE);
+            Lbl(p, I18n.Tr("Deal Conditional damage"), 12f, Color.white, 30f, 92f, 210f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(240f, 102f), new Vector2(296f, 102f), TXT_DIM);
+            Diamond(p, 300f, 62f, 220f, 80f, HDR_GOLD);
+            Lbl(p, I18n.Tr("Is RefreshValid true?"), 12f, Color.white, 300f, 92f, 220f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(520f, 102f), new Vector2(586f, 132f), CELL_YES);
+            Lbl(p, I18n.Tr("Yes"), 11f, CELL_YES, 530f, 124f, 50f, 16f);
+            Box(p, 590f, 112f, 220f, 40f, CELL_NO);
+            Lbl(p, I18n.Tr("Set RefreshValid to false"), 12f, Color.white, 590f, 122f, 220f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(810f, 132f), new Vector2(866f, 132f), TXT_DIM);
+            Box(p, 870f, 112f, 200f, 40f, FLOW_BLUE);
+            Lbl(p, I18n.Tr("Trigger Refresh"), 12f, Color.white, 870f, 122f, 200f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(520f, 102f), new Vector2(586f, 62f), CELL_NO);
+            Lbl(p, I18n.Tr("No"), 11f, CELL_NO, 530f, 66f, 50f, 16f);
+            Box(p, 590f, 42f, 220f, 40f, CELL_YES);
+            Lbl(p, I18n.Tr("Set RefreshValid to true"), 12f, Color.white, 590f, 52f, 220f, 20f, UIFactory.AlignMidCenter);
+            Lbl(p, I18n.Tr("Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row."), 12f, TXT_DIM, 30f, 10f, 1100f, 18f);
+            return p;
+        }
+
+        // Spirit's full flow chart (section 2.4): every damage outcome.
         private static GameObject BuildRefreshFlow(Transform parent)
         {
-            const float H = 250f;
+            const float H = 420f;
             var p = Panel(parent, "VizRefresh", H);
-            Header(p, H, I18n.Tr("REFRESHVALID STATE MACHINE"));
-            var trueCol = new Color(0.20f, 0.58f, 0.32f, 0.92f);
-            var falseCol = new Color(0.62f, 0.25f, 0.28f, 0.92f);
-            Box(p, 210f, 138f, 190f, 44f, trueCol);
-            Box(p, 760f, 138f, 190f, 44f, falseCol);
-            Lbl(p, I18n.Tr("RefreshValid = true"), 13f, Color.white, 210f, 150f, 190f, 20f, UIFactory.AlignMidCenter);
-            Lbl(p, I18n.Tr("RefreshValid = false"), 13f, Color.white, 760f, 150f, 190f, 20f, UIFactory.AlignMidCenter);
-            Arrow(p, new Vector2(404f, 170f), new Vector2(756f, 170f), HDR_GOLD);
-            Lbl(p, I18n.Tr("5-10 damage: Refresh triggers"), 12f, HDR_GOLD, 430f, 184f, 300f, 18f, UIFactory.AlignMidCenter);
-            Arrow(p, new Vector2(756f, 146f), new Vector2(404f, 146f), TXT_DIM);
-            Lbl(p, I18n.Tr("5-10 damage: no Refresh"), 12f, TXT_MAIN, 430f, 119f, 300f, 18f, UIFactory.AlignMidCenter);
-            Box(p, 40f, 57f, 300f, 42f, KEY_NONE);
-            Lbl(p, I18n.Tr("under 5 damage: nothing; state unchanged"),
-                11f, TXT_MAIN, 46f, 68f, 288f, 20f, UIFactory.AlignMidCenter);
-            Box(p, 415f, 57f, 330f, 42f, new Color(0.22f, 0.38f, 0.56f, 0.90f));
-            Lbl(p, I18n.Tr("over 10, outside 0.35s: Refresh; set false"),
-                11f, Color.white, 421f, 68f, 318f, 20f, UIFactory.AlignMidCenter);
-            Arrow(p, new Vector2(745f, 78f), new Vector2(855f, 134f), new Color(0.30f, 0.68f, 0.95f, 0.90f));
-            Box(p, 820f, 57f, 320f, 42f, KEY_NONE);
-            Lbl(p, I18n.Tr("over 10 inside 0.35s: treat as Conditional"),
-                11f, TXT_MAIN, 826f, 68f, 308f, 20f, UIFactory.AlignMidCenter);
+            Header(p, H, I18n.Tr("EVERY DAMAGE OUTCOME"));
+            // Row A: deal damage
+            Box(p, 480f, 345f, 200f, 36f, KEY_NONE);
+            Lbl(p, I18n.Tr("Deal damage"), 12f, Color.white, 480f, 353f, 200f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(580f, 345f), new Vector2(580f, 333f), TXT_DIM);
+            // Row B: how much?
+            Diamond(p, 460f, 250f, 240f, 80f, HDR_GOLD);
+            Lbl(p, I18n.Tr("How much damage?"), 12f, Color.white, 460f, 280f, 240f, 20f, UIFactory.AlignMidCenter);
+            // left branch: more than 10 -> window?
+            Line(p, new Vector2(460f, 290f), new Vector2(170f, 290f), TXT_DIM, 2f);
+            Arrow(p, new Vector2(170f, 290f), new Vector2(170f, 268f), TXT_DIM);
+            Lbl(p, I18n.Tr("More than 10"), 11f, HDR_GOLD, 200f, 294f, 200f, 16f);
+            Diamond(p, 60f, 195f, 220f, 70f, HDR_GOLD);
+            Lbl(p, I18n.Tr("Inside the 0.35 s window?"), 11f, Color.white, 60f, 220f, 220f, 20f, UIFactory.AlignMidCenter);
+            // right branch: less than 5 -> nothing
+            Line(p, new Vector2(700f, 290f), new Vector2(990f, 290f), TXT_DIM, 2f);
+            Arrow(p, new Vector2(990f, 290f), new Vector2(990f, 250f), TXT_DIM);
+            Lbl(p, I18n.Tr("Less than 5"), 11f, HDR_GOLD, 720f, 294f, 200f, 16f);
+            Box(p, 900f, 212f, 180f, 36f, KEY_NONE);
+            Lbl(p, I18n.Tr("Do nothing"), 12f, Color.white, 900f, 220f, 180f, 20f, UIFactory.AlignMidCenter);
+            // middle branch: between 5 and 10 -> RefreshValid?
+            Arrow(p, new Vector2(580f, 250f), new Vector2(580f, 213f), TXT_DIM);
+            Lbl(p, I18n.Tr("Between 5 and 10"), 11f, HDR_GOLD, 592f, 224f, 200f, 16f);
+            Diamond(p, 470f, 140f, 220f, 70f, HDR_GOLD);
+            Lbl(p, I18n.Tr("Is RefreshValid true?"), 11f, Color.white, 470f, 165f, 220f, 20f, UIFactory.AlignMidCenter);
+            // window: yes -> reset window -> back into the RefreshValid test
+            Arrow(p, new Vector2(280f, 230f), new Vector2(306f, 230f), CELL_YES);
+            Lbl(p, I18n.Tr("Yes"), 11f, CELL_YES, 284f, 236f, 40f, 16f);
+            Box(p, 310f, 212f, 140f, 36f, CELL_NEUTRAL);
+            Lbl(p, I18n.Tr("Reset the window"), 11f, Color.white, 310f, 220f, 140f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(450f, 230f), new Vector2(468f, 178f), TXT_DIM);
+            // window: no -> refresh -> begin window -> set false
+            Arrow(p, new Vector2(170f, 195f), new Vector2(170f, 126f), CELL_NO);
+            Lbl(p, I18n.Tr("No"), 11f, CELL_NO, 178f, 172f, 40f, 16f);
+            Box(p, 70f, 88f, 200f, 36f, FLOW_BLUE);
+            Lbl(p, I18n.Tr("Trigger Refresh"), 12f, Color.white, 70f, 96f, 200f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(170f, 88f), new Vector2(170f, 68f), TXT_DIM);
+            Box(p, 70f, 30f, 200f, 36f, CELL_NEUTRAL);
+            Lbl(p, I18n.Tr("Begin the window"), 12f, Color.white, 70f, 38f, 200f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(270f, 48f), new Vector2(476f, 48f), TXT_DIM);
+            // RefreshValid: yes -> refresh -> set false; no -> set true
+            Arrow(p, new Vector2(580f, 140f), new Vector2(580f, 126f), CELL_YES);
+            Lbl(p, I18n.Tr("Yes"), 11f, CELL_YES, 590f, 126f, 40f, 16f);
+            Box(p, 480f, 88f, 200f, 36f, FLOW_BLUE);
+            Lbl(p, I18n.Tr("Trigger Refresh"), 12f, Color.white, 480f, 96f, 200f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(580f, 88f), new Vector2(580f, 68f), TXT_DIM);
+            Box(p, 480f, 30f, 200f, 36f, CELL_NO);
+            Lbl(p, I18n.Tr("Set RefreshValid to false"), 12f, Color.white, 480f, 38f, 200f, 20f, UIFactory.AlignMidCenter);
+            Arrow(p, new Vector2(690f, 175f), new Vector2(736f, 160f), CELL_NO);
+            Lbl(p, I18n.Tr("No"), 11f, CELL_NO, 700f, 180f, 40f, 16f);
+            Box(p, 740f, 140f, 210f, 36f, CELL_YES);
+            Lbl(p, I18n.Tr("Set RefreshValid to true"), 12f, Color.white, 740f, 148f, 210f, 20f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("Diagram of Spirit's research, 'On Damage Types and Buff Activation'."),
-                13f, TXT_DIM, 40f, 10f, 1100f, 20f);
+                12f, TXT_DIM, 30f, 6f, 1100f, 18f);
             return p;
         }
 

@@ -2008,10 +2008,38 @@ namespace CompetitiveRounds
         // STARTUP BASELINE — a click directive equal to it is inert whatever nonce
         // it carries (a 6-hex nonce collides 1 in 16.7M; the baseline closes even that).
         private static string _testLeverBaseline;
+        // Sept 4: a Music click replayed in the SAME tick as the page open was
+        // refused every time ("no decode (entry: menu not open)" — the engine's
+        // admission wants the page open on the two preceding frames plus the
+        // click frame). The click is now armed here and replayed on a later
+        // tick, and once it has run the page is closed again when the seat is
+        // inside an online room: the click was the lever's whole purpose, and a
+        // page left open over a live spectate is what the stream showed for
+        // whole games.
+        private static string _pendingMusicClick;
+        private static float _pendingMusicClickAt;
+        private static int _pendingMusicClickFrame;
+
         private void TickTestOpenTab()
         {
             if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;
             if (!_testLeverNonceLogged) { _testLeverNonceLogged = true; Plugin.Log.LogInfo($"[UI] TestOpenTab click nonce for this process: {_testLeverNonce}"); }
+            if (_pendingMusicClick != null && Time.realtimeSinceStartup >= _pendingMusicClickAt && Time.frameCount >= _pendingMusicClickFrame)
+            {
+                string click = _pendingMusicClick;
+                _pendingMusicClick = null;
+                try { NativeUI.DevMusicClick(click); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestOpenTab deferred click failed: {ex.Message}"); }
+                try
+                {
+                    if (GameStateWatcher.IsInOnlineRoom && NativeUI.IsOpen)
+                    {
+                        NativeUI.Close();
+                        Plugin.Log.LogInfo("[UI] TestOpenTab: page closed after the click (seat is in an online room)");
+                    }
+                }
+                catch { }
+            }
             // Re-read the cfg file every 2s so the lever can be driven without
             // a relaunch (Config.Bind values never track disk edits, #190).
             if (Time.realtimeSinceStartup - _testOpenTabCfgReloadAt > 2f)
@@ -2091,7 +2119,14 @@ namespace CompetitiveRounds
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
-            if (!string.IsNullOrEmpty(musicClick)) NativeUI.DevMusicClick(musicClick);
+            if (!string.IsNullOrEmpty(musicClick))
+            {
+                // Armed, not replayed: see the field comment above.
+                _pendingMusicClick = musicClick;
+                _pendingMusicClickAt = Time.realtimeSinceStartup + 0.75f;
+                _pendingMusicClickFrame = Time.frameCount + 6;
+                Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' armed for a later tick");
+            }
         }
 
         // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──
@@ -2545,6 +2580,9 @@ namespace CompetitiveRounds
             // Map-skin test lever tour / auto-Sandbox (broadcast identity only).
             try { ArtHandlerNextArtPatch.TickTestLever(); } catch { }
             try { TickTestOpenTab(); } catch { }
+            // Overlay left open with nobody at the seat (every identity; the
+            // player branch only acts inside an online room).
+            try { OverlayIdleClose.Tick(); } catch { }
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
