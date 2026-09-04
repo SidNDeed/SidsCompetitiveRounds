@@ -27,7 +27,7 @@
 
 - Settings → "Lag notices" turns on short corner lines under the FPS label while
   a state holds: your game dropping frames (worst N ms), your ping to the relay
-  high (N ms), the opponent's updates arriving late (in transit), or the
+  high (N ms), the opponent's updates arriving late, or the
   opponent's game reporting a high ping. Several can show at once. Each state
   needs a few one-second windows to enter, three clean windows to clear, and
   waits thirty seconds before re-announcing. 1v1 fighter seats only; nothing is

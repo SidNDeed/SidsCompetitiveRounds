@@ -509,8 +509,12 @@ class H2HSummaryResponse(BaseModel):
     completed tie is counted in series_tied and series_total, for neither
     side). last_played_at is the latest counted game that ended strictly
     before the caller's current UTC day; played_today says whether any
-    counted game ended on or after that boundary. Both null/zero when the
-    pair has no history or the opponent is unknown (name null too).
+    counted game ended on or after that boundary; last_played_days_ago is
+    the whole-UTC-day distance from last_played_at's date to that boundary's
+    date, computed on the server's clock (null with last_played_at) so the
+    client renders "yesterday / N days ago" without a clock of its own. All
+    null/zero when the pair has no history or the opponent is unknown (name
+    null too).
     """
     opponent_display_name: str | None = None
     games_total: int = 0
@@ -521,6 +525,7 @@ class H2HSummaryResponse(BaseModel):
     series_lost: int = 0
     series_tied: int = 0
     last_played_at: datetime | None = None
+    last_played_days_ago: int | None = None
     played_today: bool = False
 
 

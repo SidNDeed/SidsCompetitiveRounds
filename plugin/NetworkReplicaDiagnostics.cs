@@ -28,9 +28,15 @@ namespace CompetitiveRounds
         private const int JitterLogThresholdMs = 150;
 
         /// <summary>The sampler's delivery-excess formula (GapWindow.Record):
-        /// how much longer a batch took to arrive than the sender's own
-        /// timestamps advanced, floored at 0. Extracted so LagNotices' self-test
-        /// classifies canned samples with the production arithmetic (r3 L6).</summary>
+        /// the interval between two accepted batch arrivals, measured on this
+        /// seat's Stopwatch, minus the interval the peer's embedded
+        /// timestamps advanced between the same two batches, floored at 0.
+        /// A RECEIVER observation with one unverifiable input: the peer's
+        /// timestamps are whatever the peer wrote into its serialization, so
+        /// the excess says how much of the arrival interval the peer's own
+        /// stamps do not account for — not where that time was spent (r6 M2).
+        /// Extracted so LagNotices' self-test classifies canned samples with
+        /// the production arithmetic (r3 L6).</summary>
         internal static int DeliveryExcessMs(int arrivalGapMs, int senderGapMs)
         {
             int excess = arrivalGapMs - senderGapMs;
@@ -312,18 +318,25 @@ namespace CompetitiveRounds
                     // Quarantined samples returned above; the first sample after
                     // the revive handler's ClearBaseline is a baseline
                     // (Valid=false). The input is the DELIVERY EXCESS the sampler
-                    // computes (arrival gap minus the sender-stamped gap,
-                    // DeliveryExcessMs), never the raw arrival gap: a sender that
+                    // computes (DeliveryExcessMs: this seat's arrival interval
+                    // minus the interval the peer's embedded timestamps
+                    // advanced), never the raw arrival gap: a sender that
                     // merely had nothing new to send (UnreliableOnChange, #459 —
                     // a stationary opponent, a Phoenix charge) stamps its next
                     // batch with a networkTime that advanced by the whole
                     // silence, so the sender gap grows with the arrival gap and
-                    // the excess stays at ordinary jitter. Only transit time
-                    // beyond the sender's own cadence counts, and the notice text
-                    // names that measurement ("in transit"), not a party.
+                    // the excess stays at ordinary jitter. What is measured is a
+                    // receiver observation with one input this seat cannot
+                    // verify — the peer's own timestamps — so the excess means
+                    // "arrival interval the peer's stamps do not account for"
+                    // and nothing more; the notice text says only that the
+                    // updates arrived late (r6 M2), naming neither a leg nor a
+                    // party. r6 M3: the sender's actor rides along so the window
+                    // can tell the eligible opponent's samples from any other
+                    // fighter's.
                     if (sample.Valid && LagNotices.IsLateDelivery(sample.DeliveryExcessMs))
                     {
-                        try { NetworkSeatTelemetry.NoteLateDelivery(); } catch { }
+                        try { NetworkSeatTelemetry.NoteLateDelivery(_ctxActor); } catch { }
                     }
                 }
                 // Payload equality (r1 MEDIUM 7 → r4 LOW 11 → r6 LOW 9): ALL EIGHT
@@ -1185,6 +1198,12 @@ namespace CompetitiveRounds
                 if (arrivalGap >= 1500) Gap1500++;
                 if (arrivalGap > MaxArrivalGapMs) MaxArrivalGapMs = arrivalGap;
 
+                // r6 M2: arrivalGap is this seat's clock; senderGap is the
+                // difference of two peer-supplied timestamps (the networkTime
+                // the peer embedded in each serialization) that this seat
+                // cannot verify. The excess is therefore a receiver observation
+                // of "arrival interval beyond what the peer's stamps account
+                // for" — never a located cause.
                 int deliveryExcess = DeliveryExcessMs(arrivalGap, senderGap);
                 if (deliveryExcess >= JitterLogThresholdMs) Jitter150++;
                 if (deliveryExcess > MaxDeliveryExcessMs)

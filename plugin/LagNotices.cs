@@ -99,9 +99,14 @@ namespace CompetitiveRounds
             return !force && gameOpen && !spectator;
         }
 
-        /// <summary>r3 M6: the per-sample OPP_STREAM input. Only the delivery
-        /// excess counts — time the batch spent in transit beyond the sender's
-        /// own cadence — never the raw arrival gap.</summary>
+        /// <summary>r3 M6 / r6 M2: the per-sample OPP_STREAM input. Only the
+        /// delivery excess counts — never the raw arrival gap. The excess is a
+        /// RECEIVER observation: the interval between two batch arrivals,
+        /// measured on this seat's clock, minus the interval the peer's
+        /// embedded timestamps advanced between the same two batches. The
+        /// peer's timestamps are an input this seat cannot verify, so the
+        /// excess means "arrival interval beyond what the peer's stamps
+        /// account for" and says nothing about WHERE the time went.</summary>
         internal static bool IsLateDelivery(int deliveryExcessMs)
         {
             return deliveryExcessMs >= LATE_EXCESS_MS;
@@ -252,6 +257,51 @@ namespace CompetitiveRounds
             return n > 0 ? WindowValue(s, recent[0]) : 0;
         }
 
+        /// <summary>r6 M3: a window carries a key (OppActor != 0) only when
+        /// the telemetry captured the whole window under one eligible
+        /// opponent; the key is the actor number plus the advertised id
+        /// ("" when the id property was absent — an id that arrives later
+        /// makes a different key, the conservative direction).</summary>
+        internal static bool KeyEquals(NetworkSeatTelemetry.WindowFacts w, int actor, string id)
+        {
+            return w.OppActor != 0 && w.OppActor == actor
+                && string.Equals(w.OppId ?? "", id ?? "", StringComparison.Ordinal);
+        }
+
+        /// <summary>r6 M3 history admission — the one decision both the
+        /// production tick and the self-test apply before any Step. Of the
+        /// closed windows (newest first, <paramref name="count"/> valid),
+        /// Step may read only the newest-first CONTIGUOUS run keyed exactly
+        /// like the newest window; a window without a key (not an eligible
+        /// 1v1 against one opponent at both its open and its close, or a late
+        /// batch from another actor inside it) or keyed to another opponent
+        /// ends the run and is never consumed. Returns 0 when the newest
+        /// window has no key. <paramref name="resetWhy"/> is non-null when the caller must
+        /// reset every slot before stepping: the slots were built under a key
+        /// (<paramref name="builtActor"/> != 0) that the newest window no
+        /// longer carries ("key-lost") or differs from ("opponent"). Pure —
+        /// mutates nothing; the caller resets, then adopts the newest
+        /// window's key. Through the production sampler two adjacent keyed
+        /// windows always share a key (a change spans a window that opens
+        /// under one key and closes under another, which is unkeyed), so
+        /// "opponent" states the invariant for any producer and is reached
+        /// by the self-test, which feeds windows directly.</summary>
+        internal static int AdmitWindows(NetworkSeatTelemetry.WindowFacts[] recent, int count, int builtActor, string builtId, out string resetWhy)
+        {
+            resetWhy = null;
+            int n = Math.Min(count, LOOKBACK);
+            if (n <= 0) return 0;
+            if (recent[0].OppActor == 0)
+            {
+                if (builtActor != 0) resetWhy = "key-lost";
+                return 0;
+            }
+            if (builtActor != 0 && !KeyEquals(recent[0], builtActor, builtId)) resetWhy = "opponent";
+            int run = 1;
+            while (run < n && KeyEquals(recent[run], recent[0].OppActor, recent[0].OppId)) run++;
+            return run;
+        }
+
         /// <summary>The line for a shown state and its latched value.</summary>
         internal static string LineFor(State s, int value)
         {
@@ -262,13 +312,18 @@ namespace CompetitiveRounds
                 case State.OWN_PING:
                     return I18n.TrF("Your ping to the relay is high ({0} ms)", value);
                 case State.OPP_STREAM:
-                    // Names what was measured (time in transit beyond the
-                    // sender's own cadence) and no party: a one-sided receiver
+                    // Cause-neutral by design (r6 M2): the enter condition is
+                    // a receiver observation — batch arrival intervals on this
+                    // seat's clock, less the interval the peer's own embedded
+                    // timestamps advanced — and the peer's timestamps are an
+                    // input this seat cannot verify. So the line states only
+                    // what this seat observed (the updates arrived late) and
+                    // names neither a leg nor a party: a one-sided receiver
                     // cannot tell the opponent's uplink from the relay from
                     // its own downlink (#446), and this seat's own stall
                     // windows are excluded from the enter condition rather
                     // than attributed.
-                    return I18n.Tr("Opponent's updates are arriving late (in transit)");
+                    return I18n.Tr("Opponent's updates are arriving late");
                 case State.OPP_PING_REPORTED:
                     // Peer-reported value: "reports" is the label, never a bare attribution.
                     return I18n.TrF("Opponent reports {0} ms ping", value);
@@ -281,6 +336,16 @@ namespace CompetitiveRounds
         private static readonly Slot[] _slots = NewSlots();
         private static readonly NetworkSeatTelemetry.WindowFacts[] _recent = new NetworkSeatTelemetry.WindowFacts[LOOKBACK];
         private static int _recentCount;
+        // r6 M3: the eligible-opponent key the slots' state was built under
+        // (0/null = none). Every closed window carries the key it was captured
+        // under (NetworkSeatTelemetry: actor number + advertised id of the
+        // only other fighter, present only when the seat was an eligible
+        // plain 1v1 against that opponent at the window's open and close and
+        // every late sample in it came from that actor); AdmitWindows lets
+        // Step read only the newest windows keyed exactly like this and asks
+        // for a reset when the key is lost or differs.
+        private static int _keyActor;
+        private static string _keyId;
 
         private static readonly string[] NoLines = new string[0];
         private static string[] _lines = NoLines;
@@ -296,8 +361,10 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Plain-1v1 fighter seat, not a spectator, not the broadcast
-        /// identity (hidden there regardless of the setting, §9 Q3).</summary>
-        private static bool SeatEligible()
+        /// identity (hidden there regardless of the setting, §9 Q3). Also the
+        /// predicate NetworkSeatTelemetry.SampleEligibleKey keys windows by
+        /// (r6 M3), so a keyed window and an eligible tick cannot disagree.</summary>
+        internal static bool SeatEligible()
         {
             try
             {
@@ -330,7 +397,11 @@ namespace CompetitiveRounds
         /// <summary>The only tick: called by NetworkSeatTelemetry.CloseWindow
         /// after the window is in the ring and only when WindowFeedsEvaluator
         /// allowed it, so every value read below belongs to a CLOSED,
-        /// unforced window.</summary>
+        /// unforced window. r6 M3: Step reads only the newest contiguous run
+        /// of windows captured under the current eligible opponent
+        /// (AdmitWindows) — the ring keeps every window for the bundle, so
+        /// eligibility gained mid-game must not import windows captured
+        /// before it.</summary>
         internal static void OnWindowClosed()
         {
             try
@@ -338,7 +409,16 @@ namespace CompetitiveRounds
                 if (!SettingOn()) { ResetAll(logExits: false, why: null); return; }
                 if (!SeatEligible()) { ResetAll(logExits: true, why: "seat"); return; }
                 _recentCount = NetworkSeatTelemetry.RecentWindows(_recent);
+                string resetWhy;
+                int admitted = AdmitWindows(_recent, _recentCount, _keyActor, _keyId, out resetWhy);
+                // A reset's exit lines print the whole fill (the opp= series
+                // shows the key change that decided it); ResetAll clears the
+                // built key, so the newest window's key is adopted after it.
+                if (resetWhy != null) ResetAll(logExits: true, why: resetWhy);
+                _recentCount = admitted;
                 if (_recentCount <= 0) return;
+                _keyActor = _recent[0].OppActor;
+                _keyId = _recent[0].OppId;
                 double nowS = NowS();
                 bool changed = false;
                 for (int s = 0; s < STATE_COUNT; s++)
@@ -388,6 +468,8 @@ namespace CompetitiveRounds
             }
             _lines = NoLines;
             _recentCount = 0;
+            _keyActor = 0;
+            _keyId = null;
         }
 
         private static double NowS()
@@ -416,6 +498,7 @@ namespace CompetitiveRounds
                 AppendSeries(sb, " ownPing=", 1);
                 AppendSeries(sb, " late300=", 2);
                 AppendSeries(sb, " peerRtt=", 3);
+                AppendSeries(sb, " opp=", 4);   // r6 M3: the key (actor number) each window was captured under; 0 = unkeyed
                 Plugin.Log?.LogInfo(sb.ToString());
             }
             catch { }
@@ -434,7 +517,9 @@ namespace CompetitiveRounds
                     case 0: v = _recent[i].WorstMs; break;
                     case 1: v = _recent[i].OwnPing; break;
                     case 2: v = _recent[i].ObsLate300; break;
-                    default: v = _recent[i].PeerRtt; break;
+                    case 3: v = _recent[i].PeerRtt; break;
+                    case 4: v = _recent[i].OppActor; break;
+                    default: v = 0; break;
                 }
                 sb.Append(v.ToString(CultureInfo.InvariantCulture));
             }
@@ -488,14 +573,21 @@ namespace CompetitiveRounds
         // after every step, authored by hand. One line per case:
         //   [LAG-NOTICE] selftest case=<name> expected=<states> got=<states> <PASS|FAIL>
         // <states> = one entry per window, ',' separated: '-' none, 'x' the
-        // window was dropped by the forced-close gate, else the shown states
-        // in fixed order joined by '+', each NAME@value (no @ for OPP_STREAM).
+        // window was dropped by the forced-close gate, 'k' the window carried
+        // no opponent key so nothing was stepped (r6 M3), else the shown
+        // states in fixed order joined by '+', each NAME@value (no @ for
+        // OPP_STREAM).
         // Summary:
         //   [LAG-NOTICE] selftest summary run=<n> expected=<CASE_COUNT> pass=<p> fail=<f> <PASS|FAIL>
         // PASS requires run == CASE_COUNT (a literal — a deleted or throwing
         // case cannot pass silently) and fail == 0.
+        // r6 M3: every canned window carries the opponent key the telemetry
+        // would have stamped (default actor 2 / id "A"; actor 0 = captured
+        // while the seat was not an eligible 1v1), and each step applies the
+        // production admission (AdmitWindows) before Step, resetting the
+        // slots exactly where OnWindowClosed does.
 
-        private const int CASE_COUNT = 20;
+        private const int CASE_COUNT = 25;
 
         private struct Canned
         {
@@ -509,25 +601,30 @@ namespace CompetitiveRounds
             public Canned[] Seq;
             public string Expected;
             public bool IgnoreForcedGate;   // negative control only: proves the forced case discriminates (#391)
+            public bool IgnoreKeyGate;      // negative control only: proves the r6 M3 admission discriminates (#391)
         }
 
-        private static Canned W(int worst, int ping = 40, int peer = 40, int late = 0, bool forced = false)
+        private const int KEY_A = 2;   // the default canned opponent: actor 2, id "A"
+        private const int KEY_B = 3;
+
+        private static Canned W(int worst, int ping = 40, int peer = 40, int late = 0, bool forced = false, int actor = KEY_A, string id = "A")
         {
             return new Canned
             {
-                W = new NetworkSeatTelemetry.WindowFacts { WorstMs = worst, OwnPing = ping, PeerRtt = peer, ObsLate300 = late },
+                W = new NetworkSeatTelemetry.WindowFacts { WorstMs = worst, OwnPing = ping, PeerRtt = peer, ObsLate300 = late, OppActor = actor, OppId = id },
                 Forced = forced,
             };
         }
 
         /// <summary>An opponent-stream window built the way the sampler
         /// builds it: one accepted batch with the given arrival gap and
-        /// sender-stamped gap, classified by the production excess formula
-        /// and threshold.</summary>
-        private static Canned Opp(int worst, int arrivalGapMs, int senderGapMs)
+        /// peer-stamped gap, classified by the production excess formula
+        /// and threshold, captured under the given key (actor 0 = the seat
+        /// was not an eligible 1v1 for that window).</summary>
+        private static Canned Opp(int worst, int arrivalGapMs, int senderGapMs, int actor = KEY_A, string id = "A")
         {
             int excess = NetworkReplicaDiagnostics.DeliveryExcessMs(arrivalGapMs, senderGapMs);
-            return W(worst, late: IsLateDelivery(excess) ? 1 : 0);
+            return W(worst, late: IsLateDelivery(excess) ? 1 : 0, actor: actor, id: id);
         }
 
         private static Canned[] Seq(params Canned[] w) { return w; }
@@ -630,6 +727,50 @@ namespace CompetitiveRounds
                     Seq = Seq(W(40, ping: 150), W(40, ping: 150), W(40, ping: 150), W(40, ping: 200), W(40, ping: 160)),
                     Expected = Exp("-", "-", "OWN_PING@150", "OWN_PING@200", "OWN_PING@200"),
                 },
+                // r6 M3 lifecycle: two late windows captured while the seat was
+                // NOT an eligible 1v1 (a third fighter's stream in a casual
+                // room — no key), then the room becomes a 1v1 against A. The
+                // unkeyed windows are never consumed: A needs two of its own.
+                new Case
+                {
+                    Name = "opp_stream_unkeyed_windows_never_consumed",
+                    Seq = Seq(Opp(40, 2700, 300, actor: 0, id: null), Opp(40, 2700, 300, actor: 0, id: null), Opp(40, 2700, 300), Opp(40, 2700, 300)),
+                    Expected = Exp("k", "k", "-", "OPP_STREAM"),
+                },
+                // Negative control: the same sequence with the admission
+                // bypassed reproduces the defect — OPP_STREAM at step 2 from
+                // the unkeyed windows alone.
+                new Case
+                {
+                    Name = "opp_stream_unkeyed_gate_control",
+                    Seq = Seq(Opp(40, 2700, 300, actor: 0, id: null), Opp(40, 2700, 300, actor: 0, id: null), Opp(40, 2700, 300), Opp(40, 2700, 300)),
+                    Expected = Exp("-", "OPP_STREAM", "OPP_STREAM", "OPP_STREAM"),
+                    IgnoreKeyGate = true,
+                },
+                // A window under another opponent's key resets the machine;
+                // B needs two late windows of its own (A's are not contiguous).
+                new Case
+                {
+                    Name = "opp_stream_key_change_resets",
+                    Seq = Seq(Opp(40, 2700, 300), Opp(40, 2700, 300), Opp(40, 2700, 300, actor: KEY_B, id: "B"), Opp(40, 2700, 300, actor: KEY_B, id: "B")),
+                    Expected = Exp("-", "OPP_STREAM", "-", "OPP_STREAM"),
+                },
+                // Same actor number, different advertised id = a different key.
+                new Case
+                {
+                    Name = "opp_stream_same_actor_new_id_resets",
+                    Seq = Seq(Opp(40, 2700, 300), Opp(40, 2700, 300), Opp(40, 2700, 300, id: "C"), Opp(40, 2700, 300, id: "C")),
+                    Expected = Exp("-", "OPP_STREAM", "-", "OPP_STREAM"),
+                },
+                // Eligibility lost for one window (no key) resets the machine
+                // AND breaks contiguity: A's earlier windows sit behind the gap
+                // and are not consumed once A is eligible again.
+                new Case
+                {
+                    Name = "opp_stream_key_lost_breaks_contiguity",
+                    Seq = Seq(Opp(40, 2700, 300), Opp(40, 2700, 300), Opp(40, 2700, 300, actor: 0, id: null), Opp(40, 2700, 300), Opp(40, 2700, 300)),
+                    Expected = Exp("-", "OPP_STREAM", "k", "-", "OPP_STREAM"),
+                },
             };
         }
 
@@ -639,6 +780,7 @@ namespace CompetitiveRounds
             var ring = new List<NetworkSeatTelemetry.WindowFacts>(LOOKBACK + 1);
             var recent = new NetworkSeatTelemetry.WindowFacts[LOOKBACK];
             var got = new List<string>(c.Seq.Length);
+            int keyActor = 0; string keyId = null;
             for (int i = 0; i < c.Seq.Length; i++)
             {
                 double nowS = i + 1;
@@ -654,8 +796,20 @@ namespace CompetitiveRounds
                 w.Seq = i + 1;
                 ring.Insert(0, w);
                 if (ring.Count > LOOKBACK) ring.RemoveAt(LOOKBACK);
-                int n = ring.Count;
-                for (int k = 0; k < n; k++) recent[k] = ring[k];
+                int filled = ring.Count;
+                for (int k = 0; k < filled; k++) recent[k] = ring[k];
+                // The production admission (r6 M3), mirrored from
+                // OnWindowClosed: reset on a lost/changed key, step only the
+                // admitted contiguous run, adopt the newest window's key.
+                int n = filled;
+                if (!c.IgnoreKeyGate)
+                {
+                    string resetWhy;
+                    n = AdmitWindows(recent, filled, keyActor, keyId, out resetWhy);
+                    if (resetWhy != null) { slots = NewSlots(); keyActor = 0; keyId = null; }
+                    if (n <= 0) { got.Add("k"); continue; }
+                    keyActor = recent[0].OppActor; keyId = recent[0].OppId;
+                }
                 for (int s = 0; s < STATE_COUNT; s++) Step((State)s, slots[s], recent, n, nowS);
                 got.Add(Render(slots));
             }

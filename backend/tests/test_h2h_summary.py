@@ -17,12 +17,23 @@ refuses a facts statement that carries the stats helper's ">= 2 wins" series
 pre-filter (design r3 §1.1 MEDIUM): every completed valid pair series is
 classified here, so a completed 2-2 row is one tie and one series.
 Source-shape tests pin the gate order and the rate-limit prefix.
+
+The clock is FROZEN, not anchored: an autouse fixture points main._utc_now —
+the one seam the handler's UTC-day boundary and the strict session gate read
+— at a fixed instant, so every fixture below holds on any calendar date
+(review r6 LOW: a real-clock production path under a fixed-date fixture
+starts failing the day the fixture's session expires). A parametrised test
+moves that instant to 2020 and 2099 to prove the seam is the one production
+reads. The client's retry delays are pinned against the server's debounce
+window by reading plugin/H2HRules.cs (both sides of one contract).
 """
 
 import asyncio
 import inspect
+import re
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -91,6 +102,10 @@ class _Rows:
         return list(self._rows)
 
 
+def _aware(dt):
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _match_eligible(m, vid, pid):
     return ({m["player1_id"], m["player2_id"]} == {vid, pid}
             and m.get("invalidated_at") is None
@@ -122,6 +137,7 @@ class FakeSession:
         self.matches = list(matches)
         self.series = list(series)
         self.statements = []
+        self.facts_params = None
 
     async def execute(self, statement, params=None):
         sql = str(statement)
@@ -138,9 +154,12 @@ class FakeSession:
             assert SERIES_PREFILTER not in sql, "facts query carries the decided-only series pre-filter"
             vid, pid, day_start = params["vid"], params["pid"], params["day_start"]
             assert isinstance(day_start, datetime) and day_start.tzinfo is not None
+            self.facts_params = dict(params)
             eligible = [m for m in self.matches if _match_eligible(m, vid, pid)]
-            before = [m["ended_at"] for m in eligible if m["ended_at"] < day_start]
-            today = any(m["ended_at"] >= day_start for m in eligible)
+            # a naive ended_at compares as UTC (the column's zone) and is
+            # returned as stored, the way a naive row would reach the handler
+            before = [m["ended_at"] for m in eligible if _aware(m["ended_at"]) < day_start]
+            today = any(_aware(m["ended_at"]) >= day_start for m in eligible)
             oriented = [_series_oriented(s, vid) for s in self.series if _series_eligible(s, vid, pid)]
             return _Rows([{"games_won": sum(1 for m in eligible if m.get("winner_id") == vid),
                            "games_lost": sum(1 for m in eligible if m.get("winner_id") == pid),
@@ -156,12 +175,14 @@ class FakeSession:
         raise AssertionError(f"unexpected statement: {sql[:80]}")
 
 
+# A fixed instant, honoured because _freeze_clock (autouse, below) points
+# main._utc_now at it — see the module docstring.
 NOW = datetime(2026, 9, 4, 15, 30, tzinfo=timezone.utc)
 DAY_START = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _good_session(sid=ME_SID):
-    return {"steam_id": sid, "verified": True, "expires_at": NOW + timedelta(hours=1)}
+def _good_session(sid=ME_SID, now=NOW):
+    return {"steam_id": sid, "verified": True, "expires_at": now + timedelta(hours=1)}
 
 
 def _players(opp_name="Opp Name"):
@@ -198,6 +219,13 @@ def _raises(session, me=ME_SID, opp=OPP_SID, token="tok"):
     with pytest.raises(HTTPException) as info:
         _call(session, me, opp, token)
     return info.value
+
+
+@pytest.fixture(autouse=True)
+def _freeze_clock(monkeypatch):
+    """Production's wall-clock seam, frozen at NOW for every test; a test
+    that needs another instant re-points it."""
+    monkeypatch.setattr(main, "_utc_now", lambda: NOW)
 
 
 @pytest.fixture(autouse=True)
@@ -247,7 +275,7 @@ def test_response_schema_is_exactly_the_aggregates_and_carries_nothing_room_deri
         "opponent_display_name",
         "games_total", "games_won", "games_lost",
         "series_total", "series_won", "series_lost", "series_tied",
-        "last_played_at", "played_today",
+        "last_played_at", "played_today", "last_played_days_ago",
     }
     for name in fields:
         for banned in ("room", "_id", "region", "token", "code", "match_"):
@@ -255,6 +283,7 @@ def test_response_schema_is_exactly_the_aggregates_and_carries_nothing_room_deri
     empty = schemas.H2HSummaryResponse()
     assert empty.opponent_display_name is None
     assert empty.last_played_at is None
+    assert empty.last_played_days_ago is None
     assert empty.played_today is False
     assert (empty.games_total, empty.games_won, empty.games_lost) == (0, 0, 0)
     assert (empty.series_total, empty.series_won, empty.series_lost, empty.series_tied) == (0, 0, 0, 0)
@@ -365,6 +394,7 @@ def test_last_played_excludes_today_while_played_today_sees_it():
     ])
     r = _call(session)
     assert r.last_played_at == yesterday_late
+    assert r.last_played_days_ago == 1
     assert r.played_today is True
     assert (r.games_won, r.games_lost) == (2, 1)
 
@@ -373,12 +403,14 @@ def test_last_played_excludes_today_while_played_today_sees_it():
                           matches=[_match(ME, three_days)])
     r = _call_fresh(session)
     assert r.last_played_at == three_days and r.played_today is False
+    assert r.last_played_days_ago == 3
 
     # only history today: no "last played", but played_today
     session = FakeSession(session_row=_good_session(), players=_players(),
                           matches=[_match(ME, today_early)])
     r = _call_fresh(session)
     assert r.last_played_at is None and r.played_today is True and r.games_total == 1
+    assert r.last_played_days_ago is None
 
     # the day boundary is the caller's CURRENT UTC midnight, sent as a typed bind
     cte = next(s for s in session.statements if "WITH pair_matches" in s)
@@ -400,6 +432,7 @@ def test_no_history_answers_zeros_with_the_opponent_name():
     assert r.opponent_display_name == "Fresh"
     assert r.games_total == 0 and r.series_total == 0
     assert r.last_played_at is None and r.played_today is False
+    assert r.last_played_days_ago is None
 
 
 def test_an_id_shaped_name_is_cleaned_to_null_like_the_stats_endpoint():
@@ -525,3 +558,118 @@ def test_fake_session_refuses_a_facts_statement_that_lost_a_predicate():
     assert with_prefilter != real
     with pytest.raises(AssertionError, match="pre-filter"):
         asyncio.run(session.execute(text(with_prefilter), params))
+
+
+# ── review r6: server-computed day distance, frozen clock, retry window ───
+
+def test_last_played_days_ago_is_the_utc_day_distance_on_the_server_clock(monkeypatch):
+    """r6 LOW: the relative-day copy's integer is computed here, on the clock
+    that set day_start — the client never subtracts last_played_at from its
+    own clock. Whole UTC days between the game's UTC date and the caller's
+    current UTC date; at least 1 because the facts statement bounds
+    last_played_at strictly below day_start."""
+    def days_for(ended_at, now=NOW):
+        monkeypatch.setattr(main, "_utc_now", lambda: now)
+        session = FakeSession(session_row=_good_session(now=now), players=_players(),
+                              matches=[_match(ME, ended_at)])
+        r = _call_fresh(session)
+        assert r.last_played_at == ended_at
+        return r.last_played_days_ago
+
+    assert days_for(NOW - timedelta(days=3)) == 3
+    assert days_for(DAY_START - timedelta(microseconds=1)) == 1       # yesterday's last instant
+    assert days_for(DAY_START - timedelta(days=1)) == 1               # yesterday's first instant
+    assert days_for(DAY_START - timedelta(days=1, microseconds=1)) == 2
+    assert days_for(NOW - timedelta(days=400)) == 400
+    # a naive row (no tzinfo) is read as UTC, the column's zone
+    assert days_for((NOW - timedelta(days=13)).replace(tzinfo=None)) == 13
+    # just past UTC midnight, a 23:59 game is one day ago on the server's
+    # day — a client clock an hour behind UTC would have called it "today";
+    # it never gets to decide
+    early = datetime(2026, 9, 5, 0, 30, tzinfo=timezone.utc)
+    assert days_for(datetime(2026, 9, 4, 23, 59, tzinfo=timezone.utc), now=early) == 1
+    # no counted game before today: no timestamp and no distance
+    monkeypatch.setattr(main, "_utc_now", lambda: NOW)
+    session = FakeSession(session_row=_good_session(), players=_players(),
+                          matches=[_match(ME, DAY_START + timedelta(minutes=1))])
+    r = _call_fresh(session)
+    assert r.last_played_at is None and r.last_played_days_ago is None and r.played_today is True
+
+
+@pytest.mark.parametrize("instant", [
+    datetime(2020, 1, 1, 0, 30, tzinfo=timezone.utc),      # past: a raw-clock gate would 401 the +1 h session
+    datetime(2099, 12, 31, 23, 59, tzinfo=timezone.utc),   # future: a raw-clock day_start would find no game before it
+])
+def test_the_suite_holds_on_any_date_because_production_reads_the_frozen_seam(monkeypatch, instant):
+    """r6 LOW (test lifetime): the fixtures are anchored to an instant that
+    production is made to share through main._utc_now. Moving that instant to
+    2020 and to 2099 keeps every expectation true — and each choice is a
+    negative control for one reader of the raw clock: the strict session gate
+    (2020) and the handler's day boundary (2099)."""
+    monkeypatch.setattr(main, "_utc_now", lambda: instant)
+    day_start = instant.replace(hour=0, minute=0, second=0, microsecond=0)
+    session = FakeSession(session_row=_good_session(now=instant), players=_players(), matches=[
+        _match(ME, day_start - timedelta(minutes=1)),
+        _match(OPP, day_start + timedelta(minutes=1)),
+    ])
+    r = _call_fresh(session)
+    assert session.facts_params["day_start"] == day_start
+    assert r.last_played_at == day_start - timedelta(minutes=1)
+    assert r.last_played_days_ago == 1 and r.played_today is True
+    assert (r.games_won, r.games_lost) == (1, 1)
+    # the seam is the only wall clock either reader consults
+    for fn in (main.h2h_summary, main._strict_steam_session_ok):
+        src = inspect.getsource(fn)
+        assert "_utc_now()" in src, fn.__name__
+        assert "datetime.now(" not in src and "utcnow(" not in src, fn.__name__
+    # ...while the debounce window stays on the monotonic clock, untouched by the freeze
+    assert "time.monotonic()" in inspect.getsource(main.h2h_summary)
+
+
+H2H_RULES_CS = Path(__file__).resolve().parents[2] / "plugin" / "H2HRules.cs"
+
+
+def _cs_float_const(name):
+    src = H2H_RULES_CS.read_text(encoding="utf-8")
+    m = re.search(rf"internal const float {name} = (\d+(?:\.\d+)?)f;", src)
+    assert m, f"{name} not found in {H2H_RULES_CS}"
+    return float(m.group(1))
+
+
+def test_client_retry_delays_sit_beyond_the_server_debounce_window():
+    """r6 LOW: an accepted request arms the window; if its response is lost
+    the client's re-send must land OUTSIDE the window or it is refused as an
+    echo — and a 429 is retried once after retry_after, not treated as
+    permanent. The server half is pinned as literals and executed; the client
+    half is read from plugin/H2HRules.cs (one contract, both sides — a change
+    to either literal fails here)."""
+    window = main._H2H_DEBOUNCE_SECONDS
+    assert window == 5.0
+    assert _cs_float_const("SERVER_DEBOUNCE_SECONDS") == window
+    transport = _cs_float_const("TRANSPORT_RETRY_DELAY")
+    fallback = _cs_float_const("DEBOUNCE_RETRY_FALLBACK")
+    margin = _cs_float_const("DEBOUNCE_RETRY_MARGIN")
+    assert transport > window, "a transport re-send inside the window is refused as an echo"
+    assert fallback > window, "a 429 retry without a readable retry_after must outlast the window"
+    assert margin >= 1.0
+
+    # executed: arm the window, then re-send exactly the client's transport
+    # delay later — accepted, not 429
+    session = FakeSession(session_row=_good_session(), players=_players())
+    _call(session)
+    main._h2h_last_read[(ME_SID, OPP_SID)] = time.monotonic() - transport
+    session = FakeSession(session_row=_good_session(), players=_players())
+    assert _call(session).opponent_display_name == "Opp Name"
+
+    # an echo inside the window: a 429 whose retry_after never exceeds the
+    # window, in the detail shape the client reads — and the request re-sent
+    # retry_after + margin later is accepted
+    main._h2h_last_read[(ME_SID, OPP_SID)] = time.monotonic() - 1.0
+    session = FakeSession(session_row=_good_session(), players=_players())
+    err = _raises(session)
+    assert err.status_code == 429
+    assert set(err.detail) == {"error", "retry_after"}
+    assert 1 <= err.detail["retry_after"] <= window
+    main._h2h_last_read[(ME_SID, OPP_SID)] = time.monotonic() - (err.detail["retry_after"] + margin)
+    session = FakeSession(session_row=_good_session(), players=_players())
+    assert _call(session).opponent_display_name == "Opp Name"

@@ -1489,7 +1489,7 @@ namespace CompetitiveRounds
             "Opponent hasn't connected yet — they have a few minutes of grace. Hang tight...",
             "Opponent reports {0} ms ping",
             "Opponent's picks",
-            "Opponent's updates are arriving late (in transit)",
+            "Opponent's updates are arriving late",
             "Orange Cursor",
             "Orange melting into pink. Golden hour, every round. Two-color gradient.",
             "Orange-to-yellow gradient that sears the arena.",

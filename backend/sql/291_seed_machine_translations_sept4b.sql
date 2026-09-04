@@ -76,11 +76,6 @@ INSERT INTO _seed291 (key_id, lang, source_hash, target) VALUES
   , ('98e4a76eed695306', 'ru', '02ceb2093b5bcc236bd9551a871fa0884433fade', E'Соперник сообщает пинг {0} мс')
   , ('98e4a76eed695306', 'uk', '02ceb2093b5bcc236bd9551a871fa0884433fade', E'Суперник повідомляє пінг {0} мс')
   , ('98e4a76eed695306', 'sv', '02ceb2093b5bcc236bd9551a871fa0884433fade', E'Motståndaren rapporterar {0} ms ping')
-  -- "Opponent's updates are arriving late (in transit)"
-  , ('9b0b5e78093b80dd', 'es', 'e5336e6106c1b000895725fd8ac765b349047068', E'Las actualizaciones del rival llegan tarde (en tránsito)')
-  , ('9b0b5e78093b80dd', 'ru', 'e5336e6106c1b000895725fd8ac765b349047068', E'Обновления соперника приходят с опозданием (в пути)')
-  , ('9b0b5e78093b80dd', 'uk', 'e5336e6106c1b000895725fd8ac765b349047068', E'Оновлення суперника надходять із запізненням (у дорозі)')
-  , ('9b0b5e78093b80dd', 'sv', 'e5336e6106c1b000895725fd8ac765b349047068', E'Motståndarens uppdateringar kommer sent (under överföring)')
   -- "Last played {0} · also played today · H2H {1}-{2} · Ranked s"
   , ('adce3a775476d686', 'es', 'b7248097e6ae78ea75acdc1bf03fa3a7f754fae1', E'Última partida {0} · también hoy · H2H {1}-{2} · Series ranked {3}')
   , ('adce3a775476d686', 'ru', 'b7248097e6ae78ea75acdc1bf03fa3a7f754fae1', E'Последняя игра {0} · также играли сегодня · H2H {1}-{2} · Рейтинговые серии: {3}')
@@ -111,6 +106,11 @@ INSERT INTO _seed291 (key_id, lang, source_hash, target) VALUES
   , ('d00d1cf6fc532cd8', 'ru', '9344533c4118c35c73e68a704ed70271514f9211', E'{0} дн. назад')
   , ('d00d1cf6fc532cd8', 'uk', '9344533c4118c35c73e68a704ed70271514f9211', E'{0} дн. тому')
   , ('d00d1cf6fc532cd8', 'sv', '9344533c4118c35c73e68a704ed70271514f9211', E'för {0} dagar sedan')
+  -- "Opponent's updates are arriving late"
+  , ('d8e56457c902871a', 'es', 'a54036d0cbe937247c84a1c8b342ac04070c9ed8', E'Las actualizaciones del rival llegan tarde')
+  , ('d8e56457c902871a', 'ru', 'a54036d0cbe937247c84a1c8b342ac04070c9ed8', E'Обновления соперника приходят с опозданием')
+  , ('d8e56457c902871a', 'uk', 'a54036d0cbe937247c84a1c8b342ac04070c9ed8', E'Оновлення суперника надходять із запізненням')
+  , ('d8e56457c902871a', 'sv', 'a54036d0cbe937247c84a1c8b342ac04070c9ed8', E'Motståndarens uppdateringar kommer sent')
   -- "Corner notices when your frames drop, your ping is high or t"
   , ('f6f39272fe6447ee', 'es', '2c8c0c76f27b62f1dbb24cb436ae7a2d42c026db', E'Avisos en la esquina cuando tus fotogramas caen, tu ping es alto o las actualizaciones del rival llegan tarde. Solo 1v1.')
   , ('f6f39272fe6447ee', 'ru', '2c8c0c76f27b62f1dbb24cb436ae7a2d42c026db', E'Уведомления в углу экрана, когда падает частота кадров, высокий пинг или обновления соперника приходят с опозданием. Только 1 на 1.')

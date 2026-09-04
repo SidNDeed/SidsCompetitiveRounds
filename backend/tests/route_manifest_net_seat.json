@@ -502,7 +502,7 @@
           ],
           "main",
           "h2h_summary",
-          "e7a895616a8b9c1af02d44ab00302e08eed1c6af"
+          "e4b750bc413cb3bcb09c9c1588c928e189b224b1"
         ],
         [
           "/api/v1/internal/bug-reports/by-number/{bug_number}/user-comment",

@@ -9150,8 +9150,10 @@ namespace CompetitiveRounds
         /// server matched rather than on the peer-advertised u_id. Written at
         /// the two issuance sites (both_ready / ready_join) from the
         /// response's own pair fields; read by H2HSummary through
-        /// TryGetIssuedOpponent, which requires the room NAME to match and the
-        /// queue lifecycle (queueGen) not to have moved; retired by
+        /// TryGetIssuedOpponent, which requires the room NAME to match, the
+        /// queue lifecycle (queueGen) not to have moved and, once bound, the
+        /// same (incarnation, other-fighter actor) it was first consumed for
+        /// (H2HRules.ResolveIssued, review r6 MEDIUM); retired by
         /// H2HSummary.OnJoinedRoom when the joined room is any other room, by
         /// a lifecycle bump, and by ResetQueueState. Holds a room name, so it
         /// never leaves this process (#463).</summary>
@@ -9160,6 +9162,12 @@ namespace CompetitiveRounds
             public int Gen;
             public string RoomName;
             public string OpponentSteamId;
+            // The (H2HSummary incarnation, other-fighter actor) this pairing
+            // was first consumed for; BoundActor < 0 until then. The pairing
+            // names a pair, not whoever holds the other seat later, so
+            // H2HRules.ResolveIssued answers for this binding only.
+            public int BoundIncarnation;
+            public int BoundActor;
         }
         private static QueueIssuedPair? issuedPair;
 
@@ -9190,25 +9198,35 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo("[QUEUE] issued room carries no usable opponent id — the H2H line will use the room's own resolver");
                     return;
                 }
-                issuedPair = new QueueIssuedPair { Gen = queueGen, RoomName = room, OpponentSteamId = opp };
+                issuedPair = new QueueIssuedPair { Gen = queueGen, RoomName = room, OpponentSteamId = opp,
+                                                   BoundIncarnation = -1, BoundActor = -1 };
             }
             catch { issuedPair = null; }
         }
 
         /// <summary>H2HSummary's read: the attested opponent for THIS room
-        /// name, only while the lifecycle that issued it is current. The
-        /// ordinary entry path holds the lifecycle — LeaveQueue from the
-        /// joined ranked room returns before its bump because the issuance
-        /// already parked the state Idle with polling off.</summary>
-        internal static bool TryGetIssuedOpponent(string roomName, out string opponentSteamId)
+        /// name, only while the lifecycle that issued it is current, and only
+        /// for the (incarnation, other-fighter actor) the pairing was first
+        /// consumed for — H2HRules.ResolveIssued binds on the first Attested
+        /// answer and answers Suppressed for any other actor or incarnation
+        /// in the issued room (review r6 MEDIUM); NotIssued for any other
+        /// room, with the binding untouched. The ordinary entry path holds
+        /// the lifecycle — LeaveQueue from the joined ranked room returns
+        /// before its bump because the issuance already parked the state
+        /// Idle with polling off.</summary>
+        internal static H2HRules.IssuedOpponent TryGetIssuedOpponent(string roomName, int incarnation, int actor,
+                                                                    out string opponentSteamId)
         {
             opponentSteamId = null;
             var p = issuedPair;
-            if (p == null || string.IsNullOrEmpty(roomName)) return false;
-            if (p.Value.Gen != queueGen) { issuedPair = null; return false; }
-            if (!string.Equals(p.Value.RoomName, roomName, StringComparison.Ordinal)) return false;
-            opponentSteamId = p.Value.OpponentSteamId;
-            return true;
+            if (p == null || string.IsNullOrEmpty(roomName)) return H2HRules.IssuedOpponent.NotIssued;
+            if (p.Value.Gen != queueGen) { issuedPair = null; return H2HRules.IssuedOpponent.NotIssued; }
+            if (!string.Equals(p.Value.RoomName, roomName, StringComparison.Ordinal)) return H2HRules.IssuedOpponent.NotIssued;
+            var pair = p.Value;
+            var verdict = H2HRules.ResolveIssued(true, ref pair.BoundIncarnation, ref pair.BoundActor, incarnation, actor);
+            issuedPair = pair;   // the binding, written back (a nullable struct is a copy)
+            if (verdict == H2HRules.IssuedOpponent.Attested) opponentSteamId = pair.OpponentSteamId;
+            return verdict;
         }
 
         /// <summary>H2HSummary.OnJoinedRoom: a join to any room other than the

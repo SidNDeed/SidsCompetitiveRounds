@@ -6847,6 +6847,12 @@ async def _viewer_h2h_counts(db, viewer_id, player_id):
 # owns it. retry_after rides the BODY — the client's HTTP wrapper forwards
 # code+body only (#252d); the header is for ordinary HTTP citizens.
 _H2H_DEBOUNCE_SECONDS = 5.0
+# The client's retry delays (plugin/H2HRules.cs: TRANSPORT_RETRY_DELAY and
+# DEBOUNCE_RETRY_FALLBACK, both 6 s; after a 429, the body's retry_after
+# + 1 s) sit beyond this window, so a re-send after an ambiguous transport
+# failure — the first request may have been accepted and armed it — is
+# not refused as an echo (review r6 LOW). test_h2h_summary.py pins the
+# literals on both sides.
 # The table is bounded two ways (design r3 §1.1 LOW): keys older than the
 # TTL are dropped, and the oldest are evicted past the hard cap — a session
 # holder rotating opponent ids mints a fresh key per request, so the TTL
@@ -6854,6 +6860,14 @@ _H2H_DEBOUNCE_SECONDS = 5.0
 _H2H_DEBOUNCE_TTL_SECONDS = 60.0
 _H2H_DEBOUNCE_MAX_KEYS = 4096
 _h2h_last_read: dict[tuple[str, str], float] = {}
+
+
+def _utc_now() -> datetime:
+    """The wall clock behind h2h_summary's UTC-day boundary and
+    _strict_steam_session_ok's expiry check — one seam, so the contract
+    tests freeze the clock those two read instead of anchoring their
+    fixtures to a calendar date that expires (review r6 LOW)."""
+    return datetime.now(timezone.utc)
 
 
 @app.get("/api/v1/h2h/{steam_id}/{opponent_steam_id}", response_model=H2HSummaryResponse, tags=["Players"])
@@ -6880,10 +6894,13 @@ async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
     the stats endpoint's helper keeps its own decided-only rule).
     last_played_at is the latest counted game that ended strictly before
     the caller's current UTC day (typed bind, TIMESTAMPTZ); played_today
-    reports whether any counted game ended on or after that boundary. The
-    response carries counters, a display name and one timestamp — no room
-    name, match id or series id (#463). Primary-only: not on the edge's
-    replica read list.
+    reports whether any counted game ended on or after that boundary;
+    last_played_days_ago is the whole-UTC-day distance from last_played_at's
+    date to that boundary's date (null with it), computed here so the
+    client's relative-day copy uses no clock of its own (review r6 LOW).
+    The response carries counters, a display name, one timestamp and that
+    integer — no room name, match id or series id (#463). Primary-only:
+    not on the edge's replica read list.
     """
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
@@ -6928,7 +6945,7 @@ async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
 
     opp_name = _clean_display_name(opp_row["display_name"], opponent_steam_id)
 
-    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = _utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
     # One statement for every aggregate. pair_matches: the pair's valid 1v1
     # games under _viewer_h2h_counts's predicates, verbatim — games_won /
     # games_lost are its ranked + casual counters folded (a game with no
@@ -6975,6 +6992,18 @@ async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
     series_won = int(facts["series_won"] or 0) if facts else 0
     series_lost = int(facts["series_lost"] or 0) if facts else 0
     series_tied = int(facts["series_tied"] or 0) if facts else 0
+    # Whole UTC days from the last counted pre-today game's UTC date to the
+    # caller's current UTC date, on the clock that set day_start — the
+    # client renders "yesterday / N days ago" from this integer and never
+    # subtracts a server timestamp from its own clock (review r6 LOW). The
+    # facts statement bounds last_played_at strictly below day_start, so a
+    # non-null value is at least 1. A naive row is read as UTC, the
+    # column's zone.
+    last_played_days_ago = None
+    if last_played_at is not None:
+        _lp = (last_played_at if last_played_at.tzinfo is not None
+               else last_played_at.replace(tzinfo=timezone.utc))
+        last_played_days_ago = (day_start.date() - _lp.astimezone(timezone.utc).date()).days
 
     return H2HSummaryResponse(
         opponent_display_name=opp_name,
@@ -6986,6 +7015,7 @@ async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
         series_lost=series_lost,
         series_tied=series_tied,
         last_played_at=last_played_at,
+        last_played_days_ago=last_played_days_ago,
         played_today=played_today,
     )
 
@@ -11009,7 +11039,7 @@ async def _strict_steam_session_ok(request, steam_id: str, db: AsyncSession) -> 
         ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
         if row is None or not row["verified"]:
             return False
-        if row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc):
+        if row["expires_at"] is not None and row["expires_at"] < _utc_now():
             return False
         return row["steam_id"] == steam_id
     except Exception:
