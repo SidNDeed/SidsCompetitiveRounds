@@ -12023,7 +12023,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
-        private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn, chatTtlBtn;
+        private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, lagNoticesToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn, chatTtlBtn;
         // Music opt-ins (design §8): menu playback + credit toast.
         private static GameObject menuMusicToggleBtn, musicCreditToggleBtn;
         private static object menuMusicToggleTxt, musicCreditToggleTxt;
@@ -12042,7 +12042,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Bug #159: heavier menu text (the game's own font at a higher SDF weight).
         private static GameObject heavyFontBtn;
         private static object heavyFontTxt;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, muteBgToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt, chatTtlTxt;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, muteBgToggleTxt, pingToggleTxt, lagNoticesToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt, chatTtlTxt;
         private static GameObject muteBgToggleBtn;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
@@ -13000,6 +13000,17 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "Shows your current server region and your ping to it.");
             pingToggleTxt = UIFactory.GetButtonText(pingToggleBtn);
+            // Release B §4 (bug 332): lag notices, default off. Sits under the
+            // ping/region row because both describe the same corner label.
+            lagNoticesToggleBtn = SettingsToggle(intBox.transform, "SLagNotice", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Lag notices toggled");
+                    if (Plugin.LagNoticesEnabled != null) Plugin.LagNoticesEnabled.Value = !Plugin.LagNoticesEnabled.Value;
+                    dirty = true;
+                },
+                "Corner notices when your frames drop, your ping is high or the opponent's updates arrive late. 1v1 only.");
+            lagNoticesToggleTxt = UIFactory.GetButtonText(lagNoticesToggleBtn);
             ingameChatToggleBtn = SettingsToggle(intBox.transform, "SIgChat", new Vector2(260, 28),
                 () =>
                 {
@@ -13616,6 +13627,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.ShowRegionPing.Value
                         ? "Ping / region display: <color=#88FF88>ON</color>"
                         : "Ping / region display: <color=#FF9966>OFF</color>");
+            if (lagNoticesToggleTxt != null && Plugin.LagNoticesEnabled != null)
+                UIFactory.SetText(lagNoticesToggleTxt,
+                    Plugin.LagNoticesEnabled.Value
+                        ? "Lag notices: <color=#88FF88>ON</color>"
+                        : "Lag notices: <color=#FF9966>OFF</color>");
             if (ingameChatToggleTxt != null && Plugin.ShowIngameChat != null)
             {
                 // The ON and OFF literals are kept VERBATIM — rewording OFF to

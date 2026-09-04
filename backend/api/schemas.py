@@ -497,6 +497,33 @@ class PlayerStatsResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class H2HSummaryResponse(BaseModel):
+    """GET /api/v1/h2h/{steam_id}/{opponent_steam_id} — aggregates only, for
+    the client's in-room "vs NAME · last played · H2H · ranked series" line.
+
+    Counters, one display name and one timestamp. Nothing room-derived: no
+    room name, match id or series id (a stored room name can be turned into
+    a JoinRoom argument, so it is a credential, not an identifier — #463).
+    Counts follow _viewer_h2h_counts's rules (both ranked and casual games;
+    a series counts only when completed, not invalidated and decided; a
+    completed tie is counted in series_tied and series_total, for neither
+    side). last_played_at is the latest counted game that ended strictly
+    before the caller's current UTC day; played_today says whether any
+    counted game ended on or after that boundary. Both null/zero when the
+    pair has no history or the opponent is unknown (name null too).
+    """
+    opponent_display_name: str | None = None
+    games_total: int = 0
+    games_won: int = 0
+    games_lost: int = 0
+    series_total: int = 0
+    series_won: int = 0
+    series_lost: int = 0
+    series_tied: int = 0
+    last_played_at: datetime | None = None
+    played_today: bool = False
+
+
 class LeaderboardEntry(BaseModel):
     """One row on the leaderboard."""
     rank: int

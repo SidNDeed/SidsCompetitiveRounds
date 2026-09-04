@@ -331,6 +331,8 @@ namespace CompetitiveRounds
             // debug input overlay and every modal paint over it.
             DrawMusicCredit();
             DrawFPS();
+            DrawH2HBanner();          // Release B §1: "vs NAME · last played · H2H" (10 s)
+            DrawLagNotices();   // Release B §4: opt-in network notices under the corner label
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
             DrawDancePreview();   // dance shop preview puppet (Aug 31 item 5)
@@ -7720,6 +7722,76 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(6, 4, fpsLabelWidth, 18), fpsLabel, fpsStyle);
         }
 
+        // ── Head-to-head banner (Release B §1) ──────────────────────────────
+        // One line directly under the corner label for the first 10 s after
+        // H2HSummary is Ready — "vs NAME · Last played 3 days ago · H2H 12-8 ·
+        // Ranked series 4" or "First time playing NAME". The text is cached in
+        // H2HSummary (rebuilt only on a catalogue change); richText is OFF so
+        // the server-returned name can carry no markup into the label.
+        private static GUIStyle h2hBannerStyle;
+
+        private static void DrawH2HBanner()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            // Whole body guarded: DrawUI has no outer try/catch (#255).
+            try
+            {
+                string text = H2HSummary.BannerLine;
+                if (string.IsNullOrEmpty(text)) return;
+                if (h2hBannerStyle == null)
+                {
+                    h2hBannerStyle = new GUIStyle(GUI.skin.label);
+                    h2hBannerStyle.fontSize = 12;
+                    h2hBannerStyle.fontStyle = FontStyle.Bold;
+                    h2hBannerStyle.richText = false;
+                    h2hBannerStyle.normal.textColor = new Color(0.85f, 0.85f, 0.85f, 0.9f);
+                }
+                GUI.Label(new Rect(6, 22, 900, 20), text, h2hBannerStyle);
+            }
+            catch { }
+        }
+
+        // ── Lag notices (Release B §4, bug 332) ───────────────────────────────
+        // A "network notices" stack directly under the corner FPS/ping label:
+        // one grey line per active state (LagNotices.ActiveLines, at most
+        // four), same style as the label, never the toast slot. The lines are
+        // rebuilt at window close only, so Repaint reads one array reference.
+        // Gates: the [Network] LagNotices setting, never the broadcast identity
+        // (hidden there regardless of the setting, §9 Q3), never a spectator;
+        // the plain-1v1 fighter gate is applied where the lines are produced.
+        // Rect registered in the avoided-rects comment above NOTIF_SET_BASE_Y.
+        private static GUIStyle lagNoticeStyle;
+
+        private static void DrawLagNotices()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            try
+            {
+                // Once per process (a bool check after that): binds the
+                // setting-off edge and the [Network] LagNoticesSelfTest run —
+                // BEFORE the setting gate, so the self-test's log lines are the
+                // positive signal on seats where the HUD itself never draws.
+                LagNotices.EnsureStartup();
+                if (Plugin.LagNoticesEnabled == null || !Plugin.LagNoticesEnabled.Value) return;
+                if (BroadcastMode.IsBroadcastIdentity) return;
+                if (RoomActors.LocalIsSpectator) return;
+                var lines = LagNotices.ActiveLines;
+                if (lines == null || lines.Length == 0) return;
+                if (lagNoticeStyle == null)
+                {
+                    lagNoticeStyle = new GUIStyle(GUI.skin.label);
+                    lagNoticeStyle.fontSize = 11;
+                    lagNoticeStyle.normal.textColor = new Color(0.5f, 0.5f, 0.5f, 0.7f);
+                }
+                int n = Math.Min(lines.Length, LagNotices.MAX_LINES);
+                // Sits under the H2H banner (y=22, 10 s) while that is visible, else directly under the corner label.
+                int lagBaseY = 24 + (string.IsNullOrEmpty(H2HSummary.BannerLine) ? 0 : 20);
+                for (int i = 0; i < n; i++)
+                    GUI.Label(new Rect(6, lagBaseY + 16 * i, 640, 16), lines[i], lagNoticeStyle);
+            }
+            catch { }
+        }
+
         // ── Music credit line (music feature §7) ────────────────────────────
         // One small grey line, bottom-left, same visual weight as DrawFPS.
         // Two gates share it: the broadcast seat's permanent attribution
@@ -7987,6 +8059,14 @@ namespace CompetitiveRounds
         //   spectator roster   : x Screen.width-420.., Screen.height-28 .. -6
         //   F5 menu bottom bar : a 26px row at roughly Screen.height - 30
         //   debug input overlay: Screen.height - 14
+        //   lag notices        : x 6..646, y 24..88 — or y 44..108 while the
+        //                        H2H banner (y 22..42, 10 s) is up, which the
+        //                        stack sits under via lagBaseY (r3 L8); up to
+        //                        four 16px grey lines under the FPS/ping label; opt-in
+        //                        [Network] LagNotices, plain-1v1 fighter seats
+        //                        only, never the broadcast identity; drawn right
+        //                        after DrawFPS, so every later overlay paints
+        //                        over it — Release B §4.)
         //   music credit line  : x 12.., Screen.height-26 .. -8 (one ~18px
         //                        grey line, width follows the label; broadcast
         //                        attribution / opt-in now-playing toast; drawn

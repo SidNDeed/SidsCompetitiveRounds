@@ -26,6 +26,16 @@ namespace CompetitiveRounds
         private const int MaxMeasuredGapMs = 60000;
         private const int ArrivalGapLogThresholdMs = 300;
         private const int JitterLogThresholdMs = 150;
+
+        /// <summary>The sampler's delivery-excess formula (GapWindow.Record):
+        /// how much longer a batch took to arrive than the sender's own
+        /// timestamps advanced, floored at 0. Extracted so LagNotices' self-test
+        /// classifies canned samples with the production arithmetic (r3 L6).</summary>
+        internal static int DeliveryExcessMs(int arrivalGapMs, int senderGapMs)
+        {
+            int excess = arrivalGapMs - senderGapMs;
+            return excess < 0 ? 0 : excess;
+        }
         private const int JitterLogMaximumPerRoom = 16;
         private const int GameSummaryLogMaximumPerRoom = 128;
 
@@ -295,6 +305,26 @@ namespace CompetitiveRounds
                 {
                     GapSample sample;
                     CommitTiming(actor, _ctxActor, _ctxNetworkTime, _ctxArrivalTick, out sample);
+                    // Release B §4.3 / design-review r3 M6: a late-delivery
+                    // sample on the CONFIRMED Player view, counted once per
+                    // accepted sample here rather than inside Record (which runs
+                    // for Room and again for Game while a game is active).
+                    // Quarantined samples returned above; the first sample after
+                    // the revive handler's ClearBaseline is a baseline
+                    // (Valid=false). The input is the DELIVERY EXCESS the sampler
+                    // computes (arrival gap minus the sender-stamped gap,
+                    // DeliveryExcessMs), never the raw arrival gap: a sender that
+                    // merely had nothing new to send (UnreliableOnChange, #459 —
+                    // a stationary opponent, a Phoenix charge) stamps its next
+                    // batch with a networkTime that advanced by the whole
+                    // silence, so the sender gap grows with the arrival gap and
+                    // the excess stays at ordinary jitter. Only transit time
+                    // beyond the sender's own cadence counts, and the notice text
+                    // names that measurement ("in transit"), not a party.
+                    if (sample.Valid && LagNotices.IsLateDelivery(sample.DeliveryExcessMs))
+                    {
+                        try { NetworkSeatTelemetry.NoteLateDelivery(); } catch { }
+                    }
                 }
                 // Payload equality (r1 MEDIUM 7 → r4 LOW 11 → r6 LOW 9): ALL EIGHT
                 // wire values under THIS SEAT's live PUN element rules (exact
@@ -1155,8 +1185,7 @@ namespace CompetitiveRounds
                 if (arrivalGap >= 1500) Gap1500++;
                 if (arrivalGap > MaxArrivalGapMs) MaxArrivalGapMs = arrivalGap;
 
-                int deliveryExcess = arrivalGap - senderGap;
-                if (deliveryExcess < 0) deliveryExcess = 0;
+                int deliveryExcess = DeliveryExcessMs(arrivalGap, senderGap);
                 if (deliveryExcess >= JitterLogThresholdMs) Jitter150++;
                 if (deliveryExcess > MaxDeliveryExcessMs)
                     MaxDeliveryExcessMs = deliveryExcess;

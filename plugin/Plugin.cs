@@ -58,6 +58,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<int> BroadcastFpsCap;
         internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
+        internal static ConfigEntry<bool> LagNoticesEnabled;   // [Network] LagNotices — Release B §4, default off
         internal static ConfigEntry<bool> ShowIngameChat;
         // Bug 211/213 (Sid's chosen design): M cycles the in-game chat overlay
         // through Normal -> Pinned -> Muted. The on/off half of that state IS
@@ -610,6 +611,15 @@ namespace CompetitiveRounds
                 "UI", "ShowRegionPing",
                 true,
                 "Show Photon ping and region alongside FPS when in a room"
+            );
+
+            // Release B §4 (bug 332): opt-in lag notices. A NEW key with a
+            // false default — Config.Bind writes a default once and never
+            // revisits it (#190), so this ships off for every install.
+            LagNoticesEnabled = Config.Bind(
+                "Network", "LagNotices",
+                false,
+                "Show short corner notices when this seat measures dropped frames, high ping to the relay, or late-arriving opponent updates. 1v1 fighter seats only; informational, nothing is sent."
             );
 
             ShowIngameChat = Config.Bind(
@@ -2604,6 +2614,10 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogError($"Poll error: {ex.Message}");
             }
+            // Release B §1: the in-room head-to-head line. Reads the opponent
+            // id Poll's TryResolveOpponent just resolved; self-gated to one
+            // request per room incarnation.
+            try { H2HSummary.Tick(); } catch { }
 
             // SCR Broadcast director + §2c identity fence (design §3a). Runs
             // from THIS persistent tick — never a coroutine host that
@@ -3836,6 +3850,10 @@ namespace CompetitiveRounds
         public void OnConnectedToMaster() { }
         public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
         {
+            // Release B §1: the head-to-head line dies with the room — first
+            // statement, so an in-flight response can never bind to the next
+            // room. Idempotent.
+            try { H2HSummary.Invalidate(); } catch { }
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
             // OnLeftRoom must still close the room/game telemetry — first
             // statement, before any early return below. Idempotent: with no
@@ -3865,6 +3883,11 @@ namespace CompetitiveRounds
             // Bug 235 diagnostics bind to the reliable Photon room edge so a
             // fast leave+rejoin cannot merge two sittings' counters/budgets.
             try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }
+            // Release B §1: a fresh head-to-head incarnation for every join,
+            // every role — the request itself is gated on the fighter/1v1
+            // rule at tick time, but the counter must move here so a late
+            // response from the previous room is discarded.
+            try { H2HSummary.OnJoinedRoom(); } catch { }
             // Join-op settlement bookkeeping BEFORE anything can early-return
             // (broadcast r2 find 1): a room entry terminally resolves the one
             // spectate JoinRoom op that can be in flight. Pure flag clear;
@@ -4408,6 +4431,9 @@ namespace CompetitiveRounds
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+            // Release B §1: the head-to-head line dies with the room — first
+            // statement (same reason as OnDisconnected). Idempotent.
+            try { H2HSummary.Invalidate(); } catch { }
             // Bug #269: the map-scale publish ticket must die on the RELIABLE
             // leave edge, not only through FfaMode's room poll — a leave and a
             // fast rejoin to a same-named recreated room can land between poll

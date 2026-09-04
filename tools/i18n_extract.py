@@ -81,6 +81,12 @@ FILES = [
     # no translation sites today; listed so a future player-seat variant
     # (which would need a toast) is harvested the moment it appears.
     "OverlayIdleClose.cs",
+    # In-room head-to-head line (Sept 4, Release B §1) — banner/Tab-Info
+    # templates and the relative-day phrases, all at I18n.Tr/TrF sites.
+    "H2HSummary.cs",
+    # Lag notices (Sept 4, Release B §4) — the four corner-notice texts at
+    # I18n.Tr/TrF sites; its [LAG-NOTICE] log lines are not user-visible.
+    "LagNotices.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

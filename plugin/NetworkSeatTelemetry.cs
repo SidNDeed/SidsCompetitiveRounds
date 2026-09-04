@@ -88,13 +88,31 @@ namespace CompetitiveRounds
             public long CloseTick;   // r6 LOW 5: monotonic close time — the HUD's recency test; UtcMs is for cross-system correlation only
             public int Writes, Unchanged, Attempted, Accepted, Resent, Discarded, Crc, Fragment, QOut, QIn, Hitch50, Hitch200, WorstMs;
             public string WorstTags;
+            // Release B §4.3 (lag notices): this seat's Photon ping at close
+            // (0 = unavailable), the opponent's self-reported RTT if fresh at
+            // close (0 = not fresh / not a plain 1v1), and the count of
+            // accepted batches on confirmed remote Player views whose DELIVERY
+            // EXCESS (arrival gap minus the sender-stamped gap) reached 300 ms
+            // during the window (NoteLateDelivery, design-review r3 M6; in a
+            // 1v1 that is the opponent's stream). Never the raw arrival gap:
+            // an UnreliableOnChange sender that had nothing new to send makes
+            // a large arrival gap with a matching sender gap and no excess.
+            // Bundle + notices only, never a report field.
+            public int OwnPing, PeerRtt, ObsLate300;
         }
         private static readonly Window[] _ring = new Window[WINDOW_RING];
         private static int _ringCount, _ringHead, _windowSeq;
         private static long _wWrites, _wUnchanged, _wAttempted, _wAccepted, _wHitch50, _wHitch200;
         private static int _wWorstMs, _wQOut, _wQIn;
         private static int _wResent, _wDiscarded, _wCrc, _wFragment;
+        private static int _wObsLate300;
         private static string _wWorstTags = "";
+
+        /// <summary>The closed-window facts LagNotices reads (§4.3).</summary>
+        internal struct WindowFacts
+        {
+            public int Seq, WorstMs, OwnPing, PeerRtt, ObsLate300;
+        }
 
         // Local Player view id — lazily acquired from the first local-Player
         // OnSerializeWrite (v6 §1.3), cleared on room change. Integer only:
@@ -140,6 +158,7 @@ namespace CompetitiveRounds
             try { NetworkReplicaDiagnostics.ResetHookCost(); } catch { }
             _lastUpdateTick = System.Diagnostics.Stopwatch.GetTimestamp();
             _lastFrameWall = 0;
+            try { LagNotices.OnGameStarted(); } catch { }   // Release B §4: fresh states, no carried cooldown
         }
 
         internal static bool GameOpen => _gameOpen;
@@ -150,6 +169,7 @@ namespace CompetitiveRounds
             CloseWindow(force: true);
             SamplePeerDeltas();
             _gameOpen = false;
+            try { LagNotices.OnGameEnded(); } catch { }   // Release B §4: shown states exit here
             try { NetworkReplicaDiagnostics.DrainFrameHookTicks(); } catch { }   // r3 MEDIUM 12: clear at the end edge too
             if (!_spectatorGame)
             {
@@ -186,7 +206,20 @@ namespace CompetitiveRounds
         {
             _wWrites = _wUnchanged = _wAttempted = _wAccepted = _wHitch50 = _wHitch200 = 0;
             _wWorstMs = 0; _wQOut = _wQIn = 0; _wResent = _wDiscarded = _wCrc = _wFragment = 0;
+            _wObsLate300 = 0;
             _wWorstTags = "";
+        }
+
+        /// <summary>Release B §4.3 / r3 M6: one accepted batch on the confirmed
+        /// opponent Player view whose delivery excess reached
+        /// LagNotices.LATE_EXCESS_MS, counted into the current window. Called
+        /// from NetworkReplicaDiagnostics' fighter-path commit, once per
+        /// accepted sample. Fighter games only — a spectator seat's
+        /// observations are not this seat's opponent stream.</summary>
+        internal static void NoteLateDelivery()
+        {
+            if (!_gameOpen || _spectatorGame) return;
+            if (_wObsLate300 < int.MaxValue) _wObsLate300++;
         }
 
         // ── per-frame (from GameStateWatcher.TickFrame) ──────────────────
@@ -296,8 +329,24 @@ namespace CompetitiveRounds
             SamplePeerDeltas();
             int serverTs = 0;
             try { serverTs = PhotonNetwork.ServerTimestamp; } catch { }
+            // Release B §4.3: sampled at close. Same accessor and 1..3000 bounds
+            // as GameStateWatcher.ReplicaAgeEstimateMs; 0 = unavailable. The
+            // peer value is the opponent's self-report, fresh within 10 s, only
+            // in a plain 1v1 (TryGetPeerRttFresh) — 0 otherwise.
+            int ownPing = 0, peerRtt = 0;
+            try
+            {
+                if (!PhotonNetwork.OfflineMode && PhotonNetwork.InRoom)
+                {
+                    long p = PhotonNetwork.GetPing();
+                    if (p >= 1 && p <= 3000) ownPing = (int)p;
+                }
+            }
+            catch { }
+            try { int r; if (!_spectatorGame && GameStateWatcher.TryGetPeerRttFresh(out r)) peerRtt = r; } catch { }
             var w = new Window
             {
+                OwnPing = ownPing, PeerRtt = peerRtt, ObsLate300 = _wObsLate300,
                 Seq = ++_windowSeq,
                 UtcMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds,
                 CloseTick = System.Diagnostics.Stopwatch.GetTimestamp(),
@@ -314,6 +363,27 @@ namespace CompetitiveRounds
             if (_ringCount < WINDOW_RING) _ringCount++;
             ResetWindowAccumulators();
             _windowStartRt = Time.realtimeSinceStartup;
+            // Release B §4.3: the ONLY tick of the lag-notice machine, after the
+            // window is in the ring — every input it reads is a CLOSED window.
+            // Never on the forced close (r3 M7(a)): OnMatchEnded is the only
+            // force caller — game over, room leave and disconnect all arrive
+            // there — and it ends the states right after (LagNotices.OnGameEnded).
+            if (LagNotices.WindowFeedsEvaluator(force, _gameOpen, _spectatorGame)) { try { LagNotices.OnWindowClosed(); } catch { } }
+        }
+
+        /// <summary>Release B §4.3: the newest CLOSED windows, newest first,
+        /// for LagNotices — never the partial one. Returns the count filled
+        /// (at most buf.Length).</summary>
+        internal static int RecentWindows(WindowFacts[] buf)
+        {
+            int n = 0;
+            if (buf == null) return 0;
+            for (int i = 1; i <= _ringCount && n < buf.Length; i++)
+            {
+                var w = _ring[(_ringHead - i + WINDOW_RING) % WINDOW_RING];
+                buf[n++] = new WindowFacts { Seq = w.Seq, WorstMs = w.WorstMs, OwnPing = w.OwnPing, PeerRtt = w.PeerRtt, ObsLate300 = w.ObsLate300 };
+            }
+            return n;
         }
 
         /// <summary>HUD (r1 MEDIUM 16 / r2 LOW 16 / r3 LOW 14): the windows that
@@ -599,7 +669,7 @@ namespace CompetitiveRounds
             Plugin.Log?.LogInfo(sb.ToString());
             // Window ring: newest last, one line, bounded.
             var wl = new StringBuilder(2048);
-            wl.Append("[NET-SEAT-WINDOWS] n=").Append(_ringCount).Append(" seq@utcMs@serverTs:w/u/att/acc/res/dis/crc/frag/qoMax/qiMax/h50/h200/worst(tags) ");
+            wl.Append("[NET-SEAT-WINDOWS] n=").Append(_ringCount).Append(" seq@utcMs@serverTs:w/u/att/acc/res/dis/crc/frag/qoMax/qiMax/h50/h200/worst(tags)/ping/peerRtt/late300 ");
             int start = (_ringHead - _ringCount + WINDOW_RING) % WINDOW_RING;
             for (int i = 0; i < _ringCount; i++)
             {
@@ -609,7 +679,8 @@ namespace CompetitiveRounds
                   .Append(w.Writes).Append('/').Append(w.Unchanged).Append('/').Append(w.Attempted).Append('/').Append(w.Accepted)
                   .Append('/').Append(w.Resent).Append('/').Append(w.Discarded).Append('/').Append(w.Crc).Append('/').Append(w.Fragment)
                   .Append('/').Append(w.QOut).Append('/').Append(w.QIn).Append('/').Append(w.Hitch50).Append('/').Append(w.Hitch200).Append('/').Append(w.WorstMs)
-                  .Append('(').Append(w.WorstTags ?? "").Append(')');
+                  .Append('(').Append(w.WorstTags ?? "").Append(')')
+                  .Append('/').Append(w.OwnPing).Append('/').Append(w.PeerRtt).Append('/').Append(w.ObsLate300);
             }
             Plugin.Log?.LogInfo(wl.ToString());
             // Self-profiler: this class's per-frame cost + the observer hooks'.

@@ -496,6 +496,15 @@
           "d60c920c36c2e4389647dddfc941a60fba76afd2"
         ],
         [
+          "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
+          [
+            "GET"
+          ],
+          "main",
+          "h2h_summary",
+          "e7a895616a8b9c1af02d44ab00302e08eed1c6af"
+        ],
+        [
           "/api/v1/internal/bug-reports/by-number/{bug_number}/user-comment",
           [
             "POST"
@@ -2308,7 +2317,7 @@
           ],
           "main",
           "queue_ready",
-          "5736b651d960434830fa82464bc9167314a3559a"
+          "8baff6eb6cc302c6420baa8e4941a4af7f03dd59"
         ],
         [
           "/api/v1/queue/recent-joins",
@@ -2407,7 +2416,7 @@
           ],
           "main",
           "purchase_item",
-          "81d855c0b19ce1e74dd094ac0df171091481441e"
+          "26f78be7be5d8abea561dca9f307da431ace35cd"
         ],
         [
           "/api/v1/shop/sales-board",

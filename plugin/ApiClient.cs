@@ -3876,6 +3876,21 @@ namespace CompetitiveRounds
                 }, sessionAware: true));
         }
 
+        /// <summary>Release B §1: GET /api/v1/h2h/{me}/{opponent} — the in-room
+        /// head-to-head summary (H2HSummary). detailedErrors so the callback
+        /// can tell a 401/429 from a transport failure ("HTTP &lt;code&gt;:"
+        /// prefix); sessionAware as the queue poll — the server strict-
+        /// session-gates this read, and a stale token's 401 session_required
+        /// must re-mint (HandleSessionReject) instead of 401-looping.
+        /// H2HSummary decides whether to re-send (only after a NEWER token).
+        /// Both ids are 17-digit path segments, validated by the caller.</summary>
+        public static void FetchH2HSummary(string steamId, string opponentSteamId, Action<bool, string> callback)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/h2h/{Uri.EscapeDataString(steamId ?? "")}/{Uri.EscapeDataString(opponentSteamId ?? "")}",
+                callback, detailedErrors: true, sessionAware: true));
+        }
+
         public static void FetchCosmeticSubmissionsAdmin(string adminSteamId, Action<bool, List<CosmeticSubmission>> callback)
         {
             string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:cosmetic-subs:list");
@@ -8602,6 +8617,7 @@ namespace CompetitiveRounds
         // every parser internal. Same semantics as ExtractJsonInt.
         public static string ExtractJsonStringPublic(string json, string key) => ExtractJsonString(json, key);
         public static int ExtractJsonIntPublic(string json, string key) => ExtractJsonInt(json, key);
+        public static bool ExtractJsonBoolPublic(string json, string key) => ExtractJsonBool(json, key);
 
         /// <summary>Reads a flat array of strings ("xp_bonuses":["a","b"]) into a list.
         /// Quote-aware, so a label containing a comma can't split into two entries —
@@ -9126,6 +9142,92 @@ namespace CompetitiveRounds
         /// its callback refuses to bind across a bump.</summary>
         public static int RoomIncarnation;
         public static QueuePollData LastPollData { get; private set; }
+
+        /// <summary>Release B §1 (design r3 §1.2 MEDIUM): the server-attested
+        /// pairing of the LAST queue-issued room, kept past the moment both
+        /// issuance paths null LastPollData and the joiner clears the pending
+        /// room, so the head-to-head line in that room keys on the id the
+        /// server matched rather than on the peer-advertised u_id. Written at
+        /// the two issuance sites (both_ready / ready_join) from the
+        /// response's own pair fields; read by H2HSummary through
+        /// TryGetIssuedOpponent, which requires the room NAME to match and the
+        /// queue lifecycle (queueGen) not to have moved; retired by
+        /// H2HSummary.OnJoinedRoom when the joined room is any other room, by
+        /// a lifecycle bump, and by ResetQueueState. Holds a room name, so it
+        /// never leaves this process (#463).</summary>
+        private struct QueueIssuedPair
+        {
+            public int Gen;
+            public string RoomName;
+            public string OpponentSteamId;
+        }
+        private static QueueIssuedPair? issuedPair;
+
+        /// <summary>The opponent the server paired this seat with for the room
+        /// it just issued: the response's opponent_steam_id when present
+        /// (ready_join), else the pair member that is not this seat (both_ready
+        /// carries p1/p2 only), else the matched poll's answer still in
+        /// LastPollData at this point. Nothing is retained unless the result
+        /// is a 17-digit id other than this seat's own — H2HSummary then falls
+        /// back to the room's own resolver.</summary>
+        private static void RetainIssuedPair(string room, string response)
+        {
+            try
+            {
+                string me = MatchTracker.LocalSteamId ?? "";
+                string opp = ExtractJsonString(response, "opponent_steam_id");
+                if (!IsSteamId64(opp))
+                {
+                    string p1 = ExtractJsonString(response, "p1_steam_id");
+                    string p2 = ExtractJsonString(response, "p2_steam_id");
+                    if (p1 == me && IsSteamId64(p2)) opp = p2;
+                    else if (p2 == me && IsSteamId64(p1)) opp = p1;
+                    else opp = LastPollData?.opponent_steam_id;
+                }
+                if (string.IsNullOrEmpty(room) || !IsSteamId64(opp) || opp == me)
+                {
+                    issuedPair = null;
+                    Plugin.Log.LogInfo("[QUEUE] issued room carries no usable opponent id — the H2H line will use the room's own resolver");
+                    return;
+                }
+                issuedPair = new QueueIssuedPair { Gen = queueGen, RoomName = room, OpponentSteamId = opp };
+            }
+            catch { issuedPair = null; }
+        }
+
+        /// <summary>H2HSummary's read: the attested opponent for THIS room
+        /// name, only while the lifecycle that issued it is current. The
+        /// ordinary entry path holds the lifecycle — LeaveQueue from the
+        /// joined ranked room returns before its bump because the issuance
+        /// already parked the state Idle with polling off.</summary>
+        internal static bool TryGetIssuedOpponent(string roomName, out string opponentSteamId)
+        {
+            opponentSteamId = null;
+            var p = issuedPair;
+            if (p == null || string.IsNullOrEmpty(roomName)) return false;
+            if (p.Value.Gen != queueGen) { issuedPair = null; return false; }
+            if (!string.Equals(p.Value.RoomName, roomName, StringComparison.Ordinal)) return false;
+            opponentSteamId = p.Value.OpponentSteamId;
+            return true;
+        }
+
+        /// <summary>H2HSummary.OnJoinedRoom: a join to any room other than the
+        /// issued one retires the record — it describes exactly one room.</summary>
+        internal static void RetireIssuedPairUnless(string roomName)
+        {
+            var p = issuedPair;
+            if (p == null) return;
+            if (!string.Equals(p.Value.RoomName, roomName ?? "", StringComparison.Ordinal)) issuedPair = null;
+        }
+
+        private static bool IsSteamId64(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length != 17) return false;
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] < '0' || s[i] > '9') return false;
+            return true;
+        }
+
         public static bool IsQueuePolling { get; private set; } = false;
         private static float queuePollTimer = 0f;
         private static float queuePollInterval = 3f;
@@ -9732,6 +9834,17 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo("[QUEUE] Ready Up sent");
 
             int gen = queueGen;  // captured, not bumped: ready is not a lifecycle edge
+            // POST /queue/ready requires the caller's own Steam session (401
+            // session_required, refused before any write — the server row stays
+            // matched). PostRequestWithRetry consumes that 401 through
+            // HandleSessionReject on every attempt (POSTs carry no sessionAware
+            // opt-in; only GetRequest has one), so the token is dropped and the
+            // heartbeat re-mints. The failure branch below returns to Searching,
+            // and while the pair still stands the next accepted poll re-answers
+            // "matched" so a second click works. Leaving the queue stays the
+            // poll's time-windowed refusal rule; a refused ready is not counted
+            // there — its retries after the first strike go out token-less, the
+            // shape that rule excludes.
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/queue/ready?steam_id={Escape(steamId)}",
                 "",
@@ -9763,6 +9876,9 @@ namespace CompetitiveRounds
                             {
                                 IsQueuePolling = false;
                                 CurrentQueueState = QueueState.Idle;
+                                // Release B §1: the attested pairing outlives
+                                // the poll data nulled next (r3 §1.2 MEDIUM).
+                                RetainIssuedPair(room, response);
                                 LastPollData = null;
                                 Plugin.SetPendingRoom(room, region);
                                 Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId}");
@@ -9898,6 +10014,9 @@ namespace CompetitiveRounds
                                 GameStateWatcher.StashResumedSeriesScore(room, _pmw, _pow);
                             IsQueuePolling = false;
                             CurrentQueueState = QueueState.Idle;
+                            // Release B §1: the attested pairing outlives the
+                            // poll data nulled next (r3 §1.2 MEDIUM).
+                            RetainIssuedPair(room, response);
                             LastPollData = null;
                             Plugin.SetPendingRoom(room, region);
                             Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId ?? "(none)"}");
@@ -9982,6 +10101,7 @@ namespace CompetitiveRounds
             CurrentQueueState = QueueState.Idle;
             IsQueuePolling = false;
             LastPollData = null;
+            issuedPair = null;
             ResetQueuePoll401();
         }
 

@@ -11,6 +11,42 @@
   the article is split into shorter pages, and library search still finds the
   chart contents. Card names inside the charts stay English in every language.
 
+**Head-to-head line at match start**
+
+- Joining a two-player room (quick queue, ranked queue or a room code) shows a
+  corner line for ten seconds and a Tab-Info line for the match: "vs NAME ·
+  Last played 3 days ago · H2H 12-8 · Ranked series 4", "First time playing
+  NAME", or "First played today" when the only games are from today. The
+  numbers come from a new session-authenticated read that returns totals only;
+  the name shown is the one the server holds for the opponent, so a room where
+  the seats change re-fetches for the new opponent. Queue-issued rooms use the
+  opponent the queue assigned; other rooms use the id the opponent's game
+  advertises.
+
+**Lag notices (opt-in, default off)**
+
+- Settings → "Lag notices" turns on short corner lines under the FPS label while
+  a state holds: your game dropping frames (worst N ms), your ping to the relay
+  high (N ms), the opponent's updates arriving late (in transit), or the
+  opponent's game reporting a high ping. Several can show at once. Each state
+  needs a few one-second windows to enter, three clean windows to clear, and
+  waits thirty seconds before re-announcing. 1v1 fighter seats only; nothing is
+  sent anywhere; the broadcast seat never shows them. A cfg self-test key logs
+  the evaluator's canned cases at startup for verification.
+
+**Music**
+
+- Deselecting every track now plays the game's own music instead of silence.
+  (Silence is the game's music volume slider.)
+
+**Queue and shop**
+
+- The queue's ready call requires the caller's own session, the same rule the
+  poll already applied; a refused ready writes nothing and the seat returns to
+  searching.
+- A purchase re-checks that the item is still available under the same lock it
+  reads the price with.
+
 **Diagnostics and small fixes**
 
 - The music watchdog's "vanilla re-entry UNVERIFIED" line now records what it
@@ -33,9 +69,10 @@
   with a logged reason, and transport actions are not lever-driven.
 
 **Schema changes:** migrations **288** (client i18n keys for the new library
-strings) and **289** (machine-translation proposals for es/ru/uk/sv for those
-keys; the same translations ship bundled in the client). Apply both AFTER the
-API deploy; 288 before 289.
+strings), **289** (machine-translation proposals for es/ru/uk/sv for those
+keys), **290** (client i18n keys for the head-to-head and lag-notice strings)
+and **291** (their es/ru/uk/sv proposals). The same translations ship bundled
+in the client. Apply all four AFTER the API deploy, in numeric order.
 
 ## v1.40.1 — 2026-09-03
 

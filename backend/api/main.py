@@ -57,6 +57,7 @@ from schemas import (
     MatchReport,
     MatchResponse,
     PlayerStatsResponse,
+    H2HSummaryResponse,
     QueueJoinRequest,
     QueueDeclineRequest,
     QueuePollResponse,
@@ -3900,6 +3901,11 @@ _RL_SENSITIVE_PREFIXES = (
     # submit route (/api/v1/bug-reports, no slash), which is unauthenticated
     # and already has its own per-steam daily cap.
     "/api/v1/bug-reports/",
+    # In-room head-to-head summary (Release B §1). A literal prefix of its
+    # own because this table matches by startswith: "/api/v1/players/"
+    # would throttle every player read. The trailing slash keeps it from
+    # matching any sibling path.
+    "/api/v1/h2h/",
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
     # Lobby-phase wagers (migration 207). startswith also covers
@@ -6832,6 +6838,156 @@ async def _viewer_h2h_counts(db, viewer_id, player_id):
         elif vw < pw:
             series_l += 1
     return ranked_w, ranked_l, casual_w, casual_l, series_w, series_l
+
+
+# ── In-room head-to-head summary (Release B §1) ───────────────────────────
+# Per-(caller, opponent) debounce, the music_rate debounce's shape
+# (_music_rate_last_write): only a request that passed the session gate
+# arms it, so a refused request cannot burn the window for the seat that
+# owns it. retry_after rides the BODY — the client's HTTP wrapper forwards
+# code+body only (#252d); the header is for ordinary HTTP citizens.
+_H2H_DEBOUNCE_SECONDS = 5.0
+# The table is bounded two ways (design r3 §1.1 LOW): keys older than the
+# TTL are dropped, and the oldest are evicted past the hard cap — a session
+# holder rotating opponent ids mints a fresh key per request, so the TTL
+# alone does not bound the table.
+_H2H_DEBOUNCE_TTL_SECONDS = 60.0
+_H2H_DEBOUNCE_MAX_KEYS = 4096
+_h2h_last_read: dict[tuple[str, str], float] = {}
+
+
+@app.get("/api/v1/h2h/{steam_id}/{opponent_steam_id}", response_model=H2HSummaryResponse, tags=["Players"])
+async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
+                      db: AsyncSession = Depends(get_db)):
+    """Aggregates-only head-to-head between the caller and one opponent, for
+    the client's in-room "vs NAME · last played · H2H · ranked series" line.
+
+    Requires the caller's OWN valid Steam session (_strict_steam_session_ok,
+    fail-closed — the gate queue_poll uses), checked before any other
+    statement; the 401 detail literal "session_required" is what
+    ApiClient.HandleSessionReject matches to re-mint. The opponent id is a
+    17-digit path parameter and must differ from the caller; anything else
+    is 400. Match rules are _viewer_h2h_counts's (its pair, invalidation
+    and room-prefix predicates are repeated verbatim in the one facts
+    statement, whose games_won / games_lost are its ranked + casual
+    counters folded): an admin-invalidated match never counts, nor a
+    team_/ovt_/ffa_ misroute, and a game with no winner counts for neither.
+    Series (design r3 §1.1 MEDIUM): EVERY completed, non-invalidated series
+    between the pair is classified, oriented to the caller — more wins is
+    series_won, fewer is series_lost, level is series_tied — and
+    series_total is the sum of the three, so a completed 2-2 row is one
+    tie and one series (no "decided" pre-filter ahead of the tie count;
+    the stats endpoint's helper keeps its own decided-only rule).
+    last_played_at is the latest counted game that ended strictly before
+    the caller's current UTC day (typed bind, TIMESTAMPTZ); played_today
+    reports whether any counted game ended on or after that boundary. The
+    response carries counters, a display name and one timestamp — no room
+    name, match id or series id (#463). Primary-only: not on the edge's
+    replica read list.
+    """
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    if (len(opponent_steam_id) != 17 or not opponent_steam_id.isdigit()
+            or opponent_steam_id == steam_id):
+        raise HTTPException(status_code=400, detail="bad_request")
+
+    _nowm = time.monotonic()
+    _dkey = (steam_id, opponent_steam_id)
+    _last = _h2h_last_read.get(_dkey)
+    if _last is not None and (_nowm - _last) < _H2H_DEBOUNCE_SECONDS:
+        _retry_s = max(1, math.ceil(_H2H_DEBOUNCE_SECONDS - (_nowm - _last)))
+        raise HTTPException(status_code=429,
+                            detail={"error": "rate_debounced",
+                                    "retry_after": _retry_s},
+                            headers={"Retry-After": str(_retry_s)})
+    _h2h_last_read[_dkey] = _nowm
+    if len(_h2h_last_read) > _H2H_DEBOUNCE_MAX_KEYS:
+        # TTL pruning first, then oldest-first eviction until the cap holds.
+        # The key just written is the newest, so it survives; an evicted
+        # younger key's pair can be read again inside its window — the
+        # accepted cost of the bound (r3 §1.1 LOW).
+        _cut = _nowm - _H2H_DEBOUNCE_TTL_SECONDS
+        for _k in [k for k, v in _h2h_last_read.items() if v < _cut]:
+            _h2h_last_read.pop(_k, None)
+        _over = len(_h2h_last_read) - _H2H_DEBOUNCE_MAX_KEYS
+        if _over > 0:
+            for _k in sorted(_h2h_last_read, key=_h2h_last_read.__getitem__)[:_over]:
+                _h2h_last_read.pop(_k, None)
+
+    rows = (await db.execute(text("""
+        SELECT p.steam_id, p.id, p.display_name
+          FROM players p
+         WHERE p.steam_id IN (CAST(:me AS VARCHAR), CAST(:opp AS VARCHAR))
+    """), {"me": steam_id, "opp": opponent_steam_id})).mappings().all()
+    me_row = next((r for r in rows if r["steam_id"] == steam_id), None)
+    opp_row = next((r for r in rows if r["steam_id"] == opponent_steam_id), None)
+    if me_row is None or opp_row is None:
+        # Unknown opponent (or a caller with no players row yet): zeros and
+        # no name — the client renders its "first time" line.
+        return H2HSummaryResponse()
+
+    opp_name = _clean_display_name(opp_row["display_name"], opponent_steam_id)
+
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # One statement for every aggregate. pair_matches: the pair's valid 1v1
+    # games under _viewer_h2h_counts's predicates, verbatim — games_won /
+    # games_lost are its ranked + casual counters folded (a game with no
+    # winner counts for neither). pair_series: every completed, valid series
+    # between the pair with its wins oriented to the caller (vw = the
+    # caller's side, pw = the opponent's), classified in the projection and
+    # not pre-filtered, so a level row reaches series_tied and
+    # won + lost + tied is the row count.
+    facts = (await db.execute(text("""
+        WITH pair_matches AS (
+            SELECT m.ended_at, m.winner_id
+              FROM matches m
+             WHERE ((m.player1_id = :vid AND m.player2_id = :pid)
+                 OR (m.player1_id = :pid AND m.player2_id = :vid))
+               AND m.invalidated_at IS NULL
+               AND (m.photon_room_id IS NULL OR (
+                       LEFT(m.photon_room_id, 5) <> 'team_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ovt_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ffa_'))
+        ), pair_series AS (
+            SELECT CASE WHEN rs.player1_id = :vid THEN rs.p1_series_wins ELSE rs.p2_series_wins END AS vw,
+                   CASE WHEN rs.player1_id = :vid THEN rs.p2_series_wins ELSE rs.p1_series_wins END AS pw
+              FROM ranked_series rs
+             WHERE rs.status = 'completed'
+               AND rs.invalidated_at IS NULL
+               AND ((rs.player1_id = :vid AND rs.player2_id = :pid)
+                 OR (rs.player1_id = :pid AND rs.player2_id = :vid))
+        )
+        SELECT
+            (SELECT COUNT(*) FROM pair_matches pm WHERE pm.winner_id = :vid) AS games_won,
+            (SELECT COUNT(*) FROM pair_matches pm WHERE pm.winner_id = :pid) AS games_lost,
+            (SELECT MAX(pm.ended_at) FROM pair_matches pm
+              WHERE pm.ended_at < CAST(:day_start AS TIMESTAMPTZ)) AS last_played_at,
+            EXISTS (SELECT 1 FROM pair_matches pm
+                     WHERE pm.ended_at >= CAST(:day_start AS TIMESTAMPTZ)) AS played_today,
+            (SELECT COUNT(*) FROM pair_series ps WHERE ps.vw > ps.pw) AS series_won,
+            (SELECT COUNT(*) FROM pair_series ps WHERE ps.vw < ps.pw) AS series_lost,
+            (SELECT COUNT(*) FROM pair_series ps WHERE ps.vw = ps.pw) AS series_tied
+    """), {"vid": me_row["id"], "pid": opp_row["id"], "day_start": day_start})).mappings().first()
+    games_won = int(facts["games_won"] or 0) if facts else 0
+    games_lost = int(facts["games_lost"] or 0) if facts else 0
+    last_played_at = facts["last_played_at"] if facts else None
+    played_today = bool(facts["played_today"]) if facts else False
+    series_won = int(facts["series_won"] or 0) if facts else 0
+    series_lost = int(facts["series_lost"] or 0) if facts else 0
+    series_tied = int(facts["series_tied"] or 0) if facts else 0
+
+    return H2HSummaryResponse(
+        opponent_display_name=opp_name,
+        games_total=games_won + games_lost,
+        games_won=games_won,
+        games_lost=games_lost,
+        series_total=series_won + series_lost + series_tied,
+        series_won=series_won,
+        series_lost=series_lost,
+        series_tied=series_tied,
+        last_played_at=last_played_at,
+        played_today=played_today,
+    )
 
 
 @app.get("/api/v1/players/{steam_id}", response_model=PlayerStatsResponse, tags=["Players"])
@@ -12882,8 +13038,16 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     """
     import uuid as uuid_mod
 
-    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
-    await _check_steam_session(request, steam_id, db)
+    # Requires the caller's OWN valid Steam session: the same fail-closed gate
+    # queue_poll uses (_strict_steam_session_ok), placed before the first
+    # statement so a refused request writes no ready flag, stamps no room and
+    # answers no room name. The 401 detail literal is LOAD-BEARING:
+    # ApiClient.HandleSessionReject matches "session_required" to drop the
+    # token so the heartbeat re-mints. A refused ready returns the client to
+    # Searching; the queue-leave decision stays with the poll's time-windowed
+    # refusal rule (see queue_poll).
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
 
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
@@ -20235,13 +20399,18 @@ async def purchase_item(
     # compatible with the KEY SHARE concurrent purchases' player_items FK
     # inserts hold (#202). Every decision below reads THIS tuple; the ORM
     # `item` is only trusted for fields no endpoint mutates (kind, sku,
-    # rotation_pool, catalog_ready).
+    # rotation_pool). catalog_ready rides the locked read and is re-checked
+    # under it, so a row unpublished between the ORM snapshot and this lock
+    # gets the pre-lock refusal, not a debit. Rule: any later unpublish UPDATE
+    # must take a lock mode that conflicts with this FOR SHARE (#202).
     _locked = (await db.execute(text(
-        "SELECT price, artist_steam_id, stock_limit "
+        "SELECT price, artist_steam_id, stock_limit, catalog_ready "
         "FROM shop_items WHERE id = :iid FOR SHARE"
     ), {"iid": item.id})).mappings().first()
     if _locked is None:
         raise HTTPException(status_code=404, detail="Item not found")
+    if not _locked["catalog_ready"]:
+        raise HTTPException(status_code=409, detail="This cosmetic is approved but has not shipped in the mod yet")
     live_price = int(_locked["price"])
     live_artist = _locked["artist_steam_id"]
     live_stock = _locked["stock_limit"]

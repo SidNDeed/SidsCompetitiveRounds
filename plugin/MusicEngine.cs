@@ -1154,9 +1154,15 @@ namespace CompetitiveRounds
             if (SelectionUniverseEmpty()) return MusicMode.Vanilla;          // nothing to manage — fail open
             // r3 MEDIUM 3: an explicit PlayTrack takeover plays its ONE track
             // regardless of the selection; ordinary transport history never
-            // overrides "deselected everything" (deliberate silence).
+            // overrides "deselected everything".
             if (s.takeoverKey != null) return s.hasReadyTrack ? MusicMode.Custom : MusicMode.Loading;
-            if (!s.selectionNonEmpty) return MusicMode.MutedByChoice;        // user deselected everything: deliberate silence
+            // music v3 §4: every track unchecked = Vanilla, the same value and
+            // reason as the empty universe above (nothing to manage). Vanilla
+            // is non-owned like Loading, so TransitionTo runs the same [G5]
+            // release. Within this method MutedByChoice is returned only for
+            // stopIntent (Stop, loop-off run-out); Reconcile's menu branch
+            // adds the menu "silent" setting.
+            if (!s.selectionNonEmpty) return MusicMode.Vanilla;
             if (s.manualTakeover) return s.hasReadyTrack ? MusicMode.Custom : MusicMode.Loading;
             if (SelectionIsPureFullVanilla()) return MusicMode.Vanilla;      // engine output would be byte-identical vanilla
             return s.hasReadyTrack ? MusicMode.Custom : MusicMode.Loading;
@@ -1491,10 +1497,11 @@ namespace CompetitiveRounds
             // park is suppressed HERE so vanilla in-game music never blips in
             // the frame before the tick's Reconcile re-takes ownership. [I18]
             // the parked OWNERSHIP CLASS decides: parked MutedByChoice always
-            // suppresses (silence is the point — stopIntent and empty
-            // selection alike); parked Custom suppresses only while a track
-            // is still ready, so a readiness loss cannot swallow the only
-            // vanilla call of a Loading round.
+            // suppresses (silence is the point — ComputeDesiredMode yields
+            // MutedByChoice only for stopIntent, Stop or a loop-off run-out,
+            // so that is what a parked one is); parked Custom suppresses only
+            // while a track is still ready, so a readiness loss cannot
+            // swallow the only vanilla call of a Loading round.
             if (!menuCall && s.menuParked)
             {
                 suppress = s.menuParkedMode == MusicMode.MutedByChoice
@@ -3845,9 +3852,11 @@ namespace CompetitiveRounds
                 // [I9] Ownership loss must never resolve to owned silence:
                 // when the revoke just EMPTIED the effective selection while
                 // the universe stays non-empty, release takeover to vanilla
-                // explicitly — MutedByChoice stays reserved for the user's
-                // own deselect-everything choice, and the consent-revoke
-                // promise is "vanilla music comes back".
+                // explicitly — the consent-revoke promise is "vanilla music
+                // comes back". (ComputeDesiredMode now maps an empty
+                // selection to Vanilla as well; the explicit latch here is
+                // unchanged.) MutedByChoice stays reserved for stopIntent and
+                // the menu "silent" setting.
                 if (hadSelection && !s.stopIntent)
                 {
                     EnsureQueueCurrent();
