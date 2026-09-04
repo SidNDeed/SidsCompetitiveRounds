@@ -19,27 +19,31 @@ namespace CompetitiveRounds
     /// Scope, by design: a PLAYER seat is only ever idle-closed inside a live
     /// online room (a match, a lobby, a spectate) — at the main menu a page left
     /// open is nobody's problem, and the idle showcase manages its own pages
-    /// there. The player gets a toast first and the close follows 15 s after the
-    /// toast was actually SHOWN (r1 MEDIUM 4: a toast the notification surface
-    /// dropped — notifications off, a critical cue owning the slot — is retried,
-    /// and with notifications off the page is simply left open). The BROADCAST
-    /// seat has no reader: in a room it closes after a short quiet spell with no
-    /// warning, and at the menu it closes a lever-opened page after a minute
-    /// (long enough for the verification screenshots that lever exists for)
-    /// while leaving showcase-owned pages to the showcase.</summary>
+    /// there. Inside a room the page closes after PLAYER_CLOSE_SEC without input;
+    /// a courtesy toast is issued once per idle episode at PLAYER_WARN_SEC. The
+    /// close does NOT depend on that toast: three review rounds of coupling the
+    /// close to the toast's delivery, replacement and per-lifetime retry budget
+    /// each found the next hole inside the previous repair, so the coupling was
+    /// deleted rather than repaired again (r3 cut). Failure direction: a seat
+    /// that produced no input for PLAYER_CLOSE_SEC inside a live room loses one
+    /// page and reopens it with F5; a seat that was present produced input and
+    /// never reaches the close. With notifications off the toast cannot show and
+    /// the close still fires (logged once per session). The BROADCAST seat has
+    /// no reader: in a room it closes after a short quiet spell with no warning,
+    /// and at the menu it closes a lever-opened page after a minute (long enough
+    /// for the verification screenshots that lever exists for) while leaving
+    /// showcase-owned pages to the showcase.</summary>
     internal static class OverlayIdleClose
     {
         private const float PLAYER_WARN_SEC = 60f;
-        private const float PLAYER_GRACE_SEC = 15f;          // after a DELIVERED warning
+        private const float PLAYER_CLOSE_SEC = 75f;          // the toast text promises 15 s more
         private const float BROADCAST_ROOM_CLOSE_SEC = 30f;
         private const float BROADCAST_MENU_CLOSE_SEC = 60f;
 
         private static bool wasOpen;
-        private static bool warned;
-        private static bool undeliverableLogged;
+        private static bool warned;             // one toast per idle episode
+        private static bool notifOffLogged;
         private static float lastPresenceRt;
-        private static float warnedAt;
-        private static float nextWarnTryRt;
         private static Vector3 lastMouse;
 
         /// <summary>Room state read straight from Photon (r1 MEDIUM 1):
@@ -73,10 +77,10 @@ namespace CompetitiveRounds
                 || (mouse - lastMouse).sqrMagnitude > 4f
                 || Input.mouseScrollDelta.sqrMagnitude > 0f;
             lastMouse = mouse;
-            if (present) { lastPresenceRt = now; ResetWarning(); return; }
+            if (present) { lastPresenceRt = now; warned = false; return; }
             bool prompt;
             try { prompt = NativeUI.HasOpenPrompt; } catch { prompt = false; }
-            if (prompt) { lastPresenceRt = now; ResetWarning(); return; }
+            if (prompt) { lastPresenceRt = now; warned = false; return; }
 
             bool inRoom = InLiveOnlineRoom;
             bool broadcast;
@@ -92,84 +96,32 @@ namespace CompetitiveRounds
                 if (idle >= BROADCAST_MENU_CLOSE_SEC) CloseIdle("broadcast-menu", idle);
                 return;
             }
-            if (!inRoom) { lastPresenceRt = now; ResetWarning(); return; }
-            if (!warned)
+            if (!inRoom) { lastPresenceRt = now; warned = false; return; }
+            if (!warned && idle >= PLAYER_WARN_SEC)
             {
-                if (idle >= PLAYER_WARN_SEC && now >= nextWarnTryRt)
+                warned = true;
+                bool delivered = false;
+                try { delivered = CompetitiveUI.ShowNotification(I18n.Tr("Menu closes in 15 s - move the mouse to keep it open"), Color.yellow, 6f); }
+                catch { }
+                if (!delivered && !notifOffLogged)
                 {
-                    nextWarnTryRt = now + 1f;
-                    if (warnAttempts >= WARN_MAX_ATTEMPTS)
+                    bool notifOff = false;
+                    try { notifOff = Plugin.ShowNotifications != null && !Plugin.ShowNotifications.Value; } catch { }
+                    if (notifOff)
                     {
-                        // Every warning so far was overwritten before the player
-                        // could read it (a busy toast surface). Failure direction:
-                        // the page stays open — never close on a warning nobody saw.
-                        if (!undeliverableLogged)
-                        {
-                            undeliverableLogged = true;
-                            Plugin.Log?.LogInfo("[NATIVE] idle-close: the warning toast was replaced " + WARN_MAX_ATTEMPTS + " times before it was readable - player page left open");
-                        }
-                        return;
-                    }
-                    bool delivered = false;
-                    try { delivered = CompetitiveUI.ShowNotification(I18n.Tr("Menu closes in 15 s - move the mouse to keep it open"), Color.yellow, 6f); }
-                    catch { }
-                    if (delivered)
-                    {
-                        warned = true; warnedAt = now; warnAttempts++;
-                        warnVisibleSec = 0f; lastTickRt = now;
-                        try { warnSeq = CompetitiveUI.NotificationSeq; } catch { warnSeq = -1; }
-                    }
-                    else if (!undeliverableLogged)
-                    {
-                        bool notifOff = false;
-                        try { notifOff = Plugin.ShowNotifications != null && !Plugin.ShowNotifications.Value; } catch { }
-                        if (notifOff)
-                        {
-                            undeliverableLogged = true;
-                            Plugin.Log?.LogInfo("[NATIVE] idle-close: notifications are off, so the 15 s warning cannot be shown - player pages are left open");
-                        }
+                        notifOffLogged = true;
+                        Plugin.Log?.LogInfo("[NATIVE] idle-close: notifications are off, so the 15 s warning cannot be shown; an idle page inside a room still closes after " + PLAYER_CLOSE_SEC + " s");
                     }
                 }
-                return;
             }
-            // r2 MEDIUM 2: ShowNotification grants no ownership of the slot — an
-            // ordinary toast (an FFA auto-pick, say) can overwrite the warning
-            // before it was ever rendered. The grace period therefore counts
-            // only once the warning has been ON SCREEN for WARN_MIN_VISIBLE_SEC
-            // (same sequence number, timer still running, sampled per tick); a
-            // warning replaced before that is re-issued, bounded by
-            // WARN_MAX_ATTEMPTS, and an unread warning never closes the page.
-            bool visible = false;
-            try { visible = CompetitiveUI.NotificationVisible(warnSeq); } catch { }
-            if (visible) warnVisibleSec += Mathf.Max(0f, now - lastTickRt);
-            lastTickRt = now;
-            if (warnVisibleSec < WARN_MIN_VISIBLE_SEC)
-            {
-                if (!visible) { warned = false; nextWarnTryRt = now + 1f; }
-                return;
-            }
-            if (now - warnedAt >= PLAYER_GRACE_SEC) CloseIdle("player-room", idle);
-        }
-
-        /// <summary>The warning must be readable before it counts: this many
-        /// seconds with the warning toast actually occupying the slot.</summary>
-        private const float WARN_MIN_VISIBLE_SEC = 3f;
-        /// <summary>Re-issues of a warning that was overwritten early, per idle
-        /// episode; past this the page is left open (logged once per session).</summary>
-        private const int WARN_MAX_ATTEMPTS = 3;
-        private static int warnSeq = -1, warnAttempts;
-        private static float warnVisibleSec, lastTickRt;
-
-        private static void ResetWarning()
-        {
-            warned = false; warnAttempts = 0; warnVisibleSec = 0f; warnSeq = -1;
+            if (idle >= PLAYER_CLOSE_SEC) CloseIdle("player-room", idle);
         }
 
         private static void CloseIdle(string why, float idle)
         {
             Plugin.Log?.LogInfo($"[NATIVE] idle-close ({why}) after {idle:F0}s without input");
             try { NativeUI.Close(); } catch { }
-            wasOpen = false; ResetWarning();
+            wasOpen = false; warned = false;
         }
     }
 }

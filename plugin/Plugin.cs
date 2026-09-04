@@ -151,7 +151,6 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestMapSkin;  // broadcast seat only — map-skin test lever
         internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
-        internal static ConfigEntry<string> BroadcastMusicStreamProbe;   // broadcast seat only — music v7 spike (MusicStreamProbe)
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
@@ -980,10 +979,6 @@ namespace CompetitiveRounds
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
                 "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
-            );
-            BroadcastMusicStreamProbe = Config.Bind(
-                "Broadcast", "MusicStreamProbe", "",
-                "Broadcast seat only: '<albumSku>:<trackIdx>[:stress]' plays that track STREAMED (streamAudio=true) on a private source for 120 s (stress: 600 s) and logs [MUSIC-PROBE] lines (GetContent ms, DSP-vs-source drift, stalls, heap). Music v7 spike; set a NEW value to re-run. Reloaded from disk every 2 s with the other levers."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
@@ -2013,67 +2008,24 @@ namespace CompetitiveRounds
         // STARTUP BASELINE — a click directive equal to it is inert whatever nonce
         // it carries (a 6-hex nonce collides 1 in 16.7M; the baseline closes even that).
         private static string _testLeverBaseline;
-        // Sept 4: a Music click replayed in the SAME tick as the page open was
-        // refused every time ("no decode (entry: menu not open)" — the engine's
-        // admission wants the page open on the two preceding frames plus the
-        // click frame). The click is now armed here and replayed on a later
-        // tick, and once it has run the page is closed again when the seat is
-        // inside an online room: the click was the lever's whole purpose, and a
-        // page left open over a live spectate is what the stream showed for
-        // whole games.
-        private static string _pendingMusicClick;
-        private static float _pendingMusicClickAt;
-        private static int _pendingMusicClickFrame;
-        private static object _pendingMusicClickRoom;   // the Room object at arm time (r1 MEDIUM 3)
-        private static int _pendingMusicClickGen;       // NativeUI.PageGeneration at arm time (r2 MEDIUM 1)
-        private static string _pendingMusicClickNetState; // PhotonNetwork.NetworkClientState at arm time (r2 MEDIUM 1)
+        // Sept 4: a Music click replayed in the SAME tick as the page open is
+        // refused by the engine ("no decode (entry: menu not open)" — its
+        // admission wants the page open on the preceding frames). The first
+        // design ARMED the click here and replayed it on a later tick; three
+        // review rounds then bound the replay to the page, the Room object, the
+        // page generation and the Photon client state, and each round found the
+        // next unbound transition inside the previous repair (a spectator
+        // acquisition entering Granting changes none of them). r3 cut: there is
+        // no armed state any more. A click directive runs in the tick that
+        // reads it or not at all, with every admission predicate read at the
+        // instant of the call (MusicClickRefusal), and it requires the page to be
+        // ALREADY open on the Music tab from an earlier lever open — the
+        // operator issues the open, then the click with a fresh nonce.
 
         private void TickTestOpenTab()
         {
             if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;
             if (!_testLeverNonceLogged) { _testLeverNonceLogged = true; Plugin.Log.LogInfo($"[UI] TestOpenTab click nonce for this process: {_testLeverNonce}"); }
-            if (_pendingMusicClick != null && Time.realtimeSinceStartup >= _pendingMusicClickAt && Time.frameCount >= _pendingMusicClickFrame)
-            {
-                string click = _pendingMusicClick;
-                _pendingMusicClick = null;
-                object armedRoom = _pendingMusicClickRoom; _pendingMusicClickRoom = null;
-                int armedGen = _pendingMusicClickGen; string armedNet = _pendingMusicClickNetState ?? "";
-                // r1 MEDIUM 3: the replay is bound to the page and the room
-                // incarnation that armed it — the Music tab must still be the
-                // open page and the seat must hold the same Room object (or
-                // still none); anything else drops the click.
-                bool sameContext = false;
-                try
-                {
-                    object roomNow = null;
-                    try { roomNow = PhotonNetwork.CurrentRoom; } catch { }
-                    string netNow = "";
-                    try { netNow = PhotonNetwork.NetworkClientState.ToString(); } catch { }
-                    sameContext = NativeUI.IsOpen && NativeUI.CurrentTab == 16 && ReferenceEquals(roomNow, armedRoom)
-                        && NativeUI.PageGeneration == armedGen
-                        && string.Equals(netNow, armedNet, StringComparison.Ordinal)
-                        && !SpectatorJoiner.JoinOpUnsettled;
-                }
-                catch { }
-                if (!sameContext)
-                {
-                    Plugin.Log.LogInfo($"[UI] TestOpenTab deferred click '{click}' dropped: page or room changed since it was armed");
-                    return;
-                }
-                try { NativeUI.DevMusicClick(click); }
-                catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestOpenTab deferred click failed: {ex.Message}"); }
-                try
-                {
-                    // r1 MEDIUM 1: live Photon room state, not the watcher flag
-                    // a spectator seat stops maintaining.
-                    if (OverlayIdleClose.InLiveOnlineRoom && NativeUI.IsOpen)
-                    {
-                        NativeUI.Close();
-                        Plugin.Log.LogInfo("[UI] TestOpenTab: page closed after the click (seat is in an online room)");
-                    }
-                }
-                catch { }
-            }
             // Re-read the cfg file every 2s so the lever can be driven without
             // a relaunch (Config.Bind values never track disk edits, #190).
             if (Time.realtimeSinceStartup - _testOpenTabCfgReloadAt > 2f)
@@ -2151,24 +2103,52 @@ namespace CompetitiveRounds
             }
             Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"} shopCat {shopCat} musicClick {musicClick ?? "-"}");
             NativeUI.ReleaseShowcaseOwnership();   // r1 LOW 9: the lever takes the page over from the showcase
+            if (!string.IsNullOrEmpty(musicClick))
+            {
+                // Synchronous, never armed (see the comment above TickTestOpenTab).
+                string refuse = MusicClickRefusal();
+                if (refuse == null)
+                {
+                    try
+                    {
+                        NativeUI.DevMusicClick(musicClick);
+                        Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' applied");
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestOpenTab music click '{musicClick}' failed: {ex.Message}"); }
+                    return;
+                }
+                Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' not applied: {refuse}");
+                bool onMusicTab = false;
+                try { onMusicTab = NativeUI.IsOpen && NativeUI.CurrentTab == 16; } catch { }
+                if (onMusicTab) return;   // page already there; nothing else to do
+                // fall through: open the Music tab so a re-issued directive can run
+            }
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
-            if (!string.IsNullOrEmpty(musicClick))
+        }
+
+        /// <summary>Why a lever Music click may not run RIGHT NOW, or null when it
+        /// may. Read at the instant of the call — there is no armed state to
+        /// bind, so no transition can slip between the check and the click. The
+        /// page must already be open on the Music tab (the engine's admission
+        /// wants it open on the preceding frames), the seat must be at the menu
+        /// (no room of any kind), and no spectator acquisition, spectator session
+        /// or join operation may be under way (r3 MEDIUM 1: an acquisition
+        /// entering Granting changes neither the room nor the client state).</summary>
+        private static string MusicClickRefusal()
+        {
+            try
             {
-                // Armed, not replayed: see the field comment above.
-                _pendingMusicClick = musicClick;
-                _pendingMusicClickAt = Time.realtimeSinceStartup + 0.75f;
-                try { _pendingMusicClickRoom = PhotonNetwork.CurrentRoom; } catch { _pendingMusicClickRoom = null; }
-                // r2 MEDIUM 1: bind to the page INSTANCE (generation bumps on
-                // open/close/tab switch) and to the Photon client state, so a
-                // rebuild back to tab 16 or a roomless transition (null room at
-                // arm AND replay, e.g. a spectator join starting) drops the click.
-                _pendingMusicClickGen = NativeUI.PageGeneration;
-                try { _pendingMusicClickNetState = PhotonNetwork.NetworkClientState.ToString(); } catch { _pendingMusicClickNetState = ""; }
-                _pendingMusicClickFrame = Time.frameCount + 6;
-                Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' armed for a later tick");
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 16)
+                    return "the page is not open on the Music tab (opening it now - re-issue the directive with a new nonce once it is)";
+                if (PhotonNetwork.InRoom) return "the seat is inside a room";
+                if (BroadcastMode.AcquisitionBusy) return "a spectator acquisition is in progress";
+                if (SpectatorSession.IsLocalSpectator) return "the seat is a spectator";
+                if (SpectatorJoiner.JoinOpUnsettled) return "a join operation is unsettled";
+                return null;
             }
+            catch (Exception ex) { return "state read failed: " + ex.Message; }
         }
 
         // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──
@@ -2625,7 +2605,6 @@ namespace CompetitiveRounds
             // Overlay left open with nobody at the seat (every identity; the
             // player branch only acts inside an online room).
             try { OverlayIdleClose.Tick(); } catch { }
-            try { MusicStreamProbe.Tick(); } catch { }
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }

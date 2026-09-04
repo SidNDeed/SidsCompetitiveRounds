@@ -24,15 +24,6 @@ namespace CompetitiveRounds
         private static string notifText = "";
         private static Color notifColor = Color.white;
         private static float notifTimer = 0f;
-        /// <summary>Incremented every time the single slot is (re)written —
-        /// ShowNotification, the critical variant, and the queue pop. A caller
-        /// that must know whether ITS toast is still the one on screen keeps
-        /// the value ShowNotification left and asks NotificationVisible
-        /// (Sept 4 idle-close r2 MEDIUM 2: a delivered toast can be replaced
-        /// before the player reads it).</summary>
-        private static int notifSeq;
-        public static int NotificationSeq => notifSeq;
-        public static bool NotificationVisible(int seq) { return seq == notifSeq && notifTimer > 0f; }
         private static List<QueuedNotif> notifQueue = new List<QueuedNotif>();
         /// <summary>While unscaled time is below this, the notification slot
         /// belongs to a match-critical cue: ordinary toasts are DROPPED for
@@ -70,7 +61,6 @@ namespace CompetitiveRounds
             notifText = text;
             notifColor = color;
             notifTimer = duration;
-            notifSeq++;
             return true;
         }
 
@@ -94,7 +84,6 @@ namespace CompetitiveRounds
             notifText = text;
             notifColor = color;
             notifTimer = duration;
-            notifSeq++;
             notifCriticalUntil = Time.unscaledTime + duration;
             // A critical cue OWNS the whole notification surface for its
             // duration (#356), and the set band is part of that surface. This
@@ -7936,7 +7925,7 @@ namespace CompetitiveRounds
             if (notifTimer <= 0f && notifQueue.Count > 0)
             {
                 var n = notifQueue[0]; notifQueue.RemoveAt(0);
-                notifText = n.text; notifColor = n.color; notifTimer = n.dur; notifSeq++;
+                notifText = n.text; notifColor = n.color; notifTimer = n.dur;
             }
             if (notifTimer <= 0f) return;
             // OnGUI runs 2+ times per frame (Layout + Repaint + one per input event);
