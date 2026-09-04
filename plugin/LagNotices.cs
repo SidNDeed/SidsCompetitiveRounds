@@ -99,6 +99,29 @@ namespace CompetitiveRounds
             return !force && gameOpen && !spectator;
         }
 
+        /// <summary>r7 M3/L1: the window-keying PRODUCER's decision, here so
+        /// the self-test runs the same code NetworkSeatTelemetry.CloseWindow
+        /// does. A closed window carries a key only when it was one eligible
+        /// opponent's window for its WHOLE span, not merely at its ends:
+        /// • openActor/openId — the eligible key sampled when the window
+        ///   opened; openActor 0 means the seat was not an eligible 1v1 then.
+        /// • closeActor/closeId — the same, sampled when it closed.
+        /// • keyBroken — latched by the telemetry the moment any frame INSIDE
+        ///   the window sampled a different key (eligibility lost, the
+        ///   opponent replaced, a third fighter present), so an opponent who
+        ///   arrives and leaves between two boundaries can no longer leave the
+        ///   window keyed.
+        /// • lateForeign — a late batch arrived from an actor other than the
+        ///   one the window opened under.
+        /// False => the window is stored with no key, and AdmitWindows never
+        /// lets the evaluator read it.</summary>
+        internal static bool WindowKeyed(int openActor, string openId, int closeActor, string closeId,
+                                         bool lateForeign, bool keyBroken)
+        {
+            if (openActor == 0 || keyBroken || lateForeign) return false;
+            return closeActor == openActor && string.Equals(openId ?? "", closeId ?? "", StringComparison.Ordinal);
+        }
+
         /// <summary>r3 M6 / r6 M2: the per-sample OPP_STREAM input. Only the
         /// delivery excess counts — never the raw arrival gap. The excess is a
         /// RECEIVER observation: the interval between two batch arrivals,
@@ -586,8 +609,13 @@ namespace CompetitiveRounds
         // while the seat was not an eligible 1v1), and each step applies the
         // production admission (AdmitWindows) before Step, resetting the
         // slots exactly where OnWindowClosed does.
+        // r7 L1: the "producer_" cases are the other half — the sequence cases
+        // take a window's key as given, and these run the code that DECIDES it
+        // (WindowKeyed, the same call NetworkSeatTelemetry.CloseWindow makes)
+        // over one window's boundary facts. Their <states> field is that
+        // verdict, "keyed" or "unkeyed", not a window sequence.
 
-        private const int CASE_COUNT = 25;
+        private const int CASE_COUNT = 32;
 
         private struct Canned
         {
@@ -602,6 +630,17 @@ namespace CompetitiveRounds
             public string Expected;
             public bool IgnoreForcedGate;   // negative control only: proves the forced case discriminates (#391)
             public bool IgnoreKeyGate;      // negative control only: proves the r6 M3 admission discriminates (#391)
+            // r7 L1: a PRODUCER case — it runs the window-keying producer
+            // (WindowKeyed) on one window's boundary facts instead of feeding
+            // the evaluator a window sequence, and its result is the string.
+            public Func<string> Producer;
+        }
+
+        /// <summary>r7 L1: the producer's verdict for one window, rendered.</summary>
+        private static string Keyed(int openActor, string openId, int closeActor, string closeId,
+                                    bool lateForeign, bool keyBroken)
+        {
+            return WindowKeyed(openActor, openId, closeActor, closeId, lateForeign, keyBroken) ? "keyed" : "unkeyed";
         }
 
         private const int KEY_A = 2;   // the default canned opponent: actor 2, id "A"
@@ -771,11 +810,29 @@ namespace CompetitiveRounds
                     Seq = Seq(Opp(40, 2700, 300), Opp(40, 2700, 300), Opp(40, 2700, 300, actor: 0, id: null), Opp(40, 2700, 300), Opp(40, 2700, 300)),
                     Expected = Exp("-", "OPP_STREAM", "k", "-", "OPP_STREAM"),
                 },
+
+                // r7 L1: the PRODUCER that decides whether a window carries a
+                // key at all — the cases above take that decision as given.
+                // Arguments: open key, close key, lateForeign, keyBroken.
+                new Case { Name = "producer_one_opponent_whole_window", Producer = () => Keyed(KEY_A, "A", KEY_A, "A", false, false), Expected = "keyed" },
+                // r7 M3: eligibility lost (or a third fighter present) INSIDE
+                // the window, back to the same key by the boundary — the two
+                // boundary samples agree and only the latch sees it.
+                new Case { Name = "producer_key_broken_inside_window", Producer = () => Keyed(KEY_A, "A", KEY_A, "A", false, true), Expected = "unkeyed" },
+                // Negative control for the case above: the same window with the
+                // latch term dropped is keyed, so that case discriminates the
+                // latch and nothing else (#391).
+                new Case { Name = "producer_key_broken_latch_control", Producer = () => Keyed(KEY_A, "A", KEY_A, "A", false, false), Expected = "keyed" },
+                new Case { Name = "producer_opponent_replaced_at_close", Producer = () => Keyed(KEY_A, "A", KEY_B, "B", false, false), Expected = "unkeyed" },
+                new Case { Name = "producer_same_actor_new_id_at_close", Producer = () => Keyed(KEY_A, "A", KEY_A, "C", false, false), Expected = "unkeyed" },
+                new Case { Name = "producer_ineligible_at_open", Producer = () => Keyed(0, null, KEY_A, "A", false, false), Expected = "unkeyed" },
+                new Case { Name = "producer_late_batch_from_other_actor", Producer = () => Keyed(KEY_A, "A", KEY_A, "A", true, false), Expected = "unkeyed" },
             };
         }
 
         private static string RunCase(Case c)
         {
+            if (c.Producer != null) return c.Producer();
             var slots = NewSlots();
             var ring = new List<NetworkSeatTelemetry.WindowFacts>(LOOKBACK + 1);
             var recent = new NetworkSeatTelemetry.WindowFacts[LOOKBACK];

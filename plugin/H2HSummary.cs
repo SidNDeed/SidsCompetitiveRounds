@@ -27,12 +27,15 @@ namespace CompetitiveRounds
     /// way the server answers with ITS name for the id and the line is
     /// labelled with that name; this line is the id's only consumer here.
     ///
-    /// The attested id names a PAIR, not a seat (review r6 MEDIUM): it is
-    /// bound to the first (incarnation, other-fighter actor) it is consumed
-    /// for — H2HRules.ResolveIssued, state held on ApiClient's issued pair —
-    /// and any other actor or incarnation in that room gets no line at all,
-    /// never the advertised id: a replacement fighter would otherwise be
-    /// shown the original opponent's record under the original's name.
+    /// The attestation VERIFIES an identity; it never supplies one (review
+    /// r6/r7 MEDIUM — H2HRules.ConsultIssued, state held on ApiClient's
+    /// issued pair). In the room the queue issued, the line is shown only
+    /// when the other fighter's own advertised id IS the attested one, and
+    /// only for the (incarnation, actor) the pairing is bound to on its
+    /// first such consumption. A fighter advertising anything else, a later
+    /// actor or incarnation, and a queue lifecycle that has moved on all get
+    /// no line at all — never the advertised id, which would show one
+    /// player the record and server name of another.
     ///
     /// Key: the attempt and its result belong to (room incarnation, opponent
     /// actor number, opponent id) — r3 §1.2/1.3 MEDIUM. When the actor or
@@ -228,16 +231,16 @@ namespace CompetitiveRounds
 
         /// <summary>No single resolvable other fighter right now — the
         /// opponent left, a third fighter arrived, the room stopped being a
-        /// plain 1v1, there is no room, or (suppressed) the other fighter in
-        /// a queue-issued room is not the one the pairing was bound to. The
-        /// attempt and its line end here; the next resolvable opponent
-        /// starts a new key.</summary>
+        /// plain 1v1, there is no room, or (suppressed) the queue's pairing
+        /// for this room does not stand for the other fighter. The attempt
+        /// and its line end here; the next resolvable opponent starts a new
+        /// key.</summary>
         private static void NoteNoOpponent(bool suppressed)
         {
             if (suppressed && !suppressionLogged)
             {
                 suppressionLogged = true;
-                Plugin.Log.LogInfo("[H2H] other fighter is not the one the queue paired this seat with — no line for this fighter");
+                Plugin.Log.LogInfo("[H2H] the queue's pairing for this room does not stand for the other fighter — no line");
             }
             if (keyActor < 0 && state == State.Idle) return;
             bool hadLine = state != State.Idle;
@@ -246,14 +249,18 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The other fighter and the id the line keys on. Actor: the
-        /// single other active fighter (RoomActors' census). Id: the
-        /// server-attested opponent for a queue-issued room this client still
-        /// holds the name of (ApiClient.TryGetIssuedOpponent — Attested only
-        /// for the actor and incarnation the pairing is bound to), otherwise
-        /// the actor's own u_id property — "" until it arrives. False when
-        /// there is not exactly one other fighter, or (suppressed = true)
-        /// when the queue-issued room's other fighter is not the bound one:
-        /// then the advertised id is not consulted (review r6 MEDIUM).</summary>
+        /// single other active fighter (RoomActors' census). Id: in a
+        /// queue-issued room this client still holds the name of, the attested
+        /// opponent — but only once that fighter's OWN advertised u_id says he
+        /// is that player (ApiClient.TryGetIssuedOpponent, review r7 MEDIUM:
+        /// the attestation verifies an identity, it never supplies one); in
+        /// any other room, the actor's own u_id property. "" until that
+        /// property arrives, either way. False when there is not exactly one
+        /// other fighter, or (suppressed = true) when the queue-issued room's
+        /// other fighter is not the paired one — an advertised id that differs
+        /// from the attested one, an actor or incarnation the pairing is not
+        /// bound to, or a queue lifecycle that has moved on: then no line at
+        /// all, and never the advertised id.</summary>
         private static bool ResolveOpponent(Photon.Realtime.Room room, out int actor, out string id, out bool attested, out bool suppressed)
         {
             actor = -1;
@@ -263,8 +270,9 @@ namespace CompetitiveRounds
             var others = RoomActors.OtherActiveFighters();
             if (others == null || others.Length != 1 || others[0] == null) return false;
             actor = others[0].ActorNumber;
+            string advertised = RoomActors.SteamIdOf(others[0]) ?? "";
             string issued;
-            switch (ApiClient.TryGetIssuedOpponent(room.Name, incarnation, actor, out issued))
+            switch (ApiClient.TryGetIssuedOpponent(room.Name, advertised, incarnation, actor, out issued))
             {
                 case H2HRules.IssuedOpponent.Attested:
                     id = issued;
@@ -273,8 +281,15 @@ namespace CompetitiveRounds
                 case H2HRules.IssuedOpponent.Suppressed:
                     suppressed = true;
                     return false;
+                case H2HRules.IssuedOpponent.Pending:
+                    // The issued room's other fighter advertises no id yet, so
+                    // there is nothing for the attestation to verify: id stays
+                    // "", exactly as it does in an ordinary room while a u_id
+                    // is still on its way. No request and no line until it
+                    // arrives.
+                    return true;
                 default:
-                    id = RoomActors.SteamIdOf(others[0]) ?? "";
+                    id = advertised;
                     return true;
             }
         }

@@ -120,6 +120,12 @@ namespace CompetitiveRounds
         private static int _wOpenActor;
         private static string _wOpenId;
         private static bool _wLateForeign;
+        // r7 M3: latched the moment any frame INSIDE the current window
+        // sampled an eligible key different from the one it opened under —
+        // eligibility lost, the opponent replaced, a third fighter present.
+        // Sampling only at the two boundaries left a window keyed when the
+        // change happened and reverted between them.
+        private static bool _wKeyBroken;
 
         /// <summary>The closed-window facts LagNotices reads (§4.3).</summary>
         internal struct WindowFacts
@@ -223,6 +229,7 @@ namespace CompetitiveRounds
             _wWorstMs = 0; _wQOut = _wQIn = 0; _wResent = _wDiscarded = _wCrc = _wFragment = 0;
             _wObsLate300 = 0;
             _wLateForeign = false;
+            _wKeyBroken = false;
             _wWorstTags = "";
         }
 
@@ -243,26 +250,52 @@ namespace CompetitiveRounds
             if (actorNumber <= 0 || _wOpenActor == 0 || actorNumber != _wOpenActor) _wLateForeign = true;
         }
 
-        /// <summary>r6 M3: the eligible-opponent key at a window boundary —
-        /// the actor number and advertised id (u_id; "" when absent) of the
-        /// ONLY other fighter — when this seat passes LagNotices.SeatEligible
-        /// (plain 1v1 fighter seat, not a spectator, not the broadcast
-        /// identity); 0/null otherwise. The same predicate as the evaluator's
-        /// own gate, so a keyed window and an eligible tick cannot disagree.</summary>
+        /// <summary>r6 M3: the eligible-opponent key right now — the actor
+        /// number and advertised id (u_id; "" when absent) of the ONLY other
+        /// fighter — when this seat passes LagNotices.SeatEligible (plain 1v1
+        /// fighter seat, not a spectator, not the broadcast identity); 0/null
+        /// otherwise. The same predicate as the evaluator's own gate, so a
+        /// keyed window and an eligible tick cannot disagree. r7 M3: called
+        /// every frame as well as at the two boundaries, so it reads the
+        /// roster through RoomActors' per-frame fighter cache instead of
+        /// building a fresh list on every call.</summary>
         private static void SampleEligibleKey(out int actor, out string id)
         {
             actor = 0; id = null;
             try
             {
                 if (_spectatorGame || !LagNotices.SeatEligible()) return;
-                var others = RoomActors.OtherActiveFighters();
-                if (others == null || others.Length != 1 || others[0] == null) return;
-                int a = others[0].ActorNumber;
+                var all = RoomActors.ActiveFighters();
+                if (all == null) return;
+                int other = -1;
+                for (int i = 0; i < all.Length; i++)
+                {
+                    if (all[i] == null || all[i].IsLocal) continue;
+                    if (other >= 0) return;   // more than one other fighter: no key
+                    other = i;
+                }
+                if (other < 0) return;
+                int a = all[other].ActorNumber;
                 if (a <= 0) return;
                 actor = a;
-                id = RoomActors.SteamIdOf(others[0]);
+                id = RoomActors.SteamIdOf(all[other]);
             }
             catch { actor = 0; id = null; }
+        }
+
+        /// <summary>r7 M3: one in-window eligibility sample, taken every frame
+        /// from TickFrame. Eligibility is LATCHED, not re-derived at the
+        /// boundary: any frame whose key differs from the one the window
+        /// opened under marks that whole window unusable, however briefly the
+        /// difference lasts, and the latch clears only when the next window
+        /// opens.</summary>
+        private static void NoteKeySampleInWindow()
+        {
+            if (_wKeyBroken) return;
+            int actor; string id;
+            SampleEligibleKey(out actor, out id);
+            if (actor != _wOpenActor || !string.Equals(id ?? "", _wOpenId ?? "", StringComparison.Ordinal))
+                _wKeyBroken = true;
         }
 
         // ── per-frame (from GameStateWatcher.TickFrame) ──────────────────
@@ -344,8 +377,17 @@ namespace CompetitiveRounds
                     _windowStartRt = rt;
                     SampleEligibleKey(out _wOpenActor, out _wOpenId);
                     _wLateForeign = false;
+                    _wKeyBroken = false;
                 }
-                else if (rt - _windowStartRt >= 1f) CloseWindow(force: false);
+                else
+                {
+                    // r7 M3: this frame is INSIDE the open window, so the key
+                    // is sampled here, where a change happens, and latched —
+                    // an opponent who arrives and leaves between two
+                    // boundaries no longer leaves the window keyed.
+                    NoteKeySampleInWindow();
+                    if (rt - _windowStartRt >= 1f) CloseWindow(force: false);
+                }
             }
             catch { }
             finally { _tickTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0; _tickCalls++; }
@@ -393,18 +435,16 @@ namespace CompetitiveRounds
             }
             catch { }
             try { int r; if (!_spectatorGame && GameStateWatcher.TryGetPeerRttFresh(out r)) peerRtt = r; } catch { }
-            // r6 M3: the window is keyed only when the eligible key at close
-            // equals the one it opened under and no late sample came from
-            // another actor — a window whose key differs between its open and
-            // its close (opponent replaced, eligibility gained or lost), or
-            // that received a late batch from any other actor, carries no key
-            // and is never consumed by the evaluator. Eligibility is sampled
-            // at the two boundaries, not continuously; a late batch from a
-            // transient third actor is what marks the window in between.
+            // r6 M3 / r7 M3: the window is keyed only when it was one eligible
+            // opponent's window for its WHOLE span — the key sampled at its
+            // open, the key sampled at its close, and every per-frame sample
+            // in between (latched in _wKeyBroken) all agree, and no late batch
+            // came from another actor. An unkeyed window is never consumed by
+            // the evaluator. LagNotices.WindowKeyed holds the rule, so the
+            // self-test decides these windows with this exact code.
             int closeActor; string closeId;
             SampleEligibleKey(out closeActor, out closeId);
-            bool keyed = _wOpenActor != 0 && closeActor == _wOpenActor && !_wLateForeign
-                && string.Equals(_wOpenId ?? "", closeId ?? "", StringComparison.Ordinal);
+            bool keyed = LagNotices.WindowKeyed(_wOpenActor, _wOpenId, closeActor, closeId, _wLateForeign, _wKeyBroken);
             var w = new Window
             {
                 OwnPing = ownPing, PeerRtt = peerRtt, ObsLate300 = _wObsLate300,

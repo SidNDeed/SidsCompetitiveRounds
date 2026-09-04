@@ -18,10 +18,12 @@
   Last played 3 days ago · H2H 12-8 · Ranked series 4", "First time playing
   NAME", or "First played today" when the only games are from today. The
   numbers come from a new session-authenticated read that returns totals only;
-  the name shown is the one the server holds for the opponent, so a room where
-  the seats change re-fetches for the new opponent. Queue-issued rooms use the
-  opponent the queue assigned; other rooms use the id the opponent's game
-  advertises.
+  the name shown is the one the server holds for the opponent. In an ordinary
+  room the line follows the seat: if the other player is replaced, it clears and
+  re-fetches for whoever is there now, using the id that player's game
+  advertises. In a room the ranked queue issued, the line is for the opponent
+  the queue assigned and nobody else — anyone else in that seat gets no line at
+  all, rather than the assigned player's name and record.
 
 **Lag notices (opt-in, default off)**
 

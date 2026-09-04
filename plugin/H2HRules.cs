@@ -15,32 +15,78 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class H2HRules
     {
-        // ── queue-issued attestation binding (review r6 MEDIUM) ────────────
+        // ── queue-issued attestation (review r6/r7 MEDIUM) ─────────────────
 
-        internal enum IssuedOpponent { NotIssued, Attested, Suppressed }
+        internal enum IssuedOpponent { NotIssued, Attested, Pending, Suppressed }
 
-        /// <summary>The queue's retained pairing names a PAIR, not a seat. It
-        /// is bound to the first (H2HSummary incarnation, other-fighter actor)
-        /// it is consumed for and answers Attested for that binding only; any
-        /// other actor or incarnation in the room it was issued for is
-        /// Suppressed — the caller shows no line, and never the peer's
-        /// advertised id. NotIssued when the room is not the issued one (the
-        /// room-code path, which keys on the advertised id); the binding is
-        /// untouched then. The bound pair lives with ApiClient's issued pair,
-        /// so a new issuance or a retire starts unbound.</summary>
-        internal static IssuedOpponent ResolveIssued(bool issuedForRoom, ref int boundIncarnation, ref int boundActor,
-                                                     int incarnation, int actor)
+        /// <summary>The pairing the queue retained for the room it issued, as
+        /// ApiClient holds it: the lifecycle generation it was issued under,
+        /// the room name it describes, the opponent the server paired this
+        /// seat with, and the (H2HSummary incarnation, other-fighter actor)
+        /// the pairing was first consumed for (BoundActor &lt; 0 until then).
+        /// Plain ints and strings — nothing Unity, Photon or Steam.</summary>
+        internal struct IssuedPairState
         {
-            if (!issuedForRoom) return IssuedOpponent.NotIssued;
-            if (boundActor < 0)
+            public int Gen;
+            public string RoomName;
+            public string OpponentSteamId;
+            public int BoundIncarnation;
+            public int BoundActor;
+        }
+
+        /// <summary>The whole queue-issued read, decided here so the self-test
+        /// runs the same code the client does (review r7 LOW): ApiClient owns
+        /// the record and the lifecycle counter and passes them in; every
+        /// check, and the binding write-back, happen in this one place.
+        ///
+        /// pair: the retained pairing, null when this client holds none.
+        /// currentGen: ApiClient's queue lifecycle counter now. roomName: the
+        /// room this seat is in. advertisedId: the Steam id the other fighter's
+        /// own game advertises (null/"" until its property arrives).
+        /// incarnation/actor: H2HSummary's room incarnation and that fighter's
+        /// Photon actor number.
+        ///
+        /// NotIssued for any room other than the one the pairing names — the
+        /// caller keys on the advertised id there and the pairing is untouched.
+        /// In the room the pairing names:
+        /// • Suppressed once the queue lifecycle has moved on. The record is
+        ///   KEPT, so the answer stays Suppressed for that room instead of
+        ///   falling back to the advertised id (review r7 MEDIUM); it is
+        ///   retired by a join to any other room.
+        /// • Suppressed for any actor or incarnation other than the one the
+        ///   pairing was bound to.
+        /// • Pending while the other fighter advertises no id yet: nothing to
+        ///   verify against, so no answer — the caller waits exactly as it
+        ///   does for an ordinary room's not-yet-arrived id.
+        /// • Suppressed when the id that fighter advertises is not the attested
+        ///   one. The attestation VERIFIES the identity a fighter claims; it
+        ///   never supplies one for a fighter who claims something else, or
+        ///   nothing (review r7 MEDIUM).
+        /// • Attested otherwise, and the first Attested answer binds the
+        ///   pairing to that (incarnation, actor).
+        /// attestedId is set on Attested only.</summary>
+        internal static IssuedOpponent ConsultIssued(ref IssuedPairState? pair, int currentGen, string roomName,
+                                                     string advertisedId, int incarnation, int actor,
+                                                     out string attestedId)
+        {
+            attestedId = null;
+            if (pair == null || string.IsNullOrEmpty(roomName)) return IssuedOpponent.NotIssued;
+            var p = pair.Value;
+            if (!string.Equals(p.RoomName ?? "", roomName, StringComparison.Ordinal)) return IssuedOpponent.NotIssued;
+            if (p.Gen != currentGen) return IssuedOpponent.Suppressed;
+            if (p.BoundActor >= 0 && (p.BoundIncarnation != incarnation || p.BoundActor != actor))
+                return IssuedOpponent.Suppressed;
+            if (string.IsNullOrEmpty(advertisedId)) return IssuedOpponent.Pending;
+            if (!string.Equals(advertisedId, p.OpponentSteamId ?? "", StringComparison.Ordinal))
+                return IssuedOpponent.Suppressed;
+            if (p.BoundActor < 0)
             {
-                boundIncarnation = incarnation;
-                boundActor = actor;
-                return IssuedOpponent.Attested;
+                p.BoundIncarnation = incarnation;
+                p.BoundActor = actor;
+                pair = p;   // the binding, written back (a nullable struct is a copy)
             }
-            return boundIncarnation == incarnation && boundActor == actor
-                ? IssuedOpponent.Attested
-                : IssuedOpponent.Suppressed;
+            attestedId = p.OpponentSteamId;
+            return IssuedOpponent.Attested;
         }
 
         // ── failure handling (review r6 LOW) ───────────────────────────────
@@ -152,7 +198,7 @@ namespace CompetitiveRounds
 
         // ── self-test ──────────────────────────────────────────────────────
 
-        internal const int SELFTEST_CASES = 28;
+        internal const int SELFTEST_CASES = 36;
 
         /// <summary>Every rule above against canned inputs. A case marked
         /// control expects the WRONG answer and passes only when the harness
@@ -175,16 +221,33 @@ namespace CompetitiveRounds
 
             try
             {
-                // binding
-                int bi = -1, ba = -1;
-                Check("issued:not-issued", Bind(false, ref bi, ref ba, 3, 2), "NotIssued/-1/-1");
-                Check("issued:first-bind", Bind(true, ref bi, ref ba, 3, 2), "Attested/3/2");
-                Check("issued:same-actor", Bind(true, ref bi, ref ba, 3, 2), "Attested/3/2");
-                Check("issued:other-actor", Bind(true, ref bi, ref ba, 3, 5), "Suppressed/3/2");
-                Check("issued:original-after-other", Bind(true, ref bi, ref ba, 3, 2), "Attested/3/2");
-                Check("issued:other-incarnation", Bind(true, ref bi, ref ba, 4, 2), "Suppressed/3/2");
-                Check("issued:other-room-keeps-binding", Bind(false, ref bi, ref ba, 4, 9), "NotIssued/3/2");
-                Check("control:issued:other-actor-attested", Bind(true, ref bi, ref ba, 3, 5), "Attested/3/2", control: true);
+                // queue-issued attestation — the producer itself: one record,
+                // consulted the way ApiClient consults it, so the binding
+                // write-back and the lifecycle answer are under test too
+                // (review r7 LOW). Rendered as verdict/attested-id/bound.
+                const string OPP = "76561190000000001";
+                const string OTHER = "76561190000000002";
+                IssuedPairState? none = null;
+                Check("issued:none-held", Consult(ref none, 7, "ranked_r", OPP, 3, 2), "NotIssued/-/none");
+                IssuedPairState? pair = new IssuedPairState { Gen = 7, RoomName = "ranked_r", OpponentSteamId = OPP,
+                                                             BoundIncarnation = -1, BoundActor = -1 };
+                Check("issued:other-room", Consult(ref pair, 7, "code_room", OPP, 3, 2), "NotIssued/-/-1/-1");
+                Check("issued:no-advertised-id", Consult(ref pair, 7, "ranked_r", "", 3, 2), "Pending/-/-1/-1");
+                Check("issued:advertised-mismatch", Consult(ref pair, 7, "ranked_r", OTHER, 3, 2), "Suppressed/-/-1/-1");
+                Check("issued:verified-first-bind", Consult(ref pair, 7, "ranked_r", OPP, 3, 2), "Attested/" + OPP + "/3/2");
+                Check("issued:same-actor-again", Consult(ref pair, 7, "ranked_r", OPP, 3, 2), "Attested/" + OPP + "/3/2");
+                Check("issued:other-actor", Consult(ref pair, 7, "ranked_r", OPP, 3, 5), "Suppressed/-/3/2");
+                Check("issued:other-incarnation", Consult(ref pair, 7, "ranked_r", OPP, 4, 2), "Suppressed/-/3/2");
+                Check("issued:bound-actor-changes-id", Consult(ref pair, 7, "ranked_r", OTHER, 3, 2), "Suppressed/-/3/2");
+                Check("issued:bound-actor-drops-id", Consult(ref pair, 7, "ranked_r", "", 3, 2), "Pending/-/3/2");
+                Check("issued:original-after-other", Consult(ref pair, 7, "ranked_r", OPP, 3, 2), "Attested/" + OPP + "/3/2");
+                Check("issued:lifecycle-moved-suppresses", Consult(ref pair, 8, "ranked_r", OPP, 3, 2), "Suppressed/-/3/2");
+                Check("issued:lifecycle-moved-stays-suppressed", Consult(ref pair, 8, "ranked_r", OPP, 3, 2), "Suppressed/-/3/2");
+                Check("issued:other-room-keeps-record", Consult(ref pair, 8, "code_room", OPP, 9, 9), "NotIssued/-/3/2");
+                Check("control:issued:mismatch-attested", Consult(ref pair, 7, "ranked_r", OTHER, 3, 2),
+                      "Attested/" + OPP + "/3/2", control: true);
+                Check("control:issued:lifecycle-not-issued", Consult(ref pair, 8, "ranked_r", OPP, 3, 2),
+                      "NotIssued/-/3/2", control: true);
 
                 // failures
                 var b = new RetryBudget();
@@ -242,9 +305,16 @@ namespace CompetitiveRounds
             return run;
         }
 
-        private static string Bind(bool issued, ref int bi, ref int ba, int inc, int actor)
+        /// <summary>verdict/attested-id/binding, where the binding is the
+        /// record's own BoundIncarnation/BoundActor after the call ("none"
+        /// when no record is held) — so a case reads the write-back, not just
+        /// the return value.</summary>
+        private static string Consult(ref IssuedPairState? pair, int gen, string room, string advertised, int inc, int actor)
         {
-            return ResolveIssued(issued, ref bi, ref ba, inc, actor) + "/" + bi + "/" + ba;
+            string id;
+            var verdict = ConsultIssued(ref pair, gen, room, advertised, inc, actor, out id);
+            return verdict + "/" + (id ?? "-") + "/"
+                   + (pair.HasValue ? pair.Value.BoundIncarnation + "/" + pair.Value.BoundActor : "none");
         }
 
         private static string Describe(string err, int retryAfter, ref RetryBudget b)
