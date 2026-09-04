@@ -1050,8 +1050,10 @@ namespace CompetitiveRounds
                     // running a build NEWER than the advertised latest (the
                     // desktop drop, the broadcast VM before the LATEST bump)
                     // logged "Update available: v1.40.1 -> v1.40.0" — a downgrade
-                    // offer that was only ever a log line, but it reads as a bug
-                    // report in every such log.
+                    // offer. The Settings footer and its Update button used the
+                    // same string inequality; NativeUI.RefreshVersionStatus now
+                    // uses this compare too, so an ahead-of-latest seat is never
+                    // offered the older build (r1 LOW 11).
                     int cmp = CompareVersion(Plugin.ModVersion, ver);
                     if (cmp < 0)
                         Plugin.Log.LogWarning($"[VERSION] Update available: v{Plugin.ModVersion} → v{ver}");
@@ -1089,7 +1091,7 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Returns -1 / 0 / +1 by dotted-int component comparison. Treats parse failures as 0.</summary>
-        private static int CompareVersion(string a, string b)
+        internal static int CompareVersion(string a, string b)
         {
             if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return 0;
             var ap = a.Split('.'); var bp = b.Split('.');

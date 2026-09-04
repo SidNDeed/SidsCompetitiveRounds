@@ -37,9 +37,12 @@ namespace CompetitiveRounds
 
         public static void ToggleOverlay() => NativeUI.Toggle();
 
-        public static void ShowNotification(string text, Color color, float duration = 5f)
+        /// <summary>Returns whether the toast was actually placed in the slot
+        /// (Sept 4, idle-close r1 MEDIUM 4): a caller that promises the player a
+        /// warning must not act on a toast this surface dropped.</summary>
+        public static bool ShowNotification(string text, Color color, float duration = 5f)
         {
-            if (!Plugin.ShowNotifications.Value) return;
+            if (!Plugin.ShowNotifications.Value) return false;
             // A critical cue owns the slot for its whole duration (Aug 12
             // review r2): ordinary toasts write the same three fields, so an
             // FFA pick toast landing a second after the leave-confirm cue
@@ -48,7 +51,7 @@ namespace CompetitiveRounds
             // not queued: this surface is latest-wins by design, and queueing
             // them (self-audit) let a busy FFA stack minutes of stale toasts
             // that then replayed out of context.
-            if (Time.unscaledTime < notifCriticalUntil) return;
+            if (Time.unscaledTime < notifCriticalUntil) return false;
             // L10n chokepoint for the IMGUI toast surface (Codex client
             // review find 7): these render via GUI.Label, never through
             // UIFactory, so without this the exact catalogue entries for
@@ -58,6 +61,7 @@ namespace CompetitiveRounds
             notifText = text;
             notifColor = color;
             notifTimer = duration;
+            return true;
         }
 
         public static void QueueNotification(string text, Color color, float duration = 5f)

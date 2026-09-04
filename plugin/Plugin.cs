@@ -151,6 +151,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestMapSkin;  // broadcast seat only — map-skin test lever
         internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
+        internal static ConfigEntry<string> BroadcastMusicStreamProbe;   // broadcast seat only — music v7 spike (MusicStreamProbe)
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
@@ -979,6 +980,10 @@ namespace CompetitiveRounds
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
                 "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
+            );
+            BroadcastMusicStreamProbe = Config.Bind(
+                "Broadcast", "MusicStreamProbe", "",
+                "Broadcast seat only: '<albumSku>:<trackIdx>[:stress]' plays that track STREAMED (streamAudio=true) on a private source for 120 s (stress: 600 s) and logs [MUSIC-PROBE] lines (GetContent ms, DSP-vs-source drift, stalls, heap). Music v7 spike; set a NEW value to re-run. Reloaded from disk every 2 s with the other levers."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
@@ -2019,6 +2024,7 @@ namespace CompetitiveRounds
         private static string _pendingMusicClick;
         private static float _pendingMusicClickAt;
         private static int _pendingMusicClickFrame;
+        private static object _pendingMusicClickRoom;   // the Room object at arm time (r1 MEDIUM 3)
 
         private void TickTestOpenTab()
         {
@@ -2028,11 +2034,31 @@ namespace CompetitiveRounds
             {
                 string click = _pendingMusicClick;
                 _pendingMusicClick = null;
+                object armedRoom = _pendingMusicClickRoom; _pendingMusicClickRoom = null;
+                // r1 MEDIUM 3: the replay is bound to the page and the room
+                // incarnation that armed it — the Music tab must still be the
+                // open page and the seat must hold the same Room object (or
+                // still none); anything else drops the click.
+                bool sameContext = false;
+                try
+                {
+                    object roomNow = null;
+                    try { roomNow = PhotonNetwork.CurrentRoom; } catch { }
+                    sameContext = NativeUI.IsOpen && NativeUI.CurrentTab == 16 && ReferenceEquals(roomNow, armedRoom);
+                }
+                catch { }
+                if (!sameContext)
+                {
+                    Plugin.Log.LogInfo($"[UI] TestOpenTab deferred click '{click}' dropped: page or room changed since it was armed");
+                    return;
+                }
                 try { NativeUI.DevMusicClick(click); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestOpenTab deferred click failed: {ex.Message}"); }
                 try
                 {
-                    if (GameStateWatcher.IsInOnlineRoom && NativeUI.IsOpen)
+                    // r1 MEDIUM 1: live Photon room state, not the watcher flag
+                    // a spectator seat stops maintaining.
+                    if (OverlayIdleClose.InLiveOnlineRoom && NativeUI.IsOpen)
                     {
                         NativeUI.Close();
                         Plugin.Log.LogInfo("[UI] TestOpenTab: page closed after the click (seat is in an online room)");
@@ -2116,6 +2142,7 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[UI] TestOpenTab click directive ignored: nonce mismatch (this process: {_testLeverNonce})");
             }
             Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"} shopCat {shopCat} musicClick {musicClick ?? "-"}");
+            NativeUI.ReleaseShowcaseOwnership();   // r1 LOW 9: the lever takes the page over from the showcase
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
@@ -2124,6 +2151,7 @@ namespace CompetitiveRounds
                 // Armed, not replayed: see the field comment above.
                 _pendingMusicClick = musicClick;
                 _pendingMusicClickAt = Time.realtimeSinceStartup + 0.75f;
+                try { _pendingMusicClickRoom = PhotonNetwork.CurrentRoom; } catch { _pendingMusicClickRoom = null; }
                 _pendingMusicClickFrame = Time.frameCount + 6;
                 Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' armed for a later tick");
             }
@@ -2583,6 +2611,7 @@ namespace CompetitiveRounds
             // Overlay left open with nobody at the seat (every identity; the
             // player branch only acts inside an online room).
             try { OverlayIdleClose.Tick(); } catch { }
+            try { MusicStreamProbe.Tick(); } catch { }
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }

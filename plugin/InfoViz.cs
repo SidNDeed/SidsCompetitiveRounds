@@ -940,7 +940,6 @@ namespace CompetitiveRounds
         private static readonly Color CELL_COND = new Color(0.72f, 0.52f, 0.14f, 0.92f);
         private static readonly Color CELL_NEUTRAL = new Color(0.20f, 0.23f, 0.30f, 0.92f);
         private static readonly Color CELL_REFRESH = new Color(0.62f, 0.50f, 0.14f, 0.95f);
-        private static readonly Color FLOW_BLUE = new Color(0.22f, 0.38f, 0.56f, 0.90f);
         private static readonly Color ROW_ALT = new Color(1f, 1f, 1f, 0.035f);
 
         // Table 1: name | Scavenger Brawler TasteOfBlood Lifesteal Refresh
@@ -955,6 +954,87 @@ namespace CompetitiveRounds
             "Silence|YYYYC", "Shockwave|YYYYN", "Static Field|YYYYC", "Supernova|YYYYY",
             "Timed Detonation|YYYYC", "Timed Detonation (self)|YNNNN", "Toxic Cloud|YYYYC", "Toxic Cloud (self)|YNNNN",
         };
+
+        // r1 MEDIUM 6: card identities stay raw (the translated catalogues keep
+        // card names in English); the generic base and the qualifiers are
+        // localized. Literal Tr calls so the extractor harvests the keys.
+        private static string MatrixRowLabel(string raw)
+        {
+            string b = raw, q = "";
+            if (b.EndsWith(" (self)", StringComparison.Ordinal)) { b = b.Substring(0, b.Length - 7); q = " " + I18n.Tr("(self)"); }
+            else if (b.EndsWith(" (AoE)", StringComparison.Ordinal)) { b = b.Substring(0, b.Length - 6); q = " " + I18n.Tr("(AoE)"); }
+            if (b == "Bullet damage") b = I18n.Tr("Bullet damage");
+            return b + q;
+        }
+        private static string ActionLabel(string a)
+        {
+            if (a == "Shoot") return I18n.Tr("Shoot");
+            if (a == "QShoot") return I18n.Tr("QShoot");
+            return a;   // a card identity (Silence) stays raw
+        }
+
+        /// <summary>Plain-text form of the Spirit visuals (r1 MEDIUM 5): the
+        /// Info search haystack and the render fallback when a builder returns
+        /// null, so the facts that moved out of the article body keep a text
+        /// copy. Null for visuals that carry no facts of their own.</summary>
+        internal static string TextFallback(string key)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                switch (key)
+                {
+                    case "damage-matrix":
+                    {
+                        string yes = I18n.Tr("Yes"), no = I18n.Tr("No"), cond = I18n.Tr("Conditional");
+                        sb.Append(I18n.Tr("TABLE OF DAMAGE INTERACTIONS")).Append(" - Scavenger / Brawler / Taste of Blood / Lifesteal / Refresh\n");
+                        for (int i = 0; i < DMG_MATRIX.Length; i++)
+                        {
+                            string[] parts = DMG_MATRIX[i].Split('|');
+                            sb.Append(MatrixRowLabel(parts[0])).Append(": ");
+                            for (int c = 0; c < parts[1].Length; c++)
+                            {
+                                if (c > 0) sb.Append(" / ");
+                                char code = parts[1][c];
+                                sb.Append(code == 'Y' ? yes : code == 'C' ? cond : no);
+                            }
+                            sb.Append('\n');
+                        }
+                        return sb.ToString();
+                    }
+                    case "refresh-sequences":
+                        SeqText(sb, I18n.Tr("Silence only: every other Silence produces a Refresh"), "FTFTF", new[] { "Silence", "Silence", "Silence", "Silence", "Silence" }, "NYNYN");
+                        SeqText(sb, I18n.Tr("A shot placed second: the shot Refreshes and resets the flag"), "FTFTF", new[] { "Silence", "Shoot", "Silence", "Silence", "Silence" }, "NYNYN");
+                        SeqText(sb, I18n.Tr("A shot placed third: an extra Refresh"), "FTFFT", new[] { "Silence", "Silence", "Shoot", "Silence", "Silence" }, "NYYNY");
+                        return sb.ToString();
+                    case "refresh-window-sequences":
+                        SeqText(sb, I18n.Tr("A quick follow-up shot (QShoot) counts as Conditional damage"), "FFTFT", new[] { "Shoot", "QShoot", "Silence", "QShoot", "Silence" }, "YNYNY");
+                        SeqText(sb, I18n.Tr("The same actions in a different order"), "FFTFT", new[] { "Shoot", "Silence", "QShoot", "Silence", "QShoot" }, "YNYNY");
+                        return sb.ToString();
+                    case "refresh-gate":
+                        return I18n.Tr("ONE CONDITIONAL HIT") + ": " + I18n.Tr("Deal Conditional damage") + " -> " + I18n.Tr("Is RefreshValid true?")
+                            + " " + I18n.Tr("Yes") + ": " + I18n.Tr("Set RefreshValid to false") + ", " + I18n.Tr("Trigger Refresh")
+                            + " / " + I18n.Tr("No") + ": " + I18n.Tr("Set RefreshValid to true") + "\n";
+                    case "refresh-flow":
+                        return I18n.Tr("EVERY DAMAGE OUTCOME") + ": " + I18n.Tr("Deal damage") + " -> " + I18n.Tr("How much damage?") + "\n"
+                            + I18n.Tr("More than 10") + " -> " + I18n.Tr("Inside the 0.35 s window?") + " " + I18n.Tr("Yes") + ": " + I18n.Tr("Reset the window") + " -> " + I18n.Tr("Is RefreshValid true?")
+                            + " / " + I18n.Tr("No") + ": " + I18n.Tr("Trigger Refresh") + ", " + I18n.Tr("Begin the window") + ", " + I18n.Tr("Set RefreshValid to false") + "\n"
+                            + I18n.Tr("Between 5 and 10") + " -> " + I18n.Tr("Is RefreshValid true?") + " " + I18n.Tr("Yes") + ": " + I18n.Tr("Trigger Refresh") + ", " + I18n.Tr("Set RefreshValid to false")
+                            + " / " + I18n.Tr("No") + ": " + I18n.Tr("Set RefreshValid to true") + "\n"
+                            + I18n.Tr("Less than 5") + " -> " + I18n.Tr("Do nothing") + "\n";
+                }
+            }
+            catch { }
+            return null;
+        }
+        private static void SeqText(System.Text.StringBuilder sb, string caption, string valid, string[] action, string refresh)
+        {
+            string tTrue = I18n.Tr("True"), tFalse = I18n.Tr("False"), tRef = I18n.Tr("Refresh"), tNone = I18n.Tr("No Refresh");
+            sb.Append(caption).Append('\n');
+            for (int c = 0; c < 5; c++)
+                sb.Append("RefreshValid ").Append(valid[c] == 'T' ? tTrue : tFalse).Append(" -> ").Append(ActionLabel(action[c]))
+                  .Append(" -> ").Append(refresh[c] == 'Y' ? tRef : tNone).Append('\n');
+        }
 
         private static GameObject BuildDamageMatrix(Transform parent)
         {
@@ -974,7 +1054,7 @@ namespace CompetitiveRounds
                 string[] parts = DMG_MATRIX[i].Split('|');
                 float y = H - TOP - ROW * (i + 1);
                 if ((i & 1) == 1) Box(p, 10f, y, 1130f, ROW, ROW_ALT);
-                Lbl(p, parts[0], 12f, TXT_MAIN, NAME_X, y, NAME_W, ROW);
+                Lbl(p, MatrixRowLabel(parts[0]), 12f, TXT_MAIN, NAME_X, y, NAME_W, ROW);
                 for (int c = 0; c < 5 && c < parts[1].Length; c++)
                 {
                     char code = parts[1][c];
@@ -1014,7 +1094,7 @@ namespace CompetitiveRounds
                     float x = X0 + c * (CELL_W + GAP);
                     Color col; string txt;
                     if (r == 0) { bool t = valid[c] == 'T'; col = t ? CELL_YES : CELL_NO; txt = t ? tTrue : tFalse; }
-                    else if (r == 1) { col = CELL_NEUTRAL; txt = action[c]; }
+                    else if (r == 1) { col = CELL_NEUTRAL; txt = ActionLabel(action[c]); }
                     else { bool t = refresh[c] == 'Y'; col = t ? CELL_REFRESH : KEY_NONE; txt = t ? tRef : tNone; }
                     Box(p, x, y + 1f, CELL_W, ROW - 2f, col);
                     Lbl(p, txt, 11f, Color.white, x, y, CELL_W, ROW, UIFactory.AlignMidCenter);
@@ -1070,7 +1150,7 @@ namespace CompetitiveRounds
             Box(p, 590f, 112f, 220f, 40f, CELL_NO);
             Lbl(p, I18n.Tr("Set RefreshValid to false"), 12f, Color.white, 590f, 122f, 220f, 20f, UIFactory.AlignMidCenter);
             Arrow(p, new Vector2(810f, 132f), new Vector2(866f, 132f), TXT_DIM);
-            Box(p, 870f, 112f, 200f, 40f, FLOW_BLUE);
+            Box(p, 870f, 112f, 200f, 40f, CELL_REFRESH);
             Lbl(p, I18n.Tr("Trigger Refresh"), 12f, Color.white, 870f, 122f, 200f, 20f, UIFactory.AlignMidCenter);
             Arrow(p, new Vector2(520f, 102f), new Vector2(586f, 62f), CELL_NO);
             Lbl(p, I18n.Tr("No"), 11f, CELL_NO, 530f, 66f, 50f, 16f);
@@ -1119,7 +1199,7 @@ namespace CompetitiveRounds
             // window: no -> refresh -> begin window -> set false
             Arrow(p, new Vector2(170f, 195f), new Vector2(170f, 126f), CELL_NO);
             Lbl(p, I18n.Tr("No"), 11f, CELL_NO, 178f, 172f, 40f, 16f);
-            Box(p, 70f, 88f, 200f, 36f, FLOW_BLUE);
+            Box(p, 70f, 88f, 200f, 36f, CELL_REFRESH);
             Lbl(p, I18n.Tr("Trigger Refresh"), 12f, Color.white, 70f, 96f, 200f, 20f, UIFactory.AlignMidCenter);
             Arrow(p, new Vector2(170f, 88f), new Vector2(170f, 68f), TXT_DIM);
             Box(p, 70f, 30f, 200f, 36f, CELL_NEUTRAL);
@@ -1128,7 +1208,7 @@ namespace CompetitiveRounds
             // RefreshValid: yes -> refresh -> set false; no -> set true
             Arrow(p, new Vector2(580f, 140f), new Vector2(580f, 126f), CELL_YES);
             Lbl(p, I18n.Tr("Yes"), 11f, CELL_YES, 590f, 126f, 40f, 16f);
-            Box(p, 480f, 88f, 200f, 36f, FLOW_BLUE);
+            Box(p, 480f, 88f, 200f, 36f, CELL_REFRESH);
             Lbl(p, I18n.Tr("Trigger Refresh"), 12f, Color.white, 480f, 96f, 200f, 20f, UIFactory.AlignMidCenter);
             Arrow(p, new Vector2(580f, 88f), new Vector2(580f, 68f), TXT_DIM);
             Box(p, 480f, 30f, 200f, 36f, CELL_NO);

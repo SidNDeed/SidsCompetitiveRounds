@@ -1328,7 +1328,7 @@ namespace CompetitiveRounds
         /// live combat).</summary>
         private static void TeardownOverlaySurfaces(){try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
-        public static void Close(){showcaseOwned=false;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
         /// <summary>Sid2's screenshot shows the page title/footer over live
         /// gameplay on his 16:10 monitor while 16:9 machines never see it.
@@ -5542,10 +5542,15 @@ namespace CompetitiveRounds
         // Deferred Info-article body scroll for the lever (see DevOpenTab).
         private static float pendingInfoScroll = -1f;
         private static int pendingInfoScrollFrame;
+        private static string pendingInfoScrollKey;
         private static void ApplyPendingInfoScroll()
         {
             if (pendingInfoScroll < 0f || Time.frameCount < pendingInfoScrollFrame) return;
             float s = pendingInfoScroll; pendingInfoScroll = -1f;
+            // r1 LOW 7: the offset belongs to the article that scheduled it —
+            // a close and a different article inside the three frames drop it
+            // (Close() also clears it).
+            if (!string.Equals(infoSelectedKey, pendingInfoScrollKey, StringComparison.Ordinal)) return;
             try
             {
                 if (infoBodyScrollGO == null || UIFactory.tScrollRect == null) return;
@@ -5585,7 +5590,7 @@ namespace CompetitiveRounds
                                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out bodyScroll))
                             key = infoArticleKey.Substring(0, colon).Trim();
                         SelectInfoArticle(key);
-                        if (bodyScroll >= 0f) { pendingInfoScroll = Mathf.Clamp01(bodyScroll); pendingInfoScrollFrame = Time.frameCount + 3; }
+                        if (bodyScroll >= 0f) { pendingInfoScroll = Mathf.Clamp01(bodyScroll); pendingInfoScrollFrame = Time.frameCount + 3; pendingInfoScrollKey = key; }
                     }
                 }
                 if (idx == 4 && shopScroll >= 0f && shopScrollGO != null && UIFactory.tScrollRect != null)
@@ -5698,6 +5703,19 @@ namespace CompetitiveRounds
         internal static bool ShowcaseOwnsPage
         {
             get { try { return showcaseOwned && InputCaptureActive; } catch { return false; } }
+        }
+        /// <summary>Sept 4 (idle-close r1 LOW 9): an operator lever that takes
+        /// a page over from the showcase revokes the showcase's ownership, so the
+        /// showcase neither rotates nor closes the requested view and the
+        /// idle-close treats it as an operator page.</summary>
+        internal static void ReleaseShowcaseOwnership() { showcaseOwned = false; }
+        /// <summary>A page modal awaiting a decision — bet amount, LFP ping,
+        /// first-run language prompt (r1 MEDIUM 2). While one is open the page is
+        /// in use whatever the raw input says, and closing the page under it
+        /// would leave the modal interactive over gameplay.</summary>
+        public static bool HasOpenPrompt
+        {
+            get { try { return LfpPromptOpen || CustomBetPromptOpen || LangPromptOpen; } catch { return false; } }
         }
         internal static bool TryOpenForShowcase()
         {
@@ -12402,17 +12420,21 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var ordered = new List<Transform>();
             foreach (var seg in segs)
             {
+                string segText = seg.Text;
                 if (!string.IsNullOrEmpty(seg.Viz))
                 {
                     var panel = InfoViz.Build(seg.Viz, content);
-                    if (panel != null) { infoBodyExtraGOs.Add(panel); ordered.Add(panel.transform); }
-                    continue;
+                    if (panel != null) { infoBodyExtraGOs.Add(panel); ordered.Add(panel.transform); continue; }
+                    // r1 MEDIUM 5: a visual that fails to build must not take its
+                    // facts with it — its text form is rendered in its place.
+                    segText = InfoViz.TextFallback(seg.Viz);
+                    if (string.IsNullOrEmpty(segText)) continue;
                 }
-                if (string.IsNullOrEmpty(seg.Text)) continue;
+                if (string.IsNullOrEmpty(segText)) continue;
                 if (!primaryUsed)
                 {
                     primaryUsed = true;
-                    UIFactory.SetTextRaw(infoBodyTxt, LinkifyInfoBody(seg.Text));
+                    UIFactory.SetTextRaw(infoBodyTxt, LinkifyInfoBody(segText));
                     if (bodyGO != null) ordered.Add(bodyGO.transform);
                     continue;
                 }
@@ -12420,7 +12442,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     new Color(0.84f, 0.85f, 0.90f), UIFactory.AlignTopLeft, sizeDelta: new Vector2(1180, 400));
                 UIFactory.SetWordWrap(extra, true);
                 UIFactory.SetTextAutoHeight(extra);
-                UIFactory.SetTextRaw(extra, LinkifyInfoBody(seg.Text));
+                UIFactory.SetTextRaw(extra, LinkifyInfoBody(segText));
                 var ego = (extra as Component)?.gameObject;
                 if (ego != null)
                 {
@@ -12481,6 +12503,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 string body = "";
                 try { body = art.Body() ?? ""; } catch { }
+                // r1 MEDIUM 5: facts that live in a visual are searchable through
+                // its text form (the 31-row damage matrix moved out of the body).
+                try
+                {
+                    var segs = art.Segments != null ? art.Segments() : null;
+                    if (segs != null)
+                        foreach (var sg in segs)
+                            if (!string.IsNullOrEmpty(sg.Viz))
+                            {
+                                string t = InfoViz.TextFallback(sg.Viz);
+                                if (!string.IsNullOrEmpty(t)) body += "\n" + t;
+                            }
+                }
+                catch { }
                 string title = "";
                 try { title = art.Title() ?? ""; } catch { }
                 hay = title + "\n" + System.Text.RegularExpressions.Regex.Replace(body, "<[^>]{1,40}>", "");
@@ -13941,7 +13977,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return false;
         }
 
-        private static void RefreshVersionStatus(){if(txtVersionStatus==null)return;if(ApiClient.ForceUpdateRequired){UIFactory.SetText(txtVersionStatus,"<color=#FF4444>UPDATE REQUIRED</color>");if(updateBtn!=null)updateBtn.SetActive(true);return;}if(ApiClient.UpdateReady){UIFactory.SetText(txtVersionStatus,"<color=#44FF44>Close ROUNDS to apply update</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(ApiClient.IsUpdating){UIFactory.SetText(txtVersionStatus,"<color=#66CCFF>Downloading...</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}string latest=ApiClient.LatestModVersion;if(latest==null){UIFactory.SetText(txtVersionStatus,"");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(latest==Plugin.ModVersion){UIFactory.SetText(txtVersionStatus,"<color=#44AA44>Up to date</color>");if(updateBtn!=null)updateBtn.SetActive(false);}else{UIFactory.SetText(txtVersionStatus,$"<color=#FFAA33>v{latest} available!</color>");if(updateBtn!=null)updateBtn.SetActive(true);}}
+        private static void RefreshVersionStatus(){if(txtVersionStatus==null)return;if(ApiClient.ForceUpdateRequired){UIFactory.SetText(txtVersionStatus,"<color=#FF4444>UPDATE REQUIRED</color>");if(updateBtn!=null)updateBtn.SetActive(true);return;}if(ApiClient.UpdateReady){UIFactory.SetText(txtVersionStatus,"<color=#44FF44>Close ROUNDS to apply update</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(ApiClient.IsUpdating){UIFactory.SetText(txtVersionStatus,"<color=#66CCFF>Downloading...</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}string latest=ApiClient.LatestModVersion;if(latest==null){UIFactory.SetText(txtVersionStatus,"");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(ApiClient.CompareVersion(Plugin.ModVersion,latest)>=0){/* Sept 4 (r1 LOW 11): ordered compare — an ahead-of-latest seat is never offered the older build */UIFactory.SetText(txtVersionStatus,"<color=#44AA44>Up to date</color>");if(updateBtn!=null)updateBtn.SetActive(false);}else{UIFactory.SetText(txtVersionStatus,$"<color=#FFAA33>v{latest} available!</color>");if(updateBtn!=null)updateBtn.SetActive(true);}}
 
         // ── Aug 12 item 2: per-mode rating / standing formatting ─────────────
         // ONE set of formatters, consumed by BOTH the My Stats pane and the

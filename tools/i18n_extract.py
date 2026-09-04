@@ -77,6 +77,8 @@ FILES = [
     # deliberately absent: album/track/artist text stays raw (#368) and their
     # log lines are not user-visible.
     "MusicAssets.cs", "MusicEngine.cs",
+    # Overlay idle-close (Sept 4) — the 15 s warning toast.
+    "OverlayIdleClose.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
