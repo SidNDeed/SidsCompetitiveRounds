@@ -674,6 +674,14 @@ namespace CompetitiveRounds
         private class PendingReport { public string url; public string json; public int attempts; public float nextAt; }
         private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
         private static bool _outboxLoopStarted;
+        /// <summary>Said once: a supervisor that could not be started is a
+        /// queue with no retry driver, and the previous code could not tell that
+        /// state from a healthy one.</summary>
+        private static bool _outboxLoopWarned;
+        /// <summary>How deep the supervisor will drive nested coroutines before
+        /// handing one to Unity. The pass nests one level (the request); the
+        /// cap is a bound on the hand-driving, not a statement about the depth.</summary>
+        private const int OUTBOX_NEST_LIMIT = 8;
         // One line per session, not per write: see PersistOutbox.
         private static bool _outboxPersistWarned;
         private const int OUTBOX_MAX_ATTEMPTS = 20;
@@ -777,7 +785,22 @@ namespace CompetitiveRounds
                 foreach (var p in _pendingReports)
                     sb.Append(p.url).Append('\t').Append(p.json.Replace("\n", " ").Replace("\r", " ")).Append('\n');
                 if (sb.Length == 0) { if (File.Exists(OutboxPath)) File.Delete(OutboxPath); }
-                else File.WriteAllText(OutboxPath, sb.ToString());
+                else
+                {
+                    // Written beside the queue and MOVED over it, never
+                    // truncated in place. WriteAllText opens the live file
+                    // with Truncate, so an interruption between the truncate
+                    // and the last byte leaves an empty or half-written queue
+                    // — losing exactly the reports this file exists to carry
+                    // through a crash, in exactly the window where one is most
+                    // likely, since we rewrite on every enqueue and dequeue.
+                    // With the move, an interruption leaves either the whole
+                    // previous queue or the whole new one.
+                    string tmp = OutboxPath + ".tmp";
+                    File.WriteAllText(tmp, sb.ToString());
+                    if (File.Exists(OutboxPath)) File.Replace(tmp, OutboxPath, null);
+                    else File.Move(tmp, OutboxPath);
+                }
             }
             catch (Exception ex)
             {
@@ -823,13 +846,27 @@ namespace CompetitiveRounds
         private static void EnsureOutboxLoop()
         {
             if (_outboxLoopStarted || Plugin.Instance == null) return;
-            // Set AFTER the coroutine is running. StartCoroutine throws when
-            // the host is inactive or mid-destruction, and both callers swallow
-            // it — so setting the flag first latched "a supervisor exists" with
-            // none running, and the flag is the only guard, so no later call
-            // could start one. Set after, a failed start simply leaves the flag
-            // false and the next enqueue re-arms.
-            Plugin.Instance.StartCoroutine(OutboxSupervisor());
+            // Set AFTER the coroutine is running, and only if it IS running.
+            // Setting it first latched "a supervisor exists" with none running,
+            // and the flag is the only guard, so no later call could start one.
+            //
+            // A THROW IS NOT THE ONLY WAY TO FAIL. On a host that is inactive
+            // Unity logs and returns null instead of throwing, so a try/catch
+            // around the call proves nothing about whether anything started —
+            // the returned Coroutine is what says so. Left false, the next
+            // enqueue re-arms, which is the behaviour this guard was written
+            // for in the first place.
+            var running = Plugin.Instance.StartCoroutine(OutboxSupervisor());
+            if (running == null)
+            {
+                if (!_outboxLoopWarned)
+                {
+                    _outboxLoopWarned = true;
+                    Plugin.Log.LogWarning("[OUTBOX] retry supervisor did not start (inactive host); "
+                                          + "queued reports wait for the next enqueue to re-arm it");
+                }
+                return;
+            }
             _outboxLoopStarted = true;
         }
 
@@ -844,7 +881,18 @@ namespace CompetitiveRounds
         /// one starts against the same queue; entries keep their attempt
         /// counts and their next-attempt times, so a repeated fault costs
         /// retries rather than the queue. The started flag is cleared if this
-        /// ever returns, so EnsureOutboxLoop can start a fresh one.</summary>
+        /// ever returns, so EnsureOutboxLoop can start a fresh one.
+        ///
+        /// NESTED COROUTINES ARE DRIVEN HERE TOO, and that is the difference
+        /// between the guard covering the pass and the guard covering one
+        /// statement of it. `OutboxPass` yields the request coroutine itself;
+        /// a yielded IEnumerator is run by UNITY, on its own, outside the try
+        /// below — so a throw inside a request (a malformed url on a persisted
+        /// entry reaches one) escaped the supervisor and killed it, and the
+        /// queue then waited for an enqueue that a session with nothing left to
+        /// report never makes. Driving nested enumerators on a small stack
+        /// keeps every frame inside the guard; only real yield instructions go
+        /// to Unity.</summary>
         private static IEnumerator OutboxSupervisor()
         {
             try
@@ -852,23 +900,36 @@ namespace CompetitiveRounds
                 while (true)
                 {
                     yield return new WaitForSecondsRealtime(10f);
-                    IEnumerator pass = OutboxPass();
-                    while (true)
+                    var stack = new List<IEnumerator>(OUTBOX_NEST_LIMIT);
+                    stack.Add(OutboxPass());
+                    while (stack.Count > 0)
                     {
+                        IEnumerator top = stack[stack.Count - 1];
                         object current = null;
-                        bool moved = false;
+                        bool moved = false, faulted = false;
                         try
                         {
-                            moved = pass.MoveNext();
-                            if (moved) current = pass.Current;
+                            moved = top.MoveNext();
+                            if (moved) current = top.Current;
                         }
                         catch (Exception ex)
                         {
                             Plugin.Log.LogWarning($"[OUTBOX] retry pass failed ({ex.Message}) — "
                                                   + $"{_pendingReports.Count} report(s) still queued for the next pass");
-                            moved = false;
+                            faulted = true;
                         }
-                        if (!moved) break;
+                        // The whole pass is abandoned, not just the frame that
+                        // threw: the entry being attempted already has its
+                        // attempt count and its next-attempt time, so the next
+                        // pass picks the queue up where this one left it.
+                        if (faulted) break;
+                        if (!moved) { stack.RemoveAt(stack.Count - 1); continue; }
+                        var nested = current as IEnumerator;
+                        if (nested != null && stack.Count < OUTBOX_NEST_LIMIT)
+                        {
+                            stack.Add(nested);
+                            continue;
+                        }
                         yield return current;
                     }
                 }
@@ -17988,6 +18049,28 @@ namespace CompetitiveRounds
                 return string.Equals(ActiveRankedSeriesRoom, here, StringComparison.Ordinal) ? sid : "";
             }
             catch { return ""; }
+        }
+
+        /// <summary>TRUE when this seat is in a room that the active series
+        /// id was demonstrably NOT published for — the id belongs to another
+        /// room. Outside a room there is nothing to compare against, so the
+        /// answer is FALSE: "not contradicted" is the honest reading of no
+        /// evidence, and it is what keeps a report submitted after the room
+        /// closed from losing its ranked routing. Consumers that FILE an
+        /// observation against a specific series want SeriesIdForThisRoom()
+        /// instead; this is for consumers that only need to know the id is not
+        /// from somewhere else.</summary>
+        public static bool ActiveSeriesContradictedByRoom()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ActiveRankedSeriesId)) return false;
+                if (!PhotonNetwork.InRoom) return false;
+                string here = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
+                if (string.IsNullOrEmpty(here)) return false;
+                return !string.Equals(ActiveRankedSeriesRoom, here, StringComparison.Ordinal);
+            }
+            catch { return false; }
         }
 
         public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId, string seriesId)

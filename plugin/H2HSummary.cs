@@ -7,10 +7,15 @@ namespace CompetitiveRounds
 {
     /// <summary>
     /// Release B §1 — the in-room "vs NAME · last played · H2H · ranked
-    /// series" line. One GET /api/v1/h2h/{me}/{opponent} per room
-    /// incarnation, aggregates only (the response carries counters, a name,
-    /// one timestamp and the server's day count for it — nothing
-    /// room-derived). Rendered as a 10 s banner under the corner HUD label
+    /// series" line. GET /api/v1/h2h/{me}/{opponent}, aggregates only (the
+    /// response carries counters, a name, one timestamp and the server's day
+    /// count for it — nothing room-derived).
+    ///
+    /// One read ANSWERS a key, which is not the same as one read per room:
+    /// the retry ladder below sends up to four requests for one key, and a
+    /// room whose opponent key changes buys a fresh ladder each time, which
+    /// is what the room budget bounds at H2HRules.MAX_REQUESTS_PER_ROOM. The
+    /// ordinary room — one opponent, first request answered — spends one. Rendered as a 10 s banner under the corner HUD label
     /// (CompetitiveUI.DrawH2HBanner) and as a header line on the hold-Tab
     /// board (TabStatsOverlay) for the rest of the sitting.
     ///

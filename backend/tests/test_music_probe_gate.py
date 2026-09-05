@@ -30,6 +30,8 @@ because widening the seat is exactly when those refusals start to matter.
 import re
 from pathlib import Path
 
+import pytest
+
 
 PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 PROBE_CS = PLUGIN / "MusicStreamProbe.cs"
@@ -269,14 +271,72 @@ def test_the_silence_mask_does_not_cover_the_audible_steps():
     track — and masking them hid every zero buffer in the two steps the
     measurement most cares about."""
     play = _code(_cs_method_body(PROBE_CS, "private static void PumpPlayback(float now)"))
-    assert "_tap.CallbacksPaused = _step == 3;" in play
     assert "_tap.SilenceExpected = _step == 3 || now < _maskUntil;" in play
+    assert "_tap.CallbacksPaused =" not in play, (
+        "the pause mask is a transition, not a per-frame poll — see the "
+        "MaskCallbacks test below"
+    )
     assert "_step >= 3 && _step <= 5" not in play, "the whole-step mask is back"
     controls = _code(_cs_method_body(PROBE_CS, "private static void PumpControls(float now, float t, float len)"))
     assert controls.count("_maskUntil = now + 0.5f;") == 4, (
         "the running seek, the resume, the near-end seek and the restart each "
         "need their own bounded mask, and only that"
     )
+
+
+def test_the_pause_mask_is_taken_at_the_call_and_not_at_the_next_poll():
+    """r12 MEDIUM, two faults with one shape.
+
+    The flag used to be assigned once a frame from `_step`, AFTER PumpControls
+    had already called Pause() or UnPause() — so a callback in between was
+    attributed to the wrong side of the mask: one after the resume and before
+    the clear was dropped although it carried real audio, one after the pause
+    and before the set was counted as content.
+
+    And leaving a HEALTHY pause cleared nothing, because the clear lived in the
+    callback that a healthy pause never receives — so the first callback after
+    a three-second pause differenced against the pre-pause stamp and reported a
+    three-second dropout, in the field whose whole job is finding dropouts."""
+    mask = _code(_cs_method_body(PROBE_CS, "private static void MaskCallbacks(bool paused)"))
+    assert "if (paused) { tap.CallbacksPaused = true; return; }" in mask
+    assert "tap.LastCallbackTicks = 0;" in mask
+    assert mask.index("tap.LastCallbackTicks = 0;") < mask.index("tap.CallbacksPaused = false;"), (
+        "the clock is cleared before the flag, so no callback lands between"
+    )
+    controls = _code(_cs_method_body(PROBE_CS, "private static void PumpControls(float now, float t, float len)"))
+    # entering: set AFTER the pause call, so a callback still in flight is
+    # counted rather than discarded. Both branches of step 2 pause.
+    assert controls.count("_src.Pause(); MaskCallbacks(true);") == 2
+    assert "MaskCallbacks(true); _src.Pause();" not in controls
+    # leaving: cleared BEFORE the resume, which cannot lose one — a paused
+    # source produces no callbacks at all.
+    assert "MaskCallbacks(false);\n                    _src.UnPause();" in controls
+    assert "MaskCallbacks(false);   // the natural end is an intended silence, not a gap" in controls
+    # and the audio thread still clears the clock for a callback that DOES
+    # arrive while the flag is set
+    tap = _code(_cs_method_body(PROBE_CS, "private sealed class ProbeTap : MonoBehaviour"))
+    assert "if (CallbacksPaused) { SilentRun = 0; LastCallbackTicks = 0; return; }" in tap
+
+
+def test_the_resumed_step_is_measured_rather_than_masked():
+    """r12 MEDIUM. Step 3 pauses; step 3's handler resumes and enters step 4, so
+    step 4 is AUDIBLE — and it is the step whose entire purpose is to verify
+    that the resume took. Treating it as part of the pause suppressed a
+    resume-only stall and then reset the reference it would have shown up
+    against, so the failure the step exists to find produced zeros.
+
+    `resuming` is separate because isPlaying can lag UnPause by a tick, and an
+    unexpected-stop verdict there would pre-empt step 4's own judgement."""
+    play = _code(_cs_method_body(PROBE_CS, "private static void PumpPlayback(float now)"))
+    assert "bool paused = _step == 3;" in play
+    assert "bool resuming = _step == 4;" in play
+    assert "_step == 3 || _step == 4" not in play, "step 4 is back inside the pause"
+    assert "bool ended = !_src.isPlaying && !paused && !resuming && _step != 5;" in play
+    # the drift reference is retaken at the resume, because the one from before
+    # the pause and the seek is meaningless
+    controls = _code(_cs_method_body(PROBE_CS, "private static void PumpControls(float now, float t, float len)"))
+    resume = controls[controls.index("_src.UnPause();"):]
+    assert resume.index("ResetDriftRef();") < resume.index("_step = 4;")
 
 
 def test_the_natural_end_needs_elapsed_time_and_not_one_not_playing_read():
@@ -300,9 +360,13 @@ def test_the_natural_end_also_proves_the_playhead_got_there():
         "the baseline must be taken at the seek, not read at the judgement"
     )
     assert "float owed = EndRunSeconds();" in controls
-    assert "bool played = owed < 0f || owed >= 4f;" in controls, (
-        "an unavailable measurement must be neutral, not a failure"
+    assert "bool played = owed >= 4f;" in controls, (
+        "r12: an UNAVAILABLE delivery figure is not evidence that the playhead "
+        "reached the end — it is a broken probe run, and the timing alone is "
+        "satisfied by a source that stopped for any other reason"
     )
+    assert "owed < 0f || owed >= 4f" not in controls
+    assert 'delivered=" + (owed < 0f ? "unavailable"' in controls
     helper = _code(_cs_method_body(PROBE_CS, "private static float EndRunSeconds()"))
     assert "_tap.FramesDelivered - _framesAtEndSeek" in helper
     assert "if (rate <= 0) return -1f;" in helper
@@ -328,8 +392,13 @@ def test_the_startup_metric_observes_the_frames_it_claims():
 def test_every_refusal_the_reviews_put_here_survives_the_wider_gate():
     start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
     assert 'ctx == "online-room" ? "online-room"' in start
-    assert '(_mode == Mode.Stress && ctx != "sandbox") ? "stress-needs-offline-sandbox"' in start
+    assert '(wanted == Mode.Stress && ctx != "sandbox") ? "stress-needs-offline-sandbox"' in start
     assert 'custom ? "custom-music-playing"' in start
+    # r12 MEDIUM: SeatContext returns "?" when the Photon read throws, and "?"
+    # is not "online-room" — so a context the probe could not establish used to
+    # be admitted, which is the fail-open direction on the one question this
+    # guard answers.
+    assert 'ctx == "?" ? "seat-context-unreadable"' in start
     refusal = _code(_cs_method_body(PROBE_CS, "private static string RefusalNow()"))
     assert 'if (ctx == "online-room") return "entered online room";' in refusal
     assert 'if (_mode == Mode.Stress && ctx != "sandbox") return "left sandbox";' in refusal
@@ -446,8 +515,16 @@ def test_no_blocking_collection_runs_while_a_room_is_live():
     tick = _code(_cs_method_body(PROBE_CS, "internal static void Tick()"))
     gc_at = tick.index("_cleanupGcAt > 0f && now >= _cleanupGcAt")
     block = tick[gc_at:]
-    assert block.index('SeatContext() == "online-room"') < block.index("GC.Collect()"), (
+    # r12 MEDIUM: stated as the contexts that are SAFE, not as the one that is
+    # not. "?" is an unreadable context, not a proof of anything, and it used
+    # to run the collection because it is not equal to "online-room".
+    gate = 'if (ctxNow != "menu" && ctxNow != "sandbox" && ctxNow != "offline-idle")'
+    assert gate in block
+    assert block.index(gate) < block.index("GC.Collect()"), (
         "the context gate must precede the collection, not follow it"
+    )
+    assert 'ctxNow == "online-room"' not in block, (
+        "an unreadable context must defer too"
     )
     assert "_cleanupGcDeadline" in block, "a deferral with no bound never ends"
     stop = _code(_cs_method_body(PROBE_CS, "private static void Stop(string why)"))
@@ -461,6 +538,27 @@ def test_a_pending_cleanup_belongs_to_the_run_that_scheduled_it():
     start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
     assert "_cleanupSampleAt = -1f; _cleanupGcAt = -1f;" in start
     assert "_gen++;" in start
+
+
+def test_a_refused_command_moves_no_state_at_all():
+    """r12 LOW. The mode-suffix refusal was written above the mutations and
+    said so; the CONTEXT refusal was written below them. So a command refused
+    for being online still bumped the generation — invalidating the outgoing
+    tap of a run that was still finishing — and still dropped that run's
+    pending cleanup, which is the exact damage the comment above it promised
+    could not happen."""
+    start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
+    refusal = start.index("if (refuse != null)")
+    for mutation in ("_gen++;", "_cleanupSampleAt = -1f; _cleanupGcAt = -1f;",
+                     "_key = key;", "_audioWallSeconds = 0f;", "_mode = wanted;"):
+        assert mutation in start, mutation
+        assert start.index(mutation) > refusal, (
+            f"{mutation} runs before the command is known to be admitted"
+        )
+    # ...and the refusal reads the mode this COMMAND asked for, not the one the
+    # previous run left in the field
+    assert "wanted == Mode.Stress" in start[:refusal]
+    assert "_mode == Mode.Stress" not in start[:refusal]
 
 
 def test_a_late_tap_destruction_cannot_stop_a_later_run():
@@ -554,3 +652,36 @@ def test_the_starvation_claim_is_scoped_to_the_source_callback():
     doc = " ".join(src[max(0, sig - 700):sig].replace("///", " ").split())
     assert "Scoped to the source callback" in doc
     assert "mixer or the output device" in doc
+
+
+def test_the_room_entry_edge_ends_the_run_rather_than_the_next_poll():
+    """r12 LOW. The playback tick asks RefusalNow every frame, but Photon can
+    join a room AFTER that tick has already read "menu" — so the probe's
+    private source stayed audible for the rest of the frame and into the next
+    one, and "never runs inside an online room" was true only by the next poll.
+
+    Offline joins raise the same callback and are NOT an end: the Sandbox is
+    where this probe is meant to run. A read that throws is treated as online,
+    because the run ending early costs a measurement and the other direction
+    costs somebody else's match."""
+    hook = _code(_cs_method_body(PROBE_CS, "internal static void OnRoomJoined()"))
+    assert "online = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode;" in hook
+    assert "catch { online = true; }" in hook, "an unreadable room state ends the run"
+    assert "if (!online) return;" in hook
+    assert 'Stop("entered online room")' in hook
+    caller = _code(_cs_method_body(PLUGIN_CS, "public void OnJoinedRoom()"))
+    assert "MusicStreamProbe.OnRoomJoined();" in caller
+
+
+def test_a_tap_that_reported_a_clean_zero_is_not_no_measurement():
+    """r12 LOW. `-1` on the end line means no tap ever existed. It was decided
+    by whether the run-scoped maximum was greater than zero, so a churn cycle
+    whose tap reported a clean zero — the best possible result — came out as
+    -1, i.e. as no measurement at all."""
+    stop = _code(_cs_method_body(PROBE_CS, "private static void Stop(string why)"))
+    assert "(_runHadTap ? _runSilentRunMax : -1)" in stop
+    assert "_runSilentRunMax > 0 ? _runSilentRunMax : -1" not in stop
+    close = _code(_cs_method_body(PROBE_CS, "private static void CloseObjects()"))
+    assert "_runHadTap = true;" in close, "the flag is set where the tap is folded in"
+    start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
+    assert "_runHadTap = false;" in start, "and it belongs to one run"

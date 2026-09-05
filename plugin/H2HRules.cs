@@ -238,9 +238,17 @@ namespace CompetitiveRounds
         /// pins it), which is all an ordinary room ever uses.</summary>
         internal const int MAX_REQUESTS_PER_ROOM = 6;
 
-        /// <summary>Least time between two reads under one incarnation. Both
-        /// retry delays are already far longer than this, so it constrains
-        /// key churn only and never delays a retry.</summary>
+        /// <summary>Least time between two reads under one incarnation.
+        ///
+        /// The delays this file CHOOSES are longer than it — TRANSPORT_RETRY_DELAY
+        /// and DEBOUNCE_RETRY_FALLBACK both clear the server's 5 s window — so
+        /// for those it constrains key churn only. A 429 retry is the
+        /// exception, and it is the exception because that delay is not ours:
+        /// it is the server's retry_after plus DEBOUNCE_RETRY_MARGIN, and a
+        /// retry_after of 1 schedules the re-send 2 s out, inside this. Then
+        /// the retry waits for the spacing and goes on the first admissible
+        /// tick, because TooSoon is not a refusal — later than asked, never
+        /// dropped.</summary>
         internal const float MIN_REQUEST_SPACING_SECONDS = 3f;
 
         /// <summary>Reads spent under one room incarnation, and when the last

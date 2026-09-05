@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from hashlib import sha1
 import ast
 import inspect
+import sys
 import textwrap
 import json
 from pathlib import Path
@@ -49,12 +50,52 @@ PINNED_FASTAPI = next(
 # module-level functions and the transitive closure of a route is 4 of them at
 # the median, 17 at p90 and 52 at the worst — a gate that drifted on every
 # commit would be a gate nobody reads.
+_SERVED_MODULES = {}
+
+
+def _served_modules():
+    """Every module that DEFINES a route this gate enumerates.
+
+    r12 MEDIUM. The closure below used to be computed over `vars(main)` alone,
+    and `main` is not where all of this api lives: tournaments defines its own
+    routes and the helpers those routes delegate to. A change to a tournaments
+    helper -- `_build_current_response` composes what a tournament route
+    returns -- therefore moved no fingerprint at all, and the gate certified
+    every one of those handlers unchanged. Following helpers transitively
+    inside one module is not the same as following them, and this gate's whole
+    claim is that implementation drift forces a re-review.
+
+    Discovered from the app's own routes rather than listed, for the same
+    reason the closure is computed rather than curated: a list is wrong the
+    first time someone adds a router."""
+    if _SERVED_MODULES:
+        return _SERVED_MODULES
+    _SERVED_MODULES["main"] = main
+    stack = list(main.app.routes)
+    while stack:
+        route = stack.pop()
+        if isinstance(route, Mount):
+            stack.extend(route.routes)
+            continue
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        name = getattr(endpoint, "__module__", None)
+        module = sys.modules.get(name)
+        if module is not None:
+            _SERVED_MODULES.setdefault(name, module)
+    return _SERVED_MODULES
+
+
 def _module_functions():
-    return {
-        name: obj
-        for name, obj in vars(main).items()
-        if inspect.isfunction(obj) and getattr(obj, "__module__", None) == "main"
-    }
+    """{(module, name): function} over every served module. Keyed by module
+    too, because two modules may spell the same helper name differently."""
+    table = {}
+    for mod_name, module in _served_modules().items():
+        for name, obj in vars(module).items():
+            if inspect.isfunction(obj) and getattr(obj, "__module__", None) == mod_name:
+                table[(mod_name, name)] = obj
+    return table
 
 
 def _referenced_names(fn):
@@ -76,16 +117,25 @@ def _referenced_names(fn):
 
 
 def _helper_closure(endpoint):
+    """Sorted (module, name) pairs. A bare name is resolved in the function's
+    OWN module first and in any other served module after that -- on a name two
+    modules share, the second one is folded in as well, which widens the
+    reviewed surface rather than narrowing it."""
     funcs = _module_functions()
+    others = list(_served_modules())
     seen = set()
     frontier = [endpoint]
     while frontier:
-        for name in _referenced_names(frontier.pop()):
-            helper = funcs.get(name)
-            if helper is None or name in seen:
-                continue
-            seen.add(name)
-            frontier.append(helper)
+        fn = frontier.pop()
+        origin = getattr(fn, "__module__", "main")
+        for name in _referenced_names(fn):
+            for mod_name in [origin] + [m for m in others if m != origin]:
+                helper = funcs.get((mod_name, name))
+                if helper is None:
+                    continue
+                if (mod_name, name) not in seen:
+                    seen.add((mod_name, name))
+                    frontier.append(helper)
     return sorted(seen)
 
 MODULE_SRC = (Path(__file__).parents[1] / "api" / "main.py").read_text(encoding="utf-8")
@@ -124,10 +174,13 @@ def _route_identities(routes, prefix=""):
         # to, transitively — an extracted helper must not become a fingerprint
         # hole. Sorted, so the fingerprint does not depend on walk order.
         source_text = inspect.getsource(endpoint)
-        for helper_name in _helper_closure(endpoint):
+        for mod_name, helper_name in _helper_closure(endpoint):
+            module = _served_modules().get(mod_name)
+            if module is None:
+                continue
             try:
-                source_text += inspect.getsource(getattr(main, helper_name))
-            except (OSError, TypeError):
+                source_text += inspect.getsource(getattr(module, helper_name))
+            except (OSError, TypeError, AttributeError):
                 continue
         identities.append(
             {
@@ -234,12 +287,73 @@ def test_the_helper_surface_is_computed_and_not_hand_curated():
     for route_name, expected in (
         ("queue_poll", {"_pick_room_region", "_region_agreed", "_region_corroborated"}),
         ("queue_ready", {"_pick_room_region", "_region_agreed", "_region_corroborated"}),
-        ("queue_join", {"_note_region_seen", "_region_token"}),
+        # the sighting moved off queue_join in r13: an established session
+        # binds the speaker, not the region named in the sentence
+        ("submit_match", {"_note_region_seen", "_region_token"}),
     ):
         closure = set(_helper_closure(getattr(main, route_name)))
-        assert expected <= closure, (
-            f"{route_name} does not cover {sorted(expected - closure)}"
+        want = {("main", name) for name in expected}
+        assert want <= closure, (
+            f"{route_name} does not cover {sorted(want - closure)}"
         )
+
+    # r12 MEDIUM: and the closure leaves `main`. A tournaments route reaches
+    # the tournaments helpers that compose its response, so editing one of
+    # those moves that route's fingerprint.
+    tournament_routes = [
+        r for r in main.app.routes
+        if isinstance(r, APIRoute)
+        and getattr(r.endpoint, "__module__", "") == "tournaments"
+    ]
+    assert tournament_routes, "the tournaments router is part of this app"
+    crossed = [(m, n) for r in tournament_routes
+               for (m, n) in _helper_closure(r.endpoint) if m != "main"]
+    assert crossed, "the closure never left main -- helpers there are unfingerprinted"
+
+
+def test_a_helper_in_another_module_moves_its_routes_fingerprint():
+    """The mutation the previous test's shape is for. Rewrite the body of a
+    tournaments helper that a route delegates to and that route's source_sha1
+    must move; the negative control is the same route with nothing edited."""
+    import tournaments
+
+    target = None
+    for route in main.app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if getattr(route.endpoint, "__module__", "") != "tournaments":
+            continue
+        helpers = [n for (m, n) in _helper_closure(route.endpoint) if m == "tournaments"]
+        if helpers:
+            target = (route, sorted(helpers)[0])
+            break
+    assert target, "no tournaments route delegates to a tournaments helper"
+    route, helper_name = target
+
+    def _fingerprint():
+        for entry in _route_identities([route]):
+            return entry["source_sha1"]
+        raise AssertionError("the route did not enumerate")
+
+    before = _fingerprint()
+    assert before == _fingerprint(), "negative control: unedited source must not move"
+
+    original = getattr(tournaments, helper_name)
+    real_source = inspect.getsource
+
+    def _mutated(obj):
+        if obj is original:
+            return real_source(obj) + "\n# mutation\n"
+        return real_source(obj)
+
+    inspect.getsource = _mutated
+    try:
+        after = _fingerprint()
+    finally:
+        inspect.getsource = real_source
+    assert after != before, (
+        f"editing tournaments.{helper_name} left {route.path} certified unchanged"
+    )
 
 
 def test_the_helper_closure_stays_affordable():

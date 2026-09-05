@@ -583,7 +583,7 @@
           ],
           "main",
           "submit_match",
-          "5517f08586033e7f56f6621372c965aeb5447568"
+          "c796d2d2af39cc77fc5520275bfa40ed26d87fe2"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -709,7 +709,7 @@
           ],
           "main",
           "get_player_stats",
-          "2e4eedc0b2f10757632534d6e8173a1401eb3adf"
+          "763745c0c10e7a6b08edc3f0a0d7094ef21349b3"
         ],
         [
           "/api/v1/players/{steam_id}/active-color",
@@ -916,7 +916,7 @@
           ],
           "main",
           "get_player_rating_history",
-          "e9e6eece1293058a29a58f5f07dfcf376b4c9745"
+          "6acf94d60aca4da0984546a117e8bdc8bc231e4a"
         ],
         [
           "/api/v1/players/{steam_id}/rating-preview",
@@ -988,7 +988,7 @@
           ],
           "main",
           "get_active_series",
-          "717278d4095bc72c5cbbf495d68bf6a0742b065a"
+          "973c89d8169a0b50c04190bf238e1ef7b7ca9940"
         ],
         [
           "/api/v1/series/preflight",
@@ -997,7 +997,7 @@
           ],
           "main",
           "series_preflight",
-          "1f98f21ebd91f5e682cebdb424ba86baa63f76e2"
+          "71917ccc788d750949fc6a278eb22af04d815e0a"
         ],
         [
           "/api/v1/series/recent",
@@ -1006,7 +1006,7 @@
           ],
           "main",
           "get_recent_series",
-          "3626a9ccf5a8d73be898b2d5a58e6d8163dac435"
+          "e499c1d063c7fd8243fdf849700f0eec7466ef77"
         ],
         [
           "/api/v1/series/recent-multimode",
@@ -1381,7 +1381,7 @@
           ],
           "main",
           "broadcast_target",
-          "10d564e308843a1563ee81d8a18851ed3882e9f2"
+          "b7a9e4de1564f8a6fd2485c5285e3700c460c907"
         ],
         [
           "/api/v1/chat/moderate/bridge-unmute",
@@ -2029,7 +2029,7 @@
           ],
           "main",
           "internal_tournament_checkin_response",
-          "9012bec6e988eee6dff2311b7e55c90a3900ffb3"
+          "0d9933d4fb0198f0299415ea9247163748caf0d9"
         ],
         [
           "/api/v1/lfp-ping",
@@ -2290,7 +2290,7 @@
           ],
           "main",
           "queue_join",
-          "98e1c675c991743e70d62beef1f995c89f65739f"
+          "b9b33c27e5426ce22879d0b7e2f71acda1f1d4d3"
         ],
         [
           "/api/v1/queue/leave",
@@ -2380,7 +2380,7 @@
           ],
           "main",
           "report_disconnect",
-          "20b6347502ec94fcab4d63b4c0db8f6fd2b77a32"
+          "425c2419af306cef1990a30aa442dc4f10460122"
         ],
         [
           "/api/v1/settings/allow-spectators",
@@ -2443,7 +2443,7 @@
           ],
           "main",
           "spectate_games",
-          "1eb5d2775dc0342dcdefc93fa07f5c748c610c73"
+          "8f56ffc0c38baf9a7c8204e32c643959177709d8"
         ],
         [
           "/api/v1/spectate/grant",
@@ -2452,7 +2452,7 @@
           ],
           "main",
           "spectate_grant",
-          "338db2b7079dc03c4a33c09b72f50760a2207976"
+          "3b50acde95bafb63ad4cf9080f7ffdc96452a507"
         ],
         [
           "/api/v1/spectate/heartbeat",
@@ -2681,7 +2681,7 @@
           ],
           "tournaments",
           "get_current",
-          "b0f7952faf6074705175a69b83e881390e01106a"
+          "4a2dbe9ceb736b832610446f80ab7565cb550b10"
         ],
         [
           "/api/v1/tournaments/history",
@@ -2699,7 +2699,7 @@
           ],
           "tournaments",
           "history_detail",
-          "d0b012263f930b231ceb7ec510e6024e2c61d574"
+          "f7e200e34d1660168f770cb87c332efeb003c2cd"
         ],
         [
           "/api/v1/tournaments/internal/watch",
@@ -2708,7 +2708,7 @@
           ],
           "tournaments",
           "internal_watch",
-          "341c17a345746ef1afc1570e35deb9b1ef244006"
+          "587983925fb7aaa305845732b176cce90afbad12"
         ],
         [
           "/api/v1/tournaments/my-active-matches",
@@ -2717,7 +2717,7 @@
           ],
           "tournaments",
           "my_active_matches",
-          "098508f309313b157f3dcb07754e3d62b3ef6330"
+          "512b8e0f2efd8e0d11ed137ec06290aa0e74d1d9"
         ],
         [
           "/api/v1/tournaments/players/{steam_id}/penalty",
@@ -2726,7 +2726,7 @@
           ],
           "tournaments",
           "player_penalty",
-          "42ee8ee7a6feeca7fe6b8dcc3bd7650207c1d54a"
+          "fd9958bf945dde28c8f42ba98061dedcd89bed1a"
         ],
         [
           "/api/v1/tournaments/players/{steam_id}/tournaments",
@@ -2735,7 +2735,7 @@
           ],
           "tournaments",
           "player_tournaments",
-          "c9616d664a5e5db053caee5a6085798091d0ad50"
+          "333b2851fff47083ef3c6f88296dcb5b328c608e"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/bracket-detail",
@@ -2753,7 +2753,7 @@
           ],
           "tournaments",
           "force_vote",
-          "9e1ca33fe960aad1043c5d5b1b573f5d237de1d8"
+          "071cf1282f19f39166a9901ab00eb294b5debb23"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit",
@@ -2762,7 +2762,7 @@
           ],
           "tournaments",
           "forfeit_match",
-          "5b921c635926a379d6c6de4857b282b473667cac"
+          "47fd9120d110322f9f48c30664b8ce9e2bfecc91"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/play-now",
@@ -2771,7 +2771,7 @@
           ],
           "tournaments",
           "play_now",
-          "e8e2db340e5007a75af758a536d43bdb4cb87f67"
+          "c6ec2bfa5378c34ef9e5ed83ff202d00734054a7"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/ready",
@@ -2780,7 +2780,7 @@
           ],
           "tournaments",
           "ready",
-          "f5677e2e1178b94c3baa221b893e756664d5c3c2"
+          "5d4609e5f0271a3f6cd5216755083a5e6a7fe73f"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/signup",
@@ -2789,7 +2789,7 @@
           ],
           "tournaments",
           "signup",
-          "34fc73ec231fd4922244e31c66d85ac726f298f1"
+          "a23b6ef4e2485da89dfa2b728282da39cf424623"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -2798,7 +2798,7 @@
           ],
           "tournaments",
           "time_vote",
-          "e349f9132354fcce6f1f3196a94eb0dbce20338c"
+          "282c611516531fecec8941f20e416632d5993895"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/unsignup",
@@ -2807,7 +2807,7 @@
           ],
           "tournaments",
           "unsignup",
-          "70e0a5419cc70586027eb897923ffd86660f534f"
+          "2f141e306b508d8fbe1fe8cef06dbf60b57825ac"
         ]
       ]
     }

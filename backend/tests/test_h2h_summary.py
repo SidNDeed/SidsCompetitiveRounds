@@ -673,3 +673,73 @@ def test_client_retry_delays_sit_beyond_the_server_debounce_window():
     main._h2h_last_read[(ME_SID, OPP_SID)] = time.monotonic() - (err.detail["retry_after"] + margin)
     session = FakeSession(session_row=_good_session(), players=_players())
     assert _call(session).opponent_display_name == "Opp Name"
+
+
+H2H_SUMMARY_CS = Path(__file__).resolve().parents[2] / "plugin" / "H2HSummary.cs"
+
+
+def _cs_int_const(name):
+    src = H2H_RULES_CS.read_text(encoding="utf-8")
+    m = re.search(r"const int %s\s*=\s*(\d+)" % re.escape(name), src)
+    assert m, f"{name} not found in {H2H_RULES_CS}"
+    return int(m.group(1))
+
+
+def test_the_read_budget_is_per_key_and_per_room_not_one_per_room():
+    """r12 LOW. The class summary opened with "one GET per room incarnation"
+    while the paragraphs below it described a four-request ladder per key and a
+    six-request budget per room. Both numbers are deliberate; the headline was
+    the wrong one, and a headline is what a reader takes away.
+
+    What is true: one read ANSWERS a key, the ladder is what a key may spend
+    when it is not answered, and the room budget is what bounds a room whose
+    key keeps changing."""
+    doc = H2H_SUMMARY_CS.read_text(encoding="utf-8")
+    head = doc[:doc.index("Trigger, each Poll tick")]
+    assert "One GET /api/v1/h2h/{me}/{opponent} per room" not in head, (
+        "the retired claim came back"
+    )
+    assert "MAX_REQUESTS_PER_ROOM" in head, "the headline must name the real bound"
+    per_room = _cs_int_const("MAX_REQUESTS_PER_ROOM")
+    assert per_room > 1, "a per-room budget of one would make the old claim true"
+    ladder = (1 + _cs_int_const("MAX_SESSION_RESENDS")
+              + _cs_int_const("MAX_TRANSPORT_RETRIES")
+              + _cs_int_const("MAX_DEBOUNCE_RETRIES"))
+    assert ladder > 1
+    assert per_room >= ladder, "one key's whole ladder has to fit inside the room budget"
+
+
+def test_the_room_spacing_can_delay_the_one_retry_whose_delay_is_the_servers():
+    """r12 LOW. MIN_REQUEST_SPACING_SECONDS said it "never delays a retry",
+    which held for the two delays this client picks and not for the third,
+    which it does not pick: a 429 is re-sent retry_after + margin later, and
+    retry_after comes from the server. At the smallest value the server sends,
+    that schedule lands inside the spacing.
+
+    The retry is not lost -- TooSoon is not a refusal, the caller asks again on
+    a later tick -- so what the finding costs is the accuracy of the comment,
+    and that is what is fixed."""
+    spacing = _cs_float_const("MIN_REQUEST_SPACING_SECONDS")
+    margin = _cs_float_const("DEBOUNCE_RETRY_MARGIN")
+    assert _cs_float_const("TRANSPORT_RETRY_DELAY") > spacing
+    assert _cs_float_const("DEBOUNCE_RETRY_FALLBACK") > spacing
+
+    # the smallest retry_after the endpoint will hand out, taken from the
+    # endpoint rather than assumed
+    main._h2h_last_read[(ME_SID, OPP_SID)] = time.monotonic() - (main._H2H_DEBOUNCE_SECONDS - 0.1)
+    err = _raises(FakeSession(session_row=_good_session(), players=_players()))
+    assert err.status_code == 429
+    smallest = err.detail["retry_after"]
+    assert smallest + margin < spacing, (
+        "if this ever stops being true the comment below should be re-checked, "
+        "not the other way round"
+    )
+
+    rules = H2H_RULES_CS.read_text(encoding="utf-8")
+    assert "never delays a retry" not in rules, "the retired claim came back"
+    summary = rules[rules.index("Least time between two reads"):]
+    summary = summary[:summary.index("</summary>")]
+    assert "retry_after" in summary, "the exception has to be named where the claim was"
+
+    # and the delay is a delay, not a drop
+    assert "RoomGate.TooSoon) return;" in H2H_SUMMARY_CS.read_text(encoding="utf-8")

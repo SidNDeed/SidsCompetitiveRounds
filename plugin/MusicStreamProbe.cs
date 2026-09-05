@@ -150,6 +150,10 @@ namespace CompetitiveRounds
         /// <summary>Tap delivery at the seek that sets up the natural end; -1
         /// while there is no such baseline.</summary>
         private static long _framesAtEndSeek = -1L;
+        /// <summary>Whether ANY tap existed during this run. `-1` on the end
+        /// line means no measurement was ever taken; a run whose tap reported a
+        /// clean zero must not print the same marker.</summary>
+        private static bool _runHadTap;
         // Bound on deferring the post-run collection while a room is live.
         private static float _cleanupGcDeadline;
         // Bounded mask across a scripted transition, instead of masking whole
@@ -219,12 +223,20 @@ namespace CompetitiveRounds
                     // game. Deferred while a room is live, and abandoned if the
                     // room outlasts the window — a memory delta is worth
                     // nothing next to a stutter in a ranked round.
-                    if (SeatContext() == "online-room")
+                    //
+                    // Stated as the contexts that are SAFE, not as the one that
+                    // is not: an unreadable context ("?" — the Photon read
+                    // threw) was neither "online-room" nor a proof of anything,
+                    // and it used to run the collection. The two offline
+                    // contexts are the operator's own seat, which is where this
+                    // probe runs.
+                    string ctxNow = SeatContext();
+                    if (ctxNow != "menu" && ctxNow != "sandbox" && ctxNow != "offline-idle")
                     {
                         if (now >= _cleanupGcDeadline)
                         {
                             _cleanupGcAt = -1f;
-                            Plugin.Log?.LogInfo("[MUSIC-PROBE] cleanup collection abandoned — the room outlasted the window");
+                            Plugin.Log?.LogInfo("[MUSIC-PROBE] cleanup collection abandoned — context=" + ctxNow + " outlasted the window");
                         }
                         else _cleanupGcAt = now + 5f;
                     }
@@ -307,6 +319,38 @@ namespace CompetitiveRounds
                     return;
                 }
             }
+            string key = parts[0] + ":" + idx.ToString(CultureInfo.InvariantCulture);
+            // r2 MEDIUM 5: a second music owner makes every auditory reading
+            // ambiguous. Custom music sounding = refuse; vanilla = report.
+            //
+            // ASKED HERE, before anything moves. It used to sit below the
+            // generation bump and the pending-cleanup drop, so a command
+            // refused for context still ended the previous run's deferred
+            // cleanup and invalidated its outgoing tap's generation — the
+            // comment above the mode check claimed both mutations belonged to
+            // a run that was going to happen, and for this refusal they did
+            // not. It reads `wanted` rather than `_mode` for the same reason:
+            // `_mode` is not this command's mode until the run is admitted.
+            //
+            // An UNREADABLE seat context is a refusal too. SeatContext returns
+            // "?" when the Photon read throws, and "?" is not "online-room" —
+            // so a context the probe could not establish used to be admitted,
+            // which is the fail-open direction on the one question this guard
+            // exists to answer.
+            bool custom = false;
+            try { custom = MusicEngine.IsPlayingNow; } catch { }
+            string vanilla = VanillaGuards();
+            string ctx = SeatContext();
+            string refuse = custom ? "custom-music-playing"
+                : ctx == "online-room" ? "online-room"
+                : ctx == "?" ? "seat-context-unreadable"
+                : (wanted == Mode.Stress && ctx != "sandbox") ? "stress-needs-offline-sandbox"
+                : null;
+            if (refuse != null)
+            {
+                Plugin.Log?.LogWarning("[MUSIC-PROBE] refused key=" + key + " reason=" + refuse + " context=" + ctx + " vanilla_guards=" + vanilla);
+                return;
+            }
             // r9 MEDIUM: a deferred cleanup belongs to the run that
             // scheduled it. Its memory baselines are about to be overwritten
             // by this run, so comparing against them would report this run's
@@ -324,31 +368,43 @@ namespace CompetitiveRounds
             _framesAtEndSeek = -1L;
             _maskUntil = 0f;
             _mode = wanted;
-            _key = parts[0] + ":" + idx.ToString(CultureInfo.InvariantCulture);
+            _key = key;
+            _runHadTap = false;
             // r2 LOW 3: every counter belongs to THIS run, reset before the
             // request so a failed open reports zeros, not the previous run.
             _stallMax = 0f; _stalls = 0; _wraps = 0; _driftPeak = 0f; _lastDrift = 0f; _frameMax = 0f;
             _controlsPass = 0; _controlsFail = 0; _churnCycles = 0; _getContentMs = 0f; _requestMs = 0f; _openBlockMs = 0f;
-            // r2 MEDIUM 5: a second music owner makes every auditory reading
-            // ambiguous. Custom music sounding = refuse; vanilla = report.
-            bool custom = false;
-            try { custom = MusicEngine.IsPlayingNow; } catch { }
-            string vanilla = VanillaGuards();
-            string ctx = SeatContext();
-            string refuse = custom ? "custom-music-playing"
-                : ctx == "online-room" ? "online-room"
-                : (_mode == Mode.Stress && ctx != "sandbox") ? "stress-needs-offline-sandbox"
-                : null;
-            if (refuse != null)
-            {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] refused key=" + _key + " reason=" + refuse + " context=" + ctx + " vanilla_guards=" + vanilla);
-                return;
-            }
             Plugin.Log?.LogInfo("[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
                 + " cores=" + Environment.ProcessorCount + " (bots/opponents are the operator's responsibility; the log cannot see them)");
             LogMemory("baseline", _key);
             _mgd0 = GC.GetTotalMemory(false); _nat0 = NativeAlloc(); _res0 = NativeReserved(); _proc0 = ProcessPrivate();
             OpenRequest(album.Tracks[idx].OggFile, now);
+        }
+
+        /// <summary>Photon's own room-entry edge.
+        ///
+        /// The playback tick asks RefusalNow every frame, but a join can land
+        /// AFTER that tick has already read "menu", and the probe's private
+        /// source then stays audible for the rest of the frame and into the
+        /// next one. "Never runs inside an online room" has to be true at the
+        /// edge rather than at the next poll.
+        ///
+        /// Offline rooms raise this callback too — Photon's offline mode
+        /// simulates the join — and the Sandbox is where this probe is meant to
+        /// run, so an offline join is not an end. A read that throws is treated
+        /// as online: the run ending early costs a measurement, and the other
+        /// direction costs somebody else's match.</summary>
+        internal static void OnRoomJoined()
+        {
+            try
+            {
+                bool online;
+                try { online = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; }
+                catch { online = true; }
+                if (!online) return;
+                if (_req != null || _openPending || (object)_src != null) Stop("entered online room");
+            }
+            catch { }
         }
 
         /// <summary>The three conditions that end a run, asked as one
@@ -541,7 +597,15 @@ namespace CompetitiveRounds
             // Wrap-aware: a drop of more than half the clip is a loop wrap.
             if (t < _lastTime - len * 0.5f) _wraps++;
             _lastTime = t;
-            bool paused = _step == 3 || _step == 4;   // scripted pause window: the clock is expected to stand still
+            // Step 3 ALONE is the pause. Step 4 is the RESUMED source: audible,
+            // and the step whose whole purpose is to verify that the resume
+            // took — so suppressing its drift and stalls hid a resume-only
+            // stall and then reset the reference it would have been measured
+            // against. `resuming` exists because isPlaying can lag UnPause by a
+            // tick, and an unexpected-stop verdict there would pre-empt step
+            // 4's own judgement, which is the designed detector.
+            bool paused = _step == 3;
+            bool resuming = _step == 4;
             float drift = 0f;
             if (!paused && _src.isPlaying)
             {
@@ -566,7 +630,8 @@ namespace CompetitiveRounds
             // Re-derive AFTER the control step: the first VM run paused the
             // source in step 2 and the stale `paused` read it as an unexpected
             // stop one line later.
-            paused = _step == 3 || _step == 4;
+            paused = _step == 3;
+            resuming = _step == 4;
             // r9 MEDIUM: steps 4 and 5 are AUDIBLE — playing after the resume,
             // and playing toward the end of the track — so masking them hid
             // every zero buffer in the two steps the measurement most cares
@@ -575,13 +640,15 @@ namespace CompetitiveRounds
             // be silent.
             if (_tap != null)
             {
-                // Step 3 is the scripted pause — no callbacks at all. The
-                // post-seek window still gets callbacks and only excuses their
-                // content, so a missed one inside it is still measured.
-                _tap.CallbacksPaused = _step == 3;
+                // CallbacksPaused is NOT set here. It is a transition, taken
+                // by MaskCallbacks at the Pause/UnPause call itself — a poll
+                // one frame later attributes every callback in between to the
+                // wrong side. The post-seek window still gets callbacks and
+                // only excuses their content, so a missed one inside it is
+                // still measured, and that one IS a per-frame condition.
                 _tap.SilenceExpected = _step == 3 || now < _maskUntil;
             }
-            bool ended = !_src.isPlaying && !paused && _step != 5;
+            bool ended = !_src.isPlaying && !paused && !resuming && _step != 5;
             if (now >= _nextLog || now >= _endAt)
             {
                 _nextLog = now + 5f;
@@ -623,14 +690,21 @@ namespace CompetitiveRounds
                     _step = 2;
                     return;
                 case 2:
-                    if (_wraps >= 1) { Judge("loop_wrap", true, "wrapped at t=" + F1(t)); _src.Pause(); _stepTarget = _src.time; _stepAt = now; _step = 3; return; }
-                    if (now > _stepDeadline) { Judge("loop_wrap", false, "no wrap within 9 s, t=" + F1(t)); _src.Pause(); _stepTarget = _src.time; _stepAt = now; _step = 3; }
+                    if (_wraps >= 1) { Judge("loop_wrap", true, "wrapped at t=" + F1(t)); _src.Pause(); MaskCallbacks(true); _stepTarget = _src.time; _stepAt = now; _step = 3; return; }
+                    if (now > _stepDeadline) { Judge("loop_wrap", false, "no wrap within 9 s, t=" + F1(t)); _src.Pause(); MaskCallbacks(true); _stepTarget = _src.time; _stepAt = now; _step = 3; }
                     return;
                 case 3:
                     if (now - _stepAt < 3f) return;
                     Judge("pause_holds", Mathf.Abs(_src.time - _stepTarget) < 0.05f && !_src.isPlaying, "t=" + F1(_src.time) + " held=" + F1(_stepTarget) + " playing=" + (_src.isPlaying ? 1 : 0));
                     _src.time = 10f;
+                    MaskCallbacks(false);
                     _src.UnPause();
+                    // The drift reference is from before the pause and the
+                    // seek, so it is meaningless now. Step 4 is AUDIBLE and its
+                    // drift is measured (it used to be suppressed as though it
+                    // were part of the pause), which needs a reference taken
+                    // here rather than three steps ago.
+                    ResetDriftRef();
                     _maskUntil = now + 0.5f;
                     _stepAt = now;
                     _step = 4;
@@ -668,11 +742,21 @@ namespace CompetitiveRounds
                         // reached the end rather than the clock reaching 4.5.
                         float owed = EndRunSeconds();
                         bool timed = elapsed >= 4.5f && elapsed <= 6.5f;
-                        bool played = owed < 0f || owed >= 4f;
+                        // NOT "unknown counts as played". The delivered figure
+                        // is the only evidence here that the PLAYHEAD reached
+                        // the end rather than the clock reaching 4.5, so a run
+                        // that cannot produce it has not shown what this
+                        // control tests — and a source stopping five seconds
+                        // after the seek for any other reason satisfies the
+                        // timing alone. An unavailable tap is a broken probe
+                        // run, which is worth failing loudly.
+                        bool played = owed >= 4f;
                         Judge("natural_end", timed && played,
                               "isPlaying=0 after " + F1(elapsed) + " s (want 4.5-6.5 from len-5), "
-                              + "delivered=" + (owed < 0f ? "?" : F1(owed)) + " s (want >= 4), t=" + F1(_src.time));
-                        _src.loop = true; _src.time = 0f; _src.Play();
+                              + "delivered=" + (owed < 0f ? "unavailable" : F1(owed)) + " s (want >= 4), t=" + F1(_src.time));
+                        _src.loop = true; _src.time = 0f;
+                        MaskCallbacks(false);   // the natural end is an intended silence, not a gap
+                        _src.Play();
                         _maskUntil = now + 0.5f;
                         ResetDriftRef();
                         _step = 6;
@@ -691,6 +775,35 @@ namespace CompetitiveRounds
                 default:
                     return;
             }
+        }
+
+        /// <summary>The scripted pause mask, set at the call that causes it
+        /// rather than by the next tick's poll.
+        ///
+        /// Two faults, one shape. The flag used to be assigned once per frame
+        /// from `_step`, AFTER `PumpControls` had already called `Pause()` or
+        /// `UnPause()` — so a callback in between was attributed to the wrong
+        /// side: one after UnPause and before the clear was dropped although it
+        /// delivered real audio, and one after the pause and before the set was
+        /// counted as content the run had asked for. And on the way OUT of a
+        /// healthy pause nothing cleared the callback clock, because clearing
+        /// it lived in the callback that a healthy pause never receives — so
+        /// the first callback after a three-second pause reported a
+        /// three-second gap, in the field that exists to find dropouts.
+        ///
+        /// Entering, the flag is set AFTER the pause call: a callback still in
+        /// flight delivered real audio and is counted. Leaving, it is cleared
+        /// BEFORE the resume call, which cannot lose one, because a paused
+        /// source produces none — and the clock is cleared with it, so the
+        /// first callback of the resumed source starts a fresh interval
+        /// instead of measuring the pause.</summary>
+        private static void MaskCallbacks(bool paused)
+        {
+            var tap = _tap;
+            if ((object)tap == null) return;
+            if (paused) { tap.CallbacksPaused = true; return; }
+            tap.LastCallbackTicks = 0;
+            tap.CallbacksPaused = false;
         }
 
         private static void Judge(string name, bool ok, string detail)
@@ -800,6 +913,7 @@ namespace CompetitiveRounds
             {
                 if (_tap.MaxGapTicks > _runMaxGapTicks) _runMaxGapTicks = _tap.MaxGapTicks;
                 if (_tap.SilentRunMax > _runSilentRunMax) _runSilentRunMax = _tap.SilentRunMax;
+                _runHadTap = true;
                 _runFramesDelivered += _tap.FramesDelivered;
             }
             if ((object)_src != null) Release(_src, "source");
@@ -823,10 +937,14 @@ namespace CompetitiveRounds
             // folds the outgoing tap into them, so they are complete after it.
             // Run-scoped, like the gap and the deficit: in churn mode the tap
             // is rebuilt every cycle, and the last cycle's number is not the
-            // run's. -1 stays the "no tap ever existed" marker.
+            // run's. -1 stays the "no tap ever existed" marker — and it is
+            // decided by whether one ever existed, not by whether the number
+            // is zero. A churn cycle whose tap reported a clean zero used to
+            // come out as -1, i.e. as no measurement at all, which is the
+            // opposite reading of the best possible result.
             int silentRunMax = (object)_tap != null
                 ? Math.Max(_runSilentRunMax, _tap.SilentRunMax)
-                : (_runSilentRunMax > 0 ? _runSilentRunMax : -1);
+                : (_runHadTap ? _runSilentRunMax : -1);
             if (_busy != null) StopBusy();
             _openPending = false;
             CloseObjects();
@@ -919,8 +1037,15 @@ namespace CompetitiveRounds
             }
             /// <summary>The scripted PAUSE, where Unity stops calling the
             /// filter at all. Nothing is measured across it: no delivery, no
-            /// gap, no silence, and the callback clock is cleared so the far
-            /// side does not read as one enormous gap.</summary>
+            /// gap, no silence.
+            ///
+            /// The callback clock is cleared in TWO places and both are needed.
+            /// Here, for a callback that does arrive while the flag is set. And
+            /// on the main thread in MaskCallbacks, at the resume, for the
+            /// HEALTHY case — where no callback arrives at all, so nothing on
+            /// this thread runs and the pre-pause stamp would otherwise survive
+            /// to be differenced against the first resumed callback and
+            /// reported as a three-second dropout.</summary>
             public volatile bool CallbacksPaused;
 
             /// <summary>A bounded window after each seek/pause/resume where a

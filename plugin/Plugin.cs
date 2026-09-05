@@ -3921,6 +3921,13 @@ namespace CompetitiveRounds
             // Bug 235 diagnostics bind to the reliable Photon room edge so a
             // fast leave+rejoin cannot merge two sittings' counters/budgets.
             try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }
+            // The music probe's private source must not survive a room entry.
+            // Its own tick asks the same question, but a join can land after
+            // that tick has already read "menu", so the reliable Photon edge is
+            // what makes "never inside an online room" true rather than true by
+            // the next poll. Offline joins are not an end — the Sandbox is
+            // where the probe runs.
+            try { MusicStreamProbe.OnRoomJoined(); } catch { }
             // Release B §1: a fresh head-to-head incarnation for every join,
             // every role — the request itself is gated on the fighter/1v1
             // rule at tick time, but the counter must move here so a late

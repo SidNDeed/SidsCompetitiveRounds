@@ -6,8 +6,8 @@ the round teardown, because vanilla stops them from INSIDE
 skips the whole method. That is an argument from the call graph. The item was
 written with "PROVE FIRST" against it, so this ships the measurement and no fix.
 
-Two review rounds have now corrected this probe, each time because it was
-measuring something other than what it claimed. Four properties are
+Three review rounds have now corrected this probe, each time because it was
+measuring something other than what it claimed. Five properties are
 load-bearing and this file exists to stop any of them drifting back:
 
   * **The closing edge is `MOVE PLAYERS START`, not END** (r9). Vanilla logs
@@ -17,16 +17,30 @@ load-bearing and this file exists to stop any of them drifting back:
     AFTER the traversal. Closing on END put the whole scripted traversal inside
     the window on BOTH seat kinds, so the reading could never reach the noise
     floor.
-  * **The number comes from the writer, not from the result** (r10). Splitting
-    observed displacement by `playerVel.simulated` measured the network lerp:
+  * **The number is not observed displacement** (r10). Splitting displacement
+    by `playerVel.simulated` measured the network lerp:
     `Photon.Pun.SyncPlayerMovement.Update` writes `transform.position` on every
     REMOTE body every frame it has a package, without consulting the flag. A
     spectator, for whom every body is remote, banked the whole lerp as movement
     "while simulated"; the fighter banked vanilla's scripted respawn walk as
     movement "while stopped". That manufactures the acceptance differential
-    with zero contribution from local physics. `physDrive` instead integrates
-    the expression in `PlayerVelocity.FixedUpdate` (V/PlayerVelocity.cs:38-51),
-    which is the only thing that moves a body by simulating it.
+    with zero contribution from local physics.
+  * **...and it is not a distance at all** (r12). The repair for the above
+    bracketed `PlayerVelocity.FixedUpdate` with a prefix/postfix pair and took
+    the position difference. A bracket measures the whole METHOD: vanilla's own
+    z-flattening (V/PlayerVelocity.cs:50) reports a metre for a body at z=1 that
+    travelled nowhere, a co-patch's movement is attributed to vanilla, and
+    `PlayerCollision.FixedUpdate` writes player transforms under physics too
+    (V/PlayerCollision.cs:67 and :100), so the bracket was never all of local
+    physics anyway. What is counted now is vanilla's own branch DECISION,
+    read from the three fields it is about to read: `driveSteps` out of
+    `steps`. A count of branches taken cannot be moved by another writer.
+  * **A probe that is not measuring must not report a zero** (r12). A Harmony
+    patch can silently fail to attach (#83) and one exception latches the hook
+    dead; either way the acceptance counter reads zero, which is also what a
+    correctly stopped body reads. The patch latches its own liveness during
+    ordinary play and a window without it is `bracket=absent` and not
+    comparable.
   * **A control has to stay stopped to be a control** (r10). In a code room the
     vanilla rematch popup runs about two seconds in and revives the bodies,
     and the spectator suppresses that popup — so a fighter window left open to
@@ -132,29 +146,62 @@ def test_the_horizon_is_a_horizon_and_not_a_missing_marker_claim():
 
 # ── the reading itself ───────────────────────────────────────────────────────
 
-def test_the_number_is_measured_at_the_writer_not_reconstructed_from_it():
-    """The r12 repair. `physDrive` is the position difference across
-    `PlayerVelocity.FixedUpdate`, taken by a prefix/postfix pair. Nothing else
-    runs between those two halves, so a network lerp, a scripted respawn walk
-    and a map rescale — all of which write `transform.position` from elsewhere
-    in the frame — contribute nothing, by construction rather than by a rule."""
+def test_the_number_is_vanillas_own_branch_decision_not_a_distance():
+    """The r13 repair, and the third method for this item.
+
+    r12 refuted measuring the position difference across the patched method:
+    the difference is the NET EFFECT OF THE WHOLE METHOD, so vanilla's own
+    z-flattening on V/PlayerVelocity.cs:50 reports a metre of travel for a body
+    that started at z=1 and went nowhere, and any co-patch is attributed to
+    vanilla. `PlayerCollision.FixedUpdate` also writes player transforms under
+    physics, so the bracket was never the whole of local physics either.
+
+    Counting the branch instead has none of those failure modes: it is read
+    from the three fields vanilla is about to read, in the same invocation,
+    before it acts on them, so nothing else that writes a transform can
+    contribute to it."""
     src = PROBE_CS.read_text(encoding="utf-8")
-    assert '[HarmonyPatch(typeof(PlayerVelocity), "FixedUpdate")]' in src, (
-        "the bracket must target the one statement that moves a body locally"
-    )
+    assert '[HarmonyPatch(typeof(PlayerVelocity), "FixedUpdate")]' in src
     patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
-    assert "__state.pos = __instance.transform.position;" in patch
-    assert "Vector3 after = __instance.transform.position;" in patch
-    assert "Vector3.Distance(after, __state.pos)" in patch
-    assert "NotePhysicsStep(" in patch
-    # the sampler moves what the writer banked and computes nothing of its own
+    assert "bool integrating = data != null && data.isPlaying" in patch
+    assert "&& __instance.simulated && !__instance.isKinematic;" in patch
+    assert "NotePhysicsStep(__instance.GetInstanceID(), integrating);" in patch
+    # no distance is taken anywhere in the patch any more
+    assert "Vector3" not in patch, "the patch must not read a position at all"
+    assert "Distance" not in patch
+    # the sampler folds what the step counted and computes nothing of its own
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "stepDrive.TryGetValue(velId, out banked)" in tick
-    assert "float fresh = banked - st.driveSeen;" in tick
-    assert "st.physDrive += fresh;" in tick
-    # ...and observed displacement can never reach the attributed number.
-    assert not re.search(r"physDrive\s*\+=\s*step", tick)
-    assert not re.search(r"maxPhysStep\s*=\s*step", tick)
+    assert "if (DrainSteps(st)) anyDriven = true;" in tick
+    drain = _code(_cs_block(PROBE_CS, "private static bool DrainSteps(BodyState st)"))
+    assert "int freshSteps = c.steps - st.stepsSeen;" in drain
+    assert "int freshDrive = c.driveSteps - st.driveStepsSeen;" in drain
+    # ...and observed displacement can never reach the acceptance counter
+    assert not re.search(r"driveSteps\s*\+=\s*step\b", tick)
+
+
+def test_the_restated_guard_still_matches_vanilla():
+    """Method 3 copies three of vanilla's fields, which is the class of thing
+    r11 caught going stale. Both sides of the contract are read here, so the
+    copy cannot drift silently: if ROUNDS changes the guard, this fails.
+
+    Reachability is deliberately NOT in the copy — Unity does not call
+    FixedUpdate on a component that fails it, so the prefix does not run."""
+    vanilla = (Path(__file__).resolve().parents[2] / "logs-snapshot" / "decompiled"
+               / "full" / "PlayerVelocity.cs")
+    if not vanilla.exists():
+        return  # decompile not present on this seat; the patch test still runs
+    text = vanilla.read_text(encoding="utf-8")
+    body = text[text.index("private void FixedUpdate()"):]
+    body = body[:body.index("internal void AddForce")]
+    assert "if (data.isPlaying)" in body
+    assert "if (simulated && !isKinematic)" in body
+    assert "base.transform.position +=" in body
+    patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
+    for term in ("data.isPlaying", "__instance.simulated", "!__instance.isKinematic"):
+        assert term in patch, term
+    assert "isActiveAndEnabled" not in patch, (
+        "reachability is structural here; copying it is what went stale before"
+    )
 
 
 def test_nothing_reconstructs_the_step_any_more():
@@ -169,10 +216,12 @@ def test_nothing_reconstructs_the_step_any_more():
     assert "private static float SafeTimeScale()" not in src, (
         "the time scale existed only to scale the reconstruction"
     )
-    # physDrive has exactly one writer, and it is the drain
-    # the log lines print the literal ` physDrive=`, so match the assignment
-    writes = re.findall(r"physDrive \+= (\w+)", src)
-    assert writes == ["fresh", "totalDrive"], (
+    assert "physDrive" not in src, "the refuted distance measure is gone entirely"
+    assert "maxPhysStep" not in src, "a per-step maximum of a distance went with it"
+    # the acceptance counter has exactly two writers: the drain into a body, and
+    # the fold of the bodies into the seat
+    writes = re.findall(r"driveSteps \+= (\w+)", src)
+    assert writes == ["freshDrive", "totalDrive"], (
         f"expected the drain and the totals fold and nothing else, found {writes}"
     )
 
@@ -208,10 +257,59 @@ def test_a_window_that_did_not_end_at_the_stop_is_marked_not_comparable():
     as though the two measured the same interval. A window with no frame or no
     body carries no measurement either."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    for term in ('!revived', 'why != "horizon"', 'why != "error"',
-                 "frames > 0", "bodies.Count > 0"):
+    for term in ("why == COMPARABLE_CLOSE", "!revived", "frames > 0",
+                 "bodies.Count > 0", "bracketLive"):
         assert term in close, f"comparability is missing {term}"
     assert '" comparable="' in close
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert 'COMPARABLE_CLOSE = "move-start"' in src
+    # an ALLOWLIST, not a list of exclusions: r12 found that a room-left, a
+    # disconnect and the late move-end backstop all satisfied the old
+    # exclusions while covering a differently shaped interval, and an edge
+    # added later would have joined them silently.
+    for excluded in ('why != "horizon"', 'why != "error"',
+                     'why != "room-left"', 'why != "disconnected"'):
+        assert excluded not in close, (
+            "comparability must be stated as the one edge it accepts"
+        )
+
+
+def test_a_window_the_patch_did_not_measure_is_not_reported_as_a_zero():
+    """r12 HIGH. Zero integrating steps from a patch that never attached reads
+    exactly like zero from a body that is not being integrated — and the second
+    is the finding this probe exists to produce. A Harmony patch CAN silently
+    fail to attach (#83), and a single exception in the prefix latches the
+    channel dead for the session.
+
+    So the instrument reports its own liveness. `Alive` is latched by the
+    prefix running at all, before the window check, so ordinary play sets it;
+    a window closed without it is banked nowhere and says `bracket=absent`."""
+    patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
+    assert "internal static bool Alive { get { return ran && !dead; } }" in patch
+    prefix = _code(_cs_block(PROBE_CS, "private static void Prefix(PlayerVelocity __instance)"))
+    assert prefix.index("ran = true;") < prefix.index("WindowOpen()"), (
+        "liveness must be established by ordinary play, not by an open window"
+    )
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    assert "bool bracketLive = PlayerVelocity_TeardownDrive_Patch.Alive;" in close
+    assert '.Append(bracketLive ? "live" : "absent")' in close
+    assert "else if (!bracketLive) t.notMeasured++;" in close
+    heartbeat = _code(_cs_block(PROBE_CS, "private static void LogTotals()"))
+    assert "notMeasured=" in heartbeat, (
+        "the heartbeat has to say how many windows the instrument missed"
+    )
+
+
+def test_the_last_step_before_the_close_is_not_dropped():
+    """r12. The physics step banks into a per-instance map and the render tick
+    drains it. A fixed step taken after the last tick but before the close was
+    left in the map and never reached the line, so the window under-reported
+    exactly the steps closest to the stop — the ones the question is about."""
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    assert "DrainSteps(st);" in close
+    assert close.index("DrainSteps(st);") < close.index("totalSteps += st.steps;")
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "DrainSteps(st)" in tick, "and the tick still drains as it goes"
 
 
 def test_only_comparable_windows_feed_the_seat_totals():
@@ -222,10 +320,9 @@ def test_only_comparable_windows_feed_the_seat_totals():
     evaluate: one eight-second horizon close swamps a dozen real windows."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
     decided = close.index("bool comparable =")
-    for banked in ("t.physDrive += totalDrive;", "t.moved += totalMoved;",
+    for banked in ("t.driveSteps += totalDrive;", "t.moved += totalMoved;",
                    "t.frames += frames;", "t.physFrames += physFrames;",
-                   "t.physSteps += physSteps;",
-                   "if (maxPhysStep > t.maxPhysStep) t.maxPhysStep = maxPhysStep;"):
+                   "t.steps += totalSteps;"):
         assert banked in close, banked
         assert close.index(banked) > decided, f"{banked} is banked before comparability is known"
     # the window count is the one field that counts everything
@@ -250,16 +347,31 @@ def test_only_comparable_windows_feed_the_seat_totals():
                 break
     else:
         raise AssertionError("unbalanced braces after if (comparable)")
-    assert "t.physDrive += totalDrive;" in guarded
+    assert "t.driveSteps += totalDrive;" in guarded
+    assert "t.steps += totalSteps;" in guarded
     assert "t.moved += totalMoved;" in guarded
-    assert "t.maxPhysStep = maxPhysStep;" in guarded
     assert "t.windows++;" not in guarded
 
 
-def test_the_line_reports_the_attributed_number_and_the_raw_one():
+def test_the_line_reports_the_acceptance_counter_its_sample_size_and_the_raw_one():
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    for field in ("physFrames=", "physDrive=", "maxPhysStep=", "moved="):
+    for field in ("physFrames=", "driveSteps=", "bracket=", "moved="):
         assert field in close, field
+    # driveSteps is printed over its own sample size, so a small count and a
+    # small window cannot be confused
+    assert '.Append(" driveSteps=").Append(totalDrive).Append("/")' in close
+    assert '.Append(totalSteps)' in close
+
+
+def test_the_per_body_figures_are_labelled_with_the_games_player_id():
+    """r12. The line claimed PlayerID attribution and printed `p0`/`p1`, which
+    are positions in a sorted list. Two bodies with ids 7 and 2 could not be
+    matched to either figure."""
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    assert '.Append(" p").Append(ordered[i].playerId)' in close
+    assert '.Append(" p").Append(i)' not in close, "that is a list position"
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "playerId = id," in tick, "the id has to be stored to be printed"
 
 
 def test_a_roster_change_is_noted_and_no_longer_costs_the_window():
@@ -271,11 +383,18 @@ def test_a_roster_change_is_noted_and_no_longer_costs_the_window():
     accumulator simply stops growing, which is the right answer."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
     assert "rosterChanged = true" in tick
+    # r12 LOW: the flag used to be set whenever the map was already non-empty,
+    # so the SECOND body of an ordinary 1v1 set it on the very first sampled
+    # frame and every baseline window printed rosterChanged=1. Only an arrival
+    # on a LATER frame is a change, and `frames` is incremented at the end of
+    # the tick, so it is zero throughout the first one.
+    assert "if (frames > 0) rosterChanged = true;" in tick
+    assert "if (bodies.Count != 0) rosterChanged = true;" not in tick
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
     assert 'rosterChanged ? " rosterChanged=1"' in close
     # the wipe is gone, and cannot come back under the old name either
     assert "rebased" not in tick and "rebased" not in close
-    for wipe in ("physDrive.Clear()", "moved.Clear()", "lastPos.Clear()"):
+    for wipe in ("driveSteps.Clear()", "moved.Clear()", "lastPos.Clear()"):
         assert wipe not in tick, f"{wipe} discards a window's measurement"
 
 
@@ -314,18 +433,21 @@ def test_a_body_local_physics_is_not_touching_contributes_nothing():
         )
 
 
-def test_an_unarmed_bracket_cannot_report_a_body_at_the_origin():
-    """The prefix skips the transform read while the window is shut. If the
-    skipped state were a zero Vector3 the postfix would read the distance from
-    the origin as travel — which is exactly what a body sitting at the origin
-    is. The state carries its own flag, and the postfix requires it."""
+def test_there_is_no_bracket_left_to_straddle_a_window_edge():
+    """r12 LOW, retired by construction rather than repaired. A prefix/postfix
+    pair carries state across the middle of the patched method, and a log line
+    reached from inside it runs `OnUnityLog` on this thread — so a window could
+    close, or close and reopen, between the two halves and the second half
+    would report into the wrong window. There is no second half now: the
+    decision is complete in the prefix."""
     patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
-    assert "internal bool armed;" in patch
-    assert "__state.armed = true;" in patch
-    assert "if (dead || !__state.armed) return;" in patch
-    # and the prefix does not touch the transform while the window is shut
-    prefix = _code(_cs_block(PROBE_CS, "private static void Prefix(PlayerVelocity __instance, out DriveState __state)"))
-    assert prefix.index("WindowOpen()") < prefix.index("transform.position")
+    assert "Postfix" not in patch
+    assert "__state" not in patch
+    assert "DriveState" not in patch
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert "Window state cannot change between the two halves" not in src, (
+        "that claim was false and is now unnecessary"
+    )
 
 
 def test_the_bracket_fails_dead_rather_than_breaking_movement():
@@ -333,8 +455,11 @@ def test_the_bracket_fails_dead_rather_than_breaking_movement():
     escapes would stop bodies moving, which is a far worse outcome than a probe
     that reports nothing (#376)."""
     patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
-    assert patch.count("catch { dead = true; }") == 2, "both halves must swallow"
-    assert patch.count("if (dead") == 2, "and both must honour the latch"
+    assert patch.count("catch { dead = true; }") == 1, "the hook must swallow"
+    assert patch.count("if (dead) return;") == 1, "and honour the latch"
+    # and a dead channel is visible rather than silent: Alive goes false, which
+    # is what makes the window non-comparable instead of a zero
+    assert "return ran && !dead;" in patch
 
 
 def test_a_replaced_velocity_component_starts_a_fresh_baseline():
@@ -343,22 +468,28 @@ def test_a_replaced_velocity_component_starts_a_fresh_baseline():
     the new instance's running total against the old one's — reading zero
     forever if the new total is lower, and a jump if it is higher."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "if (velId != st.velId) { st.velId = velId; st.driveSeen = 0f; }" in tick
-    assert tick.index("st.driveSeen = 0f;") < tick.index("float fresh = banked - st.driveSeen;")
+    assert "st.stepsSeen = 0;" in tick and "st.driveStepsSeen = 0;" in tick
+    assert tick.index("if (velId != 0 && velId != st.velId)") < tick.index("DrainSteps(st)")
+    drain = _code(_cs_block(PROBE_CS, "private static bool DrainSteps(BodyState st)"))
+    assert "int freshDrive = c.driveSteps - st.driveStepsSeen;" in drain
 
 
 def test_the_step_accumulator_is_bounded_and_window_scoped():
     """It is written from the physics step for the life of the session, so it
     must not grow without limit, and it must not carry one window's travel into
     the next."""
-    note = _code(_cs_block(PROBE_CS, "internal static void NotePhysicsStep(int velId, float distance)"))
-    assert "stepDrive.Count >= MAX_BODIES_TRACKED" in note
-    assert "if (!(distance > 0f)) return;" in note, (
-        "NaN fails every comparison, so the accepted range is what must be tested"
-    )
+    note = _code(_cs_block(PROBE_CS, "internal static void NotePhysicsStep(int velId, bool willIntegrate)"))
+    assert "stepCounts.Count >= MAX_BODIES_TRACKED" in note
+    assert "if (!open) return;" in note
+    # counts, not floats: there is no NaN and no noise floor to get wrong, and
+    # a step that did NOT integrate is still counted, because the sample size
+    # is what tells a stopped body from an absent instrument
+    assert "c.steps++;" in note
+    assert "if (willIntegrate) c.driveSteps++;" in note
     open_body = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
-    assert "stepDrive.Clear();" in open_body
+    assert "stepCounts.Clear();" in open_body
     assert "physSteps = 0;" in open_body
+    assert "driveSteps = 0;" in open_body
 
 
 def test_accumulators_are_keyed_by_the_games_player_identity():
@@ -455,10 +586,8 @@ def test_the_heartbeat_keeps_each_seats_numbers_apart():
     comparison between seats IS the reading, so it goes on one line."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
     assert "totals.TryGetValue(seat, out t)" in close
-    assert "if (maxPhysStep > t.maxPhysStep) t.maxPhysStep = maxPhysStep;" in close, (
-        "the per-seat maximum must survive the per-window reset"
-    )
     heartbeat = _code(_cs_block(PROBE_CS, "private static void LogTotals()"))
     assert "foreach (var kv in totals)" in heartbeat
-    for field in ("windows=", "comparable=", "physFrames=", "physDrive=", "maxPhysStep=", "moved="):
+    for field in ("windows=", "comparable=", "notMeasured=", "physFrames=",
+                  "driveSteps=", "moved="):
         assert field in heartbeat, field

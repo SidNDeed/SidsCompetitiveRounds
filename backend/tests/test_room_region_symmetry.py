@@ -320,9 +320,9 @@ def test_a_sighting_needs_a_reporter_and_an_established_session():
     main._note_region_seen("us", "")
     assert main._REGION_SEEN == {}
 
-    join = inspect.getsource(main.queue_join)
-    assert "_session_was_verified(request)" in join
-    assert join.index("_session_was_verified(request)") < join.index("_note_region_seen(")
+    src = inspect.getsource(main.submit_match)
+    assert "_session_was_verified(request)" in src
+    assert src.index("_session_was_verified(request)") < src.index("_note_region_seen(")
     # and the verdict starts false, so an exit that neither raises nor verifies
     # cannot read as verified
     check = inspect.getsource(main._check_steam_session)
@@ -340,12 +340,32 @@ def test_only_well_formed_tokens_enter_the_map():
     assert main._REGION_SEEN == {}
 
 
-def test_the_queue_join_is_what_feeds_the_map():
-    """SOURCE SHAPE, not execution: this asserts the call is written at the
-    site that receives a live region, not that a join was run. The behaviour of
-    the map itself is executed by every other test in this file."""
-    src = inspect.getsource(main.queue_join)
-    assert "_note_region_seen(req.region, req.steam_id)" in src
+def test_an_accepted_match_is_what_feeds_the_map():
+    """SOURCE SHAPE, not execution: this asserts the call is written at the site
+    that knows a game was played and accepted. The behaviour of the map itself
+    is executed by every other test in this file.
+
+    The evidence used to be the join-time CloudRegion snapshot. Establishing a
+    session proves who is speaking and nothing about the region in the sentence,
+    so two accounts under one person could carry a region nobody can connect to
+    over the two-player bar and then win a tie against an honest one. A region
+    that does not exist cannot produce a game played in it."""
+    src = inspect.getsource(main.submit_match)
+    assert "_note_region_seen(report.region, report.reported_by_steam_id)" in src
+
+    # The flagged path commits and returns BEFORE the sighting, so an
+    # invalidated match is not evidence of anything.
+    assert src.index('if ac["invalidate"]:') < src.index("_note_region_seen(")
+
+    # The REPORTER only. Recording the opponent as well would let one account
+    # name an opponent and supply both halves of "two distinct players".
+    assert "_note_region_seen(report.region, p2.steam_id)" not in src
+    assert "_note_region_seen(report.region, p1.steam_id)" not in src
+
+    # The old source is gone, not merely supplemented — a weak feed into the
+    # same counter would make the counter worth what the weak feed is worth.
+    assert "_note_region_seen(" not in inspect.getsource(main.queue_join)
+
     # and nowhere else, so there is exactly one feed to reason about
     assert MAIN_PY.read_text(encoding="utf-8").count("_note_region_seen(") == 2, (
         "one definition and one caller"
@@ -392,3 +412,109 @@ def test_the_changelog_does_not_claim_the_fixed_order_is_gone():
     # and the fallback the sentence describes is the one the code has
     agreed = inspect.getsource(main._region_agreed)
     assert "return min(a, b)" in agreed
+
+
+def _fill_with_corroborated(count, pair=("76561198000000101", "76561198000000102")):
+    """`count` tokens, each corroborated by the same two reporters. Returns them
+    oldest-first."""
+    tokens = []
+    for i in range(count):
+        token = chr(97 + i // 26) + chr(97 + i % 26) + "q"
+        _corroborate(token, pair)
+        tokens.append(token)
+    return tokens
+
+
+def test_a_full_map_of_corroborated_tokens_still_admits_a_new_region():
+    """r12 MEDIUM. Ranking evictions by evidence has a failure of its own, and
+    it is the one that was reachable: a token nobody has corroborated YET is by
+    definition the least-corroborated entry in the map, so with the map full of
+    corroborated tokens every first sighting of a genuine new region was
+    evicted in the very call that made it. The second player to connect there
+    found nothing to join, and the region could never corroborate — not slowly,
+    not eventually, never.
+
+    A region can only corroborate if its first sighting is allowed to wait, so
+    the map reserves slots that no corroborated token may take."""
+    filled = _fill_with_corroborated(main._REGION_SEEN_MAX_TOKENS)
+    assert len(main._REGION_SEEN) == main._REGION_SEEN_MAX_TOKENS
+    assert all(main._region_corroborated(t) for t in filled)
+
+    main._note_region_seen("hk", "76561198000000201")
+    assert "hk" in main._REGION_SEEN, (
+        "the first honest sighting was evicted by the call that made it"
+    )
+    assert len(main._REGION_SEEN) == main._REGION_SEEN_MAX_TOKENS, (
+        "the map still has to be bounded"
+    )
+
+    # ...and the second genuine reporter can now find it there
+    main._note_region_seen("hk", "76561198000000202")
+    assert main._region_corroborated("hk")
+
+
+def test_the_nursery_is_bounded_and_gives_up_its_own_oldest():
+    """The reserved slots are a floor, not an exemption. New tokens compete
+    with other new tokens — recency inside the pool — and the corroborated pool
+    is untouched while it is inside its cap."""
+    cap = main._REGION_SEEN_CORROBORATED_CAP
+    room = main._REGION_SEEN_MAX_TOKENS - cap
+    assert 0 < cap < main._REGION_SEEN_MAX_TOKENS
+    settled = _fill_with_corroborated(cap)
+
+    newcomers = []
+    for i in range(room + 5):
+        token = "n" + chr(97 + i // 26) + chr(97 + i % 26)
+        main._note_region_seen(token, "76561198000000301")
+        newcomers.append(token)
+
+    assert len(main._REGION_SEEN) == main._REGION_SEEN_MAX_TOKENS
+    assert all(t in main._REGION_SEEN for t in settled), (
+        "a corroborated token was evicted while its pool was inside its cap"
+    )
+    assert newcomers[-1] in main._REGION_SEEN, "the newest sighting was evicted"
+    assert newcomers[0] not in main._REGION_SEEN, "the oldest newcomer survived"
+
+
+def test_a_corroborated_pool_over_its_cap_gives_up_its_oldest():
+    """The other direction, so the floor is not one-way: past the cap, the
+    corroborated pool is the one that pays, oldest first."""
+    settled = _fill_with_corroborated(main._REGION_SEEN_MAX_TOKENS)
+    oldest = settled[0]
+    _age(oldest, 3600.0)
+    main._note_region_seen("hk", "76561198000000201")
+    assert oldest not in main._REGION_SEEN, (
+        "the least recently seen corroborated token survived a map over its cap"
+    )
+    assert "hk" in main._REGION_SEEN
+
+
+def test_a_sighting_is_taken_on_every_accepted_report_not_once_per_reporter():
+    """r12 MEDIUM, answered by the source rather than by a new mechanism. The
+    map used to be fed at join time, once — so two genuine clients that joined
+    before their session tokens were minted were accepted, contributed nothing,
+    and were never re-noted, whatever they did afterwards.
+
+    The source is now every accepted match report, which is a recurring event:
+    an unminted session costs the reports made before its token exists and
+    nothing after. Pinned two ways — the stamp refreshes on re-report, and the
+    call is not behind any once-per-anything condition."""
+    reporter = "76561198000000401"
+    main._note_region_seen("eu", reporter)
+    _age("eu", main._REGION_SEEN_TTL_SECONDS - 5)
+    stale = main._REGION_SEEN["eu"][reporter]
+    main._note_region_seen("eu", reporter)
+    assert main._REGION_SEEN["eu"][reporter] > stale, (
+        "a re-report did not refresh the reporter's own sighting"
+    )
+
+    src = MAIN_PY.read_text(encoding="utf-8")
+    call = src.index("_note_region_seen(report.region")
+    guard = src[src.rindex("if ", 0, call):call]
+    assert "_session_was_verified(request)" in guard, (
+        "the sighting must still require an established session"
+    )
+    assert "once" not in guard and "first" not in guard, (
+        "the sighting is per accepted report; a one-shot guard would restore "
+        "the hole this replaced"
+    )

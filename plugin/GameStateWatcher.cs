@@ -1551,8 +1551,13 @@ namespace CompetitiveRounds
                 // for queue rooms (already frozen at match start).
                 try { if (!RoomActors.RosterFrozen) RoomActors.FreezeFighterRoster(sids); } catch { }
 
+                // Same class as the live-points fence: an attestation
+                // describes THIS room (it carries this room's region and this
+                // seat's actor number), so the series it names must be the one
+                // published for this room. Empty is already a legal sourceRef
+                // for every other mode and is the honest answer here.
                 string sourceRef =
-                    mode == "1v1" ? (ApiClient.ActiveRankedSeriesId ?? "")
+                    mode == "1v1" ? ApiClient.SeriesIdForThisRoom()
                     : mode == "2v2" ? (ApiClient.ActiveTeamSeriesId ?? "")
                     : mode == "1v2" ? (ApiClient.ActiveOvt1v2SeriesId ?? "")
                     : (ApiClient.ActiveFfaLobbyId ?? "");
@@ -4769,11 +4774,22 @@ namespace CompetitiveRounds
                 liveResendRefreshAt = Time.realtimeSinceStartup + 20f;
                 force = sp1 > 0 || sp2 > 0;
             }
-            if (matchIsRanked && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
+            // Points are an observation made in THIS room, so the 1v1
+            // channel takes the same room fence the 2v2 branch below has
+            // carried since r1 find 5. A queue-staged series id survives a
+            // failed join into a later room (documented at the staging site
+            // and on ActiveRankedSeriesRoom), and ranked room names are
+            // reused — so without the fence a seat that failed into series S
+            // and then played a different opponent in the same room would
+            // post THAT game's score against S. An id published for another
+            // room yields "", which sends nothing.
+            string liveSeriesId = "";
+            try { liveSeriesId = ApiClient.SeriesIdForThisRoom(); } catch { }
+            if (matchIsRanked && !string.IsNullOrEmpty(liveSeriesId)
                 && (force || sp1 != liveSentRankedP1 || sp2 != liveSentRankedP2))
             {
                 liveSentRankedP1 = sp1; liveSentRankedP2 = sp2;
-                ApiClient.PostLivePoints(ApiClient.ActiveRankedSeriesId, LocalSteamId, sp1, sp2);
+                ApiClient.PostLivePoints(liveSeriesId, LocalSteamId, sp1, sp2);
             }
             // 2v2 closes on the SAME rule — 2 points in game 1 (Sid, Aug 9).
             // GM_ArmsRace's p1/p2 point fields ARE the two teams in a cr_ff
@@ -5675,8 +5691,16 @@ namespace CompetitiveRounds
             // both players ranked-enabled). The series id is the durable signal;
             // trust it over the racy flag so game 1 counts. Server-side mirrors
             // this with a mod-pair upgrade at submit time for old clients.
+            // ...but only when the id is not demonstrably another room's.
+            // The strict room fence is wrong HERE: a report can be submitted
+            // after the room has closed, and an empty answer would then drop a
+            // genuinely ranked game to casual. ActiveSeriesContradictedByRoom
+            // asks the weaker question that has an answer in both states —
+            // "are we in a room this id was NOT published for" — so a stale id
+            // left by a failed join cannot upgrade the game we are actually in.
             if (shouldReport && !matchIsRanked
                 && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
+                && !ApiClient.ActiveSeriesContradictedByRoom()
                 && OpponentHasMod())
             {
                 Plugin.Log.LogInfo($"[REPORT-ROUTE] forcing isRanked=true: live series {ApiClient.ActiveRankedSeriesId} exists for this pairing (flag lost a race)");

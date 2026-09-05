@@ -30,6 +30,9 @@ room could spend.
 """
 
 import asyncio
+import textwrap
+import inspect
+import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +41,7 @@ from uuid import UUID, uuid4
 import pytest
 
 import main
+from sqlalchemy.exc import DBAPIError
 
 
 REPORTER_SID = "76561198000000011"
@@ -76,6 +80,15 @@ class _Result:
         return row[0] if isinstance(row, tuple) else row
 
 
+class _ScriptedAbort(Exception):
+    """Stands in for asyncpg's error object: SQLAlchemy wraps it and the
+    handler reads its sqlstate, which is the only field that decides."""
+
+    def __init__(self, sqlstate):
+        super().__init__("scripted %s" % sqlstate)
+        self.sqlstate = sqlstate
+
+
 class FakeSession:
     """Every statement report_disconnect can issue, in Python.
 
@@ -85,7 +98,8 @@ class FakeSession:
     """
 
     def __init__(self, players, event_exists=False, insert_wins=True, stored_count=4,
-                 named_series=None, series_fresh=True, series_still_eligible=True):
+                 named_series=None, series_fresh=True, series_still_eligible=True,
+                 deadlocks=0, lock_sqlstate="40P01"):
         self.players = list(players)
         self.event_exists = event_exists
         self.insert_wins = insert_wins
@@ -96,6 +110,14 @@ class FakeSession:
         # it is asked after the unlocked reads, and answers "is this still true
         # now that nothing else can change it".
         self.series_still_eligible = series_still_eligible
+        # r12 D: how many times the participant lock pass is aborted by the
+        # database before it succeeds, and with which SQLSTATE. 40P01 is a
+        # deadlock victim; anything else is a fault this endpoint must not
+        # swallow.
+        self.deadlocks = deadlocks
+        self.lock_sqlstate = lock_sqlstate
+        self.aborts_raised = 0
+        self.attempts = 0
         self.eligibility_locks = 0
         self.lock_order = []
         self.eligibility_sql = None
@@ -114,6 +136,12 @@ class FakeSession:
         sql = " ".join(str(statement).split())
         self.statements.append(sql)
         if sql.startswith("SELECT 1 FROM players") and "FOR NO KEY UPDATE" in sql:
+            if not self.lock_order or self.lock_order[-1] == "series":
+                self.attempts += 1
+            if self.deadlocks:
+                self.deadlocks -= 1
+                self.aborts_raised += 1
+                raise DBAPIError(sql, params, _ScriptedAbort(self.lock_sqlstate))
             self.lock_order.append(str((params or {}).get("pid")))
             return _Result([(1,)])
         if sql.startswith("SELECT 1 FROM ranked_series"):
@@ -214,10 +242,18 @@ def test_the_request_that_inserts_the_row_is_the_one_that_counts():
 
 
 def test_a_replay_that_loses_the_insert_counts_nothing():
-    """The whole point. Both requests clear the dc_events SELECT — that is
-    what "concurrent" means here — and only one row lands. The loser must add
-    nothing: an unconditional increment would take a leave-% denominator up by
-    one for a disconnect that happened once."""
+    """The whole point: only one row lands, and the loser must add nothing —
+    an unconditional increment would take a leave-% denominator up by one for a
+    disconnect that happened once.
+
+    r12 LOW, on the SCHEDULE this used to describe. It said both requests clear
+    the dc_events SELECT and then race the insert. Since the exclusive series
+    lock went in, two reports naming the same series serialise before either
+    reads dc_events, so that interleaving is no longer reachable in this
+    codebase and the second request takes the settled fast path instead. The
+    INSERT is still what decides, and that is deliberate: it is the last line
+    that holds if the lock is ever narrowed, moved, or taken on a different
+    row. What this exercises is the losing branch itself, driven directly."""
     session = FakeSession(_players(count=7), event_exists=False, insert_wins=False,
                           stored_count=8)
     answer = _call(session)
@@ -282,9 +318,18 @@ def test_the_predicate_is_re_asked_under_a_lock_before_anything_is_written():
     # the predicate is INSIDE the locking read, so the row that comes back is
     # the row that satisfies it — there is no gap between establishing the fact
     # and holding it
-    assert "player1_id = :rp AND player2_id = :dp" in sql
-    assert "player1_id = :dp AND player2_id = :rp" in sql
-    assert "invalidated_at IS NULL OR invalidation_reason = :exempt" in sql
+    assert "s.player1_id = :rp AND s.player2_id = :dp" in sql
+    assert "s.player1_id = :dp AND s.player2_id = :rp" in sql
+    assert "s.invalidated_at IS NULL OR s.invalidation_reason = :exempt" in sql
+    # r12: a series COMPLETING while the locks are being taken is a state
+    # change this report has to see, so reachability is re-asked here too --
+    # otherwise a report validated against a running series could be filed
+    # against one that finished in the window the lock exists to close.
+    assert "s.completed_at IS NULL" in sql
+    assert "ORDER BY s2.created_at DESC LIMIT 1" in sql
+    assert "FOR NO KEY UPDATE OF s" in sql, (
+        "with a subquery in the statement the lock has to name its table"
+    )
     # ...and it is taken before the row that decides
     order = session.statements
     lock_at = next(i for i, s in enumerate(order)
@@ -361,15 +406,25 @@ def test_a_report_with_no_series_still_resolves_at_delivery(_stub_the_gates):
     assert _stub_the_gates["find_current"] == 1
 
 
-def test_a_named_series_must_be_this_pairs():
-    """A named series is checked against the database, never taken as given:
-    its two participants have to be exactly this reporter and this leaver."""
-    session = FakeSession(_players(), named_series=_series_row(player2=STRANGER))
-    with pytest.raises(main.HTTPException) as caught:
-        _call(session, str(NAMED_SERIES))
-    assert caught.value.status_code == 403
-    assert session.inserts == 0 and session.increments == 0
+def test_a_named_series_that_is_not_this_pairs_falls_back_to_the_pair(_stub_the_gates):
+    """r12 MEDIUM. A named series is still checked against the database and
+    never taken as given -- but a name that resolves to some other pair's
+    series used to be a PERMANENT refusal, and the client treats a 4xx as
+    settled.
 
+    The name is an assertion about which series the observation belongs to.
+    When the assertion is false the server knows nothing worse than it knows
+    without one, so it does what every client that sends no name already gets:
+    resolve the pair's current series, with every check on that path applied.
+    Room names are reused, and a series id staged for a join that failed is
+    exactly how a client comes to name the wrong one."""
+    session = FakeSession(_players(), named_series=_series_row(player2=STRANGER))
+    answer = _call(session, str(NAMED_SERIES))
+    assert answer["status"] == "recorded"
+    assert _stub_the_gates["find_current"] == 1, "the unnamed resolution must run"
+    assert session.insert_params["sid"] == CURRENT_SERIES, (
+        "the event is filed against the pair's series, not the named stranger's"
+    )
 
 def test_the_pair_check_is_order_blind():
     """player1/player2 order is a property of how the series was created, not
@@ -422,15 +477,20 @@ def test_the_janitor_and_the_endpoint_read_the_same_constant():
     )
 
 
-def test_an_unknown_series_is_refused():
+def test_an_unknown_series_falls_back_the_same_way(_stub_the_gates):
+    """Same rule, the other way a name can be wrong: it resolves to nothing at
+    all. An id that names no row is not evidence about the report either.
+
+    An INVALIDATED name is still a refusal, because that IS evidence and it
+    points the conservative way -- see
+    test_an_integrity_invalidation_takes_no_new_events."""
     session = FakeSession(_players(), named_series=None)
-    with pytest.raises(main.HTTPException) as caught:
-        _call(session, str(NAMED_SERIES))
-    assert caught.value.status_code == 403
-    assert session.inserts == 0
+    answer = _call(session, str(NAMED_SERIES))
+    assert answer["status"] == "recorded"
+    assert _stub_the_gates["find_current"] == 1
+    assert session.insert_params["sid"] == CURRENT_SERIES
 
-
-def test_a_long_finished_series_is_refused_and_the_bound_is_asked_in_sql():
+def test_a_series_the_name_cannot_reach_is_refused_and_asked_in_sql():
     """Naming a series is what lets a queued report reach a series that is no
     longer current; the age bound is what keeps that from reaching the pair's
     whole shared history. It is asked of the database clock, so an api
@@ -443,22 +503,39 @@ def test_a_long_finished_series_is_refused_and_the_bound_is_asked_in_sql():
     assert session.inserts == 0
 
 
-def test_the_age_bound_binds_a_series_that_never_completes():
-    """The fake answers the freshness query with a boolean, so the test above
-    passes whatever the SQL actually asks. Both terms matter and one of them is
-    new: a series the janitor abandons keeps completed_at NULL forever, so the
-    completed_at term admits it at any age and created_at is what bounds it —
-    which is exactly the row the reason-scoped exemption above now accepts."""
+def test_the_name_reaches_one_series_and_ages_from_the_end_not_the_start():
+    """Two r12 findings, one predicate.
+
+    REACHABILITY. The unnamed path can only ever reach one series. Naming used
+    to reach every series of the pair inside a week, so a participant could
+    file one disconnect against the other for every normally-completed series
+    they had played -- and ranked_dc_count feeds the leave-% denominator. A
+    name reaches a series that has not completed, or the pair's most recent
+    one: at most one completed series at any moment, which is the bound the
+    unnamed path already had.
+
+    FRESHNESS. It used to be asked of created_at, which is the one column that
+    says nothing about whether a series is over. Resume-forever is the whole
+    point of the helper this endpoint switched to in July -- a resumed series
+    and game 3 of a long BO3 both have an ancient created_at -- so the bound
+    refused exactly the reports naming was added to save. It is asked of the
+    END now, and a series with no end is running, which is not an age at
+    all."""
     sql = MAIN_PY.read_text(encoding="utf-8")
-    start = sql.index("SELECT 1 FROM ranked_series WHERE id = CAST(:sid AS uuid)")
-    query = sql[start:start + 400]
-    assert "created_at >= NOW() - INTERVAL '7 days'" in query, (
-        "an abandoned series has no completed_at, so nothing else bounds its age"
+    start = sql.index("SELECT 1 FROM ranked_series s")
+    query = sql[start:start + 1200]
+    assert "s.completed_at IS NULL" in query
+    assert "ORDER BY s2.created_at DESC LIMIT 1" in query, (
+        "the pair's most recent series is the one completed series a name reaches"
     )
-    assert "completed_at IS NULL OR completed_at >= NOW() - INTERVAL '7 days'" in query
+    assert "COALESCE(s.completed_at, s.invalidated_at) >= NOW() - INTERVAL '7 days'" in query, (
+        "an abandoned series has no completed_at; invalidated_at is its end"
+    )
+    assert "s.created_at >= NOW()" not in query, (
+        "a created_at bound refuses a legitimately resumed active series"
+    )
     # asked of the database clock, never compared to a python now
     assert "NOW()" in query and "datetime.now" not in query
-
 
 def test_a_malformed_series_id_is_a_4xx_so_the_client_stops_retrying():
     """4xx is permanent to the client's retry pass. A report whose id cannot
@@ -632,12 +709,49 @@ def test_one_faulting_pass_cannot_retire_the_queue_for_the_session():
     ended every retry for the rest of the session — including reports already
     written to disk — with nothing but the exception in the log."""
     sup = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor()")
-    assert "pass.MoveNext()" in sup, "the pass must be driven by hand to be catchable"
+    assert "top.MoveNext()" in sup, "the pass must be driven by hand to be catchable"
     assert "catch (Exception ex)" in sup
     assert "finally { _outboxLoopStarted = false; }" in sup
     src = API_CLIENT_CS.read_text(encoding="utf-8")
     assert src.count("_outboxLoopStarted = false") == 1
     assert "StartCoroutine(OutboxSupervisor())" in src
+
+
+def test_the_guard_covers_the_request_and_not_only_the_pass():
+    """r12 MEDIUM. Driving the pass by hand catches a throw in the PASS. But
+    the pass yields the request coroutine itself, and a yielded IEnumerator is
+    run by UNITY, on its own, outside that catch — so a throw inside a request
+    escaped the supervisor and killed it. A persisted entry with a malformed
+    url reaches exactly that, and the queue then waits for an enqueue a session
+    with nothing left to report never makes.
+
+    Nested enumerators are driven on the same stack; only real yield
+    instructions are handed to Unity."""
+    sup = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor()")
+    assert "var nested = current as IEnumerator;" in sup
+    assert "stack.Add(nested);" in sup
+    assert "stack.Count < OUTBOX_NEST_LIMIT" in sup, "the hand-driving must be bounded"
+    # the yield that reaches Unity is the one that is NOT an enumerator
+    assert sup.index("var nested = current as IEnumerator;") < sup.index("yield return current;")
+    # a fault abandons the pass, it does not retire the queue: the entry keeps
+    # the attempt count and next-attempt time set before the yield
+    assert "if (faulted) break;" in sup
+    pass_body = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxPass()")
+    assert "p.nextAt = Time.realtimeSinceStartup" in pass_body
+    assert pass_body.index("p.nextAt =") < pass_body.index("yield return PostRequest(")
+
+
+def test_a_supervisor_that_did_not_start_does_not_latch_the_flag():
+    """r12 LOW. The premise was that StartCoroutine THROWS on an inactive
+    host. On an inactive host Unity logs and returns null instead, so a
+    try/catch around the call proves nothing about whether anything started —
+    and the flag is the only guard, so latching it on a null answer retires the
+    retry queue with no supervisor behind it."""
+    ensure = _cs_method_body(API_CLIENT_CS, "private static void EnsureOutboxLoop()")
+    assert "var running = Plugin.Instance.StartCoroutine(OutboxSupervisor());" in ensure
+    assert "if (running == null)" in ensure
+    assert ensure.index("if (running == null)") < ensure.index("_outboxLoopStarted = true;")
+    assert "_outboxLoopWarned" in ensure, "a queue with no driver has to say so once"
 
 
 def test_the_initial_delay_set_stays_small_and_explicit():
@@ -795,3 +909,121 @@ def test_a_failed_queue_write_is_logged_once():
     assert "queue file unwritable" in body
     src = API_CLIENT_CS.read_text(encoding="utf-8")
     assert "private static bool _outboxPersistWarned;" in src
+
+
+def test_the_outbox_is_written_by_replacement_not_by_truncation():
+    """The whole crash guarantee is this file, so how it is written is part of
+    the guarantee. WriteAllText opens the LIVE copy with Truncate: an
+    interruption between the truncate and the last byte leaves an empty or
+    half-written queue, losing exactly the reports the file exists to carry
+    through a crash, in exactly the window where one is most likely -- it is
+    rewritten on every enqueue and every dequeue. Written beside and moved over,
+    an interruption leaves either the whole previous queue or the whole new
+    one."""
+    body = _cs_method_body(API_CLIENT_CS, "private static void PersistOutbox()")
+    assert "File.WriteAllText(OutboxPath," not in body, (
+        "the live queue file must never be opened for truncation"
+    )
+    assert 'string tmp = OutboxPath + ".tmp";' in body
+    assert "File.WriteAllText(tmp, sb.ToString());" in body
+    assert "File.Replace(tmp, OutboxPath, null);" in body
+    assert "File.Move(tmp, OutboxPath);" in body
+    # the whole file exists before anything replaces the old one
+    assert body.index("File.WriteAllText(tmp") < body.index("File.Replace(tmp")
+    assert body.index("File.WriteAllText(tmp") < body.index("File.Move(tmp")
+    # an empty queue still removes the file rather than leaving a stale one
+    assert "if (File.Exists(OutboxPath)) File.Delete(OutboxPath);" in body
+    # and a write that fails is still said out loud once (r12 finding A4) --
+    # the sentence about surviving a crash is worth nothing if the write
+    # failing is silent
+    assert "_outboxPersistWarned" in body
+
+
+def test_a_deadlock_victim_is_re_run_instead_of_being_handed_to_the_player(_stub_the_gates):
+    """r12 MEDIUM. This endpoint locks the two participants and then the
+    series; tournament completion holds FOR SHARE on every bound bracket series
+    through commit and then writes the podium players. A delayed report about a
+    semifinal leaver and a completion of that bracket wait on each other and
+    PostgreSQL aborts one with 40P01.
+
+    Neither order is movable -- series-first here would put this endpoint in an
+    ABBA against every other 1v1 writer, and the veto cannot enumerate its
+    podium players in advance (#204). So the abort is what is handled: the
+    transaction rolled back whole, nothing is half written, and the retry
+    re-reads everything under fresh locks."""
+    session = FakeSession(_players(), deadlocks=1)
+    answer = _call(session)
+    assert answer["status"] == "recorded"
+    assert session.aborts_raised == 1
+    assert session.attempts == 2, "the request is re-run, not resumed"
+    assert session.rollbacks >= 1, "the aborted transaction has to be rolled back first"
+    assert session.inserts == 1 and session.increments == 1, (
+        "the retry must count exactly once"
+    )
+    assert session.commits == 1
+
+
+def test_a_deadlock_that_repeats_answers_retryable_and_not_settled(_stub_the_gates):
+    """The second abort means the counterparty is still holding. Waiting inside
+    the request is worse for the caller than answering something its outbox
+    brings back -- and the outbox drops a 4xx as settled and keeps everything
+    else, so the answer has to be a 5xx. 503 says "not judged", which is what
+    happened."""
+    session = FakeSession(_players(), deadlocks=main.DC_DEADLOCK_ATTEMPTS)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session)
+    assert caught.value.status_code == 503
+    assert 500 <= caught.value.status_code < 600, (
+        "a 4xx here would make the client drop a report nobody judged"
+    )
+    assert session.aborts_raised == main.DC_DEADLOCK_ATTEMPTS
+    assert session.inserts == 0 and session.increments == 0 and session.commits == 0
+
+
+def test_an_abort_that_is_not_a_deadlock_is_not_retried(_stub_the_gates):
+    """The negative control. Retrying is only correct for the error whose whole
+    meaning is "you were picked, try again"; a serialization failure, a
+    constraint fault or a dead connection re-run blind would hide a real
+    defect, so only 40P01 is caught."""
+    session = FakeSession(_players(), deadlocks=1, lock_sqlstate="55P03")
+    with pytest.raises(DBAPIError):
+        _call(session)
+    assert session.aborts_raised == 1, "one attempt, not two"
+    assert session.inserts == 0
+
+
+def test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain():
+    """r12 LOW, and the other half of the finding above. _prune_stale_series
+    locks a series and then writes the players its bets belong to. Run as ONE
+    transaction it held every series and every bettor it had touched so far, so
+    a batch holding a stale S1 while it reached the bettors of S2 could wait on
+    a player a DC report held while that report waited on S1. The row that
+    closes the cycle is a bettor, which no lock ordering here enumerates; what
+    removes it is the transaction ending at the item boundary (#204).
+
+    Read structurally rather than by string: each loop commits, and nothing
+    commits after the loops."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(main._prune_stale_series)))
+    fn = tree.body[0]
+
+    def _commits(node):
+        return [n for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "commit"]
+
+    loops = [n for n in fn.body if isinstance(n, ast.For)]
+    assert len(loops) == 3, f"expected the three prune modes, found {len(loops)}"
+    for index, loop in enumerate(loops):
+        commits = _commits(loop)
+        continues = [n for n in ast.walk(loop) if isinstance(n, ast.Continue)]
+        assert commits, f"prune loop {index} never ends its transaction"
+        assert len(commits) >= len(continues) + 1, (
+            f"prune loop {index} has a path that skips an item while still "
+            f"holding the locks it took for it"
+        )
+
+    tail = [n for n in fn.body if not isinstance(n, ast.For)]
+    assert not any(_commits(n) for n in tail), (
+        "a commit outside the loops is the batch transaction coming back"
+    )

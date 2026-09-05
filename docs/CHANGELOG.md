@@ -56,10 +56,10 @@
 - The region a ranked room is created in no longer depends on which of the two
   clients happened to ask for the room first. Two players whose games agree on
   a region still land there, as before; when the two signals disagree, the
-  choice goes to the region the server has actually seen players connected to
-  recently, rather than to the seat that reached us first. When neither region
-  has that evidence — which includes every pick made shortly after a server
-  restart — or when both do, the tie falls to a fixed order: still arbitrary,
+  choice goes to the region that recent finished games were actually played in,
+  rather than to the seat that reached us first. When neither region has that
+  evidence — which includes every pick made shortly after a server restart — or
+  when both do, the tie falls to a fixed order: still arbitrary,
   but identical for both of you and no longer an advantage for the faster
   connection. This does not try to pick the BEST region for a cross-region
   pair — nothing here measures ping between the two of you yet.
