@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using HarmonyLib;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -51,23 +52,33 @@ namespace CompetitiveRounds
     ///             velocity += down * fixedDeltaTime * timeScale * 20f;
     ///             transform.position += fixedDeltaTime * timeScale * velocity;
     ///
-    /// `physDrive` accumulates that step and nothing else: while
-    /// `isActiveAndEnabled &amp;&amp; isPlaying &amp;&amp; simulated &amp;&amp;
-    /// !isKinematic` holds, it adds |velocity| * deltaTime * timeScale — the
-    /// distance local physics moved this body over the frame, summed over the
-    /// frame's fixed steps. A position written by the network lerp, by the
-    /// respawn walk or by a map rescale adds nothing to it, because none of
-    /// those is that expression.
+    /// `physDrive` is that statement's OUTPUT, measured, not re-derived. A
+    /// Harmony prefix/postfix pair brackets `FixedUpdate` and reports the
+    /// position difference across it, so a metre of `physDrive` means vanilla's
+    /// own `transform.position +=` moved the body a metre. A position written
+    /// by the network lerp, by the respawn walk or by a map rescale adds
+    /// nothing, because none of them happens between the two halves of that
+    /// bracket.
     ///
-    /// The first term is the writer's REACHABILITY and r11 added it: a dead
-    /// body is deactivated by `HealthHandler.RPCA_Die` (V/HealthHandler.cs:374)
-    /// with `isPlaying`, `simulated` and `isKinematic` all untouched and its
-    /// death velocity still on it, so the other three terms hold for a body
-    /// `FixedUpdate` is not running on at all.
-    /// The lerp does write `velocity`, and that is the point rather than a
-    /// leak: a seat whose bodies are still simulated integrates that velocity
-    /// into the transform, which is the behaviour under suspicion, and a seat
-    /// whose bodies are stopped multiplies the same velocity by zero.
+    /// It is measured rather than re-derived because two rounds of re-deriving
+    /// it kept being wrong in a new way. The sampler read `velocity` in the
+    /// render `Update` and multiplied by `Time.deltaTime`: between two Updates
+    /// `FixedUpdate` runs zero times, one, or several, so the product invented
+    /// travel for a body that never stepped and understated one that stepped
+    /// twice — and `Photon.Pun.SyncPlayerMovement.Update` rewrites `velocity`
+    /// on every remote body after the fact, so the value sampled was frequently
+    /// not the value the step used. Each repair also had to restate vanilla's
+    /// four-term guard, and r11 found the restatement short a term
+    /// (`isActiveAndEnabled`: `HealthHandler.RPCA_Die`, V/HealthHandler.cs:374,
+    /// deactivates a dead body with `isPlaying`, `simulated` and `isKinematic`
+    /// untouched and its death velocity still on it). Bracketing the writer
+    /// retires the whole class: there is no guard to copy and no arithmetic to
+    /// get wrong, because the number appears if and only if the writer ran.
+    ///
+    /// The lerp writing `velocity` is the point rather than a leak: a seat
+    /// whose bodies are still simulated integrates that velocity into the
+    /// transform, which is the behaviour under suspicion, and a seat whose
+    /// bodies are stopped never reaches the statement at all.
     ///
     /// Observed displacement is still reported, as `moved`, with no
     /// attribution attached to it. It is context — it says the bodies went
@@ -105,8 +116,11 @@ namespace CompetitiveRounds
     ///     at its fourth line on exactly the seat under test.
     ///
     /// ACCEPTANCE for the fix this informs: `physDrive` and `maxPhysStep` on a
-    /// spectator seat down to what the fighter control already reports, over
-    /// windows that are neither `revived` nor closed by the horizon.
+    /// spectator seat down to what the fighter control already reports. The
+    /// totals line is made of exactly the windows that criterion names — the
+    /// comparable ones — rather than of every window with a comparable COUNT
+    /// beside it, so the two seats' figures can be read against each other
+    /// directly. `physSteps` is the sample size behind them.
     ///
     /// Bounded on purpose: a broadcast seat sits in matches all day, so this
     /// logs the first MAX_REPORTS windows of a session and then a periodic
@@ -127,8 +141,12 @@ namespace CompetitiveRounds
         /// enough for the seat to have started doing something else.</summary>
         private const float WINDOW_HORIZON_SECONDS = 8f;
 
-        /// <summary>Physics travel below this in a single frame is arithmetic
-        /// noise, not motion.</summary>
+        /// <summary>Observed displacement below this in a single frame is
+        /// float noise in two transform reads, not motion. It applies to
+        /// `moved` ONLY. `physDrive` is no longer reconstructed from anything,
+        /// so it has no arithmetic error to filter: it is the sum of the
+        /// position deltas PlayerVelocity.FixedUpdate itself produced, and a
+        /// small true step is a small true step.</summary>
         private const float NOISE_FLOOR = 0.001f;
 
         private const int MAX_REPORTS = 20;
@@ -160,12 +178,32 @@ namespace CompetitiveRounds
             internal float moved;
             internal bool wasSimulated;  // vel.simulated ALONE - see the latch
             internal int order;          // first-seen, so the line's order is stable
+            internal int velId;          // which PlayerVelocity the drive below came from
+            internal float driveSeen;    // that instance's cumulative, already folded in
         }
 
         private static readonly Dictionary<int, BodyState> bodies =
             new Dictionary<int, BodyState>();
         private static int bodyOrder;
         private const int MAX_BODIES_TRACKED = 32;
+
+        /// <summary>Distance moved by PlayerVelocity.FixedUpdate itself, per
+        /// PlayerVelocity instance, cumulative for the window. Written on the
+        /// physics step by the patch below and drained by Tick.
+        ///
+        /// Keyed by instance rather than by player id ON PURPOSE: identity
+        /// resolution costs a component walk, and the physics step is the one
+        /// place in this file that must stay cheap. Tick already holds both
+        /// halves of the mapping, so it does the attribution.</summary>
+        private static readonly Dictionary<int, float> stepDrive =
+            new Dictionary<int, float>();
+
+        /// <summary>Fixed steps in the window that moved a body. Distinct from
+        /// physFrames, which counts RENDER frames in which any drive was
+        /// drained — the two differ by the fixed/render ratio, and seeing both
+        /// is how a reader tells a stalled render loop from a stopped physics
+        /// one.</summary>
+        private static int physSteps;
 
         private static int reports;
 
@@ -182,7 +220,8 @@ namespace CompetitiveRounds
             internal float physDrive;
             internal float moved;
             internal float maxPhysStep;
-            internal int comparable;   // neither revived nor horizon-closed
+            internal int physSteps;
+            internal int comparable;   // the windows every other field is made of
         }
 
         private static readonly Dictionary<string, SeatTotals> totals =
@@ -211,6 +250,8 @@ namespace CompetitiveRounds
                 revived = false;
                 bodies.Clear();
                 bodyOrder = 0;
+                stepDrive.Clear();
+                physSteps = 0;
                 rosterAtOpen = RosterCount();
                 windowsTotal++;
             }
@@ -232,8 +273,6 @@ namespace CompetitiveRounds
                 var players = PlayerManager.instance != null ? PlayerManager.instance.players : null;
                 if (players == null) return;
 
-                float dt = Time.deltaTime;
-                float scale = SafeTimeScale();
                 bool anyDriven = false;
 
                 for (int i = 0; i < players.Count; i++)
@@ -242,9 +281,8 @@ namespace CompetitiveRounds
                     if (p == null) continue;
 
                     int id;
+                    int velId = 0;
                     bool simulatedNow = false;
-                    bool driven = false;
-                    float speed = 0f;
                     try
                     {
                         id = p.PlayerID;
@@ -252,22 +290,8 @@ namespace CompetitiveRounds
                         var vel = data != null ? data.playerVel : null;
                         if (vel != null)
                         {
+                            velId = vel.GetInstanceID();
                             simulatedNow = vel.simulated;
-                            // The exact predicate PlayerVelocity.FixedUpdate
-                            // applies before it touches the transform, INCLUDING
-                            // the term that decides whether FixedUpdate runs at
-                            // all. A dead body is deactivated by
-                            // HealthHandler.RPCA_Die with isPlaying, simulated
-                            // and isKinematic untouched and its death velocity
-                            // still on it, so without isActiveAndEnabled the
-                            // probe banks drive for a body local physics is not
-                            // touching — the same defect class this sampler was
-                            // written to remove, one term further in.
-                            driven = vel.isActiveAndEnabled
-                                     && data.isPlaying
-                                     && simulatedNow
-                                     && !vel.isKinematic;
-                            if (driven) speed = ((Vector2)vel.velocity).magnitude;
                         }
                     }
                     catch { continue; }
@@ -282,6 +306,7 @@ namespace CompetitiveRounds
                             lastPos = SafePos(players, i),
                             wasSimulated = simulatedNow,
                             order = bodyOrder++,
+                            velId = velId,
                         };
                         bodies[id] = st;
                     }
@@ -313,12 +338,19 @@ namespace CompetitiveRounds
                     st.lastPos = now;
                     if (step >= NOISE_FLOOR) st.moved += step;
 
-                    if (!driven) continue;
+                    // Drain whatever the physics writer banked for this body
+                    // since the last frame. A body whose PlayerVelocity was
+                    // replaced starts a fresh baseline rather than comparing
+                    // against another instance's running total.
+                    if (velId == 0) continue;
+                    if (velId != st.velId) { st.velId = velId; st.driveSeen = 0f; }
+                    float banked;
+                    if (!stepDrive.TryGetValue(velId, out banked)) continue;
+                    float fresh = banked - st.driveSeen;
+                    if (fresh <= 0f) continue;
+                    st.driveSeen = banked;
+                    st.physDrive += fresh;
                     anyDriven = true;
-                    float travel = speed * dt * scale;
-                    if (travel < NOISE_FLOOR) continue;
-                    st.physDrive += travel;
-                    if (travel > maxPhysStep) maxPhysStep = travel;
                 }
 
                 frames++;
@@ -330,6 +362,38 @@ namespace CompetitiveRounds
                 }
             }
             catch { CloseWindow("error"); }
+        }
+
+        /// <summary>Called from the postfix below, on the physics step, with
+        /// the distance PlayerVelocity.FixedUpdate just moved that body. Costs
+        /// one bool read while the window is closed, which is almost always.
+        ///
+        /// This is the whole re-approach: the probe used to re-derive this
+        /// number in Update from the velocity it could see and the render
+        /// delta, which is wrong in both directions. Zero fixed steps between
+        /// two Updates invents travel for a body that never moved; two invent
+        /// half of it; and `Photon.Pun.SyncPlayerMovement.Update` rewrites
+        /// `velocity` on every remote body after the fact, so the velocity
+        /// sampled was often not the one the step used. Bracketing the writer
+        /// removes the arithmetic and the guesswork together — a delta appears
+        /// here if and only if vanilla's own `transform.position +=` ran.</summary>
+        internal static bool WindowOpen() { return open; }
+
+        internal static void NotePhysicsStep(int velId, float distance)
+        {
+            if (!open) return;
+            // NaN fails every comparison, so test for the accepted range rather
+            // than for the rejected one.
+            if (!(distance > 0f)) return;
+            float banked;
+            if (!stepDrive.TryGetValue(velId, out banked))
+            {
+                if (stepDrive.Count >= MAX_BODIES_TRACKED) return;
+                banked = 0f;
+            }
+            stepDrive[velId] = banked + distance;
+            physSteps++;
+            if (distance > maxPhysStep) maxPhysStep = distance;
         }
 
         /// <summary>Closed by the first `MOVE PLAYERS START` (the per-player
@@ -349,14 +413,34 @@ namespace CompetitiveRounds
                 string seat = openSeat ?? "?";
                 SeatTotals t;
                 if (!totals.TryGetValue(seat, out t)) { t = new SeatTotals(); totals[seat] = t; }
+                // Comparability is decided BEFORE anything is banked. The
+                // acceptance criterion in this file's header is stated over
+                // windows that are neither revived nor closed by the horizon,
+                // and the totals line is the only place that criterion is ever
+                // read — so the totals have to be made of those windows and
+                // nothing else. Banking every window and merely COUNTING the
+                // comparable ones produced a physDrive nobody could evaluate:
+                // a horizon close is eight seconds of some other activity, and
+                // one of them swamps a dozen real windows.
+                //
+                // A window that saw no frame, or no body, carries no
+                // measurement either — it would only dilute the counts.
+                bool comparable = !revived
+                                  && why != "horizon"
+                                  && why != "error"
+                                  && frames > 0
+                                  && bodies.Count > 0;
                 t.windows++;
-                t.frames += frames;
-                t.physFrames += physFrames;
-                t.physDrive += totalDrive;
-                t.moved += totalMoved;
-                if (maxPhysStep > t.maxPhysStep) t.maxPhysStep = maxPhysStep;
-                bool comparable = !revived && why != "horizon" && why != "error";
-                if (comparable) t.comparable++;
+                if (comparable)
+                {
+                    t.comparable++;
+                    t.frames += frames;
+                    t.physFrames += physFrames;
+                    t.physSteps += physSteps;
+                    t.physDrive += totalDrive;
+                    t.moved += totalMoved;
+                    if (maxPhysStep > t.maxPhysStep) t.maxPhysStep = maxPhysStep;
+                }
 
                 if (reports >= MAX_REPORTS)
                 {
@@ -379,6 +463,7 @@ namespace CompetitiveRounds
                   .Append(" comparable=").Append(comparable ? "1" : "0")
                   .Append(revived ? " revived=1" : "")
                   .Append(" physFrames=").Append(physFrames).Append("/").Append(frames)
+                  .Append(" physSteps=").Append(physSteps)
                   .Append(" physDrive=").Append(totalDrive.ToString("F3"))
                   .Append(" maxPhysStep=").Append(maxPhysStep.ToString("F4"))
                   .Append(" moved=").Append(totalMoved.ToString("F3"));
@@ -404,7 +489,12 @@ namespace CompetitiveRounds
         /// <summary>One line carrying every seat this process has held, each
         /// with its own counters and its own maximum. The comparison between
         /// them is the whole reading, so it cannot be split across lines whose
-        /// seats are only known from when they happened to be written.</summary>
+        /// seats are only known from when they happened to be written.
+        ///
+        /// `windows` is every window the seat held; every other field is made
+        /// of the `comparable` subset only. A seat whose two numbers diverge is
+        /// telling you its windows are being cut short, which is worth knowing
+        /// before reading the drive figure beside it.</summary>
         private static void LogTotals()
         {
             try
@@ -417,6 +507,7 @@ namespace CompetitiveRounds
                       .Append(": windows=").Append(t.windows)
                       .Append(" comparable=").Append(t.comparable)
                       .Append(" physFrames=").Append(t.physFrames).Append("/").Append(t.frames)
+                      .Append(" physSteps=").Append(t.physSteps)
                       .Append(" physDrive=").Append(t.physDrive.ToString("F2"))
                       .Append(" maxPhysStep=").Append(t.maxPhysStep.ToString("F4"))
                       .Append(" moved=").Append(t.moved.ToString("F2"));
@@ -424,14 +515,6 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogInfo(sb.ToString());
             }
             catch { }
-        }
-
-        /// <summary>Vanilla scales physics by this; the probe integrates the
-        /// same expression, so it has to read the same number.</summary>
-        private static float SafeTimeScale()
-        {
-            try { return TimeHandler.timeScale; }
-            catch { return 1f; }
         }
 
         private static Vector3 SafePos(List<Player> players, int i)
@@ -452,6 +535,64 @@ namespace CompetitiveRounds
                 return players != null ? players.Count : 0;
             }
             catch { return 0; }
+        }
+    }
+
+    /// <summary>Brackets the one statement in vanilla that moves a body under
+    /// local physics: `PlayerVelocity.FixedUpdate`'s `transform.position +=`.
+    ///
+    /// The prefix remembers the position, the postfix reports the difference.
+    /// Nothing else runs between them, so the difference is that statement's
+    /// output and nothing else — not a network correction, not a teleport, not
+    /// a map transition, all of which move the same transform from elsewhere in
+    /// the frame and all of which the previous sampler could not tell apart.
+    ///
+    /// Runs on every body every fixed step for the whole session, so the closed
+    /// case has to be free: both halves gate on the same window read, and while
+    /// it is shut the prefix does not even touch the transform. The state
+    /// carries its own `armed` flag rather than a sentinel position, because a
+    /// body legitimately sits at the origin and a sentinel would report the
+    /// distance from it as travel. Window state cannot change between the two
+    /// halves — the round call-in that opens one runs on the same thread and
+    /// there is no yield in vanilla's FixedUpdate.
+    ///
+    /// A throw here would break vanilla movement, so both halves swallow and
+    /// the channel latches dead — the probe reporting nothing is a fine outcome,
+    /// a game that cannot move bodies is not (#376 places diagnostics so they
+    /// cannot damage the behaviour they observe).</summary>
+    [HarmonyPatch(typeof(PlayerVelocity), "FixedUpdate")]
+    internal static class PlayerVelocity_TeardownDrive_Patch
+    {
+        private static bool dead;
+
+        private struct DriveState
+        {
+            internal bool armed;
+            internal Vector3 pos;
+        }
+
+        private static void Prefix(PlayerVelocity __instance, out DriveState __state)
+        {
+            __state = default(DriveState);
+            if (dead || !SpectatorTeardownProbe.WindowOpen()) return;
+            try
+            {
+                __state.pos = __instance.transform.position;
+                __state.armed = true;
+            }
+            catch { dead = true; }
+        }
+
+        private static void Postfix(PlayerVelocity __instance, DriveState __state)
+        {
+            if (dead || !__state.armed) return;
+            try
+            {
+                Vector3 after = __instance.transform.position;
+                SpectatorTeardownProbe.NotePhysicsStep(
+                    __instance.GetInstanceID(), Vector3.Distance(after, __state.pos));
+            }
+            catch { dead = true; }
         }
     }
 }

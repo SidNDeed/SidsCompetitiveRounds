@@ -167,16 +167,66 @@ def test_a_home_region_cannot_corroborate_itself():
     )
 
 
+def _age(token, seconds, only=None):
+    """Push a token's reporters back in time. `only` ages one of them, which is
+    how the per-reporter clock is separated from a token-wide one."""
+    ids = main._REGION_SEEN[token]
+    for rid in list(ids):
+        if only is None or rid == only:
+            ids[rid] = ids[rid] - seconds
+
+
 def test_a_sighting_ages_out():
     _corroborate("us")
     assert main._region_corroborated("us")
-    seen_at, ids = main._REGION_SEEN["us"]
-    main._REGION_SEEN["us"] = (seen_at - main._REGION_SEEN_TTL_SECONDS - 1, ids)
+    _age("us", main._REGION_SEEN_TTL_SECONDS + 1)
     assert not main._region_corroborated("us")
     # ...and a fresh sighting starts the player count over, so a region kept
     # alive by one straggler does not inherit an old quorum.
     main._note_region_seen("us", "76561198000000009")
     assert not main._region_corroborated("us")
+
+
+def test_one_reporter_cannot_keep_anothers_stale_sighting_alive():
+    """r11 HIGH. With one last-seen stamp per TOKEN, the reporter who queues
+    from a region every day refreshes it, and the whole entry — including a
+    second player's year-old sighting — stays inside the TTL forever. The map
+    would then answer "two players recently" on the strength of one. Each
+    reporter's sighting has to expire on its own schedule."""
+    a, b = "76561198000000001", "76561198000000002"
+    main._note_region_seen("eu", a)
+    main._note_region_seen("eu", b)
+    assert main._region_corroborated("eu")
+
+    # b stops playing there; a keeps queueing from it.
+    _age("eu", main._REGION_SEEN_TTL_SECONDS + 1, only=b)
+    main._note_region_seen("eu", a)
+    assert not main._region_corroborated("eu"), (
+        "one active reporter preserved another's expired sighting"
+    )
+    # the expired reporter is dropped rather than kept as a dead entry
+    assert b not in main._REGION_SEEN["eu"]
+
+    # and b coming back restores the quorum, since this is a freshness rule
+    # rather than a one-way retirement
+    main._note_region_seen("eu", b)
+    assert main._region_corroborated("eu")
+
+
+def test_a_tokens_reporters_are_bounded_by_dropping_the_oldest():
+    """A fixed first-N would let a region's original reporters hold its quorum
+    open long after they stopped playing there — the same defect as the shared
+    clock, one level down."""
+    cap = main._REGION_SEEN_IDS_PER_TOKEN
+    for i in range(cap):
+        main._note_region_seen("us", "7656119800000%04d" % i)
+    _age("us", 60.0)
+    newcomer = "76561198000009999"
+    main._note_region_seen("us", newcomer)
+    ids = main._REGION_SEEN["us"]
+    assert len(ids) == cap, "the per-token reporter set is not bounded"
+    assert newcomer in ids, "the newest reporter was refused rather than admitted"
+    assert "76561198000000000" not in ids, "the oldest reporter was kept"
 
 
 def test_the_map_is_bounded_and_evicts_the_oldest():
@@ -211,8 +261,7 @@ def test_eviction_is_by_last_seen_not_by_first_seen():
     # token and the test cannot tell which rule the code is following.
     main._note_region_seen(in_use, "76561198000000001")
     main._note_region_seen(stale, "76561198000000001")
-    seen_at, ids = main._REGION_SEEN[stale]
-    main._REGION_SEEN[stale] = (seen_at - 3600.0, ids)
+    _age(stale, 3600.0)
 
     # Cap minus one more tokens, so the map lands exactly one over its bound.
     fillers = [chr(97 + i // 26) + chr(97 + i % 26) + "z"
@@ -223,6 +272,66 @@ def test_eviction_is_by_last_seen_not_by_first_seen():
     assert len(main._REGION_SEEN) == main._REGION_SEEN_MAX_TOKENS
     assert stale not in main._REGION_SEEN, "the least recently seen token survived"
     assert in_use in main._REGION_SEEN, "a token seen moments ago was evicted"
+
+
+def test_eviction_drops_the_unevidenced_before_the_corroborated():
+    """Ranking purely by age lets any stream of new tokens push out the
+    corroborated ones, so a full map of regions people actually play in could be
+    turned over by regions nobody has connected to. Evidence ranks above age."""
+    real = "eu"
+    main._note_region_seen(real, "76561198000000001")
+    main._note_region_seen(real, "76561198000000002")
+    assert main._region_corroborated(real)
+    # ...and make it the OLDEST thing in the map, so age alone would evict it
+    _age(real, 3600.0)
+
+    fillers = [chr(97 + i // 26) + chr(97 + i % 26) + "z"
+               for i in range(main._REGION_SEEN_MAX_TOKENS + 5)]
+    for token in fillers:
+        main._note_region_seen(token, "76561198000000003")
+
+    assert len(main._REGION_SEEN) == main._REGION_SEEN_MAX_TOKENS
+    assert real in main._REGION_SEEN, (
+        "the oldest token was evicted although it was the only corroborated one"
+    )
+
+
+def test_both_candidates_are_judged_against_one_clock_reading():
+    """Two separate time.monotonic() calls put the TTL boundary between the two
+    comparisons, so at the moment both sightings expire, whichever is read first
+    can still be live and win a tie it should not have been in."""
+    agreed = inspect.getsource(main._region_agreed)
+    assert "now = time.monotonic()" in agreed
+    assert "_region_corroborated(a, now)" in agreed
+    assert "_region_corroborated(b, now)" in agreed
+    assert agreed.count("time.monotonic()") == 1, (
+        "the pair must be decided against a single reading"
+    )
+
+
+def test_a_sighting_needs_a_reporter_and_an_established_session():
+    """The map's claim is about PLAYERS, so it is worth exactly as much as the
+    binding behind the ids. _check_steam_session soft-fails by design in several
+    documented conditions — it must never take down the write path it guards —
+    so "it did not raise" is a weaker fact than "it verified", and only the
+    stronger one may feed corroboration."""
+    # no reporter, no sighting: there is no path that records an anonymous one
+    main._note_region_seen("us", None)
+    main._note_region_seen("us", "")
+    assert main._REGION_SEEN == {}
+
+    join = inspect.getsource(main.queue_join)
+    assert "_session_was_verified(request)" in join
+    assert join.index("_session_was_verified(request)") < join.index("_note_region_seen(")
+    # and the verdict starts false, so an exit that neither raises nor verifies
+    # cannot read as verified
+    check = inspect.getsource(main._check_steam_session)
+    assert "_mark_session_verified(request, False)" in check
+    assert "_mark_session_verified(request, True)" in check
+    assert check.index("_mark_session_verified(request, False)") < \
+        check.index("_mark_session_verified(request, True)")
+    reader = inspect.getsource(main._session_was_verified)
+    assert "return False" in reader, "an unreadable verdict must read as unverified"
 
 
 def test_only_well_formed_tokens_enter_the_map():
@@ -257,3 +366,29 @@ def test_the_monotonic_clock_is_what_ages_a_sighting():
     src = inspect.getsource(main._note_region_seen) + inspect.getsource(main._region_corroborated)
     assert "time.monotonic()" in src
     assert "utcnow" not in src and "datetime" not in src
+
+
+def test_the_changelog_does_not_claim_the_fixed_order_is_gone():
+    """r11 HIGH. The bullet said the choice no longer goes to whichever region
+    came first alphabetically — and `_region_agreed` still ends in `min(a, b)`
+    whenever the two candidates are equally corroborated, which includes every
+    pick made on a map that is empty. The sentence has to describe the code's
+    actual fallback, because a player reading it would otherwise be told a
+    guarantee the server does not make."""
+    changelog = (Path(__file__).parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    start = changelog.index("The region a ranked room is created in")
+    # Line wraps are a property of the file, not of the claim: flatten first so
+    # a phrase split across two lines still reads as the phrase.
+    bullet = " ".join(changelog[start:start + 700].split())
+    assert "came first alphabetically" not in bullet, (
+        "the removed-alphabetical claim is back, and min(a, b) still decides a tie"
+    )
+    assert "the tie falls to a fixed order" in bullet, (
+        "the fallback the code actually takes has to be stated"
+    )
+    assert "after a server restart" in bullet, (
+        "the cold-map case is when a reader is most likely to see the fallback"
+    )
+    # and the fallback the sentence describes is the one the code has
+    agreed = inspect.getsource(main._region_agreed)
+    assert "return min(a, b)" in agreed

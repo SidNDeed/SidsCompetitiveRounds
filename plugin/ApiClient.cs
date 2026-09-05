@@ -674,6 +674,8 @@ namespace CompetitiveRounds
         private class PendingReport { public string url; public string json; public int attempts; public float nextAt; }
         private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
         private static bool _outboxLoopStarted;
+        // One line per session, not per write: see PersistOutbox.
+        private static bool _outboxPersistWarned;
         private const int OUTBOX_MAX_ATTEMPTS = 20;
         private const float OUTBOX_RETRY_SECONDS = 60f;
 
@@ -777,7 +779,19 @@ namespace CompetitiveRounds
                 if (sb.Length == 0) { if (File.Exists(OutboxPath)) File.Delete(OutboxPath); }
                 else File.WriteAllText(OutboxPath, sb.ToString());
             }
-            catch { /* disk persistence is best-effort; in-memory queue still works */ }
+            catch (Exception ex)
+            {
+                // The in-memory queue still works, so this is not fatal to the
+                // session — but it IS the whole of the crash/quit guarantee the
+                // enqueue sites claim, and it used to fail with nothing in the
+                // log. Once per session: a permission or disk fault repeats on
+                // every write and would otherwise bury the round.
+                if (!_outboxPersistWarned)
+                {
+                    _outboxPersistWarned = true;
+                    Plugin.Log.LogWarning($"[OUTBOX] queue file unwritable ({ex.GetType().Name}); queued reports are memory-only this session");
+                }
+            }
         }
 
         private static void LoadOutbox()
@@ -17985,9 +17999,13 @@ namespace CompetitiveRounds
             bool durable = !string.IsNullOrEmpty(seriesId);
             if (durable) url += $"&series_id={Escape(seriesId)}";
             // Queue BEFORE the first network yield, so a quit or a crash
-            // between here and the response cannot lose the report; the
-            // success callback below takes it back out. The server counts an
-            // increment only for the request that inserted the dc_events row,
+            // between here and the response does not lose the report; the
+            // success callback below takes it back out. Surviving the process
+            // is the queue FILE's job, and that write is best-effort — it now
+            // says so in the log once when it cannot write, which is the only
+            // condition under which this sentence is false.
+            // The server counts an increment only for the request that
+            // inserted the dc_events row,
             // and uq_dc_event_series_player admits one row per (series,
             // leaver), so a replay cannot double-count. A 4xx — including
             // every refusal the named series can earn — is permanent to

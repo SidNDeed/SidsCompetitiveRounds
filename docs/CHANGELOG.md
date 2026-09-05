@@ -56,11 +56,13 @@
 - The region a ranked room is created in no longer depends on which of the two
   clients happened to ask for the room first. Two players whose games agree on
   a region still land there, as before; when the two signals disagree, the
-  choice now goes to the region the server has actually seen players connected
-  to recently, rather than to whichever of the two came first alphabetically or
-  had the faster connection to us. This does not try to pick the BEST region
-  for a cross-region pair — nothing here measures ping between the two of you
-  yet.
+  choice goes to the region the server has actually seen players connected to
+  recently, rather than to the seat that reached us first. When neither region
+  has that evidence — which includes every pick made shortly after a server
+  restart — or when both do, the tie falls to a fixed order: still arbitrary,
+  but identical for both of you and no longer an advantage for the faster
+  connection. This does not try to pick the BEST region for a cross-region
+  pair — nothing here measures ping between the two of you yet.
 
 **Diagnostics and small fixes**
 
@@ -73,8 +75,10 @@
   missed (it produced 46 HarmonyX warnings per session and patched nothing).
 - When an opponent leaves a ranked series part-way through, the report of that
   leave now survives a failed send. It records which series it belongs to and
-  is retried until the server takes it, across a restart if need be, so a
-  single refused request no longer loses the record that feeds leave %. The
+  is retried in the background, across a restart if need be, so a single
+  refused request no longer loses the record that feeds leave %. The retries
+  are bounded — twenty attempts, a little over an hour, and a relaunch gives a
+  still-queued report a fresh set rather than resuming a spent one. The
   server accepts one such report per series per player however many times it
   arrives, and refuses one that names a series the two of you did not play.
   A leave seen in the moment between one game being recorded and the next
@@ -82,8 +86,9 @@
 - The background queue of unsent match reports no longer stops for the rest of
   a session if one pass over it fails, and a report that lands on its first
   attempt can no longer make the queue drop a different one.
-- A leave that could not be sent at the time is retried until the server takes
-  it, across a restart if need be, and is filed against the series it was
+- A leave that could not be sent at the time is retried in the background on
+  the same bounded budget as any other queued report, across a restart if need
+  be, and is filed against the series it was
   watched in rather than whatever series is current when the retry lands. A
   report the game cannot tie to a series is sent once and not queued, so
   nothing is filed against a guess.

@@ -85,17 +85,25 @@ class FakeSession:
     """
 
     def __init__(self, players, event_exists=False, insert_wins=True, stored_count=4,
-                 named_series=None, series_fresh=True):
+                 named_series=None, series_fresh=True, series_still_eligible=True):
         self.players = list(players)
         self.event_exists = event_exists
         self.insert_wins = insert_wins
         self.stored_count = stored_count
         self.named_series = named_series
         self.series_fresh = series_fresh
+        # The locked re-check, which is a DIFFERENT question from series_fresh:
+        # it is asked after the unlocked reads, and answers "is this still true
+        # now that nothing else can change it".
+        self.series_still_eligible = series_still_eligible
+        self.eligibility_locks = 0
+        self.lock_order = []
+        self.eligibility_sql = None
         self.statements = []
         self.increments = 0
         self.inserts = 0
         self.commits = 0
+        self.rollbacks = 0
         self.series_loads = 0
         self.freshness_checks = 0
         self.count_reads = 0
@@ -105,9 +113,17 @@ class FakeSession:
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         self.statements.append(sql)
+        if sql.startswith("SELECT 1 FROM players") and "FOR NO KEY UPDATE" in sql:
+            self.lock_order.append(str((params or {}).get("pid")))
+            return _Result([(1,)])
         if sql.startswith("SELECT 1 FROM ranked_series"):
-            assert "INTERVAL '7 days'" in sql, "the age bound must be a literal interval, not a bind (#448)"
             assert "CAST(:sid AS uuid)" in sql, "the id bind must be typed (#448)"
+            if "FOR NO KEY UPDATE" in sql:
+                self.eligibility_locks += 1
+                self.eligibility_sql = sql
+                self.lock_order.append("series")
+                return _Result([(1,)] if self.series_still_eligible else [])
+            assert "INTERVAL '7 days'" in sql, "the age bound must be a literal interval, not a bind (#448)"
             self.freshness_checks += 1
             return _Result([(1,)] if self.series_fresh else [])
         if "FROM ranked_series" in sql:
@@ -139,6 +155,12 @@ class FakeSession:
 
     async def commit(self):
         self.commits += 1
+
+    async def rollback(self):
+        # A settled duplicate wrote nothing and rolls back to release the lock
+        # pass. Counted separately from commits so "this request wrote nothing"
+        # stays assertable as commits == 0.
+        self.rollbacks += 1
 
 
 def _players(count=3):
@@ -241,6 +263,75 @@ def test_the_recorded_answer_is_the_value_the_database_returned():
 
 
 # ── executed: the series the report NAMES ────────────────────────────────────
+
+
+def test_the_predicate_is_re_asked_under_a_lock_before_anything_is_written():
+    """r11. Existence, the pair and the invalidation were established by
+    unlocked reads, and the insert and the counter increment happened after
+    them — so an integrity invalidation committing in that window was checked
+    against a state that had already gone. #208: the transaction re-reads its
+    row and re-checks the predicate, under a lock it holds to commit."""
+    session = FakeSession(_players(), named_series=_series_row())
+    _call(session, str(NAMED_SERIES))
+    assert session.eligibility_locks == 1
+    sql = session.eligibility_sql
+    assert "FOR NO KEY UPDATE" in sql, (
+        "#202: the weakest mode that still conflicts with the status and "
+        "invalidation UPDATEs this is guarding against"
+    )
+    # the predicate is INSIDE the locking read, so the row that comes back is
+    # the row that satisfies it — there is no gap between establishing the fact
+    # and holding it
+    assert "player1_id = :rp AND player2_id = :dp" in sql
+    assert "player1_id = :dp AND player2_id = :rp" in sql
+    assert "invalidated_at IS NULL OR invalidation_reason = :exempt" in sql
+    # ...and it is taken before the row that decides
+    order = session.statements
+    lock_at = next(i for i, s in enumerate(order)
+                   if s.startswith("SELECT 1 FROM ranked_series") and "FOR NO KEY UPDATE" in s)
+    insert_at = next(i for i, s in enumerate(order) if s.startswith("INSERT INTO dc_events"))
+    assert lock_at < insert_at
+
+
+def test_the_lock_order_is_participants_then_series():
+    """The 1v1 protocol is players -> ranked_series (#206), taken by
+    /api/v1/matches and by the bet payout path. Series-then-players is the 2v2
+    order — its table is disjoint — and taking it here would form an ABBA
+    against every 1v1 writer. Participants are sorted by str(id) so two reports
+    naming the same pair cannot deadlock against each other."""
+    session = FakeSession(_players(), named_series=_series_row())
+    _call(session, str(NAMED_SERIES))
+    assert session.lock_order == sorted([str(REPORTER), str(LEAVER)]) + ["series"]
+    # the unnamed path takes exactly the same locks: the protection is not a
+    # property of naming a series
+    other = FakeSession(_players())
+    _call(other, None)
+    assert other.lock_order == sorted([str(REPORTER), str(LEAVER)]) + ["series"]
+
+
+def test_a_series_that_stops_qualifying_under_the_lock_records_nothing():
+    """Every unlocked read passed; the locked re-check did not. Nothing is
+    inserted, nothing is incremented, and the client is told it is settled —
+    a 4xx, because no amount of retrying makes an invalidated series
+    eligible."""
+    session = FakeSession(_players(), named_series=_series_row(),
+                          series_still_eligible=False)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+    assert session.inserts == 0
+    assert session.increments == 0
+
+
+def test_a_settled_duplicate_does_not_hold_its_locks_to_the_response():
+    """It wrote nothing, so there is no reason for two participants and their
+    series to stay locked while the response is built and sent."""
+    session = FakeSession(_players(), named_series=_series_row(), event_exists=True)
+    result = _call(session, str(NAMED_SERIES))
+    assert result["status"] == "already_recorded"
+    assert session.rollbacks == 1, "the lock pass is still held through the response"
+    assert session.commits == 0, "a request that wrote nothing must not claim a write"
+    assert session.increments == 0
 
 
 def test_a_named_series_is_what_the_event_is_filed_against(_stub_the_gates):
@@ -659,3 +750,48 @@ def test_a_failed_start_does_not_latch_the_outbox_off():
     assert body.index("StartCoroutine(OutboxSupervisor());") < body.index("_outboxLoopStarted = true;"), (
         "the guard latches before the coroutine it guards exists"
     )
+
+
+def test_the_changelog_states_the_retry_budget():
+    """r11. Two bullets promised the report is "retried until the server takes
+    it". The budget is twenty attempts on a linear-ish backoff capped at four
+    times the base minute — about seventy-five minutes — after which the entry
+    is dropped. A player reading "until" would expect a report that survives an
+    afternoon of server trouble; it does not."""
+    changelog = (Path(__file__).parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "retried until the server takes it" not in changelog, (
+        "the unbounded promise is back"
+    )
+    assert "twenty attempts" in changelog, "the bound has to be stated in the bullet"
+    # ...and twenty is the number the client actually uses
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "private const int OUTBOX_MAX_ATTEMPTS = 20;" in src, (
+        "the changelog says twenty; the code has to be where that comes from"
+    )
+
+
+def test_the_crash_claim_names_what_it_depends_on():
+    """r11. The enqueue said a crash "cannot lose the report". What carries a
+    report across a crash is the queue FILE, and that write is best-effort —
+    it used to swallow every failure, so the promise could be false for a whole
+    session with nothing in the log. The write now says so once, which is what
+    makes the sentence checkable."""
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "cannot lose the report" not in src, "the unconditional promise is back"
+    assert "Surviving the process\n            // is the queue FILE's job" in src
+
+
+def test_a_failed_queue_write_is_logged_once():
+    """A permission or disk fault repeats on every write, so an unconditional
+    warning would bury the round it is trying to explain — and no warning at
+    all leaves the durability claim above unfalsifiable."""
+    body = _cs_method_body(API_CLIENT_CS, "private static void PersistOutbox()")
+    assert "catch { /* disk persistence is best-effort" not in body, (
+        "the silent catch is back"
+    )
+    assert "_outboxPersistWarned" in body
+    assert "if (!_outboxPersistWarned)" in body
+    assert "_outboxPersistWarned = true;" in body
+    assert "queue file unwritable" in body
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "private static bool _outboxPersistWarned;" in src

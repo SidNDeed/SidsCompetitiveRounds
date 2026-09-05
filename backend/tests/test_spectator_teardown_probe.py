@@ -132,49 +132,49 @@ def test_the_horizon_is_a_horizon_and_not_a_missing_marker_claim():
 
 # ── the reading itself ───────────────────────────────────────────────────────
 
-def _driven_predicate(tick):
-    """The one assignment to `driven` that is the predicate — not the `= false`
-    declaration above it. Asserting there is exactly one is half the point: a
-    second assignment would mean the predicate is decided somewhere this test
-    is not reading."""
-    real = [m.group(1) for m in re.finditer(r"driven\s*=(.*?);", tick, re.S)
-            if "isPlaying" in m.group(1)]
-    assert len(real) == 1, f"expected one predicate assignment, found {len(real)}"
-    return real[0]
-
-
-def test_the_number_is_taken_from_the_writer_not_from_the_result():
-    """The r10 repair, and the whole of it. `physDrive` integrates exactly the
-    expression `PlayerVelocity.FixedUpdate` uses to move a body — the same
-    predicate and the same quantity — so a position written by anything else
-    contributes nothing to it. A network lerp, a scripted respawn walk and a
-    map rescale all write `transform.position` directly."""
+def test_the_number_is_measured_at_the_writer_not_reconstructed_from_it():
+    """The r12 repair. `physDrive` is the position difference across
+    `PlayerVelocity.FixedUpdate`, taken by a prefix/postfix pair. Nothing else
+    runs between those two halves, so a network lerp, a scripted respawn walk
+    and a map rescale — all of which write `transform.position` from elsewhere
+    in the frame — contribute nothing, by construction rather than by a rule."""
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert '[HarmonyPatch(typeof(PlayerVelocity), "FixedUpdate")]' in src, (
+        "the bracket must target the one statement that moves a body locally"
+    )
+    patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
+    assert "__state.pos = __instance.transform.position;" in patch
+    assert "Vector3 after = __instance.transform.position;" in patch
+    assert "Vector3.Distance(after, __state.pos)" in patch
+    assert "NotePhysicsStep(" in patch
+    # the sampler moves what the writer banked and computes nothing of its own
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    # The TERMS, not the spelling. r11 found the predicate short by one term
-    # while this test pinned the three-term string verbatim — so the incomplete
-    # predicate was the only one that could pass, and the correction failed.
-    predicate = _driven_predicate(tick)
-    for term in ("isActiveAndEnabled", "isPlaying", "simulated", "isKinematic"):
-        assert term in predicate, f"the predicate is missing {term}"
-    assert re.search(r"!\s*[\w.]*isKinematic", predicate), "isKinematic must be negated"
-    assert "float travel = speed * dt * scale;" in tick
-    assert "st.physDrive += travel;" in tick
-    assert "if (travel > maxPhysStep) maxPhysStep = travel;" in tick
+    assert "stepDrive.TryGetValue(velId, out banked)" in tick
+    assert "float fresh = banked - st.driveSeen;" in tick
+    assert "st.physDrive += fresh;" in tick
     # ...and observed displacement can never reach the attributed number.
-    assert not re.search(r"travel\s*=\s*[^;\n]*step", tick)
     assert not re.search(r"physDrive\s*\+=\s*step", tick)
     assert not re.search(r"maxPhysStep\s*=\s*step", tick)
 
 
-def test_the_integral_uses_the_same_time_scale_vanilla_does():
-    """`fixedDeltaTime * timeScale * velocity` summed over a frame's fixed
-    steps is `deltaTime * timeScale * velocity`. Dropping the scale would read
-    a slow-motion teardown as more travel than it was."""
+def test_nothing_reconstructs_the_step_any_more():
+    """Two rounds were spent correcting a re-derivation of the writer's work —
+    first its predicate, then a term missing from the predicate. The guard
+    against a third is that the ingredients are gone: no render delta, no time
+    scale, no velocity magnitude anywhere in the sampler."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "float scale = SafeTimeScale();" in tick
-    scale_fn = _code(_cs_block(PROBE_CS, "private static float SafeTimeScale()"))
-    assert "TimeHandler.timeScale" in scale_fn
-    assert "return 1f;" in scale_fn, "an unavailable time scale must not zero the reading"
+    for gone in ("Time.deltaTime", "SafeTimeScale", "velocity", "magnitude", "driven"):
+        assert gone not in tick, f"{gone} is an ingredient of the refuted reconstruction"
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert "private static float SafeTimeScale()" not in src, (
+        "the time scale existed only to scale the reconstruction"
+    )
+    # physDrive has exactly one writer, and it is the drain
+    # the log lines print the literal ` physDrive=`, so match the assignment
+    writes = re.findall(r"physDrive \+= (\w+)", src)
+    assert writes == ["fresh", "totalDrive"], (
+        f"expected the drain and the totals fold and nothing else, found {writes}"
+    )
 
 
 def test_observed_displacement_carries_no_attribution():
@@ -205,10 +205,55 @@ def test_a_control_that_is_revived_stops_being_a_control():
 def test_a_window_that_did_not_end_at_the_stop_is_marked_not_comparable():
     """Eight seconds is long enough for the seat to be doing something else.
     The line has to say so, or a horizon window is read beside a stop window
-    as though the two measured the same interval."""
+    as though the two measured the same interval. A window with no frame or no
+    body carries no measurement either."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    assert 'bool comparable = !revived && why != "horizon" && why != "error";' in close
+    for term in ('!revived', 'why != "horizon"', 'why != "error"',
+                 "frames > 0", "bodies.Count > 0"):
+        assert term in close, f"comparability is missing {term}"
     assert '" comparable="' in close
+
+
+def test_only_comparable_windows_feed_the_seat_totals():
+    """r11. The totals line is the only place the acceptance criterion in the
+    file header is ever read, and that criterion is stated over comparable
+    windows — so the totals have to be MADE of them. Banking every window and
+    counting the comparable ones separately produced a physDrive nobody could
+    evaluate: one eight-second horizon close swamps a dozen real windows."""
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    decided = close.index("bool comparable =")
+    for banked in ("t.physDrive += totalDrive;", "t.moved += totalMoved;",
+                   "t.frames += frames;", "t.physFrames += physFrames;",
+                   "t.physSteps += physSteps;",
+                   "if (maxPhysStep > t.maxPhysStep) t.maxPhysStep = maxPhysStep;"):
+        assert banked in close, banked
+        assert close.index(banked) > decided, f"{banked} is banked before comparability is known"
+    # the window count is the one field that counts everything
+    assert "t.windows++;" in close
+    # ...and the banking is INSIDE the conditional, not merely after it. A
+    # slice from the `if` to the end of the method cannot tell those apart:
+    # `if (comparable) t.comparable++;` followed by an unconditional block
+    # satisfies it exactly as well as the guarded form does.
+    head = close.index("if (comparable)")
+    brace = close.index("{", head)
+    assert not close[head + len("if (comparable)"):brace].strip(), (
+        "the banking must be a braced block attached to the condition"
+    )
+    depth = 0
+    for i in range(brace, len(close)):
+        if close[i] == "{":
+            depth += 1
+        elif close[i] == "}":
+            depth -= 1
+            if depth == 0:
+                guarded = close[brace:i + 1]
+                break
+    else:
+        raise AssertionError("unbalanced braces after if (comparable)")
+    assert "t.physDrive += totalDrive;" in guarded
+    assert "t.moved += totalMoved;" in guarded
+    assert "t.maxPhysStep = maxPhysStep;" in guarded
+    assert "t.windows++;" not in guarded
 
 
 def test_the_line_reports_the_attributed_number_and_the_raw_one():
@@ -254,14 +299,66 @@ def test_the_revive_latch_cannot_be_tripped_by_a_stun():
 
 
 def test_a_body_local_physics_is_not_touching_contributes_nothing():
-    """r11 HIGH. HealthHandler.RPCA_Die deactivates the body
-    (V/HealthHandler.cs:374) and leaves isPlaying, simulated and isKinematic
-    untouched with its death velocity still on it. Without the writer's own
-    reachability term the probe banks drive for a body FixedUpdate is not
-    running on at all — the same defect class r10 refuted, one term further
-    in."""
+    """r11 HIGH, closed differently in r12. HealthHandler.RPCA_Die deactivates
+    the body (V/HealthHandler.cs:374) and leaves isPlaying, simulated and
+    isKinematic untouched with its death velocity still on it — so a restated
+    predicate has to carry the writer's REACHABILITY as well as its guards, and
+    the restatement was short that term for a round. Bracketing FixedUpdate
+    needs no term: Unity does not call it on a deactivated component, so the
+    prefix never runs and nothing is banked. The guard is that the sampler
+    contains no such restatement to go stale."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "isActiveAndEnabled" in _driven_predicate(tick)
+    for term in ("isActiveAndEnabled", "isPlaying", "isKinematic"):
+        assert term not in tick, (
+            f"{term} is vanilla's guard restated; the bracket is what decides now"
+        )
+
+
+def test_an_unarmed_bracket_cannot_report_a_body_at_the_origin():
+    """The prefix skips the transform read while the window is shut. If the
+    skipped state were a zero Vector3 the postfix would read the distance from
+    the origin as travel — which is exactly what a body sitting at the origin
+    is. The state carries its own flag, and the postfix requires it."""
+    patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
+    assert "internal bool armed;" in patch
+    assert "__state.armed = true;" in patch
+    assert "if (dead || !__state.armed) return;" in patch
+    # and the prefix does not touch the transform while the window is shut
+    prefix = _code(_cs_block(PROBE_CS, "private static void Prefix(PlayerVelocity __instance, out DriveState __state)"))
+    assert prefix.index("WindowOpen()") < prefix.index("transform.position")
+
+
+def test_the_bracket_fails_dead_rather_than_breaking_movement():
+    """It runs inside vanilla's own FixedUpdate on every body. A throw that
+    escapes would stop bodies moving, which is a far worse outcome than a probe
+    that reports nothing (#376)."""
+    patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
+    assert patch.count("catch { dead = true; }") == 2, "both halves must swallow"
+    assert patch.count("if (dead") == 2, "and both must honour the latch"
+
+
+def test_a_replaced_velocity_component_starts_a_fresh_baseline():
+    """The accumulator is keyed by PlayerVelocity instance and the body holds a
+    baseline into it. A body whose component is replaced would otherwise compare
+    the new instance's running total against the old one's — reading zero
+    forever if the new total is lower, and a jump if it is higher."""
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "if (velId != st.velId) { st.velId = velId; st.driveSeen = 0f; }" in tick
+    assert tick.index("st.driveSeen = 0f;") < tick.index("float fresh = banked - st.driveSeen;")
+
+
+def test_the_step_accumulator_is_bounded_and_window_scoped():
+    """It is written from the physics step for the life of the session, so it
+    must not grow without limit, and it must not carry one window's travel into
+    the next."""
+    note = _code(_cs_block(PROBE_CS, "internal static void NotePhysicsStep(int velId, float distance)"))
+    assert "stepDrive.Count >= MAX_BODIES_TRACKED" in note
+    assert "if (!(distance > 0f)) return;" in note, (
+        "NaN fails every comparison, so the accepted range is what must be tested"
+    )
+    open_body = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    assert "stepDrive.Clear();" in open_body
+    assert "physSteps = 0;" in open_body
 
 
 def test_accumulators_are_keyed_by_the_games_player_identity():

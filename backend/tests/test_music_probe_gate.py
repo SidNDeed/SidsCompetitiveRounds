@@ -224,8 +224,10 @@ def test_the_delivered_audio_is_compared_with_the_time_it_was_expected_in():
     assert "_audioWallSeconds - delivered" in deficit
     play = _code(_cs_method_body(PROBE_CS, "private static void PumpPlayback(float now)"))
     assert "_audioWallSeconds += Time.unscaledDeltaTime;" in play
-    assert "!_tap.SilenceExpected && _src.isPlaying" in play, (
-        "wall time must only accrue where output was actually expected"
+    assert "!_tap.CallbacksPaused && _src.isPlaying" in play, (
+        "wall time must accrue wherever callbacks are owed — which is the whole "
+        "of playback except the scripted pause, INCLUDING the post-seek window "
+        "whose content is excused but whose cadence is not"
     )
 
 
@@ -239,11 +241,35 @@ def test_both_new_numbers_reach_the_log():
         assert field in stop, f"{field} missing from the end record"
 
 
+def test_the_content_mask_and_the_pause_mask_are_different_masks():
+    """r11. One flag meant two things: "the callback will not be called" (the
+    scripted pause) and "the callback's buffers may legally be zero" (the 0.5 s
+    after a seek). Spelled as one, the second excused cadence and delivery as
+    well as content — so a callback that never arrived inside those 0.5 s left
+    no gap, no missing frames and no silence, and starvation in the window was
+    invisible to a probe built to find starvation."""
+    tap = _code(_cs_method_body(PROBE_CS, "private sealed class ProbeTap : MonoBehaviour"))
+    assert "public volatile bool CallbacksPaused;" in tap
+    # the pause mask returns first and measures nothing
+    assert "if (CallbacksPaused) { SilentRun = 0; LastCallbackTicks = 0; return; }" in tap
+    # ...and the content mask returns only AFTER cadence and delivery
+    assert "if (SilenceExpected) { SilentRun = 0; return; }" in tap
+    for measured in ("if (gap > MaxGapTicks) MaxGapTicks = gap;",
+                     "FramesDelivered +=", "Buffers++;"):
+        assert tap.index(measured) < tap.index("if (SilenceExpected)"), (
+            f"{measured} is excused by the content mask"
+        )
+    # a reused tap must not inherit either mask
+    reset = _code(_cs_method_body(PROBE_CS, "public void Reset()"))
+    assert "CallbacksPaused = false; SilenceExpected = false;" in reset
+
+
 def test_the_silence_mask_does_not_cover_the_audible_steps():
     """Steps 4 and 5 are playing — after the resume and toward the end of the
     track — and masking them hid every zero buffer in the two steps the
     measurement most cares about."""
     play = _code(_cs_method_body(PROBE_CS, "private static void PumpPlayback(float now)"))
+    assert "_tap.CallbacksPaused = _step == 3;" in play
     assert "_tap.SilenceExpected = _step == 3 || now < _maskUntil;" in play
     assert "_step >= 3 && _step <= 5" not in play, "the whole-step mask is back"
     controls = _code(_cs_method_body(PROBE_CS, "private static void PumpControls(float now, float t, float len)"))
@@ -257,8 +283,32 @@ def test_the_natural_end_needs_elapsed_time_and_not_one_not_playing_read():
     """The seek is to len-5, so a genuine end arrives about five seconds later.
     An immediate !isPlaying is a source that stopped for some other reason."""
     controls = _code(_cs_method_body(PROBE_CS, "private static void PumpControls(float now, float t, float len)"))
-    assert 'Judge("natural_end", elapsed >= 4.5f,' in controls
+    assert "bool timed = elapsed >= 4.5f && elapsed <= 6.5f;" in controls
+    assert 'Judge("natural_end", timed && played,' in controls
     assert 'Judge("natural_end", true' not in controls, "the unconditional pass is back"
+
+
+def test_the_natural_end_also_proves_the_playhead_got_there():
+    """r11. Elapsed wall time says five seconds passed, which a source stopped
+    by anything else also satisfies — and an upper bound alone would not
+    separate them either. The tap must have been handed roughly those five
+    seconds of audio, which is the only evidence available here that the
+    PLAYHEAD reached the end rather than the clock reaching 4.5."""
+    controls = _code(_cs_method_body(PROBE_CS, "private static void PumpControls(float now, float t, float len)"))
+    assert "_framesAtEndSeek = (object)_tap != null ? _tap.FramesDelivered : -1L;" in controls
+    assert controls.index("_framesAtEndSeek =") < controls.index("_step = 5;"), (
+        "the baseline must be taken at the seek, not read at the judgement"
+    )
+    assert "float owed = EndRunSeconds();" in controls
+    assert "bool played = owed < 0f || owed >= 4f;" in controls, (
+        "an unavailable measurement must be neutral, not a failure"
+    )
+    helper = _code(_cs_method_body(PROBE_CS, "private static float EndRunSeconds()"))
+    assert "_tap.FramesDelivered - _framesAtEndSeek" in helper
+    assert "if (rate <= 0) return -1f;" in helper
+    # and it belongs to the run, like every other counter
+    start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
+    assert "_framesAtEndSeek = -1L;" in start
 
 
 def test_the_startup_metric_observes_the_frames_it_claims():
@@ -280,29 +330,103 @@ def test_every_refusal_the_reviews_put_here_survives_the_wider_gate():
     assert 'ctx == "online-room" ? "online-room"' in start
     assert '(_mode == Mode.Stress && ctx != "sandbox") ? "stress-needs-offline-sandbox"' in start
     assert 'custom ? "custom-music-playing"' in start
+    refusal = _code(_cs_method_body(PROBE_CS, "private static string RefusalNow()"))
+    assert 'if (ctx == "online-room") return "entered online room";' in refusal
+    assert 'if (_mode == Mode.Stress && ctx != "sandbox") return "left sandbox";' in refusal
     play = _code(_cs_method_body(PROBE_CS, "private static void PumpPlayback(float now)"))
-    assert 'if (ctxNow == "online-room") { Stop("entered online room"); return; }' in play
-    assert 'if (_mode == Mode.Stress && ctxNow != "sandbox") { Stop("left sandbox"); return; }' in play
+    assert "string refuseNow = RefusalNow();" in play
+    assert "if (refuseNow != null) { Stop(refuseNow); return; }" in play
+
+
+def test_the_refusal_is_one_question_asked_everywhere():
+    """r11. The playback tick asked three questions; the open path asked one of
+    them. A run could therefore reach Play() with custom music already sounding,
+    or as a stress run outside the Sandbox it is confined to — the open path is
+    where the first audible sample is, so it is the path that most needs all
+    three."""
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert "private static string RefusalNow()" in src
+    for caller in ("private static void PumpPlayback(float now)",
+                   "private static void PumpRequest(float now)"):
+        body = _code(_cs_method_body(PROBE_CS, caller))
+        assert "RefusalNow()" in body, f"{caller} does not ask the question"
+    # nobody compares a raw context against one value any more
+    for body in (_code(_cs_method_body(PROBE_CS, "private static void PumpPlayback(float now)")),
+                 _code(_cs_method_body(PROBE_CS, "private static void PumpRequest(float now)"))):
+        assert 'SeatContext() == "online-room"' not in body
+        assert 'ctxNow == "online-room"' not in body
+
+
+def test_a_context_that_cannot_be_read_is_a_refusal():
+    """r11. SeatContext returns "?" when the Photon read throws, and "?" is not
+    "online-room" — so a context the probe could not establish counted as
+    evidence that it was NOT in a match, and the run continued. A context nobody
+    can read is not one an online room can be excluded from."""
+    refusal = _code(_cs_method_body(PROBE_CS, "private static string RefusalNow()"))
+    assert 'if (ctx == "?") return "seat context unreadable";' in refusal
+    ctx = _code(_cs_method_body(PROBE_CS, "private static string SeatContext()"))
+    assert 'catch { return "?"; }' in ctx, "the sentinel this refuses must still be produced"
 
 
 def test_exclusive_ownership_is_re_asked_and_not_only_admitted():
     """The normal engine can be paused or mid-load at admission and resume
     after it. Two of this mod's music sources audible at once makes every
     auditory reading in the run ambiguous."""
+    refusal = _code(_cs_method_body(PROBE_CS, "private static string RefusalNow()"))
+    assert "MusicEngine.IsPlayingNow" in refusal
+    assert 'return "custom music started";' in refusal
     play = _code(_cs_method_body(PROBE_CS, "private static void PumpPlayback(float now)"))
-    assert "customNow = MusicEngine.IsPlayingNow;" in play
-    assert 'if (customNow) { Stop("custom music started"); return; }' in play
+    assert "RefusalNow()" in play
 
 
 def test_the_online_refusal_precedes_the_work_it_refuses():
     """Entering an online room while the request was in flight used to reach
     GetContent() and Play() on that tick, with the playback tick noticing only
-    afterwards."""
+    afterwards. GetContent decodes a whole track, so the answer taken at the top
+    of the method is milliseconds old by the time anything is audible — it is
+    asked again on the line before Play()."""
     pump = _code(_cs_method_body(PROBE_CS, "private static void PumpRequest(float now)"))
-    assert 'if (SeatContext() == "online-room") { Stop("entered online room"); return; }' in pump
-    assert pump.index("SeatContext()") < pump.index("GetContent"), (
+    assert pump.index("RefusalNow()") < pump.index("GetContent"), (
         "the refusal must come before the completion block, not after it"
     )
+    assert "string refuseAtPlay = RefusalNow();" in pump
+    assert pump.index("string refuseAtPlay") < pump.index("_src.Play();"), (
+        "the last question must be asked before the first audible sample"
+    )
+    assert pump.count("RefusalNow()") == 2
+
+
+def test_the_longest_silent_run_belongs_to_the_run_not_to_the_last_tap():
+    """r11, the same shape as the gap and the deficit one round earlier. In
+    churn mode the tap is destroyed and rebuilt every cycle, so the number the
+    end record printed was the last cycle's, beside a wall time covering ten."""
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert "_runSilentRunMax" in src
+    start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
+    assert "_runSilentRunMax = 0;" in start
+    close = _code(_cs_method_body(PROBE_CS, "private static void CloseObjects()"))
+    assert "if (_tap.SilentRunMax > _runSilentRunMax) _runSilentRunMax = _tap.SilentRunMax;" in close
+    assert close.index("_runSilentRunMax") < close.index('Release(_tap, "tap")')
+    stop = _code(_cs_method_body(PROBE_CS, "private static void Stop(string why)"))
+    assert "Math.Max(_runSilentRunMax, _tap.SilentRunMax)" in stop
+
+
+def test_an_unknown_mode_suffix_is_refused_rather_than_defaulted():
+    """r11. `sku:0:strss` ran a two-minute NORMAL run and said mode=Normal in a
+    line nobody re-reads, so the operator's stress measurement silently was not
+    one. The refusal happens before the run takes any state — before the
+    generation bump and before a pending cleanup is dropped — so a rejected
+    lever costs the previous run nothing."""
+    start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
+    assert 'LogWarning("[MUSIC-PROBE] unknown mode ' in start
+    assert 'LogWarning("[MUSIC-PROBE] too many fields ' in start
+    assert "Mode wanted = Mode.Normal;" in start
+    assert "_mode = wanted;" in start
+    assert start.index("Mode wanted") < start.index("_gen++;"), (
+        "a refused lever must not bump the generation or drop a pending cleanup"
+    )
+    # and there is no path left that reaches a mode without deciding it
+    assert start.count("_mode = ") == 1
 
 
 def test_sandbox_means_a_live_sandbox_round_and_not_two_photon_flags():
@@ -411,3 +535,22 @@ def test_stop_releases_before_it_reports():
         )
     # the one value that does not survive the release is read first
     assert stop.index("int silentRunMax") < stop.index("CloseObjects();")
+
+
+def test_the_starvation_claim_is_scoped_to_the_source_callback():
+    """r11. The gap and the deficit are taken at an OnAudioFilterRead tap on the
+    probe's own AudioSource, so they answer whether Unity kept pulling audio out
+    of that source. A dropout introduced downstream of the tap — mixer, output
+    device, driver — leaves both numbers clean, and a reader who takes them as
+    "the player heard no gap" has been told something the measurement cannot
+    say. Both the file header and the number's own docstring name the
+    boundary."""
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert "scoped to the SOURCE callback path" in src
+    assert "downstream of the tap" in src
+    # _cs_method_body returns the brace block, so the doc comment lives just
+    # above it — read the 700 characters before the signature instead.
+    sig = src.index("private static float DeficitMs()")
+    doc = " ".join(src[max(0, sig - 700):sig].replace("///", " ").split())
+    assert "Scoped to the source callback" in doc
+    assert "mixer or the output device" in doc

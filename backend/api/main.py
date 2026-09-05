@@ -11046,6 +11046,25 @@ async def _strict_steam_session_ok(request, steam_id: str, db: AsyncSession) -> 
         return False
 
 
+def _mark_session_verified(request, ok):
+    """Stamp the session verdict on the request. Fail-quiet: a caller reading
+    it back defaults to False, and a request object without `state` (internal
+    direct calls pass None) simply carries no verdict — which reads as
+    unverified, the conservative direction."""
+    try:
+        if request is not None:
+            request.state.scr_session_verified = bool(ok)
+    except Exception:
+        pass
+
+
+def _session_was_verified(request):
+    try:
+        return bool(getattr(request.state, "scr_session_verified", False))
+    except Exception:
+        return False
+
+
 async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None:
     """Session enforcement for the mutating endpoints. Reads X-Session-Token,
     matches it (sha256, single indexed SELECT) against steam_sessions for the
@@ -11058,6 +11077,14 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
     never take down the write path it protects. Internal callers (bot) send
     no X-Mod-Version, so enforce is always False for them; `request` may be
     None on direct internal function calls (place_discord_bet → place_bet)."""
+    # Record the verdict on the request so a caller can ask whether the
+    # claimed steam_id was ESTABLISHED, not merely accepted. The soft-fail
+    # conditions above are deliberate — this check must never take down the
+    # write path it protects — but that makes "we did not raise" a weaker fact
+    # than "we verified", and anything treating the id as evidence needs the
+    # stronger one. Set false first: every later exit either raises or leaves
+    # this alone, so an unreachable code path cannot read as verified.
+    _mark_session_verified(request, False)
     token = None
     try:
         if request is not None:
@@ -11085,6 +11112,7 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
             print(f"[STEAM-AUTH] session lookup error (soft): {type(ex).__name__}")
             return
     if reason is None:
+        _mark_session_verified(request, True)
         return
     key_set = bool(os.getenv("STEAM_WEB_API_KEY"))
     # Master soak switch (July 22): even with the key set, enforcement stays
@@ -11920,14 +11948,25 @@ def _region_token(value):
 # are already in play — never to reject a region outright — so the worst it can
 # do is choose the same way the code without it would have.
 #
-# Two guards on what a client can put in here. A token counts only once it has
-# been seen from more than one distinct player, so no single client can
-# corroborate a region of its own invention; and the whole map is bounded and
-# aged, so it cannot grow without limit or hold a sighting forever.
+# Three guards on what a client can put in here. A token counts only once it
+# has been seen from more than one distinct player, so no single client can
+# corroborate a region of its own invention; a sighting is recorded only from a
+# request whose session the API actually established, so the two players are two
+# players rather than two claims; and the whole map is bounded and aged, so it
+# cannot grow without limit or hold a sighting forever.
+#
+# EVERY REPORTER CARRIES ITS OWN CLOCK, which is the shape this needs and not
+# the obvious one. A single last-seen stamp per token is refreshed by whoever
+# reported most recently, so one player queueing from a region daily keeps a
+# second player's year-old sighting alive and the quorum with it — the map would
+# say "two players recently" on the strength of one. Per reporter, an old
+# sighting stops counting on its own schedule whatever anyone else is doing.
 #
 # In-process on purpose. It is empty at boot and refills within minutes of
 # queue traffic, and while it is empty the tie-break falls back to the stable
 # order below — i.e. to exactly what this did before corroboration existed.
+#
+# token -> {steam_id: time.monotonic() of that reporter's last sighting}
 _REGION_SEEN = {}
 _REGION_SEEN_TTL_SECONDS = 7 * 24 * 3600
 _REGION_SEEN_MAX_TOKENS = 64
@@ -11935,34 +11974,68 @@ _REGION_SEEN_MIN_PLAYERS = 2
 _REGION_SEEN_IDS_PER_TOKEN = 8
 
 
-def _note_region_seen(token, steam_id=None):
-    """One live sighting. Called where a client reports the region it is
-    actually connected to, never for a stored home region — a cache must not
-    be able to corroborate itself."""
+def _note_region_seen(token, steam_id):
+    """One live sighting, from one identified reporter. Called where a client
+    reports the region it is actually connected to, never for a stored home
+    region — a cache must not be able to corroborate itself.
+
+    A sighting with no reporter is not evidence of anything this map claims, so
+    there is no path that records one: the caller establishes the session first
+    and passes the id it established."""
     token = _region_token(token)
-    if not token:
+    if not token or not steam_id:
         return
     now = time.monotonic()
-    seen_at, ids = _REGION_SEEN.get(token, (0.0, set()))
-    if now - seen_at > _REGION_SEEN_TTL_SECONDS:
-        ids = set()
-    if steam_id and len(ids) < _REGION_SEEN_IDS_PER_TOKEN:
-        ids = ids | {str(steam_id)}
-    _REGION_SEEN[token] = (now, ids)
-    if len(_REGION_SEEN) > _REGION_SEEN_MAX_TOKENS:
-        for stale in sorted(_REGION_SEEN, key=lambda k: _REGION_SEEN[k][0])[
-                :len(_REGION_SEEN) - _REGION_SEEN_MAX_TOKENS]:
-            _REGION_SEEN.pop(stale, None)
+    ids = _REGION_SEEN.get(token)
+    if ids is None:
+        ids = {}
+        _REGION_SEEN[token] = ids
+    ids[str(steam_id)] = now
+    for expired in [rid for rid, ts in ids.items()
+                    if now - ts > _REGION_SEEN_TTL_SECONDS]:
+        ids.pop(expired, None)
+    # Bounded per token by evicting the OLDEST reporter, not by refusing the
+    # newest: a fixed first-eight would let a region's original reporters hold
+    # the quorum open long after they stopped playing there.
+    while len(ids) > _REGION_SEEN_IDS_PER_TOKEN:
+        ids.pop(min(ids, key=ids.get), None)
+    _evict_region_tokens(now)
 
 
-def _region_corroborated(token):
-    entry = _REGION_SEEN.get(_region_token(token))
-    if not entry:
+def _evict_region_tokens(now):
+    """Bound the map by dropping what carries the least evidence first.
+
+    Purely-oldest eviction lets any new token push out a corroborated one, so a
+    full map of real regions could be turned over by tokens nobody has played
+    in. Rank uncorroborated before corroborated, and oldest first within each
+    class, so what survives a full map is what two players have actually been
+    connected to."""
+    if len(_REGION_SEEN) <= _REGION_SEEN_MAX_TOKENS:
+        return
+
+    def rank(tok):
+        ids = _REGION_SEEN.get(tok) or {}
+        return (1 if _region_corroborated(tok, now) else 0,
+                max(ids.values()) if ids else 0.0)
+
+    for stale in sorted(_REGION_SEEN, key=rank)[
+            :len(_REGION_SEEN) - _REGION_SEEN_MAX_TOKENS]:
+        _REGION_SEEN.pop(stale, None)
+
+
+def _region_corroborated(token, now=None):
+    """Whether two distinct reporters have been connected to `token` inside the
+    TTL. `now` is passed in when two candidates are being compared, so both are
+    decided against one reading of the clock — otherwise a token can be fresh
+    for the first comparison and expired for the second, and which one loses
+    depends on where the TTL boundary fell between two statements."""
+    ids = _REGION_SEEN.get(_region_token(token))
+    if not ids:
         return False
-    seen_at, ids = entry
-    if time.monotonic() - seen_at > _REGION_SEEN_TTL_SECONDS:
-        return False
-    return len(ids) >= _REGION_SEEN_MIN_PLAYERS
+    if now is None:
+        now = time.monotonic()
+    live = sum(1 for ts in ids.values() if now - ts <= _REGION_SEEN_TTL_SECONDS)
+    return live >= _REGION_SEEN_MIN_PLAYERS
 
 
 def _region_agreed(a, b):
@@ -11987,7 +12060,8 @@ def _region_agreed(a, b):
     if a and b:
         if a == b:
             return a
-        ca, cb = _region_corroborated(a), _region_corroborated(b)
+        now = time.monotonic()
+        ca, cb = _region_corroborated(a, now), _region_corroborated(b, now)
         if ca != cb:
             return a if ca else b
         return min(a, b)
@@ -12116,7 +12190,12 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     # right now. Every join feeds the corroboration map the room-region
     # tie-break reads, which is why it fills far faster than issuance alone
     # would fill it.
-    _note_region_seen(req.region, req.steam_id)
+    # Only from a request whose session was established. The check above soft-
+    # fails by design in several documented conditions, so passing it is not the
+    # same fact as verifying it — and "two distinct players" is worth exactly as
+    # much as the binding behind the two ids.
+    if _session_was_verified(request):
+        _note_region_seen(req.region, req.steam_id)
 
     # Upsert into queue
     stmt = pg_insert(RankedQueue).values(
@@ -13701,6 +13780,48 @@ async def report_disconnect(
     resolved_series_id = series.id
     await _assert_no_service_subject(
         db, affected_player_ids=[series.player1_id, series.player2_id])
+
+    # ── One protected validation, held to the insert (#208) ─────────────────
+    #
+    # Everything decided above was read WITHOUT a lock, and the insert and the
+    # counter increment below happen afterwards — so an integrity invalidation
+    # committing in that window would be checked against a state that no longer
+    # existed, and the report would still be counted. Re-ask the predicate under
+    # a lock this transaction holds until it commits, which is the same rule the
+    # bet payout path follows for the same reason.
+    #
+    # ORDER IS THE 1v1 PROTOCOL'S: participants sorted by str(id), THEN
+    # ranked_series (#206). /api/v1/matches and the payout path both take that
+    # sequence; series-then-players is the 2v2 order (its table is disjoint) and
+    # taking it here would form an ABBA against every 1v1 writer. FOR NO KEY
+    # UPDATE per #202 — the weakest mode that still conflicts with the plain
+    # status/invalidation UPDATEs, while staying compatible with the FK KEY
+    # SHARE that this endpoint's own dc_events insert takes.
+    for _pid in sorted({reporter.id, disconnected.id}, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+        ), {"pid": _pid})
+    # The predicate lives INSIDE the locking read, so the row that comes back is
+    # the row that satisfies it — there is no gap between establishing the fact
+    # and holding it. The age bound is deliberately NOT re-asked here: it exists
+    # only for a NAMED series, and the unnamed path resolves a currently active
+    # one, which resume-forever allows to be arbitrarily old.
+    still_eligible = (await db.execute(text(
+        "SELECT 1 FROM ranked_series"
+        " WHERE id = CAST(:sid AS uuid)"
+        "   AND ((player1_id = :rp AND player2_id = :dp)"
+        "     OR (player1_id = :dp AND player2_id = :rp))"
+        "   AND (invalidated_at IS NULL OR invalidation_reason = :exempt)"
+        " FOR NO KEY UPDATE"
+    ), {"sid": str(resolved_series_id), "rp": reporter.id, "dp": disconnected.id,
+        "exempt": PRUNE_REASON_NO_MATCH})).first()
+    if still_eligible is None:
+        # 403 and not 409: from the client's side this is the same settled
+        # refusal as the unlocked checks above, and it must not be retried.
+        raise HTTPException(
+            status_code=403,
+            detail="series is no longer eligible for a DC report")
+
     # Per-series dedup: one DC increment per (series, disconnected player). A
     # FlaggedMatch-style marker row would be heavier; reuse AdminAction's audit
     # table is wrong here, so dedup via a dc-events guard on ranked_dc_count by
@@ -13716,6 +13837,11 @@ async def report_disconnect(
         _committed = (await db.execute(text(
             "SELECT ranked_dc_count FROM players WHERE id = :dp"
         ), {"dp": disconnected.id})).scalar()
+        # Release the lock pass before answering. ROLLBACK, not commit: this
+        # request wrote nothing, and saying so is the accurate statement — the
+        # locks are all it is holding, and a settled duplicate has no reason to
+        # hold two participants and their series through its response.
+        await db.rollback()
         return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
                 "ranked_dc_count": _committed if _committed is not None else 0}
 
@@ -13740,6 +13866,9 @@ async def report_disconnect(
         _committed = (await db.execute(text(
             "SELECT ranked_dc_count FROM players WHERE id = :dp"
         ), {"dp": disconnected.id})).scalar()
+        # Nothing was written here either: the insert conflicted and did
+        # nothing. Release the locks, do not claim a write.
+        await db.rollback()
         return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
                 "ranked_dc_count": _committed if _committed is not None else 0}
 
