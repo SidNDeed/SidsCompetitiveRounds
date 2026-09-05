@@ -459,8 +459,17 @@ namespace CompetitiveRounds
             // opened (all three latched in _wKeyBroken), and no late batch from
             // another actor. The generation is what makes "whole span" true
             // rather than "true at the moments we looked". An unkeyed window is
-            // never consumed by the evaluator. LagNotices.WindowKeyed holds the
-            // rule, so the self-test decides these windows with this exact code.
+            // never consumed by the evaluator.
+            //
+            // BOUND ON THE HARNESS, corrected at r9: LagNotices.WindowKeyed
+            // holds the open/close/late-batch half of the rule and the in-game
+            // self-test drives that half with the code that runs here. The
+            // GENERATION half does not live in WindowKeyed — it is the three
+            // latch sites and the line below, which fold a roster or identity
+            // change into _wKeyBroken before WindowKeyed ever sees it. No
+            // self-test case reaches those, so deleting them leaves every case
+            // green. test_h2h_pairing_and_window_latch.py asserts they exist
+            // instead; that is a source-shape guard, not an executed one.
             int closeActor; string closeId;
             SampleEligibleKey(out closeActor, out closeId);
             if (RoomActors.RosterGeneration != _wOpenRosterGen) _wKeyBroken = true;

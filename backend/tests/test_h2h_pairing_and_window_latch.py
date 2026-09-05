@@ -86,15 +86,23 @@ def test_no_artifact_describes_the_pairing_as_authenticating_the_fighter():
 
 
 def test_the_changelog_states_what_the_line_actually_rests_on():
-    """The line a player reads. It may promise suppression — that is what the
-    code does — but not that the assigned player is the only one who can
-    produce the line."""
+    """The line a player reads. It may promise suppression AFTER the binding —
+    that is what the code does — but not that the assigned player is the only
+    one who can produce the line in the first place.
+
+    r9 corrected this: ConsultIssued binds on the FIRST actor whose advertised
+    id matches, and a Steam id is public, so a game that claims the assigned
+    player's id before the assigned player's own game does would be believed.
+    Suppression on a seat change applies only once something is bound."""
     text = _prose(CHANGELOG)
+    assert "appears only when that name matches the one the queue assigned" in text
+    assert "it then follows the first game that matched" in text
     assert (
-        "the line is shown only while the other player's game says it is the "
-        "opponent the queue assigned" in text
+        "It is an agreement between two games about who is present, not a "
+        "check of who really is." in text
     )
-    assert "there is no line at all rather than the assigned player's name and record" in text
+    # the overclaim r9 killed must not come back in either wording
+    assert "if a different player takes that seat, there is no line at all" not in text
 
 
 def test_the_source_says_the_pairing_is_compared_never_handed_out():

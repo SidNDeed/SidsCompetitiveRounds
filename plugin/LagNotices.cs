@@ -383,10 +383,6 @@ namespace CompetitiveRounds
             try { return Plugin.LagNoticesEnabled != null && Plugin.LagNoticesEnabled.Value; } catch { return false; }
         }
 
-        /// <summary>Plain-1v1 fighter seat, not a spectator, not the broadcast
-        /// identity (hidden there regardless of the setting, §9 Q3). Also the
-        /// predicate NetworkSeatTelemetry.SampleEligibleKey keys windows by
-        /// (r6 M3), so a keyed window and an eligible tick cannot disagree.</summary>
         /// <summary>Whether a closed window's key can be consumed at all
         /// (review r8 LOW 4). OnWindowClosed returns at its first statement
         /// when the setting is off, so with notices off nothing anywhere reads
@@ -398,6 +394,10 @@ namespace CompetitiveRounds
             return SettingOn();
         }
 
+        /// <summary>Plain-1v1 fighter seat, not a spectator, not the broadcast
+        /// identity (hidden there regardless of the setting, §9 Q3). Also the
+        /// predicate NetworkSeatTelemetry.SampleEligibleKey keys windows by
+        /// (r6 M3), so a keyed window and an eligible tick cannot disagree.</summary>
         internal static bool SeatEligible()
         {
             try

@@ -720,33 +720,30 @@ namespace CompetitiveRounds
                 && url.EndsWith("/api/v1/matches/macro-evidence", StringComparison.Ordinal);
         }
 
-        /// <summary>Its parameters ride the query string, so match on the
-        /// path.</summary>
-        private static bool IsDisconnectReportUrl(string url)
-        {
-            return !string.IsNullOrEmpty(url)
-                && url.IndexOf("/api/v1/report-disconnect", StringComparison.Ordinal) >= 0;
-        }
-
         /// <summary>Queued work the player never asked for and cannot act on,
-        /// so it gets no toast in either direction. Macro evidence is one; so
-        /// is a disconnect report (review r8 MEDIUM 3), which records the
-        /// OPPONENT's leave — "Couldn't record the match" would tell the wrong
-        /// player about the wrong thing.</summary>
+        /// so it gets no toast in either direction. Macro evidence is the only
+        /// one; the disconnect report was enrolled here for r8 and descoped at
+        /// r9 — see ReportDisconnect.</summary>
         private static bool IsSilentOutboxUrl(string url)
         {
-            return IsMacroEvidenceUrl(url) || IsDisconnectReportUrl(url);
+            return IsMacroEvidenceUrl(url);
         }
 
         /// <summary>How long an enqueued report waits before its first retry.
         /// Macro evidence is advisory and can sit behind the match report it
-        /// accompanies. A disconnect report is accepted only while the pair's
-        /// series is still current, so it goes back sooner — but not so soon
-        /// that it lands inside the same rate-limit window that refused the
-        /// immediate attempts.</summary>
+        /// accompanies.
+        ///
+        /// This bound is load-bearing beyond politeness: OutboxLoop removes an
+        /// entry by the index it captured BEFORE its network yield, so a url
+        /// whose immediate retry chain is still running when the loop picks the
+        /// same entry up can have both completions race that removal. Every
+        /// enqueue site is safe against that today — the match reports queue
+        /// only after their chain has already failed, and macro evidence's
+        /// ~72 s chain finishes well inside 120 s. A future enqueue-first
+        /// caller must either keep that margin or the loop must be changed to
+        /// remove by reference.</summary>
         private static float OutboxInitialDelay(string url)
         {
-            if (IsDisconnectReportUrl(url)) return 15f;
             return IsMacroEvidenceUrl(url) ? 120f : 30f;
         }
 
@@ -9242,8 +9239,16 @@ namespace CompetitiveRounds
                     && !string.IsNullOrEmpty(previous.Value.RoomName)
                     && !string.Equals(previous.Value.RoomName, room ?? "", StringComparison.Ordinal))
                 {
+                    // ONE slot, and it holds the MOST RECENT superseded room
+                    // only (review r9). A third issuance overwrites the second,
+                    // so if the first room is somehow still the one we are in,
+                    // its pairing is no longer remembered as superseded and the
+                    // line there falls back to the room's own occupant ids.
+                    // Ordinarily this is stamped from the menu — the retained
+                    // pairing is retired on a JOIN, never on a leave — so the
+                    // superseded room is usually one we already left.
                     supersededIssuedRoom = previous.Value.RoomName;
-                    Plugin.Log.LogInfo("[QUEUE] a later room was issued while the previous one may still be occupied — no H2H line there until we leave it");
+                    Plugin.Log.LogInfo("[QUEUE] a later room was issued; the room it replaced gets no H2H line");
                 }
                 if (string.IsNullOrEmpty(room) || !IsSteamId64(opp) || opp == me)
                 {
@@ -17825,53 +17830,45 @@ namespace CompetitiveRounds
             // §2c identity fence: the broadcast service account never reports.
             if (BroadcastMode.FenceBlocksFighterPath("report-dc")) return;
             if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(disconnectedSteamId)) return;
-            string url = $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}";
-            // Durable, like a match report (review r8 MEDIUM 3). This is a
-            // ONE-SHOT write about somebody else's leave: GameStateWatcher
-            // latches opponentDCReported, so a refused attempt WAS the
-            // attempt, and the dc_events row and the ranked_dc_count
-            // increment behind it were never made at all. A 429 is the
-            // ordinary way that happens — this path shares one per-IP bucket
-            // with every other sensitive endpoint, and two players behind one
-            // address share it with each other.
+            // STILL A ONE-SHOT WRITE, and r8's MEDIUM 3 is still open on this
+            // half. It reports somebody else's leave, GameStateWatcher latches
+            // opponentDCReported, and this path shares one per-IP bucket with
+            // every other sensitive endpoint — so a refusal loses the
+            // dc_events row and the ranked_dc_count increment behind it.
             //
-            // WHAT THE QUEUE DOES AND DOES NOT BUY. The server accepts the
-            // report only while the pair's series is still CURRENT
-            // (_find_current_active_series). For the DC this reports — mid
-            // series, neither player at match point — that series stays
-            // active with no time limit, so a retry minutes later, or from
-            // the next launch, normally still lands; once the pair finish or
-            // abandon it the report is refused for good and the outbox drops
-            // it on the 4xx. Replay is safe by construction rather than by
-            // timing: the server counts the increment only for the request
-            // that inserted the dc_events row.
+            // The durable version was built for r8 and DESCOPED at r9, because
+            // enrolling this call in the outbox needs a contract it does not
+            // have. The report carries no series identity: the server resolves
+            // the pair's CURRENT series at delivery time, so a replay that
+            // arrives after the pair start a new series is accepted and
+            // attributed to the wrong one, and a replay with no successor is
+            // dropped. Making that safe means capturing the immutable series id
+            // at observation, persisting it in the outbox line, and validating
+            // it server-side — a client/server contract, not a line here. The
+            // enrolment also made a latent outbox defect reachable: OutboxLoop
+            // removes entries by an index captured before its network yield,
+            // and this was the only queued url whose immediate retry chain
+            // (~34 s) outlived its own first outbox retry (15 s), so the two
+            // could complete against the same entry. Every other enqueue site
+            // either queues only after its chain has failed, or waits 120 s.
             //
-            // The payload is "{}" rather than empty because the outbox
-            // persists url and payload tab-separated and LoadOutbox skips a
-            // line whose payload is empty — which would silently delete
-            // exactly the cross-launch retry. The parameters themselves ride
-            // the query string, as they always have; the endpoint declares no
-            // body and ignores this one.
-            EnqueueFailedReport(url, DC_REPORT_BODY);
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
-                url,
-                DC_REPORT_BODY,
+            // What r8's finding DID buy, and what stays: the server counts the
+            // increment only for the request that inserted the dc_events row,
+            // and the increment is a delta rather than a read-modify-write. A
+            // durable client can be built on that whenever the series contract
+            // is done; it is safe against replay by construction now.
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}",
+                "",
                 (success, response) =>
                 {
                     if (success)
-                    {
-                        RemovePendingReport(url, DC_REPORT_BODY);
                         Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
-                    }
                     else
-                        Plugin.Log.LogWarning($"[DC] Disconnect report refused, queued for retry: {response}");
+                        Plugin.Log.LogWarning($"[DC] Failed to report disconnect: {response}");
                 }
             ));
         }
-
-        /// <summary>See ReportDisconnect: a placeholder payload the endpoint
-        /// ignores, kept non-empty so the outbox can persist the entry.</summary>
-        private const string DC_REPORT_BODY = "{}";
 
         /// <summary>Aug 6 item 1 — casual rage-quit report. The surviving
         /// client reports a mid-game leave in a CASUAL 1v1 (any midgame

@@ -45,6 +45,7 @@ PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 API_CLIENT_CS = PLUGIN / "ApiClient.cs"
 H2H_RULES_CS = PLUGIN / "H2HRules.cs"
 H2H_SUMMARY_CS = PLUGIN / "H2HSummary.cs"
+MAIN_PY = Path(__file__).resolve().parents[1] / "api" / "main.py"
 
 
 # ── executed: the server half ────────────────────────────────────────────────
@@ -212,53 +213,67 @@ def _cs_method_body(path, signature):
     raise AssertionError(f"unbalanced braces after {signature}")
 
 
-def test_the_disconnect_report_is_persisted_before_the_first_network_yield():
-    """Enqueue-then-send, the order ReportMacroEvidence uses: a quit or a
-    crash between the two must not be able to erase the report."""
+def test_the_disconnect_report_is_a_one_shot_send_again():
+    """r8 asked for a durable disconnect report and one was built; r9 descoped
+    it. The report carries no series identity, so the server resolves the
+    pair's CURRENT series at delivery time — a replay arriving after the pair
+    start a new series is written against that one instead. Making it durable
+    needs the immutable series id captured at observation, persisted in the
+    outbox line and validated server-side; that is a client/server contract,
+    not a change to this call."""
     body = _cs_method_body(
         API_CLIENT_CS,
         "public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId)",
     )
-    assert "EnqueueFailedReport(url, DC_REPORT_BODY);" in body
-    assert "PostRequestWithRetry(" in body
-    assert "RemovePendingReport(url, DC_REPORT_BODY);" in body
-    assert body.index("EnqueueFailedReport") < body.index("StartCoroutine")
-    assert "PostRequest(" not in body.replace("PostRequestWithRetry(", ""), (
-        "the one-shot send is what the finding is about"
-    )
-
-
-def test_the_queued_payload_is_one_the_outbox_can_reload():
-    """LoadOutbox splits url and payload on a tab and SKIPS a line whose
-    payload is empty, so an empty body would delete exactly the cross-launch
-    retry — the one a rate-limited report most needs."""
+    assert "EnqueueFailedReport" not in body
+    assert "RemovePendingReport" not in body
+    assert "StartCoroutine(PostRequest(" in body
     src = API_CLIENT_CS.read_text(encoding="utf-8")
-    m = re.search(r'private const string DC_REPORT_BODY = "([^"]*)";', src)
-    assert m, "DC_REPORT_BODY not found"
-    assert m.group(1), "the queued payload must be non-empty"
-    load = _cs_method_body(API_CLIENT_CS, "private static void LoadOutbox()")
-    assert "tab >= line.Length - 1" in load, (
-        "the reload rule this payload is shaped for changed — re-check the shape"
-    )
+    for gone in ("DC_REPORT_BODY", "IsDisconnectReportUrl"):
+        assert gone not in src, f"{gone} outlived the code that used it"
 
 
-def test_the_disconnect_report_is_silent_and_is_not_the_macro_evidence_race():
-    """It carries no toast (it records the OPPONENT's leave; "Couldn't record
-    the match" would tell the wrong player about the wrong thing), and it must
-    NOT inherit macro evidence's retryable-409 rule, which is about racing the
-    elected reporter's match insert."""
-    silent = _cs_method_body(API_CLIENT_CS, "private static bool IsSilentOutboxUrl(string url)")
-    assert "IsDisconnectReportUrl(url)" in silent
-    assert "IsMacroEvidenceUrl(url)" in silent
-    src = API_CLIENT_CS.read_text(encoding="utf-8")
-    macro_rule = re.search(r"bool retryableMacroResponse\s*=\s*(\w+)\(p\.url\)", src)
-    assert macro_rule, "the macro 409 rule moved"
-    assert macro_rule.group(1) == "IsMacroEvidenceUrl"
+def test_no_queued_url_can_race_its_own_immediate_retry_chain():
+    """The defect the enrolment made reachable, kept as a standing check.
+
+    OutboxLoop captures an index, yields into PostRequest, and then removes by
+    that stale index; RemovePendingReport mutates the same list from a separate
+    coroutine. So an entry that is queued BEFORE its immediate send, and whose
+    send chain is still running when the loop picks it up, can have both
+    completions act on one entry — the loop then removes a different entry, or
+    throws and ends the coroutine for the session (`_outboxLoopStarted` is
+    never reset).
+
+    Two things keep that unreachable, and both are asserted here rather than
+    left to timing: the disconnect report's 15 s branch is gone, so the only
+    delays are macro evidence's 120 s (against a chain of at most ~72 s) and
+    the shared 30 s default, which is only ever reached by callers that queue
+    AFTER their chain has already failed."""
+    import re as _re
+
     delay = _cs_method_body(API_CLIENT_CS, "private static float OutboxInitialDelay(string url)")
-    assert "IsDisconnectReportUrl(url)) return 15f;" in delay, (
-        "a disconnect report is accepted only while the series is current; it "
-        "cannot wait behind macro evidence's 120 s"
+    delays = sorted(int(x) for x in _re.findall(r"(\d+)f", delay))
+    assert delays == [30, 120], f"a new initial-retry delay appeared: {delays}"
+
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    sites = src.count("EnqueueFailedReport(")
+    # one declaration + macro evidence + the four match-report paths
+    assert sites == 6, (
+        f"{sites} EnqueueFailedReport references, expected 6. A NEW caller must "
+        "either queue only after its immediate chain has failed, or keep a "
+        "first-retry delay longer than that chain — or OutboxLoop must be "
+        "changed to remove by reference instead of by a stale index."
     )
+
+
+def test_the_server_half_of_the_finding_is_what_survived():
+    """The descope is of the client half only. The server's replay safety is
+    what makes a durable client buildable later, so it must not drift."""
+    src = MAIN_PY.read_text(encoding="utf-8")
+    handler = src[src.index("async def report_disconnect("):]
+    handler = handler[: handler.index("\n@app.")] if "\n@app." in handler else handler
+    assert "ON CONFLICT DO NOTHING RETURNING 1" in handler
+    assert "COALESCE(ranked_dc_count, 0) + 1" in handler
 
 
 # ── the client half: the room budget ─────────────────────────────────────────
