@@ -1,27 +1,32 @@
 """The round-teardown probe measures; it does not yet fix anything.
 
 Recourse item 1 says the spectator seat keeps simulating player bodies through
-the ~2.5-3.5 s round teardown, because vanilla stops them from INSIDE
+the round teardown, because vanilla stops them from INSIDE
 `GM_ArmsRace.RPCA_NextRound` (V/GM_ArmsRace.cs:531) and our observer prefix
 skips the whole method. That is an argument from the call graph. The item was
-written with "PROVE FIRST" against it, so this commit adds the measurement and
-no fix.
+written with "PROVE FIRST" against it, so this ships the measurement and no fix.
 
-What is easy to get wrong here is not the arithmetic, it is the PLACEMENT. Two
-of the three call sites sit deliberately above a gate:
+Review r9 found the first version's window edges wrong in a way that made its
+own acceptance test unreachable, and both reviewers landed on the same repair.
+Three properties are now load-bearing, and this file exists to stop any of them
+drifting back:
 
-  * the window opens above `SpectatorPatchSupport.Suppress`, so a fighter seat
-    -- where vanilla's own stop runs microseconds later -- emits the same line
-    as a positive control, and so a suppression that fails to engage still
-    produces a reading rather than silence;
-  * the close runs above `OnUnityLog`'s spectator quiesce, which returns at its
-    fourth line on exactly the seat under investigation. Below it, every
-    spectator window would time out on the cap with the next round's combat
-    folded into the number.
-
-Both are the #376 class: a diagnostic placed inside the behaviour it is meant
-to judge is dead where it is needed. These tests are what stops either from
-drifting back down.
+  * **The closing edge is `MOVE PLAYERS START`, not END.** Vanilla logs START at
+    the top of `PlayerManager.Move` (V/PlayerManager.cs:384) immediately before
+    setting `simulated = false` for that player, then drives
+    `transform.position` frame by frame to the spawn point, and logs END at :409
+    AFTER the traversal. Closing on END put the whole scripted traversal inside
+    the window on BOTH seat kinds, so displacement could never reach the noise
+    floor.
+  * **Displacement is split by the flag.** `movedSim` accumulates only while
+    that player's `playerVel.simulated` is true. A body moved by something else
+    lands in `movedStop` and cannot be misread as evidence.
+  * **Placement above two gates.** The window opens above
+    `SpectatorPatchSupport.Suppress` so a fighter seat is a control in the same
+    format, and the close runs above `OnUnityLog`'s spectator quiesce, which
+    returns at its fourth line on exactly the seat under test. Both are the #376
+    class: a diagnostic inside the behaviour it judges is dead where it is
+    needed.
 """
 
 import re
@@ -62,7 +67,85 @@ def _code(block):
     return "\n".join(out)
 
 
-# ── placement: the two sites that must sit above a gate ──────────────────────
+# ── the window edges ─────────────────────────────────────────────────────────
+
+def test_the_window_closes_on_move_players_start_not_end():
+    """The r9 repair. END is emitted after vanilla has already walked every
+    body to its spawn point, so a window closing there can never read at the
+    noise floor no matter what the seat did."""
+    body = _code(_cs_block(GSW_CS, "private static void OnUnityLog("))
+    assert 'message.StartsWith("MOVE PLAYERS START")' in body
+    assert 'SpectatorTeardownProbe.CloseWindow("move-start")' in body
+    # END survives only as a backstop, and must be tested AFTER START —
+    # "MOVE PLAYERS END" and "MOVE PLAYERS START" share a prefix.
+    assert body.index('"MOVE PLAYERS START"') < body.index('"MOVE PLAYERS END"')
+    assert 'CloseWindow("move-end-backstop")' in body
+
+
+def test_the_close_runs_above_the_spectator_quiesce():
+    body = _code(_cs_block(GSW_CS, "private static void OnUnityLog("))
+    assert body.index("SpectatorTeardownProbe.CloseWindow") < body.index(
+        "if (SpectatorSession.IsLocalSpectator) return;"
+    ), "OnUnityLog returns early for a spectator, which is the seat under test"
+
+
+def test_the_window_is_bound_to_its_room():
+    """A seat that leaves mid-teardown must not carry the window into the next
+    room. The reliable leave edge is the Photon callback, not an InRoom poll."""
+    body = _code(_cs_block(PLUGIN_CS, "public void OnLeftRoom()"))
+    assert 'SpectatorTeardownProbe.CloseWindow("room-left")' in body
+
+
+def test_the_horizon_is_a_horizon_and_not_a_missing_marker_claim():
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert re.search(r"WINDOW_HORIZON_SECONDS\s*=\s*8f", src)
+    assert "WINDOW_CAP_SECONDS" not in src
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "Time.time - openedAt > WINDOW_HORIZON_SECONDS" in tick
+    assert 'CloseWindow("horizon")' in tick
+
+
+# ── the reading itself ───────────────────────────────────────────────────────
+
+def test_displacement_is_split_by_the_simulated_flag():
+    """`moved` alone cannot distinguish "the bodies are simulating" from
+    "something else moved them" — vanilla's own respawn traversal moves every
+    body with simulation already off."""
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "p.data.playerVel.simulated" in tick
+    assert "movedSim[i] = movedSim[i] + step" in tick
+    assert "movedStop[i] = movedStop[i] + step" in tick
+    # and the per-frame maximum is taken from the simulated half only
+    sim_branch = tick[tick.index("if (sim)"):]
+    assert "maxStepSim = step" in sim_branch
+
+
+def test_the_line_reports_both_halves():
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    for field in ("simFrames=", "movedSim=", "movedStop=", "maxStepSim="):
+        assert field in close, field
+
+
+def test_a_truncated_window_says_so():
+    """A roster change clears the accumulators. Without a marker in the line a
+    truncated window is indistinguishable from a window with no movement."""
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "players.Count != lastPos.Count" in tick
+    rebase = tick.index("players.Count != lastPos.Count")
+    assert "rebased = true" in tick[rebase:]
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    assert 'rebased ? " rebased=1"' in close
+
+
+def test_a_duplicate_call_in_does_not_restart_the_clock():
+    """Vanilla dedupes bunched round broadcasts with `isTransitioning`, which
+    lives in the suppressed machine; the observer sees them all. The teardown
+    began at the first one."""
+    body = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    assert "if (open) return;" in body
+
+
+# ── placement and control ────────────────────────────────────────────────────
 
 def test_the_window_opens_above_the_suppression_gate():
     body = _code(_cs_block(SPEC_CS, "internal static class Spectator_ObserveNextRound_Patch"))
@@ -74,23 +157,37 @@ def test_the_window_opens_above_the_suppression_gate():
 
 def test_both_seat_kinds_emit_a_line_so_the_fighter_is_a_control():
     body = _code(_cs_block(SPEC_CS, "internal static class Spectator_ObserveNextRound_Patch"))
-    assert '"spectator"' in body and '"fighter"' in body, (
+    assert 'SpectatorPatchSupport.Suppress ? "spectator" : "fighter"' in body, (
         "without the fighter control a non-zero reading cannot be attributed "
         "to the suppression rather than to teardown motion generally"
     )
 
 
-def test_the_close_runs_above_the_spectator_quiesce():
-    body = _code(_cs_block(GSW_CS, "private static void OnUnityLog("))
-    assert "SpectatorTeardownProbe.CloseWindow" in body
-    assert body.index("SpectatorTeardownProbe.CloseWindow") < body.index(
-        "if (SpectatorSession.IsLocalSpectator) return;"
-    ), "OnUnityLog returns early for a spectator, which is the seat under test"
-
-
-def test_the_probe_is_ticked_every_frame():
+def test_the_probe_is_ticked_from_the_per_frame_update():
+    """Asserting the string occurs somewhere in Plugin.cs would pass with the
+    call sitting in an unreachable method. Require it in the SAME block as the
+    per-frame work it runs beside."""
+    update = None
     src = PLUGIN_CS.read_text(encoding="utf-8")
-    assert src.count("try { SpectatorTeardownProbe.Tick(); } catch { }") == 1
+    # Plugin.cs has several Update() hosts. Brace-match forward from each and
+    # keep the one that also ticks the overlay idle close — the established
+    # per-frame host this call was placed beside.
+    for m in re.finditer(r"private void Update\(\)", src):
+        open_brace = src.index("{", m.end())
+        depth = 0
+        for i in range(open_brace, len(src)):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    body = src[open_brace : i + 1]
+                    break
+        if "OverlayIdleClose.Tick()" in body:
+            update = body
+            break
+    assert update is not None, "could not find the per-frame Update host"
+    assert _code(update).count("SpectatorTeardownProbe.Tick()") == 1
 
 
 # ── it measures, it does not fix ─────────────────────────────────────────────
@@ -98,68 +195,24 @@ def test_the_probe_is_ticked_every_frame():
 def test_the_probe_writes_nothing_to_the_game():
     """The fix is deliberately not in this commit. A probe that also stopped
     the bodies would make its own reading meaningless."""
-    src = PROBE_CS.read_text(encoding="utf-8")
-    code = _code(src)
+    code = _code(PROBE_CS.read_text(encoding="utf-8"))
     assert "SetPlayersSimulated" not in code
     assert not re.search(r"\.simulated\s*=", code), "the probe assigns the flag it measures"
     assert not re.search(r"\.velocity\s*=", code)
     assert not re.search(r"\.position\s*=", code)
 
 
-# ── the reading has to be trustworthy ────────────────────────────────────────
-
-def test_a_duplicate_call_in_does_not_restart_the_clock():
-    """Vanilla dedupes bunched round broadcasts with `isTransitioning`, which
-    lives in the suppressed machine; the observer sees them all. Teardown
-    began at the first one."""
-    body = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
-    assert "if (open) return;" in body
-
-
-def test_the_window_cannot_outlive_the_teardown():
-    """Without a cap, a window whose closing marker never arrives keeps
-    sampling into the next round's combat and reports that as teardown
-    movement."""
-    src = PROBE_CS.read_text(encoding="utf-8")
-    assert re.search(r"WINDOW_CAP_SECONDS\s*=\s*8f", src)
-    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "Time.time - openedAt > WINDOW_CAP_SECONDS" in tick
-    assert 'CloseWindow("cap")' in tick
-
-
-def test_a_roster_change_rebases_instead_of_counting_as_movement():
-    """Positions are held by list index. A player leaving mid-teardown shifts
-    every index below them, which would read as a large simultaneous jump."""
-    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "players.Count != lastPos.Count" in tick
-    rebase = tick.index("players.Count != lastPos.Count")
-    assert "lastPos.Clear();" in tick[rebase:]
-
-
-def test_the_log_volume_is_bounded():
-    """A broadcast seat sits in matches all day; this runs on it."""
-    src = PROBE_CS.read_text(encoding="utf-8")
-    assert re.search(r"MAX_REPORTS\s*=\s*20", src)
-    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    assert "if (reports >= MAX_REPORTS)" in close
-    assert "windowsTotal % MAX_REPORTS == 0" in close, (
-        "after the budget the totals must still surface, or a log opened late "
-        "in a sitting carries no answer at all"
-    )
-
-
 def test_one_line_per_round_not_one_per_frame():
-    """~60 fps over a 3 s teardown is ~180 lines a round. The per-frame
-    maximum is carried as a field instead."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
     assert "Plugin.Log" not in tick
-    assert "maxStep" in tick
 
 
-def test_the_line_carries_the_flag_the_argument_is_about():
-    """`moved` alone cannot distinguish "bodies are simulating" from "bodies
-    are being moved by something else"; simFrames reads the flag directly."""
+def test_the_heartbeat_carries_the_answer_not_just_a_count():
+    """After the budget a log opened late in a long sitting must still be worth
+    reading; window and movement totals alone do not say which seat, nor
+    whether the bodies were simulated."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    assert "simFrames=" in close
-    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "p.data.playerVel.simulated" in tick
+    tail = close[close.index("if (reports >= MAX_REPORTS)"):]
+    heartbeat = tail[: tail.index("reports++")]
+    for field in ("seat=", "simFrames=", "movedSim=", "maxStepSim="):
+        assert field in heartbeat, field

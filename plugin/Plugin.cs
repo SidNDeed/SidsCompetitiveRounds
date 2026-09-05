@@ -4452,6 +4452,11 @@ namespace CompetitiveRounds
             // Release B §1: the head-to-head line dies with the room — first
             // statement (same reason as OnDisconnected). Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
+            // A teardown window is bound to the room it was opened in. Without
+            // this a seat that leaves between the round call-in and the call-in
+            // of new players carries the open window across the room boundary
+            // and folds the next room's first frames into it (review r9).
+            try { SpectatorTeardownProbe.CloseWindow("room-left"); } catch { }
             // Bug #269: the map-scale publish ticket must die on the RELIABLE
             // leave edge, not only through FfaMode's room poll — a leave and a
             // fast rejoin to a same-named recreated room can land between poll

@@ -7284,12 +7284,25 @@ namespace CompetitiveRounds
             // Teardown-probe window close. This sits ABOVE the spectator
             // quiesce two lines down deliberately: the spectator seat is the
             // one the measurement is about, so a close placed below it would
-            // never run there and every spectator window would report "cap"
-            // with the next round's combat folded into it (#376).
+            // never run there and every spectator window would report the
+            // horizon with the next round's combat folded into it (#376).
+            //
+            // START, not END. Vanilla logs "MOVE PLAYERS START" at the top of
+            // PlayerManager.Move (V/PlayerManager.cs:384), immediately before
+            // it sets simulated=false and isKinematic=true for that player and
+            // then drives transform.position frame by frame to the spawn
+            // point; "MOVE PLAYERS END" is logged at :409 AFTER that whole
+            // traversal. Closing on END put every scripted frame inside the
+            // window on both seat kinds (review r9). One START is logged per
+            // player, all in the same frame — the close is idempotent, so the
+            // first one wins, which is the edge we want. END stays as a late
+            // backstop for a transition that somehow skips START.
             try
             {
-                if (message.StartsWith("MOVE PLAYERS END"))
-                    SpectatorTeardownProbe.CloseWindow("move-players-end");
+                if (message.StartsWith("MOVE PLAYERS START"))
+                    SpectatorTeardownProbe.CloseWindow("move-start");
+                else if (message.StartsWith("MOVE PLAYERS END"))
+                    SpectatorTeardownProbe.CloseWindow("move-end-backstop");
             }
             catch { }
 
