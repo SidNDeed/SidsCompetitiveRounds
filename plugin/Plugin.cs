@@ -3881,6 +3881,13 @@ namespace CompetitiveRounds
             // in-flight spectate JoinRoom op (the socket is gone; nothing can
             // deliver it). Must run before the diag early-return below.
             try { SpectatorJoiner.NoteJoinSettled($"disconnected ({cause})"); } catch { }
+            // A teardown window is bound to the room it was opened in, and a
+            // socket loss reaches here WITHOUT an OnLeftRoom (the same
+            // asymmetry the telemetry close above is here for). Without this
+            // the window survives to its horizon and can sample menu teardown,
+            // or a fast join into the next room, under the old seat. Before
+            // the early return below, and idempotent.
+            try { SpectatorTeardownProbe.CloseWindow("disconnected"); } catch { }
             if (Diag2v2.PendingSlot() < 0) return;
             try { Plugin.Log.LogWarning($"[2v2-DIAG] Disconnected: cause={cause} stack={Diag2v2.ShortStack()}"); }
             catch { }

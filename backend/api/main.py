@@ -13446,6 +13446,11 @@ async def report_disconnect(
     request: Request,
     reporter_steam_id: str = Query(...),
     disconnected_steam_id: str = Query(...),
+    series_id: str | None = Query(
+        None,
+        description="The series the leave was observed in. Clients that send it "
+                    "get a durable report; clients that omit it keep the "
+                    "resolve-at-delivery behaviour."),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -13485,10 +13490,55 @@ async def report_disconnect(
     # both have ancient created_at, and the old gate 403'd exactly the leaver-
     # accountability DCs the FAQ promises to record. The per-series dedup
     # below still prevents replay inflation.
-    series = await _find_current_active_series(db, reporter.id, disconnected.id)
-    if series is None:
-        raise HTTPException(status_code=403, detail="no current shared ranked series for this DC report")
-    series_id = series.id
+    #
+    # WHICH SERIES (r10 restore of r8's M3). Without a named series this
+    # endpoint answers "the pair's series right now", which is the same answer
+    # for the observation and for a retry delivered minutes later — so a report
+    # that could not be delivered while the series ran was either attributed to
+    # the pair's NEXT series or dropped for want of one. A client that keeps an
+    # undelivered report now names the series it watched the leave in, and that
+    # name is what this endpoint files against; the resolve-at-delivery path
+    # below stays for clients that do not send one.
+    #
+    # A named series is checked against the database, never trusted: it must
+    # exist, its two participants must be exactly this reporter and this
+    # leaver, it must not be invalidated, and it must not have finished more
+    # than a week ago. The last bound is what keeps the naming from widening
+    # what a report can reach — the pair's whole shared history would otherwise
+    # be nameable, where the unnamed path can only ever reach one series. Every
+    # containment that was already here still applies on top: the Steam-session
+    # binding, and uq_dc_event_series_player, which lets one (series, leaver)
+    # count exactly once however many times it is reported.
+    if series_id:
+        try:
+            claimed = uuid.UUID(str(series_id))
+        except (ValueError, AttributeError, TypeError):
+            # 4xx: a client holding this report treats it as settled and stops
+            # retrying, which is right — a malformed id can never resolve.
+            raise HTTPException(status_code=400, detail="invalid series id")
+        series = (await db.execute(
+            select(RankedSeries).where(RankedSeries.id == claimed)
+        )).scalar_one_or_none()
+        if series is None:
+            raise HTTPException(status_code=403, detail="unknown series for this DC report")
+        if {series.player1_id, series.player2_id} != {reporter.id, disconnected.id}:
+            raise HTTPException(status_code=403, detail="named series does not belong to this pair")
+        if series.invalidated_at is not None:
+            raise HTTPException(status_code=403, detail="named series was invalidated")
+        # Age is asked in SQL against the database clock rather than compared
+        # to a python "now", so an api container with a skewed clock cannot
+        # widen or narrow the bound. Bound is a literal interval, not a bind.
+        fresh = (await db.execute(text(
+            "SELECT 1 FROM ranked_series WHERE id = CAST(:sid AS uuid) "
+            "AND (completed_at IS NULL OR completed_at >= NOW() - INTERVAL '7 days') LIMIT 1"
+        ), {"sid": str(claimed)})).first()
+        if fresh is None:
+            raise HTTPException(status_code=403, detail="named series is too old for a queued DC report")
+    else:
+        series = await _find_current_active_series(db, reporter.id, disconnected.id)
+        if series is None:
+            raise HTTPException(status_code=403, detail="no current shared ranked series for this DC report")
+    resolved_series_id = series.id
     await _assert_no_service_subject(
         db, affected_player_ids=[series.player1_id, series.player2_id])
     # Per-series dedup: one DC increment per (series, disconnected player). A
@@ -13497,12 +13547,19 @@ async def report_disconnect(
     # checking we haven't already logged this series for this player this window.
     already = (await db.execute(text(
         "SELECT 1 FROM dc_events WHERE series_id = :sid AND disconnected_player_id = :dp LIMIT 1"
-    ), {"sid": series_id, "dp": disconnected.id})).first()
+    ), {"sid": resolved_series_id, "dp": disconnected.id})).first()
     if already:
+        # The ORM row was loaded before the insert below decided anything, so
+        # for a request that lost the conflict it is one behind by
+        # construction — it would answer N while the committed value is N+1.
+        # Ask the database for the number this response reports.
+        _committed = (await db.execute(text(
+            "SELECT ranked_dc_count FROM players WHERE id = :dp"
+        ), {"dp": disconnected.id})).scalar()
         return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
-                "ranked_dc_count": disconnected.ranked_dc_count or 0}
+                "ranked_dc_count": _committed if _committed is not None else 0}
 
-    # THE ROW DECIDES, NOT THE READ ABOVE (review r8 MEDIUM 3). The client now
+    # THE ROW DECIDES, NOT THE READ ABOVE (review r8 MEDIUM 3). The client
     # keeps an unsent DC report in the durable outbox, so the same report can
     # arrive twice at once -- the immediate attempt whose response was lost,
     # and the retry that replaced it. Both would clear the SELECT above and
@@ -13514,10 +13571,17 @@ async def report_disconnect(
     inserted = (await db.execute(text(
         "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id) "
         "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING RETURNING 1"
-    ), {"sid": series_id, "dp": disconnected.id, "rp": reporter.id})).first()
+    ), {"sid": resolved_series_id, "dp": disconnected.id, "rp": reporter.id})).first()
     if inserted is None:
+        # The ORM row was loaded before the insert below decided anything, so
+        # for a request that lost the conflict it is one behind by
+        # construction — it would answer N while the committed value is N+1.
+        # Ask the database for the number this response reports.
+        _committed = (await db.execute(text(
+            "SELECT ranked_dc_count FROM players WHERE id = :dp"
+        ), {"dp": disconnected.id})).scalar()
         return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
-                "ranked_dc_count": disconnected.ranked_dc_count or 0}
+                "ranked_dc_count": _committed if _committed is not None else 0}
 
     # A DELTA, never an absolute write (learning #326): the read-modify-write
     # this replaces was computed from a row read before the insert decided.

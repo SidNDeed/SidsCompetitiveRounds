@@ -3826,8 +3826,18 @@ namespace CompetitiveRounds
                         if (matchIsRanked && meaningfulPlay && localR < 4 && oppR < 4
                             && opponentSteamIdResolved && !opponentSteamId.StartsWith("photon_"))
                         {
-                            Plugin.Log.LogInfo($"[DC] Opponent {opponentDisplayName} disconnected at game-rounds={localR}-{oppR}, pts={totalPts}, series-games={seriesGames} — reporting leave");
-                            ApiClient.ReportDisconnect(localSteamId, opponentSteamId);
+                            // The series id as it stands NOW, at the
+                            // observation. The report can be retried long
+                            // after this frame, and by then the field has
+                            // moved on — it is cleared at every game-report
+                            // boundary and at room leave, and re-published by
+                            // the next game's preflight. What is captured here
+                            // is what the leave belongs to; an empty one makes
+                            // the report a single attempt.
+                            string dcSeriesId = ApiClient.ActiveRankedSeriesId;
+                            string dcSeriesLabel = string.IsNullOrEmpty(dcSeriesId) ? "(none)" : dcSeriesId;
+                            Plugin.Log.LogInfo($"[DC] Opponent {opponentDisplayName} disconnected at game-rounds={localR}-{oppR}, pts={totalPts}, series-games={seriesGames}, series={dcSeriesLabel} — reporting leave");
+                            ApiClient.ReportDisconnect(localSteamId, opponentSteamId, dcSeriesId);
                         }
                         else if (!matchIsRanked && opponentSteamIdResolved
                                  && !opponentSteamId.StartsWith("photon_"))

@@ -8,10 +8,14 @@ increment behind it simply unmade, on another player's record. The two halves,
 and why they are one change:
 
   * the client keeps a refused report in the durable outbox until the server
-    accepts it or settles it, so a refusal is retried instead of lost; and
-  * because that creates replays, the server now counts the increment only for
-    the request that INSERTED the dc_events row — otherwise the retry added to
-    protect the number would be the thing that inflated it.
+    accepts it or settles it, so a refusal is retried instead of lost;
+  * the report NAMES the series the leave was watched in, because "the pair's
+    series" is a different series by the time a retry lands — r9 took the
+    durability out for exactly that reason and this restores it with the
+    identity it was missing; and
+  * because durability creates replays, the server counts the increment only
+    for the request that INSERTED the dc_events row — otherwise the retry
+    added to protect the number would be the thing that inflated it.
 
 The server half is EXECUTED against a fake session (the style of
 test_h2h_summary.py) so it is tested as wiring rather than as a source string:
@@ -40,6 +44,10 @@ REPORTER_SID = "76561198000000011"
 LEAVER_SID = "76561198000000012"
 REPORTER = UUID("11111111-1111-4111-8111-111111111111")
 LEAVER = UUID("22222222-2222-4222-8222-222222222222")
+STRANGER = UUID("33333333-3333-4333-8333-333333333333")
+# the series the pair are in RIGHT NOW, and the older one a queued report names
+CURRENT_SERIES = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+NAMED_SERIES = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
 PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 API_CLIENT_CS = PLUGIN / "ApiClient.cs"
@@ -76,29 +84,50 @@ class FakeSession:
     and its outbox retry produce.
     """
 
-    def __init__(self, players, event_exists=False, insert_wins=True, stored_count=4):
+    def __init__(self, players, event_exists=False, insert_wins=True, stored_count=4,
+                 named_series=None, series_fresh=True):
         self.players = list(players)
         self.event_exists = event_exists
         self.insert_wins = insert_wins
         self.stored_count = stored_count
+        self.named_series = named_series
+        self.series_fresh = series_fresh
         self.statements = []
         self.increments = 0
         self.inserts = 0
         self.commits = 0
+        self.series_loads = 0
+        self.freshness_checks = 0
+        self.count_reads = 0
+        self.insert_params = None
+        self.dedup_params = None
 
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         self.statements.append(sql)
+        if sql.startswith("SELECT 1 FROM ranked_series"):
+            assert "INTERVAL '7 days'" in sql, "the age bound must be a literal interval, not a bind (#448)"
+            assert "CAST(:sid AS uuid)" in sql, "the id bind must be typed (#448)"
+            self.freshness_checks += 1
+            return _Result([(1,)] if self.series_fresh else [])
+        if "FROM ranked_series" in sql:
+            self.series_loads += 1
+            return _Result([self.named_series] if self.named_series is not None else [])
+        if sql.startswith("SELECT ranked_dc_count FROM players"):
+            self.count_reads += 1
+            return _Result([(self.stored_count,)])
         if sql.startswith("SELECT") and "FROM players" in sql:
             wanted = list(statement.compile().params.values())[0]
             return _Result([p for p in self.players if p.steam_id == wanted])
         if "FROM dc_events" in sql:
+            self.dedup_params = dict(params or {})
             return _Result([(1,)] if self.event_exists else [])
         if sql.startswith("INSERT INTO dc_events"):
             assert "RETURNING" in sql, (
                 "the insert must report whether it was the one that recorded the event"
             )
             self.inserts += 1
+            self.insert_params = dict(params or {})
             return _Result([(1,)] if self.insert_wins else [])
         if sql.startswith("UPDATE players"):
             assert "ranked_dc_count = COALESCE(ranked_dc_count, 0) + 1" in sql, (
@@ -122,24 +151,34 @@ def _players(count=3):
 @pytest.fixture(autouse=True)
 def _stub_the_gates(monkeypatch):
     """Everything the handler leans on that is not this finding: the session
-    gate, the service-account fence and the pair's current series."""
+    gate, the service-account fence and the pair's current series. Returns the
+    call counter so a test can assert the resolve-at-delivery path was NOT
+    taken when the report named a series."""
+    calls = {"find_current": 0}
 
     async def _noop(*args, **kwargs):
         return None
 
     async def _series(*args, **kwargs):
-        return SimpleNamespace(id=uuid4(), player1_id=REPORTER, player2_id=LEAVER)
+        calls["find_current"] += 1
+        return SimpleNamespace(id=CURRENT_SERIES, player1_id=REPORTER, player2_id=LEAVER)
 
     monkeypatch.setattr(main, "_check_steam_session", _noop)
     monkeypatch.setattr(main, "_assert_no_service_subject", _noop)
     monkeypatch.setattr(main, "_find_current_active_series", _series)
+    return calls
 
 
-def _call(session):
+def _call(session, series_id=None):
     request = SimpleNamespace(headers={"X-Session-Token": "tok"})
     return asyncio.run(
-        main.report_disconnect(request, REPORTER_SID, LEAVER_SID, session)
+        main.report_disconnect(request, REPORTER_SID, LEAVER_SID, series_id, session)
     )
+
+
+def _series_row(player1=REPORTER, player2=LEAVER, invalidated=None, sid=NAMED_SERIES):
+    return SimpleNamespace(id=sid, player1_id=player1, player2_id=player2,
+                           invalidated_at=invalidated)
 
 
 def test_the_request_that_inserts_the_row_is_the_one_that_counts():
@@ -156,25 +195,41 @@ def test_a_replay_that_loses_the_insert_counts_nothing():
     what "concurrent" means here — and only one row lands. The loser must add
     nothing: an unconditional increment would take a leave-% denominator up by
     one for a disconnect that happened once."""
-    session = FakeSession(_players(count=7), event_exists=False, insert_wins=False)
+    session = FakeSession(_players(count=7), event_exists=False, insert_wins=False,
+                          stored_count=8)
     answer = _call(session)
     assert answer["status"] == "already_recorded"
     assert session.inserts == 1
     assert session.increments == 0, "the losing replay incremented the count"
     assert session.commits == 0
-    assert answer["ranked_dc_count"] == 7
+    # 8 is what the winner committed; 7 is the row this request loaded before
+    # the conflict was decided, and is one behind by construction.
+    assert answer["ranked_dc_count"] == 8
 
 
 def test_the_settled_replay_still_short_circuits_before_any_write():
     """A retry arriving after the first report committed: the fast path reads
     the row and answers without attempting an insert at all."""
-    session = FakeSession(_players(count=7), event_exists=True)
+    session = FakeSession(_players(count=7), event_exists=True, stored_count=8)
     answer = _call(session)
     assert answer["status"] == "already_recorded"
-    assert answer["ranked_dc_count"] == 7
+    assert answer["ranked_dc_count"] == 8
+    assert session.count_reads == 1
     assert session.inserts == 0
     assert session.increments == 0
     assert session.commits == 0
+
+
+def test_no_settled_answer_reports_the_row_this_request_loaded():
+    """Both already_recorded paths. The ORM row is read at the top of the
+    handler, before anything has been decided; under a concurrent report it is
+    behind the committed value by exactly the increment this request lost."""
+    for kwargs in ({"event_exists": True}, {"insert_wins": False}):
+        session = FakeSession(_players(count=3), stored_count=11, **kwargs)
+        answer = _call(session)
+        assert answer["status"] == "already_recorded"
+        assert answer["ranked_dc_count"] == 11
+        assert session.count_reads == 1
 
 
 def test_the_recorded_answer_is_the_value_the_database_returned():
@@ -182,6 +237,102 @@ def test_the_recorded_answer_is_the_value_the_database_returned():
     that read is stale by construction under a concurrent replay."""
     session = FakeSession(_players(count=0), stored_count=9)
     assert _call(session)["ranked_dc_count"] == 9
+
+
+# ── executed: the series the report NAMES ────────────────────────────────────
+
+
+def test_a_named_series_is_what_the_event_is_filed_against(_stub_the_gates):
+    """The whole point of the restore. The pair have moved on to
+    CURRENT_SERIES; a report queued during NAMED_SERIES arrives now. It must
+    land on the series it was observed in, and the resolve-at-delivery helper
+    must not be consulted at all — consulting it is how the wrong answer was
+    reached."""
+    session = FakeSession(_players(), named_series=_series_row())
+    answer = _call(session, str(NAMED_SERIES))
+    assert answer["status"] == "recorded"
+    assert session.insert_params["sid"] == NAMED_SERIES
+    assert session.dedup_params["sid"] == NAMED_SERIES
+    assert _stub_the_gates["find_current"] == 0, (
+        "a named series must not fall through to the pair's current one"
+    )
+
+
+def test_a_report_with_no_series_still_resolves_at_delivery(_stub_the_gates):
+    """Old clients, and the one window a current client has none: the
+    behaviour they had is unchanged."""
+    session = FakeSession(_players())
+    answer = _call(session, None)
+    assert answer["status"] == "recorded"
+    assert session.insert_params["sid"] == CURRENT_SERIES
+    assert session.series_loads == 0
+    assert _stub_the_gates["find_current"] == 1
+
+
+def test_a_named_series_must_be_this_pairs():
+    """A named series is checked against the database, never taken as given:
+    its two participants have to be exactly this reporter and this leaver."""
+    session = FakeSession(_players(), named_series=_series_row(player2=STRANGER))
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+    assert session.inserts == 0 and session.increments == 0
+
+
+def test_the_pair_check_is_order_blind():
+    """player1/player2 order is a property of how the series was created, not
+    of who is reporting."""
+    session = FakeSession(_players(), named_series=_series_row(player1=LEAVER, player2=REPORTER))
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+
+
+def test_an_invalidated_series_takes_no_new_events():
+    session = FakeSession(_players(), named_series=_series_row(invalidated="2026-09-01"))
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+    assert session.inserts == 0
+
+
+def test_an_unknown_series_is_refused():
+    session = FakeSession(_players(), named_series=None)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+    assert session.inserts == 0
+
+
+def test_a_long_finished_series_is_refused_and_the_bound_is_asked_in_sql():
+    """Naming a series is what lets a queued report reach a series that is no
+    longer current; the age bound is what keeps that from reaching the pair's
+    whole shared history. It is asked of the database clock, so an api
+    container with a skewed clock cannot move it."""
+    session = FakeSession(_players(), named_series=_series_row(), series_fresh=False)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+    assert session.freshness_checks == 1
+    assert session.inserts == 0
+
+
+def test_a_malformed_series_id_is_a_4xx_so_the_client_stops_retrying():
+    """4xx is permanent to the client's retry pass. A report whose id cannot
+    parse can never land, so it must be settled rather than retried."""
+    session = FakeSession(_players())
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, "not-a-uuid")
+    assert 400 <= caught.value.status_code < 500
+    assert session.series_loads == 0 and session.inserts == 0
+
+
+def test_a_named_series_still_dedups_per_series_and_player():
+    """The replay safety the server already had has to survive the new path —
+    it is what makes queueing safe at all."""
+    session = FakeSession(_players(count=7), named_series=_series_row(), insert_wins=False)
+    answer = _call(session, str(NAMED_SERIES))
+    assert answer["status"] == "already_recorded"
+    assert session.increments == 0
+    assert session.commits == 0
 
 
 def test_both_paths_of_the_finding_sit_in_one_rate_bucket():
@@ -213,42 +364,110 @@ def _cs_method_body(path, signature):
     raise AssertionError(f"unbalanced braces after {signature}")
 
 
-def test_the_disconnect_report_is_a_one_shot_send_again():
-    """r8 asked for a durable disconnect report and one was built; r9 descoped
-    it. The report carries no series identity, so the server resolves the
-    pair's CURRENT series at delivery time — a replay arriving after the pair
-    start a new series is written against that one instead. Making it durable
-    needs the immutable series id captured at observation, persisted in the
-    outbox line and validated server-side; that is a client/server contract,
-    not a change to this call."""
-    body = _cs_method_body(
-        API_CLIENT_CS,
-        "public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId)",
+DC_SIGNATURE = ("public static void ReportDisconnect(string reporterSteamId, "
+                "string disconnectedSteamId, string seriesId)")
+
+
+def test_the_disconnect_report_is_durable_and_names_its_series():
+    """The queued copy is written BEFORE the first network yield, so a quit or
+    a crash between here and the response cannot lose it, and the url it is
+    stored under carries the series — that url is the whole record, because
+    the outbox persists a url and a body and nothing else."""
+    body = _cs_method_body(API_CLIENT_CS, DC_SIGNATURE)
+    assert "&series_id={Escape(seriesId)}" in body
+    assert body.index("EnqueueFailedReport") < body.index("StartCoroutine("), (
+        "the report must be queued before the first network yield"
     )
-    assert "EnqueueFailedReport" not in body
-    assert "RemovePendingReport" not in body
-    assert "StartCoroutine(PostRequest(" in body
+    assert "RemovePendingReport(url, DC_REPORT_BODY)" in body
+
+
+def test_a_report_that_cannot_name_its_series_is_never_queued():
+    """The unnamed report is exactly the one a later delivery would have to
+    guess about. It keeps the single attempt it always had."""
+    body = _cs_method_body(API_CLIENT_CS, DC_SIGNATURE)
+    assert "bool durable = !string.IsNullOrEmpty(seriesId);" in body
+    for guarded in ("if (durable) EnqueueFailedReport(url, DC_REPORT_BODY);",
+                    "if (durable) url += $\"&series_id={Escape(seriesId)}\";"):
+        assert guarded in body, f"missing: {guarded}"
+    assert body.count("EnqueueFailedReport") == 1
+    assert body.count("RemovePendingReport") == 1
+
+
+def test_the_series_is_captured_at_the_observation_not_at_the_send():
+    """ActiveRankedSeriesId is cleared at every game-report boundary and at
+    room leave. Reading it inside ReportDisconnect would be reading it at send
+    time, which for a retry is the wrong moment by construction — so the id
+    arrives as an argument, from the frame that saw the leave."""
+    body = _cs_method_body(API_CLIENT_CS, DC_SIGNATURE)
+    assert "ActiveRankedSeriesId" not in body
+    gsw = (PLUGIN / "GameStateWatcher.cs").read_text(encoding="utf-8")
+    assert gsw.count("ApiClient.ReportDisconnect(") == 1
+    call = "ApiClient.ReportDisconnect(localSteamId, opponentSteamId, dcSeriesId);"
+    assert call in gsw
+    capture = "string dcSeriesId = ApiClient.ActiveRankedSeriesId;"
+    assert capture in gsw
+    assert gsw.index(capture) < gsw.index(call)
+
+
+def test_the_queued_body_is_one_constant_on_both_paths():
+    """The outbox finds an entry by (url, body). A send that used a different
+    body from the queued copy could never remove its own entry, and the report
+    would be delivered twice — harmless to the count, but it would retry for
+    twenty attempts against a server that had already recorded it."""
     src = API_CLIENT_CS.read_text(encoding="utf-8")
-    for gone in ("DC_REPORT_BODY", "IsDisconnectReportUrl"):
-        assert gone not in src, f"{gone} outlived the code that used it"
+    assert 'internal const string DC_REPORT_BODY = "{}";' in src
+    body = _cs_method_body(API_CLIENT_CS, DC_SIGNATURE)
+    assert body.count("DC_REPORT_BODY") == 3
+    assert '""' not in body.replace('"{}"', "")
 
 
-def test_no_queued_url_can_race_its_own_immediate_retry_chain():
-    """The defect the enrolment made reachable, kept as a standing check.
+def test_the_disconnect_report_gets_no_toast_in_either_direction():
+    """It reports somebody else's leave. There is nothing for the player to
+    do about it, so neither the queue notice nor the delivered notice fires."""
+    silent = _cs_method_body(API_CLIENT_CS, "private static bool IsSilentOutboxUrl(string url)")
+    assert "IsDisconnectReportUrl(url)" in silent
 
-    OutboxLoop captures an index, yields into PostRequest, and then removes by
-    that stale index; RemovePendingReport mutates the same list from a separate
-    coroutine. So an entry that is queued BEFORE its immediate send, and whose
-    send chain is still running when the loop picks it up, can have both
-    completions act on one entry — the loop then removes a different entry, or
-    throws and ends the coroutine for the session (`_outboxLoopStarted` is
-    never reset).
 
-    Two things keep that unreachable, and both are asserted here rather than
-    left to timing: the disconnect report's 15 s branch is gone, so the only
-    delays are macro evidence's 120 s (against a chain of at most ~72 s) and
-    the shared 30 s default, which is only ever reached by callers that queue
-    AFTER their chain has already failed."""
+def test_the_retry_pass_removes_by_reference_and_not_by_a_stale_index():
+    """The defect enrolling this report made reachable, fixed rather than
+    avoided (learning #488).
+
+    The old sweep captured an index, yielded into PostRequest, then removed by
+    that index — while RemovePendingReport, running on a success callback in
+    another coroutine, could shrink the same list during the yield. The index
+    then named a different entry, or none. Nothing about the timing is
+    asserted here because nothing about the timing is load-bearing any more:
+    the pass takes a snapshot, re-checks membership after every yield, and
+    removes the entry it actually attempted."""
+    body = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxPass()")
+    assert "RemoveAt(" not in body, "the pass is back to removing by index"
+    assert body.count("_pendingReports.Remove(p)") == 2, (
+        "both dispositions — delivered and dropped — must remove the entry itself"
+    )
+    assert "if (!_pendingReports.Contains(p)) continue;" in body, (
+        "an entry the immediate send already delivered must not be resent"
+    )
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "IEnumerator OutboxLoop()" not in src, "the old index-walking loop is still here"
+
+
+def test_one_faulting_pass_cannot_retire_the_queue_for_the_session():
+    """Unity stops a coroutine that lets an exception out, and
+    _outboxLoopStarted is written once. Before the supervisor, one throw
+    ended every retry for the rest of the session — including reports already
+    written to disk — with nothing but the exception in the log."""
+    sup = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor()")
+    assert "pass.MoveNext()" in sup, "the pass must be driven by hand to be catchable"
+    assert "catch (Exception ex)" in sup
+    assert "finally { _outboxLoopStarted = false; }" in sup
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert src.count("_outboxLoopStarted = false") == 1
+    assert "StartCoroutine(OutboxSupervisor())" in src
+
+
+def test_the_initial_delay_set_stays_small_and_explicit():
+    """No longer a safety property — remove-by-reference is — but a new delay
+    is still a decision somebody should have to make on purpose."""
     import re as _re
 
     delay = _cs_method_body(API_CLIENT_CS, "private static float OutboxInitialDelay(string url)")
@@ -257,18 +476,13 @@ def test_no_queued_url_can_race_its_own_immediate_retry_chain():
 
     src = API_CLIENT_CS.read_text(encoding="utf-8")
     sites = src.count("EnqueueFailedReport(")
-    # one declaration + macro evidence + the four match-report paths
-    assert sites == 6, (
-        f"{sites} EnqueueFailedReport references, expected 6. A NEW caller must "
-        "either queue only after its immediate chain has failed, or keep a "
-        "first-retry delay longer than that chain — or OutboxLoop must be "
-        "changed to remove by reference instead of by a stale index."
-    )
+    # declaration + macro evidence + four match-report paths + the disconnect report
+    assert sites == 7, f"{sites} EnqueueFailedReport references, expected 7"
 
 
-def test_the_server_half_of_the_finding_is_what_survived():
-    """The descope is of the client half only. The server's replay safety is
-    what makes a durable client buildable later, so it must not drift."""
+def test_the_server_half_of_the_finding_holds_the_replay_safety():
+    """Durability on the client creates replays; these two lines are what make
+    a replay cost nothing. They must not drift."""
     src = MAIN_PY.read_text(encoding="utf-8")
     handler = src[src.index("async def report_disconnect("):]
     handler = handler[: handler.index("\n@app.")] if "\n@app." in handler else handler

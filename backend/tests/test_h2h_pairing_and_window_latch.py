@@ -14,6 +14,10 @@ issuance took the first room's pairing away while this seat could still be
 sitting in it, and the bare name mismatch that produced read as "never issued"
 — releasing the line to the advertised id in exactly the room that was supposed
 to be attested. A tombstone keeps that room suppressed until the leave edge.
+The tombstone is ONE slot, so r10 found the same hole one issuance further out:
+R1 -> R2 -> R3 with the seat still in R1 used to overwrite R1's tombstone with
+R2's. A later supersession may now take the slot only from a room this seat has
+already left, which is what the tests below pin.
 
 M4 is the difference between a poll and a latch. The lag-notice window claimed
 one opponent for its WHOLE span while only sampling the key once per frame, and
@@ -142,6 +146,36 @@ def test_a_second_issuance_tombstones_the_room_it_took_the_pairing_from():
     # set BEFORE either path that overwrites or empties the slot
     assert body.index("supersededIssuedRoom =") < body.index("issuedPair = null;")
     assert body.index("supersededIssuedRoom =") < body.index("issuedPair = new H2HRules.IssuedPairState")
+
+
+def test_a_third_issuance_cannot_take_the_tombstone_from_the_room_we_are_in():
+    """r10. The slot holds one room, and it used to hold the most recent
+    superseded one unconditionally: with R1 -> R2 -> R3 while the seat was
+    still physically in R1, R3's supersession of R2 overwrote R1's tombstone
+    and the line in R1 fell back to the room's own occupant ids — in exactly
+    the room the tombstone exists for. A later supersession may take the slot
+    only from a room this seat has already left."""
+    body = _cs_method_body(API_CLIENT_CS, "private static void RetainIssuedPair(string room, string response)")
+    assert "PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? \"\") : \"\"" in body, (
+        "the guard has to ask which room this seat is actually in"
+    )
+    assert "bool slotHoldsOurRoom = !string.IsNullOrEmpty(supersededIssuedRoom)" in body
+    assert "string.Equals(supersededIssuedRoom, here, StringComparison.Ordinal)" in body
+    # the write is reached only when the slot is NOT protecting our own room
+    assert body.index("slotHoldsOurRoom") < body.index("supersededIssuedRoom = previous.Value.RoomName;")
+    assert body.count("supersededIssuedRoom = previous.Value.RoomName;") == 1
+    # an unavailable room name must not be read as "we are in the slot's room"
+    assert "!string.IsNullOrEmpty(here)" in body
+
+
+def test_no_artifact_promises_more_than_one_remembered_superseded_room():
+    """The claim r10 corrected. Every surviving statement about the tombstone
+    is about the room the seat is IN, never about every room superseded."""
+    for path in (H2H_RULES_CS, H2H_SUMMARY_CS, API_CLIENT_CS):
+        prose = _prose(path)
+        if "supersededRoom" not in prose and "supersededIssuedRoom" not in prose:
+            continue
+        assert "review r10" in prose, f"{path.name} states the tombstone rule without the r10 correction"
 
 
 def test_the_tombstone_is_cleared_at_the_leave_edge_and_on_a_join_elsewhere():

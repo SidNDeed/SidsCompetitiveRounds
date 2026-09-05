@@ -6,21 +6,33 @@ the round teardown, because vanilla stops them from INSIDE
 skips the whole method. That is an argument from the call graph. The item was
 written with "PROVE FIRST" against it, so this ships the measurement and no fix.
 
-Review r9 found the first version's window edges wrong in a way that made its
-own acceptance test unreachable, and both reviewers landed on the same repair.
-Three properties are now load-bearing, and this file exists to stop any of them
-drifting back:
+Two review rounds have now corrected this probe, each time because it was
+measuring something other than what it claimed. Four properties are
+load-bearing and this file exists to stop any of them drifting back:
 
-  * **The closing edge is `MOVE PLAYERS START`, not END.** Vanilla logs START at
-    the top of `PlayerManager.Move` (V/PlayerManager.cs:384) immediately before
-    setting `simulated = false` for that player, then drives
+  * **The closing edge is `MOVE PLAYERS START`, not END** (r9). Vanilla logs
+    START at the top of `PlayerManager.Move` (V/PlayerManager.cs:384)
+    immediately before setting `simulated = false` for that player, then drives
     `transform.position` frame by frame to the spawn point, and logs END at :409
     AFTER the traversal. Closing on END put the whole scripted traversal inside
-    the window on BOTH seat kinds, so displacement could never reach the noise
+    the window on BOTH seat kinds, so the reading could never reach the noise
     floor.
-  * **Displacement is split by the flag.** `movedSim` accumulates only while
-    that player's `playerVel.simulated` is true. A body moved by something else
-    lands in `movedStop` and cannot be misread as evidence.
+  * **The number comes from the writer, not from the result** (r10). Splitting
+    observed displacement by `playerVel.simulated` measured the network lerp:
+    `Photon.Pun.SyncPlayerMovement.Update` writes `transform.position` on every
+    REMOTE body every frame it has a package, without consulting the flag. A
+    spectator, for whom every body is remote, banked the whole lerp as movement
+    "while simulated"; the fighter banked vanilla's scripted respawn walk as
+    movement "while stopped". That manufactures the acceptance differential
+    with zero contribution from local physics. `physDrive` instead integrates
+    the expression in `PlayerVelocity.FixedUpdate` (V/PlayerVelocity.cs:38-51),
+    which is the only thing that moves a body by simulating it.
+  * **A control has to stay stopped to be a control** (r10). In a code room the
+    vanilla rematch popup runs about two seconds in and revives the bodies,
+    and the spectator suppresses that popup — so a fighter window left open to
+    the horizon reports revived bodies as if they had never stopped. The window
+    ends at the re-enable, and windows that end at the horizon are marked not
+    comparable.
   * **Placement above two gates.** The window opens above
     `SpectatorPatchSupport.Suppress` so a fighter seat is a control in the same
     format, and the close runs above `OnUnityLog`'s spectator quiesce, which
@@ -96,6 +108,19 @@ def test_the_window_is_bound_to_its_room():
     assert 'SpectatorTeardownProbe.CloseWindow("room-left")' in body
 
 
+def test_the_window_closes_on_a_full_disconnect_too():
+    """Socket loss reaches OnDisconnected WITHOUT an OnLeftRoom — the same
+    asymmetry the telemetry close beside it exists for. Without this the
+    window survives to its horizon and samples menu teardown, or the next
+    room, under the seat it opened with."""
+    body = _code(_cs_block(
+        PLUGIN_CS, "public void OnDisconnected(Photon.Realtime.DisconnectCause cause)"))
+    assert 'SpectatorTeardownProbe.CloseWindow("disconnected")' in body
+    assert body.index("SpectatorTeardownProbe.CloseWindow") < body.index(
+        "if (Diag2v2.PendingSlot() < 0) return;"
+    ), "the close must run before the diagnostic early return"
+
+
 def test_the_horizon_is_a_horizon_and_not_a_missing_marker_claim():
     src = PROBE_CS.read_text(encoding="utf-8")
     assert re.search(r"WINDOW_HORIZON_SECONDS\s*=\s*8f", src)
@@ -107,22 +132,73 @@ def test_the_horizon_is_a_horizon_and_not_a_missing_marker_claim():
 
 # ── the reading itself ───────────────────────────────────────────────────────
 
-def test_displacement_is_split_by_the_simulated_flag():
-    """`moved` alone cannot distinguish "the bodies are simulating" from
-    "something else moved them" — vanilla's own respawn traversal moves every
-    body with simulation already off."""
+def test_the_number_is_taken_from_the_writer_not_from_the_result():
+    """The r10 repair, and the whole of it. `physDrive` integrates exactly the
+    expression `PlayerVelocity.FixedUpdate` uses to move a body — the same
+    predicate and the same quantity — so a position written by anything else
+    contributes nothing to it. A network lerp, a scripted respawn walk and a
+    map rescale all write `transform.position` directly."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "p.data.playerVel.simulated" in tick
-    assert "movedSim[i] = movedSim[i] + step" in tick
-    assert "movedStop[i] = movedStop[i] + step" in tick
-    # and the per-frame maximum is taken from the simulated half only
-    sim_branch = tick[tick.index("if (sim)"):]
-    assert "maxStepSim = step" in sim_branch
+    assert "driven = data.isPlaying && vel.simulated && !vel.isKinematic;" in tick, (
+        "the predicate must be vanilla's, all three terms of it"
+    )
+    assert "float travel = speed * dt * scale;" in tick
+    assert "physDrive[i] = physDrive[i] + travel;" in tick
+    assert "if (travel > maxPhysStep) maxPhysStep = travel;" in tick
+    # ...and observed displacement can never reach the attributed number.
+    assert not re.search(r"travel\s*=\s*[^;\n]*step", tick)
+    assert not re.search(r"physDrive\[i\][^;\n]*step", tick)
+    assert not re.search(r"maxPhysStep\s*=\s*step", tick)
 
 
-def test_the_line_reports_both_halves():
+def test_the_integral_uses_the_same_time_scale_vanilla_does():
+    """`fixedDeltaTime * timeScale * velocity` summed over a frame's fixed
+    steps is `deltaTime * timeScale * velocity`. Dropping the scale would read
+    a slow-motion teardown as more travel than it was."""
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "float scale = SafeTimeScale();" in tick
+    scale_fn = _code(_cs_block(PROBE_CS, "private static float SafeTimeScale()"))
+    assert "TimeHandler.timeScale" in scale_fn
+    assert "return 1f;" in scale_fn, "an unavailable time scale must not zero the reading"
+
+
+def test_observed_displacement_carries_no_attribution():
+    """The r10 finding, kept as a standing check: no accumulator may be split
+    by the `simulated` flag again. `moved` is context and is reported as such."""
+    src = PROBE_CS.read_text(encoding="utf-8")
+    for gone in ("movedSim", "movedStop", "maxStepSim", "framesAnySimulated"):
+        assert gone not in src, f"{gone} is the measurement r10 refuted"
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "moved[i] = moved[i] + step;" in tick
+
+
+def test_a_control_that_is_revived_stops_being_a_control():
+    """A code room is outside CompetitiveRoomDetect, so the vanilla rematch
+    popup runs about two seconds into the window and revives the bodies
+    (`PopUpHandler.StartPicking`) — on the fighter only, because the spectator
+    suppresses that popup. The window ends at the re-enable rather than
+    reporting a revived body as one that was never stopped."""
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "if (!driven) sawStopped = true;" in tick
+    assert "revived = true" in tick
+    assert 'CloseWindow("revived")' in tick
+    open_body = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    for reset in ("sawStopped = false;", "revived = false;"):
+        assert reset in open_body, f"{reset} must not leak between windows"
+
+
+def test_a_window_that_did_not_end_at_the_stop_is_marked_not_comparable():
+    """Eight seconds is long enough for the seat to be doing something else.
+    The line has to say so, or a horizon window is read beside a stop window
+    as though the two measured the same interval."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    for field in ("simFrames=", "movedSim=", "movedStop=", "maxStepSim="):
+    assert 'bool comparable = !revived && why != "horizon" && why != "error";' in close
+    assert '" comparable="' in close
+
+
+def test_the_line_reports_the_attributed_number_and_the_raw_one():
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    for field in ("physFrames=", "physDrive=", "maxPhysStep=", "moved="):
         assert field in close, field
 
 
@@ -199,6 +275,7 @@ def test_the_probe_writes_nothing_to_the_game():
     assert "SetPlayersSimulated" not in code
     assert not re.search(r"\.simulated\s*=", code), "the probe assigns the flag it measures"
     assert not re.search(r"\.velocity\s*=", code)
+    assert not re.search(r"\.isKinematic\s*=", code)
     assert not re.search(r"\.position\s*=", code)
 
 
@@ -207,12 +284,17 @@ def test_one_line_per_round_not_one_per_frame():
     assert "Plugin.Log" not in tick
 
 
-def test_the_heartbeat_carries_the_answer_not_just_a_count():
-    """After the budget a log opened late in a long sitting must still be worth
-    reading; window and movement totals alone do not say which seat, nor
-    whether the bodies were simulated."""
+def test_the_heartbeat_keeps_each_seats_numbers_apart():
+    """One process can play a round and then watch one. A single set of
+    counters reports the LAST window's seat beside both seats' totals, and a
+    maximum that resets every window — a heartbeat that cannot be read. The
+    comparison between seats IS the reading, so it goes on one line."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    tail = close[close.index("if (reports >= MAX_REPORTS)"):]
-    heartbeat = tail[: tail.index("reports++")]
-    for field in ("seat=", "simFrames=", "movedSim=", "maxStepSim="):
+    assert "totals.TryGetValue(seat, out t)" in close
+    assert "if (maxPhysStep > t.maxPhysStep) t.maxPhysStep = maxPhysStep;" in close, (
+        "the per-seat maximum must survive the per-window reset"
+    )
+    heartbeat = _code(_cs_block(PROBE_CS, "private static void LogTotals()"))
+    assert "foreach (var kv in totals)" in heartbeat
+    for field in ("windows=", "comparable=", "physFrames=", "physDrive=", "maxPhysStep=", "moved="):
         assert field in heartbeat, field

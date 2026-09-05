@@ -38,9 +38,12 @@ namespace CompetitiveRounds
     /// the paired one, and only for the (incarnation, actor) the pairing is
     /// bound to on its first such consumption. A fighter advertising anything
     /// else, a later actor or incarnation, a queue lifecycle that has moved
-    /// on, and a room whose pairing a later issuance replaced all get no line
-    /// at all — never the advertised id, which would put one player's record
-    /// and server name on the line for another. A fighter who claims the
+    /// on, and the one remembered room whose pairing a later issuance replaced
+    /// all get no line at all — never the advertised id, which would put one
+    /// player's record and server name on the line for another. One superseded
+    /// room is remembered, and a later supersession can only take that slot
+    /// from a room this seat has already left (review r10), so the room the
+    /// seat is sitting in is the one the rule is about. A fighter who claims the
     /// paired id is taken at his word, exactly as in any other room.
     ///
     /// Key: the attempt and its result belong to (room incarnation, opponent
@@ -305,9 +308,11 @@ namespace CompetitiveRounds
         /// other fighter, or (suppressed = true) when the queue-issued room's
         /// other fighter is not the paired one — an advertised id that differs
         /// from the paired one, an actor or incarnation the pairing is not
-        /// bound to, a queue lifecycle that has moved on, or a room whose
-        /// pairing a later issuance replaced: then no line at all, and never
-        /// the advertised id.</summary>
+        /// bound to, a queue lifecycle that has moved on, or the one remembered
+        /// room whose pairing a later issuance replaced: then no line at all,
+        /// and never the advertised id. That last slot holds one room, and a
+        /// later supersession takes it only from a room this seat has already
+        /// left (review r10).</summary>
         private static bool ResolveOpponent(Photon.Realtime.Room room, out int actor, out string id, out bool attested, out bool suppressed)
         {
             actor = -1;

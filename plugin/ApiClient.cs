@@ -720,28 +720,35 @@ namespace CompetitiveRounds
                 && url.EndsWith("/api/v1/matches/macro-evidence", StringComparison.Ordinal);
         }
 
+        /// <summary>The disconnect report, whichever series it names. The
+        /// series id sits in the query string, so match on the path.</summary>
+        internal static bool IsDisconnectReportUrl(string url)
+        {
+            return !string.IsNullOrEmpty(url)
+                && url.IndexOf("/api/v1/report-disconnect?", StringComparison.Ordinal) >= 0;
+        }
+
         /// <summary>Queued work the player never asked for and cannot act on,
-        /// so it gets no toast in either direction. Macro evidence is the only
-        /// one; the disconnect report was enrolled here for r8 and descoped at
-        /// r9 — see ReportDisconnect.</summary>
+        /// so it gets no toast in either direction: macro evidence, and the
+        /// report of somebody else's leave.</summary>
         private static bool IsSilentOutboxUrl(string url)
         {
-            return IsMacroEvidenceUrl(url);
+            return IsMacroEvidenceUrl(url) || IsDisconnectReportUrl(url);
         }
 
         /// <summary>How long an enqueued report waits before its first retry.
         /// Macro evidence is advisory and can sit behind the match report it
-        /// accompanies.
+        /// accompanies; everything else waits 30 s.
         ///
-        /// This bound is load-bearing beyond politeness: OutboxLoop removes an
-        /// entry by the index it captured BEFORE its network yield, so a url
-        /// whose immediate retry chain is still running when the loop picks the
-        /// same entry up can have both completions race that removal. Every
-        /// enqueue site is safe against that today — the match reports queue
-        /// only after their chain has already failed, and macro evidence's
-        /// ~72 s chain finishes well inside 120 s. A future enqueue-first
-        /// caller must either keep that margin or the loop must be changed to
-        /// remove by reference.</summary>
+        /// This bound used to be load-bearing rather than polite, because the
+        /// retry pass removed an entry by an index captured BEFORE its network
+        /// yield: a url whose immediate attempt was still in flight when the
+        /// pass reached the same entry had two completions racing that
+        /// removal, and the margin that kept them apart was a property of each
+        /// caller's chain length rather than of the loop (learning #488).
+        /// OutboxPass now removes by reference and re-checks membership after
+        /// every yield, so this is a courtesy again — it stops a retry from
+        /// doubling an immediate attempt that has not timed out yet.</summary>
         private static float OutboxInitialDelay(string url)
         {
             return IsMacroEvidenceUrl(url) ? 120f : 30f;
@@ -803,85 +810,141 @@ namespace CompetitiveRounds
         {
             if (_outboxLoopStarted || Plugin.Instance == null) return;
             _outboxLoopStarted = true;
-            Plugin.Instance.StartCoroutine(OutboxLoop());
+            Plugin.Instance.StartCoroutine(OutboxSupervisor());
         }
 
-        private static IEnumerator OutboxLoop()
+        /// <summary>Runs OutboxPass forever, driving it by hand so a throw
+        /// inside one pass is caught here instead of escaping.
+        ///
+        /// Unity stops a coroutine that lets an exception out, and
+        /// _outboxLoopStarted is written once and never cleared — so a single
+        /// fault used to retire the retry queue for the rest of the session,
+        /// including the reports already written to disk, with nothing in the
+        /// log but the exception. A pass that throws is logged and the next
+        /// one starts against the same queue; entries keep their attempt
+        /// counts and their next-attempt times, so a repeated fault costs
+        /// retries rather than the queue. The started flag is cleared if this
+        /// ever returns, so EnsureOutboxLoop can start a fresh one.</summary>
+        private static IEnumerator OutboxSupervisor()
         {
-            while (true)
+            try
             {
-                yield return new WaitForSecondsRealtime(10f);
-                if (_pendingReports.Count == 0) continue;
-                float now = Time.realtimeSinceStartup;
-                bool changed = false;
-                for (int i = _pendingReports.Count - 1; i >= 0; i--)
+                while (true)
                 {
-                    var p = _pendingReports[i];
-                    if (p.nextAt > now) continue;
-                    p.attempts++;
-                    // Linear-ish backoff, capped at 4x the base interval.
-                    p.nextAt = now + OUTBOX_RETRY_SECONDS * Math.Min(4, p.attempts);
-                    bool done = false, ok = false; string resp = null;
-                    yield return PostRequest(p.url, p.json, (s, r) => { done = true; ok = s; resp = r; });
-                    while (!done) yield return null;
-                    if (ok)
+                    yield return new WaitForSecondsRealtime(10f);
+                    IEnumerator pass = OutboxPass();
+                    while (true)
                     {
-                        Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
-                        if (!IsSilentOutboxUrl(p.url))
-                            CompetitiveUI.ShowNotification("Match recorded", new Color(0.4f, 1f, 0.5f), 4f);
-                        _pendingReports.RemoveAt(i);
-                        changed = true;
-                    }
-                    else
-                    {
-                        // 4xx = the server understood and refused (bad signature, dup,
-                        // validation) — retrying can never succeed. 5xx/transport keep
-                        // retrying until the budget runs out.
-                        // Macro evidence can legitimately race the elected
-                        // reporter's match insert. Its 409 becomes retryable;
-                        // exact room correlation remains valid after a restart.
-                        bool retryableMacroResponse =
-                            IsMacroEvidenceUrl(p.url)
-                            && resp != null
-                            && (resp.Contains("401")
-                                || resp.Contains("409")
-                                || resp.Contains("429"));
-                        // "Any 4xx is permanent" threw away three RECOVERABLE
-                        // classes (found auditing the July 30 lost-game
-                        // incidents). The rule was written for 403 bad-signature
-                        // and duplicate-key, where retrying genuinely cannot
-                        // help, but it also deleted:
-                        //   429 — we were merely throttled; the game is fine and
-                        //         the next attempt would have worked.
-                        //   401 — the Steam session lapsed; SteamAuth.MaybeRefresh
-                        //         mints a new ticket on its own 60s loop, so the
-                        //         retry after it lands succeeds.
-                        // Both are now retryable for EVERY outbox url, not just
-                        // the silent macro-evidence ones. 409 stays permanent:
-                        // the server state really has moved on, retrying cannot
-                        // change it, and the server now quarantines that report
-                        // for admin recovery instead of dropping it. The attempts
-                        // cap still bounds anything that never succeeds.
-                        bool retryableTransient =
-                            resp != null
-                            && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
-                                || resp.Contains("HTTP 401") || resp.Contains("HTTP/1.1 401"));
-                        bool permanent =
-                            !retryableMacroResponse
-                            && !retryableTransient
-                            && resp != null
-                            && (resp.StartsWith("HTTP 4", StringComparison.Ordinal)
-                                || resp.Contains("HTTP/1.1 4")
-                                || resp.Contains("duplicate key"));
-                        if (permanent || p.attempts >= OUTBOX_MAX_ATTEMPTS)
+                        object current = null;
+                        bool moved = false;
+                        try
                         {
-                            Plugin.Log.LogWarning($"[OUTBOX] dropping report after {p.attempts} attempt(s): {Trunc(resp ?? "(no response)", 160)}");
-                            _pendingReports.RemoveAt(i);
-                            changed = true;
+                            moved = pass.MoveNext();
+                            if (moved) current = pass.Current;
                         }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning($"[OUTBOX] retry pass failed ({ex.Message}) — "
+                                                  + $"{_pendingReports.Count} report(s) still queued for the next pass");
+                            moved = false;
+                        }
+                        if (!moved) break;
+                        yield return current;
                     }
                 }
-                if (changed || _pendingReports.Count > 0) PersistOutbox();
+            }
+            finally { _outboxLoopStarted = false; }
+        }
+
+        /// <summary>One sweep of the queue: every entry whose time has come is
+        /// attempted once.
+        ///
+        /// Entries are collected first and removed BY REFERENCE. The sweep
+        /// this replaces walked live indices and called RemoveAt(i) after its
+        /// network yield, while RemovePendingReport — running on another
+        /// coroutine's success callback — could shrink the same list during
+        /// that yield, leaving the index naming a different entry or none.
+        /// The membership re-check before each attempt closes the same window
+        /// from the other side: an immediate attempt that lands mid-pass takes
+        /// its own entry out, and this pass must not resend it.</summary>
+        private static IEnumerator OutboxPass()
+        {
+            if (_pendingReports.Count == 0) yield break;
+            float now = Time.realtimeSinceStartup;
+            var due = new List<PendingReport>();
+            foreach (var candidate in _pendingReports)
+                if (candidate.nextAt <= now) due.Add(candidate);
+            foreach (var p in due)
+            {
+                if (!_pendingReports.Contains(p)) continue;
+                p.attempts++;
+                // Linear-ish backoff, capped at 4x the base interval. Measured
+                // from now rather than from the top of the pass — an earlier
+                // entry's attempt can have taken most of a minute.
+                p.nextAt = Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * Math.Min(4, p.attempts);
+                bool done = false, ok = false; string resp = null;
+                yield return PostRequest(p.url, p.json, (s, r) => { done = true; ok = s; resp = r; });
+                while (!done) yield return null;
+                if (ok)
+                {
+                    Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
+                    if (!IsSilentOutboxUrl(p.url))
+                        CompetitiveUI.ShowNotification("Match recorded", new Color(0.4f, 1f, 0.5f), 4f);
+                    if (_pendingReports.Remove(p)) PersistOutbox();
+                }
+                else
+                {
+                    // 4xx = the server understood and refused (bad signature, dup,
+                    // validation) — retrying can never succeed. 5xx/transport keep
+                    // retrying until the budget runs out.
+                    // Macro evidence can legitimately race the elected
+                    // reporter's match insert. Its 409 becomes retryable;
+                    // exact room correlation remains valid after a restart.
+                    bool retryableMacroResponse =
+                        IsMacroEvidenceUrl(p.url)
+                        && resp != null
+                        && (resp.Contains("401")
+                            || resp.Contains("409")
+                            || resp.Contains("429"));
+                    // "Any 4xx is permanent" threw away three RECOVERABLE
+                    // classes (found auditing the July 30 lost-game
+                    // incidents). The rule was written for 403 bad-signature
+                    // and duplicate-key, where retrying genuinely cannot
+                    // help, but it also deleted:
+                    //   429 — we were merely throttled; the game is fine and
+                    //         the next attempt would have worked.
+                    //   401 — the Steam session lapsed; SteamAuth.MaybeRefresh
+                    //         mints a new ticket on its own 60s loop, so the
+                    //         retry after it lands succeeds.
+                    // Both are now retryable for EVERY outbox url, not just
+                    // the silent macro-evidence ones. 409 stays permanent:
+                    // the server state really has moved on, retrying cannot
+                    // change it, and the server now quarantines that report
+                    // for admin recovery instead of dropping it. The attempts
+                    // cap still bounds anything that never succeeds.
+                    //
+                    // The disconnect report reaches this branch too, and its
+                    // refusals are the ones that MUST be permanent: a named
+                    // series that is not this pair's, or is invalidated, or
+                    // finished more than a week ago, is 403 and no amount of
+                    // retrying changes any of those.
+                    bool retryableTransient =
+                        resp != null
+                        && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
+                            || resp.Contains("HTTP 401") || resp.Contains("HTTP/1.1 401"));
+                    bool permanent =
+                        !retryableMacroResponse
+                        && !retryableTransient
+                        && resp != null
+                        && (resp.StartsWith("HTTP 4", StringComparison.Ordinal)
+                            || resp.Contains("HTTP/1.1 4")
+                            || resp.Contains("duplicate key"));
+                    if (permanent || p.attempts >= OUTBOX_MAX_ATTEMPTS)
+                    {
+                        Plugin.Log.LogWarning($"[OUTBOX] dropping report after {p.attempts} attempt(s): {Trunc(resp ?? "(no response)", 160)}");
+                        if (_pendingReports.Remove(p)) PersistOutbox();
+                    }
+                }
             }
         }
 
@@ -9204,7 +9267,13 @@ namespace CompetitiveRounds
         /// in precisely the room that was supposed to be attested. Cleared at
         /// the leave edge (Photon's own OnLeftRoom/OnDisconnected, which
         /// cannot be missed the way a polled edge can) and on a join to any
-        /// room other than this one.</summary>
+        /// room other than this one.
+        ///
+        /// ONE slot, and what it holds is decided at the write site: a later
+        /// supersession takes it only from a room this seat has already left
+        /// (review r10). So the guarantee is about the room the seat is IN —
+        /// that one stays suppressed until it is left — and NOT about every
+        /// room ever superseded, of which only one is remembered.</summary>
         private static string supersededIssuedRoom;
 
         /// <summary>The opponent the server paired this seat with for the room
@@ -9239,16 +9308,32 @@ namespace CompetitiveRounds
                     && !string.IsNullOrEmpty(previous.Value.RoomName)
                     && !string.Equals(previous.Value.RoomName, room ?? "", StringComparison.Ordinal))
                 {
-                    // ONE slot, and it holds the MOST RECENT superseded room
-                    // only (review r9). A third issuance overwrites the second,
-                    // so if the first room is somehow still the one we are in,
-                    // its pairing is no longer remembered as superseded and the
-                    // line there falls back to the room's own occupant ids.
-                    // Ordinarily this is stamped from the menu — the retained
-                    // pairing is retired on a JOIN, never on a leave — so the
-                    // superseded room is usually one we already left.
-                    supersededIssuedRoom = previous.Value.RoomName;
-                    Plugin.Log.LogInfo("[QUEUE] a later room was issued; the room it replaced gets no H2H line");
+                    // ONE slot, and the room this seat is SITTING IN keeps
+                    // it (review r10). It used to hold the most recent
+                    // superseded room unconditionally, so with issuances
+                    // R1 -> R2 -> R3 while the seat was still physically in R1,
+                    // R3's supersession of R2 overwrote R1's tombstone and the
+                    // line in R1 fell back to the room's own occupant ids — in
+                    // exactly the room the tombstone exists for. A later
+                    // supersession can now only take the slot from a room this
+                    // seat has already left, which is the ordinary case: this
+                    // is usually stamped from the menu, because the retained
+                    // pairing is retired on a JOIN and never on a leave.
+                    string here = "";
+                    try { here = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; }
+                    catch { }
+                    bool slotHoldsOurRoom = !string.IsNullOrEmpty(supersededIssuedRoom)
+                        && !string.IsNullOrEmpty(here)
+                        && string.Equals(supersededIssuedRoom, here, StringComparison.Ordinal);
+                    if (slotHoldsOurRoom)
+                    {
+                        Plugin.Log.LogInfo("[QUEUE] a later room was issued; the tombstone stays on the room this seat is in");
+                    }
+                    else
+                    {
+                        supersededIssuedRoom = previous.Value.RoomName;
+                        Plugin.Log.LogInfo("[QUEUE] a later room was issued; the room it replaced gets no H2H line");
+                    }
                 }
                 if (string.IsNullOrEmpty(room) || !IsSteamId64(opp) || opp == me)
                 {
@@ -17825,47 +17910,68 @@ namespace CompetitiveRounds
 
         // ── Disconnect Reporting (leave % tracking) ─────────
 
-        public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId)
+        /// <summary>The outbox stores a url and a body; this endpoint takes
+        /// its arguments in the query string, so the body is a constant. It
+        /// has to be non-empty for EnqueueFailedReport to keep it, and it has
+        /// to be the SAME constant on the immediate send, or the success
+        /// callback could not find its own queued copy.</summary>
+        internal const string DC_REPORT_BODY = "{}";
+
+        /// <summary>Report that the opponent left mid-series.
+        ///
+        /// seriesId is the series the leave was watched in —
+        /// ActiveRankedSeriesId as it stood at that moment, captured by the
+        /// caller rather than read here, because this report can outlive it.
+        /// It is what makes the report durable: with a series named, a failed
+        /// attempt can be retried for as long as the outbox allows and still
+        /// lands on the right series. r8 made this durable without it and r9
+        /// took the durability back out, because a retry arriving after the
+        /// pair started a NEW series was filed against that one — the server
+        /// resolved "the pair's current series" at delivery time and had
+        /// nothing else to go on.
+        ///
+        /// With no series id — the window between one game's report and the
+        /// next game's preflight — the report stays a single attempt and is
+        /// never queued. An unnamed report is exactly the one that could not
+        /// be delivered later without guessing, so it does not get to try.
+        ///
+        /// Still true, and still worth knowing: this reports somebody else's
+        /// leave, GameStateWatcher latches opponentDCReported, and the path
+        /// shares one per-IP bucket with every other sensitive endpoint. What
+        /// changed is that a refusal now costs a retry rather than the
+        /// dc_events row and the ranked_dc_count increment behind it.</summary>
+        public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId, string seriesId)
         {
             // §2c identity fence: the broadcast service account never reports.
             if (BroadcastMode.FenceBlocksFighterPath("report-dc")) return;
             if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(disconnectedSteamId)) return;
-            // STILL A ONE-SHOT WRITE, and r8's MEDIUM 3 is still open on this
-            // half. It reports somebody else's leave, GameStateWatcher latches
-            // opponentDCReported, and this path shares one per-IP bucket with
-            // every other sensitive endpoint — so a refusal loses the
-            // dc_events row and the ranked_dc_count increment behind it.
-            //
-            // The durable version was built for r8 and DESCOPED at r9, because
-            // enrolling this call in the outbox needs a contract it does not
-            // have. The report carries no series identity: the server resolves
-            // the pair's CURRENT series at delivery time, so a replay that
-            // arrives after the pair start a new series is accepted and
-            // attributed to the wrong one, and a replay with no successor is
-            // dropped. Making that safe means capturing the immutable series id
-            // at observation, persisting it in the outbox line, and validating
-            // it server-side — a client/server contract, not a line here. The
-            // enrolment also made a latent outbox defect reachable: OutboxLoop
-            // removes entries by an index captured before its network yield,
-            // and this was the only queued url whose immediate retry chain
-            // (~34 s) outlived its own first outbox retry (15 s), so the two
-            // could complete against the same entry. Every other enqueue site
-            // either queues only after its chain has failed, or waits 120 s.
-            //
-            // What r8's finding DID buy, and what stays: the server counts the
+            string url = $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}";
+            bool durable = !string.IsNullOrEmpty(seriesId);
+            if (durable) url += $"&series_id={Escape(seriesId)}";
+            // Queue BEFORE the first network yield, so a quit or a crash
+            // between here and the response cannot lose the report; the
+            // success callback below takes it back out. The server counts an
             // increment only for the request that inserted the dc_events row,
-            // and the increment is a delta rather than a read-modify-write. A
-            // durable client can be built on that whenever the series contract
-            // is done; it is safe against replay by construction now.
+            // and uq_dc_event_series_player admits one row per (series,
+            // leaver), so a replay cannot double-count. A 4xx — including
+            // every refusal the named series can earn — is permanent to
+            // OutboxPass, so a report that can never land is dropped rather
+            // than retried twenty times.
+            if (durable) EnqueueFailedReport(url, DC_REPORT_BODY);
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}",
-                "",
+                url,
+                DC_REPORT_BODY,
                 (success, response) =>
                 {
                     if (success)
+                    {
+                        if (durable) RemovePendingReport(url, DC_REPORT_BODY);
                         Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
+                    }
+                    else if (durable)
+                        Plugin.Log.LogWarning($"[DC] Disconnect report failed, queued for retry: {response}");
                     else
-                        Plugin.Log.LogWarning($"[DC] Failed to report disconnect: {response}");
+                        Plugin.Log.LogWarning($"[DC] Failed to report disconnect (no series id — not queued): {response}");
                 }
             ));
         }

@@ -61,6 +61,17 @@
   advertised version no longer reads as outdated.
 - The Phoenix sound fix no longer attempts an exact-method lookup that always
   missed (it produced 46 HarmonyX warnings per session and patched nothing).
+- When an opponent leaves a ranked series part-way through, the report of that
+  leave now survives a failed send. It records which series it belongs to and
+  is retried until the server takes it, across a restart if need be, so a
+  single refused request no longer loses the record that feeds leave %. The
+  server accepts one such report per series per player however many times it
+  arrives, and refuses one that names a series the two of you did not play.
+  A leave seen in the moment between one game being recorded and the next
+  starting has no series to name, and is still a single attempt.
+- The background queue of unsent match reports no longer stops for the rest of
+  a session if one pass over it fails, and a report that lands on its first
+  attempt can no longer make the queue drop a different one.
 
 **Broadcast seat only**
 

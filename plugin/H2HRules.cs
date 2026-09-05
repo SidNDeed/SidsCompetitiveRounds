@@ -100,6 +100,12 @@ namespace CompetitiveRounds
         /// advertised id, in the one room that was supposed to be attested.
         /// It suppresses instead, until the leave edge clears it.
         ///
+        /// ONE room is remembered, not every superseded room (review r10). The
+        /// caller decides which: a later supersession may take the slot only
+        /// from a room this seat has already left, so the room the seat is IN
+        /// keeps its tombstone for as long as it is occupied. Nothing here
+        /// promises anything about a third room.
+        ///
         /// NotIssued for any room other than the one the pairing names — the
         /// caller keys on the advertised id there and the pairing is untouched.
         /// In the room the pairing names:
