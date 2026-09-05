@@ -709,6 +709,30 @@ namespace CompetitiveRounds
         private const int OUTBOX_NEST_LIMIT = 8;
         // One line per session, not per write: see PersistOutbox.
         private static bool _outboxPersistWarned;
+
+        /// <summary>Set the first time the queue is read from disk in this
+        /// process. `_pendingReports` is static and outlives the plugin
+        /// behaviour, but Plugin's `startupComplete` is an INSTANCE field --
+        /// so the host respawn this class now survives re-runs DoInitialize
+        /// and, with it, Initialize and LoadOutbox. A second read appended the
+        /// same reports to a list that already held them, and every respawn
+        /// multiplied the queue (r14 MEDIUM). The disk is the previous
+        /// session's copy; this session has been the authority on it since the
+        /// first read.</summary>
+        private static bool _outboxLoaded;
+
+        /// <summary>Whether this exact report is already queued. Identity is
+        /// the url and the body, which is what RemovePendingReport already
+        /// matches on, so the two agree about what "the same report" means.</summary>
+        private static bool OutboxAlreadyQueued(string url, string json)
+        {
+            for (int i = 0; i < _pendingReports.Count; i++)
+            {
+                var p = _pendingReports[i];
+                if (p.url == url && p.json == json) return true;
+            }
+            return false;
+        }
         private const int OUTBOX_MAX_ATTEMPTS = 20;
         private const float OUTBOX_RETRY_SECONDS = 60f;
 
@@ -1031,6 +1055,15 @@ namespace CompetitiveRounds
         /// live copy and finds no temp at all.</summary>
         private static void LoadOutbox()
         {
+            // Once per process. Not once per behaviour: the list is static and
+            // the behaviour is not, so a respawn used to add the previous
+            // session's reports on top of the copies already held.
+            if (_outboxLoaded)
+            {
+                Plugin.Log.LogInfo("[OUTBOX] queue already loaded this process; the disk copy is not re-read");
+                return;
+            }
+            _outboxLoaded = true;
             try
             {
                 string tmp = OutboxTempPath;
@@ -1101,10 +1134,24 @@ namespace CompetitiveRounds
                                           + "its reports cannot be replayed this session");
                 }
 
-                foreach (var entry in chosen.entries) _pendingReports.Add(entry);
+                // Merged by identity as well as latched. The latch is what
+                // stops the respawn path; this stops ANY second reader from
+                // multiplying the queue, including one that has not been
+                // written yet, and it costs a comparison per entry on a list
+                // that is empty in the ordinary case.
+                int added = 0, duplicates = 0;
+                foreach (var entry in chosen.entries)
+                {
+                    if (OutboxAlreadyQueued(entry.url, entry.json)) { duplicates++; continue; }
+                    _pendingReports.Add(entry);
+                    added++;
+                }
+                if (duplicates > 0)
+                    Plugin.Log.LogInfo($"[OUTBOX] {duplicates} report(s) from disk were already queued and were not added again");
                 if (_pendingReports.Count > 0)
                 {
-                    Plugin.Log.LogInfo($"[OUTBOX] loaded {_pendingReports.Count} unsent report(s) from previous session");
+                    Plugin.Log.LogInfo($"[OUTBOX] loaded {added} unsent report(s) from previous session "
+                                       + $"({_pendingReports.Count} queued in total)");
                     EnsureOutboxLoop();
                 }
             }
@@ -1215,6 +1262,23 @@ namespace CompetitiveRounds
                     stack.Add(OutboxPass());
                     while (stack.Count > 0)
                     {
+                        // A PASS IS NOT A MOMENT, and the beat used to be
+                        // written as though it were: once, at the top of the
+                        // lap, before any of the work. Every due entry can
+                        // spend a full request timeout, so a queue with a few
+                        // due entries takes longer than the beat window while
+                        // behaving perfectly normally -- and a stale beat reads
+                        // as "no supervisor", so the tick started a second one
+                        // over the same list while this one was still working.
+                        // Both would post the same entries and spend the same
+                        // attempt budget. Progress, not lap start.
+                        //
+                        // The generation is checked HERE for the same reason:
+                        // at the top of the lap it is checked once every ten
+                        // seconds plus a pass, and a superseded supervisor has
+                        // no business finishing the pass it is holding.
+                        if (_outboxLoopGeneration != generation) yield break;
+                        _outboxLoopBeatRt = Time.realtimeSinceStartup;
                         IEnumerator top = stack[stack.Count - 1];
                         object current = null;
                         bool moved = false, faulted = false;

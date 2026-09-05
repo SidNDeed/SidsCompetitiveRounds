@@ -1328,3 +1328,79 @@ def test_each_prune_mode_re_asks_its_whole_selection_under_its_own_lock():
     assert tail.index("_still_a = ") < tail.index("_refund_series_bets("), (
         "mode 1 refunds before it locks the series it is refunding"
     )
+
+
+# ---------------------------------------------------------------------------
+# r14 MEDIUM: the two failures the outbox repair introduced itself.
+# ---------------------------------------------------------------------------
+
+def test_the_heartbeat_records_progress_and_not_the_start_of_a_lap():
+    """A lap contains a whole pass, and every due entry can spend a full
+    request timeout — so a queue with a few due entries outlives the 45s
+    ownership window while behaving normally. A beat written once at the top
+    of the lap therefore reads as "no supervisor" mid-pass, the tick starts a
+    second one, and the first finishes its pass concurrently over the same
+    list: both post the same entries and both spend the same attempt budget.
+
+    Asserted by POSITION, not presence. The beat existing somewhere in the
+    method is what the broken version had."""
+    sup = _cs_method_body(
+        API_CLIENT_CS, "private static IEnumerator OutboxSupervisor(int generation)")
+    drive = sup.index("while (stack.Count > 0)")
+    top = sup.index("IEnumerator top = stack[stack.Count - 1];")
+    inner = sup[drive:top]
+    assert "_outboxLoopBeatRt = Time.realtimeSinceStartup;" in inner, (
+        "the beat is not refreshed inside the drive loop; a long pass still "
+        "looks like a dead supervisor"
+    )
+    assert "if (_outboxLoopGeneration != generation) yield break;" in inner, (
+        "a superseded supervisor still finishes the pass it is holding"
+    )
+    # ...and it is still checked once per lap as well, so a supervisor that is
+    # sitting in the 10s wait with nothing to do also stops.
+    lap = sup[:drive]
+    assert "if (_outboxLoopGeneration != generation) yield break;" in lap
+    assert sup.count("_outboxLoopBeatRt = Time.realtimeSinceStartup;") == 2, (
+        "the beat should be written at the lap and at each drive step, and "
+        "nowhere else"
+    )
+
+
+def test_the_queue_is_read_from_disk_once_per_process():
+    """`_pendingReports` is `static readonly`; Plugin's `startupComplete` is an
+    INSTANCE field. The host respawn this class now survives therefore re-runs
+    DoInitialize -> Initialize -> LoadOutbox, and a second read appended the
+    previous session's reports to a list that already held them. Every respawn
+    multiplied the queue, and the ownership repair is what makes the duplicates
+    actually get sent."""
+    api = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "private static readonly List<PendingReport> _pendingReports" in api, (
+        "the premise: the queue outlives the behaviour"
+    )
+    plugin_src = (PLUGIN / "Plugin.cs").read_text(encoding="utf-8")
+    assert "private bool startupComplete = false;" in plugin_src, (
+        "the other half of the premise: the init latch does NOT outlive it"
+    )
+
+    load = _cs_method_body(API_CLIENT_CS, "private static void LoadOutbox()")
+    guard = load[:load.index("try")]
+    assert "if (_outboxLoaded)" in guard and "return;" in guard, (
+        "a second LoadOutbox still re-reads the disk"
+    )
+    assert "_outboxLoaded = true;" in guard, "the latch is never set"
+
+    # ...and the merge is by identity too, so no second reader can multiply the
+    # queue even if one is added later.
+    assert "if (OutboxAlreadyQueued(entry.url, entry.json)) { duplicates++; continue; }" in load, (
+        "entries from disk are added without checking whether they are held"
+    )
+    ident = _cs_method_body(
+        API_CLIENT_CS, "private static bool OutboxAlreadyQueued(string url, string json)")
+    assert "p.url == url && p.json == json" in ident, (
+        "identity must match what RemovePendingReport matches on, or the two "
+        "disagree about what the same report is"
+    )
+    remove = _cs_method_body(API_CLIENT_CS, "private static void RemovePendingReport(string url, string json)")
+    assert "pending.url != url || pending.json != json" in remove, (
+        "the removal side changed its idea of identity; the merge must follow"
+    )
