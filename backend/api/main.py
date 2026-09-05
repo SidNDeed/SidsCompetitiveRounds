@@ -11887,6 +11887,108 @@ async def _enrollment_identity_gate(db: AsyncSession, steam_id: str) -> None:
             raise HTTPException(status_code=410, detail="account_deleted")
 
 
+# A region token as clients report it. Anything else is treated as ABSENT
+# rather than pinned: the value is handed back to both clients to connect to,
+# and there is no recovery from a room neither of them can reach.
+_REGION_TOKEN_RE = _re.compile(r"^[a-z]{2,5}$")
+
+
+def _region_token(value):
+    v = (value or "").strip().lower()
+    return v if _REGION_TOKEN_RE.match(v) else ""
+
+
+# ── Which regions this process has actually seen somebody connected to ───────
+#
+# CORROBORATION, NOT AN ALLOWLIST, and the distinction is the whole point. A
+# fixed list of regions was refused for the ranked queue with a good argument:
+# the room name is server-generated and the region goes straight to
+# PhotonNetwork, which accepts regions the game's own selector does not offer —
+# hk and uae are both in this project's match history. A list would move a pair
+# that was connecting fine to a worse room, and would need editing every time
+# Photon changes its map.
+#
+# This is built instead from the live CloudRegion token clients report when
+# they join the queue: a region ROUNDS adds tomorrow qualifies the first time
+# somebody plays there, and one that is retired stops being reported and ages
+# out on its own. It is used ONLY to break a tie between two candidates that
+# are already in play — never to reject a region outright — so the worst it can
+# do is choose the same way the code without it would have.
+#
+# Two guards on what a client can put in here. A token counts only once it has
+# been seen from more than one distinct player, so no single client can
+# corroborate a region of its own invention; and the whole map is bounded and
+# aged, so it cannot grow without limit or hold a sighting forever.
+#
+# In-process on purpose. It is empty at boot and refills within minutes of
+# queue traffic, and while it is empty the tie-break falls back to the stable
+# order below — i.e. to exactly what this did before corroboration existed.
+_REGION_SEEN = {}
+_REGION_SEEN_TTL_SECONDS = 7 * 24 * 3600
+_REGION_SEEN_MAX_TOKENS = 64
+_REGION_SEEN_MIN_PLAYERS = 2
+_REGION_SEEN_IDS_PER_TOKEN = 8
+
+
+def _note_region_seen(token, steam_id=None):
+    """One live sighting. Called where a client reports the region it is
+    actually connected to, never for a stored home region — a cache must not
+    be able to corroborate itself."""
+    token = _region_token(token)
+    if not token:
+        return
+    now = time.monotonic()
+    seen_at, ids = _REGION_SEEN.get(token, (0.0, set()))
+    if now - seen_at > _REGION_SEEN_TTL_SECONDS:
+        ids = set()
+    if steam_id and len(ids) < _REGION_SEEN_IDS_PER_TOKEN:
+        ids = ids | {str(steam_id)}
+    _REGION_SEEN[token] = (now, ids)
+    if len(_REGION_SEEN) > _REGION_SEEN_MAX_TOKENS:
+        for stale in sorted(_REGION_SEEN, key=lambda k: _REGION_SEEN[k][0])[
+                :len(_REGION_SEEN) - _REGION_SEEN_MAX_TOKENS]:
+            _REGION_SEEN.pop(stale, None)
+
+
+def _region_corroborated(token):
+    entry = _REGION_SEEN.get(_region_token(token))
+    if not entry:
+        return False
+    seen_at, ids = entry
+    if time.monotonic() - seen_at > _REGION_SEEN_TTL_SECONDS:
+        return False
+    return len(ids) >= _REGION_SEEN_MIN_PLAYERS
+
+
+def _region_agreed(a, b):
+    """One region from two signals of the same kind, SYMMETRICALLY.
+
+    The answer must not depend on the argument order, because the caller's
+    order is "whichever seat's request triggered issuance" — i.e. whichever
+    client polled first, which correlates with having the better connection to
+    this API. That made the room land on the faster poller's region and gave
+    the same seat the advantage it was already enjoying.
+
+    When only one signal exists it is the answer; when they agree, that is the
+    answer. When two signals genuinely DISAGREE, prefer the one this process
+    has seen a client connected to — that is the only fact available here about
+    whether a region still exists, and it is what stops a stale cache naming a
+    retired region from winning by sorting first. With both corroborated or
+    neither, the tie goes to a fixed order: a coin flip made stable, not a
+    latency decision, and written down as such so nobody reads the result as a
+    preference. The pair has no comparable latency measurement, which is the
+    whole reason region steering was cut.
+    """
+    if a and b:
+        if a == b:
+            return a
+        ca, cb = _region_corroborated(a), _region_corroborated(b)
+        if ca != cb:
+            return a if ca else b
+        return min(a, b)
+    return a or b
+
+
 def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
     """Room-region decision for a 1v1 queue pair (Aug 15 item 5, Jarvis/Nix).
 
@@ -11901,20 +12003,44 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
       1. Both HOME regions (Photon best-region ping cache, sent by 1.38.7+
          clients) agree -> use them. Same-region pairs now always land home
          no matter what either client was connected to at join time.
-      2. Otherwise the old live-snapshot chain, then the home regions as
-         further fallbacks — ANY region signal beats the "us" default
-         (empty+empty previously fell straight through to us).
+      2. Otherwise the live snapshots, then the home regions — ANY region
+         signal beats the "us" default (empty+empty previously fell straight
+         through to us). Each rung is resolved SYMMETRICALLY: this function's
+         argument order is "whichever seat's request triggered issuance", i.e.
+         whichever client polled first, which correlates with having the
+         better connection to this API. The old chain
+         `my_region or opp_region or mh or oh` therefore put the room wherever
+         the faster poller was, handing the seat that was already ahead the
+         region as well.
+    A signal that is not a well-formed region token counts as ABSENT rather
+    than being pinned: it would be handed to both clients to connect to, and
+    there is no recovery from a room neither of them can reach.
     The one-line log makes the next region report diagnosable from logs:api
-    without a repro.
+    without a repro. It carries the corroboration state of whatever was
+    chosen, because "both cached regions disagree and neither has been seen
+    live" is the case that strands a pair behind a series that already exists,
+    and it is invisible otherwise.
+
+    What this does NOT claim: that the chosen region is the best one for a
+    cross-region pair. Steering on a stored home region was refused for good
+    reasons — a persistent, untimestamped best-region cache steers a player who
+    relocated by where they used to be — and the measurement that would settle
+    it does not exist yet.
     """
-    mh = (my_home or "").strip().lower()
-    oh = (opp_home or "").strip().lower()
+    mr, orr = _region_token(my_region), _region_token(opp_region)
+    mh, oh = _region_token(my_home), _region_token(opp_home)
+    # NOTHING is recorded here. Only queue_join feeds the corroboration map,
+    # and only with a player id attached: refreshing a token's timestamp from
+    # issuance would keep a region the picker itself chose looking recent
+    # forever, so a retired one could never age out of the map that is there
+    # to notice exactly that.
     if mh and mh == oh:
         chosen = mh
     else:
-        chosen = my_region or opp_region or mh or oh or "us"
+        chosen = _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us"
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
-          f"live=({my_region},{opp_region}) home=({mh},{oh})")
+          f"seen={'y' if _region_corroborated(chosen) else 'n'} "
+          f"live=({mr},{orr}) home=({mh},{oh})")
     return chosen
 
 
@@ -11981,6 +12107,11 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     # (the live CloudRegion snapshot) — the room-region pick prefers two
     # AGREEING home regions over either snapshot.
     _home_region = (req.home_region or "").strip().lower()[:8] or None
+    # The live snapshot is a sighting: this player is connected to that region
+    # right now. Every join feeds the corroboration map the room-region
+    # tie-break reads, which is why it fills far faster than issuance alone
+    # would fill it.
+    _note_region_seen(req.region, req.steam_id)
 
     # Upsert into queue
     stmt = pg_insert(RankedQueue).values(

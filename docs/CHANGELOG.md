@@ -51,6 +51,14 @@
   searching.
 - A purchase re-checks that the item is still available under the same lock it
   reads the price with.
+- The region a ranked room is created in no longer depends on which of the two
+  clients happened to ask for the room first. Two players whose games agree on
+  a region still land there, as before; when the two signals disagree, the
+  choice now goes to the region the server has actually seen players connected
+  to recently, rather than to whichever of the two came first alphabetically or
+  had the faster connection to us. This does not try to pick the BEST region
+  for a cross-region pair — nothing here measures ping between the two of you
+  yet.
 
 **Diagnostics and small fixes**
 
@@ -72,6 +80,11 @@
 - The background queue of unsent match reports no longer stops for the rest of
   a session if one pass over it fails, and a report that lands on its first
   attempt can no longer make the queue drop a different one.
+- New diagnostic keys in the config file, both off by default and only useful
+  if you have been asked for a measurement: `[Music] StreamProbe` plays one
+  track on its own private audio source and writes timing, output and memory
+  readings to the log, and `[Music] StreamProbeRun` says which track. It never
+  runs inside an online room and never touches your music settings.
 
 **Broadcast seat only**
 
