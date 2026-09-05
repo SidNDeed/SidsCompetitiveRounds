@@ -141,6 +141,15 @@ class FakeQueueSession:
                 r.update(status="searching", matched_with=None, room_name=None, room_region=None,
                          ready=False, matched_at=None)
             return _Result([])
+        if "DELETE FROM issued_room_regions" in sql:
+            # Migration 292 promised rows are deleted past 30 days and nothing
+            # deleted them. The issuance path is where it happens: there is no
+            # cron for this table, and a promised prune with no pruner is a
+            # table that grows forever while the comment says it does not.
+            assert "issued_at <" in sql and "30 days" in sql, (
+                f"the prune is not bounded by age: {sql}"
+            )
+            return _Result([])
         raise AssertionError(f"unexpected statement: {sql[:100]}")
 
 
@@ -240,7 +249,11 @@ def test_fake_session_refuses_statements_that_lost_a_predicate():
     _run(main._queue_delete_partner_if_reciprocal(recorder, ME, PARTNER))
     stamp_sql = next(q for q in recorder.statements if "SET room_name = :room" in q)
     reset_sql = next(q for q in recorder.statements if "WHERE player_id = :partner AND status = 'matched' AND matched_with = :me AND room_name IS NULL" in q)
-    delete_sql = next(q for q in recorder.statements if q.startswith("DELETE"))
+    # Specific, because the issuance path now also emits the age-bounded
+    # prune of issued_room_regions and "the first DELETE" stopped being
+    # the partner delete this test mutates. The control above caught it.
+    delete_sql = next(q for q in recorder.statements
+                      if q.startswith("DELETE") and "matched_with = :me" in q)
     mutations = (
         stamp_sql.replace("AND status = 'matched' AND ready = true AND room_name IS NULL", "AND status = 'matched' AND ready = true"),
         stamp_sql.replace("OR (player_id = :b AND matched_with = :a))", "OR player_id = :b)"),

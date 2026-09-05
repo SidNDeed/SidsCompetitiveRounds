@@ -749,12 +749,31 @@ namespace CompetitiveRounds
             return h.ToString("x16");
         }
 
+        /// <summary>Three different answers that used to be one. `present`
+        /// and `readable` exist because "there is no queue" and "there is a
+        /// queue and I could not open it" call for opposite actions: the first
+        /// starts a fresh generation, the second must not write ANYTHING, and
+        /// collapsing them let a locked file be overwritten from generation 1
+        /// (r14 HIGH). `whole` adds "and it passed its own trailer".</summary>
         private class OutboxGeneration
         {
+            public bool present;
+            public bool readable;
             public bool whole;
+            /// <summary>Entries recovered from a file that is NOT whole -- a
+            /// last resort, never preferred over a complete queue.</summary>
+            public bool salvaged;
             public long generation;
             public List<PendingReport> entries;
         }
+
+        /// <summary>Set when load found a queue file it could not read. While
+        /// this is true the generation on disk is UNKNOWN, and writing would
+        /// stamp a lower one over it. Re-derived on every write rather than
+        /// latched, so the ordinary cause -- a scanner holding the file for a
+        /// few seconds -- clears itself without a restart.</summary>
+        private static bool _outboxGenerationUncertain;
+        private static bool _outboxUncertainWarned;
 
         /// <summary>Reads one candidate file. `allowLegacy` is true only for the
         /// live copy: a file with no trailer is either a pre-trailer build's
@@ -762,15 +781,22 @@ namespace CompetitiveRounds
         /// the first; the temp can only ever be the second.</summary>
         private static OutboxGeneration ReadOutboxFile(string path, bool allowLegacy)
         {
-            var result = new OutboxGeneration { whole = false, generation = 0, entries = new List<PendingReport>() };
+            var result = new OutboxGeneration { present = false, readable = false, whole = false,
+                                                salvaged = false, generation = 0,
+                                                entries = new List<PendingReport>() };
             if (!File.Exists(path)) return result;
+            result.present = true;
             string[] lines;
             try { lines = File.ReadAllLines(path); }
             catch (Exception ex)
             {
+                // present but not readable. The caller must not treat this as
+                // an empty queue: the file may be entirely intact and simply
+                // held open by something else (r14 HIGH).
                 Plugin.Log.LogWarning($"[OUTBOX] {Path.GetFileName(path)} unreadable: {ex.Message}");
                 return result;
             }
+            result.readable = true;
 
             int bodyLines = lines.Length;
             long generation = 0;
@@ -791,9 +817,14 @@ namespace CompetitiveRounds
             }
             else if (!allowLegacy)
             {
-                // A temp with no trailer is a write that did not finish. It is
-                // not a queue, and preferring it would lose the live copy.
-                return result;
+                // A temp with no trailer did not finish being written, so it is
+                // not a queue and must never be PREFERRED over the live copy.
+                // It is still read: the alternative on this path was to delete
+                // it, and its lines parse independently -- a torn last line is
+                // skipped by the loop below like any other malformed one. The
+                // caller uses these only when nothing whole exists at all, i.e.
+                // when the choice is between these reports and none.
+                result.salvaged = true;
             }
 
             for (int i = 0; i < bodyLines; i++)
@@ -925,6 +956,35 @@ namespace CompetitiveRounds
                 string tmp = OutboxTempPath;
                 if (body.Length == 0 && !File.Exists(OutboxPath) && !File.Exists(tmp)) return;
 
+                // Load could not read a queue file that exists, so the
+                // generation on disk is unknown and a write now would stamp a
+                // lower one over it. Ask again rather than staying blocked
+                // forever: the usual cause holds the file for seconds, and a
+                // guard with no way back costs every report of the session
+                // (#430). Readable again -> adopt its generation and carry on;
+                // gone -> there was nothing to protect; still locked -> stay
+                // memory-only for this write and try again on the next.
+                if (_outboxGenerationUncertain)
+                {
+                    var probe = ReadOutboxFile(OutboxPath, true);
+                    if (probe.present && !probe.readable)
+                    {
+                        if (!_outboxUncertainWarned)
+                        {
+                            _outboxUncertainWarned = true;
+                            Plugin.Log.LogWarning("[OUTBOX] the queue file is still unreadable; not writing over a "
+                                                  + "queue whose contents are unknown - reports stay in memory "
+                                                  + "until it can be read");
+                        }
+                        return;
+                    }
+                    _outboxGeneration = Math.Max(_outboxGeneration, probe.generation);
+                    _outboxGenerationUncertain = false;
+                    _outboxUncertainWarned = false;
+                    Plugin.Log.LogInfo($"[OUTBOX] queue file readable again at generation {probe.generation}; "
+                                       + "persisting resumes");
+                }
+
                 // Written beside the queue and MOVED over it, never truncated
                 // in place. WriteAllText opens the live file with Truncate, so
                 // an interruption between the truncate and the last byte leaves
@@ -980,7 +1040,32 @@ namespace CompetitiveRounds
                 bool takeStranded = stranded.whole
                                     && (!live.whole || stranded.generation > live.generation);
                 var chosen = takeStranded ? stranded : live;
-                _outboxGeneration = Math.Max(live.generation, stranded.generation);
+
+                // Only a file we actually READ can tell us its generation. A
+                // present-but-unreadable one leaves it unknown, and seeding 0
+                // there is what let a locked queue be overwritten from
+                // generation 1 (r14 HIGH). Writing stays blocked, and unblocks
+                // itself, in PersistOutbox.
+                _outboxGeneration = Math.Max(live.readable ? live.generation : 0,
+                                             stranded.readable ? stranded.generation : 0);
+                _outboxGenerationUncertain = (live.present && !live.readable)
+                                             || (stranded.present && !stranded.readable);
+                if (_outboxGenerationUncertain)
+                    Plugin.Log.LogWarning("[OUTBOX] a queue file exists but could not be read; its generation is "
+                                          + "unknown, so nothing will be written over it until it can be");
+
+                // Nothing whole anywhere, but the temp parsed: the choice is
+                // between these reports and none. Never reached when a complete
+                // queue exists under either name.
+                bool salvaging = false;
+                if (!live.whole && !stranded.whole && !takeStranded
+                    && stranded.salvaged && stranded.entries.Count > 0)
+                {
+                    salvaging = true;
+                    chosen = stranded;
+                    Plugin.Log.LogWarning($"[OUTBOX] no complete queue on disk; recovering {stranded.entries.Count} "
+                                          + "report(s) from an unfinished write rather than discarding them");
+                }
 
                 if (takeStranded)
                 {
@@ -1000,10 +1085,13 @@ namespace CompetitiveRounds
                         Plugin.Log.LogWarning($"[OUTBOX] recovered queue could not be promoted: {ex.Message}");
                     }
                 }
-                else if (File.Exists(tmp))
+                else if (File.Exists(tmp) && !salvaging && !_outboxGenerationUncertain)
                 {
                     // Superseded or torn. Leaving it would make every later load
-                    // weigh a file that has already lost.
+                    // weigh a file that has already lost. Not while it is the
+                    // copy just salvaged from, and not while some queue file
+                    // could not be read -- deleting on the strength of a read
+                    // that failed is the same mistake as writing on one.
                     try { File.Delete(tmp); } catch { }
                 }
 
@@ -9521,7 +9609,21 @@ namespace CompetitiveRounds
         // v1.22 — server returns this on /queue/ready when both players ready up. Used by
         // GameStateWatcher's poll to address the correct series when posting live point counts.
         // Cleared after the series's first match report (no longer needed; bets locked anyway).
-        public static string ActiveRankedSeriesId;
+        /// <summary>DERIVED from the binding, never stored beside it. It was
+        /// a plain field written next to the binding, and a retirement nulled
+        /// the binding while the field kept the id (r14 HIGH): the gates that
+        /// ask "is a series already live here" read the field, so a retired
+        /// series went on suppressing the next pairing's preflight while the
+        /// contradiction rule -- reading the null binding -- reported nothing
+        /// to contradict. Two values describing one thing will eventually
+        /// disagree; one value cannot.
+        ///
+        /// Null and not empty when there is no series, because every reader
+        /// tests it with IsNullOrEmpty and two of them print it with ?? .</summary>
+        public static string ActiveRankedSeriesId
+        {
+            get { return activeSeriesBinding.HasValue ? activeSeriesBinding.Value.SeriesId : null; }
+        }
         /// <summary>r4 find 2: monotonic id for preflight requests. Bumped on
         /// every send; a callback whose captured value is no longer the latest
         /// describes a superseded request and must bind nothing.</summary>
@@ -9659,6 +9761,14 @@ namespace CompetitiveRounds
                 issuedPair = new H2HRules.IssuedPairState { Gen = queueGen, RoomName = room, OpponentSteamId = opp,
                                                             BoundIncarnation = -1, BoundActor = -1,
                                                             JoinIncarnation = -1 };
+                // Both queue paths publish the series id for this room a few
+                // statements BEFORE this, so the publication read the previous
+                // pairing or none (r14 HIGH). The record takes the pairing now
+                // it exists; an empty opponent is the permissive value, so
+                // without this the one term that separates two occupancies of
+                // a recurring room name was never filled in on the path that
+                // knew the answer.
+                H2HRules.RetainSeriesPairing(ref activeSeriesBinding, room, opp);
             }
             catch { issuedPair = null; }
         }
@@ -9706,11 +9816,11 @@ namespace CompetitiveRounds
                 && !string.Equals(supersededIssuedRoom, roomName ?? "", StringComparison.Ordinal))
                 supersededIssuedRoom = null;
             H2HRules.RetireOnJoin(ref issuedPair, roomName, incarnation);
-            // The series record keeps the same company. Both describe ONE
-            // occupancy of the room they name, and both are decided here so
-            // they cannot drift apart into two different answers about the
-            // same join.
-            H2HRules.RetireSeriesOnJoin(ref activeSeriesBinding, roomName, incarnation);
+            // The series record is NOT decided here. It describes the same
+            // occupancy, but it is read against RoomIncarnation while this
+            // incarnation is H2HSummary's -- and this call runs before
+            // RoomIncarnation is even bumped. ApiClient.OnRoomJoinedForSeries
+            // is its join, from Plugin, after that bump.
         }
 
         private static bool IsSteamId64(string s)
@@ -18284,13 +18394,9 @@ namespace CompetitiveRounds
         /// series id can start being answered for.</summary>
         public static void PublishActiveSeries(string seriesId, string room)
         {
-            ActiveRankedSeriesId = seriesId;
-            if (string.IsNullOrEmpty(seriesId))
-            {
-                activeSeriesBinding = null;
-                return;
-            }
             string opponent = "";
+            bool inRoomHere = false;
+            string roomHere = null;
             try
             {
                 if (issuedPair.HasValue
@@ -18298,21 +18404,34 @@ namespace CompetitiveRounds
                     opponent = issuedPair.Value.OpponentSteamId ?? "";
             }
             catch { }
-            activeSeriesBinding = new H2HRules.RoomBoundSeries
+            try
             {
-                SeriesId = seriesId,
-                RoomName = room ?? "",
-                OpponentSteamId = opponent,
-                // Published at both_ready, which is BEFORE this seat has joined
-                // the room it names. Unstamped until a join matches it, and a
-                // staged id answers for nothing.
-                JoinIncarnation = -1,
-            };
+                inRoomHere = PhotonNetwork.InRoom;
+                roomHere = inRoomHere && PhotonNetwork.CurrentRoom != null
+                    ? PhotonNetwork.CurrentRoom.Name : null;
+            }
+            catch { }
+            // The queue publishes from the menu and the join stamps it; a
+            // PREFLIGHT publishes from inside the room it is about, and no
+            // further join is coming to stamp that one.
+            H2HRules.PublishSeries(ref activeSeriesBinding, seriesId, room, opponent,
+                                   inRoomHere, roomHere, RoomIncarnation);
+        }
+
+        /// <summary>Plugin.OnJoinedRoom, immediately after RoomIncarnation is
+        /// bumped. The series record is stamped and retired HERE and not
+        /// alongside the queue's pairing record: that one is decided from
+        /// H2HSummary's own incarnation counter, and this one is READ against
+        /// RoomIncarnation, so deciding them together stamped this record from
+        /// a counter nothing compares it to (r14 HIGH). Same room, first join:
+        /// stamped. Any later join: retired.</summary>
+        internal static void OnRoomJoinedForSeries(string roomName)
+        {
+            H2HRules.RetireSeriesOnJoin(ref activeSeriesBinding, roomName, RoomIncarnation);
         }
 
         public static void ClearActiveSeries()
         {
-            ActiveRankedSeriesId = null;
             activeSeriesBinding = null;
         }
 

@@ -83,13 +83,28 @@ def test_the_strict_fence_needs_the_room_and_the_occupancy_it_was_issued_for():
     assert "StringComparison.Ordinal" in rules, (
         "room names are compared exactly, not case- or culture-folded"
     )
-    # ...and the record is written in exactly one place, so a second publish
-    # site cannot start answering for a series without the occupancy stamp
+    # ...and the record is CONSTRUCTED in exactly one place, which is now
+    # inside the rules component rather than at the call site: publication is
+    # a transition (H2HRules.PublishSeries) and not a struct the caller
+    # assembles, so the stamp cannot be decided by whoever is publishing.
     api = API_CLIENT_CS.read_text(encoding="utf-8")
-    assert api.count("activeSeriesBinding = new H2HRules.RoomBoundSeries") == 1
-    assert api.count("ActiveRankedSeriesId = ") == 2, (
-        "the id is assigned outside PublishActiveSeries/ClearActiveSeries"
+    assert rules.count("bound = new RoomBoundSeries") == 1, (
+        "the record is built somewhere other than the publication transition"
     )
+    assert api.count("H2HRules.PublishSeries(ref activeSeriesBinding") == 1, (
+        "a second publish site would answer for a series without going through "
+        "the transition that decides the stamp"
+    )
+    # The id is DERIVED from the record and no longer stored beside it (r14
+    # HIGH: a retirement nulled the binding and the field kept the id). A
+    # get-only property is a stronger statement than any count of write sites:
+    # there is nothing to count, and a new assignment would not compile.
+    _decl = api.index("public static string ActiveRankedSeriesId")
+    _window = api[_decl:_decl + 400]
+    assert "get { return activeSeriesBinding.HasValue" in _window, (
+        "the id is a stored field again; it can now disagree with its binding"
+    )
+    assert "set;" not in _window, "the id gained a setter"
 
 
 def test_the_weak_question_is_false_when_there_is_nothing_to_compare():

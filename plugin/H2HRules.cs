@@ -88,6 +88,66 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>Publication, as its own transition rather than a record
+        /// the caller assembles.
+        ///
+        /// A series id is published at both_ready, from the menu, for a room
+        /// this seat has not joined -- that is the queue case, and it stages
+        /// the record for the join to stamp. It is ALSO published by a
+        /// preflight, and a preflight runs from INSIDE the room it is about:
+        /// private and tournament rooms, and every game after the first.
+        /// Staging those was a live regression (r14 HIGH) -- no further join
+        /// is coming to stamp them, so the record answered "" for the rest of
+        /// the room and took live points, named disconnect reports and
+        /// attestations with it. A publication naming the room this seat is
+        /// already in describes THIS occupancy and is stamped with it.</summary>
+        internal static void PublishSeries(ref RoomBoundSeries? bound, string seriesId, string room,
+                                           string opponent, bool inRoomHere, string roomHere,
+                                           int incarnation)
+        {
+            if (string.IsNullOrEmpty(seriesId))
+            {
+                bound = null;
+                return;
+            }
+            bool alreadyHere = inRoomHere
+                               && !string.IsNullOrEmpty(roomHere)
+                               && string.Equals(roomHere, room ?? "", StringComparison.Ordinal);
+            bound = new RoomBoundSeries
+            {
+                SeriesId = seriesId,
+                RoomName = room ?? "",
+                OpponentSteamId = opponent ?? "",
+                JoinIncarnation = alreadyHere ? incarnation : -1,
+            };
+        }
+
+        /// <summary>The queue's pairing for the room, arriving AFTER the id
+        /// was published for it.
+        ///
+        /// Both queue paths publish the series id from the response and
+        /// retain the pairing from the same response a few statements later,
+        /// so a publication that reads the pairing gets the PREVIOUS one or
+        /// none (r14 HIGH): the record was built with an empty opponent, and
+        /// an empty opponent is the permissive value, so the one term that
+        /// could tell two occupancies of a recurring room name apart was
+        /// never populated on the path that had the answer. Retention is the
+        /// second half of publication, not a caller's bookkeeping.
+        ///
+        /// Only a pairing for the room the record already names binds; a
+        /// pairing for anywhere else says nothing about this record, and the
+        /// join is what retires it. Returns true when the record took it.</summary>
+        internal static bool RetainSeriesPairing(ref RoomBoundSeries? bound, string room, string opponent)
+        {
+            if (bound == null) return false;
+            if (string.IsNullOrEmpty(opponent)) return false;
+            var b = bound.Value;
+            if (!string.Equals(b.RoomName ?? "", room ?? "", StringComparison.Ordinal)) return false;
+            b.OpponentSteamId = opponent;
+            bound = b;
+            return true;
+        }
+
         /// <summary>The series id an observation made HERE may be filed under,
         /// or empty. Empty is a real answer and not a failure: it makes the
         /// report a single unnamed attempt, which the server resolves from the
@@ -432,7 +492,7 @@ namespace CompetitiveRounds
 
         // ── self-test ──────────────────────────────────────────────────────
 
-        internal const int SELFTEST_CASES = 67;
+        internal const int SELFTEST_CASES = 81;
 
         /// <summary>Every rule above against canned inputs. A case marked
         /// control expects the WRONG answer and passes only when the harness
@@ -524,6 +584,47 @@ namespace CompetitiveRounds
                 Check("series:nowhere-during-it", SeriesNoRoom(ref sb, 4), "-/no/4");
                 Check("series:later-join-retires", SeriesJoin(ref sb, "ranked_r", 9), "retired");
                 Check("series:retired-answers-nothing", Series(ref sb, "ranked_r", 9), "-/no/none");
+
+                // The lifecycle, EXECUTED. Every case above this line hands
+                // the predicates a record built by the test; these run the
+                // client's own sequence -- publish, retain, join, read,
+                // disconnect, retire -- so an error in the order of those
+                // steps has somewhere to show up (r14 LOW).
+                RoomBoundSeries? lf = null;
+                // (a) the queue path: published from the MENU, for a room not
+                // yet joined, before the response's pairing has been retained
+                Check("life:published-from-menu", SeriesPublish(ref lf, "S9", "ranked_a", "", false, null, 7),
+                      "S9/-/-1");
+                Check("life:pairing-arrives-after-publication", SeriesRetain(ref lf, "ranked_a", OPP), OPP);
+                Check("life:pairing-for-another-room-is-ignored", SeriesRetain(ref lf, "elsewhere", OTHER), OPP);
+                Check("life:the-join-stamps-it", SeriesJoin(ref lf, "ranked_a", 8), "kept/8");
+                Check("life:reads-in-its-own-room", Series(ref lf, "ranked_a", 8, OPP), "S9/no/8");
+                // the pairing retained in (b) is what makes this answerable at
+                // all: with the empty opponent the old order produced, a
+                // recurring room name and a different fighter read as this one
+                Check("life:another-fighter-in-that-room", Series(ref lf, "ranked_a", 8, OTHER), "-/yes/8");
+                // a disconnect produces no room-left callback and no bump, and
+                // ranked routing must survive it
+                Check("life:disconnect-keeps-routing", SeriesNoRoom(ref lf, 8), "-/no/8");
+                Check("life:the-next-join-retires-it", SeriesJoin(ref lf, "ranked_b", 9), "retired");
+                Check("life:retired-record-answers-nothing", Series(ref lf, "ranked_a", 9), "-/no/none");
+
+                // (b) the preflight path: published from INSIDE the room, which
+                // is every private room, every tournament room and every game
+                // after the first. No further join is coming.
+                RoomBoundSeries? lp = null;
+                Check("life:published-from-inside-the-room",
+                      SeriesPublish(ref lp, "S10", "code_x", "", true, "code_x", 12), "S10/-/12");
+                Check("life:in-room-publication-answers-at-once", Series(ref lp, "code_x", 12), "S10/no/12");
+                // control: the stamp is the CURRENT incarnation and not a
+                // constant -- a later occupancy of the same name must not read
+                Check("life:control-stamp-is-not-a-constant", Series(ref lp, "code_x", 13), "S10/no/12", true);
+                // ...and a publication naming a room this seat is NOT in stays
+                // staged even though the seat is in some room
+                RoomBoundSeries? lq = null;
+                Check("life:publication-for-a-room-not-joined-stays-staged",
+                      SeriesPublish(ref lq, "S11", "other_room", "", true, "code_x", 12), "S11/-/-1");
+                Check("life:staged-answers-nothing-yet", Series(ref lq, "other_room", 12), "-/no/-1");
                 RoomBoundSeries? sctl = new RoomBoundSeries { SeriesId = "S2", RoomName = "ranked_r",
                                                               OpponentSteamId = OPP, JoinIncarnation = 4 };
                 Check("control:series:name-alone-answers", Series(ref sctl, "ranked_r", 9), "S2/no/4", control: true);
@@ -653,6 +754,30 @@ namespace CompetitiveRounds
             bool no = SeriesContradictedByRoom(bound, false, "", incarnation, null);
             return (string.IsNullOrEmpty(id) ? "-" : id) + "/" + (no ? "yes" : "no") + "/"
                    + (bound.HasValue ? bound.Value.JoinIncarnation.ToString(CultureInfo.InvariantCulture) : "none");
+        }
+
+        /// <summary>Publication run through the real entry point, rendered as
+        /// id/pairing/stamp. The A1 cases used to hand-build the record these
+        /// steps produce, which cannot see an error in the ORDER the client
+        /// performs them in -- and the order was the error (r14).</summary>
+        private static string SeriesPublish(ref RoomBoundSeries? bound, string id, string room,
+                                            string opponent, bool inRoomHere, string roomHere,
+                                            int incarnation)
+        {
+            PublishSeries(ref bound, id, room, opponent, inRoomHere, roomHere, incarnation);
+            if (!bound.HasValue) return "none";
+            var b = bound.Value;
+            return b.SeriesId + "/" + (string.IsNullOrEmpty(b.OpponentSteamId) ? "-" : "opp")
+                   + "/" + b.JoinIncarnation.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>The pairing the record holds after a retention attempt.</summary>
+        private static string SeriesRetain(ref RoomBoundSeries? bound, string room, string opponent)
+        {
+            RetainSeriesPairing(ref bound, room, opponent);
+            if (!bound.HasValue) return "none";
+            string o = bound.Value.OpponentSteamId;
+            return string.IsNullOrEmpty(o) ? "-" : o;
         }
 
         private static string SeriesJoin(ref RoomBoundSeries? bound, string room, int incarnation)

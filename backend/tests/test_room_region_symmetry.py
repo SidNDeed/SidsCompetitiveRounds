@@ -367,17 +367,28 @@ def test_the_region_a_sighting_carries_is_the_one_this_server_issued():
     and two accounts one person holds could carry a region nobody can connect
     to over the two-player bar and win a tie against an honest one.
 
-    The token is now read back from issued_room_regions, keyed by the room id,
-    which the HMAC DOES cover. The claim behind a sighting is "the server sent
-    two players here and a game from that room was accepted"."""
+    The token is now read back from issued_room_regions, keyed by the room
+    name DERIVED from the room id, which the HMAC does cover.
+
+    This test used to assert the literal `"room": str(report.photon_room_id)`,
+    and that literal was the defect r14 found: the report id is the room name
+    plus a per-game suffix, so keying the lookup on it matched nothing, ever.
+    A test that asserts the spelling of the line it is watching cannot fail
+    while that line is wrong. What is pinned now is the property the paragraph
+    above actually claims -- the key is derived from a field the signature
+    covers, and no unsigned field reaches it."""
     src = inspect.getsource(main.submit_match)
 
     assert "_note_region_seen(report.region" not in src, (
         "the unsigned client field is back in the map"
     )
     assert "SELECT region FROM issued_room_regions" in src
-    assert '"room": str(report.photon_room_id)' in src, (
-        "the lookup must be keyed on the room id the HMAC covers"
+    assert "_issued_room_candidates(report.photon_room_id)" in src, (
+        "the lookup key must still be derived from the room id the HMAC covers"
+    )
+    assert "report.region" not in src[src.index("SELECT region FROM issued_room_regions") - 400:
+                                      src.index("SELECT region FROM issued_room_regions") + 900], (
+        "the unsigned region field must not appear anywhere in the lookup"
     )
     assert "_note_region_seen(*_region_sighting)" in src
 
@@ -597,3 +608,124 @@ def test_a_sighting_is_taken_on_every_accepted_report_not_once_per_reporter():
         "the hole this replaced"
     )
 
+
+
+# ---------------------------------------------------------------------------
+# The lookup has to match something. Review r14 HIGH: it never did.
+#
+# Issuance stores the Photon room name; the client reports that name with a
+# per-game suffix appended, and the two were compared for equality. Every test
+# above this line passed throughout, because all of them exercise the picker
+# and the map directly -- none of them asked whether a real report ever reaches
+# the map at all. These do, and they take the client's format from the client's
+# own source rather than restating it here, because a restated contract drifts
+# and a test that builds its input from the wrong shape proves nothing.
+# ---------------------------------------------------------------------------
+
+WATCHER_CS = Path(__file__).resolve().parents[2] / "plugin" / "GameStateWatcher.cs"
+
+
+def test_the_client_still_builds_report_ids_the_way_this_file_assumes():
+    """If the client's format changes, the derivation below is wrong and these
+    tests must fail rather than keep asserting against a stale shape."""
+    src = WATCHER_CS.read_text(encoding="utf-8", errors="replace")
+    assert '_r{reportRoundTotal}' in src, (
+        "the 1v1 report id no longer ends in the _r<n> suffix this derivation strips"
+    )
+    assert '{matchStartTime:HHmmss}_r{FfaMode.GameNumber}' in src, (
+        "the FFA report id no longer has the _<HHmmss>_r<n> shape this derivation strips"
+    )
+
+
+def test_a_real_report_id_resolves_to_the_room_the_server_issued():
+    """The finding itself. `ranked_<12hex>` is what issuance stores
+    (main.py builds it with uuid4().hex[:12]); the client reports that name
+    plus `_<HHmmss>_r<n>`. Equality between the two is never true."""
+    issued = "ranked_a1b2c3d4e5f6"
+    reported = f"{issued}_143052_r3"
+    assert reported != issued, "the premise of this test is that they differ"
+    cands = main._issued_room_candidates(reported)
+    assert issued in cands, (
+        f"the issued room name is not among the lookup candidates for {reported!r}; "
+        "the corroboration map can never receive a sighting"
+    )
+    assert reported in cands, "the id as sent must remain a candidate too"
+
+
+def test_room_names_containing_underscores_survive_intact():
+    """Every name this matters for has underscores in it -- `ranked_<hex>` and
+    the tournament rooms -- so a derivation that split on the first one would
+    hand the lookup a prefix that was never issued to anybody."""
+    for issued in ("ranked_a1b2c3d4e5f6", "sct-4f2a_qual_r1_room", "code_ABCD"):
+        cands = main._issued_room_candidates(f"{issued}_091500_r12")
+        assert issued in cands, f"{issued!r} did not survive suffix removal"
+
+
+def test_a_bare_room_name_is_left_alone():
+    """Nothing in the client sends this today. It costs one list entry to keep
+    working if anything ever does, and a derivation that MANGLED it would be
+    the same class of silent miss."""
+    assert main._issued_room_candidates("ranked_a1b2c3d4e5f6") == ["ranked_a1b2c3d4e5f6"]
+    assert main._issued_room_candidates("") == []
+    assert main._issued_room_candidates(None) == []
+
+
+def test_the_lookup_requires_the_pair_the_room_was_issued_to():
+    """A region recorded without the pair says only that some room got a
+    region, so any accepted report naming that room fed the map. The row now
+    records who the server sent, and the read requires the report's two
+    players to be exactly those two."""
+    src = MAIN_PY.read_text(encoding="utf-8")
+    call = src.index("SELECT region FROM issued_room_regions")
+    stmt = src[call:src.index("})).scalar()", call)]
+    assert "player1_id IS NOT NULL" in stmt and "player2_id IS NOT NULL" in stmt, (
+        "a row with no pair recorded must not corroborate anything"
+    )
+    assert "player1_id = :pa AND player2_id = :pb" in stmt, "pair check missing"
+    assert "player1_id = :pb AND player2_id = :pa" in stmt, (
+        "the pair check must be order-independent -- which of the two rows the "
+        "issuance wrote first is not a fact about the game"
+    )
+    assert "room_name = :room_full OR room_name = :room_base" in stmt, (
+        "the lookup must offer the derived room name as well as the id as sent"
+    )
+
+
+def test_the_issuance_records_the_pair_and_prunes():
+    """Both halves of the row, written where the pair is known -- and the
+    deletion migration 292 promises, on the path that does the inserting.
+    A promised prune with nothing that prunes is a table that grows forever."""
+    src = MAIN_PY.read_text(encoding="utf-8")
+    ins = src.index("INSERT INTO issued_room_regions")
+    stmt = src[ins:src.index("return True", ins)]
+    assert "player1_id, player2_id" in stmt, "issuance does not record the pair"
+    assert '"a": my_pid, "b": opp_pid' in stmt, "the pair bound is not the issued pair"
+    assert "DELETE FROM issued_room_regions WHERE issued_at <" in stmt, (
+        "migration 292 promises rows are deleted past 30 days; nothing deletes them"
+    )
+
+
+def test_the_comment_no_longer_claims_no_client_supplied_the_region():
+    """`_pick_room_region` chooses from the two seats' own region and
+    home_region tokens. The DECISION is the server's and that is what the row
+    records -- but the file used to say the region was not client-supplied at
+    all, which is a stronger claim than the code makes and the kind that gets
+    trusted by the next change (r14)."""
+    src = MAIN_PY.read_text(encoding="utf-8")
+    assert "IT IS NOT A CLIENT-SUPPLIED REGION AT ALL" not in src, (
+        "the retired absolute claim is back"
+    )
+    assert "IT IS NOT READ FROM THE REPORT" in src, "the true, narrower claim is missing"
+    assert "the candidates come" in src and "from clients" in src, (
+        "the correction must say where the candidates actually come from"
+    )
+
+
+def test_the_deploy_block_puts_292_before_the_api():
+    """The report path SELECTs from `issued_room_regions`. An API deployed
+    ahead of the table fails every match report with undefined_table."""
+    changelog = (Path(__file__).resolve().parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    block = changelog[changelog.index("**Schema changes:** migration **292**"):][:1200]
+    assert "BEFORE the API deploy" in block, "292 is not ordered before the API"
+    for seed in ("288", "289", "290", "291"):
+        assert seed in block, f"migration {seed} dropped from the deploy block"

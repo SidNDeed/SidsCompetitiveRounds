@@ -659,13 +659,14 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
         "the fence has to hand the rule the occupancy and the pairing, not a name"
     )
     # The id and the room it was published for used to be two assignments a
-    # caller had to remember to write together, and this sweep checked that
-    # every caller did. r13 H1 removed the choice: both live in ONE record,
-    # written by PublishActiveSeries and cleared by ClearActiveSeries, so the
-    # question worth asking is whether anything writes the id outside them.
+    # caller had to remember to write together; r13 put both in ONE record and
+    # this sweep checked that nothing wrote the id outside the two owners.
     #
-    # Asserted per WRITE SITE and per FILE rather than by counting occurrences,
-    # because a count is satisfied by any two lines that happen to add up.
+    # r14 removed the question. A retirement nulled the binding while the field
+    # kept the id, so the gates that ask "is a series live here" still saw one
+    # and suppressed the next pairing's preflight -- two values describing one
+    # thing, disagreeing. The id is now DERIVED from the record, so there are
+    # no write sites to sweep for and a new one would not compile.
     strays = []
     for name, src in (("ApiClient.cs", api), ("GameStateWatcher.cs", gsw),
                       ("Plugin.cs", (PLUGIN / "Plugin.cs").read_text(encoding="utf-8"))):
@@ -675,15 +676,19 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
             if "public static string ActiveRankedSeriesId" in ln:   # the declaration
                 continue
             strays.append((name, ln.strip()))
-    # PublishActiveSeries assigns it; ClearActiveSeries nulls it. Nothing else.
-    assert [n for n, _ in strays] == ["ApiClient.cs", "ApiClient.cs"], (
-        f"the series id is written outside the two methods that own it: {strays}"
+    assert strays == [], (
+        f"the series id is stored somewhere as well as derived: {strays}"
+    )
+    decl = api.index("public static string ActiveRankedSeriesId")
+    assert "get { return activeSeriesBinding.HasValue" in api[decl:decl + 400], (
+        "the id is not derived from the binding it is supposed to describe"
     )
     publish = _cs_method_body(API_CLIENT_CS, "public static void PublishActiveSeries(string seriesId, string room)")
     clear = _cs_method_body(API_CLIENT_CS, "public static void ClearActiveSeries()")
-    assert "ActiveRankedSeriesId = seriesId;" in publish
-    assert "ActiveRankedSeriesId = null;" in clear
-    assert "activeSeriesBinding = null;" in clear, "the id is cleared and its binding is not"
+    assert "H2HRules.PublishSeries(ref activeSeriesBinding" in publish, (
+        "publication no longer goes through the transition that decides the stamp"
+    )
+    assert "activeSeriesBinding = null;" in clear, "clearing does not clear the record"
 
     # ...and the callers are still the sites they were: 3 publishes (preflight,
     # queue both_ready, queue poll) and 4 clears (two in ApiClient, the
@@ -1081,6 +1086,17 @@ def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
     assert "var stranded = ReadOutboxFile(tmp, false);" in load, (
         "a temp with no trailer is a torn write, never a legacy queue"
     )
+    # It is not a queue, so it never WINS -- but it is no longer deleted
+    # unread either. Its lines parse independently and the only path that
+    # reaches them is "nothing whole exists under either name", i.e. the
+    # choice is between these reports and none.
+    reader_all = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "result.salvaged = true;" in reader_all, (
+        "a trailerless temp is discarded rather than read as a last resort"
+    )
+    assert "if (!live.whole && !stranded.whole && !takeStranded" in load, (
+        "salvage must be unreachable while any complete queue exists"
+    )
     assert ("bool takeStranded = stranded.whole" in load
             and "stranded.generation > live.generation" in load), (
         "the temp has to WIN on generation, not merely exist"
@@ -1091,9 +1107,32 @@ def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
     # recovered means promoted, and a loser is removed rather than re-weighed
     assert load.index("takeStranded") < load.index("File.Replace(tmp, OutboxPath, null);")
     assert "try { File.Delete(tmp); } catch { }" in load
-    assert "_outboxGeneration = Math.Max(live.generation, stranded.generation);" in load, (
+    assert "_outboxGeneration = Math.Max(live.readable ? live.generation : 0," in load, (
         "the counter has to carry across launches or an older file outranks a newer one"
     )
+    # ...and ONLY from a file that was actually read. A queue file that exists
+    # but could not be opened -- a scanner or a backup agent holding it, the
+    # ordinary case -- used to read as generation 0 with no entries, exactly
+    # like no file at all, so the session's first write stamped generation 1
+    # over a real queue and destroyed it (r14 HIGH).
+    assert "stranded.readable ? stranded.generation : 0);" in load, (
+        "an unreadable temp still seeds the generation"
+    )
+    assert "_outboxGenerationUncertain = (live.present && !live.readable)" in load, (
+        "'absent' and 'present but unreadable' are the same state again"
+    )
+    assert "!salvaging && !_outboxGenerationUncertain" in load, (
+        "the temp is deleted on the strength of a read that failed"
+    )
+    persist = _cs_method_body(API_CLIENT_CS, "private static void PersistOutbox()")
+    assert "if (_outboxGenerationUncertain)" in persist, (
+        "a write can still land on a queue whose generation is unknown"
+    )
+    assert "var probe = ReadOutboxFile(OutboxPath, true);" in persist, (
+        "the block must be re-derived per write, not latched -- a guard with no "
+        "way back costs every report of the session"
+    )
+    assert "_outboxGenerationUncertain = false;" in persist, "the block never clears"
 
     reader = _cs_method_body(
         API_CLIENT_CS, "private static OutboxGeneration ReadOutboxFile(string path, bool allowLegacy)")

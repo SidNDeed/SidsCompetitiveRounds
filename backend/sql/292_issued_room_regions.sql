@@ -16,14 +16,27 @@
 -- region does not exist produces no accepted match, which is what stops the
 -- server from corroborating its own guesses.
 --
--- Rows are evidence with a shelf life: the map's own TTL is 7 days and the
--- prune job deletes past 30. Idempotent, IF NOT EXISTS — safe to re-run.
+-- The row records WHO the room was issued to as well. Without the pair it
+-- said only "this region was issued for this room", so any accepted report
+-- naming the room fed the map; with it, the read can require the report's two
+-- players to be the two the server actually sent there. Nullable because the
+-- column is added by the same statement that may find rows already present.
+--
+-- Rows are evidence with a shelf life: the map's own TTL is 7 days, and rows
+-- past 30 days are deleted by the issuance path itself (see main.py's
+-- _queue_stamp_room_reciprocal). There is no cron for this and there was never
+-- going to be one — a promise of pruning with nothing that prunes is how a
+-- table grows forever while the comment says it does not.
+-- Idempotent, IF NOT EXISTS — safe to re-run.
 
 CREATE TABLE IF NOT EXISTS issued_room_regions (
     room_name  VARCHAR(64) PRIMARY KEY,
     region     VARCHAR(16) NOT NULL DEFAULT '',
     issued_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE issued_room_regions ADD COLUMN IF NOT EXISTS player1_id UUID;
+ALTER TABLE issued_room_regions ADD COLUMN IF NOT EXISTS player2_id UUID;
 
 CREATE INDEX IF NOT EXISTS idx_issued_room_regions_issued_at
     ON issued_room_regions (issued_at);

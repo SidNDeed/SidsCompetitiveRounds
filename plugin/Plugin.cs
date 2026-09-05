@@ -3980,6 +3980,13 @@ namespace CompetitiveRounds
                 // PREVIOUS room incarnation — the name fence aliases when a
                 // code room is left and re-entered under the same code.
                 ApiClient.RoomIncarnation++;
+                // The series record's join, immediately after the bump it is
+                // read against. It used to be decided inside
+                // RetireIssuedPairUnless, called forty lines above this from
+                // H2HSummary.OnJoinedRoom -- with H2HSummary's counter, and
+                // before this bump, so the stamp could never equal the value
+                // its readers compare it to (r14 HIGH).
+                try { ApiClient.OnRoomJoinedForSeries(Photon.Pun.PhotonNetwork.CurrentRoom?.Name); } catch { }
                 GameStateWatcher.ClearTournamentContext();
                 string _rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
                 if (_rn.StartsWith("sct-", StringComparison.Ordinal)

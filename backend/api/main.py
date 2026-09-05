@@ -5931,18 +5931,35 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # room id — which the HMAC does cover. A room the server never issued (a
     # private or tournament room) has no binding and contributes nothing.
     #
+    # The lookup takes the room name the client DERIVED its report id from as
+    # well as the id itself: the id is the room name plus a per-game suffix, so
+    # the equality test alone never matched anything (r14 HIGH).
+    #
+    # And the row must have been issued to THESE TWO PLAYERS. Recording the
+    # region without the pair meant any accepted report naming the room fed the
+    # map; the pair is what makes the row say "the server sent these two here".
+    #
     # NOT PUBLISHED YET, either (r13 MEDIUM): the map is process memory and the
     # match is not committed here. A rollback below would leave a sighting for a
     # game that was never recorded, and two of those would corroborate a region
     # on the strength of two failures. The pair is held and noted after commit.
     _region_sighting = None
     if _session_was_verified(request) and report.photon_room_id:
+        _rooms = _issued_room_candidates(report.photon_room_id)
+        # Two scalar binds and not an array one. The id as sent and the room
+        # name derived from it are the only two candidates there will ever be,
+        # and a varchar bind is the form the rest of this file uses and this
+        # deploy can actually verify.
         _issued_region = (await db.execute(text(
             "SELECT region FROM issued_room_regions"
-            " WHERE room_name = :room"
+            " WHERE (room_name = :room_full OR room_name = :room_base)"
             "   AND issued_at >= NOW() - CAST(:ttl AS interval)"
-        ), {"room": str(report.photon_room_id),
-            "ttl": "%d seconds" % int(_REGION_SEEN_TTL_SECONDS)})).scalar()
+            "   AND player1_id IS NOT NULL AND player2_id IS NOT NULL"
+            "   AND ((player1_id = :pa AND player2_id = :pb)"
+            "     OR (player1_id = :pb AND player2_id = :pa))"
+        ), {"room_full": _rooms[0], "room_base": _rooms[-1],
+            "pa": p1.id, "pb": p2.id,
+            "ttl": "%d seconds" % int(_REGION_SEEN_TTL_SECONDS)})).scalar() if _rooms else None
         if _issued_region:
             _region_sighting = (_issued_region, report.reported_by_steam_id)
 
@@ -11423,9 +11440,20 @@ async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_n
     # collision would be a reused name and the FIRST issuance is the one that
     # sent two players somewhere.
     await db.execute(text(
-        "INSERT INTO issued_room_regions (room_name, region) "
-        "VALUES (:room, :region) ON CONFLICT (room_name) DO NOTHING"
-    ), {"room": room_name, "region": region or ""})
+        "INSERT INTO issued_room_regions (room_name, region, player1_id, player2_id) "
+        "VALUES (:room, :region, :a, :b) ON CONFLICT (room_name) DO NOTHING"
+    ), {"room": room_name, "region": region or "", "a": my_pid, "b": opp_pid})
+    # The pair is stored because the region alone did not say who the room was
+    # issued TO, so any accepted report naming it fed the map (r14 HIGH).
+    #
+    # And the table is pruned HERE, on the path that adds to it. Migration 292
+    # promised deletion past 30 days and nothing deleted anything: there is no
+    # cron for this table and adding one would be a second thing to keep alive.
+    # The index on issued_at makes this a bounded range delete, and room
+    # issuance is the right frequency for it -- a handful a minute at peak, and
+    # nothing at all when nobody is queueing.
+    await db.execute(text(
+        "DELETE FROM issued_room_regions WHERE issued_at < NOW() - INTERVAL '30 days'"))
     return True
 
 
@@ -11997,13 +12025,19 @@ def _region_token(value):
 # region outright, and never to introduce one — so the worst it can do is
 # choose the same way the code without it would have.
 #
-# IT IS NOT A CLIENT-SUPPLIED REGION AT ALL, which is the whole design. Neither
-# the join-time CloudRegion snapshot (what this read first) nor the match
-# report's `region` field (what it read second) is signed: the match HMAC covers
-# seven fields and the region is not one of them, so establishing a session
-# proves WHO is speaking and nothing about the region named in the sentence.
-# Two accounts one person holds could play real games, label them with a region
-# nobody can connect to, corroborate it, and beat an honest region in a tie.
+# IT IS NOT READ FROM THE REPORT, which is the design. Neither the join-time
+# CloudRegion snapshot (what this read first) nor the match report's `region`
+# field (what it read second) is signed: the match HMAC covers seven fields and
+# the region is not one of them, so establishing a session proves WHO is
+# speaking and nothing about the region named in the sentence.
+#
+# What it is NOT is a region no client had a hand in. _pick_room_region chooses
+# from the two seats' own region and home_region tokens, so the candidates come
+# from clients and the DECISION is the server's — and it is the decision that
+# is recorded here, against the pair it was made for. The claim a sighting
+# carries is therefore exactly this and no more: this server committed these
+# two players to this region, and a game from that room came back and was
+# accepted. It is not "a client named this region".
 #
 # The token is the region THIS SERVER ISSUED for the room, read back from
 # issued_room_regions by the room id — which the HMAC does cover. So the claim
@@ -12044,6 +12078,33 @@ def _region_token(value):
 # token -> {steam_id: time.monotonic() of that reporter's last sighting}
 _REGION_SEEN = {}
 _REGION_SEEN_TTL_SECONDS = 7 * 24 * 3600
+
+# The client appends `_<HHmmss>_r<n>` to the Photon room name to build the
+# per-game report id (GameStateWatcher.BuildGameReportIdPrefix + the `_r`
+# suffix, and the FFA path that builds the same shape). issued_room_regions is
+# keyed by the room name the queue ISSUED, so comparing the two for equality
+# never matched and the corroboration map never received a sighting from a real
+# game (r14 HIGH).
+#
+# Stripping the suffix is safe because the whole id is one of the seven fields
+# the match HMAC covers: the derived name is a pure function of signed input.
+# The pattern is anchored at both ends and the suffix shape is fixed, so a room
+# name that itself contains underscores -- every ranked and tournament name --
+# survives intact. Both the derived name and the id as sent are offered, so a
+# client that ever reports the bare room name still resolves.
+_ISSUED_ROOM_SUFFIX_RE = _re.compile(r"^(?P<room>.+)_[0-9]{6}_r[0-9]+$")
+
+
+def _issued_room_candidates(report_room_id):
+    """The room names an accepted report could have been issued under."""
+    rid = str(report_room_id or "")
+    if not rid:
+        return []
+    out = [rid]
+    m = _ISSUED_ROOM_SUFFIX_RE.match(rid)
+    if m and m.group("room") and m.group("room") != rid:
+        out.append(m.group("room"))
+    return out
 _REGION_SEEN_MAX_TOKENS = 64
 _REGION_SEEN_MIN_PLAYERS = 2
 _REGION_SEEN_IDS_PER_TOKEN = 8

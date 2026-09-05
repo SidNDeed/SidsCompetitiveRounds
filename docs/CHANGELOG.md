@@ -113,11 +113,19 @@
   on the Music tab and the seat idle at the menu; anything else is refused
   with a logged reason, and transport actions are not lever-driven.
 
-**Schema changes:** migrations **288** (client i18n keys for the new library
-strings), **289** (machine-translation proposals for es/ru/uk/sv for those
-keys), **290** (client i18n keys for the head-to-head and lag-notice strings)
-and **291** (their es/ru/uk/sv proposals). The same translations ship bundled
-in the client. Apply all four AFTER the API deploy, in numeric order.
+**Schema changes:** migration **292** (`issued_room_regions` — the region and
+player pair this server issued for a ranked room) BEFORE the API deploy, then
+migrations **288** (client i18n keys for the new library strings), **289**
+(machine-translation proposals for es/ru/uk/sv for those keys), **290** (client
+i18n keys for the head-to-head and lag-notice strings) and **291** (their
+es/ru/uk/sv proposals) after it, in numeric order. The same translations ship
+bundled in the client.
+
+**292 goes first and the order is not cosmetic:** the new match-report path
+SELECTs from `issued_room_regions`, so an API deployed ahead of the table would
+fail every match report with `undefined_table` until the migration landed. The
+i18n seeds only add rows the client already carries bundled, which is why those
+four stay after.
 
 ## v1.40.1 — 2026-09-03
 
