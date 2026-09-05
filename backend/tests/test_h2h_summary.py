@@ -700,6 +700,37 @@ def test_the_read_budget_is_per_key_and_per_room_not_one_per_room():
         "the retired claim came back"
     )
     assert "MAX_REQUESTS_PER_ROOM" in head, "the headline must name the real bound"
+
+    # r13 LOW: over the WHOLE doc block, not the headline slice. The headline
+    # was corrected in r12 and a second statement of the same retired rule sat
+    # forty lines below it, inside the Key paragraph -- outside this slice, so
+    # the gate that was written to stop the claim coming back could not see the
+    # copy that had never left. A claim is not fixed where it is fixed once.
+    whole = doc[:doc.index("internal static class H2HSummary")]
+
+    # The correction is allowed to QUOTE the retired rule, so it is cut out
+    # first and the assertion runs on what is left. Cutting it out rather than
+    # letting its presence excuse the whole block matters: a gate that goes
+    # green because the correction exists SOMEWHERE cannot see the claim being
+    # restated somewhere else, which is the shape of the finding this replaces.
+    marker = '"One request per key" is what that budget USED to be'
+    assert marker in whole, "the correction that quotes the retired rule is gone"
+    # Delimited by the correction's OWN last words, not by whatever paragraph
+    # happens to follow it. A region that runs to the next heading swallows
+    # anything written just above that heading -- proven by mutation: a fresh
+    # restatement inserted one line before the Room-budget paragraph landed
+    # inside the cut and the gate stayed green.
+    end = "the Retry paragraph is where its bound is stated."
+    assert end in whole, "the correction paragraph no longer ends where this expects"
+    cut_from = whole.index(marker)
+    cut_to = whole.index(end, cut_from) + len(end)
+    remainder = whole[:cut_from] + whole[cut_to:]
+    for phrase in ("one-request-per-key", "one request per key",
+                   "One request per key", "One GET /api/v1/h2h/{me}/{opponent} per room"):
+        assert phrase not in remainder, (
+            f"the doc block asserts {phrase!r} as current, outside the paragraph "
+            "that retires it"
+        )
     per_room = _cs_int_const("MAX_REQUESTS_PER_ROOM")
     assert per_room > 1, "a per-room budget of one would make the old claim true"
     ladder = (1 + _cs_int_const("MAX_SESSION_RESENDS")

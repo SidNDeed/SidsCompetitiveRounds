@@ -988,9 +988,18 @@ namespace CompetitiveRounds
 
         /// <summary>Seconds of audio the tap was handed since the seek to
         /// len-5, or -1 when it cannot be established (no tap, no baseline, or
-        /// no sample rate). Negative means "no evidence", which the caller
-        /// treats as neutral rather than as failure — an unavailable
-        /// measurement must not turn a passing control into a failing one.</summary>
+        /// no sample rate).
+        ///
+        /// NEGATIVE IS A FAILING ANSWER, not a neutral one, and this sentence
+        /// used to say the opposite (r13 LOW). The natural-end control asks
+        /// whether the PLAYHEAD reached the end of the clip; the only evidence
+        /// of that available here is the audio the tap was handed, because the
+        /// timing window alone is satisfied by a source that stopped five
+        /// seconds after the seek for any other reason. A run that cannot
+        /// produce the figure has not shown what the control tests, so the
+        /// caller requires `>= 4` and an unavailable measurement fails it. That
+        /// is a broken probe run reported as broken -- the outcome this file
+        /// prefers over a control that passes on no evidence.</summary>
         private static float EndRunSeconds()
         {
             if (_framesAtEndSeek < 0L || (object)_tap == null) return -1f;

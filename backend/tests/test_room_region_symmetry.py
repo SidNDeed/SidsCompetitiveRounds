@@ -1,5 +1,4 @@
-"""The ranked room's region must not be decided by which client polled first,
-and the tie that decides it must not be decided by the alphabet.
+"""The ranked room's region must not be decided by which client polled first.
 
 `_pick_room_region` takes the REQUESTING player's signals first and both
 issuance sites pass them that way, so the old chain
@@ -15,12 +14,29 @@ regions Photon actually offers. Resolving a disagreement with `min()` therefore
 lands on a retired region EVERY time when a stale cache names one, where the
 old order-dependent chain landed there about half the time: strictly worse.
 
-The tie-break now asks which region this process has actually seen a client
-connected to. That is corroboration, not an allowlist — a static list was
+The tie-break asks which region this process has evidence two players have
+actually played in. That is corroboration, not an allowlist — a static list was
 refused with a good argument (`hk` and `uae` are in this project's own match
-history and the game's own selector does not offer them) — and it is built from
-the live region token every queueing client reports. It only ever breaks a tie
-between two candidates already in play, so it cannot reject a region outright.
+history and the game's own selector does not offer them) — and it only ever
+breaks a tie between two candidates already in play, so it cannot reject a
+region outright.
+
+WHERE THAT EVIDENCE COMES FROM has been rewritten twice, and the current answer
+is the only one that is not a client's word for it. First it was the join-time
+CloudRegion snapshot; then the match report's `region` field. Neither is signed
+— the match HMAC covers seven fields and the region is not among them — so
+establishing a session proves who is speaking and nothing about the region
+named in the sentence. The token is now the region THIS SERVER issued for the
+room, read back from `issued_room_regions` by the room id, which the HMAC does
+cover. The evidence is therefore "the server sent two players here and a game
+from that room was reported and accepted", and it is published only once that
+report has committed.
+
+AND WHEN CORROBORATION CANNOT DECIDE, `min(a, b)` does — the alphabet, chosen
+because a pair has no comparable latency measurement and a stable coin flip is
+better than one that depends on which seat asked. That is written down as a
+coin flip rather than a preference, and a test below pins that it is not
+described as anything else.
 
 What none of this claims: that the chosen region is the BEST one for a
 cross-region pair. Steering on a stored home region was refused because an
@@ -340,36 +356,98 @@ def test_only_well_formed_tokens_enter_the_map():
     assert main._REGION_SEEN == {}
 
 
-def test_an_accepted_match_is_what_feeds_the_map():
-    """SOURCE SHAPE, not execution: this asserts the call is written at the site
-    that knows a game was played and accepted. The behaviour of the map itself
-    is executed by every other test in this file.
+def test_the_region_a_sighting_carries_is_the_one_this_server_issued():
+    """SOURCE SHAPE, not execution: this asserts WHERE the token comes from.
+    The behaviour of the map itself is executed by every other test here.
 
-    The evidence used to be the join-time CloudRegion snapshot. Establishing a
-    session proves who is speaking and nothing about the region in the sentence,
-    so two accounts under one person could carry a region nobody can connect to
-    over the two-player bar and then win a tie against an honest one. A region
-    that does not exist cannot produce a game played in it."""
+    r13 HIGH. The evidence was the join-time CloudRegion snapshot, then the
+    match report's `region` field. Neither is signed -- the match HMAC covers
+    seven fields and the region is not one of them -- so establishing a session
+    proves who is speaking and nothing about the region named in the sentence,
+    and two accounts one person holds could carry a region nobody can connect
+    to over the two-player bar and win a tie against an honest one.
+
+    The token is now read back from issued_room_regions, keyed by the room id,
+    which the HMAC DOES cover. The claim behind a sighting is "the server sent
+    two players here and a game from that room was accepted"."""
     src = inspect.getsource(main.submit_match)
-    assert "_note_region_seen(report.region, report.reported_by_steam_id)" in src
 
-    # The flagged path commits and returns BEFORE the sighting, so an
-    # invalidated match is not evidence of anything.
-    assert src.index('if ac["invalidate"]:') < src.index("_note_region_seen(")
+    assert "_note_region_seen(report.region" not in src, (
+        "the unsigned client field is back in the map"
+    )
+    assert "SELECT region FROM issued_room_regions" in src
+    assert '"room": str(report.photon_room_id)' in src, (
+        "the lookup must be keyed on the room id the HMAC covers"
+    )
+    assert "_note_region_seen(*_region_sighting)" in src
+
+    # The flagged path commits and returns BEFORE the lookup, so an invalidated
+    # match is not evidence of anything.
+    assert src.index('if ac["invalidate"]:') < src.index("issued_room_regions")
 
     # The REPORTER only. Recording the opponent as well would let one account
     # name an opponent and supply both halves of "two distinct players".
-    assert "_note_region_seen(report.region, p2.steam_id)" not in src
-    assert "_note_region_seen(report.region, p1.steam_id)" not in src
+    assert "report.reported_by_steam_id)" in src
+    assert "_region_sighting = (_issued_region, p2.steam_id)" not in src
+    assert "_region_sighting = (_issued_region, p1.steam_id)" not in src
 
-    # The old source is gone, not merely supplemented — a weak feed into the
-    # same counter would make the counter worth what the weak feed is worth.
+    # The old feeds are gone, not merely supplemented.
     assert "_note_region_seen(" not in inspect.getsource(main.queue_join)
-
-    # and nowhere else, so there is exactly one feed to reason about
     assert MAIN_PY.read_text(encoding="utf-8").count("_note_region_seen(") == 2, (
         "one definition and one caller"
     )
+
+
+def test_the_sighting_is_published_only_after_the_match_has_committed():
+    """r13 MEDIUM. The map is process memory and the match is not committed
+    where the region is read. A rollback after the sighting -- the duplicate
+    branch takes exactly that path -- would leave evidence for a game that was
+    never recorded, and two of those corroborate a region on the strength of
+    two failures.
+
+    So the lookup happens inside the transaction and the PUBLICATION happens
+    after it: read, hold, commit, then note."""
+    src = inspect.getsource(main.submit_match)
+    read_at = src.index("SELECT region FROM issued_room_regions")
+    commit_at = src.index("await db.commit()", read_at)
+    publish_at = src.index("_note_region_seen(*_region_sighting)")
+    assert read_at < commit_at < publish_at, (
+        "the sighting is published before the match it witnesses is committed"
+    )
+    # ...and the rollback branch returns before the publication
+    duplicate_return = src.index('series_status="duplicate"')
+    assert commit_at < duplicate_return < publish_at
+
+
+def test_a_room_this_server_never_issued_contributes_nothing():
+    """A private or tournament room has no binding, so there is no region to
+    read and no sighting to make. Fail-closed: absence of a binding is not an
+    invitation to fall back on what the client said."""
+    src = inspect.getsource(main.submit_match)
+    guard = src[src.index("_region_sighting = None"):src.index("_note_region_seen(*")]
+    assert "if _issued_region:" in guard, (
+        "the sighting must be conditional on the binding existing"
+    )
+    assert "report.region" not in guard, "no fallback to the client's field"
+
+
+def test_the_issued_binding_is_written_where_the_room_is_issued():
+    """One helper stamps the room on both queue rows, and both issuance sites
+    go through it -- so the binding is written exactly when two players are
+    told where to play, and only when the stamp actually took."""
+    stamp = inspect.getsource(main._queue_stamp_room_reciprocal)
+    assert "INSERT INTO issued_room_regions" in stamp
+    assert "ON CONFLICT (room_name) DO NOTHING" in stamp, (
+        "a reused room name must keep the issuance that sent players somewhere"
+    )
+    # written only on the proven-reciprocal path
+    assert stamp.index("if updated != {my_pid, opp_pid}:") < stamp.index(
+        "INSERT INTO issued_room_regions")
+    src = MAIN_PY.read_text(encoding="utf-8")
+    assert src.count("_queue_stamp_room_reciprocal(db,") == 2, (
+        "both issuance sites must go through the helper that writes the binding"
+    )
+    assert src.count("INSERT INTO issued_room_regions") == 1
 
 
 def test_the_log_line_says_whether_the_choice_was_corroborated():
@@ -491,14 +569,14 @@ def test_a_corroborated_pool_over_its_cap_gives_up_its_oldest():
 
 def test_a_sighting_is_taken_on_every_accepted_report_not_once_per_reporter():
     """r12 MEDIUM, answered by the source rather than by a new mechanism. The
-    map used to be fed at join time, once — so two genuine clients that joined
+    map used to be fed at join time, once -- so two genuine clients that joined
     before their session tokens were minted were accepted, contributed nothing,
     and were never re-noted, whatever they did afterwards.
 
     The source is now every accepted match report, which is a recurring event:
     an unminted session costs the reports made before its token exists and
-    nothing after. Pinned two ways — the stamp refreshes on re-report, and the
-    call is not behind any once-per-anything condition."""
+    nothing after. Pinned two ways -- the stamp refreshes on re-report, and the
+    lookup is not behind any once-per-anything condition."""
     reporter = "76561198000000401"
     main._note_region_seen("eu", reporter)
     _age("eu", main._REGION_SEEN_TTL_SECONDS - 5)
@@ -509,7 +587,7 @@ def test_a_sighting_is_taken_on_every_accepted_report_not_once_per_reporter():
     )
 
     src = MAIN_PY.read_text(encoding="utf-8")
-    call = src.index("_note_region_seen(report.region")
+    call = src.index("SELECT region FROM issued_room_regions")
     guard = src[src.rindex("if ", 0, call):call]
     assert "_session_was_verified(request)" in guard, (
         "the sighting must still require an established session"
@@ -518,3 +596,4 @@ def test_a_sighting_is_taken_on_every_accepted_report_not_once_per_reporter():
         "the sighting is per accepted report; a one-shot guard would restore "
         "the hole this replaced"
     )
+

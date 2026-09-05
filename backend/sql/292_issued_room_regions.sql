@@ -1,0 +1,29 @@
+-- 292: the region the SERVER issued for a ranked room, keyed by the room name.
+--
+-- Review r13 HIGH. The region-corroboration map used to take its evidence from
+-- the match report's `region` field. That field is outside the seven-field
+-- match HMAC (p1:p2:p1_rounds:p2_rounds:is_ranked:reporter:room_id — a format
+-- that does not change), so establishing the reporter's session proves who is
+-- speaking and nothing about the region named in the sentence: two accounts
+-- could play real games and label them with a region nobody can connect to,
+-- corroborate it, and have it beat a real region in a tie-break.
+--
+-- The server already CHOOSES the region for every queue-issued ranked room and
+-- tells both seats to connect there. This table keeps that decision, so the
+-- evidence can be read back from what the server issued rather than from what a
+-- client reports. The room name IS covered by the HMAC, so a report can only
+-- reach the binding for the room it was actually signed for; and a room whose
+-- region does not exist produces no accepted match, which is what stops the
+-- server from corroborating its own guesses.
+--
+-- Rows are evidence with a shelf life: the map's own TTL is 7 days and the
+-- prune job deletes past 30. Idempotent, IF NOT EXISTS — safe to re-run.
+
+CREATE TABLE IF NOT EXISTS issued_room_regions (
+    room_name  VARCHAR(64) PRIMARY KEY,
+    region     VARCHAR(16) NOT NULL DEFAULT '',
+    issued_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_issued_room_regions_issued_at
+    ON issued_room_regions (issued_at);

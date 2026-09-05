@@ -3454,7 +3454,7 @@ namespace CompetitiveRounds
                 // for. Carrying it across rooms would let the ranked-override at
                 // report time force-rank a later casual game vs an unrelated
                 // (possibly vanilla) opponent.
-                ApiClient.ActiveRankedSeriesId = null; ApiClient.ActiveRankedSeriesRoom = "";
+                ApiClient.ClearActiveSeries();
                 // Bug 231: the tournament banner context binds to the same
                 // pairing/room as the series id — it dies here with it (#353).
                 ClearTournamentContext();

@@ -151,7 +151,9 @@ class FakeSession:
                 self.eligibility_sql = sql
                 self.lock_order.append("series")
                 return _Result([(1,)] if self.series_still_eligible else [])
-            assert "INTERVAL '7 days'" in sql, "the age bound must be a literal interval, not a bind (#448)"
+            assert "CAST(:live_window AS interval)" in sql, (
+                "an interval bind has to be CAST, never concatenated (#448)"
+            )
             self.freshness_checks += 1
             return _Result([(1,)] if self.series_fresh else [])
         if "FROM ranked_series" in sql:
@@ -503,39 +505,52 @@ def test_a_series_the_name_cannot_reach_is_refused_and_asked_in_sql():
     assert session.inserts == 0
 
 
-def test_the_name_reaches_one_series_and_ages_from_the_end_not_the_start():
-    """Two r12 findings, one predicate.
+def test_the_name_reaches_one_series_that_is_live_and_has_been_played():
+    """Three r-round findings, one predicate, asked of the server's own record.
 
     REACHABILITY. The unnamed path can only ever reach one series. Naming used
-    to reach every series of the pair inside a week, so a participant could
-    file one disconnect against the other for every normally-completed series
-    they had played -- and ranked_dc_count feeds the leave-% denominator. A
-    name reaches a series that has not completed, or the pair's most recent
-    one: at most one completed series at any moment, which is the bound the
-    unnamed path already had.
+    to reach every series of the pair inside a week, so a participant could file
+    one disconnect against the other for every normally-completed series they
+    had played -- and ranked_dc_count feeds the leave-% denominator. A name
+    reaches a series that has not completed, or the pair's most recent one.
 
-    FRESHNESS. It used to be asked of created_at, which is the one column that
-    says nothing about whether a series is over. Resume-forever is the whole
-    point of the helper this endpoint switched to in July -- a resumed series
-    and game 3 of a long BO3 both have an ancient created_at -- so the bound
-    refused exactly the reports naming was added to save. It is asked of the
-    END now, and a series with no end is running, which is not an age at
-    all."""
+    LIVENESS (r13 MEDIUM). `completed_at IS NULL` was carrying "still running",
+    and it cannot: a tournament forfeit deliberately leaves its series row
+    active with both terminal timestamps null forever, so every old forfeited
+    series stayed nameable and each was worth one disconnect. A running series
+    is one something happened in recently, and `last_activity_at` is the column
+    the server stamps itself.
+
+    GAMEPLAY (r13 MEDIUM). The ">= 2 total points" rule existed only on the
+    client, so an authenticated participant could report an opponent at 0-0 in a
+    series where nothing had happened. The same bar is asked of live_p*_points,
+    or satisfied by a recorded match."""
     sql = MAIN_PY.read_text(encoding="utf-8")
     start = sql.index("SELECT 1 FROM ranked_series s")
-    query = sql[start:start + 1200]
+    query = sql[start:start + 1600]
     assert "s.completed_at IS NULL" in query
     assert "ORDER BY s2.created_at DESC LIMIT 1" in query, (
         "the pair's most recent series is the one completed series a name reaches"
     )
-    assert "COALESCE(s.completed_at, s.invalidated_at) >= NOW() - INTERVAL '7 days'" in query, (
-        "an abandoned series has no completed_at; invalidated_at is its end"
+    assert "COALESCE(s.last_activity_at, s.created_at)" in query, (
+        "liveness is asked of the column the server stamps, not of a null"
     )
-    assert "s.created_at >= NOW()" not in query, (
-        "a created_at bound refuses a legitimately resumed active series"
+    assert "CAST(:live_window AS interval)" in query, (
+        "an interval bind has to be CAST, never concatenated (#448)"
+    )
+    assert "COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0)" in query
+    assert "EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id)" in query
+    assert "INTERVAL '7 days'" not in query, (
+        "the created_at/completed_at week is retired; liveness replaced it"
     )
     # asked of the database clock, never compared to a python now
     assert "NOW()" in query and "datetime.now" not in query
+    # and the window is a number this module owns, not a literal in a string
+    assert main.DC_LIVE_WINDOW_SECONDS <= 24 * 3600, (
+        "a day-wide window would let a name walk back through the pair's history"
+    )
+    assert main.DC_MIN_LIVE_POINTS >= 2, "the server bar must not be below the client's"
+
 
 def test_a_malformed_series_id_is_a_4xx_so_the_client_stops_retrying():
     """4xx is permanent to the client's retry pass. A report whose id cannot
@@ -637,28 +652,64 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
     api = API_CLIENT_CS.read_text(encoding="utf-8")
     fence = _cs_method_body(API_CLIENT_CS, "public static string SeriesIdForThisRoom()")
     assert "PhotonNetwork.InRoom" in fence
-    assert "ActiveRankedSeriesRoom" in fence
-    assert 'return string.Equals(ActiveRankedSeriesRoom, here, StringComparison.Ordinal) ? sid : "";' in fence
-    # Every publish of the id records the room it was published for, and every
-    # clear clears both — otherwise the fence compares against a stale room
-    # name. Asserted per WRITE SITE rather than by counting occurrences, so the
-    # field declarations cannot make the totals agree by accident.
-    sites = 0
-    for src in (api, gsw, (PLUGIN / "Plugin.cs").read_text(encoding="utf-8")):
-        lines = src.splitlines()
-        for i, ln in enumerate(lines):
+    assert "H2HRules.SeriesForRoom(activeSeriesBinding" in fence, (
+        "r13 HIGH: the fence asks the occupancy rule, not a room name"
+    )
+    assert "RoomIncarnation, OpponentInRoomOrEmpty());" in fence, (
+        "the fence has to hand the rule the occupancy and the pairing, not a name"
+    )
+    # The id and the room it was published for used to be two assignments a
+    # caller had to remember to write together, and this sweep checked that
+    # every caller did. r13 H1 removed the choice: both live in ONE record,
+    # written by PublishActiveSeries and cleared by ClearActiveSeries, so the
+    # question worth asking is whether anything writes the id outside them.
+    #
+    # Asserted per WRITE SITE and per FILE rather than by counting occurrences,
+    # because a count is satisfied by any two lines that happen to add up.
+    strays = []
+    for name, src in (("ApiClient.cs", api), ("GameStateWatcher.cs", gsw),
+                      ("Plugin.cs", (PLUGIN / "Plugin.cs").read_text(encoding="utf-8"))):
+        for ln in src.splitlines():
             if "ActiveRankedSeriesId = " not in ln:
                 continue
-            if "public static" in ln:      # the declaration, not a write
+            if "public static string ActiveRankedSeriesId" in ln:   # the declaration
                 continue
-            near = ln + (lines[i + 1] if i + 1 < len(lines) else "")
-            assert "ActiveRankedSeriesRoom = " in near, (
-                f"a write to the series id does not set its room: {ln.strip()}"
-            )
-            sites += 1
-    # 3 publishes (preflight, queue both_ready, queue poll) and 4 clears
-    # (two in ApiClient, the game-report boundary, the room-leave edge).
-    assert sites == 7, f"expected 3 publishes and 4 clears, found {sites}"
+            strays.append((name, ln.strip()))
+    # PublishActiveSeries assigns it; ClearActiveSeries nulls it. Nothing else.
+    assert [n for n, _ in strays] == ["ApiClient.cs", "ApiClient.cs"], (
+        f"the series id is written outside the two methods that own it: {strays}"
+    )
+    publish = _cs_method_body(API_CLIENT_CS, "public static void PublishActiveSeries(string seriesId, string room)")
+    clear = _cs_method_body(API_CLIENT_CS, "public static void ClearActiveSeries()")
+    assert "ActiveRankedSeriesId = seriesId;" in publish
+    assert "ActiveRankedSeriesId = null;" in clear
+    assert "activeSeriesBinding = null;" in clear, "the id is cleared and its binding is not"
+
+    # ...and the callers are still the sites they were: 3 publishes (preflight,
+    # queue both_ready, queue poll) and 4 clears (two in ApiClient, the
+    # game-report boundary, the room-leave edge).
+    sites = []
+    for name, src in (("ApiClient.cs", api), ("GameStateWatcher.cs", gsw),
+                      ("Plugin.cs", (PLUGIN / "Plugin.cs").read_text(encoding="utf-8"))):
+        for ln in src.splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("public static void PublishActiveSeries"):
+                continue
+            if stripped.startswith("public static void ClearActiveSeries"):
+                continue
+            if "PublishActiveSeries(" in ln:
+                sites.append((name, "publish"))
+            elif "ClearActiveSeries()" in ln:
+                sites.append((name, "clear"))
+    assert sorted(sites) == sorted([
+        ("ApiClient.cs", "publish"),        # preflight
+        ("ApiClient.cs", "publish"),        # queue /ready both_ready
+        ("ApiClient.cs", "publish"),        # queue poll ready_join
+        ("ApiClient.cs", "clear"),          # live-points "not active" refusal
+        ("ApiClient.cs", "clear"),          # the game-report boundary
+        ("GameStateWatcher.cs", "clear"),   # the polled room exit
+        ("Plugin.cs", "clear"),             # the reliable room-leave edge
+    ]), f"the publish/clear sites moved: {sorted(sites)}"
 
 
 def test_the_queued_body_is_one_constant_on_both_paths():
@@ -704,17 +755,22 @@ def test_the_retry_pass_removes_by_reference_and_not_by_a_stale_index():
 
 
 def test_one_faulting_pass_cannot_retire_the_queue_for_the_session():
-    """Unity stops a coroutine that lets an exception out, and
-    _outboxLoopStarted is written once. Before the supervisor, one throw
-    ended every retry for the rest of the session — including reports already
-    written to disk — with nothing but the exception in the log."""
-    sup = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor()")
+    """Unity stops a coroutine that lets an exception out. Before the
+    supervisor, one throw ended every retry for the rest of the session —
+    including reports already written to disk — with nothing but the exception
+    in the log.
+
+    The property is unchanged; what USED to record "a supervisor exists" is
+    not. It was a static bool, and r13 replaced it with the host that is
+    driving one, because destroying that host stops the coroutine without
+    running the `finally` that cleared the bool."""
+    sup = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor(int generation)")
     assert "top.MoveNext()" in sup, "the pass must be driven by hand to be catchable"
     assert "catch (Exception ex)" in sup
-    assert "finally { _outboxLoopStarted = false; }" in sup
+    assert "_outboxLoopHost = null;" in sup, "a supervisor that returns must release the host"
+    assert "finally {" in sup, "release has to happen on the way out, however it leaves"
     src = API_CLIENT_CS.read_text(encoding="utf-8")
-    assert src.count("_outboxLoopStarted = false") == 1
-    assert "StartCoroutine(OutboxSupervisor())" in src
+    assert "StartCoroutine(OutboxSupervisor(generation))" in src
 
 
 def test_the_guard_covers_the_request_and_not_only_the_pass():
@@ -727,7 +783,7 @@ def test_the_guard_covers_the_request_and_not_only_the_pass():
 
     Nested enumerators are driven on the same stack; only real yield
     instructions are handed to Unity."""
-    sup = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor()")
+    sup = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor(int generation)")
     assert "var nested = current as IEnumerator;" in sup
     assert "stack.Add(nested);" in sup
     assert "stack.Count < OUTBOX_NEST_LIMIT" in sup, "the hand-driving must be bounded"
@@ -741,19 +797,17 @@ def test_the_guard_covers_the_request_and_not_only_the_pass():
     assert pass_body.index("p.nextAt =") < pass_body.index("yield return PostRequest(")
 
 
-def test_a_supervisor_that_did_not_start_does_not_latch_the_flag():
-    """r12 LOW. The premise was that StartCoroutine THROWS on an inactive
+def test_a_supervisor_that_did_not_start_takes_no_ownership():
+    """r12 LOW, kept: the premise was that StartCoroutine THROWS on an inactive
     host. On an inactive host Unity logs and returns null instead, so a
-    try/catch around the call proves nothing about whether anything started —
-    and the flag is the only guard, so latching it on a null answer retires the
-    retry queue with no supervisor behind it."""
+    try/catch around the call proves nothing about whether anything started.
+    The returned Coroutine is what says so, and ownership is recorded only
+    after it comes back non-null."""
     ensure = _cs_method_body(API_CLIENT_CS, "private static void EnsureOutboxLoop()")
-    assert "var running = Plugin.Instance.StartCoroutine(OutboxSupervisor());" in ensure
+    assert "var running = host.StartCoroutine(OutboxSupervisor(generation));" in ensure
     assert "if (running == null)" in ensure
-    assert ensure.index("if (running == null)") < ensure.index("_outboxLoopStarted = true;")
+    assert ensure.index("if (running == null)") < ensure.index("_outboxLoopHost = host;")
     assert "_outboxLoopWarned" in ensure, "a queue with no driver has to say so once"
-
-
 def test_the_initial_delay_set_stays_small_and_explicit():
     """No longer a safety property — remove-by-reference is — but a new delay
     is still a decision somebody should have to make on purpose."""
@@ -852,20 +906,67 @@ def test_one_room_cannot_spend_the_shared_bucket():
     assert most_in_window <= _cs_int_const("MAX_REQUESTS_PER_ROOM")
 
 
-def test_a_failed_start_does_not_latch_the_outbox_off():
-    """StartCoroutine throws when the host object is inactive or being
-    destroyed, and both callers swallow it. Setting the guard flag first
-    latched "a supervisor exists" with none running — and the flag is the only
-    guard, so nothing could start one afterwards. Set after the call returns, a
-    failed start leaves the flag false and the next enqueue re-arms."""
-    body = _cs_method_body(API_CLIENT_CS, "private static void EnsureOutboxLoop()")
-    assert "StartCoroutine(OutboxSupervisor());" in body
-    assert "_outboxLoopStarted = true;" in body
-    assert body.index("StartCoroutine(OutboxSupervisor());") < body.index("_outboxLoopStarted = true;"), (
-        "the guard latches before the coroutine it guards exists"
+def test_the_supervisor_is_owned_by_a_host_and_not_by_a_latch():
+    """r13 MEDIUM, and the finding that replaces this test's old premise.
+
+    Ownership used to be a static bool cleared by the coroutine's `finally`.
+    The ordinary way a supervisor dies does not run one: destroying the
+    GameObject it was started on stops it where it stands. The bool then read
+    "a supervisor exists" for the rest of the process, the respawned host
+    declined to start another, and reports already on disk sat unsent -- with
+    the enqueue that would have re-armed it returning early on the duplicate
+    before it got that far.
+
+    Four properties, each the answer to one of those:
+
+      1. ownership names WHICH host, so a respawn does not inherit it. Unity
+         reports a destroyed object as null, so the same test covers a host
+         that was destroyed without being replaced;
+      2. it is generation-stamped, so a late `finally` from a superseded
+         supervisor cannot clear its replacement's;
+      3. it expires on a missed lap, which is the bound that covers however
+         else a coroutine can stop without unwinding -- there is no enumerating
+         those;
+      4. it is asked on a TICK, not only on an enqueue. A session whose driver
+         died with reports already queued makes no further enqueue, and that is
+         exactly the session whose queue would otherwise never move.
+    """
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "_outboxLoopStarted" not in src, "the latch is back"
+
+    live = _cs_method_body(API_CLIENT_CS, "private static bool OutboxLoopIsLive(MonoBehaviour host)")
+    assert "if (_outboxLoopHost == null) return false;" in live, (
+        "a destroyed host has to read as no owner"
+    )
+    assert "if (!ReferenceEquals(_outboxLoopHost, host)) return false;" in live, (
+        "a respawned host has to read as no owner"
+    )
+    assert "_outboxLoopBeatRt <= OUTBOX_BEAT_TIMEOUT" in live, "ownership never expires"
+
+    supervisor = _cs_method_body(API_CLIENT_CS, "private static IEnumerator OutboxSupervisor(int generation)")
+    assert "if (_outboxLoopGeneration != generation) yield break;" in supervisor
+    assert "_outboxLoopBeatRt = Time.realtimeSinceStartup;" in supervisor, "nothing beats"
+    assert "finally { if (_outboxLoopGeneration == generation) _outboxLoopHost = null; }" in supervisor, (
+        "a superseded supervisor's finally can still clear the live owner"
     )
 
+    enqueue = _cs_method_body(API_CLIENT_CS, "public static void EnqueueFailedReport(string url, string json)")
+    dup = enqueue.index("if (pending.url == url && pending.json == json)")
+    assert enqueue.index("EnsureOutboxLoop();") < dup, (
+        "the duplicate enqueue returns before it can re-arm the driver"
+    )
 
+    tick = _cs_method_body(API_CLIENT_CS, "internal static void OutboxTick()")
+    assert "if (_pendingReports.Count == 0) return;" in tick, "the tick has to be free when idle"
+    assert "EnsureOutboxLoop();" in tick
+    plugin_cs = (API_CLIENT_CS.parent / "Plugin.cs").read_text(encoding="utf-8")
+    assert "ApiClient.OutboxTick();" in plugin_cs, "nothing calls the tick"
+
+    # ...and the beat window is several laps, not one: a single late frame is
+    # not evidence that a coroutine died.
+    import re as _re
+    lap = float(_re.search(r"OUTBOX_BEAT_TIMEOUT = (\d+(?:\.\d+)?)f;", src).group(1))
+    assert lap >= 30.0, f"OUTBOX_BEAT_TIMEOUT={lap} is inside ordinary jitter"
 def test_the_changelog_states_the_retry_budget():
     """r11. Two bullets promised the report is "retried until the server takes
     it". The budget is twenty attempts on a linear-ish backoff capped at four
@@ -917,28 +1018,114 @@ def test_the_outbox_is_written_by_replacement_not_by_truncation():
     interruption between the truncate and the last byte leaves an empty or
     half-written queue, losing exactly the reports the file exists to carry
     through a crash, in exactly the window where one is most likely -- it is
-    rewritten on every enqueue and every dequeue. Written beside and moved over,
-    an interruption leaves either the whole previous queue or the whole new
-    one."""
+    rewritten on every enqueue and every dequeue. Written beside and moved
+    over, an interruption leaves either the whole previous queue or the whole
+    new one."""
     body = _cs_method_body(API_CLIENT_CS, "private static void PersistOutbox()")
     assert "File.WriteAllText(OutboxPath," not in body, (
         "the live queue file must never be opened for truncation"
     )
-    assert 'string tmp = OutboxPath + ".tmp";' in body
-    assert "File.WriteAllText(tmp, sb.ToString());" in body
+    assert "string tmp = OutboxTempPath;" in body
+    assert "File.WriteAllText(tmp, body + trailer);" in body
     assert "File.Replace(tmp, OutboxPath, null);" in body
     assert "File.Move(tmp, OutboxPath);" in body
     # the whole file exists before anything replaces the old one
     assert body.index("File.WriteAllText(tmp") < body.index("File.Replace(tmp")
     assert body.index("File.WriteAllText(tmp") < body.index("File.Move(tmp")
-    # an empty queue still removes the file rather than leaving a stale one
-    assert "if (File.Exists(OutboxPath)) File.Delete(OutboxPath);" in body
     # and a write that fails is still said out loud once (r12 finding A4) --
     # the sentence about surviving a crash is worth nothing if the write
     # failing is silent
     assert "_outboxPersistWarned" in body
 
 
+def test_an_empty_queue_is_written_rather_than_deleted():
+    """r13 HIGH, the half that would have been a new bug. Once a stranded temp
+    can be recovered, deleting the live file on an empty queue leaves that temp
+    as the ONLY file on disk -- so the next launch would recover an older
+    generation and re-send reports that had already landed. An empty generation
+    is a write like any other and outranks it by the same rule.
+
+    The one session that writes nothing is the one that never queued anything:
+    no live file, no temp, nothing to say."""
+    body = _cs_method_body(API_CLIENT_CS, "private static void PersistOutbox()")
+    assert "File.Delete(OutboxPath)" not in body, (
+        "deleting the live copy hands the next launch a stale temp with nothing to outrank it"
+    )
+    assert ("if (body.Length == 0 && !File.Exists(OutboxPath) && !File.Exists(tmp)) return;"
+            in body), "a session that never queued anything should leave no file"
+    assert body.index("if (body.Length == 0") < body.index("File.WriteAllText(tmp")
+
+
+def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
+    """r13 HIGH. Write-beside-and-move closed the torn-file window and opened a
+    smaller one: written in full, not yet renamed. In THAT window the temp is
+    the newest queue -- it holds the enqueue that the live copy does not, and
+    on a first creation there is no live copy at all -- and load read only the
+    live copy, so the report the queue exists to carry was lost anyway.
+
+    Load now weighs both names. Four states, each with an answer here:
+
+      live newer / no temp   -> the ordinary case, live copy, temp deleted;
+      temp newer and whole   -> recovered, and promoted so a second crash does
+                                not have to recover it twice;
+      temp torn              -> not a queue: no trailer, wrong line count or
+                                wrong checksum, and it does not compete;
+      live has no trailer    -> a queue from a build before this format;
+                                readable, generation 0, and a trailered temp
+                                outranks it.
+    """
+    load = _cs_method_body(API_CLIENT_CS, "private static void LoadOutbox()")
+    assert "var live = ReadOutboxFile(OutboxPath, true);" in load, (
+        "the live copy is read with the legacy allowance -- older builds wrote no trailer"
+    )
+    assert "var stranded = ReadOutboxFile(tmp, false);" in load, (
+        "a temp with no trailer is a torn write, never a legacy queue"
+    )
+    assert ("bool takeStranded = stranded.whole" in load
+            and "stranded.generation > live.generation" in load), (
+        "the temp has to WIN on generation, not merely exist"
+    )
+    assert "!live.whole || stranded.generation" in load, (
+        "a first creation has no live copy for the temp to outrank"
+    )
+    # recovered means promoted, and a loser is removed rather than re-weighed
+    assert load.index("takeStranded") < load.index("File.Replace(tmp, OutboxPath, null);")
+    assert "try { File.Delete(tmp); } catch { }" in load
+    assert "_outboxGeneration = Math.Max(live.generation, stranded.generation);" in load, (
+        "the counter has to carry across launches or an older file outranks a newer one"
+    )
+
+    reader = _cs_method_body(
+        API_CLIENT_CS, "private static OutboxGeneration ReadOutboxFile(string path, bool allowLegacy)")
+    assert "if (claimedCount != bodyLines) return result;" in reader, "truncation is not detected"
+    assert "if (parts[3] != OutboxHash(body.ToString())) return result;" in reader, (
+        "a torn body is not detected"
+    )
+    assert "else if (!allowLegacy)" in reader and "return result;" in reader
+
+    persist = _cs_method_body(API_CLIENT_CS, "private static void PersistOutbox()")
+    assert "_outboxGeneration++;" in persist
+    assert persist.index("_outboxGeneration++;") < persist.index("File.WriteAllText(tmp"), (
+        "the generation on the trailer has to be this write's, not the last one's"
+    )
+    assert "OutboxHash(body)" in persist
+
+
+def test_the_outbox_trailer_is_a_marker_that_exists_for_no_other_purpose():
+    """#306. The trailer decides whether a file on disk is a queue at all, so it
+    must not be a string that could occur in the payload it terminates: every
+    body line is `url<TAB>json`, and no url begins with a hash."""
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert 'private const string OUTBOX_TRAILER = "#scr-outbox";' in src
+    assert src.count('"#scr-outbox"') == 1, "the marker is spelled in more than one place"
+    reader = _cs_method_body(
+        API_CLIENT_CS, "private static OutboxGeneration ReadOutboxFile(string path, bool allowLegacy)")
+    assert "StartsWith(OUTBOX_TRAILER, StringComparison.Ordinal)" in reader, (
+        "the marker is matched by literal rather than through the constant"
+    )
+    assert "if (parts.Length != 4) return result;" in reader, (
+        "a trailer that is not the four fields this writes is not a trailer"
+    )
 def test_a_deadlock_victim_is_re_run_instead_of_being_handed_to_the_player(_stub_the_gates):
     """r12 MEDIUM. This endpoint locks the two participants and then the
     series; tournament completion holds FOR SHARE on every bound bracket series
@@ -1026,4 +1213,79 @@ def test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain():
     tail = [n for n in fn.body if not isinstance(n, ast.For)]
     assert not any(_commits(n) for n in tail), (
         "a commit outside the loops is the batch transaction coming back"
+    )
+
+
+def test_the_unnamed_path_is_bound_by_liveness_and_play_too(_stub_the_gates):
+    """r13 MEDIUM, the half that is easy to miss. Resolving "the pair's current
+    series" answers WHICH series and nothing else -- not that anything happened
+    in it, not that it is still live. If the two new terms lived only where a
+    NAME is validated, a client that simply omitted the name would walk past
+    both of them, and omitting a field is not a hurdle.
+
+    So they are asked in the LOCKED re-check, which both paths reach, and the
+    fake proves the runtime consults it: a series that fails there records
+    nothing whichever way it was resolved."""
+    locked = FakeSession(_players(), series_still_eligible=False)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(locked)                       # no name: the unnamed resolution
+    assert caught.value.status_code == 403
+    assert locked.eligibility_locks == 1, "the unnamed path must reach the locked check"
+    assert locked.inserts == 0 and locked.increments == 0
+
+    ok = FakeSession(_players())
+    assert _call(ok)["status"] == "recorded"
+    assert "COALESCE(s.last_activity_at, s.created_at)" in ok.eligibility_sql, (
+        "liveness is not asked on the path a client reaches by sending no name"
+    )
+    assert "COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0)" in ok.eligibility_sql
+    assert "EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id)" in ok.eligibility_sql
+
+
+def test_each_prune_mode_re_asks_its_whole_selection_under_its_own_lock():
+    """r13 MEDIUM x2 and LOW. A locked re-check that asks a SUBSET of the
+    selection is a re-check for the terms it kept and a stale snapshot for the
+    rest. Mode 2 kept active/<2 and dropped the stall age and the unsettled-bet
+    term, so a series snapshotted stalled at 1-0 and resumed at 1-1 while the
+    loop worked still passed, and live wagers were refunded. Mode 1 had no
+    locked re-check at all: it overwrote whatever state had arrived -- an admin
+    reversal's invalidation reason included -- with `no_match_reported`, which
+    the disconnect path treats as exempt.
+
+    Each mode's re-check must therefore carry every term its selection did."""
+    src = inspect.getsource(main._prune_stale_series)
+
+    def slice_from(marker):
+        start = src.index(marker)
+        return src[start:src.index("first()", start)]
+
+    mode_terms = {
+        "_still_a = ": [
+            "rs.status = 'active'",
+            "rs.invalidated_at IS NULL",
+            "rs.is_tournament = FALSE",
+            "rs.created_at < NOW() - CAST(:cutoff AS interval)",
+            "NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id)",
+        ],
+        "_still_b = ": [
+            "rs.status = 'active'",
+            "rs.invalidated_at IS NULL",
+            "rs.is_tournament = FALSE",
+            "rs.p1_series_wins < 2 AND rs.p2_series_wins < 2",
+            "EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id)",
+            "b.settled_at IS NULL",
+            "CAST(:stalled AS interval)",
+        ],
+    }
+    for marker, terms in mode_terms.items():
+        recheck = slice_from(marker)
+        assert "FOR NO KEY UPDATE" in recheck, f"{marker} does not lock"
+        for term in terms:
+            assert term in recheck, f"{marker} re-check dropped: {term}"
+
+    # ...and mode 1 takes that lock BEFORE it moves any gold, which is the
+    # order the admin reversal takes on the same rows.
+    tail = src[src.index("for sid, player1_id, player2_id, prune_reason in abandon_rows:"):]
+    assert tail.index("_still_a = ") < tail.index("_refund_series_bets("), (
+        "mode 1 refunds before it locks the series it is refunding"
     )

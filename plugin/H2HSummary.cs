@@ -55,9 +55,16 @@ namespace CompetitiveRounds
     /// actor number, opponent id) — r3 §1.2/1.3 MEDIUM. When the actor or
     /// the id changes, or no single other fighter remains (the opponent
     /// left, a third fighter arrived), the line is cleared and the next
-    /// resolvable opponent gets its own request, under the same
-    /// one-request-per-key rule; keyGen moves with every such change so a
+    /// resolvable opponent gets its own attempt, under the same per-key
+    /// budget as the first; keyGen moves with every such change so a
     /// response for the previous key is discarded.
+    ///
+    /// "One request per key" is what that budget USED to be, and this
+    /// paragraph outlived it (r13 LOW): the retry ladder below spends up to
+    /// FOUR requests on a single key -- the 401 re-send after the token
+    /// changes, the transport re-send 6 s later, the 429 re-send after
+    /// retry_after. One ATTEMPT per key is the rule; the attempt is bounded,
+    /// not single, and the Retry paragraph is where its bound is stated.
     ///
     /// Binding: a request captures the Room OBJECT it was sent from, an
     /// incarnation counter bumped on every OnJoinedRoom and Invalidate

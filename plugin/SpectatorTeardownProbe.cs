@@ -197,6 +197,15 @@ namespace CompetitiveRounds
         private static int frames;
         private static int physFrames;
         private static int rosterAtOpen;
+
+        /// <summary>The PlayerIDs the window opened over, not merely how many
+        /// there were. Roster drift used to be "a body first seen on a frame
+        /// after the first", which misses a body that joined between OpenWindow
+        /// and the first Tick entirely -- it is new to the map, but so is
+        /// everyone on that frame, so the rule could not tell them apart. The
+        /// set can: anyone not in it arrived after the window did, whenever the
+        /// sampler happened to notice (r13 LOW).</summary>
+        private static readonly HashSet<int> rosterIdsAtOpen = new HashSet<int>();
         private static bool rosterChanged;
         private static bool sawStopped;
         private static bool revived;
@@ -248,9 +257,37 @@ namespace CompetitiveRounds
             new Dictionary<int, StepCount>();
 
         /// <summary>Window totals for the two counters, across every body.
-        /// `physSteps` is the sample size; `driveSteps` is the answer.</summary>
+        /// `physSteps` is the sample size; `driveSteps` is the answer.
+        ///
+        /// THE ANSWER COMES FROM HERE, not from the per-body sums (r13 MEDIUM).
+        /// A body's counters are attributed through its current PlayerVelocity,
+        /// and an instance that is replaced mid-window, or destroyed before the
+        /// sampler has attributed it once, takes its counts out of that sum --
+        /// so the number the question is settled with was the one number a
+        /// component swap could quietly reduce. These two are incremented on
+        /// the physics step itself and no identity change can touch them. The
+        /// per-body figures remain, as attribution, and the line prints both:
+        /// a gap between them is a fact about the window worth seeing.</summary>
         private static int physSteps;
         private static int driveSteps;
+
+        /// <summary>How many prefix runs the instrument had done when this
+        /// window opened. `Alive` says the patch attached SOMETIME in this
+        /// process; it cannot say the patch ran during THIS window, and a
+        /// window with frames, bodies and no physics step at all would
+        /// otherwise be banked as a measured zero (r13 LOW).</summary>
+        private static int prefixRunsAtOpen;
+
+        /// <summary>Foreign prefixes and transpilers on PlayerVelocity.FixedUpdate
+        /// at the moment this window opened, and whether the census could be
+        /// taken at all. Either one makes the window non-comparable: this probe
+        /// reads the fields vanilla is about to read, and another patch that
+        /// writes them after us, or rewrites the method body, or declines to
+        /// run the original, makes "the branch vanilla took" a claim we are not
+        /// in a position to make. Refusing loudly is the outcome this file
+        /// prefers over a number with an asterisk (r13 MEDIUM).</summary>
+        private static int coPatches;
+        private static bool coPatchCensusFailed;
 
         private static int reports;
 
@@ -298,7 +335,10 @@ namespace CompetitiveRounds
                 stepCounts.Clear();
                 physSteps = 0;
                 driveSteps = 0;
-                rosterAtOpen = RosterCount();
+                rosterIdsAtOpen.Clear();
+                rosterAtOpen = SnapshotRoster();
+                prefixRunsAtOpen = PlayerVelocity_TeardownDrive_Patch.Runs;
+                CensusCoPatches();
                 windowsTotal++;
             }
             catch { open = false; }
@@ -346,15 +386,19 @@ namespace CompetitiveRounds
                     if (!bodies.TryGetValue(id, out st))
                     {
                         if (bodies.Count >= MAX_BODIES_TRACKED) continue;
-                        // A body seen on the FIRST sampled frame is part of the
-                        // roster this window opened with, however many of them
-                        // there are — they are all "new" on that frame because
-                        // the map starts empty. Only an arrival on a LATER
-                        // frame is a roster change. (Keying on the dictionary
-                        // being non-empty made every ordinary 1v1 print
-                        // rosterChanged=1, because body 2 was added while body
-                        // 1 was already in it.)
-                        if (frames > 0) rosterChanged = true;
+                        // Roster drift is asked of the ROSTER, not of the frame
+                        // count. "New to the accumulator map" cannot answer it:
+                        // on the first sampled frame every body is new, because
+                        // the map starts empty -- keying on the map being
+                        // non-empty made every ordinary 1v1 print
+                        // rosterChanged=1. `frames > 0` fixed that and bought a
+                        // hole with it: a body that joined between OpenWindow
+                        // and the first Tick arrives on frame 0 and is
+                        // indistinguishable from the roster the window opened
+                        // over, though the emitted line still says
+                        // players=rosterAtOpen (r13 LOW). The set of ids the
+                        // window opened with answers both.
+                        if (!rosterIdsAtOpen.Contains(id)) rosterChanged = true;
                         st = new BodyState
                         {
                             playerId = id,
@@ -396,9 +440,15 @@ namespace CompetitiveRounds
 
                     // A body whose PlayerVelocity was replaced starts a fresh
                     // baseline rather than differencing against another
-                    // instance's running totals.
+                    // instance's running totals -- but the OUTGOING instance is
+                    // drained first (r13 MEDIUM). Resetting the seen-counters
+                    // and moving on abandoned whatever that instance had banked
+                    // since the last drain, which is a body's last steps before
+                    // it was replaced: the steps most likely to be the ones
+                    // under question.
                     if (velId != 0 && velId != st.velId)
                     {
+                        DrainSteps(st);
                         st.velId = velId;
                         st.stepsSeen = 0;
                         st.driveStepsSeen = 0;
@@ -508,23 +558,47 @@ namespace CompetitiveRounds
                 // steps for the same reason a properly stopped body does. That
                 // is the failure direction this probe cannot have (#83), so
                 // such a window is banked nowhere and counted as notMeasured.
+                // Six conditions now, and the last three are all the same
+                // point: a window whose number cannot be attributed to vanilla
+                // must not be banked as one that can.
+                //
+                //   bracketLive     the patch attached at some point and has
+                //                   not latched dead;
+                //   bracketRan      it ran during THIS window. "Ever ran" is
+                //                   not "ran here", and a window that contains
+                //                   no physics step at all reports zero
+                //                   integrating steps for the same reason a
+                //                   properly stopped body does (#83);
+                //   uncoPatched     nothing foreign prefixes or rewrites the
+                //                   method. This probe reads the fields vanilla
+                //                   is about to read; a patch that writes them
+                //                   after us, rewrites the body, or declines to
+                //                   run the original makes that reading a claim
+                //                   about somebody else's code.
                 bool bracketLive = PlayerVelocity_TeardownDrive_Patch.Alive;
+                bool bracketRan = PlayerVelocity_TeardownDrive_Patch.Runs > prefixRunsAtOpen;
+                bool uncoPatched = coPatches == 0 && !coPatchCensusFailed;
                 bool comparable = why == COMPARABLE_CLOSE
                                   && !revived
                                   && frames > 0
                                   && bodies.Count > 0
-                                  && bracketLive;
+                                  && bracketLive
+                                  && bracketRan
+                                  && uncoPatched;
                 t.windows++;
                 if (comparable)
                 {
                     t.comparable++;
                     t.frames += frames;
                     t.physFrames += physFrames;
-                    t.steps += totalSteps;
-                    t.driveSteps += totalDrive;
+                    // The GLOBAL counters, for the reason on their
+                    // declaration: a per-body sum is what a replaced or
+                    // destroyed PlayerVelocity can silently shrink.
+                    t.steps += physSteps;
+                    t.driveSteps += driveSteps;
                     t.moved += totalMoved;
                 }
-                else if (!bracketLive) t.notMeasured++;
+                else if (!bracketLive || !bracketRan) t.notMeasured++;
 
                 if (reports >= MAX_REPORTS)
                 {
@@ -545,10 +619,18 @@ namespace CompetitiveRounds
                   .Append(" players=").Append(rosterAtOpen)
                   .Append(rosterChanged ? " rosterChanged=1" : "")
                   .Append(" bracket=").Append(bracketLive ? "live" : "absent")
+                  .Append(bracketRan ? "" : " bracketRan=0")
+                  .Append(coPatchCensusFailed ? " coPatched=?"
+                          : (coPatches > 0 ? " coPatched=" + coPatches : ""))
                   .Append(" comparable=").Append(comparable ? "1" : "0")
                   .Append(revived ? " revived=1" : "")
                   .Append(" physFrames=").Append(physFrames).Append("/").Append(frames)
-                  .Append(" driveSteps=").Append(totalDrive).Append("/").Append(totalSteps)
+                  // The answer, then what could be attributed to a body. They
+                  // agree unless an instance was replaced or destroyed, and the
+                  // difference is the size of what attribution lost.
+                  .Append(" driveSteps=").Append(driveSteps).Append("/").Append(physSteps)
+                  .Append(totalDrive == driveSteps && totalSteps == physSteps ? ""
+                          : " attributed=" + totalDrive + "/" + totalSteps)
                   .Append(" moved=").Append(totalMoved.ToString("F3"));
                 // Listed in first-seen order so two lines from one sitting can
                 // be read against each other, and labelled with the game's own
@@ -613,14 +695,60 @@ namespace CompetitiveRounds
             catch { return Vector3.zero; }
         }
 
-        private static int RosterCount()
+        /// <summary>The roster the window opens over: the count for the line,
+        /// and the ids in `rosterIdsAtOpen` so drift is a question about WHO
+        /// rather than about when the sampler first noticed.</summary>
+        private static int SnapshotRoster()
         {
             try
             {
                 var players = PlayerManager.instance != null ? PlayerManager.instance.players : null;
-                return players != null ? players.Count : 0;
+                if (players == null) return 0;
+                for (int i = 0; i < players.Count; i++)
+                {
+                    var p = players[i];
+                    if (p == null) continue;
+                    try { rosterIdsAtOpen.Add(p.PlayerID); } catch { }
+                }
+                return players.Count;
             }
             catch { return 0; }
+        }
+
+        /// <summary>Count the patches on PlayerVelocity.FixedUpdate that are not
+        /// ours, once per window rather than once per process -- a patch can be
+        /// applied by a mod that loads after us, and a census taken at startup
+        /// would answer for a world that no longer exists.
+        ///
+        /// Prefixes and transpilers only. A postfix cannot change the branch
+        /// vanilla took before it ran, so it does not invalidate the reading;
+        /// a prefix can write the three fields after us or decline to run the
+        /// original, and a transpiler can replace the branch outright.
+        ///
+        /// A census that THROWS is not a census: `coPatchCensusFailed` makes
+        /// the window non-comparable exactly as a positive count does, because
+        /// "we could not find out" and "there is nothing there" must not be the
+        /// same answer.</summary>
+        private static void CensusCoPatches()
+        {
+            coPatches = 0;
+            coPatchCensusFailed = false;
+            try
+            {
+                var target = AccessTools.Method(typeof(PlayerVelocity), "FixedUpdate");
+                if (target == null) { coPatchCensusFailed = true; return; }
+                var info = Harmony.GetPatchInfo(target);
+                if (info == null) return;
+                int foreign = 0;
+                if (info.Prefixes != null)
+                    foreach (var p in info.Prefixes)
+                        if (!string.Equals(p.owner, Plugin.ModId, StringComparison.Ordinal)) foreign++;
+                if (info.Transpilers != null)
+                    foreach (var p in info.Transpilers)
+                        if (!string.Equals(p.owner, Plugin.ModId, StringComparison.Ordinal)) foreign++;
+                coPatches = foreign;
+            }
+            catch { coPatchCensusFailed = true; }
         }
     }
 
@@ -652,18 +780,46 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(PlayerVelocity), "FixedUpdate")]
     internal static class PlayerVelocity_TeardownDrive_Patch
     {
-        private static bool ran;
+        private static int runs;
         private static bool dead;
 
         /// <summary>TRUE once the prefix has actually executed and has not
-        /// latched dead. Read by CloseWindow to decide whether the window was
-        /// measured at all.</summary>
-        internal static bool Alive { get { return ran && !dead; } }
+        /// latched dead. Read by CloseWindow to decide whether the patch
+        /// attached at all -- ATTACHMENT, not activity: see Runs.</summary>
+        internal static bool Alive { get { return runs > 0 && !dead; } }
 
+        /// <summary>How many times the prefix has run this process. A window
+        /// compares this against the value it opened with, because "the patch
+        /// attached earlier in this session" says nothing about whether a
+        /// physics step happened inside the window being reported (r13 LOW).</summary>
+        internal static int Runs { get { return runs; } }
+
+        /// <summary>LAST among prefixes (r13 MEDIUM). The three fields this
+        /// reads are vanilla's own inputs, and another prefix on the same
+        /// method may write them; sampling before it recorded a decision
+        /// vanilla was not going to make. HarmonyX orders prefixes high
+        /// priority to low, so Priority.Last puts this sample after every
+        /// prefix at a higher priority -- and it runs regardless of what any
+        /// of them returned, since HarmonyX runs every prefix even after one
+        /// returns false (bug #203, proven live on this codebase).
+        ///
+        /// It is an ORDERING, not a guarantee: a co-patch may sit at Last too,
+        /// and the order between equals is not ours to decide. That residue is
+        /// why the census below exists rather than being belt-and-braces --
+        /// any foreign prefix at all makes the window non-comparable, whatever
+        /// priority it holds.
+        ///
+        /// That covers a co-patch that WRITES the fields. A co-patch that
+        /// suppresses the original cannot be detected from in here at all --
+        /// this HarmonyX has no `__runOriginal` -- so it is answered where it
+        /// can be: SpectatorTeardownProbe counts foreign prefixes and
+        /// transpilers on this method per window and refuses to call such a
+        /// window comparable.</summary>
+        [HarmonyPriority(Priority.Last)]
         private static void Prefix(PlayerVelocity __instance)
         {
             if (dead) return;
-            ran = true;
+            runs++;
             if (!SpectatorTeardownProbe.WindowOpen()) return;
             try
             {

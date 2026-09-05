@@ -2605,6 +2605,12 @@ namespace CompetitiveRounds
             // Canvas UI tick (notifications, match status, session refresh)
             try { CompetitiveUI.Tick(); } catch { }
 
+            // Re-arm the report retry driver if it stopped. Self-throttled, and
+            // a no-op with an empty queue. On a tick rather than only on an
+            // enqueue because a session that has stopped enqueueing is the one
+            // whose queue would otherwise stay put.
+            try { ApiClient.OutboxTick(); } catch { }
+
             // F5 input (no log spam — just toggle)
             if (Input.GetKeyDown(KeyCode.F5))
             {
@@ -4547,7 +4553,7 @@ namespace CompetitiveRounds
             // suppressed the new room's preflight and posted the new game's
             // live points into the old pairing. Menu-time queue-staged ids
             // are untouched: no room exit fires for them, same as today.
-            try { ApiClient.ActiveRankedSeriesId = null; ApiClient.ActiveRankedSeriesRoom = ""; } catch { }
+            try { ApiClient.ClearActiveSeries(); } catch { }
             // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
             // materials die with the room too — Reset() previously had NO
             // caller, so the flush the r4 cap depends on never ran and a

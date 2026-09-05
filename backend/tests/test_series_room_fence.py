@@ -1,12 +1,20 @@
 """An observation is filed against the series for THIS room.
 
 A queue-staged `ActiveRankedSeriesId` survives a failed join into a later room
--- that is documented at the staging site and on `ActiveRankedSeriesRoom`, and
-it is why `SeriesIdForThisRoom()` exists. Ranked room NAMES are reused, so a
-seat that failed into series S and then plays a different opponent in a room of
-the same name still holds S. Any consumer that files an observation against a
-specific series therefore has to ask which room the id was published for, not
-merely whether an id exists.
+-- that is documented at the staging site and on the binding record, and it is
+why `SeriesIdForThisRoom()` exists. Ranked room NAMES are reused, so a seat that
+failed into series S and then plays a different opponent in a room of the same
+name still holds S. Any consumer that files an observation against a specific
+series therefore has to ask which room the id was published for, not merely
+whether an id exists.
+
+AND ASKING FOR THE NAME IS NOT ASKING FOR THE ROOM (r13 HIGH). The paragraph
+above describes the hazard exactly and the fence did not close it: it compared
+the room's NAME, which is the one thing the two occupancies share. The binding
+is now the occupancy -- H2HRules.RoomBoundSeries, stamped by the join that
+matched it and retired by any later join, the same rule the queue's pairing
+record has followed since r8. The rules themselves live in H2HRules so they run
+under the self-test harness; this file gates the wiring around them.
 
 Two questions, deliberately different, because the right one depends on whether
 the consumer still has a room to compare against:
@@ -30,6 +38,7 @@ from pathlib import Path
 PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 API_CLIENT_CS = PLUGIN / "ApiClient.cs"
 WATCHER_CS = PLUGIN / "GameStateWatcher.cs"
+H2H_RULES_CS = PLUGIN / "H2HRules.cs"
 
 
 def _cs_method_body(path, signature):
@@ -51,16 +60,36 @@ def _cs_method_body(path, signature):
 
 # -- the two questions -------------------------------------------------------
 
-def test_the_strict_fence_needs_the_room_and_an_exact_name():
+def test_the_strict_fence_needs_the_room_and_the_occupancy_it_was_issued_for():
+    """r13 HIGH moved the decision. A room NAME does not identify a room -- code
+    rooms are player-typed and reusable, ranked names recur -- so "published for
+    a room called this" let a pairing whose join failed leave its id standing
+    for the next occupancy of that name, with a different opponent. The rule now
+    names the occupancy (H2HRules.RoomBoundSeries), which is the distinction the
+    pairing record beside it has drawn since r8.
+
+    What this test can say is that the reader delegates, and hands the rule
+    everything the rule needs to decide. What the rule ANSWERS is decided by
+    H2HRules.SelfTest, which runs the cases rather than reading them."""
     body = _cs_method_body(API_CLIENT_CS, "public static string SeriesIdForThisRoom()")
-    assert 'if (!PhotonNetwork.InRoom) return "";' in body, (
-        "outside a room there is no room to have been published for"
+    assert "H2HRules.SeriesForRoom(activeSeriesBinding" in body, (
+        "the reader has to ask the rule, not compare a name of its own"
     )
-    assert "StringComparison.Ordinal" in body, (
+    for handed in ("PhotonNetwork.InRoom", "RoomIncarnation", "OpponentInRoomOrEmpty()"):
+        assert handed in body, f"the rule is not handed {handed}"
+    assert 'catch { return ""; }' in body, "a throw must not become a named series"
+
+    rules = H2H_RULES_CS.read_text(encoding="utf-8")
+    assert "StringComparison.Ordinal" in rules, (
         "room names are compared exactly, not case- or culture-folded"
     )
-    assert ('return string.Equals(ActiveRankedSeriesRoom, here, '
-            'StringComparison.Ordinal) ? sid : "";') in body
+    # ...and the record is written in exactly one place, so a second publish
+    # site cannot start answering for a series without the occupancy stamp
+    api = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert api.count("activeSeriesBinding = new H2HRules.RoomBoundSeries") == 1
+    assert api.count("ActiveRankedSeriesId = ") == 2, (
+        "the id is assigned outside PublishActiveSeries/ClearActiveSeries"
+    )
 
 
 def test_the_weak_question_is_false_when_there_is_nothing_to_compare():
@@ -70,15 +99,30 @@ def test_the_weak_question_is_false_when_there_is_nothing_to_compare():
     the one the fence exists to prevent."""
     body = _cs_method_body(
         API_CLIENT_CS, "public static bool ActiveSeriesContradictedByRoom()")
-    assert "if (!PhotonNetwork.InRoom) return false;" in body
-    assert "if (string.IsNullOrEmpty(ActiveRankedSeriesId)) return false;" in body
-    assert "if (string.IsNullOrEmpty(here)) return false;" in body
-    assert ("return !string.Equals(ActiveRankedSeriesRoom, here, "
-            "StringComparison.Ordinal);") in body
+    assert "H2HRules.SeriesContradictedByRoom(activeSeriesBinding" in body
     assert "catch { return false; }" in body, "a throw is not evidence of a wrong room"
-    # every early exit is false: the method only ever answers true from the
-    # comparison itself
-    assert body.count("return true") == 0
+    assert body.count("return true") == 0, (
+        "the reader answers true only through the rule"
+    )
+
+    # The rule keeps the polarity: every one of its exits for "nothing to
+    # compare" is false, and it says true only from evidence.
+    rule = _cs_method_body(
+        H2H_RULES_CS,
+        "internal static bool SeriesContradictedByRoom(RoomBoundSeries? bound, bool inRoom, string roomHere,")
+    assert "if (bound == null) return false;" in rule
+    assert "if (!inRoom) return false;" in rule
+    assert "if (string.IsNullOrEmpty(roomHere)) return false;" in rule
+    assert "if (string.IsNullOrEmpty(b.SeriesId)) return false;" in rule
+
+    # ...with one exception, and it is r13 HIGH's other half. A leave that
+    # produced no OnLeftRoom leaves this seat believing it is nowhere, and the
+    # old rule read that as "nothing to compare against" and kept the id. A
+    # join stamp that no longer matches the current incarnation is evidence on
+    # its own, so it is asked BEFORE the in-room question.
+    assert rule.index("b.JoinIncarnation != incarnation") < rule.index("if (!inRoom) return false;"), (
+        "the stale-occupancy evidence is behind the fail-open it exists to close"
+    )
 
 
 # -- the consumers -----------------------------------------------------------

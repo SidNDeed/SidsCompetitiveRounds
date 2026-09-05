@@ -370,6 +370,21 @@ def test_the_natural_end_also_proves_the_playhead_got_there():
     helper = _code(_cs_method_body(PROBE_CS, "private static float EndRunSeconds()"))
     assert "_tap.FramesDelivered - _framesAtEndSeek" in helper
     assert "if (rate <= 0) return -1f;" in helper
+
+    # r13 LOW: and the CONTRACT above the helper has to say what the line below
+    # it does. It read "negative means no evidence, which the caller treats as
+    # neutral rather than as failure" -- the exact opposite of `owed >= 4f`, so
+    # a maintainer reading the contract would have concluded that an
+    # unavailable measurement passes the control, and a maintainer restoring
+    # the contract would have made it true. The runtime is right; the sentence
+    # was two rounds stale.
+    src = PROBE_CS.read_text(encoding="utf-8")
+    doc = src[:src.index("private static float EndRunSeconds()")]
+    doc = doc[doc.rindex("/// <summary>Seconds of audio the tap was handed"):]
+    assert "neutral rather than as failure" not in doc, (
+        "the contract says an unavailable measurement is neutral; the code fails it"
+    )
+    assert "NEGATIVE IS A FAILING ANSWER" in doc
     # and it belongs to the run, like every other counter
     start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
     assert "_framesAtEndSeek = -1L;" in start

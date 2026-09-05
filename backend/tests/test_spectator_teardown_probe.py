@@ -58,6 +58,8 @@ load-bearing and this file exists to stop any of them drifting back:
 import re
 from pathlib import Path
 
+import pytest
+
 
 PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 PROBE_CS = PLUGIN / "SpectatorTeardownProbe.cs"
@@ -189,18 +191,107 @@ def test_the_restated_guard_still_matches_vanilla():
     vanilla = (Path(__file__).resolve().parents[2] / "logs-snapshot" / "decompiled"
                / "full" / "PlayerVelocity.cs")
     if not vanilla.exists():
-        return  # decompile not present on this seat; the patch test still runs
+        # r13 LOW. This used to `return`, which a test runner reports as a
+        # PASS -- so the one gate that compares the copy against the original
+        # read green on every seat that does not have the original. The gate
+        # cannot RUN without its input, but it must not claim to have.
+        pytest.skip("no decompile at logs-snapshot/decompiled/full/PlayerVelocity.cs "
+                    "(gitignored); the copy could not be compared against vanilla")
+
+    # ...and a snapshot older than the binary it was taken from is not evidence
+    # about the binary. Only checkable where the game is installed; where it is
+    # not, say so rather than passing.
+    game_dll = Path(r"C:\Program Files (x86)\Steam\steamapps\common\ROUNDS"
+                    r"\Rounds_Data\Managed\Assembly-CSharp.dll")
+    if game_dll.exists():
+        assert vanilla.stat().st_mtime >= game_dll.stat().st_mtime, (
+            "the decompile predates the installed Assembly-CSharp.dll; it is a "
+            "snapshot of an older game and this comparison proves nothing about "
+            "the build the probe runs against"
+        )
+
     text = vanilla.read_text(encoding="utf-8")
     body = text[text.index("private void FixedUpdate()"):]
     body = body[:body.index("internal void AddForce")]
     assert "if (data.isPlaying)" in body
     assert "if (simulated && !isKinematic)" in body
     assert "base.transform.position +=" in body
+
+    # The three terms being PRESENT is not the contract; their NESTING is. The
+    # probe reads `isPlaying && simulated && !isKinematic` as one predicate,
+    # which is only equivalent to vanilla while the second test sits inside the
+    # first and the integration sits inside both. Vanilla flattening these into
+    # siblings would leave every substring above satisfied and the probe
+    # counting a branch that no longer implies the position write.
+    outer = body.index("if (data.isPlaying)")
+    inner = body.index("if (simulated && !isKinematic)")
+    write = body.index("base.transform.position +=")
+    assert outer < inner < write, "the guards are no longer nested outer-to-inner"
+    outer_indent = len(body[:outer].rsplit(chr(10), 1)[-1])
+    inner_indent = len(body[:inner].rsplit(chr(10), 1)[-1])
+    write_indent = len(body[:write].rsplit(chr(10), 1)[-1])
+    assert outer_indent < inner_indent < write_indent, (
+        f"nesting flattened: isPlaying@{outer_indent} simulated@{inner_indent} "
+        f"write@{write_indent}"
+    )
     patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
     for term in ("data.isPlaying", "__instance.simulated", "!__instance.isKinematic"):
         assert term in patch, term
     assert "isActiveAndEnabled" not in patch, (
         "reachability is structural here; copying it is what went stale before"
+    )
+
+
+def test_the_sample_is_taken_after_every_other_prefix_and_refuses_a_co_patched_method():
+    """r13 MEDIUM. The prefix reads the three fields vanilla is ABOUT to read,
+    which is only the branch vanilla takes if nothing writes them in between.
+    Another prefix on the same method can; one that declines to run the
+    original removes the branch entirely.
+
+    The finding's own remedy was a transpiler injecting counters at the
+    integrating branch. That is IL surgery on the method that moves every body
+    in the game, and #376 is explicit that a diagnostic does not get to risk
+    the behaviour it observes -- so the two halves are answered by two
+    mechanisms that cannot:
+
+      ordering    Priority.Last puts this sample after every other prefix's
+                  writes. HarmonyX runs every prefix even after one returns
+                  false (#203), so nothing skips it either;
+      suppression cannot be seen from inside the prefix -- this HarmonyX build
+                  has no `__runOriginal`, checked in the shipped assemblies --
+                  so it is answered by refusing: a window opened while a
+                  FOREIGN prefix or transpiler is on the method is not
+                  comparable, and says so on its line.
+    """
+    patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
+    assert "[HarmonyPriority(Priority.Last)]" in patch, (
+        "the sample runs before other prefixes have written the fields it reads"
+    )
+
+    census = _code(_cs_block(PROBE_CS, "private static void CensusCoPatches()"))
+    assert "Harmony.GetPatchInfo(target)" in census
+    assert "info.Prefixes" in census and "info.Transpilers" in census
+    assert "info.Postfixes" not in census, (
+        "a postfix cannot change the branch vanilla already took"
+    )
+    assert "Plugin.ModId" in census, "our own patch would otherwise count as foreign"
+    assert "catch { coPatchCensusFailed = true; }" in census, (
+        '"we could not find out" must not read the same as "there is nothing there"'
+    )
+    assert "if (target == null) { coPatchCensusFailed = true; return; }" in census
+
+    # taken per WINDOW, not once per process: a mod that loads after us patches
+    # a method a startup census has already cleared
+    opened = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    assert "CensusCoPatches();" in opened
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert src.count("CensusCoPatches();") == 1, "the census has a second caller"
+
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    assert "bool uncoPatched = coPatches == 0 && !coPatchCensusFailed;" in close
+    assert "&& uncoPatched" in close, "a co-patched window is still banked as comparable"
+    assert 'coPatchCensusFailed ? " coPatched=?"' in close, (
+        "a window that could not be censused has to say so"
     )
 
 
@@ -221,7 +312,7 @@ def test_nothing_reconstructs_the_step_any_more():
     # the acceptance counter has exactly two writers: the drain into a body, and
     # the fold of the bodies into the seat
     writes = re.findall(r"driveSteps \+= (\w+)", src)
-    assert writes == ["freshDrive", "totalDrive"], (
+    assert writes == ["freshDrive", "driveSteps"], (
         f"expected the drain and the totals fold and nothing else, found {writes}"
     )
 
@@ -285,15 +376,30 @@ def test_a_window_the_patch_did_not_measure_is_not_reported_as_a_zero():
     prefix running at all, before the window check, so ordinary play sets it;
     a window closed without it is banked nowhere and says `bracket=absent`."""
     patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
-    assert "internal static bool Alive { get { return ran && !dead; } }" in patch
+    assert "internal static bool Alive { get { return runs > 0 && !dead; } }" in patch
     prefix = _code(_cs_block(PROBE_CS, "private static void Prefix(PlayerVelocity __instance)"))
-    assert prefix.index("ran = true;") < prefix.index("WindowOpen()"), (
+    assert prefix.index("runs++;") < prefix.index("WindowOpen()"), (
         "liveness must be established by ordinary play, not by an open window"
     )
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
     assert "bool bracketLive = PlayerVelocity_TeardownDrive_Patch.Alive;" in close
     assert '.Append(bracketLive ? "live" : "absent")' in close
-    assert "else if (!bracketLive) t.notMeasured++;" in close
+
+    # r13 LOW: and "attached at some point this process" is not "ran during
+    # this window". After ordinary play has set the flag, a teardown window can
+    # contain frames and bodies and NO physics step at all, and it was banked as
+    # a measured zero -- which is the one reading this probe may not produce
+    # (#83). The window compares the instrument's run counter against the value
+    # it opened with, which is a question about this window and nothing else.
+    assert "internal static int Runs { get { return runs; } }" in patch
+    assert "bool bracketRan = PlayerVelocity_TeardownDrive_Patch.Runs > prefixRunsAtOpen;" in close
+    assert "&& bracketRan" in close, "activity is not part of comparability"
+    assert "else if (!bracketLive || !bracketRan) t.notMeasured++;" in close
+    assert '.Append(bracketRan ? "" : " bracketRan=0")' in close, (
+        "a window nothing ran in has to say so on its own line"
+    )
+    opened = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    assert "prefixRunsAtOpen = PlayerVelocity_TeardownDrive_Patch.Runs;" in opened
     heartbeat = _code(_cs_block(PROBE_CS, "private static void LogTotals()"))
     assert "notMeasured=" in heartbeat, (
         "the heartbeat has to say how many windows the instrument missed"
@@ -320,9 +426,9 @@ def test_only_comparable_windows_feed_the_seat_totals():
     evaluate: one eight-second horizon close swamps a dozen real windows."""
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
     decided = close.index("bool comparable =")
-    for banked in ("t.driveSteps += totalDrive;", "t.moved += totalMoved;",
+    for banked in ("t.driveSteps += driveSteps;", "t.moved += totalMoved;",
                    "t.frames += frames;", "t.physFrames += physFrames;",
-                   "t.steps += totalSteps;"):
+                   "t.steps += physSteps;"):
         assert banked in close, banked
         assert close.index(banked) > decided, f"{banked} is banked before comparability is known"
     # the window count is the one field that counts everything
@@ -347,10 +453,40 @@ def test_only_comparable_windows_feed_the_seat_totals():
                 break
     else:
         raise AssertionError("unbalanced braces after if (comparable)")
-    assert "t.driveSteps += totalDrive;" in guarded
-    assert "t.steps += totalSteps;" in guarded
+    assert "t.driveSteps += driveSteps;" in guarded
+    assert "t.steps += physSteps;" in guarded
     assert "t.moved += totalMoved;" in guarded
     assert "t.windows++;" not in guarded
+
+
+def test_the_answer_is_the_global_count_and_not_the_per_body_sum():
+    """r13 MEDIUM. Both counters exist: the physics step increments a global
+    pair AND a per-instance pair that the sampler attributes to a body. The
+    verdict was taken from the per-body sums, and those are exactly the numbers
+    an identity change can quietly shrink -- a PlayerVelocity replaced
+    mid-window stranded whatever it had banked since the last drain, and one
+    destroyed before its first attribution tick contributed nothing at all.
+
+    So the answer comes from the globals, which no identity change touches. The
+    per-body figures stay, as attribution; the line prints them TOO when they
+    disagree, because the size of what attribution lost is itself a fact about
+    the window."""
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    assert '.Append(" driveSteps=").Append(driveSteps).Append("/").Append(physSteps)' in close, (
+        "the printed answer is still the per-body sum"
+    )
+    assert "totalDrive == driveSteps && totalSteps == physSteps" in close
+    assert '" attributed=" + totalDrive + "/" + totalSteps' in close, (
+        "a gap between the answer and what could be attributed has to be visible"
+    )
+    # ...and the outgoing instance is drained BEFORE the body switches to a new
+    # one, or the last steps it took are the ones dropped.
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    swap = tick.index("if (velId != 0 && velId != st.velId)")
+    tail = tick[swap:swap + 400]
+    assert tail.index("DrainSteps(st);") < tail.index("st.velId = velId;"), (
+        "the replaced instance is abandoned with its last steps unfolded"
+    )
 
 
 def test_the_line_reports_the_acceptance_counter_its_sample_size_and_the_raw_one():
@@ -359,8 +495,8 @@ def test_the_line_reports_the_acceptance_counter_its_sample_size_and_the_raw_one
         assert field in close, field
     # driveSteps is printed over its own sample size, so a small count and a
     # small window cannot be confused
-    assert '.Append(" driveSteps=").Append(totalDrive).Append("/")' in close
-    assert '.Append(totalSteps)' in close
+    assert '.Append(" driveSteps=").Append(driveSteps).Append("/")' in close
+    assert '.Append(physSteps)' in close
 
 
 def test_the_per_body_figures_are_labelled_with_the_games_player_id():
@@ -385,11 +521,36 @@ def test_a_roster_change_is_noted_and_no_longer_costs_the_window():
     assert "rosterChanged = true" in tick
     # r12 LOW: the flag used to be set whenever the map was already non-empty,
     # so the SECOND body of an ordinary 1v1 set it on the very first sampled
-    # frame and every baseline window printed rosterChanged=1. Only an arrival
-    # on a LATER frame is a change, and `frames` is incremented at the end of
-    # the tick, so it is zero throughout the first one.
-    assert "if (frames > 0) rosterChanged = true;" in tick
+    # frame and every baseline window printed rosterChanged=1.
     assert "if (bodies.Count != 0) rosterChanged = true;" not in tick
+    # r13 LOW: and `frames > 0`, which fixed that, bought a hole with it. A body
+    # that joined between OpenWindow and the first Tick arrives on frame 0, so
+    # it read as part of the roster the window opened over -- while the line
+    # still printed players=rosterAtOpen, a number that no longer described the
+    # bodies in the figures beside it. Asked of the roster instead, both are
+    # answered: everyone on frame 0 who was there at open is not a change, and
+    # anyone who was not, is.
+    assert "if (frames > 0) rosterChanged = true;" not in tick, (
+        "frame count cannot answer a question about the roster"
+    )
+    assert "if (!rosterIdsAtOpen.Contains(id)) rosterChanged = true;" in tick
+    opened = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    assert "rosterIdsAtOpen.Clear();" in opened
+    assert "rosterAtOpen = SnapshotRoster();" in opened
+    assert opened.index("rosterIdsAtOpen.Clear();") < opened.index("SnapshotRoster()")
+    snap = _code(_cs_block(PROBE_CS, "private static int SnapshotRoster()"))
+    # The WHOLE statement, not the call inside it. A substring assertion cannot
+    # tell a live call from one behind a constant-false guard -- proven by
+    # mutation: `if (false) rosterIdsAtOpen.Add(p.PlayerID);` satisfied the
+    # earlier form of this line and left the set empty, which would have made
+    # every body look like an arrival.
+    assert "try { rosterIdsAtOpen.Add(p.PlayerID); } catch { }" in snap, (
+        "the count and the id set have to come from one walk of one roster"
+    )
+    assert "if (false" not in snap and "#if" not in snap
+    # ...and inside the walk over the roster, so the set covers all of it
+    assert snap.index("for (int i = 0; i < players.Count; i++)") < snap.index("rosterIdsAtOpen.Add")
+    assert snap.index("rosterIdsAtOpen.Add") < snap.index("return players.Count;")
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
     assert 'rosterChanged ? " rosterChanged=1"' in close
     # the wipe is gone, and cannot come back under the old name either
@@ -459,7 +620,7 @@ def test_the_bracket_fails_dead_rather_than_breaking_movement():
     assert patch.count("if (dead) return;") == 1, "and honour the latch"
     # and a dead channel is visible rather than silent: Alive goes false, which
     # is what makes the window non-comparable instead of a zero
-    assert "return ran && !dead;" in patch
+    assert "return runs > 0 && !dead;" in patch
 
 
 def test_a_replaced_velocity_component_starts_a_fresh_baseline():

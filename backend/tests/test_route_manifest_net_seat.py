@@ -46,10 +46,13 @@ PINNED_FASTAPI = next(
 # their own source had not moved. A list of exceptions fails precisely when
 # someone extracts a helper, which is the case it exists for.
 #
-# So the closure is computed instead. It is affordable: main has 608
-# module-level functions and the transitive closure of a route is 4 of them at
-# the median, 17 at p90 and 52 at the worst — a gate that drifted on every
-# commit would be a gate nobody reads.
+# So the closure is computed instead. It is affordable: this api has 692
+# module-level functions and the transitive closure of a route is 6 of them at
+# the median, 21 at p90 and 92 at the worst (/api/v1/matches) -- a gate that
+# drifted on every commit would be a gate nobody reads. Re-measure these
+# numbers when the walk changes shape; they were 4/17/52 of 608 before r13 M8
+# widened it to imported helpers, and a stale figure here is the kind of claim
+# the gate itself exists to catch.
 _SERVED_MODULES = {}
 
 
@@ -87,15 +90,57 @@ def _served_modules():
     return _SERVED_MODULES
 
 
-def _module_functions():
-    """{(module, name): function} over every served module. Keyed by module
-    too, because two modules may spell the same helper name differently."""
+API_DIR = (Path(__file__).parents[1] / "api").resolve()
+
+
+def _is_ours(fn):
+    """Whether a function is part of THIS api's source rather than a library's.
+
+    The filter used to be `__module__ == <the module we found it in>`, which
+    silently meant "defined here". r13 MEDIUM: `tournaments` imports
+    `build_double_elim_bracket` from `tournament_bracket` and calls it from a
+    route, so under that rule the function that lays out a bracket was in no
+    route's fingerprint at all. What actually matters is whether the source is
+    ours to review, and the file says so."""
+    try:
+        path = Path(inspect.getfile(fn)).resolve()
+    except (TypeError, OSError):
+        return False
+    return path.parent == API_DIR
+
+
+_MODULE_FUNCTIONS_CACHE = {}
+
+
+def _module_functions(extra_modules=()):
+    """{(module-as-seen, name): function} over every served module, plus any
+    module a walk has stepped into. Keyed by the module the NAME is spelled in,
+    which is how a reference resolves; the function it points at may be defined
+    anywhere in this api."""
+    modules = dict(_served_modules())
+    for mod_name in extra_modules:
+        module = sys.modules.get(mod_name)
+        if module is not None:
+            modules.setdefault(mod_name, module)
+    key = frozenset(modules)
+    cached = _MODULE_FUNCTIONS_CACHE.get(key)
+    if cached is not None:
+        return cached
     table = {}
-    for mod_name, module in _served_modules().items():
+    for mod_name, module in modules.items():
         for name, obj in vars(module).items():
-            if inspect.isfunction(obj) and getattr(obj, "__module__", None) == mod_name:
+            if inspect.isfunction(obj) and _is_ours(obj):
                 table[(mod_name, name)] = obj
+    _MODULE_FUNCTIONS_CACHE[key] = table
     return table
+
+
+def _identity(fn):
+    """What a helper IS, independent of the names it is imported under."""
+    return (getattr(fn, "__module__", "?"), getattr(fn, "__qualname__", "?"))
+
+
+_REFERENCED_NAMES_CACHE = {}
 
 
 def _referenced_names(fn):
@@ -103,40 +148,80 @@ def _referenced_names(fn):
     Deliberately over-inclusive: a name that happens to match a module-level
     function is folded in even if it was never called, which can only widen the
     reviewed surface, never narrow it."""
+    cached = _REFERENCED_NAMES_CACHE.get(fn)
+    if cached is not None:
+        return cached
     try:
         tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
     except (OSError, TypeError, SyntaxError, IndentationError):
-        return set()
+        _REFERENCED_NAMES_CACHE[fn] = frozenset()
+        return _REFERENCED_NAMES_CACHE[fn]
     names = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             names.add(node.id)
         elif isinstance(node, ast.Attribute):
             names.add(node.attr)
-    return names
+    # Frozen and cached: this is a pure function of the source on disk, and the
+    # walk asks it for the same helpers once per route.
+    _REFERENCED_NAMES_CACHE[fn] = frozenset(names)
+    return _REFERENCED_NAMES_CACHE[fn]
 
 
-def _helper_closure(endpoint):
-    """Sorted (module, name) pairs. A bare name is resolved in the function's
-    OWN module first and in any other served module after that -- on a name two
-    modules share, the second one is folded in as well, which widens the
-    reviewed surface rather than narrowing it."""
-    funcs = _module_functions()
-    others = list(_served_modules())
-    seen = set()
+def _walk_helper_functions(endpoint):
+    """{(defining module, qualname): function} for everything a route reaches.
+
+    A bare name is resolved in the module the referencing function is written
+    in first, and in any other module this walk knows after that -- on a name
+    two modules share, the second one is folded in as well, which widens the
+    reviewed surface rather than narrowing it. Keyed by what the helper IS, so
+    the same function imported under two names is one entry and its source is
+    appended once.
+
+    The walk STEPS INTO the modules it lands in: reaching a function defined in
+    tournament_bracket brings that module's own helpers into scope for the rest
+    of the walk, which is what makes this transitive across files and not just
+    across the two modules that happen to serve routes."""
+    walked = {"main"}
+    walked.update(_served_modules())
+    funcs = _module_functions(walked)
+    seen = {}
     frontier = [endpoint]
     while frontier:
         fn = frontier.pop()
         origin = getattr(fn, "__module__", "main")
+        if origin not in walked and sys.modules.get(origin) is not None:
+            walked.add(origin)
+            funcs = _module_functions(walked)
+        lookup = [origin] + [m for m in walked if m != origin]
         for name in _referenced_names(fn):
-            for mod_name in [origin] + [m for m in others if m != origin]:
+            for mod_name in lookup:
                 helper = funcs.get((mod_name, name))
                 if helper is None:
                     continue
-                if (mod_name, name) not in seen:
-                    seen.add((mod_name, name))
+                ident = _identity(helper)
+                if ident not in seen:
+                    seen[ident] = helper
                     frontier.append(helper)
-    return sorted(seen)
+    return seen
+
+
+_CLOSURE_CACHE = {}
+
+
+def _helper_functions(endpoint):
+    """Memoised wrapper: the closure of one endpoint is asked for by the
+    manifest build, by the affordability test and by every assertion below."""
+    cached = _CLOSURE_CACHE.get(endpoint)
+    if cached is None:
+        cached = _walk_helper_functions(endpoint)
+        _CLOSURE_CACHE[endpoint] = cached
+    return cached
+
+
+def _helper_closure(endpoint):
+    """The identities alone, sorted -- (defining module, qualname)."""
+    return sorted(_helper_functions(endpoint))
 
 MODULE_SRC = (Path(__file__).parents[1] / "api" / "main.py").read_text(encoding="utf-8")
 
@@ -174,13 +259,11 @@ def _route_identities(routes, prefix=""):
         # to, transitively — an extracted helper must not become a fingerprint
         # hole. Sorted, so the fingerprint does not depend on walk order.
         source_text = inspect.getsource(endpoint)
-        for mod_name, helper_name in _helper_closure(endpoint):
-            module = _served_modules().get(mod_name)
-            if module is None:
-                continue
+        helpers = _helper_functions(endpoint)
+        for ident in sorted(helpers):
             try:
-                source_text += inspect.getsource(getattr(module, helper_name))
-            except (OSError, TypeError, AttributeError):
+                source_text += inspect.getsource(helpers[ident])
+            except (OSError, TypeError):
                 continue
         identities.append(
             {
@@ -310,6 +393,16 @@ def test_the_helper_surface_is_computed_and_not_hand_curated():
                for (m, n) in _helper_closure(r.endpoint) if m != "main"]
     assert crossed, "the closure never left main -- helpers there are unfingerprinted"
 
+    # r13 MEDIUM: and it reaches helpers that are IMPORTED rather than defined
+    # in the module serving the route. `tournaments` calls
+    # tournament_bracket.build_double_elim_bracket from a route; keeping only
+    # functions whose __module__ matched the module they were found in put that
+    # function -- which decides a bracket's shape -- in no fingerprint at all.
+    imported = [ident for r in tournament_routes
+                for ident in _helper_closure(r.endpoint)
+                if ident[0] not in ("main", "tournaments")]
+    assert imported, "the closure never left the two route-serving modules"
+
 
 def test_a_helper_in_another_module_moves_its_routes_fingerprint():
     """The mutation the previous test's shape is for. Rewrite the body of a
@@ -358,9 +451,17 @@ def test_a_helper_in_another_module_moves_its_routes_fingerprint():
 
 def test_the_helper_closure_stays_affordable():
     """A fingerprint that pulls half the module in drifts on every commit, and
-    a gate that always fires is a gate nobody reads. Measured before this shape
-    was chosen: 4 helpers at the median of 608 module-level functions, 17 at
-    p90, 52 at the worst."""
+    a gate that always fires is a gate nobody reads. Measured at the shape this
+    file walks now: 6 helpers at the median of 692 module-level functions, 21 at
+    p90, 92 at the worst. The bounds below sit above those with room, so this
+    fails on a walk that has gone wrong rather than on ordinary growth.
+
+    Cost is the other half of affordable, and it is not free: the same helpers
+    are reached from hundreds of routes, so both pure steps (`_referenced_names`
+    over a function's ast, `_module_functions` over a set of modules) are
+    memoised. Without those the widened walk took 287 s and this file was the
+    slowest thing in the suite by an order of magnitude; with them it is ~10 s.
+    Anything added to the walk belongs behind a memo too."""
     routes = [r for r in main.app.routes
               if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
     assert routes
@@ -589,3 +690,48 @@ def test_flag_and_review_formatters_do_not_consume_net_seat_columns():
     query_source = inspect.getsource(flag_evidence.fetch_flag_context_rows)
     assert all(name not in source for name in STORAGE_FIELDS)
     assert all(name not in query_source for name in STORAGE_FIELDS)
+
+
+def test_an_imported_helper_moves_the_fingerprint_of_the_route_that_calls_it():
+    """r13 MEDIUM, mutation-proven on the case the finding names: a function
+    DEFINED in tournament_bracket and IMPORTED into tournaments, reached from a
+    route. Editing it must move that route's fingerprint; the negative control
+    is the same route with nothing edited."""
+    import tournament_bracket
+
+    target = None
+    for route in main.app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        idents = _helper_closure(route.endpoint)
+        outside = [i for i in idents if i[0] == "tournament_bracket"]
+        if outside:
+            target = (route, sorted(outside)[0])
+            break
+    assert target, "no route reaches a helper defined in tournament_bracket"
+    route, (mod_name, qualname) = target
+    original = getattr(tournament_bracket, qualname)
+
+    def _fingerprint():
+        for entry in _route_identities([route]):
+            return entry["source_sha1"]
+        raise AssertionError("the route did not enumerate")
+
+    before = _fingerprint()
+    assert before == _fingerprint(), "negative control: unedited source must not move"
+
+    real_source = inspect.getsource
+
+    def _mutated(obj):
+        if obj is original:
+            return real_source(obj) + "\n# mutation\n"
+        return real_source(obj)
+
+    inspect.getsource = _mutated
+    try:
+        after = _fingerprint()
+    finally:
+        inspect.getsource = real_source
+    assert after != before, (
+        f"editing {mod_name}.{qualname} left {route.path} certified unchanged"
+    )

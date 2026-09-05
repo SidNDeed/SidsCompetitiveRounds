@@ -37,6 +37,114 @@ namespace CompetitiveRounds
             public int JoinIncarnation;
         }
 
+        /// <summary>The series id the queue published, bound to the ONE room
+        /// occupancy it describes rather than to a room NAME (r13 HIGH).
+        ///
+        /// The name was the whole binding: the id was filed under the room it
+        /// was published for, and any later occupancy of a room by that name
+        /// answered to it. Room names are reusable -- code rooms are
+        /// player-typed, ranked names recur -- so a pairing whose join failed
+        /// could leave its id standing, and the next occupancy of that name,
+        /// with a different opponent, would file its score against it. The
+        /// pairing record beside this one has drawn that distinction since r8;
+        /// this one had not.
+        ///
+        /// JoinIncarnation &lt; 0 means the id was published (at both_ready,
+        /// which is BEFORE the seat has joined anything) and no join has
+        /// matched it yet -- a staged id, not a played one. OpponentSteamId is
+        /// the pairing the queue issued for that room where the queue knew it,
+        /// and empty where it did not; empty is permissive, because the seat
+        /// filing a leave report is by definition looking at a room the
+        /// opponent has left.</summary>
+        internal struct RoomBoundSeries
+        {
+            public string SeriesId;
+            public string RoomName;
+            public string OpponentSteamId;
+            public int JoinIncarnation;
+        }
+
+        /// <summary>Same rule as RetireOnJoin, for the series record: the first
+        /// join whose name matches stamps its incarnation, and any later join
+        /// -- same name or not -- retires the record. Returns true when it
+        /// was retired.</summary>
+        internal static bool RetireSeriesOnJoin(ref RoomBoundSeries? bound, string roomName, int incarnation)
+        {
+            if (bound == null) return false;
+            var b = bound.Value;
+            if (!string.Equals(b.RoomName ?? "", roomName ?? "", StringComparison.Ordinal))
+            {
+                bound = null;
+                return true;
+            }
+            if (b.JoinIncarnation < 0)
+            {
+                b.JoinIncarnation = incarnation;
+                bound = b;
+                return false;
+            }
+            if (b.JoinIncarnation == incarnation) return false;
+            bound = null;
+            return true;
+        }
+
+        /// <summary>The series id an observation made HERE may be filed under,
+        /// or empty. Empty is a real answer and not a failure: it makes the
+        /// report a single unnamed attempt, which the server resolves from the
+        /// pair.
+        ///
+        /// Every term is a way the id could belong to something else: no
+        /// record; not in a room to compare against; a different room; a room
+        /// of the same name this seat has not joined (a staged id); a
+        /// different occupancy of that same name; or the same name with the
+        /// queue's pairing for it replaced. An unknown opponent is permissive
+        /// on purpose -- the seat reporting a leave is looking at a room the
+        /// opponent has already left, and the incarnation is what carries the
+        /// weight there.</summary>
+        internal static string SeriesForRoom(RoomBoundSeries? bound, bool inRoom, string roomHere,
+                                             int incarnation, string opponentHere)
+        {
+            if (bound == null) return "";
+            var b = bound.Value;
+            if (string.IsNullOrEmpty(b.SeriesId)) return "";
+            if (!inRoom) return "";
+            if (string.IsNullOrEmpty(roomHere)) return "";
+            if (!string.Equals(b.RoomName ?? "", roomHere, StringComparison.Ordinal)) return "";
+            if (b.JoinIncarnation < 0) return "";
+            if (b.JoinIncarnation != incarnation) return "";
+            if (!string.IsNullOrEmpty(opponentHere) && !string.IsNullOrEmpty(b.OpponentSteamId)
+                && !string.Equals(b.OpponentSteamId, opponentHere, StringComparison.Ordinal))
+                return "";
+            return b.SeriesId;
+        }
+
+        /// <summary>TRUE only with positive evidence that the held id is not
+        /// this room's. Used where an empty answer would cost ranked routing
+        /// rather than protect a series, so "no evidence" reads as FALSE.
+        ///
+        /// The incarnation is checked BEFORE the in-room question, and that
+        /// ordering is the point: a leave that never produced Photon's own
+        /// callback leaves this seat believing it is nowhere, and the previous
+        /// rule read that as "nothing to compare against, not contradicted"
+        /// and kept the id. A join stamp that no longer matches the current
+        /// incarnation is evidence on its own -- the occupancy the id
+        /// describes is over, whatever this seat thinks it is in now.</summary>
+        internal static bool SeriesContradictedByRoom(RoomBoundSeries? bound, bool inRoom, string roomHere,
+                                                      int incarnation, string opponentHere)
+        {
+            if (bound == null) return false;
+            var b = bound.Value;
+            if (string.IsNullOrEmpty(b.SeriesId)) return false;
+            if (b.JoinIncarnation >= 0 && b.JoinIncarnation != incarnation) return true;
+            if (!inRoom) return false;
+            if (string.IsNullOrEmpty(roomHere)) return false;
+            if (!string.Equals(b.RoomName ?? "", roomHere, StringComparison.Ordinal)) return true;
+            if (!string.IsNullOrEmpty(opponentHere) && !string.IsNullOrEmpty(b.OpponentSteamId)
+                && !string.Equals(b.OpponentSteamId, opponentHere, StringComparison.Ordinal))
+                return true;
+            return false;
+        }
+
         /// <summary>What a join does to the retained pairing (review r8
         /// LOW 1). A room NAME does not identify a room — code rooms are
         /// player-typed and reusable, and ApiClient keeps a whole incarnation
@@ -244,8 +352,10 @@ namespace CompetitiveRounds
         /// and DEBOUNCE_RETRY_FALLBACK both clear the server's 5 s window — so
         /// for those it constrains key churn only. A 429 retry is the
         /// exception, and it is the exception because that delay is not ours:
-        /// it is the server's retry_after plus DEBOUNCE_RETRY_MARGIN, and a
-        /// retry_after of 1 schedules the re-send 2 s out, inside this. Then
+        /// it is the server's retry_after plus DEBOUNCE_RETRY_MARGIN, and the
+        /// smallest retry_after the endpoint hands out schedules the re-send
+        /// inside this (a test reads both numbers from the source and pins
+        /// it, so the sentence cannot rot when either constant moves). Then
         /// the retry waits for the spacing and goes on the first admissible
         /// tick, because TooSoon is not a refusal — later than asked, never
         /// dropped.</summary>
@@ -322,7 +432,7 @@ namespace CompetitiveRounds
 
         // ── self-test ──────────────────────────────────────────────────────
 
-        internal const int SELFTEST_CASES = 52;
+        internal const int SELFTEST_CASES = 67;
 
         /// <summary>Every rule above against canned inputs. A case marked
         /// control expects the WRONG answer and passes only when the harness
@@ -385,6 +495,44 @@ namespace CompetitiveRounds
                 IssuedPairState? ctl = new IssuedPairState { Gen = 7, RoomName = "code_room", OpponentSteamId = OPP,
                                                              BoundIncarnation = -1, BoundActor = -1, JoinIncarnation = 4 };
                 Check("control:rejoin:name-alone-keeps-it", Retire(ref ctl, "code_room", 9), "kept/4", control: true);
+
+                // ...and the same rule for the SERIES id, which had only the
+                // room name behind it until r13. Rendered as the id the rule
+                // hands an observation, then whether the id reads as
+                // contradicted, then the record's own join stamp.
+                RoomBoundSeries? sb = null;
+                Check("series:no-record", Series(ref sb, "ranked_r", 4), "-/no/none");
+                sb = new RoomBoundSeries { SeriesId = "S1", RoomName = "ranked_r",
+                                           OpponentSteamId = OPP, JoinIncarnation = -1 };
+                // published at both_ready, before this seat has joined anything
+                Check("series:staged-not-yet-joined", Series(ref sb, "ranked_r", 4), "-/no/-1");
+                // ...and an unstamped record must not match a caller that has
+                // no incarnation either. The rule does not get to assume the
+                // counter it is handed is non-negative: sentinel equals
+                // sentinel is not a join.
+                Check("series:staged-meets-an-unknown-incarnation", Series(ref sb, "ranked_r", -1), "-/no/-1");
+                Check("series:join-stamps", SeriesJoin(ref sb, "ranked_r", 4), "kept/4");
+                Check("series:names-its-own-room", Series(ref sb, "ranked_r", 4), "S1/no/4");
+                Check("series:another-room-contradicts", Series(ref sb, "other_room", 4), "-/yes/4");
+                Check("series:opponent-swapped", Series(ref sb, "ranked_r", 4, OTHER), "-/yes/4");
+                // the finding itself: the name is recreated for a new pairing
+                Check("series:same-name-new-occupancy", Series(ref sb, "ranked_r", 9), "-/yes/4");
+                // ...and the no-room fail-open it also named: a leave that
+                // produced no OnLeftRoom leaves this seat believing it is
+                // nowhere, and the stamp is evidence with or without a room
+                Check("series:nowhere-after-the-occupancy-ended", SeriesNoRoom(ref sb, 9), "-/yes/4");
+                Check("series:nowhere-during-it", SeriesNoRoom(ref sb, 4), "-/no/4");
+                Check("series:later-join-retires", SeriesJoin(ref sb, "ranked_r", 9), "retired");
+                Check("series:retired-answers-nothing", Series(ref sb, "ranked_r", 9), "-/no/none");
+                RoomBoundSeries? sctl = new RoomBoundSeries { SeriesId = "S2", RoomName = "ranked_r",
+                                                              OpponentSteamId = OPP, JoinIncarnation = 4 };
+                Check("control:series:name-alone-answers", Series(ref sctl, "ranked_r", 9), "S2/no/4", control: true);
+                Check("control:series:staged-id-answers", Series(ref sb, "ranked_r", 4), "S1/no/none", control: true);
+                // an unknown opponent is permissive on purpose: the seat that
+                // files a leave is looking at a room the opponent has left
+                RoomBoundSeries? sopp = new RoomBoundSeries { SeriesId = "S3", RoomName = "ranked_r",
+                                                              OpponentSteamId = "", JoinIncarnation = 4 };
+                Check("series:unknown-pairing-still-answers", Series(ref sopp, "ranked_r", 4, OTHER), "S3/no/4");
 
                 // a later issuance replaced the pairing of a room this seat
                 // may still be in (review r8 MEDIUM 2)
@@ -480,6 +628,37 @@ namespace CompetitiveRounds
             var verdict = ConsultIssued(ref pair, supersededRoom, gen, room, advertised, inc, actor, out id);
             return verdict + "/" + (id ?? "-") + "/"
                    + (pair.HasValue ? pair.Value.BoundIncarnation + "/" + pair.Value.BoundActor : "none");
+        }
+
+        /// <summary>The id the rule hands an observation ("-" for none), then
+        /// whether the same state reads as CONTRADICTED, then the record's own
+        /// join stamp — so one case reads the permissive rule, the
+        /// evidence-only rule and the record together, and a fix that satisfies
+        /// one of them by breaking another has nowhere to hide.</summary>
+        private static string Series(ref RoomBoundSeries? bound, string roomHere, int incarnation,
+                                     string opponentHere = null)
+        {
+            string id = SeriesForRoom(bound, true, roomHere, incarnation, opponentHere);
+            bool no = SeriesContradictedByRoom(bound, true, roomHere, incarnation, opponentHere);
+            return (string.IsNullOrEmpty(id) ? "-" : id) + "/" + (no ? "yes" : "no") + "/"
+                   + (bound.HasValue ? bound.Value.JoinIncarnation.ToString(CultureInfo.InvariantCulture) : "none");
+        }
+
+        /// <summary>The same, for a seat that believes it is in no room at
+        /// all — which is what a leave without Photon's callback leaves
+        /// behind.</summary>
+        private static string SeriesNoRoom(ref RoomBoundSeries? bound, int incarnation)
+        {
+            string id = SeriesForRoom(bound, false, "", incarnation, null);
+            bool no = SeriesContradictedByRoom(bound, false, "", incarnation, null);
+            return (string.IsNullOrEmpty(id) ? "-" : id) + "/" + (no ? "yes" : "no") + "/"
+                   + (bound.HasValue ? bound.Value.JoinIncarnation.ToString(CultureInfo.InvariantCulture) : "none");
+        }
+
+        private static string SeriesJoin(ref RoomBoundSeries? bound, string room, int incarnation)
+        {
+            if (RetireSeriesOnJoin(ref bound, room, incarnation)) return "retired";
+            return "kept/" + (bound.HasValue ? bound.Value.JoinIncarnation.ToString(CultureInfo.InvariantCulture) : "none");
         }
 
         /// <summary>"retired", or "kept/" the join incarnation the record

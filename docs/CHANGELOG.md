@@ -80,7 +80,11 @@
   are bounded — twenty attempts, a little over an hour, and a relaunch gives a
   still-queued report a fresh set rather than resuming a spent one. The
   server accepts one such report per series per player however many times it
-  arrives, and refuses one that names a series the two of you did not play.
+  arrives. A report that names the wrong series is not thrown away: the server
+  falls back to working out which series the two of you are in, exactly as it
+  does for a report that names none. What it will not accept is a leave filed
+  against a series that is over, that nothing has happened in for hours, or in
+  which no game was played — the record it feeds is about games that happened.
   A leave seen in the moment between one game being recorded and the next
   starting has no series to name, and is still a single attempt.
 - The background queue of unsent match reports no longer stops for the rest of

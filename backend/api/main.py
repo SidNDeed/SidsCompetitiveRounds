@@ -5923,8 +5923,28 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # flagged path above returns before here on purpose, so an invalidated
     # match contributes nothing. Reporter only: recording the opponent as well
     # would let one account supply both halves of the two-player bar.
-    if _session_was_verified(request):
-        _note_region_seen(report.region, report.reported_by_steam_id)
+    #
+    # THE REGION IS NOT READ FROM THE REPORT (r13 HIGH). `report.region` is
+    # outside the seven-field HMAC, so establishing the session proves who is
+    # speaking and nothing about the region named in the sentence. What is read
+    # instead is the region THIS SERVER issued for this room, looked up by the
+    # room id — which the HMAC does cover. A room the server never issued (a
+    # private or tournament room) has no binding and contributes nothing.
+    #
+    # NOT PUBLISHED YET, either (r13 MEDIUM): the map is process memory and the
+    # match is not committed here. A rollback below would leave a sighting for a
+    # game that was never recorded, and two of those would corroborate a region
+    # on the strength of two failures. The pair is held and noted after commit.
+    _region_sighting = None
+    if _session_was_verified(request) and report.photon_room_id:
+        _issued_region = (await db.execute(text(
+            "SELECT region FROM issued_room_regions"
+            " WHERE room_name = :room"
+            "   AND issued_at >= NOW() - CAST(:ttl AS interval)"
+        ), {"room": str(report.photon_room_id),
+            "ttl": "%d seconds" % int(_REGION_SEEN_TTL_SECONDS)})).scalar()
+        if _issued_region:
+            _region_sighting = (_issued_region, report.reported_by_steam_id)
 
     # Increment games_in_period for both players
     for pid in [p1.id, p2.id]:
@@ -6391,6 +6411,12 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             series_status="duplicate", series_score=series_score,
             gold_gained=0, gold_bonuses=[],
         )
+
+    # Committed. NOW the sighting is real evidence: a game that is on disk, in a
+    # room this server sent two players to. The duplicate branch above returns
+    # before here, because a report that recorded nothing witnesses nothing.
+    if _region_sighting:
+        _note_region_seen(*_region_sighting)
 
     # Trigger Glicko recalculation only when a series completes
     # (for non-ranked matches, Glicko is not affected)
@@ -11386,7 +11412,21 @@ async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_n
              OR (player_id = :b AND matched_with = :a))
          RETURNING player_id"""), {"room": room_name, "region": region, "a": my_pid, "b": opp_pid})
     updated = {r[0] for r in res.fetchall()}
-    return updated == {my_pid, opp_pid}
+    if updated != {my_pid, opp_pid}:
+        return False
+    # KEEP WHAT THIS SERVER DECIDED (r13 HIGH). The queue rows carry the issued
+    # region too, but they are cleared when the pair leaves the queue, and the
+    # match report arrives long after that. This row survives to report time,
+    # keyed by the room name — which is one of the seven fields the match HMAC
+    # covers, so a report can only ever reach the binding for the room it was
+    # signed for. DO NOTHING on conflict: room names are fresh uuids, so a
+    # collision would be a reused name and the FIRST issuance is the one that
+    # sent two players somewhere.
+    await db.execute(text(
+        "INSERT INTO issued_room_regions (room_name, region) "
+        "VALUES (:room, :region) ON CONFLICT (room_name) DO NOTHING"
+    ), {"room": room_name, "region": region or ""})
+    return True
 
 
 _CROSS_QUEUE_TABLES = ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")
@@ -11957,16 +11997,21 @@ def _region_token(value):
 # region outright, and never to introduce one — so the worst it can do is
 # choose the same way the code without it would have.
 #
-# IT IS DELIBERATELY NOT THE JOIN-TIME CloudRegion SNAPSHOT, which is what this
-# read before, and the difference is the point. That snapshot is a sentence a
-# client types in the menu; establishing the session proves WHO typed it and
-# nothing at all about the region named in it, so two accounts one person holds
-# could put a region nobody can connect to over the quorum bar and then beat an
-# honest region in the tie. A match report is a claim too, but it is a claim
-# about a game that has an opponent, a room, a duration and a score, made on
-# the path where match integrity is already checked and where a bad one is
-# flagged and excluded below. The ordinary invented token dies before that:
-# there is no game to report from a region nobody can reach.
+# IT IS NOT A CLIENT-SUPPLIED REGION AT ALL, which is the whole design. Neither
+# the join-time CloudRegion snapshot (what this read first) nor the match
+# report's `region` field (what it read second) is signed: the match HMAC covers
+# seven fields and the region is not one of them, so establishing a session
+# proves WHO is speaking and nothing about the region named in the sentence.
+# Two accounts one person holds could play real games, label them with a region
+# nobody can connect to, corroborate it, and beat an honest region in a tie.
+#
+# The token is the region THIS SERVER ISSUED for the room, read back from
+# issued_room_regions by the room id — which the HMAC does cover. So the claim
+# behind a sighting is: the server told two players to play here, and a game
+# from that room was reported and accepted. A region that cannot be reached
+# produces no such game, which is what keeps this from being the server
+# corroborating its own guesses. A room the server did not issue (private,
+# tournament) has no binding and contributes nothing.
 #
 # Three guards on what reaches the map. A token counts only once it has been
 # seen from more than one distinct player, and only the REPORTER's own id is
@@ -12002,9 +12047,14 @@ _REGION_SEEN_TTL_SECONDS = 7 * 24 * 3600
 _REGION_SEEN_MAX_TOKENS = 64
 _REGION_SEEN_MIN_PLAYERS = 2
 _REGION_SEEN_IDS_PER_TOKEN = 8
-# Of the 64 slots, at most this many may be held by corroborated tokens. The
-# remaining 16 are where a region that only one player has reported so far
-# waits for its second reporter (r12 MEDIUM: with no such floor, a full map of
+# What the corroborated pool may hold WHEN THE MAP IS FULL AND SOMETHING HAS TO
+# GO. It is not a partition maintained at every instant — promoting nursery
+# tokens can take the corroborated count past it while the map is inside its
+# bound, and nothing is evicted then, because evicting real evidence to hold
+# empty space open would be the wrong trade. What it guarantees is the only
+# thing that matters: at the moment a newcomer needs a slot, corroborated
+# tokens above this share are what pays for it. The remaining 16 are where a
+# region that only one player has reported so far waits for its second reporter (r12 MEDIUM: with no such floor, a full map of
 # corroborated tokens evicted every first honest sighting the moment it was
 # made, because a single-reporter token is by definition the least-corroborated
 # entry — so the second reporter never found it there and the region could not
@@ -12034,6 +12084,16 @@ def _note_region_seen(token, steam_id):
     for expired in [rid for rid, ts in ids.items()
                     if now - ts > _REGION_SEEN_TTL_SECONDS]:
         ids.pop(expired, None)
+    # A PER-REPORTER QUOTA WAS CONSIDERED HERE AND IS NOT PRESENT (r13 MEDIUM).
+    # The finding was that one reporter cycling new tokens can fill the nursery
+    # and evict honest first sightings before their second player arrives. That
+    # is true of a token a client can choose. It is not true of this one: the
+    # token is the region the SERVER issued for the room, so the whole token
+    # space is the set of regions this server picks from, and "a new token" is
+    # not something a reporter can produce on demand. A quota would only have
+    # cost an honest player who genuinely played in two regions nobody else has
+    # reported their older claim. If a client-supplied string is ever fed to
+    # this function again, the quota comes back with it.
     # Bounded per token by evicting the OLDEST reporter, not by refusing the
     # newest: a fixed first-eight would let a region's original reporters hold
     # the quorum open long after they stopped playing there.
@@ -13718,6 +13778,31 @@ async def get_player_blocks(steam_id: str, db: AsyncSession = Depends(get_db)):
 
 # ── Routes: Disconnect Reporting ─────────────────────────────────
 
+DC_LIVE_WINDOW_SECONDS = 6 * 3600
+"""How stale a series' last activity may be and still take a disconnect report.
+
+r13 MEDIUM. `completed_at IS NULL` was doing the work of "still running", and it
+cannot: a tournament forfeit deliberately leaves its series row active with both
+terminal timestamps null FOREVER, so every old forfeited series of a pair stayed
+nameable and each one was worth one disconnect against the opponent. A running
+series is one something has happened in recently, which is a fact the server
+holds itself — `last_activity_at` is stamped by live points, by match reports,
+by the resume path and by both queue both-ready branches.
+
+Six hours against a client retry budget of twenty attempts a minute apart: wide
+enough for a report persisted across a restart and sent at the next launch,
+far too narrow to walk back through a pair's history."""
+
+DC_MIN_LIVE_POINTS = 2
+"""The gameplay bar, asked of the SERVER's own record (r13 MEDIUM).
+
+The client already refuses to report a leave before two total points, and until
+now that was the only place the rule existed — so an authenticated participant
+could report an opponent at 0-0, from a series in which nothing had happened,
+and the count went up. The same bar is asked here of `live_p1_points +
+live_p2_points`, which the live-points endpoint writes, or satisfied by a
+recorded match, which is the same evidence one game later."""
+
 DC_DEADLOCK_ATTEMPTS = 2
 """How many times a DC report may be re-run after PostgreSQL picks it as a
 deadlock victim (SQLSTATE 40P01). Two, not more: a second abort means the
@@ -13780,7 +13865,14 @@ async def report_disconnect(
     # Still contended. 503 and not 500: the client's outbox drops a 4xx as
     # settled and keeps everything else, so this says "not judged, ask again"
     # in the vocabulary that queue already speaks — the report is delayed by
-    # one outbox pass, never lost.
+    # one outbox pass rather than thrown away as a verdict.
+    #
+    # NOT "never lost", which the client cannot promise (r13 LOW): a queued
+    # report is dropped once it has spent OUTBOX_MAX_ATTEMPTS, whatever the
+    # response was, and a persistent 503 spends them like anything else. That
+    # bound is deliberate — an unbounded queue is its own failure — and the
+    # drop is logged rather than silent. What this answer buys is that the
+    # report keeps its budget instead of being retired on the first abort.
     raise HTTPException(
         status_code=503,
         detail="disconnect report contended, retry")
@@ -13932,10 +14024,15 @@ async def _report_disconnect_once(
             "                 WHERE ((s2.player1_id = :rp AND s2.player2_id = :dp)"
             "                     OR (s2.player1_id = :dp AND s2.player2_id = :rp))"
             "                 ORDER BY s2.created_at DESC LIMIT 1))"
-            "   AND (COALESCE(s.completed_at, s.invalidated_at) IS NULL"
-            "     OR COALESCE(s.completed_at, s.invalidated_at) >= NOW() - INTERVAL '7 days')"
+            "   AND COALESCE(s.last_activity_at, s.created_at)"
+            "       >= NOW() - CAST(:live_window AS interval)"
+            "   AND (COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0)"
+            "        >= :min_points"
+            "     OR EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id))"
             " LIMIT 1"
-        ), {"sid": str(series.id), "rp": reporter.id, "dp": disconnected.id})).first()
+        ), {"sid": str(series.id), "rp": reporter.id, "dp": disconnected.id,
+            "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+            "min_points": DC_MIN_LIVE_POINTS})).first()
         if nameable is None:
             raise HTTPException(
                 status_code=403,
@@ -13989,9 +14086,20 @@ async def _report_disconnect_once(
         "                 WHERE ((s2.player1_id = :rp AND s2.player2_id = :dp)"
         "                     OR (s2.player1_id = :dp AND s2.player2_id = :rp))"
         "                 ORDER BY s2.created_at DESC LIMIT 1))"
+        # THE UNNAMED PATH IS BOUND BY THESE TOO, which is why they are asked
+        # here and not only where a name is validated: resolving "the pair's
+        # current series" says which series, never that anything happened in
+        # it or that it is still live. Both paths reach this statement.
+        "   AND COALESCE(s.last_activity_at, s.created_at)"
+        "       >= NOW() - CAST(:live_window AS interval)"
+        "   AND (COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0)"
+        "        >= :min_points"
+        "     OR EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id))"
         " FOR NO KEY UPDATE OF s"
     ), {"sid": str(resolved_series_id), "rp": reporter.id, "dp": disconnected.id,
-        "exempt": PRUNE_REASON_NO_MATCH})).first()
+        "exempt": PRUNE_REASON_NO_MATCH,
+        "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+        "min_points": DC_MIN_LIVE_POINTS})).first()
     if still_eligible is None:
         # 403 and not 409: from the client's side this is the same settled
         # refusal as the unlocked checks above, and it must not be retried.
@@ -22150,11 +22258,13 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     # it is the transaction ending at the item boundary.
     #
     # Safe to commit per item because every item is independent and already
-    # idempotent: each mode re-verifies under its own lock, _refund_series_bets
-    # claims the rows it pays, and a mode-1 abandon takes the series out of the
-    # 'active' predicate this job selects on. A failure mid-batch now leaves
-    # the items before it committed and the rest for the next call, which is
-    # the degradation #204 asks for.
+    # idempotent: all three modes now lock the series and re-ask their own
+    # selection predicate before writing (mode 1 gained that in r13 — until then
+    # it decided from the unlocked snapshot and overwrote whatever had arrived),
+    # _refund_series_bets claims the rows it pays, and a mode-1 abandon takes the
+    # series out of the 'active' predicate this job selects on. A failure
+    # mid-batch now leaves the items before it committed and the rest for the
+    # next call, which is the degradation #204 asks for.
     for sid, player1_id, player2_id in stale_rows_c:
         await _assert_no_service_subject(
             db, affected_player_ids=[player1_id, player2_id])
@@ -22193,11 +22303,24 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         # fresh recheck sees 2 wins / non-active and skips — or the report
         # waits for this refund's commit, after which its settlement
         # SELECT reads the claimed rows as settled and skips them.
+        # r13 MEDIUM: the re-check has to ask the SELECTION predicate, not a
+        # subset of it. Without the stall age and the unsettled-bet term, a
+        # series that was snapshotted stalled at 1-0 and then RESUMED — a fresh
+        # match committing at 1-1 while this loop was working — still satisfied
+        # active/<2 and had its wagers refunded out from under a live game.
         _still_b = (await db.execute(text(
-            "SELECT 1 FROM ranked_series WHERE id = :sid "
-            "  AND status = 'active' AND invalidated_at IS NULL "
-            "  AND p1_series_wins < 2 AND p2_series_wins < 2 "
-            "FOR NO KEY UPDATE"), {"sid": str(sid)})).first()
+            "SELECT 1 FROM ranked_series rs WHERE rs.id = :sid "
+            "  AND rs.status = 'active' AND rs.invalidated_at IS NULL "
+            "  AND rs.is_tournament = FALSE "
+            "  AND rs.p1_series_wins < 2 AND rs.p2_series_wins < 2 "
+            "  AND EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
+            "  AND EXISTS (SELECT 1 FROM bets b "
+            "               WHERE b.series_id = rs.id AND b.settled_at IS NULL) "
+            "  AND COALESCE(("
+            "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
+            "      ), rs.created_at) < NOW() - CAST(:stalled AS interval) "
+            "FOR NO KEY UPDATE OF rs"), {"sid": str(sid),
+                                         "stalled": "%d minutes" % int(stalled_min)})).first()
         if _still_b is None:
             await db.commit()
             continue
@@ -22213,6 +22336,31 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     for sid, player1_id, player2_id, prune_reason in abandon_rows:
         await _assert_no_service_subject(
             db, affected_player_ids=[player1_id, player2_id])
+        # LOCK AND RE-ASK THE WHOLE PREDICATE FIRST (r13 MEDIUM). This mode used
+        # to decide from the unlocked snapshot above and then write twice — a
+        # refund, then an unconditional status/invalidation overwrite. Two
+        # things could have happened in between. An admin reversal invalidates
+        # the series with its own reason, and this overwrote that reason with
+        # `no_match_reported`, which the disconnect path treats as exempt, so an
+        # admin-invalidated series became reportable again. A first match could
+        # also have been reported, making the row no longer stale at all.
+        #
+        # It also puts the series lock BEFORE the refund (r13 LOW), which is the
+        # order the admin reversal takes and the order modes 2 and 3 take, so a
+        # concurrent operation on one series waits instead of cycling.
+        _still_a = (await db.execute(text(
+            "SELECT 1 FROM ranked_series rs "
+            " WHERE rs.id = :sid "
+            "   AND rs.status = 'active' AND rs.invalidated_at IS NULL "
+            "   AND rs.is_tournament = FALSE "
+            "   AND rs.created_at < NOW() - CAST(:cutoff AS interval) "
+            "   AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
+            "FOR NO KEY UPDATE"
+        ), {"sid": str(sid),
+            "cutoff": "%d minutes" % int(cutoff_min)})).first()
+        if _still_a is None:
+            await db.commit()
+            continue
         n = await _refund_series_bets(db, sid, "refund_abandoned")
         await db.execute(text(
             "UPDATE ranked_series SET status = 'abandoned', "

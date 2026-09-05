@@ -87,11 +87,21 @@ class FakeQueueSession:
     def __init__(self, rows):
         self.rows = {r["player_id"]: dict(r) for r in rows}
         self.statements = []
+        # r13 HIGH: the issued room -> region binding the stamp now records, so
+        # the region a later match report is credited with is the one this
+        # server chose rather than one the client named.
+        self.issued_bindings = []
 
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         self.statements.append(sql)
         params = params or {}
+        if "INSERT INTO issued_room_regions" in sql:
+            assert "ON CONFLICT (room_name) DO NOTHING" in sql, (
+                "a reused room name must keep the issuance that sent players somewhere"
+            )
+            self.issued_bindings.append((params["room"], params["region"]))
+            return _Result([])
         if "SET room_name = :room, room_region = :region" in sql:
             for p in STAMP_PREDICATES:
                 assert " ".join(p.split()) in sql, f"stamp lost predicate: {p}"
@@ -368,3 +378,29 @@ def test_strict_session_gate_is_fail_closed_for_the_poll():
                                               _S(dict(good, expires_at=now - timedelta(seconds=1))))) is False
     assert _run(main._strict_steam_session_ok(req("t"), "76561198000000001", _S(dict(good, verified=False)))) is False
     assert _run(main._strict_steam_session_ok(None, "76561198000000001", _S(good))) is False
+
+
+def test_the_issued_region_is_recorded_only_when_the_stamp_took():
+    """r13 HIGH. The region-corroboration map used to believe the report's own
+    `region` field, which is outside the seven-field match HMAC. It reads the
+    server's issuance instead, so the issuance has to be written down -- and
+    written down only when the stamp actually took, because a stamp that did
+    not take sent nobody anywhere.
+
+    Executed both ways against the same fake."""
+    intact = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="matched", ready=True, matched_with=ME),
+    ])
+    assert _run(main._queue_stamp_room_reciprocal(intact, ME, PARTNER, "ranked_abc", "eu")) is True
+    assert intact.issued_bindings == [("ranked_abc", "eu")]
+
+    # the negative control: a pair that is not reciprocal writes nothing
+    broken = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="searching", ready=False, matched_with=None),
+    ])
+    assert _run(main._queue_stamp_room_reciprocal(broken, ME, PARTNER, "ranked_xyz", "eu")) is False
+    assert broken.issued_bindings == [], (
+        "a stamp that did not take recorded an issuance anyway"
+    )

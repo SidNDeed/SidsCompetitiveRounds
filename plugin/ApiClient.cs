@@ -673,7 +673,32 @@ namespace CompetitiveRounds
         // replay of a report that actually landed just errors out and is dropped.
         private class PendingReport { public string url; public string json; public int attempts; public float nextAt; }
         private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
-        private static bool _outboxLoopStarted;
+        /// <summary>WHICH host is driving the supervisor, not merely that one
+        /// was started. The flag this replaces was cleared only by the
+        /// coroutine's `finally`, and the way a supervisor most often dies does
+        /// not run one: destroying the GameObject it was started on stops it
+        /// where it stands. The flag then said "a supervisor exists" for the
+        /// rest of the process, the respawned host declined to start another,
+        /// and every report on disk sat there unsent.
+        ///
+        /// Unity's `== null` is true for a DESTROYED object whose C# reference
+        /// is still non-null, which is exactly the question being asked.</summary>
+        private static MonoBehaviour _outboxLoopHost;
+        /// <summary>Which supervisor owns that host. A `finally` from a
+        /// superseded generation must not clear a newer one's ownership.</summary>
+        private static int _outboxLoopGeneration;
+        /// <summary>Last time the running supervisor completed a lap. Ownership
+        /// is a bound, not a mechanism: rather than enumerate the ways a
+        /// coroutine can stop without unwinding, a lap that has not happened in
+        /// OUTBOX_BEAT_TIMEOUT is treated as no supervisor at all and the next
+        /// caller re-arms. The lap is 10 s, so this is four missed ones.</summary>
+        private static float _outboxLoopBeatRt;
+        private const float OUTBOX_BEAT_TIMEOUT = 45f;
+        /// <summary>Throttle for the periodic re-arm. Re-arming has to happen on
+        /// a tick and not only on an enqueue: a session whose supervisor died
+        /// with reports already queued makes no further enqueue, and that is
+        /// precisely the session whose queue would otherwise never move.</summary>
+        private static float _outboxTickRt;
         /// <summary>Said once: a supervisor that could not be started is a
         /// queue with no retry driver, and the previous code could not tell that
         /// state from a healthy one.</summary>
@@ -692,6 +717,103 @@ namespace CompetitiveRounds
             get { return Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.pending-reports.jsonl"); }
         }
 
+        private static string OutboxTempPath
+        {
+            get { return OutboxPath + ".tmp"; }
+        }
+
+        /// <summary>Marks the last line of a COMPLETE queue file and carries the
+        /// two things load needs from it: which generation it is, and whether it
+        /// is all there. A file without this line was interrupted mid-write --
+        /// or was written by a build older than this one, which is the only
+        /// reason the live copy is still read without it.</summary>
+        private const string OUTBOX_TRAILER = "#scr-outbox";
+
+        /// <summary>Monotonic per write. Seeded from disk on load so it keeps
+        /// counting across launches rather than restarting at 1 and making an
+        /// older file look newer.</summary>
+        private static long _outboxGeneration;
+
+        /// <summary>FNV-1a over the body. Not a signature and not trying to be:
+        /// the question is whether the bytes that were meant to be written all
+        /// arrived, and a torn write fails this for the same reason a truncated
+        /// one fails the line count beside it.</summary>
+        private static string OutboxHash(string body)
+        {
+            ulong h = 14695981039346656037UL;
+            for (int i = 0; i < body.Length; i++)
+            {
+                h ^= body[i];
+                h *= 1099511628211UL;
+            }
+            return h.ToString("x16");
+        }
+
+        private class OutboxGeneration
+        {
+            public bool whole;
+            public long generation;
+            public List<PendingReport> entries;
+        }
+
+        /// <summary>Reads one candidate file. `allowLegacy` is true only for the
+        /// live copy: a file with no trailer is either a pre-trailer build's
+        /// queue (real, and readable) or a torn temp (not). The live copy can be
+        /// the first; the temp can only ever be the second.</summary>
+        private static OutboxGeneration ReadOutboxFile(string path, bool allowLegacy)
+        {
+            var result = new OutboxGeneration { whole = false, generation = 0, entries = new List<PendingReport>() };
+            if (!File.Exists(path)) return result;
+            string[] lines;
+            try { lines = File.ReadAllLines(path); }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[OUTBOX] {Path.GetFileName(path)} unreadable: {ex.Message}");
+                return result;
+            }
+
+            int bodyLines = lines.Length;
+            long generation = 0;
+            bool trailed = false;
+            if (bodyLines > 0 && lines[bodyLines - 1].StartsWith(OUTBOX_TRAILER, StringComparison.Ordinal))
+            {
+                string[] parts = lines[bodyLines - 1].Split('\t');
+                bodyLines--;
+                if (parts.Length != 4) return result;
+                var body = new StringBuilder();
+                for (int i = 0; i < bodyLines; i++) body.Append(lines[i]).Append('\n');
+                long claimedCount;
+                if (!long.TryParse(parts[1], out generation)) return result;
+                if (!long.TryParse(parts[2], out claimedCount)) return result;
+                if (claimedCount != bodyLines) return result;
+                if (parts[3] != OutboxHash(body.ToString())) return result;
+                trailed = true;
+            }
+            else if (!allowLegacy)
+            {
+                // A temp with no trailer is a write that did not finish. It is
+                // not a queue, and preferring it would lose the live copy.
+                return result;
+            }
+
+            for (int i = 0; i < bodyLines; i++)
+            {
+                string line = lines[i];
+                int tab = line.IndexOf('\t');
+                if (tab <= 0 || tab >= line.Length - 1) continue;
+                result.entries.Add(new PendingReport
+                {
+                    url = line.Substring(0, tab),
+                    json = line.Substring(tab + 1),
+                    attempts = 0,
+                    nextAt = Time.realtimeSinceStartup + 20f,
+                });
+            }
+            result.whole = true;
+            result.generation = trailed ? generation : 0;
+            return result;
+        }
+
         public static void EnqueueFailedReport(string url, string json)
         {
             try
@@ -699,6 +821,12 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(json)) return;
                 // A lost response can reach more than one retry callback. Keep
                 // one durable copy of an idempotent payload.
+                //
+                // The re-arm comes FIRST. Returning early on the duplicate also
+                // skipped EnsureOutboxLoop, so the one call most likely to be
+                // made while a queue is stuck -- the same report failing again --
+                // was the one call that could not restart the driver.
+                EnsureOutboxLoop();
                 foreach (var pending in _pendingReports)
                     if (pending.url == url && pending.json == json)
                         return;
@@ -784,23 +912,42 @@ namespace CompetitiveRounds
                 var sb = new StringBuilder();
                 foreach (var p in _pendingReports)
                     sb.Append(p.url).Append('\t').Append(p.json.Replace("\n", " ").Replace("\r", " ")).Append('\n');
-                if (sb.Length == 0) { if (File.Exists(OutboxPath)) File.Delete(OutboxPath); }
-                else
-                {
-                    // Written beside the queue and MOVED over it, never
-                    // truncated in place. WriteAllText opens the live file
-                    // with Truncate, so an interruption between the truncate
-                    // and the last byte leaves an empty or half-written queue
-                    // — losing exactly the reports this file exists to carry
-                    // through a crash, in exactly the window where one is most
-                    // likely, since we rewrite on every enqueue and dequeue.
-                    // With the move, an interruption leaves either the whole
-                    // previous queue or the whole new one.
-                    string tmp = OutboxPath + ".tmp";
-                    File.WriteAllText(tmp, sb.ToString());
-                    if (File.Exists(OutboxPath)) File.Replace(tmp, OutboxPath, null);
-                    else File.Move(tmp, OutboxPath);
-                }
+
+                // An empty queue is WRITTEN, not deleted, and that is not a
+                // detail. Deleting left the temp as the only file on disk, so
+                // the next launch would find a stale generation with nothing to
+                // outrank it and re-send reports that had already landed. An
+                // empty generation says "nothing pending, as of write N" and
+                // outranks anything older by the same rule as any other write.
+                // The one case that writes nothing is the session that never
+                // queued anything at all.
+                string body = sb.ToString();
+                string tmp = OutboxTempPath;
+                if (body.Length == 0 && !File.Exists(OutboxPath) && !File.Exists(tmp)) return;
+
+                // Written beside the queue and MOVED over it, never truncated
+                // in place. WriteAllText opens the live file with Truncate, so
+                // an interruption between the truncate and the last byte leaves
+                // an empty or half-written queue -- losing exactly the reports
+                // this file exists to carry through a crash, in exactly the
+                // window where one is most likely, since we rewrite on every
+                // enqueue and dequeue. With the move, an interruption leaves
+                // either the whole previous queue or the whole new one.
+                //
+                // AND THE TEMP IS RECOVERABLE. The window the move leaves is
+                // "written in full, not yet renamed", and in that window the
+                // temp is the NEWER queue: reading only the live copy there
+                // loses the newest enqueue, and on a first creation loses the
+                // queue outright. So each write is stamped with a generation
+                // and a checksum, and load takes the newest file that is whole
+                // -- whichever of the two names it happens to be under.
+                _outboxGeneration++;
+                string trailer = OUTBOX_TRAILER + "\t" + _outboxGeneration.ToString()
+                                 + "\t" + _pendingReports.Count.ToString()
+                                 + "\t" + OutboxHash(body) + "\n";
+                File.WriteAllText(tmp, body + trailer);
+                if (File.Exists(OutboxPath)) File.Replace(tmp, OutboxPath, null);
+                else File.Move(tmp, OutboxPath);
             }
             catch (Exception ex)
             {
@@ -817,23 +964,56 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Takes the newest COMPLETE queue of the two names a write
+        /// can leave it under. Both are read; a file that fails its own trailer
+        /// is not a queue and does not compete; the temp wins only by being
+        /// strictly newer, so the ordinary case (the rename completed) reads the
+        /// live copy and finds no temp at all.</summary>
         private static void LoadOutbox()
         {
             try
             {
-                if (!File.Exists(OutboxPath)) return;
-                foreach (var line in File.ReadAllLines(OutboxPath))
+                string tmp = OutboxTempPath;
+                var live = ReadOutboxFile(OutboxPath, true);
+                var stranded = ReadOutboxFile(tmp, false);
+
+                bool takeStranded = stranded.whole
+                                    && (!live.whole || stranded.generation > live.generation);
+                var chosen = takeStranded ? stranded : live;
+                _outboxGeneration = Math.Max(live.generation, stranded.generation);
+
+                if (takeStranded)
                 {
-                    int tab = line.IndexOf('\t');
-                    if (tab <= 0 || tab >= line.Length - 1) continue;
-                    _pendingReports.Add(new PendingReport
+                    // Recovered, and then MADE the live copy, so a second crash
+                    // does not have to recover it again -- and so the file the
+                    // rest of this class rewrites is the one that was chosen.
+                    Plugin.Log.LogInfo($"[OUTBOX] recovered generation {stranded.generation} from an interrupted write "
+                                       + $"({stranded.entries.Count} report(s)); the completed copy was "
+                                       + (live.whole ? $"generation {live.generation}" : "absent"));
+                    try
                     {
-                        url = line.Substring(0, tab),
-                        json = line.Substring(tab + 1),
-                        attempts = 0,
-                        nextAt = Time.realtimeSinceStartup + 20f,
-                    });
+                        if (File.Exists(OutboxPath)) File.Replace(tmp, OutboxPath, null);
+                        else File.Move(tmp, OutboxPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[OUTBOX] recovered queue could not be promoted: {ex.Message}");
+                    }
                 }
+                else if (File.Exists(tmp))
+                {
+                    // Superseded or torn. Leaving it would make every later load
+                    // weigh a file that has already lost.
+                    try { File.Delete(tmp); } catch { }
+                }
+
+                if (!chosen.whole && File.Exists(OutboxPath))
+                {
+                    Plugin.Log.LogWarning("[OUTBOX] the queue file on disk is incomplete; "
+                                          + "its reports cannot be replayed this session");
+                }
+
+                foreach (var entry in chosen.entries) _pendingReports.Add(entry);
                 if (_pendingReports.Count > 0)
                 {
                     Plugin.Log.LogInfo($"[OUTBOX] loaded {_pendingReports.Count} unsent report(s) from previous session");
@@ -843,9 +1023,37 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] load failed: {ex.Message}"); }
         }
 
+        /// <summary>Called from the frame tick. Cheap by construction: it does
+        /// nothing at all with an empty queue, and asks the ownership question
+        /// at most once every few seconds.</summary>
+        internal static void OutboxTick()
+        {
+            if (_pendingReports.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
+            if (now - _outboxTickRt < 5f) return;
+            _outboxTickRt = now;
+            EnsureOutboxLoop();
+        }
+
+        /// <summary>True while a supervisor is known to be running on the host
+        /// that is current NOW. Three ways this is false: nobody ever started
+        /// one; the host that was driving it has been destroyed (Unity reports
+        /// the destroyed object as null); or the current host is a different
+        /// object than the one recorded, which is what a respawn produces.
+        /// Plus the lap bound, which covers whatever is left.</summary>
+        private static bool OutboxLoopIsLive(MonoBehaviour host)
+        {
+            if (_outboxLoopHost == null) return false;
+            if (!ReferenceEquals(_outboxLoopHost, host)) return false;
+            return Time.realtimeSinceStartup - _outboxLoopBeatRt <= OUTBOX_BEAT_TIMEOUT;
+        }
+
         private static void EnsureOutboxLoop()
         {
-            if (_outboxLoopStarted || Plugin.Instance == null) return;
+            MonoBehaviour host = Plugin.Instance;
+            if (host == null) return;
+            if (OutboxLoopIsLive(host)) return;
+            _outboxLoopHost = null;
             // Set AFTER the coroutine is running, and only if it IS running.
             // Setting it first latched "a supervisor exists" with none running,
             // and the flag is the only guard, so no later call could start one.
@@ -856,18 +1064,20 @@ namespace CompetitiveRounds
             // the returned Coroutine is what says so. Left false, the next
             // enqueue re-arms, which is the behaviour this guard was written
             // for in the first place.
-            var running = Plugin.Instance.StartCoroutine(OutboxSupervisor());
+            int generation = ++_outboxLoopGeneration;
+            var running = host.StartCoroutine(OutboxSupervisor(generation));
             if (running == null)
             {
                 if (!_outboxLoopWarned)
                 {
                     _outboxLoopWarned = true;
                     Plugin.Log.LogWarning("[OUTBOX] retry supervisor did not start (inactive host); "
-                                          + "queued reports wait for the next enqueue to re-arm it");
+                                          + "queued reports wait for the next tick to re-arm it");
                 }
                 return;
             }
-            _outboxLoopStarted = true;
+            _outboxLoopHost = host;
+            _outboxLoopBeatRt = Time.realtimeSinceStartup;
         }
 
         /// <summary>Runs OutboxPass forever, driving it by hand so a throw
@@ -880,8 +1090,11 @@ namespace CompetitiveRounds
         /// log but the exception. A pass that throws is logged and the next
         /// one starts against the same queue; entries keep their attempt
         /// counts and their next-attempt times, so a repeated fault costs
-        /// retries rather than the queue. The started flag is cleared if this
-        /// ever returns, so EnsureOutboxLoop can start a fresh one.
+        /// retries rather than the queue. Ownership is released if this ever
+        /// returns, so EnsureOutboxLoop can start a fresh one -- and, because
+        /// the ways a coroutine can stop WITHOUT unwinding are not enumerable
+        /// (destroying its host is the ordinary one, and runs no `finally`),
+        /// ownership also expires on its own when a lap goes missing.
         ///
         /// NESTED COROUTINES ARE DRIVEN HERE TOO, and that is the difference
         /// between the guard covering the pass and the guard covering one
@@ -891,15 +1104,25 @@ namespace CompetitiveRounds
         /// entry reaches one) escaped the supervisor and killed it, and the
         /// queue then waited for an enqueue that a session with nothing left to
         /// report never makes. Driving nested enumerators on a small stack
-        /// keeps every frame inside the guard; only real yield instructions go
-        /// to Unity.</summary>
-        private static IEnumerator OutboxSupervisor()
+        /// keeps every frame inside the guard.
+        ///
+        /// EXCEPT AT THE CAP: past OUTBOX_NEST_LIMIT levels an enumerator is
+        /// handed to Unity instead of driven, exactly as before. The pass nests
+        /// one level, so the cap bounds the hand-driving rather than describing
+        /// a depth this code reaches; a queue that ever got there would be
+        /// unguarded at the bottom and is worth noticing, not worth an
+        /// unbounded stack.</summary>
+        private static IEnumerator OutboxSupervisor(int generation)
         {
             try
             {
                 while (true)
                 {
                     yield return new WaitForSecondsRealtime(10f);
+                    // The lap that proves this one is still running. A newer
+                    // supervisor's beat is not this one's to write.
+                    if (_outboxLoopGeneration != generation) yield break;
+                    _outboxLoopBeatRt = Time.realtimeSinceStartup;
                     var stack = new List<IEnumerator>(OUTBOX_NEST_LIMIT);
                     stack.Add(OutboxPass());
                     while (stack.Count > 0)
@@ -934,7 +1157,10 @@ namespace CompetitiveRounds
                     }
                 }
             }
-            finally { _outboxLoopStarted = false; }
+            // Only if this generation is still the owner: a `finally` that ran
+            // late, after a respawn had already armed a replacement, used to
+            // hand the new supervisor's ownership back to nobody.
+            finally { if (_outboxLoopGeneration == generation) _outboxLoopHost = null; }
         }
 
         /// <summary>One sweep of the queue: every entry whose time has come is
@@ -1005,10 +1231,18 @@ namespace CompetitiveRounds
                     // cap still bounds anything that never succeeds.
                     //
                     // The disconnect report reaches this branch too, and its
-                    // refusals are the ones that MUST be permanent: a named
-                    // series that is not this pair's, or is invalidated, or
-                    // finished more than a week ago, is 403 and no amount of
-                    // retrying changes any of those.
+                    // refusals are the ones that MUST be permanent. WHICH ones
+                    // those are narrowed in r13 (this comment named three and
+                    // two of them have moved): a name that belongs to another
+                    // pair, or resolves to nothing, is no longer a refusal at
+                    // all — the server falls back to resolving the pair's
+                    // current series, because a wrong name tells it nothing it
+                    // did not already know without one. What still answers 403
+                    // is a series this report may not be filed against: one
+                    // whose integrity invalidation is not the janitor's, one
+                    // nothing has happened in for hours, one with no gameplay
+                    // on the server's own record. Retrying changes none of
+                    // those. A 503 is not one of them and is retried.
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
@@ -1960,7 +2194,7 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogWarning("[LIVE-POINTS] held series is no longer active — clearing so the "
                                               + "preflight re-arms for the current game");
-                        ActiveRankedSeriesId = null; ActiveRankedSeriesRoom = "";
+                        ClearActiveSeries();
                     }
                     return null;   // no URL rewrite — the refusal hook is the side effect
                 });
@@ -5846,7 +6080,7 @@ namespace CompetitiveRounds
             // game that just finished; anything sent after it survives.
             if (preflightGeneration > preflightRetiredThrough)
                 preflightRetiredThrough = preflightGeneration;
-            ActiveRankedSeriesId = null; ActiveRankedSeriesRoom = "";
+            ClearActiveSeries();
 
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/matches",
@@ -9117,8 +9351,7 @@ namespace CompetitiveRounds
                             }
                         }
                         catch { }
-                        ActiveRankedSeriesId = sid;
-                        ActiveRankedSeriesRoom = roomNow ?? "";
+                        PublishActiveSeries(sid, roomNow);
                         try { Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} status={ExtractJsonString(resp, "status")}"); } catch { }
                         // Aug 9 (Sid): a rated ROOMCODE game must end every
                         // other search — the room-entry teardown deliberately
@@ -9473,6 +9706,11 @@ namespace CompetitiveRounds
                 && !string.Equals(supersededIssuedRoom, roomName ?? "", StringComparison.Ordinal))
                 supersededIssuedRoom = null;
             H2HRules.RetireOnJoin(ref issuedPair, roomName, incarnation);
+            // The series record keeps the same company. Both describe ONE
+            // occupancy of the room they name, and both are decided here so
+            // they cannot drift apart into two different answers about the
+            // same join.
+            H2HRules.RetireSeriesOnJoin(ref activeSeriesBinding, roomName, incarnation);
         }
 
         private static bool IsSteamId64(string s)
@@ -10119,8 +10357,7 @@ namespace CompetitiveRounds
                             string region = ExtractJsonString(response, "photon_region");
                             // v1.22 — server now pre-creates the ranked_series and returns its id.
                             // Stash it so live-points reports during game 1 can address the right series.
-                            ActiveRankedSeriesId = ExtractJsonString(response, "series_id");
-                            ActiveRankedSeriesRoom = room ?? "";
+                            PublishActiveSeries(ExtractJsonString(response, "series_id"), room);
                             // Bug 200: the server may have RESUMED an undecided BO3
                             // rather than creating a fresh one. Staging the tally
                             // here (not adopting) is required — the room-join reset
@@ -10261,7 +10498,7 @@ namespace CompetitiveRounds
                             // poll-discovered client never posted live points
                             // and the betting lock logic ran blind (#36).
                             string sid = ExtractJsonString(response, "series_id");
-                            if (!string.IsNullOrEmpty(sid)) { ActiveRankedSeriesId = sid; ActiveRankedSeriesRoom = room ?? ""; }
+                            if (!string.IsNullOrEmpty(sid)) PublishActiveSeries(sid, room);
                             // Bug 200: parity with the /queue/ready both_ready
                             // path — this poll branch hands over a series id the
                             // same way, so it must carry a resumed tally too.
@@ -18030,7 +18267,74 @@ namespace CompetitiveRounds
         /// same distinction is already drawn for the tournament provenance
         /// latch, which records that a queue-staged id can survive a failed
         /// join into a later room.</summary>
-        public static string ActiveRankedSeriesRoom = "";
+        public static string ActiveRankedSeriesRoom
+        {
+            get { return activeSeriesBinding.HasValue ? (activeSeriesBinding.Value.RoomName ?? "") : ""; }
+        }
+
+        /// <summary>The room, the pairing and the ONE occupancy the held series
+        /// id belongs to. A bare room name used to be the whole of it, and a
+        /// name is reusable (r13 HIGH) -- see H2HRules.RoomBoundSeries.</summary>
+        private static H2HRules.RoomBoundSeries? activeSeriesBinding;
+
+        /// <summary>Publish a series id for a room. The pairing comes from the
+        /// queue's own record for that room where it has one; where it does
+        /// not, it is left empty and the occupancy stamp carries the weight.
+        /// Nothing else writes the binding, so there is one place where a
+        /// series id can start being answered for.</summary>
+        public static void PublishActiveSeries(string seriesId, string room)
+        {
+            ActiveRankedSeriesId = seriesId;
+            if (string.IsNullOrEmpty(seriesId))
+            {
+                activeSeriesBinding = null;
+                return;
+            }
+            string opponent = "";
+            try
+            {
+                if (issuedPair.HasValue
+                    && string.Equals(issuedPair.Value.RoomName ?? "", room ?? "", StringComparison.Ordinal))
+                    opponent = issuedPair.Value.OpponentSteamId ?? "";
+            }
+            catch { }
+            activeSeriesBinding = new H2HRules.RoomBoundSeries
+            {
+                SeriesId = seriesId,
+                RoomName = room ?? "",
+                OpponentSteamId = opponent,
+                // Published at both_ready, which is BEFORE this seat has joined
+                // the room it names. Unstamped until a join matches it, and a
+                // staged id answers for nothing.
+                JoinIncarnation = -1,
+            };
+        }
+
+        public static void ClearActiveSeries()
+        {
+            ActiveRankedSeriesId = null;
+            activeSeriesBinding = null;
+        }
+
+        /// <summary>The opponent this seat can see in the room right now, or
+        /// empty when there is nobody to read -- which is the ordinary state
+        /// for the seat filing a leave report, and the state this rule is
+        /// permissive about.
+        ///
+        /// Only a real Steam id counts. The watcher clears this per room and
+        /// then carries a `photon_&lt;actor&gt;` placeholder until the id
+        /// resolves; a placeholder is not the opponent being someone else, and
+        /// treating it as one would answer "" for the first seconds of every
+        /// room.</summary>
+        private static string OpponentInRoomOrEmpty()
+        {
+            try
+            {
+                string opp = GameStateWatcher.OpponentSteamId ?? "";
+                return IsSteamId64(opp) ? opp : "";
+            }
+            catch { return ""; }
+        }
 
         /// <summary>ActiveRankedSeriesId, but only when it was published for
         /// the room this seat is in. An observation made in one room must not
@@ -18041,12 +18345,10 @@ namespace CompetitiveRounds
         {
             try
             {
-                string sid = ActiveRankedSeriesId;
-                if (string.IsNullOrEmpty(sid)) return "";
-                if (!PhotonNetwork.InRoom) return "";
-                string here = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
-                if (string.IsNullOrEmpty(here)) return "";
-                return string.Equals(ActiveRankedSeriesRoom, here, StringComparison.Ordinal) ? sid : "";
+                string here = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
+                    ? PhotonNetwork.CurrentRoom.Name : null;
+                return H2HRules.SeriesForRoom(activeSeriesBinding, PhotonNetwork.InRoom, here,
+                                              RoomIncarnation, OpponentInRoomOrEmpty());
             }
             catch { return ""; }
         }
@@ -18064,11 +18366,10 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (string.IsNullOrEmpty(ActiveRankedSeriesId)) return false;
-                if (!PhotonNetwork.InRoom) return false;
-                string here = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
-                if (string.IsNullOrEmpty(here)) return false;
-                return !string.Equals(ActiveRankedSeriesRoom, here, StringComparison.Ordinal);
+                string here = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
+                    ? PhotonNetwork.CurrentRoom.Name : null;
+                return H2HRules.SeriesContradictedByRoom(activeSeriesBinding, PhotonNetwork.InRoom, here,
+                                                         RoomIncarnation, OpponentInRoomOrEmpty());
             }
             catch { return false; }
         }
