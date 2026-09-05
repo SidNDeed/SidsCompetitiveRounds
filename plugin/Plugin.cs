@@ -58,11 +58,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<int> BroadcastFpsCap;
         internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
-        internal static ConfigEntry<bool> LagNoticesEnabled;
-        // Streamed-playback measurement (MusicStreamProbe). Opt-in, default
-        // off; the command names the track and the mode.
-        internal static ConfigEntry<bool> MusicProbeEnabled;
-        internal static ConfigEntry<string> MusicProbeRun;   // [Network] LagNotices — Release B §4, default off
+        internal static ConfigEntry<bool> LagNoticesEnabled;   // [Network] LagNotices — Release B §4, default off
         internal static ConfigEntry<bool> ShowIngameChat;
         // Bug 211/213 (Sid's chosen design): M cycles the in-game chat overlay
         // through Normal -> Pinned -> Muted. The on/off half of that state IS
@@ -908,14 +904,6 @@ namespace CompetitiveRounds
                 "Music", "MusicDeselected",
                 "",
                 "Tracks removed from your custom-music playlist, as albumSku/trackIndex pairs (comma-separated). Stored as the DESELECTED set so newly added tracks default to selected. Managed from the F5 Music tab."
-            );
-            MusicProbeEnabled = Config.Bind(
-                "Music", "StreamProbe", false,
-                "Diagnostic, off by default. Measures STREAMED music playback on this machine and writes [MUSIC-PROBE] lines to the BepInEx log; it plays on its own private audio source and never touches your music settings. Only useful if you have been asked for a measurement. Refused inside an online room. NOTE: this section is written on first launch, so set the value AFTER launching once, then restart."
-            );
-            MusicProbeRun = Config.Bind(
-                "Music", "StreamProbeRun", "",
-                "What StreamProbe measures: '<albumSku>:<trackIndex>' plays that track streamed for 120 s. Add ':stress' for 600 s plus busy threads (offline Sandbox only) or ':churn' for ten open/close cycles. Set a NEW value to run again; re-read from disk every 2 s. Ignored unless StreamProbe is true."
             );
             MusicShuffle = Config.Bind(
                 "Music", "MusicShuffle", false,
@@ -2642,7 +2630,6 @@ namespace CompetitiveRounds
             // Overlay left open with nobody at the seat (broadcast identity only;
             // the player-seat branch was cut in review — see the class comment).
             try { OverlayIdleClose.Tick(); } catch { }
-            try { MusicStreamProbe.Tick(); } catch { }
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
