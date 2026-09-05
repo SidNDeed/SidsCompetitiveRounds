@@ -21,9 +21,11 @@
   the name shown is the one the server holds for the opponent. In an ordinary
   room the line follows the seat: if the other player is replaced, it clears and
   re-fetches for whoever is there now, using the id that player's game
-  advertises. In a room the ranked queue issued, the line is for the opponent
-  the queue assigned and nobody else — anyone else in that seat gets no line at
-  all, rather than the assigned player's name and record.
+  advertises. In a room the ranked queue issued, the line is shown only while
+  the other player's game says it is the opponent the queue assigned: if it says
+  anything else, if a different player takes that seat, or if the queue has
+  since issued another room, there is no line at all rather than the assigned
+  player's name and record.
 
 **Lag notices (opt-in, default off)**
 

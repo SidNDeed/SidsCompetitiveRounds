@@ -126,6 +126,9 @@ namespace CompetitiveRounds
         // Sampling only at the two boundaries left a window keyed when the
         // change happened and reverted between them.
         private static bool _wKeyBroken;
+        // r8 M4: RoomActors.RosterGeneration as it stood when this window
+        // opened. The key can revert between two frames; this cannot.
+        private static int _wOpenRosterGen;
 
         /// <summary>The closed-window facts LagNotices reads (§4.3).</summary>
         internal struct WindowFacts
@@ -221,6 +224,7 @@ namespace CompetitiveRounds
             if (!keepFrozen) { _frozenReportFields = null; }
             ResetWindowAccumulators();
             _wOpenActor = 0; _wOpenId = null;   // r6 M3: the next game's first window samples its key when TickFrame opens it
+            _wOpenRosterGen = RoomActors.RosterGeneration;
         }
 
         private static void ResetWindowAccumulators()
@@ -292,6 +296,13 @@ namespace CompetitiveRounds
         private static void NoteKeySampleInWindow()
         {
             if (_wKeyBroken) return;
+            // r8 M4: the generation FIRST. A per-frame comparison of the key
+            // can only see differences that are still standing when the frame
+            // runs, and one PUN Dispatch can drain an enter, a late delivery
+            // and a leave between two frames — after which the key sampled on
+            // either side is identical and the window would be admitted as one
+            // opponent's whole span. The counter does not revert.
+            if (RoomActors.RosterGeneration != _wOpenRosterGen) { _wKeyBroken = true; return; }
             int actor; string id;
             SampleEligibleKey(out actor, out id);
             if (actor != _wOpenActor || !string.Equals(id ?? "", _wOpenId ?? "", StringComparison.Ordinal))
@@ -376,6 +387,7 @@ namespace CompetitiveRounds
                     // r6 M3: the game's first window opens under the key sampled now.
                     _windowStartRt = rt;
                     SampleEligibleKey(out _wOpenActor, out _wOpenId);
+                    _wOpenRosterGen = RoomActors.RosterGeneration;
                     _wLateForeign = false;
                     _wKeyBroken = false;
                 }
@@ -435,15 +447,18 @@ namespace CompetitiveRounds
             }
             catch { }
             try { int r; if (!_spectatorGame && GameStateWatcher.TryGetPeerRttFresh(out r)) peerRtt = r; } catch { }
-            // r6 M3 / r7 M3: the window is keyed only when it was one eligible
-            // opponent's window for its WHOLE span — the key sampled at its
-            // open, the key sampled at its close, and every per-frame sample
-            // in between (latched in _wKeyBroken) all agree, and no late batch
-            // came from another actor. An unkeyed window is never consumed by
-            // the evaluator. LagNotices.WindowKeyed holds the rule, so the
-            // self-test decides these windows with this exact code.
+            // r6 M3 / r7 M3 / r8 M4: the window is keyed only when it was one
+            // eligible opponent's window for its WHOLE span — the key sampled
+            // at its open, the key sampled at its close, every per-frame sample
+            // in between, and no roster or identity change AT ALL since it
+            // opened (all three latched in _wKeyBroken), and no late batch from
+            // another actor. The generation is what makes "whole span" true
+            // rather than "true at the moments we looked". An unkeyed window is
+            // never consumed by the evaluator. LagNotices.WindowKeyed holds the
+            // rule, so the self-test decides these windows with this exact code.
             int closeActor; string closeId;
             SampleEligibleKey(out closeActor, out closeId);
+            if (RoomActors.RosterGeneration != _wOpenRosterGen) _wKeyBroken = true;
             bool keyed = LagNotices.WindowKeyed(_wOpenActor, _wOpenId, closeActor, closeId, _wLateForeign, _wKeyBroken);
             var w = new Window
             {
@@ -465,6 +480,7 @@ namespace CompetitiveRounds
             if (_ringCount < WINDOW_RING) _ringCount++;
             ResetWindowAccumulators();
             _wOpenActor = closeActor; _wOpenId = closeId;   // r6 M3: the next window opens under the key sampled at this boundary
+            _wOpenRosterGen = RoomActors.RosterGeneration;  // r8 M4: and under the generation standing at it
             _windowStartRt = Time.realtimeSinceStartup;
             // Release B §4.3: the ONLY tick of the lag-notice machine, after the
             // window is in the ring — every input it reads is a CLOSED window.

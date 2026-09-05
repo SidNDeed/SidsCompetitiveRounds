@@ -20,22 +20,28 @@ namespace CompetitiveRounds
     /// room property, exactly two active fighters, and the other fighter
     /// resolved by ResolveOpponent: its actor number, plus the id the line
     /// keys on — for a queue-issued room whose name this client still holds,
-    /// the SERVER-ATTESTED opponent (ApiClient.TryGetIssuedOpponent, design
-    /// r3 §1.2 MEDIUM: the peer's u_id is peer-controlled); for any other
-    /// room, that actor's own u_id property (RoomActors.SteamIdOf, read per
-    /// actor every tick, so a replacement opponent is seen as one). Either
-    /// way the server answers with ITS name for the id and the line is
-    /// labelled with that name; this line is the id's only consumer here.
+    /// the opponent the SERVER PAIRED this seat with, once the other
+    /// fighter's own game claims to be that player
+    /// (ApiClient.TryGetIssuedOpponent); for any other room, that actor's own
+    /// u_id property (RoomActors.SteamIdOf, read per actor every tick, so a
+    /// replacement opponent is seen as one). Either way the server answers
+    /// with ITS name for the id and the line is labelled with that name; this
+    /// line is the id's only consumer here.
     ///
-    /// The attestation VERIFIES an identity; it never supplies one (review
-    /// r6/r7 MEDIUM — H2HRules.ConsultIssued, state held on ApiClient's
-    /// issued pair). In the room the queue issued, the line is shown only
-    /// when the other fighter's own advertised id IS the attested one, and
-    /// only for the (incarnation, actor) the pairing is bound to on its
-    /// first such consumption. A fighter advertising anything else, a later
-    /// actor or incarnation, and a queue lifecycle that has moved on all get
-    /// no line at all — never the advertised id, which would show one
-    /// player the record and server name of another.
+    /// WHAT THE PAIRING IS AND IS NOT (review r8 MEDIUM 1). u_id is a Photon
+    /// custom property the peer's own game writes, and nothing on this client
+    /// can bind a Photon actor to a Steam identity — the queue names WHO this
+    /// seat was paired with, never WHICH ACTOR he is. So the queue-issued
+    /// room does not authenticate the fighter in it; it compares his claim
+    /// with the pairing, and only ever shows LESS than the ordinary path as a
+    /// result. The line appears when the other fighter's own advertised id IS
+    /// the paired one, and only for the (incarnation, actor) the pairing is
+    /// bound to on its first such consumption. A fighter advertising anything
+    /// else, a later actor or incarnation, a queue lifecycle that has moved
+    /// on, and a room whose pairing a later issuance replaced all get no line
+    /// at all — never the advertised id, which would put one player's record
+    /// and server name on the line for another. A fighter who claims the
+    /// paired id is taken at his word, exactly as in any other room.
     ///
     /// Key: the attempt and its result belong to (room incarnation, opponent
     /// actor number, opponent id) — r3 §1.2/1.3 MEDIUM. When the actor or
@@ -61,6 +67,16 @@ namespace CompetitiveRounds
     /// armed. A 429 is retried once, after the body's retry_after plus 1 s
     /// (6 s without one, 10 s at most). Every other HTTP refusal:
     /// Unavailable for this key. At most four requests per key.
+    ///
+    /// Room budget (review r8 MEDIUM 3): at most
+    /// H2HRules.MAX_REQUESTS_PER_ROOM reads per room incarnation, spaced by
+    /// at least MIN_REQUEST_SPACING_SECONDS, counted ACROSS key changes and
+    /// reset only when the incarnation is. The per-key ladder above bounds
+    /// one key; this bounds the room, because the key follows a property the
+    /// peer's game publishes and a changing one would otherwise buy a fresh
+    /// ladder every time. What it protects is not this line — it is the
+    /// per-IP rate bucket this read shares with the mutating endpoints, the
+    /// disconnect report among them.
     ///
     /// Relative day (review r6 LOW): "yesterday / N days ago" renders the
     /// server's last_played_days_ago — whole UTC days on the server's clock
@@ -96,6 +112,14 @@ namespace CompetitiveRounds
         // One "no line for this fighter" log per incarnation; the
         // suppression itself is re-derived every tick.
         private static bool suppressionLogged;
+
+        // The room's whole request allowance (review r8 MEDIUM 3). Reset with
+        // the INCARNATION and never with the key: a key change is the thing
+        // the budget exists to bound, since the key follows a property the
+        // peer's own game publishes. roomBudgetLogged keeps the exhaustion to
+        // one line per room.
+        private static H2HRules.RoomBudget roomBudget;
+        private static bool roomBudgetLogged;
 
         // Facts as the server answered them.
         private static string opponentName = "";
@@ -134,12 +158,18 @@ namespace CompetitiveRounds
         {
             incarnation++;
             ResetIncarnation();
+            // Out of the room the tombstone was protecting (review r8
+            // MEDIUM 2). This is the reliable edge — Photon's own callback,
+            // not a polled one.
+            try { ApiClient.ClearSupersededIssuedRoom(); } catch { }
         }
 
         private static void ResetIncarnation()
         {
             ResetKey();
             suppressionLogged = false;
+            roomBudget = default(H2HRules.RoomBudget);
+            roomBudgetLogged = false;
         }
 
         /// <summary>The current key and everything under it. The incarnation
@@ -217,6 +247,21 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(tok)) return;   // no session yet: the heartbeat mints one
             if (refusedToken != null && string.Equals(tok, refusedToken, StringComparison.Ordinal)) return;
 
+            // Last gate before the wire, so a tick that was never going to
+            // send pays nothing.
+            var gate = H2HRules.AdmitRoomRequest(ref roomBudget, Time.realtimeSinceStartup);
+            if (gate == H2HRules.RoomGate.Exhausted)
+            {
+                if (!roomBudgetLogged)
+                {
+                    roomBudgetLogged = true;
+                    Plugin.Log.LogInfo("[H2H] this room has spent its request budget ("
+                                       + H2HRules.MAX_REQUESTS_PER_ROOM + ") — no further reads until the next room");
+                }
+                return;
+            }
+            if (gate == H2HRules.RoomGate.TooSoon) return;   // asked again on a later tick
+
             state = State.Loading;
             boundRoom = room;
             int sentInc = incarnation;
@@ -250,17 +295,18 @@ namespace CompetitiveRounds
 
         /// <summary>The other fighter and the id the line keys on. Actor: the
         /// single other active fighter (RoomActors' census). Id: in a
-        /// queue-issued room this client still holds the name of, the attested
-        /// opponent — but only once that fighter's OWN advertised u_id says he
-        /// is that player (ApiClient.TryGetIssuedOpponent, review r7 MEDIUM:
-        /// the attestation verifies an identity, it never supplies one); in
+        /// queue-issued room this client still holds the name of, the paired
+        /// opponent — but only once that fighter's OWN advertised u_id claims
+        /// to be that player (ApiClient.TryGetIssuedOpponent: the pairing is
+        /// compared with the claim, it is never handed out as the claim); in
         /// any other room, the actor's own u_id property. "" until that
         /// property arrives, either way. False when there is not exactly one
         /// other fighter, or (suppressed = true) when the queue-issued room's
         /// other fighter is not the paired one — an advertised id that differs
-        /// from the attested one, an actor or incarnation the pairing is not
-        /// bound to, or a queue lifecycle that has moved on: then no line at
-        /// all, and never the advertised id.</summary>
+        /// from the paired one, an actor or incarnation the pairing is not
+        /// bound to, a queue lifecycle that has moved on, or a room whose
+        /// pairing a later issuance replaced: then no line at all, and never
+        /// the advertised id.</summary>
         private static bool ResolveOpponent(Photon.Realtime.Room room, out int actor, out string id, out bool attested, out bool suppressed)
         {
             actor = -1;

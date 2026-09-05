@@ -692,7 +692,7 @@ namespace CompetitiveRounds
                 foreach (var pending in _pendingReports)
                     if (pending.url == url && pending.json == json)
                         return;
-                float initialDelay = IsSilentOutboxUrl(url) ? 120f : 30f;
+                float initialDelay = OutboxInitialDelay(url);
                 _pendingReports.Add(new PendingReport
                 {
                     url = url,
@@ -711,10 +711,43 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] enqueue failed: {ex.Message}"); }
         }
 
-        private static bool IsSilentOutboxUrl(string url)
+        /// <summary>Macro evidence, and only it: the one queued url whose 409
+        /// is a race with the elected reporter's match insert rather than a
+        /// settled refusal.</summary>
+        private static bool IsMacroEvidenceUrl(string url)
         {
             return !string.IsNullOrEmpty(url)
                 && url.EndsWith("/api/v1/matches/macro-evidence", StringComparison.Ordinal);
+        }
+
+        /// <summary>Its parameters ride the query string, so match on the
+        /// path.</summary>
+        private static bool IsDisconnectReportUrl(string url)
+        {
+            return !string.IsNullOrEmpty(url)
+                && url.IndexOf("/api/v1/report-disconnect", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>Queued work the player never asked for and cannot act on,
+        /// so it gets no toast in either direction. Macro evidence is one; so
+        /// is a disconnect report (review r8 MEDIUM 3), which records the
+        /// OPPONENT's leave — "Couldn't record the match" would tell the wrong
+        /// player about the wrong thing.</summary>
+        private static bool IsSilentOutboxUrl(string url)
+        {
+            return IsMacroEvidenceUrl(url) || IsDisconnectReportUrl(url);
+        }
+
+        /// <summary>How long an enqueued report waits before its first retry.
+        /// Macro evidence is advisory and can sit behind the match report it
+        /// accompanies. A disconnect report is accepted only while the pair's
+        /// series is still current, so it goes back sooner — but not so soon
+        /// that it lands inside the same rate-limit window that refused the
+        /// immediate attempts.</summary>
+        private static float OutboxInitialDelay(string url)
+        {
+            if (IsDisconnectReportUrl(url)) return 15f;
+            return IsMacroEvidenceUrl(url) ? 120f : 30f;
         }
 
         private static void RemovePendingReport(string url, string json)
@@ -811,7 +844,7 @@ namespace CompetitiveRounds
                         // reporter's match insert. Its 409 becomes retryable;
                         // exact room correlation remains valid after a restart.
                         bool retryableMacroResponse =
-                            IsSilentOutboxUrl(p.url)
+                            IsMacroEvidenceUrl(p.url)
                             && resp != null
                             && (resp.Contains("401")
                                 || resp.Contains("409")
@@ -9156,8 +9189,26 @@ namespace CompetitiveRounds
         /// joined room is any other room; a lifecycle bump does NOT retire it,
         /// because in the room it names the record is what suppresses the line
         /// (review r7 MEDIUM). Holds a room name, so it never leaves this
-        /// process (#463).</summary>
+        /// process (#463).
+        ///
+        /// It is a PAIRING, not an identity for the fighter in the room
+        /// (review r8 MEDIUM 1): the server tells this seat who it was paired
+        /// with, never which Photon actor that is, and the u_id it gets
+        /// compared against is written by the peer's own game. H2HRules states
+        /// exactly what the comparison buys.</summary>
         private static H2HRules.IssuedPairState? issuedPair;
+
+        /// <summary>The room whose issued pairing a later issuance replaced
+        /// while this seat may still be sitting in it (review r8 MEDIUM 2).
+        /// One record describes one room, so the second issuance takes the
+        /// first room's pairing away — and without this the H2H tick in the
+        /// room we have not left yet would read a bare name mismatch as "no
+        /// pairing was ever issued" and fall back to the peer-advertised id,
+        /// in precisely the room that was supposed to be attested. Cleared at
+        /// the leave edge (Photon's own OnLeftRoom/OnDisconnected, which
+        /// cannot be missed the way a polled edge can) and on a join to any
+        /// room other than this one.</summary>
+        private static string supersededIssuedRoom;
 
         /// <summary>The opponent the server paired this seat with for the room
         /// it just issued: the response's opponent_steam_id when present
@@ -9180,6 +9231,20 @@ namespace CompetitiveRounds
                     else if (p2 == me && IsSteamId64(p1)) opp = p1;
                     else opp = LastPollData?.opponent_steam_id;
                 }
+                // The record this issuance is about to take the slot from
+                // describes a DIFFERENT room, and this seat may still be in
+                // it: leave that room a tombstone (review r8 MEDIUM 2). Same
+                // room re-issued is not a supersession — it is the same
+                // pairing's own room, and a tombstone there would suppress the
+                // line for the room the pairing is FOR.
+                var previous = issuedPair;
+                if (previous != null
+                    && !string.IsNullOrEmpty(previous.Value.RoomName)
+                    && !string.Equals(previous.Value.RoomName, room ?? "", StringComparison.Ordinal))
+                {
+                    supersededIssuedRoom = previous.Value.RoomName;
+                    Plugin.Log.LogInfo("[QUEUE] a later room was issued while the previous one may still be occupied — no H2H line there until we leave it");
+                }
                 if (string.IsNullOrEmpty(room) || !IsSteamId64(opp) || opp == me)
                 {
                     issuedPair = null;
@@ -9193,11 +9258,12 @@ namespace CompetitiveRounds
         }
 
         /// <summary>H2HSummary's read. This method holds the state; the answer
-        /// is H2HRules.ConsultIssued's, against the record, the CURRENT queue
-        /// lifecycle counter, the room this seat is in, and the Steam id the
-        /// other fighter's own game advertises — an attestation the fighter's
-        /// advertised id does not match is never handed out as his identity,
-        /// and a lifecycle that has moved on suppresses the line in the issued
+        /// is H2HRules.ConsultIssued's, against the record, the tombstone for
+        /// a superseded room, the CURRENT queue lifecycle counter, the room
+        /// this seat is in, and the Steam id the other fighter's own game
+        /// advertises. The pairing is never handed out as that fighter's
+        /// identity — it is only compared with the claim his game makes — and
+        /// a lifecycle that has moved on suppresses the line in the issued
         /// room rather than releasing it to the advertised id (review r7
         /// MEDIUM). The ordinary entry path holds the lifecycle anyway —
         /// LeaveQueue from the joined ranked room returns before its bump
@@ -9207,14 +9273,28 @@ namespace CompetitiveRounds
                                                                      int incarnation, int actor,
                                                                      out string opponentSteamId)
         {
-            return H2HRules.ConsultIssued(ref issuedPair, queueGen, roomName, advertisedSteamId,
-                                          incarnation, actor, out opponentSteamId);
+            return H2HRules.ConsultIssued(ref issuedPair, supersededIssuedRoom, queueGen, roomName,
+                                          advertisedSteamId, incarnation, actor, out opponentSteamId);
+        }
+
+        /// <summary>H2HSummary.Invalidate, i.e. Photon's own OnLeftRoom and
+        /// OnDisconnected: this seat is out of the room the tombstone was
+        /// protecting, so it stops answering for it.</summary>
+        internal static void ClearSupersededIssuedRoom()
+        {
+            supersededIssuedRoom = null;
         }
 
         /// <summary>H2HSummary.OnJoinedRoom: a join to any room other than the
         /// issued one retires the record — it describes exactly one room.</summary>
         internal static void RetireIssuedPairUnless(string roomName)
         {
+            // A join to anywhere but the superseded room means we are no
+            // longer in it; a join BACK to it keeps the tombstone, because its
+            // pairing is still the one that was replaced.
+            if (!string.IsNullOrEmpty(supersededIssuedRoom)
+                && !string.Equals(supersededIssuedRoom, roomName ?? "", StringComparison.Ordinal))
+                supersededIssuedRoom = null;
             var p = issuedPair;
             if (p == null) return;
             if (!string.Equals(p.Value.RoomName, roomName ?? "", StringComparison.Ordinal)) issuedPair = null;
@@ -17742,18 +17822,53 @@ namespace CompetitiveRounds
             // §2c identity fence: the broadcast service account never reports.
             if (BroadcastMode.FenceBlocksFighterPath("report-dc")) return;
             if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(disconnectedSteamId)) return;
-            Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}",
-                "",
+            string url = $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}";
+            // Durable, like a match report (review r8 MEDIUM 3). This is a
+            // ONE-SHOT write about somebody else's leave: GameStateWatcher
+            // latches opponentDCReported, so a refused attempt WAS the
+            // attempt, and the dc_events row and the ranked_dc_count
+            // increment behind it were never made at all. A 429 is the
+            // ordinary way that happens — this path shares one per-IP bucket
+            // with every other sensitive endpoint, and two players behind one
+            // address share it with each other.
+            //
+            // WHAT THE QUEUE DOES AND DOES NOT BUY. The server accepts the
+            // report only while the pair's series is still CURRENT
+            // (_find_current_active_series). For the DC this reports — mid
+            // series, neither player at match point — that series stays
+            // active with no time limit, so a retry minutes later, or from
+            // the next launch, normally still lands; once the pair finish or
+            // abandon it the report is refused for good and the outbox drops
+            // it on the 4xx. Replay is safe by construction rather than by
+            // timing: the server counts the increment only for the request
+            // that inserted the dc_events row.
+            //
+            // The payload is "{}" rather than empty because the outbox
+            // persists url and payload tab-separated and LoadOutbox skips a
+            // line whose payload is empty — which would silently delete
+            // exactly the cross-launch retry. The parameters themselves ride
+            // the query string, as they always have; the endpoint declares no
+            // body and ignores this one.
+            EnqueueFailedReport(url, DC_REPORT_BODY);
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                url,
+                DC_REPORT_BODY,
                 (success, response) =>
                 {
                     if (success)
+                    {
+                        RemovePendingReport(url, DC_REPORT_BODY);
                         Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
+                    }
                     else
-                        Plugin.Log.LogWarning($"[DC] Failed to report disconnect: {response}");
+                        Plugin.Log.LogWarning($"[DC] Disconnect report refused, queued for retry: {response}");
                 }
             ));
         }
+
+        /// <summary>See ReportDisconnect: a placeholder payload the endpoint
+        /// ignores, kept non-empty so the outbox can persist the entry.</summary>
+        private const string DC_REPORT_BODY = "{}";
 
         /// <summary>Aug 6 item 1 — casual rage-quit report. The surviving
         /// client reports a mid-game leave in a CASUAL 1v1 (any midgame

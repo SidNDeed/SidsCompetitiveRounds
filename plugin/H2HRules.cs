@@ -46,6 +46,28 @@ namespace CompetitiveRounds
         /// incarnation/actor: H2HSummary's room incarnation and that fighter's
         /// Photon actor number.
         ///
+        /// WHAT THIS DECIDES, EXACTLY (review r8 MEDIUM 1). advertisedId is a
+        /// Photon custom property the other fighter's OWN game writes, and
+        /// nothing here — or anywhere on this client — can bind a Photon actor
+        /// to a Steam identity: the queue tells this seat WHO it was paired
+        /// with, never WHICH ACTOR that is. So this is an AGREEMENT check
+        /// between the peer's claim and the server's pairing, not an
+        /// authentication of the peer. A fighter whose game claims the paired
+        /// id is taken at its word here exactly as it is in an ordinary room,
+        /// where the advertised id is all there is. What the check buys is
+        /// only ever LESS shown, never more: a claim that disagrees with the
+        /// pairing, a later actor, and a moved-on lifecycle each produce no
+        /// line at all, where the ordinary path would show a line for whoever
+        /// the claim named.
+        ///
+        /// supersededRoom (review r8 MEDIUM 2): a room this seat may still be
+        /// sitting in whose issued pairing a LATER issuance has already
+        /// replaced. One record describes one room, so the replacement leaves
+        /// the occupied room with no pairing of its own — and a bare room-name
+        /// mismatch would read as NotIssued and release the line to the
+        /// advertised id, in the one room that was supposed to be attested.
+        /// It suppresses instead, until the leave edge clears it.
+        ///
         /// NotIssued for any room other than the one the pairing names — the
         /// caller keys on the advertised id there and the pairing is untouched.
         /// In the room the pairing names:
@@ -58,19 +80,28 @@ namespace CompetitiveRounds
         /// • Pending while the other fighter advertises no id yet: nothing to
         ///   verify against, so no answer — the caller waits exactly as it
         ///   does for an ordinary room's not-yet-arrived id.
-        /// • Suppressed when the id that fighter advertises is not the attested
-        ///   one. The attestation VERIFIES the identity a fighter claims; it
-        ///   never supplies one for a fighter who claims something else, or
-        ///   nothing (review r7 MEDIUM).
+        /// • Suppressed when the id that fighter advertises is not the paired
+        ///   one. The pairing is never handed out as a fighter's identity: it
+        ///   is only ever compared with the claim that fighter's own game
+        ///   makes, and a fighter who claims something else, or nothing, gets
+        ///   no line rather than the paired player's name and record (review
+        ///   r7 MEDIUM).
         /// • Attested otherwise, and the first Attested answer binds the
         ///   pairing to that (incarnation, actor).
         /// attestedId is set on Attested only.</summary>
-        internal static IssuedOpponent ConsultIssued(ref IssuedPairState? pair, int currentGen, string roomName,
+        internal static IssuedOpponent ConsultIssued(ref IssuedPairState? pair, string supersededRoom,
+                                                     int currentGen, string roomName,
                                                      string advertisedId, int incarnation, int actor,
                                                      out string attestedId)
         {
             attestedId = null;
-            if (pair == null || string.IsNullOrEmpty(roomName)) return IssuedOpponent.NotIssued;
+            if (string.IsNullOrEmpty(roomName)) return IssuedOpponent.NotIssued;
+            // Before the record, because a later issuance may have replaced or
+            // emptied it entirely: this room's pairing is gone, and gone is not
+            // the same as never issued.
+            if (string.Equals(supersededRoom ?? "", roomName, StringComparison.Ordinal))
+                return IssuedOpponent.Suppressed;
+            if (pair == null) return IssuedOpponent.NotIssued;
             var p = pair.Value;
             if (!string.Equals(p.RoomName ?? "", roomName, StringComparison.Ordinal)) return IssuedOpponent.NotIssued;
             if (p.Gen != currentGen) return IssuedOpponent.Suppressed;
@@ -154,6 +185,53 @@ namespace CompetitiveRounds
             return FailureAction.RetryAfterDelay;
         }
 
+        // ── per-room request budget (review r8 MEDIUM 3) ───────────────────
+
+        /// <summary>The most reads one room incarnation may ask for, however
+        /// many times the opponent key changes inside it. A key change IS a
+        /// legitimate new question — a replacement fighter is a different
+        /// opponent — but the key is built from a property the peer's own game
+        /// publishes, so the number of key changes is not ours to bound, and
+        /// without this neither is the number of requests. The read shares one
+        /// per-IP rate bucket with every other sensitive endpoint, the
+        /// disconnect report among them, and that write is one-shot: a room
+        /// that keeps asking spends a budget another player's record needs.
+        /// One key's whole retry ladder fits inside this (a self-test case
+        /// pins it), which is all an ordinary room ever uses.</summary>
+        internal const int MAX_REQUESTS_PER_ROOM = 6;
+
+        /// <summary>Least time between two reads under one incarnation. Both
+        /// retry delays are already far longer than this, so it constrains
+        /// key churn only and never delays a retry.</summary>
+        internal const float MIN_REQUEST_SPACING_SECONDS = 3f;
+
+        /// <summary>Reads spent under one room incarnation, and when the last
+        /// went out. H2HSummary holds this ACROSS key changes and resets it
+        /// with the incarnation — that is the whole mechanism; a reset on the
+        /// key would restore exactly the unbounded behaviour.</summary>
+        internal struct RoomBudget
+        {
+            public int Requests;
+            public float LastSentAt;
+        }
+
+        internal enum RoomGate { Send, TooSoon, Exhausted }
+
+        /// <summary>Admit one read under the room budget AND record it in the
+        /// same call, so a caller cannot ask without paying. now is a
+        /// monotonic seconds clock (Time.realtimeSinceStartup). TooSoon is not
+        /// a refusal — the caller asks again on a later tick; Exhausted ends
+        /// the reads for this incarnation.</summary>
+        internal static RoomGate AdmitRoomRequest(ref RoomBudget budget, float now)
+        {
+            if (budget.Requests >= MAX_REQUESTS_PER_ROOM) return RoomGate.Exhausted;
+            if (budget.Requests > 0 && now - budget.LastSentAt < MIN_REQUEST_SPACING_SECONDS)
+                return RoomGate.TooSoon;
+            budget.Requests++;
+            budget.LastSentAt = now;
+            return RoomGate.Send;
+        }
+
         // ── relative-day copy (review r6 LOW) ──────────────────────────────
 
         /// <summary>The server's last_played_days_ago as ApiClient's int reader
@@ -198,7 +276,7 @@ namespace CompetitiveRounds
 
         // ── self-test ──────────────────────────────────────────────────────
 
-        internal const int SELFTEST_CASES = 36;
+        internal const int SELFTEST_CASES = 47;
 
         /// <summary>Every rule above against canned inputs. A case marked
         /// control expects the WRONG answer and passes only when the harness
@@ -249,6 +327,19 @@ namespace CompetitiveRounds
                 Check("control:issued:lifecycle-not-issued", Consult(ref pair, 8, "ranked_r", OPP, 3, 2),
                       "NotIssued/-/3/2", control: true);
 
+                // a later issuance replaced the pairing of a room this seat
+                // may still be in (review r8 MEDIUM 2)
+                IssuedPairState? next = new IssuedPairState { Gen = 7, RoomName = "ranked_next", OpponentSteamId = OPP,
+                                                              BoundIncarnation = -1, BoundActor = -1 };
+                Check("superseded:occupied-room-suppressed", Consult(ref next, 7, "ranked_r", OPP, 3, 2, "ranked_r"),
+                      "Suppressed/-/-1/-1");
+                Check("superseded:survives-an-emptied-record",
+                      Consult(ref none, 7, "ranked_r", OPP, 3, 2, "ranked_r"), "Suppressed/-/none");
+                Check("superseded:the-new-room-still-answers", Consult(ref next, 7, "ranked_next", OPP, 3, 2, "ranked_r"),
+                      "Attested/" + OPP + "/3/2");
+                Check("control:superseded:released-to-advertised",
+                      Consult(ref none, 7, "ranked_r", OPP, 3, 2, "ranked_r"), "NotIssued/-/none", control: true);
+
                 // failures
                 var b = new RetryBudget();
                 Check("retry:401-once", Describe("HTTP 401: {\"detail\":\"session_required\"}", 0, ref b), "ResendAfterNewSession/0");
@@ -281,6 +372,20 @@ namespace CompetitiveRounds
                 b = new RetryBudget();
                 Check("control:retry:429-permanent", Describe("HTTP 429: x", 2, ref b), "Unavailable/0", control: true);
 
+                // per-room request budget
+                var rb = new RoomBudget();
+                Check("room:first-admitted", Room(ref rb, 100f), "Send/1");
+                Check("room:second-too-soon", Room(ref rb, 101f), "TooSoon/1");
+                Check("room:after-spacing", Room(ref rb, 103f), "Send/2");
+                Check("room:cap-exhausts",
+                      Room(ref rb, 200f) + "|" + Room(ref rb, 300f) + "|" + Room(ref rb, 400f) + "|" + Room(ref rb, 500f),
+                      "Send/3|Send/4|Send/5|Send/6");
+                Check("room:exhausted-stays", Room(ref rb, 600f), "Exhausted/6");
+                Check("room:cap-fits-one-keys-ladder",
+                      (MAX_REQUESTS_PER_ROOM >= 1 + MAX_SESSION_RESENDS + MAX_TRANSPORT_RETRIES + MAX_DEBOUNCE_RETRIES).ToString(),
+                      "True");
+                Check("control:room:cap-not-enforced", Room(ref rb, 700f), "Send/7", control: true);
+
                 // relative day
                 Check("days:raw", Str(DaysAgo(0)) + "|" + Str(DaysAgo(-3)) + "|" + Str(DaysAgo(1)) + "|" + Str(DaysAgo(400)), "null|null|1|400");
                 Check("days:buckets", Buckets(1, 2, 13, 14, 20, 59, 60, 364, 365, 729, 730, 1500),
@@ -309,12 +414,21 @@ namespace CompetitiveRounds
         /// record's own BoundIncarnation/BoundActor after the call ("none"
         /// when no record is held) — so a case reads the write-back, not just
         /// the return value.</summary>
-        private static string Consult(ref IssuedPairState? pair, int gen, string room, string advertised, int inc, int actor)
+        private static string Consult(ref IssuedPairState? pair, int gen, string room, string advertised, int inc, int actor,
+                                      string supersededRoom = null)
         {
             string id;
-            var verdict = ConsultIssued(ref pair, gen, room, advertised, inc, actor, out id);
+            var verdict = ConsultIssued(ref pair, supersededRoom, gen, room, advertised, inc, actor, out id);
             return verdict + "/" + (id ?? "-") + "/"
                    + (pair.HasValue ? pair.Value.BoundIncarnation + "/" + pair.Value.BoundActor : "none");
+        }
+
+        /// <summary>gate/requests-spent after the call — a case reads the
+        /// budget the admission wrote, not just its answer.</summary>
+        private static string Room(ref RoomBudget b, float now)
+        {
+            var gate = AdmitRoomRequest(ref b, now);
+            return gate + "/" + b.Requests.ToString(CultureInfo.InvariantCulture);
         }
 
         private static string Describe(string err, int retryAfter, ref RetryBudget b)

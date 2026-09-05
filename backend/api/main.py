@@ -13502,19 +13502,36 @@ async def report_disconnect(
         return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
                 "ranked_dc_count": disconnected.ranked_dc_count or 0}
 
-    # Increment the disconnected player's DC count
-    disconnected.ranked_dc_count = (disconnected.ranked_dc_count or 0) + 1
-    await db.execute(text(
+    # THE ROW DECIDES, NOT THE READ ABOVE (review r8 MEDIUM 3). The client now
+    # keeps an unsent DC report in the durable outbox, so the same report can
+    # arrive twice at once -- the immediate attempt whose response was lost,
+    # and the retry that replaced it. Both would clear the SELECT above and
+    # both would add 1, while uq_dc_event_series_player (migration 101) kept
+    # only one row: a leave-% denominator inflated by the retry that made the
+    # report durable. So the INSERT is the gate. RETURNING tells this request
+    # whether it is the one that recorded the event, and only that request
+    # counts it; a loser answers exactly like the fast path above.
+    inserted = (await db.execute(text(
         "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id) "
-        "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING"
-    ), {"sid": series_id, "dp": disconnected.id, "rp": reporter.id})
+        "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING RETURNING 1"
+    ), {"sid": series_id, "dp": disconnected.id, "rp": reporter.id})).first()
+    if inserted is None:
+        return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
+                "ranked_dc_count": disconnected.ranked_dc_count or 0}
+
+    # A DELTA, never an absolute write (learning #326): the read-modify-write
+    # this replaces was computed from a row read before the insert decided.
+    new_count = (await db.execute(text(
+        "UPDATE players SET ranked_dc_count = COALESCE(ranked_dc_count, 0) + 1 "
+        "WHERE id = :dp RETURNING ranked_dc_count"
+    ), {"dp": disconnected.id})).scalar()
     await db.commit()
 
-    print(f"[DC] {reporter_steam_id} reported disconnect by {disconnected_steam_id} (total: {disconnected.ranked_dc_count})")
+    print(f"[DC] {reporter_steam_id} reported disconnect by {disconnected_steam_id} (total: {new_count})")
     return {
         "status": "recorded",
         "disconnected_steam_id": disconnected_steam_id,
-        "ranked_dc_count": disconnected.ranked_dc_count,
+        "ranked_dc_count": new_count,
     }
 
 

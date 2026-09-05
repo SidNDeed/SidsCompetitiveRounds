@@ -419,12 +419,32 @@ namespace CompetitiveRounds
         private static int _fighterCacheFrame = -1;
         private static PhotonPlayer[] _fighterCache;
 
+        /// <summary>Monotonic count of roster and identity changes this
+        /// process has been told about (review r8 MEDIUM 4). A cache
+        /// invalidation says "read again"; a reader that only reads again
+        /// cannot see a change that ARRIVED AND REVERTED between its two
+        /// reads, and one PUN Dispatch can drain an enter, a delivery and a
+        /// leave with no frame in between. This counter is the trace that
+        /// survives it. It only ever goes up, and it is never reset — a
+        /// consumer records the value it opened under and compares.</summary>
+        internal static int RosterGeneration { get { return _rosterGeneration; } }
+        private static int _rosterGeneration;
+
+        /// <summary>Player properties that decide identity or role changed.
+        /// Not a roster change, so it does not touch the fighter cache — but
+        /// it moves the key any consumer of RosterGeneration is watching.</summary>
+        internal static void NoteRosterIdentityChange()
+        {
+            _rosterGeneration++;
+        }
+
         /// <summary>Called from the room enter/leave callbacks so a roster
         /// change is visible to every later read in the SAME frame.</summary>
         internal static void InvalidateFighterCache()
         {
             _fighterCacheFrame = -1;
             _fighterCache = null;
+            NoteRosterIdentityChange();
         }
 
         internal static PhotonPlayer[] ActiveFighters()

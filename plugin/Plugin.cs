@@ -3806,7 +3806,24 @@ namespace CompetitiveRounds
             FaceResync.TrySendLocalFace("SPECTATE");
         }
 
-        public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps) { }
+        public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps)
+        {
+            // r8 M4: identity and role are what the lag-notice window keys on,
+            // and both of them change through this callback. A change that
+            // lands and reverts between two frames leaves nothing behind in
+            // the key itself, so the generation counter is the trace. Only the
+            // properties that participate in that key — bumping on every card
+            // or cosmetic property would discard usable windows for nothing.
+            try
+            {
+                if (changedProps == null) return;
+                if (changedProps.ContainsKey("u_id")
+                    || changedProps.ContainsKey(RoomActors.SPEC_PROP)
+                    || changedProps.ContainsKey(RoomActors.SPEC_LEASE_PROP))
+                    RoomActors.NoteRosterIdentityChange();
+            }
+            catch { }
+        }
         public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
