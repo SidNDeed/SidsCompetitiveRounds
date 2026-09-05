@@ -2643,6 +2643,7 @@ namespace CompetitiveRounds
             // the player-seat branch was cut in review — see the class comment).
             try { OverlayIdleClose.Tick(); } catch { }
             try { MusicStreamProbe.Tick(); } catch { }
+            try { SpectatorTeardownProbe.Tick(); } catch { }
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }

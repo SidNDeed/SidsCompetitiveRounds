@@ -7281,6 +7281,18 @@ namespace CompetitiveRounds
         {
             if (type != LogType.Log) return;
 
+            // Teardown-probe window close. This sits ABOVE the spectator
+            // quiesce two lines down deliberately: the spectator seat is the
+            // one the measurement is about, so a close placed below it would
+            // never run there and every spectator window would report "cap"
+            // with the next round's combat folded into it (#376).
+            try
+            {
+                if (message.StartsWith("MOVE PLAYERS END"))
+                    SpectatorTeardownProbe.CloseWindow("move-players-end");
+            }
+            catch { }
+
             // Spectator: the whole log-driven tracker is quiescent (Aug 10
             // design review find 12 — this listener is registered
             // unconditionally, so the Poll() quiesce never covered it). Also
