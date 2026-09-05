@@ -11887,38 +11887,6 @@ async def _enrollment_identity_gate(db: AsyncSession, steam_id: str) -> None:
             raise HTTPException(status_code=410, detail="account_deleted")
 
 
-# A region token as clients report it. Anything else is treated as ABSENT
-# rather than pinned: the value is handed back to both clients to connect to,
-# and there is no recovery from a room neither of them can reach.
-_REGION_TOKEN_RE = _re.compile(r"^[a-z]{2,5}$")
-
-
-def _region_token(value):
-    v = (value or "").strip().lower()
-    return v if _REGION_TOKEN_RE.match(v) else ""
-
-
-def _region_agreed(a, b):
-    """One region from two signals of the same kind, SYMMETRICALLY.
-
-    The answer must not depend on the argument order, because the caller's
-    order is "whichever seat's request triggered issuance" — i.e. whichever
-    client polled first, which correlates with having the better connection to
-    this API. That made the room land on the faster poller's region and gave
-    the same seat the advantage it was already enjoying.
-
-    When only one signal exists it is the answer; when they agree, that is the
-    answer. When two live snapshots genuinely DISAGREE there is nothing here to
-    decide it with — the pair has no comparable latency measurement, which is
-    the whole reason region steering was cut — so the tie goes to a fixed
-    order. That is a coin flip made stable, not a latency decision, and it is
-    written down as such so nobody reads the result as a preference.
-    """
-    if a and b:
-        return a if a == b else min(a, b)
-    return a or b
-
-
 def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
     """Room-region decision for a 1v1 queue pair (Aug 15 item 5, Jarvis/Nix).
 
@@ -11939,14 +11907,14 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
     The one-line log makes the next region report diagnosable from logs:api
     without a repro.
     """
-    mr, orr = _region_token(my_region), _region_token(opp_region)
-    mh, oh = _region_token(my_home), _region_token(opp_home)
+    mh = (my_home or "").strip().lower()
+    oh = (opp_home or "").strip().lower()
     if mh and mh == oh:
         chosen = mh
     else:
-        chosen = _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us"
+        chosen = my_region or opp_region or mh or oh or "us"
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
-          f"live=({mr},{orr}) home=({mh},{oh})")
+          f"live=({my_region},{opp_region}) home=({mh},{oh})")
     return chosen
 
 
