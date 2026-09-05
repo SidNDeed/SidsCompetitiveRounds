@@ -137,8 +137,9 @@ namespace CompetitiveRounds
         private static ConfigEntry<bool> selfTestLever;
 
         /// <summary>Plugin.OnJoinedRoom: a fresh incarnation. The queue's
-        /// retained pairing describes exactly one room — a join to any other
-        /// room retires it here.</summary>
+        /// retained pairing describes exactly one JOIN to the room it names —
+        /// a join to any other room, and any later join to a same-named one,
+        /// retire it here (review r8 LOW 1).</summary>
         internal static void OnJoinedRoom()
         {
             incarnation++;
@@ -146,7 +147,7 @@ namespace CompetitiveRounds
             try
             {
                 var room = Photon.Pun.PhotonNetwork.CurrentRoom;
-                ApiClient.RetireIssuedPairUnless(room != null ? room.Name : null);
+                ApiClient.RetireIssuedPairUnless(room != null ? room.Name : null, incarnation);
             }
             catch { }
         }

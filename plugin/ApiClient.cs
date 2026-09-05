@@ -9252,7 +9252,8 @@ namespace CompetitiveRounds
                     return;
                 }
                 issuedPair = new H2HRules.IssuedPairState { Gen = queueGen, RoomName = room, OpponentSteamId = opp,
-                                                            BoundIncarnation = -1, BoundActor = -1 };
+                                                            BoundIncarnation = -1, BoundActor = -1,
+                                                            JoinIncarnation = -1 };
             }
             catch { issuedPair = null; }
         }
@@ -9285,9 +9286,13 @@ namespace CompetitiveRounds
             supersededIssuedRoom = null;
         }
 
-        /// <summary>H2HSummary.OnJoinedRoom: a join to any room other than the
-        /// issued one retires the record — it describes exactly one room.</summary>
-        internal static void RetireIssuedPairUnless(string roomName)
+        /// <summary>H2HSummary.OnJoinedRoom, with the incarnation that join
+        /// just opened: the record describes exactly ONE join to the room it
+        /// names, and H2HRules.RetireOnJoin is where that is decided. A room
+        /// name alone would keep a pairing alive across a leave and a rejoin
+        /// of a same-named room, which is a different room (review r8
+        /// LOW 1 — the reason RoomIncarnation exists at all).</summary>
+        internal static void RetireIssuedPairUnless(string roomName, int incarnation)
         {
             // A join to anywhere but the superseded room means we are no
             // longer in it; a join BACK to it keeps the tombstone, because its
@@ -9295,9 +9300,7 @@ namespace CompetitiveRounds
             if (!string.IsNullOrEmpty(supersededIssuedRoom)
                 && !string.Equals(supersededIssuedRoom, roomName ?? "", StringComparison.Ordinal))
                 supersededIssuedRoom = null;
-            var p = issuedPair;
-            if (p == null) return;
-            if (!string.Equals(p.Value.RoomName, roomName ?? "", StringComparison.Ordinal)) issuedPair = null;
+            H2HRules.RetireOnJoin(ref issuedPair, roomName, incarnation);
         }
 
         private static bool IsSteamId64(string s)

@@ -296,6 +296,11 @@ namespace CompetitiveRounds
         private static void NoteKeySampleInWindow()
         {
             if (_wKeyBroken) return;
+            // r8 L4: with lag notices off nothing reads a window's key, and
+            // this runs on every eligible 1v1 frame. Mark the window unkeyed
+            // rather than leaving it to be read as one opponent's whole span
+            // on evidence nobody gathered.
+            if (!LagNotices.WindowKeyingWanted()) { _wKeyBroken = true; return; }
             // r8 M4: the generation FIRST. A per-frame comparison of the key
             // can only see differences that are still standing when the frame
             // runs, and one PUN Dispatch can drain an enter, a late delivery

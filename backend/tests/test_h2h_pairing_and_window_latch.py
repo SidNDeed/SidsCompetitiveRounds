@@ -139,7 +139,9 @@ def test_a_second_issuance_tombstones_the_room_it_took_the_pairing_from():
 def test_the_tombstone_is_cleared_at_the_leave_edge_and_on_a_join_elsewhere():
     invalidate = _cs_method_body(H2H_SUMMARY_CS, "internal static void Invalidate()")
     assert "ApiClient.ClearSupersededIssuedRoom();" in invalidate
-    retire = _cs_method_body(API_CLIENT_CS, "internal static void RetireIssuedPairUnless(string roomName)")
+    retire = _cs_method_body(
+        API_CLIENT_CS, "internal static void RetireIssuedPairUnless(string roomName, int incarnation)"
+    )
     assert "supersededIssuedRoom = null;" in retire
     assert "!string.Equals(supersededIssuedRoom, roomName ?? \"\", StringComparison.Ordinal)" in retire
     # Invalidate is Photon's own leave/disconnect callback, not a polled edge
@@ -200,3 +202,73 @@ def test_the_generation_only_ever_goes_up():
     src = ROOM_ACTORS_CS.read_text(encoding="utf-8")
     writes = re.findall(r"_rosterGeneration\s*(\+\+|--|=[^=])", src)
     assert writes == ["++"], f"the generation is written some other way: {writes}"
+
+
+# ── L1: a room name is not a room ────────────────────────────────────────────
+
+
+def test_a_pairing_describes_one_join_and_not_one_room_name():
+    """A code room is player-typed and reusable — the reason ApiClient keeps a
+    RoomIncarnation counter at all — so "the name still matches" cannot be what
+    keeps a retained pairing alive across a leave and a rejoin."""
+    rule = _cs_method_body(
+        H2H_RULES_CS,
+        "internal static bool RetireOnJoin(ref IssuedPairState? pair, string roomName, int incarnation)",
+    )
+    assert "p.JoinIncarnation < 0" in rule           # first matching join stamps
+    assert "p.JoinIncarnation == incarnation" in rule  # the same join is idempotent
+    assert rule.count("pair = null;") == 2            # another room, and a later join
+    retire = _cs_method_body(
+        API_CLIENT_CS, "internal static void RetireIssuedPairUnless(string roomName, int incarnation)"
+    )
+    assert "H2HRules.RetireOnJoin(ref issuedPair, roomName, incarnation);" in retire
+    assert "issuedPair = null;" not in retire, "the decision belongs to the rule, not here"
+    joined = _cs_method_body(H2H_SUMMARY_CS, "internal static void OnJoinedRoom()")
+    assert "ApiClient.RetireIssuedPairUnless(room != null ? room.Name : null, incarnation);" in joined
+    assert joined.index("incarnation++") < joined.index("RetireIssuedPairUnless"), (
+        "the join must be retired against the incarnation it opened"
+    )
+
+
+# ── L4: work nothing consumes ────────────────────────────────────────────────
+
+
+def test_the_window_key_is_not_sampled_when_nothing_can_consume_it():
+    """OnWindowClosed returns at its first statement with the setting off, so
+    the per-frame sampling that maintains the key is pure cost on every
+    eligible 1v1 frame. Skipping it must leave the window UNKEYED, not
+    silently keyed on evidence nobody gathered."""
+    evaluator = _cs_method_body(Path(PLUGIN / "LagNotices.cs"), "internal static void OnWindowClosed()")
+    assert "if (!SettingOn()) { ResetAll(logExits: false, why: null); return; }" in evaluator
+    sample = _cs_method_body(TELEMETRY_CS, "private static void NoteKeySampleInWindow()")
+    assert "if (!LagNotices.WindowKeyingWanted()) { _wKeyBroken = true; return; }" in sample
+    assert sample.index("WindowKeyingWanted") < sample.index("SampleEligibleKey"), (
+        "the cheap predicate has to come first or it saves nothing"
+    )
+
+
+# ── L2/L3: the wiring, not the helpers ───────────────────────────────────────
+
+
+def test_the_per_frame_sample_is_reached_from_the_tick():
+    """The harness exercises the rule; only this says the rule is invoked."""
+    tick = _cs_method_body(TELEMETRY_CS, "internal static void TickFrame(")
+    assert "NoteKeySampleInWindow();" in tick
+    assert TELEMETRY_CS.read_text(encoding="utf-8").count("NoteKeySampleInWindow();") == 1
+
+
+def test_the_issued_pair_reader_hands_the_rule_the_live_record():
+    """A wrapper that answered a constant would pass every self-test case."""
+    body = _cs_method_body(
+        API_CLIENT_CS,
+        "internal static H2HRules.IssuedOpponent TryGetIssuedOpponent(string roomName, string advertisedSteamId,",
+    )
+    assert "H2HRules.ConsultIssued(ref issuedPair, supersededIssuedRoom, queueGen, roomName," in body
+    assert "return IssuedOpponent" not in body, "the wrapper must not answer on its own"
+
+
+def test_both_issuance_paths_retain_the_pairing():
+    """Two sites issue a room; a pairing retained at only one of them would
+    leave the other's room keyed on the advertised id with nothing to notice."""
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert src.count("RetainIssuedPair(room, response);") == 2

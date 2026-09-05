@@ -387,6 +387,17 @@ namespace CompetitiveRounds
         /// identity (hidden there regardless of the setting, §9 Q3). Also the
         /// predicate NetworkSeatTelemetry.SampleEligibleKey keys windows by
         /// (r6 M3), so a keyed window and an eligible tick cannot disagree.</summary>
+        /// <summary>Whether a closed window's key can be consumed at all
+        /// (review r8 LOW 4). OnWindowClosed returns at its first statement
+        /// when the setting is off, so with notices off nothing anywhere reads
+        /// OppActor/OppId — and the per-frame sampling that maintains them is
+        /// pure cost on every eligible 1v1 frame. Flipping the setting on is
+        /// picked up by the next window, one second later.</summary>
+        internal static bool WindowKeyingWanted()
+        {
+            return SettingOn();
+        }
+
         internal static bool SeatEligible()
         {
             try

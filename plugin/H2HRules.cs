@@ -23,7 +23,9 @@ namespace CompetitiveRounds
         /// ApiClient holds it: the lifecycle generation it was issued under,
         /// the room name it describes, the opponent the server paired this
         /// seat with, and the (H2HSummary incarnation, other-fighter actor)
-        /// the pairing was first consumed for (BoundActor &lt; 0 until then).
+        /// the pairing was first consumed for (BoundActor &lt; 0 until then),
+        /// and the incarnation of the join that first matched its room name
+        /// (JoinIncarnation &lt; 0 until then — review r8 LOW 1).
         /// Plain ints and strings — nothing Unity, Photon or Steam.</summary>
         internal struct IssuedPairState
         {
@@ -32,6 +34,36 @@ namespace CompetitiveRounds
             public string OpponentSteamId;
             public int BoundIncarnation;
             public int BoundActor;
+            public int JoinIncarnation;
+        }
+
+        /// <summary>What a join does to the retained pairing (review r8
+        /// LOW 1). A room NAME does not identify a room — code rooms are
+        /// player-typed and reusable, and ApiClient keeps a whole incarnation
+        /// counter for exactly that reason — so "the name still matches"
+        /// cannot be the rule that keeps a pairing alive across joins. The
+        /// pairing describes ONE join to the room it names: the first join
+        /// whose name matches stamps its incarnation, and any later join,
+        /// same name or not, retires it. Returns true when the record was
+        /// retired.</summary>
+        internal static bool RetireOnJoin(ref IssuedPairState? pair, string roomName, int incarnation)
+        {
+            if (pair == null) return false;
+            var p = pair.Value;
+            if (!string.Equals(p.RoomName ?? "", roomName ?? "", StringComparison.Ordinal))
+            {
+                pair = null;
+                return true;
+            }
+            if (p.JoinIncarnation < 0)
+            {
+                p.JoinIncarnation = incarnation;
+                pair = p;
+                return false;
+            }
+            if (p.JoinIncarnation == incarnation) return false;
+            pair = null;
+            return true;
         }
 
         /// <summary>The whole queue-issued read, decided here so the self-test
@@ -276,7 +308,7 @@ namespace CompetitiveRounds
 
         // ── self-test ──────────────────────────────────────────────────────
 
-        internal const int SELFTEST_CASES = 47;
+        internal const int SELFTEST_CASES = 52;
 
         /// <summary>Every rule above against canned inputs. A case marked
         /// control expects the WRONG answer and passes only when the harness
@@ -326,6 +358,19 @@ namespace CompetitiveRounds
                       "Attested/" + OPP + "/3/2", control: true);
                 Check("control:issued:lifecycle-not-issued", Consult(ref pair, 8, "ranked_r", OPP, 3, 2),
                       "NotIssued/-/3/2", control: true);
+
+                // a room NAME is not a room INCARNATION (review r8 LOW 1)
+                IssuedPairState? rejoin = new IssuedPairState { Gen = 7, RoomName = "code_room", OpponentSteamId = OPP,
+                                                                BoundIncarnation = -1, BoundActor = -1, JoinIncarnation = -1 };
+                Check("rejoin:first-join-stamps", Retire(ref rejoin, "code_room", 4), "kept/4");
+                Check("rejoin:same-join-again", Retire(ref rejoin, "code_room", 4), "kept/4");
+                Check("rejoin:same-name-later-join-retires", Retire(ref rejoin, "code_room", 9), "retired");
+                IssuedPairState? elsewhere = new IssuedPairState { Gen = 7, RoomName = "code_room", OpponentSteamId = OPP,
+                                                                   BoundIncarnation = -1, BoundActor = -1, JoinIncarnation = -1 };
+                Check("rejoin:another-room-retires", Retire(ref elsewhere, "other_room", 4), "retired");
+                IssuedPairState? ctl = new IssuedPairState { Gen = 7, RoomName = "code_room", OpponentSteamId = OPP,
+                                                             BoundIncarnation = -1, BoundActor = -1, JoinIncarnation = 4 };
+                Check("control:rejoin:name-alone-keeps-it", Retire(ref ctl, "code_room", 9), "kept/4", control: true);
 
                 // a later issuance replaced the pairing of a room this seat
                 // may still be in (review r8 MEDIUM 2)
@@ -421,6 +466,14 @@ namespace CompetitiveRounds
             var verdict = ConsultIssued(ref pair, supersededRoom, gen, room, advertised, inc, actor, out id);
             return verdict + "/" + (id ?? "-") + "/"
                    + (pair.HasValue ? pair.Value.BoundIncarnation + "/" + pair.Value.BoundActor : "none");
+        }
+
+        /// <summary>"retired", or "kept/" the join incarnation the record
+        /// now carries — a case reads the stamp, not just the verdict.</summary>
+        private static string Retire(ref IssuedPairState? pair, string room, int incarnation)
+        {
+            if (RetireOnJoin(ref pair, room, incarnation)) return "retired";
+            return "kept/" + (pair.HasValue ? pair.Value.JoinIncarnation.ToString(CultureInfo.InvariantCulture) : "none");
         }
 
         /// <summary>gate/requests-spent after the call — a case reads the
