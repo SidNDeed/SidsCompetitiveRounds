@@ -221,8 +221,9 @@ def test_a_roster_change_is_noted_and_no_longer_costs_the_window():
     """It used to wipe every accumulator, because the accumulators were keyed
     by list position and a changed roster invalidated the baselines. Keyed by
     identity there is nothing to wipe: an arriving body starts its own
-    baseline. The note stays on the line, because a window that gained or lost
-    a body is still a window worth reading differently."""
+    baseline. The note stays on the line: a body APPEARING mid-window is worth
+    knowing about when reading the numbers. A body leaving sets nothing — its
+    accumulator simply stops growing, which is the right answer."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
     assert "rosterChanged = true" in tick
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))

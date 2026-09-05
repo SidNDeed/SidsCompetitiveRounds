@@ -92,8 +92,9 @@ namespace CompetitiveRounds
     /// between two different bodies as movement; the count-triggered rebase
     /// that used to guard that wiped every accumulator in the window to do it.
     /// Keyed by identity, an arriving body starts its own baseline, a departing
-    /// one keeps what it earned, and `rosterChanged=1` is a note on the line
-    /// rather than a reason to discard numbers.
+    /// one keeps what it earned, and `rosterChanged=1` — set when a body
+    /// APPEARS mid-window, since a departing one needs no note — is a remark on
+    /// the line rather than a reason to discard numbers.
     ///
     /// Two placement rules this file depends on, both the #376 class — a
     /// diagnostic inside the behaviour it judges is dead where it is needed:
