@@ -132,6 +132,16 @@ namespace CompetitiveRounds
         // Wall time in which audio output was expected, for the delivery
         // comparison below.
         private static float _audioWallSeconds;
+
+        /// <summary>Starvation totals for the RUN, not for the current tap.
+        /// The tap is destroyed and rebuilt on every churn cycle and its Reset
+        /// zeroes both counters, while _audioWallSeconds accrues across the
+        /// whole run — comparing one against the other measured the bookkeeping
+        /// rather than the audio path. CloseObjects folds the outgoing tap into
+        /// these before releasing it, so the run owns the totals and the tap
+        /// stays a per-instance collector.</summary>
+        private static long _runMaxGapTicks;
+        private static long _runFramesDelivered;
         // Bound on deferring the post-run collection while a room is live.
         private static float _cleanupGcDeadline;
         // Bounded mask across a scripted transition, instead of masking whole
@@ -277,6 +287,8 @@ namespace CompetitiveRounds
             _cleanupSampleAt = -1f; _cleanupGcAt = -1f;
             _gen++;
             _audioWallSeconds = 0f;
+            _runMaxGapTicks = 0L;
+            _runFramesDelivered = 0L;
             _maskUntil = 0f;
             _mode = Mode.Normal;
             if (parts.Length > 2)
@@ -698,6 +710,13 @@ namespace CompetitiveRounds
 
         private static void CloseObjects()
         {
+            // Fold BEFORE the release, or a churn cycle's gaps and delivered
+            // frames leave with the tap that recorded them.
+            if ((object)_tap != null)
+            {
+                if (_tap.MaxGapTicks > _runMaxGapTicks) _runMaxGapTicks = _tap.MaxGapTicks;
+                _runFramesDelivered += _tap.FramesDelivered;
+            }
             if ((object)_src != null) Release(_src, "source");
             if ((object)_tap != null) Release(_tap, "tap");
             if ((object)_go != null) Release(_go, "host");
@@ -710,14 +729,22 @@ namespace CompetitiveRounds
 
         private static void Stop(string why)
         {
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
-                + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
-                + " silent_run_max=" + ((object)_tap != null ? _tap.SilentRunMax : -1)
-                + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs())
-                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail);
+            // RELEASE FIRST. The record below builds a string, formats six
+            // numbers and calls into the logger; a throw anywhere in it used to
+            // strand the tap, the host object and up to seven spinning
+            // background threads, because every release sat underneath it. The
+            // one value that does not survive the release is read into a local
+            // first; the starvation numbers are run-scoped and CloseObjects
+            // folds the outgoing tap into them, so they are complete after it.
+            int silentRunMax = (object)_tap != null ? _tap.SilentRunMax : -1;
             if (_busy != null) StopBusy();
             _openPending = false;
             CloseObjects();
+            Plugin.Log?.LogInfo("[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
+                + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
+                + " silent_run_max=" + silentRunMax
+                + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs())
+                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail);
             _cleanupKey = _key;
             _cleanupSampleAt = Time.realtimeSinceStartup + 2f;
             _cleanupGcAt = Time.realtimeSinceStartup + 5f;
@@ -729,8 +756,10 @@ namespace CompetitiveRounds
         /// a callback that never happens leaves no buffer to inspect.</summary>
         private static float MaxGapMs()
         {
-            if ((object)_tap == null || _tap.MaxGapTicks <= 0) return 0f;
-            return (float)(_tap.MaxGapTicks * 1000.0 / Stopwatch.Frequency);
+            long ticks = _runMaxGapTicks;
+            if ((object)_tap != null && _tap.MaxGapTicks > ticks) ticks = _tap.MaxGapTicks;
+            if (ticks <= 0) return 0f;
+            return (float)(ticks * 1000.0 / Stopwatch.Frequency);
         }
 
         /// <summary>Wall time in which output was expected, minus the audio the
@@ -739,11 +768,11 @@ namespace CompetitiveRounds
         /// did arrive was full of sound.</summary>
         private static float DeficitMs()
         {
-            if ((object)_tap == null) return 0f;
             int rate = 0;
             try { rate = AudioSettings.outputSampleRate; } catch { }
             if (rate <= 0) return 0f;
-            float delivered = (float)(_tap.FramesDelivered / (double)rate);
+            long frames = _runFramesDelivered + ((object)_tap != null ? _tap.FramesDelivered : 0L);
+            float delivered = (float)(frames / (double)rate);
             return (_audioWallSeconds - delivered) * 1000f;
         }
 

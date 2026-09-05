@@ -3449,7 +3449,7 @@ namespace CompetitiveRounds
                 // for. Carrying it across rooms would let the ranked-override at
                 // report time force-rank a later casual game vs an unrelated
                 // (possibly vanilla) opponent.
-                ApiClient.ActiveRankedSeriesId = null;
+                ApiClient.ActiveRankedSeriesId = null; ApiClient.ActiveRankedSeriesRoom = "";
                 // Bug 231: the tournament banner context binds to the same
                 // pairing/room as the series id — it dies here with it (#353).
                 ClearTournamentContext();
@@ -3834,7 +3834,7 @@ namespace CompetitiveRounds
                             // the next game's preflight. What is captured here
                             // is what the leave belongs to; an empty one makes
                             // the report a single attempt.
-                            string dcSeriesId = ApiClient.ActiveRankedSeriesId;
+                            string dcSeriesId = ApiClient.SeriesIdForThisRoom();
                             string dcSeriesLabel = string.IsNullOrEmpty(dcSeriesId) ? "(none)" : dcSeriesId;
                             Plugin.Log.LogInfo($"[DC] Opponent {opponentDisplayName} disconnected at game-rounds={localR}-{oppR}, pts={totalPts}, series-games={seriesGames}, series={dcSeriesLabel} — reporting leave");
                             ApiClient.ReportDisconnect(localSteamId, opponentSteamId, dcSeriesId);

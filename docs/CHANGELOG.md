@@ -21,12 +21,14 @@
   the name shown is the one the server holds for the opponent. In an ordinary
   room the line follows the seat: if the other player is replaced, it clears and
   re-fetches for whoever is there now, using the id that player's game
-  advertises. In a room the ranked queue issued, the line waits for the other
-  player's game to name the opponent, and appears only when that name matches
-  the one the queue assigned; it then follows the first game that matched, so if
-  someone else takes that seat afterwards the line clears rather than showing
-  the assigned player's record beside a different player. It is an agreement
-  between two games about who is present, not a check of who really is.
+  advertises. In the room the ranked queue most recently issued, the line waits
+  for the other player's game to name the opponent, and appears only when that
+  name matches the one the queue assigned; it then follows the first game that
+  matched, so if someone else takes that seat afterwards the line clears rather
+  than showing the assigned player's record beside a different player. If the
+  queue moves you on, the room you are actually sitting in keeps that
+  protection. It is an agreement between two games about who is present, not a
+  check of who really is.
 
 **Lag notices (opt-in, default off)**
 
@@ -80,6 +82,11 @@
 - The background queue of unsent match reports no longer stops for the rest of
   a session if one pass over it fails, and a report that lands on its first
   attempt can no longer make the queue drop a different one.
+- A leave that could not be sent at the time is retried until the server takes
+  it, across a restart if need be, and is filed against the series it was
+  watched in rather than whatever series is current when the retry lands. A
+  report the game cannot tie to a series is sent once and not queued, so
+  nothing is filed against a guess.
 - New diagnostic keys in the config file, both off by default and only useful
   if you have been asked for a measurement: `[Music] StreamProbe` plays one
   track on its own private audio source and writes timing, output and memory

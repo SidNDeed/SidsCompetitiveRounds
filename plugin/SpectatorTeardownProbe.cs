@@ -52,11 +52,18 @@ namespace CompetitiveRounds
     ///             transform.position += fixedDeltaTime * timeScale * velocity;
     ///
     /// `physDrive` accumulates that step and nothing else: while
-    /// `isPlaying &amp;&amp; simulated &amp;&amp; !isKinematic` holds, it adds
-    /// |velocity| * deltaTime * timeScale — the distance local physics moved
-    /// this body over the frame, summed over the frame's fixed steps. A
-    /// position written by the network lerp, by the respawn walk or by a map
-    /// rescale adds nothing to it, because none of those is that expression.
+    /// `isActiveAndEnabled &amp;&amp; isPlaying &amp;&amp; simulated &amp;&amp;
+    /// !isKinematic` holds, it adds |velocity| * deltaTime * timeScale — the
+    /// distance local physics moved this body over the frame, summed over the
+    /// frame's fixed steps. A position written by the network lerp, by the
+    /// respawn walk or by a map rescale adds nothing to it, because none of
+    /// those is that expression.
+    ///
+    /// The first term is the writer's REACHABILITY and r11 added it: a dead
+    /// body is deactivated by `HealthHandler.RPCA_Die` (V/HealthHandler.cs:374)
+    /// with `isPlaying`, `simulated` and `isKinematic` all untouched and its
+    /// death velocity still on it, so the other three terms hold for a body
+    /// `FixedUpdate` is not running on at all.
     /// The lerp does write `velocity`, and that is the point rather than a
     /// leak: a seat whose bodies are still simulated integrates that velocity
     /// into the transform, which is the behaviour under suspicion, and a seat
@@ -65,6 +72,28 @@ namespace CompetitiveRounds
     /// Observed displacement is still reported, as `moved`, with no
     /// attribution attached to it. It is context — it says the bodies went
     /// somewhere — and it is deliberately NOT the acceptance number.
+    ///
+    /// **What ends a window, and what does not.** The control is only a control
+    /// while its bodies STAY stopped, so a re-enable inside an open window ends
+    /// it as `revived` and it is not counted. That latch reads `simulated`
+    /// ALONE, not the four-term predicate: `isKinematic` is flipped true and
+    /// back by `StunHandler` (V/StunHandler.cs:57,65) on every seat that sees
+    /// the stun, so latching on the composite would discard a window every time
+    /// a stun expired in it — throwing away precisely the windows whose bodies
+    /// were live enough to collide, and leaving the acceptance number computed
+    /// over what survived. `simulated` has three writers in vanilla
+    /// (`SetPlayersSimulated`, the `Move` coroutine whose own log lines close
+    /// this window, and `PopUpHandler.StartPicking`), so a false→true on it
+    /// inside an open window means the control came back and nothing else.
+    ///
+    /// **Accumulators are keyed by `Player.PlayerID`, not by list position.**
+    /// A slot whose occupant changes without changing the roster count would
+    /// otherwise carry the previous body's baseline forward and bank the gap
+    /// between two different bodies as movement; the count-triggered rebase
+    /// that used to guard that wiped every accumulator in the window to do it.
+    /// Keyed by identity, an arriving body starts its own baseline, a departing
+    /// one keeps what it earned, and `rosterChanged=1` is a note on the line
+    /// rather than a reason to discard numbers.
     ///
     /// Two placement rules this file depends on, both the #376 class — a
     /// diagnostic inside the behaviour it judges is dead where it is needed:
@@ -110,14 +139,32 @@ namespace CompetitiveRounds
         private static int frames;
         private static int physFrames;
         private static int rosterAtOpen;
-        private static bool rebased;
+        private static bool rosterChanged;
         private static bool sawStopped;
         private static bool revived;
         private static float maxPhysStep;
-        private static readonly List<Vector3> lastPos = new List<Vector3>();
-        private static readonly List<float> physDrive = new List<float>();
-        private static readonly List<float> moved = new List<float>();
-        private static readonly List<bool> wasSimulated = new List<bool>();
+
+        /// <summary>Per-body accumulators, keyed by Player.PlayerID rather than
+        /// by position in PlayerManager.players. A list index is not an
+        /// identity: a slot whose occupant changes without changing the count
+        /// carries the previous body's position baseline forward, and the whole
+        /// gap between two different bodies is banked as one frame of movement.
+        /// Guarding that with a count-triggered rebase costs every accumulator
+        /// in the window. Keyed by identity, a body that appears starts its own
+        /// baseline and a body that leaves keeps what it earned.</summary>
+        private class BodyState
+        {
+            internal Vector3 lastPos;
+            internal float physDrive;
+            internal float moved;
+            internal bool wasSimulated;  // vel.simulated ALONE - see the latch
+            internal int order;          // first-seen, so the line's order is stable
+        }
+
+        private static readonly Dictionary<int, BodyState> bodies =
+            new Dictionary<int, BodyState>();
+        private static int bodyOrder;
+        private const int MAX_BODIES_TRACKED = 32;
 
         private static int reports;
 
@@ -158,13 +205,11 @@ namespace CompetitiveRounds
                 frames = 0;
                 physFrames = 0;
                 maxPhysStep = 0f;
-                rebased = false;
+                rosterChanged = false;
                 sawStopped = false;
                 revived = false;
-                lastPos.Clear();
-                physDrive.Clear();
-                moved.Clear();
-                wasSimulated.Clear();
+                bodies.Clear();
+                bodyOrder = 0;
                 rosterAtOpen = RosterCount();
                 windowsTotal++;
             }
@@ -186,27 +231,6 @@ namespace CompetitiveRounds
                 var players = PlayerManager.instance != null ? PlayerManager.instance.players : null;
                 if (players == null) return;
 
-                // A roster change mid-window invalidates the position
-                // baselines (indices shift), so rebase rather than report a
-                // list-reshuffle as movement — and say so in the line, or a
-                // truncated window reads as a window with no movement.
-                if (players.Count != lastPos.Count)
-                {
-                    if (lastPos.Count != 0) rebased = true;
-                    lastPos.Clear();
-                    physDrive.Clear();
-                    moved.Clear();
-                    wasSimulated.Clear();
-                    for (int i = 0; i < players.Count; i++)
-                    {
-                        lastPos.Add(SafePos(players, i));
-                        physDrive.Add(0f);
-                        moved.Add(0f);
-                        wasSimulated.Add(false);
-                    }
-                    return;
-                }
-
                 float dt = Time.deltaTime;
                 float scale = SafeTimeScale();
                 bool anyDriven = false;
@@ -216,46 +240,83 @@ namespace CompetitiveRounds
                     var p = players[i];
                     if (p == null) continue;
 
-                    // The exact predicate PlayerVelocity.FixedUpdate applies
-                    // before it touches the transform, and the exact quantity
-                    // it adds. Anything that writes a position WITHOUT going
-                    // through that expression — the network lerp above all —
-                    // contributes nothing here by construction.
+                    int id;
+                    bool simulatedNow = false;
                     bool driven = false;
                     float speed = 0f;
                     try
                     {
+                        id = p.PlayerID;
                         var data = p.data;
                         var vel = data != null ? data.playerVel : null;
                         if (vel != null)
                         {
-                            driven = data.isPlaying && vel.simulated && !vel.isKinematic;
+                            simulatedNow = vel.simulated;
+                            // The exact predicate PlayerVelocity.FixedUpdate
+                            // applies before it touches the transform, INCLUDING
+                            // the term that decides whether FixedUpdate runs at
+                            // all. A dead body is deactivated by
+                            // HealthHandler.RPCA_Die with isPlaying, simulated
+                            // and isKinematic untouched and its death velocity
+                            // still on it, so without isActiveAndEnabled the
+                            // probe banks drive for a body local physics is not
+                            // touching — the same defect class this sampler was
+                            // written to remove, one term further in.
+                            driven = vel.isActiveAndEnabled
+                                     && data.isPlaying
+                                     && simulatedNow
+                                     && !vel.isKinematic;
                             if (driven) speed = ((Vector2)vel.velocity).magnitude;
                         }
                     }
-                    catch { }
+                    catch { continue; }
 
-                    // The control's own validity. A window is only comparable
-                    // while the bodies STAY stopped: in a code room the vanilla
-                    // rematch popup runs about two seconds in and revives them
+                    BodyState st;
+                    if (!bodies.TryGetValue(id, out st))
+                    {
+                        if (bodies.Count >= MAX_BODIES_TRACKED) continue;
+                        if (bodies.Count != 0) rosterChanged = true;
+                        st = new BodyState
+                        {
+                            lastPos = SafePos(players, i),
+                            wasSimulated = simulatedNow,
+                            order = bodyOrder++,
+                        };
+                        bodies[id] = st;
+                    }
+
+                    // The control's own validity, latched on `simulated` ALONE.
+                    // A window is only comparable while the bodies STAY
+                    // stopped: in a code room the vanilla rematch popup runs
+                    // about two seconds in and revives them
                     // (PopUpHandler.StartPicking), and the spectator suppresses
                     // that popup — so a fighter window left open to the horizon
-                    // would report the revived bodies as if they had never been
-                    // stopped. The first re-enable after a stop ends the window.
-                    if (!driven) sawStopped = true;
-                    else if (sawStopped && i < wasSimulated.Count && !wasSimulated[i]) revived = true;
-                    if (i < wasSimulated.Count) wasSimulated[i] = driven;
+                    // would report revived bodies as if they had never been
+                    // stopped.
+                    //
+                    // It must NOT be latched on the composite predicate above.
+                    // isKinematic is flipped by StunHandler on every seat that
+                    // sees the stun, and a stun expiring inside the window would
+                    // then read as a re-enable and discard the window — losing
+                    // precisely the windows whose bodies were live enough to be
+                    // stunned. `simulated` is moved by SetPlayersSimulated, by
+                    // the Move coroutine (whose own log lines close this window)
+                    // and by StartPicking, so a false->true on it inside an open
+                    // window means the control came back and nothing else.
+                    if (!simulatedNow) sawStopped = true;
+                    else if (sawStopped && !st.wasSimulated) revived = true;
+                    st.wasSimulated = simulatedNow;
 
                     Vector3 now = SafePos(players, i);
-                    float step = Vector3.Distance(now, lastPos[i]);
-                    lastPos[i] = now;
-                    if (step >= NOISE_FLOOR) moved[i] = moved[i] + step;
+                    float step = Vector3.Distance(now, st.lastPos);
+                    st.lastPos = now;
+                    if (step >= NOISE_FLOOR) st.moved += step;
 
                     if (!driven) continue;
                     anyDriven = true;
                     float travel = speed * dt * scale;
                     if (travel < NOISE_FLOOR) continue;
-                    physDrive[i] = physDrive[i] + travel;
+                    st.physDrive += travel;
                     if (travel > maxPhysStep) maxPhysStep = travel;
                 }
 
@@ -282,8 +343,7 @@ namespace CompetitiveRounds
             try
             {
                 float totalDrive = 0f, totalMoved = 0f;
-                for (int i = 0; i < physDrive.Count; i++) totalDrive += physDrive[i];
-                for (int i = 0; i < moved.Count; i++) totalMoved += moved[i];
+                foreach (var st in bodies.Values) { totalDrive += st.physDrive; totalMoved += st.moved; }
 
                 string seat = openSeat ?? "?";
                 SeatTotals t;
@@ -314,17 +374,22 @@ namespace CompetitiveRounds
                   .Append(" dur=").Append((Time.time - openedAt).ToString("F2")).Append("s")
                   .Append(" frames=").Append(frames)
                   .Append(" players=").Append(rosterAtOpen)
-                  .Append(rebased ? " rebased=1" : "")
+                  .Append(rosterChanged ? " rosterChanged=1" : "")
                   .Append(" comparable=").Append(comparable ? "1" : "0")
                   .Append(revived ? " revived=1" : "")
                   .Append(" physFrames=").Append(physFrames).Append("/").Append(frames)
                   .Append(" physDrive=").Append(totalDrive.ToString("F3"))
                   .Append(" maxPhysStep=").Append(maxPhysStep.ToString("F4"))
                   .Append(" moved=").Append(totalMoved.ToString("F3"));
-                int listed = Math.Min(physDrive.Count, MAX_PLAYERS_LISTED);
+                // Listed in first-seen order so two lines from one sitting
+                // can be read against each other; the key itself is the game's
+                // player id, which is what makes the numbers attributable.
+                var ordered = new List<BodyState>(bodies.Values);
+                ordered.Sort((a, b) => a.order.CompareTo(b.order));
+                int listed = Math.Min(ordered.Count, MAX_PLAYERS_LISTED);
                 for (int i = 0; i < listed; i++)
-                    sb.Append(" p").Append(i).Append("=").Append(physDrive[i].ToString("F3"))
-                      .Append("/").Append(moved[i].ToString("F3"));
+                    sb.Append(" p").Append(i).Append("=").Append(ordered[i].physDrive.ToString("F3"))
+                      .Append("/").Append(ordered[i].moved.ToString("F3"));
                 Plugin.Log?.LogInfo(sb.ToString());
 
                 if (reports == MAX_REPORTS)

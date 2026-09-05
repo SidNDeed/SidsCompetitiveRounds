@@ -132,6 +132,17 @@ def test_the_horizon_is_a_horizon_and_not_a_missing_marker_claim():
 
 # ── the reading itself ───────────────────────────────────────────────────────
 
+def _driven_predicate(tick):
+    """The one assignment to `driven` that is the predicate — not the `= false`
+    declaration above it. Asserting there is exactly one is half the point: a
+    second assignment would mean the predicate is decided somewhere this test
+    is not reading."""
+    real = [m.group(1) for m in re.finditer(r"driven\s*=(.*?);", tick, re.S)
+            if "isPlaying" in m.group(1)]
+    assert len(real) == 1, f"expected one predicate assignment, found {len(real)}"
+    return real[0]
+
+
 def test_the_number_is_taken_from_the_writer_not_from_the_result():
     """The r10 repair, and the whole of it. `physDrive` integrates exactly the
     expression `PlayerVelocity.FixedUpdate` uses to move a body — the same
@@ -139,15 +150,19 @@ def test_the_number_is_taken_from_the_writer_not_from_the_result():
     contributes nothing to it. A network lerp, a scripted respawn walk and a
     map rescale all write `transform.position` directly."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "driven = data.isPlaying && vel.simulated && !vel.isKinematic;" in tick, (
-        "the predicate must be vanilla's, all three terms of it"
-    )
+    # The TERMS, not the spelling. r11 found the predicate short by one term
+    # while this test pinned the three-term string verbatim — so the incomplete
+    # predicate was the only one that could pass, and the correction failed.
+    predicate = _driven_predicate(tick)
+    for term in ("isActiveAndEnabled", "isPlaying", "simulated", "isKinematic"):
+        assert term in predicate, f"the predicate is missing {term}"
+    assert re.search(r"!\s*[\w.]*isKinematic", predicate), "isKinematic must be negated"
     assert "float travel = speed * dt * scale;" in tick
-    assert "physDrive[i] = physDrive[i] + travel;" in tick
+    assert "st.physDrive += travel;" in tick
     assert "if (travel > maxPhysStep) maxPhysStep = travel;" in tick
     # ...and observed displacement can never reach the attributed number.
     assert not re.search(r"travel\s*=\s*[^;\n]*step", tick)
-    assert not re.search(r"physDrive\[i\][^;\n]*step", tick)
+    assert not re.search(r"physDrive\s*\+=\s*step", tick)
     assert not re.search(r"maxPhysStep\s*=\s*step", tick)
 
 
@@ -169,7 +184,7 @@ def test_observed_displacement_carries_no_attribution():
     for gone in ("movedSim", "movedStop", "maxStepSim", "framesAnySimulated"):
         assert gone not in src, f"{gone} is the measurement r10 refuted"
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "moved[i] = moved[i] + step;" in tick
+    assert "st.moved += step;" in tick
 
 
 def test_a_control_that_is_revived_stops_being_a_control():
@@ -179,7 +194,7 @@ def test_a_control_that_is_revived_stops_being_a_control():
     suppresses that popup. The window ends at the re-enable rather than
     reporting a revived body as one that was never stopped."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "if (!driven) sawStopped = true;" in tick
+    assert "if (!simulatedNow) sawStopped = true;" in tick
     assert "revived = true" in tick
     assert 'CloseWindow("revived")' in tick
     open_body = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
@@ -202,15 +217,66 @@ def test_the_line_reports_the_attributed_number_and_the_raw_one():
         assert field in close, field
 
 
-def test_a_truncated_window_says_so():
-    """A roster change clears the accumulators. Without a marker in the line a
-    truncated window is indistinguishable from a window with no movement."""
+def test_a_roster_change_is_noted_and_no_longer_costs_the_window():
+    """It used to wipe every accumulator, because the accumulators were keyed
+    by list position and a changed roster invalidated the baselines. Keyed by
+    identity there is nothing to wipe: an arriving body starts its own
+    baseline. The note stays on the line, because a window that gained or lost
+    a body is still a window worth reading differently."""
     tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
-    assert "players.Count != lastPos.Count" in tick
-    rebase = tick.index("players.Count != lastPos.Count")
-    assert "rebased = true" in tick[rebase:]
+    assert "rosterChanged = true" in tick
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    assert 'rebased ? " rebased=1"' in close
+    assert 'rosterChanged ? " rosterChanged=1"' in close
+    # the wipe is gone, and cannot come back under the old name either
+    assert "rebased" not in tick and "rebased" not in close
+    for wipe in ("physDrive.Clear()", "moved.Clear()", "lastPos.Clear()"):
+        assert wipe not in tick, f"{wipe} discards a window's measurement"
+
+
+def test_the_revive_latch_cannot_be_tripped_by_a_stun():
+    """r11 HIGH. StunHandler sets isKinematic true on StartStun and false on
+    StopStun (V/StunHandler.cs:57,65) and never touches simulated, and stuns
+    reach every seat. Latching the control's validity on the composite
+    predicate therefore discarded a window every time a stun expired inside it
+    — losing precisely the windows whose bodies were live enough to collide,
+    and leaving the acceptance number computed over what survived."""
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    latch = [ln for ln in tick.splitlines()
+             if "sawStopped" in ln or "revived = true" in ln or "wasSimulated =" in ln]
+    assert latch, "no latch found"
+    joined = "\n".join(latch)
+    assert "isKinematic" not in joined, (
+        "the latch reads a term a stun flips; it must read simulated alone"
+    )
+    assert "driven" not in joined, "the latch must not read the composite predicate"
+    assert "simulatedNow" in joined
+
+
+def test_a_body_local_physics_is_not_touching_contributes_nothing():
+    """r11 HIGH. HealthHandler.RPCA_Die deactivates the body
+    (V/HealthHandler.cs:374) and leaves isPlaying, simulated and isKinematic
+    untouched with its death velocity still on it. Without the writer's own
+    reachability term the probe banks drive for a body FixedUpdate is not
+    running on at all — the same defect class r10 refuted, one term further
+    in."""
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "isActiveAndEnabled" in _driven_predicate(tick)
+
+
+def test_accumulators_are_keyed_by_the_games_player_identity():
+    """A list index is not an identity. A slot whose occupant changes without
+    changing the roster count carries the previous body's position baseline
+    forward and banks the gap between two different bodies as one frame of
+    movement."""
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert "Dictionary<int, BodyState>" in src
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "id = p.PlayerID;" in tick
+    assert "bodies.TryGetValue(id, out st)" in tick
+    # nothing may address a per-body accumulator by position any more
+    assert not re.search(r"(lastPos|physDrive|moved|wasSimulated)\s*\[", tick)
+    # and the map is bounded, because a probe must not grow without limit
+    assert "bodies.Count >= MAX_BODIES_TRACKED" in tick
 
 
 def test_a_duplicate_call_in_does_not_restart_the_clock():

@@ -179,11 +179,50 @@ def test_a_sighting_ages_out():
     assert not main._region_corroborated("us")
 
 
-def test_the_map_is_bounded():
-    for i in range(main._REGION_SEEN_MAX_TOKENS + 20):
-        token = "r" + format(i, "03d")[:4]
-        main._note_region_seen(token[:5], "76561198000000001")
-    assert len(main._REGION_SEEN) <= main._REGION_SEEN_MAX_TOKENS
+def test_the_map_is_bounded_and_evicts_the_oldest():
+    """This test used to feed tokens with digits in them — "r000", "r001" — and
+    the token regex is letters only, so every one was rejected, the map was
+    EMPTY at the assertion, and `len({}) <= 64` was true no matter what the
+    eviction did. Deleting the whole eviction block left it green. It now feeds
+    tokens the regex accepts and asserts the mechanism rather than the absence
+    of growth."""
+    tokens = [chr(97 + i // 26) + chr(97 + i % 26)
+              for i in range(main._REGION_SEEN_MAX_TOKENS + 20)]
+    assert len(set(tokens)) == len(tokens)
+    for token in tokens:
+        assert main._region_token(token) == token, "the fixture must feed real tokens"
+        main._note_region_seen(token, "76561198000000001")
+    assert len(main._REGION_SEEN) == main._REGION_SEEN_MAX_TOKENS, (
+        "the map neither grew past its bound nor emptied itself"
+    )
+    assert tokens[0] not in main._REGION_SEEN, "the oldest sighting survived eviction"
+    assert tokens[-1] in main._REGION_SEEN, "the newest sighting was evicted"
+
+
+def test_eviction_is_by_last_seen_not_by_first_seen():
+    """A region still in use must not be evicted ahead of one nobody has
+    connected to since. The two ages are set explicitly rather than left to two
+    monotonic reads a microsecond apart, and exactly one eviction is forced —
+    filling past the cap evicts BOTH tokens under comparison and proves
+    nothing."""
+    stale, in_use = "aa", "ab"
+    # `in_use` is inserted FIRST and `stale` second, so insertion order and
+    # last-seen order disagree — otherwise the two orderings evict the same
+    # token and the test cannot tell which rule the code is following.
+    main._note_region_seen(in_use, "76561198000000001")
+    main._note_region_seen(stale, "76561198000000001")
+    seen_at, ids = main._REGION_SEEN[stale]
+    main._REGION_SEEN[stale] = (seen_at - 3600.0, ids)
+
+    # Cap minus one more tokens, so the map lands exactly one over its bound.
+    fillers = [chr(97 + i // 26) + chr(97 + i % 26) + "z"
+               for i in range(main._REGION_SEEN_MAX_TOKENS - 1)]
+    for token in fillers:
+        main._note_region_seen(token, "76561198000000003")
+
+    assert len(main._REGION_SEEN) == main._REGION_SEEN_MAX_TOKENS
+    assert stale not in main._REGION_SEEN, "the least recently seen token survived"
+    assert in_use in main._REGION_SEEN, "a token seen moments ago was evicted"
 
 
 def test_only_well_formed_tokens_enter_the_map():

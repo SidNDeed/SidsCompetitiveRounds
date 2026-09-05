@@ -4540,7 +4540,7 @@ namespace CompetitiveRounds
             // suppressed the new room's preflight and posted the new game's
             // live points into the old pairing. Menu-time queue-staged ids
             // are untouched: no room exit fires for them, same as today.
-            try { ApiClient.ActiveRankedSeriesId = null; } catch { }
+            try { ApiClient.ActiveRankedSeriesId = null; ApiClient.ActiveRankedSeriesRoom = ""; } catch { }
             // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
             // materials die with the room too — Reset() previously had NO
             // caller, so the flush the r4 cap depends on never ran and a

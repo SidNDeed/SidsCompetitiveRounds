@@ -11890,6 +11890,11 @@ async def _enrollment_identity_gate(db: AsyncSession, steam_id: str) -> None:
 # A region token as clients report it. Anything else is treated as ABSENT
 # rather than pinned: the value is handed back to both clients to connect to,
 # and there is no recovery from a room neither of them can reach.
+# The reason _prune_stale_series writes when it abandons a series that never
+# had a match reported against it. Named once because report_disconnect reads
+# it back: a literal in two places is a literal that drifts in one of them.
+PRUNE_REASON_NO_MATCH = "no_match_reported"
+
 _REGION_TOKEN_RE = _re.compile(r"^[a-z]{2,5}$")
 
 
@@ -13654,13 +13659,37 @@ async def report_disconnect(
             raise HTTPException(status_code=403, detail="unknown series for this DC report")
         if {series.player1_id, series.player2_id} != {reporter.id, disconnected.id}:
             raise HTTPException(status_code=403, detail="named series does not belong to this pair")
-        if series.invalidated_at is not None:
+        # An invalidated series is refused, with ONE exception, written as an
+        # allow-list of a single reason so every other reason - and any reason
+        # added later - keeps refusing.
+        #
+        # _prune_stale_series abandons an active series that is half an hour old
+        # and has no match reported against it, and stamps it
+        # PRUNE_REASON_NO_MATCH. A leave during game 1 produces exactly that
+        # row: the game is not counted, so no match is ever reported, so the
+        # sweep abandons the series the report names. Refusing on that reason
+        # would discard the report for the case durability exists for, because
+        # the outbox treats a 4xx as settled. The reason is not evidence
+        # against the report; it is the report restated by the janitor.
+        #
+        # Every other containment still applies underneath: the pair check
+        # above, the Steam-session binding, the age bound below, and
+        # uq_dc_event_series_player, which admits one row per (series, leaver)
+        # however many times it is reported.
+        if (series.invalidated_at is not None
+                and (series.invalidation_reason or "") != PRUNE_REASON_NO_MATCH):
             raise HTTPException(status_code=403, detail="named series was invalidated")
         # Age is asked in SQL against the database clock rather than compared
         # to a python "now", so an api container with a skewed clock cannot
         # widen or narrow the bound. Bound is a literal interval, not a bind.
+        #
+        # BOTH terms are needed. completed_at alone does not bound a series
+        # that never completes, and the row admitted immediately above is
+        # precisely that kind: the sweep sets status and invalidated_at and
+        # leaves completed_at NULL forever. created_at is what bounds it.
         fresh = (await db.execute(text(
             "SELECT 1 FROM ranked_series WHERE id = CAST(:sid AS uuid) "
+            "AND created_at >= NOW() - INTERVAL '7 days' "
             "AND (completed_at IS NULL OR completed_at >= NOW() - INTERVAL '7 days') LIMIT 1"
         ), {"sid": str(claimed)})).first()
         if fresh is None:
@@ -21852,7 +21881,7 @@ async def _prune_stale_series(db: AsyncSession) -> int:
             changed += 1
             print(f"[SERIES] refunded {n} bet(s) on stalled series {sid} (series stays resumable)")
     abandon_rows = [
-        (sid, player1_id, player2_id, "no_match_reported")
+        (sid, player1_id, player2_id, PRUNE_REASON_NO_MATCH)
         for sid, player1_id, player2_id in stale_rows_a
     ]
     for sid, player1_id, player2_id, prune_reason in abandon_rows:

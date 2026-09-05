@@ -6,7 +6,9 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
 from hashlib import sha1
+import ast
 import inspect
+import textwrap
 import json
 from pathlib import Path
 from uuid import UUID
@@ -35,9 +37,58 @@ PINNED_FASTAPI = next(
 )
 
 # Module-level helpers whose source is part of a handler's reviewed surface.
-ROUTE_HELPER_DEPENDENCIES = {
-    "get_player_stats": ("_viewer_h2h_counts",),
-}
+#
+# r8 LOW 5 introduced this as a hand-written dict, and r11 found the hole that
+# shape always has: it held one entry, and the release that moved
+# _pick_room_region — which decides the region both seats of a pair are told to
+# connect to — left the two routes that return it certified unchanged, because
+# their own source had not moved. A list of exceptions fails precisely when
+# someone extracts a helper, which is the case it exists for.
+#
+# So the closure is computed instead. It is affordable: main has 608
+# module-level functions and the transitive closure of a route is 4 of them at
+# the median, 17 at p90 and 52 at the worst — a gate that drifted on every
+# commit would be a gate nobody reads.
+def _module_functions():
+    return {
+        name: obj
+        for name, obj in vars(main).items()
+        if inspect.isfunction(obj) and getattr(obj, "__module__", None) == "main"
+    }
+
+
+def _referenced_names(fn):
+    """Every bare name and attribute name mentioned in a function's source.
+    Deliberately over-inclusive: a name that happens to match a module-level
+    function is folded in even if it was never called, which can only widen the
+    reviewed surface, never narrow it."""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    except (OSError, TypeError, SyntaxError, IndentationError):
+        return set()
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return names
+
+
+def _helper_closure(endpoint):
+    funcs = _module_functions()
+    seen = set()
+    frontier = [endpoint]
+    while frontier:
+        for name in _referenced_names(frontier.pop()):
+            helper = funcs.get(name)
+            if helper is None or name in seen:
+                continue
+            seen.add(name)
+            frontier.append(helper)
+    return sorted(seen)
+
+MODULE_SRC = (Path(__file__).parents[1] / "api" / "main.py").read_text(encoding="utf-8")
 
 SENTINEL_ROUTE = {
     "path": "/api/v1/matches/by-code/{code}",
@@ -69,11 +120,15 @@ def _route_identities(routes, prefix=""):
         if not path.startswith("/api/v1/"):
             continue
         endpoint = route.endpoint
-        # r8 LOW 5: a handler's fingerprint covers the module-level helpers it
-        # delegates to (an extracted helper must not become a fingerprint hole).
+        # A handler's fingerprint covers the module-level helpers it delegates
+        # to, transitively — an extracted helper must not become a fingerprint
+        # hole. Sorted, so the fingerprint does not depend on walk order.
         source_text = inspect.getsource(endpoint)
-        for helper_name in ROUTE_HELPER_DEPENDENCIES.get(endpoint.__qualname__, ()):
-            source_text += inspect.getsource(getattr(main, helper_name))
+        for helper_name in _helper_closure(endpoint):
+            try:
+                source_text += inspect.getsource(getattr(main, helper_name))
+            except (OSError, TypeError):
+                continue
         identities.append(
             {
                 "path": path,
@@ -161,6 +216,44 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
             f"{identity['methods']} {identity['path']} source fingerprint changed; "
             "re-review this handler"
         )
+
+
+def test_the_helper_surface_is_computed_and_not_hand_curated():
+    """r11. The coverage rule was a dict with one entry, so it failed exactly
+    where it was written to help: this range moved _pick_room_region, which
+    decides the region both seats of a pair are told to connect to, and the two
+    routes that return it kept their pre-range fingerprints because their own
+    source had not changed. A list of exceptions is a hole the next extraction
+    reopens silently."""
+    assert not hasattr(main, "ROUTE_HELPER_DEPENDENCIES")
+    assert "ROUTE_HELPER_DEPENDENCIES" not in MODULE_SRC, (
+        "the hand-curated list came back"
+    )
+    # The closure is real: the two queue routes now carry the region helpers
+    # they delegate to, transitively.
+    for route_name, expected in (
+        ("queue_poll", {"_pick_room_region", "_region_agreed", "_region_corroborated"}),
+        ("queue_ready", {"_pick_room_region", "_region_agreed", "_region_corroborated"}),
+        ("queue_join", {"_note_region_seen", "_region_token"}),
+    ):
+        closure = set(_helper_closure(getattr(main, route_name)))
+        assert expected <= closure, (
+            f"{route_name} does not cover {sorted(expected - closure)}"
+        )
+
+
+def test_the_helper_closure_stays_affordable():
+    """A fingerprint that pulls half the module in drifts on every commit, and
+    a gate that always fires is a gate nobody reads. Measured before this shape
+    was chosen: 4 helpers at the median of 608 module-level functions, 17 at
+    p90, 52 at the worst."""
+    routes = [r for r in main.app.routes
+              if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
+    assert routes
+    sizes = sorted(len(_helper_closure(r.endpoint)) for r in routes)
+    total = len(_module_functions())
+    assert sizes[len(sizes) // 2] <= 12, f"median closure {sizes[len(sizes) // 2]} of {total}"
+    assert sizes[-1] <= 120, f"worst closure {sizes[-1]} of {total}"
 
 
 def test_request_key_counterexample_is_rejected():

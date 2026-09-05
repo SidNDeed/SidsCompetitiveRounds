@@ -73,10 +73,61 @@ def test_the_gate_is_a_config_key_and_not_a_seat_identity():
 
 def test_nothing_that_could_identify_a_person_is_compiled_in():
     """The dV2 objection, kept as a standing check: a 17-digit account id must
-    not appear in source or in the DLL built from it."""
+    not appear in this file, and must not reach the DLL built from it.
+
+    The second half used to be a promise the body did not keep — it read one
+    .cs file and nothing looked at a built artifact, in a project whose rule is
+    that a source-level probe is not a binary-level probe (#123, #306; the
+    DebugType=none rule exists because a path leaked from a PDB while the
+    source was clean). The binary half is now real, and skips rather than
+    passes when there is no DLL to read."""
     src = PROBE_CS.read_text(encoding="utf-8")
     assert not re.search(r"7656119\d{10}", src)
     assert not re.search(r'"\d{17}"', src)
+    # An id could also arrive indirectly, so the file must not reach for the
+    # broadcast identity at all — that is the term a future edit crosses first.
+    assert "BroadcastMode.SeatSteamId" not in src
+    assert not re.search(r"BroadcastMode\.\w*Steam\w*", src)
+
+
+
+# Account ids compiled into the mod today, each with the reason it is there. A
+# whole-binary scan cannot attribute a hit to one source file, so this is an
+# allow-list rather than a prohibition: a FIFTH id appearing means an
+# identifier reached the binary that nobody decided to put there. Steam ids are
+# public identifiers that every player in a lobby can see; the one hard-coded
+# check that uses the maintainer's is a recorded decision to move the check
+# server-side in a later batch, and this list is that record.
+ACCEPTED_DLL_ACCOUNT_IDS = {
+    "76561198040410653",   # maintainer's account — the client-side Regicide check
+    "76561198709950406",   # the broadcast seat's account — seat gating
+    "76561190000000001",   # synthetic placeholder
+    "76561190000000002",   # synthetic placeholder
+}
+
+
+def test_the_dll_carries_only_the_account_ids_this_project_has_accepted():
+    """The binary half, as a real check. It used to be a promise in a docstring
+    over a body that read one .cs file — and this project's rule is explicit
+    that a source-level probe is not a binary-level probe (#123, #306): the
+    DebugType=none rule exists because a path leaked from a PDB while the
+    source read clean.
+
+    Scanned as BYTES at any offset in both encodings. A text read of a binary
+    decodes UTF-16 from byte zero and hides every wide string sitting at an odd
+    offset, which is how an ungated build once read clean (#157)."""
+    dll = PLUGIN_CS.parent / "bin" / "Release" / "netstandard2.1" / "CompetitiveRounds.dll"
+    if not dll.exists():
+        pytest.skip("no Release DLL on this seat")
+    blob = dll.read_bytes()
+    found = set()
+    found.update(m.decode("utf-8") for m in re.findall(rb"7656119[0-9]{10}", blob))
+    for m in re.findall(rb"(?:7\x006\x005\x006\x001\x001\x009\x00(?:[0-9]\x00){10})", blob):
+        found.add(m.decode("utf-16le"))
+    unexpected = found - ACCEPTED_DLL_ACCOUNT_IDS
+    assert not unexpected, (
+        f"account id(s) in the built DLL that nothing accounts for: {sorted(unexpected)}"
+    )
 
 
 def test_the_key_is_off_by_default_and_lives_in_a_section_that_already_exists():
@@ -86,6 +137,17 @@ def test_the_key_is_off_by_default_and_lives_in_a_section_that_already_exists():
     src = PLUGIN_CS.read_text(encoding="utf-8")
     assert '"Music", "StreamProbe", false,' in src
     assert '"Music", "StreamProbeRun", "",' in src
+    # The load-bearing half is the ORDERING, and it was stated in prose and
+    # never asserted: another [Music] key must be bound BEFORE these two, or
+    # BepInEx has not written the section yet when a tester hand-adds a value.
+    first_music = min(src.index(m) for m in re.findall(r'"Music", "\w+"', src)
+                      if "StreamProbe" not in m) if re.findall(
+                          r'"Music", "\w+"', src) else None
+    assert first_music is not None
+    assert first_music < src.index('"Music", "StreamProbe"'), (
+        "the probe's keys are the first [Music] binds, so the section does not "
+        "exist when a tester edits the file"
+    )
     assert "internal static ConfigEntry<bool> MusicProbeEnabled;" in src
     assert "internal static ConfigEntry<string> MusicProbeRun;" in src
 
@@ -200,9 +262,15 @@ def test_the_natural_end_needs_elapsed_time_and_not_one_not_playing_read():
 
 
 def test_the_startup_metric_observes_the_frames_it_claims():
-    """+2 observes the completion frame and one complete frame after it."""
+    """The deadline is read as `Time.frameCount >= _openLogFrame`, so +3 keeps
+    the peak-frame sampler running over the completion frame and the two whole
+    frames after it. The docstring used to say +2 while pinning +3, which left
+    the constant unchecked against any stated intent."""
     src = PROBE_CS.read_text(encoding="utf-8")
     assert "_openLogFrame = Time.frameCount + 3;" in src
+    assert "Time.frameCount >= _openLogFrame" in src, (
+        "the read site is what gives the constant its meaning"
+    )
 
 
 # ── refusals, all of them, at admission AND on every tick ────────────────────
@@ -303,3 +371,43 @@ def test_the_operator_text_matches_what_the_code_does():
     header = PROBE_CS.read_text(encoding="utf-8")[:6000]
     assert "Gate: the broadcast identity" not in header
     assert "N-1 busy threads" not in header
+
+
+def test_a_churn_cycle_does_not_reset_the_counters_without_their_reference():
+    """r11 HIGH. In churn mode the tap is destroyed and rebuilt every cycle and
+    its Reset zeroes MaxGapTicks and FramesDelivered, while _audioWallSeconds —
+    the wall time they are compared against — accrues across the whole run and
+    is zeroed only in Start. So the deficit subtracted one cycle's delivered
+    audio from the run's expected audio, and the gap reported only the last
+    cycle. The counters and their reference must be reset by the same
+    statement, so the totals belong to the run and the tap folds into them."""
+    src = PROBE_CS.read_text(encoding="utf-8")
+    assert "_runMaxGapTicks" in src and "_runFramesDelivered" in src
+    # reset together, in Start, beside the reference they are compared against
+    start = _cs_method_body(PROBE_CS, "private static void Start(string raw, float now)")
+    for line in ("_audioWallSeconds = 0f;", "_runMaxGapTicks = 0L;", "_runFramesDelivered = 0L;"):
+        assert line in start, f"{line} is not reset with the run"
+    # and the outgoing tap folds in BEFORE it is released, or a cycle's
+    # measurement leaves with the object that recorded it
+    close = _cs_method_body(PROBE_CS, "private static void CloseObjects()")
+    assert "_runFramesDelivered += _tap.FramesDelivered;" in close
+    assert close.index("_runFramesDelivered +=") < close.index('Release(_tap, "tap")')
+    # the readers use the run totals, so a churn run reports the whole run
+    gap = _cs_method_body(PROBE_CS, "private static float MaxGapMs()")
+    deficit = _cs_method_body(PROBE_CS, "private static float DeficitMs()")
+    assert "_runMaxGapTicks" in gap
+    assert "_runFramesDelivered" in deficit
+
+
+def test_stop_releases_before_it_reports():
+    """The end record builds a string, formats six numbers and calls the
+    logger. With every release underneath it, a throw anywhere in that stranded
+    the tap, the host object and up to seven spinning background threads."""
+    stop = _code(_cs_method_body(PROBE_CS, "private static void Stop(string why)"))
+    for release in ("StopBusy();", "CloseObjects();"):
+        assert release in stop, release
+        assert stop.index(release) < stop.index("[MUSIC-PROBE] end key="), (
+            f"{release} runs after the record it can be prevented by"
+        )
+    # the one value that does not survive the release is read first
+    assert stop.index("int silentRunMax") < stop.index("CloseObjects();")

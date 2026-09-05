@@ -176,9 +176,10 @@ def _call(session, series_id=None):
     )
 
 
-def _series_row(player1=REPORTER, player2=LEAVER, invalidated=None, sid=NAMED_SERIES):
+def _series_row(player1=REPORTER, player2=LEAVER, invalidated=None, sid=NAMED_SERIES,
+                reason=None):
     return SimpleNamespace(id=sid, player1_id=player1, player2_id=player2,
-                           invalidated_at=invalidated)
+                           invalidated_at=invalidated, invalidation_reason=reason)
 
 
 def test_the_request_that_inserts_the_row_is_the_one_that_counts():
@@ -286,12 +287,48 @@ def test_the_pair_check_is_order_blind():
     assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
 
 
-def test_an_invalidated_series_takes_no_new_events():
-    session = FakeSession(_players(), named_series=_series_row(invalidated="2026-09-01"))
-    with pytest.raises(main.HTTPException) as caught:
-        _call(session, str(NAMED_SERIES))
-    assert caught.value.status_code == 403
-    assert session.inserts == 0
+def test_an_integrity_invalidation_takes_no_new_events():
+    """Every reason except the janitor's one. Written as a loop over the
+    reasons actually present on ranked_series so that adding a reason cannot
+    quietly widen what this endpoint accepts — the code is an allow-list of
+    one, and this is the assertion that it stays one."""
+    for reason in ("admin_void", "short_duration_pattern_retro", "series_abandoned",
+                   "janitor_dead_lock", "member_banned", "phantom_ranked_private_room",
+                   None, ""):
+        session = FakeSession(_players(),
+                              named_series=_series_row(invalidated="2026-09-01", reason=reason))
+        with pytest.raises(main.HTTPException) as caught:
+            _call(session, str(NAMED_SERIES))
+        assert caught.value.status_code == 403, reason
+        assert session.inserts == 0, reason
+
+
+def test_the_janitors_no_match_reported_is_not_evidence_against_the_report(_stub_the_gates):
+    """r11 HIGH. _prune_stale_series abandons an active series that is half an
+    hour old with no match reported against it, stamping invalidated_at and
+    'no_match_reported'. A leave during game 1 produces exactly that row — the
+    game is not counted, so no match is ever reported — so refusing on it
+    discarded the report for the case durability exists for, and the outbox
+    treats a 4xx as settled and drops the entry. The reason is the report
+    restated by the janitor, not evidence against it."""
+    session = FakeSession(_players(),
+                          named_series=_series_row(invalidated="2026-09-01",
+                                                   reason=main.PRUNE_REASON_NO_MATCH))
+    out = _call(session, str(NAMED_SERIES))
+    assert out["status"] == "recorded"
+    assert session.inserts == 1
+
+
+def test_the_janitor_and_the_endpoint_read_the_same_constant():
+    """Two literals in two files drift in one of them. The prune writes the
+    reason and this endpoint reads it back, so there is one name for it."""
+    src = MAIN_PY.read_text(encoding="utf-8")
+    assert src.count('"no_match_reported"') == 1, (
+        "the reason is spelled once, at the constant"
+    )
+    assert src.count("PRUNE_REASON_NO_MATCH") >= 3, (
+        "one definition, the prune's writer, and the endpoint's reader"
+    )
 
 
 def test_an_unknown_series_is_refused():
@@ -313,6 +350,23 @@ def test_a_long_finished_series_is_refused_and_the_bound_is_asked_in_sql():
     assert caught.value.status_code == 403
     assert session.freshness_checks == 1
     assert session.inserts == 0
+
+
+def test_the_age_bound_binds_a_series_that_never_completes():
+    """The fake answers the freshness query with a boolean, so the test above
+    passes whatever the SQL actually asks. Both terms matter and one of them is
+    new: a series the janitor abandons keeps completed_at NULL forever, so the
+    completed_at term admits it at any age and created_at is what bounds it —
+    which is exactly the row the reason-scoped exemption above now accepts."""
+    sql = MAIN_PY.read_text(encoding="utf-8")
+    start = sql.index("SELECT 1 FROM ranked_series WHERE id = CAST(:sid AS uuid)")
+    query = sql[start:start + 400]
+    assert "created_at >= NOW() - INTERVAL '7 days'" in query, (
+        "an abandoned series has no completed_at, so nothing else bounds its age"
+    )
+    assert "completed_at IS NULL OR completed_at >= NOW() - INTERVAL '7 days'" in query
+    # asked of the database clock, never compared to a python now
+    assert "NOW()" in query and "datetime.now" not in query
 
 
 def test_a_malformed_series_id_is_a_4xx_so_the_client_stops_retrying():
@@ -404,9 +458,39 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
     assert gsw.count("ApiClient.ReportDisconnect(") == 1
     call = "ApiClient.ReportDisconnect(localSteamId, opponentSteamId, dcSeriesId);"
     assert call in gsw
-    capture = "string dcSeriesId = ApiClient.ActiveRankedSeriesId;"
+    capture = "string dcSeriesId = ApiClient.SeriesIdForThisRoom();"
     assert capture in gsw
     assert gsw.index(capture) < gsw.index(call)
+    # ...and the accessor is room-fenced, because the queue publishes the NEXT
+    # pairing's id at both_ready — before the seat has joined that room. An
+    # observation made in one room must not be filed under another room's
+    # series; an empty answer degrades to the unnamed report, which the server
+    # resolves from the pair.
+    api = API_CLIENT_CS.read_text(encoding="utf-8")
+    fence = _cs_method_body(API_CLIENT_CS, "public static string SeriesIdForThisRoom()")
+    assert "PhotonNetwork.InRoom" in fence
+    assert "ActiveRankedSeriesRoom" in fence
+    assert 'return string.Equals(ActiveRankedSeriesRoom, here, StringComparison.Ordinal) ? sid : "";' in fence
+    # Every publish of the id records the room it was published for, and every
+    # clear clears both — otherwise the fence compares against a stale room
+    # name. Asserted per WRITE SITE rather than by counting occurrences, so the
+    # field declarations cannot make the totals agree by accident.
+    sites = 0
+    for src in (api, gsw, (PLUGIN / "Plugin.cs").read_text(encoding="utf-8")):
+        lines = src.splitlines()
+        for i, ln in enumerate(lines):
+            if "ActiveRankedSeriesId = " not in ln:
+                continue
+            if "public static" in ln:      # the declaration, not a write
+                continue
+            near = ln + (lines[i + 1] if i + 1 < len(lines) else "")
+            assert "ActiveRankedSeriesRoom = " in near, (
+                f"a write to the series id does not set its room: {ln.strip()}"
+            )
+            sites += 1
+    # 3 publishes (preflight, queue both_ready, queue poll) and 4 clears
+    # (two in ApiClient, the game-report boundary, the room-leave edge).
+    assert sites == 7, f"expected 3 publishes and 4 clears, found {sites}"
 
 
 def test_the_queued_body_is_one_constant_on_both_paths():
@@ -561,3 +645,17 @@ def test_one_room_cannot_spend_the_shared_bucket():
         "two clients behind one address would leave nothing for the writes"
     )
     assert most_in_window <= _cs_int_const("MAX_REQUESTS_PER_ROOM")
+
+
+def test_a_failed_start_does_not_latch_the_outbox_off():
+    """StartCoroutine throws when the host object is inactive or being
+    destroyed, and both callers swallow it. Setting the guard flag first
+    latched "a supervisor exists" with none running — and the flag is the only
+    guard, so nothing could start one afterwards. Set after the call returns, a
+    failed start leaves the flag false and the next enqueue re-arms."""
+    body = _cs_method_body(API_CLIENT_CS, "private static void EnsureOutboxLoop()")
+    assert "StartCoroutine(OutboxSupervisor());" in body
+    assert "_outboxLoopStarted = true;" in body
+    assert body.index("StartCoroutine(OutboxSupervisor());") < body.index("_outboxLoopStarted = true;"), (
+        "the guard latches before the coroutine it guards exists"
+    )

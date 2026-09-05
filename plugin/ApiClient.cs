@@ -809,16 +809,22 @@ namespace CompetitiveRounds
         private static void EnsureOutboxLoop()
         {
             if (_outboxLoopStarted || Plugin.Instance == null) return;
-            _outboxLoopStarted = true;
+            // Set AFTER the coroutine is running. StartCoroutine throws when
+            // the host is inactive or mid-destruction, and both callers swallow
+            // it — so setting the flag first latched "a supervisor exists" with
+            // none running, and the flag is the only guard, so no later call
+            // could start one. Set after, a failed start simply leaves the flag
+            // false and the next enqueue re-arms.
             Plugin.Instance.StartCoroutine(OutboxSupervisor());
+            _outboxLoopStarted = true;
         }
 
         /// <summary>Runs OutboxPass forever, driving it by hand so a throw
         /// inside one pass is caught here instead of escaping.
         ///
-        /// Unity stops a coroutine that lets an exception out, and
-        /// _outboxLoopStarted is written once and never cleared — so a single
-        /// fault used to retire the retry queue for the rest of the session,
+        /// Unity stops a coroutine that lets an exception out, and the
+        /// started flag used to be written once and never cleared — so a single
+        /// fault retired the retry queue for the rest of the session,
         /// including the reports already written to disk, with nothing in the
         /// log but the exception. A pass that throws is logged and the next
         /// one starts against the same queue; entries keep their attempt
@@ -1879,7 +1885,7 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogWarning("[LIVE-POINTS] held series is no longer active — clearing so the "
                                               + "preflight re-arms for the current game");
-                        ActiveRankedSeriesId = null;
+                        ActiveRankedSeriesId = null; ActiveRankedSeriesRoom = "";
                     }
                     return null;   // no URL rewrite — the refusal hook is the side effect
                 });
@@ -5765,7 +5771,7 @@ namespace CompetitiveRounds
             // game that just finished; anything sent after it survives.
             if (preflightGeneration > preflightRetiredThrough)
                 preflightRetiredThrough = preflightGeneration;
-            ActiveRankedSeriesId = null;
+            ActiveRankedSeriesId = null; ActiveRankedSeriesRoom = "";
 
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/matches",
@@ -9037,6 +9043,7 @@ namespace CompetitiveRounds
                         }
                         catch { }
                         ActiveRankedSeriesId = sid;
+                        ActiveRankedSeriesRoom = roomNow ?? "";
                         try { Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} status={ExtractJsonString(resp, "status")}"); } catch { }
                         // Aug 9 (Sid): a rated ROOMCODE game must end every
                         // other search — the room-entry teardown deliberately
@@ -10038,6 +10045,7 @@ namespace CompetitiveRounds
                             // v1.22 — server now pre-creates the ranked_series and returns its id.
                             // Stash it so live-points reports during game 1 can address the right series.
                             ActiveRankedSeriesId = ExtractJsonString(response, "series_id");
+                            ActiveRankedSeriesRoom = room ?? "";
                             // Bug 200: the server may have RESUMED an undecided BO3
                             // rather than creating a fresh one. Staging the tally
                             // here (not adopting) is required — the room-join reset
@@ -10178,7 +10186,7 @@ namespace CompetitiveRounds
                             // poll-discovered client never posted live points
                             // and the betting lock logic ran blind (#36).
                             string sid = ExtractJsonString(response, "series_id");
-                            if (!string.IsNullOrEmpty(sid)) ActiveRankedSeriesId = sid;
+                            if (!string.IsNullOrEmpty(sid)) { ActiveRankedSeriesId = sid; ActiveRankedSeriesRoom = room ?? ""; }
                             // Bug 200: parity with the /queue/ready both_ready
                             // path — this poll branch hands over a series id the
                             // same way, so it must carry a resumed tally too.
@@ -17940,6 +17948,34 @@ namespace CompetitiveRounds
         /// shares one per-IP bucket with every other sensitive endpoint. What
         /// changed is that a refusal now costs a retry rather than the
         /// dc_events row and the ranked_dc_count increment behind it.</summary>
+        /// <summary>The room ActiveRankedSeriesId was published for, or
+        /// empty. The queue publishes the NEXT pairing's id at both_ready,
+        /// which is before the seat has joined that room — so "a series id
+        /// exists" is not proof that it names what is being played HERE. The
+        /// same distinction is already drawn for the tournament provenance
+        /// latch, which records that a queue-staged id can survive a failed
+        /// join into a later room.</summary>
+        public static string ActiveRankedSeriesRoom = "";
+
+        /// <summary>ActiveRankedSeriesId, but only when it was published for
+        /// the room this seat is in. An observation made in one room must not
+        /// be filed under a series that belongs to another; an empty answer is
+        /// the honest one and makes the report a single unnamed attempt, which
+        /// the server resolves from the pair.</summary>
+        public static string SeriesIdForThisRoom()
+        {
+            try
+            {
+                string sid = ActiveRankedSeriesId;
+                if (string.IsNullOrEmpty(sid)) return "";
+                if (!PhotonNetwork.InRoom) return "";
+                string here = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
+                if (string.IsNullOrEmpty(here)) return "";
+                return string.Equals(ActiveRankedSeriesRoom, here, StringComparison.Ordinal) ? sid : "";
+            }
+            catch { return ""; }
+        }
+
         public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId, string seriesId)
         {
             // §2c identity fence: the broadcast service account never reports.

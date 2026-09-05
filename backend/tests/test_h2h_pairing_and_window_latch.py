@@ -168,14 +168,50 @@ def test_a_third_issuance_cannot_take_the_tombstone_from_the_room_we_are_in():
     assert "!string.IsNullOrEmpty(here)" in body
 
 
+# The qualifier each artifact must carry. Keyed by file, because the three say
+# it in three different registers — a rule, a player-facing summary, and the
+# write site — and a single shared phrase would only prove that one of them
+# still contains a string.
+TOMBSTONE_QUALIFIERS = {
+    "H2HRules.cs": "ONE room is remembered, not every superseded room",
+    "H2HSummary.cs": "the one remembered room whose pairing a later issuance replaced",
+    "ApiClient.cs": "of which only one is remembered",
+}
+
+# The unqualified sentence r10 replaced. It must never appear except as part of
+# the corrected one.
+TOMBSTONE_OVERCLAIM = "a room whose pairing a later issuance replaced"
+TOMBSTONE_CORRECTED = "the one remembered room whose pairing a later issuance replaced"
+
+
 def test_no_artifact_promises_more_than_one_remembered_superseded_room():
-    """The claim r10 corrected. Every surviving statement about the tombstone
-    is about the room the seat is IN, never about every room superseded."""
+    """The claim r10 corrected: the tombstone is ONE slot, so a statement that
+    every superseded room stays suppressed is false.
+
+    This guard used to skip any file whose prose lacked a lowercase
+    `supersededRoom`/`supersededIssuedRoom` — which excluded H2HSummary.cs, the
+    one file carrying the player-facing sentence r10 actually rewrote (its only
+    occurrence is the method name `ClearSupersededIssuedRoom`, capital S). So
+    restoring the exact overclaim there left the suite green. A conditional
+    skip inside a regression guard needs an assertion that the skip did not
+    fire; here the skip is gone and each file is named."""
+    checked = 0
     for path in (H2H_RULES_CS, H2H_SUMMARY_CS, API_CLIENT_CS):
         prose = _prose(path)
-        if "supersededRoom" not in prose and "supersededIssuedRoom" not in prose:
-            continue
-        assert "review r10" in prose, f"{path.name} states the tombstone rule without the r10 correction"
+        qualifier = TOMBSTONE_QUALIFIERS[path.name]
+        assert qualifier in prose, (
+            f"{path.name} no longer says the tombstone is one slot: {qualifier!r}"
+        )
+        # ...and the bare sentence never appears at all. The corrected phrase
+        # reads "...remembered room whose pairing...", so it does not contain
+        # the overclaim as a substring and this is not vacuous.
+        assert TOMBSTONE_OVERCLAIM not in TOMBSTONE_CORRECTED, "the check would be vacuous"
+        assert TOMBSTONE_OVERCLAIM not in prose, (
+            f"{path.name} states the overclaim without the one-room qualifier"
+        )
+        checked += 1
+    assert checked == 3, "the file list emptied itself"
+    assert "review r10" in _prose(H2H_RULES_CS)
 
 
 def test_the_tombstone_is_cleared_at_the_leave_edge_and_on_a_join_elsewhere():
@@ -314,3 +350,15 @@ def test_both_issuance_paths_retain_the_pairing():
     leave the other's room keyed on the advertised id with nothing to notice."""
     src = API_CLIENT_CS.read_text(encoding="utf-8")
     assert src.count("RetainIssuedPair(room, response);") == 2
+
+
+def test_the_changelog_scopes_the_line_to_the_room_the_seat_is_in():
+    """The tombstone is one slot, so "in a room the ranked queue issued" is a
+    guarantee wider than the mechanism: a superseded room that is not the slot
+    holder falls back to the room's own resolver and can show a line the queue
+    did not assign. The player-facing sentence has to say which room it is
+    about."""
+    changelog = (Path(__file__).parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "In the room the ranked queue most recently issued" in changelog
+    assert "In a room the ranked queue issued, the line waits" not in changelog
+    assert "the room you are actually sitting in keeps that" in changelog
