@@ -778,7 +778,11 @@ namespace CompetitiveRounds
         /// queue and I could not open it" call for opposite actions: the first
         /// starts a fresh generation, the second must not write ANYTHING, and
         /// collapsing them let a locked file be overwritten from generation 1
-        /// (r14 HIGH). `whole` adds "and it passed its own trailer".</summary>
+        /// (r14 HIGH). `whole` means the file is a QUEUE we may act on: it
+        /// passed its own trailer, or it is a live copy from a build that
+        /// predates trailers. It used to be set unconditionally at the end of
+        /// the read, which made it mean "was readable" -- so `salvaged` implied
+        /// `whole` and the salvage branch in LoadOutbox could never run.</summary>
         private class OutboxGeneration
         {
             public bool present;
@@ -825,19 +829,32 @@ namespace CompetitiveRounds
             int bodyLines = lines.Length;
             long generation = 0;
             bool trailed = false;
-            if (bodyLines > 0 && lines[bodyLines - 1].StartsWith(OUTBOX_TRAILER, StringComparison.Ordinal))
+            bool sawTrailer = bodyLines > 0
+                && lines[bodyLines - 1].StartsWith(OUTBOX_TRAILER, StringComparison.Ordinal);
+            if (sawTrailer)
             {
                 string[] parts = lines[bodyLines - 1].Split('\t');
                 bodyLines--;
-                if (parts.Length != 4) return result;
                 var body = new StringBuilder();
                 for (int i = 0; i < bodyLines; i++) body.Append(lines[i]).Append('\n');
-                long claimedCount;
-                if (!long.TryParse(parts[1], out generation)) return result;
-                if (!long.TryParse(parts[2], out claimedCount)) return result;
-                if (claimedCount != bodyLines) return result;
-                if (parts[3] != OutboxHash(body.ToString())) return result;
-                trailed = true;
+                long claimedCount = 0;
+                trailed = parts.Length == 4
+                          && long.TryParse(parts[1], out generation)
+                          && long.TryParse(parts[2], out claimedCount)
+                          && claimedCount == bodyLines
+                          && parts[3] == OutboxHash(body.ToString());
+                if (!trailed)
+                {
+                    // A trailer that STARTS but does not verify means the write
+                    // was interrupted partway through the trailer itself -- so
+                    // the body above it is complete far more often than not.
+                    // Returning here handed the caller an EMPTY queue, and on
+                    // the temp path that also left `salvaged` false, which is
+                    // what let the file be deleted with its reports in it. The
+                    // body is parsed exactly as an untrailed file's is; nothing
+                    // acts on it unless there is no whole queue anywhere.
+                    result.salvaged = true;
+                }
             }
             else if (!allowLegacy)
             {
@@ -864,7 +881,10 @@ namespace CompetitiveRounds
                     nextAt = Time.realtimeSinceStartup + 20f,
                 });
             }
-            result.whole = true;
+            // Not "we managed to read it". A torn trailer and a temp with no
+            // trailer are both readable and neither is a queue; only a verified
+            // trailer, or a live copy from a build older than trailers, is.
+            result.whole = trailed || (allowLegacy && !sawTrailer);
             result.generation = trailed ? generation : 0;
             return result;
         }
@@ -964,6 +984,65 @@ namespace CompetitiveRounds
         {
             try
             {
+                string tmp = OutboxTempPath;
+
+                // Load could not read a queue file that exists, so the
+                // generation on disk is unknown and a write now would stamp a
+                // lower one over it. Ask again rather than staying blocked
+                // forever: the usual cause holds the file for seconds, and a
+                // guard with no way back costs every report of the session
+                // (#430). Readable again -> take what it holds and carry on;
+                // gone -> there was nothing to protect; still locked -> stay
+                // memory-only for this write and try again on the next.
+                //
+                // THIS RUNS BEFORE THE BUFFER IS BUILT, and that ordering is
+                // the fix rather than a tidy-up: recovering entries after the
+                // StringBuilder is filled would pull them into memory and then
+                // write them out of existence in the same call.
+                if (_outboxGenerationUncertain)
+                {
+                    var live = ReadOutboxFile(OutboxPath, true);
+                    var stranded = ReadOutboxFile(tmp, false);
+                    if ((live.present && !live.readable) || (stranded.present && !stranded.readable))
+                    {
+                        if (!_outboxUncertainWarned)
+                        {
+                            _outboxUncertainWarned = true;
+                            Plugin.Log.LogWarning("[OUTBOX] a queue file is still unreadable; not writing over a "
+                                                  + "queue whose contents are unknown - reports stay in memory "
+                                                  + "until it can be read");
+                        }
+                        return;
+                    }
+
+                    // The REPORTS, not just the number. Adopting the generation
+                    // and dropping the entries meant the next write replaced a
+                    // queue we had just proved we could read: a report queued
+                    // before the lock cleared was overwritten by whatever was in
+                    // memory, and a match report carries a rating and a gold
+                    // award. Merged by identity, like load's own merge.
+                    bool takeStranded, salvaging;
+                    var recovered = ChooseOutboxCopy(live, stranded, out takeStranded, out salvaging);
+                    int restored = 0;
+                    foreach (var entry in recovered.entries)
+                    {
+                        if (OutboxAlreadyQueued(entry.url, entry.json)) continue;
+                        _pendingReports.Add(entry);
+                        restored++;
+                    }
+
+                    // Both copies, because the uncertainty may have been the
+                    // TEMP's: resolving it by reading only the live file left a
+                    // newer stranded generation unexamined.
+                    _outboxGeneration = Math.Max(_outboxGeneration,
+                                                 Math.Max(live.generation, stranded.generation));
+                    _outboxGenerationUncertain = false;
+                    _outboxUncertainWarned = false;
+                    Plugin.Log.LogInfo($"[OUTBOX] queue file readable again at generation {_outboxGeneration}; "
+                                       + $"recovered {restored} report(s) it still held; persisting resumes");
+                    if (restored > 0) EnsureOutboxLoop();
+                }
+
                 var sb = new StringBuilder();
                 foreach (var p in _pendingReports)
                     sb.Append(p.url).Append('\t').Append(p.json.Replace("\n", " ").Replace("\r", " ")).Append('\n');
@@ -977,37 +1056,7 @@ namespace CompetitiveRounds
                 // The one case that writes nothing is the session that never
                 // queued anything at all.
                 string body = sb.ToString();
-                string tmp = OutboxTempPath;
                 if (body.Length == 0 && !File.Exists(OutboxPath) && !File.Exists(tmp)) return;
-
-                // Load could not read a queue file that exists, so the
-                // generation on disk is unknown and a write now would stamp a
-                // lower one over it. Ask again rather than staying blocked
-                // forever: the usual cause holds the file for seconds, and a
-                // guard with no way back costs every report of the session
-                // (#430). Readable again -> adopt its generation and carry on;
-                // gone -> there was nothing to protect; still locked -> stay
-                // memory-only for this write and try again on the next.
-                if (_outboxGenerationUncertain)
-                {
-                    var probe = ReadOutboxFile(OutboxPath, true);
-                    if (probe.present && !probe.readable)
-                    {
-                        if (!_outboxUncertainWarned)
-                        {
-                            _outboxUncertainWarned = true;
-                            Plugin.Log.LogWarning("[OUTBOX] the queue file is still unreadable; not writing over a "
-                                                  + "queue whose contents are unknown - reports stay in memory "
-                                                  + "until it can be read");
-                        }
-                        return;
-                    }
-                    _outboxGeneration = Math.Max(_outboxGeneration, probe.generation);
-                    _outboxGenerationUncertain = false;
-                    _outboxUncertainWarned = false;
-                    Plugin.Log.LogInfo($"[OUTBOX] queue file readable again at generation {probe.generation}; "
-                                       + "persisting resumes");
-                }
 
                 // Written beside the queue and MOVED over it, never truncated
                 // in place. WriteAllText opens the live file with Truncate, so
@@ -1053,6 +1102,36 @@ namespace CompetitiveRounds
         /// is not a queue and does not compete; the temp wins only by being
         /// strictly newer, so the ordinary case (the rename completed) reads the
         /// live copy and finds no temp at all.</summary>
+        /// <summary>Which copy on disk is authoritative, and whether we are
+        /// reduced to salvage. ONE rule, because load and persist both have to
+        /// answer it: while persist answered it separately it did not answer it
+        /// at all, and adopted a recovered file's generation number while
+        /// discarding the reports underneath it.</summary>
+        private static OutboxGeneration ChooseOutboxCopy(OutboxGeneration live,
+                                                         OutboxGeneration stranded,
+                                                         out bool takeStranded,
+                                                         out bool salvaging)
+        {
+            takeStranded = stranded.whole
+                           && (!live.whole || stranded.generation > live.generation);
+            salvaging = false;
+            if (takeStranded) return stranded;
+            if (live.whole) return live;
+            // Nothing whole anywhere. Prefer whichever unfinished copy actually
+            // carries reports; the choice is between these and none.
+            if (stranded.salvaged && stranded.entries.Count > 0)
+            {
+                salvaging = true;
+                return stranded;
+            }
+            if (live.salvaged && live.entries.Count > 0)
+            {
+                salvaging = true;
+                return live;
+            }
+            return live;
+        }
+
         private static void LoadOutbox()
         {
             // Once per process. Not once per behaviour: the list is static and
@@ -1070,9 +1149,8 @@ namespace CompetitiveRounds
                 var live = ReadOutboxFile(OutboxPath, true);
                 var stranded = ReadOutboxFile(tmp, false);
 
-                bool takeStranded = stranded.whole
-                                    && (!live.whole || stranded.generation > live.generation);
-                var chosen = takeStranded ? stranded : live;
+                bool takeStranded, salvaging;
+                var chosen = ChooseOutboxCopy(live, stranded, out takeStranded, out salvaging);
 
                 // Only a file we actually READ can tell us its generation. A
                 // present-but-unreadable one leaves it unknown, and seeding 0
@@ -1087,18 +1165,9 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning("[OUTBOX] a queue file exists but could not be read; its generation is "
                                           + "unknown, so nothing will be written over it until it can be");
 
-                // Nothing whole anywhere, but the temp parsed: the choice is
-                // between these reports and none. Never reached when a complete
-                // queue exists under either name.
-                bool salvaging = false;
-                if (!live.whole && !stranded.whole && !takeStranded
-                    && stranded.salvaged && stranded.entries.Count > 0)
-                {
-                    salvaging = true;
-                    chosen = stranded;
-                    Plugin.Log.LogWarning($"[OUTBOX] no complete queue on disk; recovering {stranded.entries.Count} "
+                if (salvaging)
+                    Plugin.Log.LogWarning($"[OUTBOX] no complete queue on disk; recovering {chosen.entries.Count} "
                                           + "report(s) from an unfinished write rather than discarding them");
-                }
 
                 if (takeStranded)
                 {
@@ -1128,8 +1197,11 @@ namespace CompetitiveRounds
                     try { File.Delete(tmp); } catch { }
                 }
 
-                if (!chosen.whole && File.Exists(OutboxPath))
+                if (!chosen.whole && !salvaging && File.Exists(OutboxPath))
                 {
+                    // Only when nothing was recovered. Saying reports "cannot be
+                    // replayed" while the salvage path is replaying them was a
+                    // claim about the one case this branch does not cover.
                     Plugin.Log.LogWarning("[OUTBOX] the queue file on disk is incomplete; "
                                           + "its reports cannot be replayed this session");
                 }

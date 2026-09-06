@@ -1197,6 +1197,119 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
     ]), f"the publish/clear sites moved: {sorted(sites)}"
 
 
+READ_OUTBOX_SIG = ("private static OutboxGeneration ReadOutboxFile(string path, "
+                   "bool allowLegacy)")
+LOAD_OUTBOX_SIG = "private static void LoadOutbox()"
+PERSIST_OUTBOX_SIG = "private static void PersistOutbox()"
+CHOOSE_OUTBOX_SIG = ("private static OutboxGeneration ChooseOutboxCopy(OutboxGeneration live,")
+
+
+def test_a_torn_trailer_salvages_its_body_instead_of_reporting_an_empty_queue():
+    """r15 HIGH. A trailer that STARTS but does not verify means the write was
+    interrupted inside the trailer itself, so the body above it is complete far
+    more often than not. The reader returned an EMPTY queue on every one of the
+    four validation failures -- and on the temp path that also left `salvaged`
+    false, so the salvage branch could not fire and the file was deleted with
+    the reports still in it.
+
+    Structural gate: there is no C# test runner here, so what is asserted is
+    that the validation is one boolean whose failure marks the file
+    salvageable, and that no path out of the trailer block skips the body."""
+    body = _cs_method_body(API_CLIENT_CS, READ_OUTBOX_SIG)
+    assert "bool sawTrailer" in body, "the trailer test is not named"
+    assert "trailed = parts.Length == 4" in body, (
+        "the validation is not a single boolean any more"
+    )
+    # Exactly three: the missing file, the unreadable catch, and the end. Any
+    # fourth is an early return that skips the body-parsing loop -- which is
+    # the defect itself.
+    assert body.count("return result;") == 3, (
+        f"{body.count('return result;')} `return result;` in ReadOutboxFile; "
+        "an early return inside the trailer block is what lost the queue"
+    )
+    # Positional, not a substring test. The trailerless-temp branch below also
+    # says `result.salvaged = true;`, so `in body` was satisfied by a line the
+    # mutant never touched and the mutant walked straight through (#342/#441).
+    assert body.count("result.salvaged = true;") == 2, (
+        f"{body.count('result.salvaged = true;')} salvage marks; the torn "
+        "trailer and the trailerless temp must each set one"
+    )
+    assert "result.salvaged = false;" not in body
+    assert (body.index("result.salvaged = true;")
+            < body.index("else if (!allowLegacy)")), (
+        "the torn-trailer branch no longer marks the file salvageable, so the "
+        "temp is deleted with its reports in it"
+    )
+
+
+def test_whole_means_a_queue_and_not_merely_a_file_that_could_be_read():
+    """`result.whole = true` was set unconditionally at the end of the read, so
+    `salvaged` implied `whole` -- and LoadOutbox's salvage branch, which is
+    guarded on `!stranded.whole && stranded.salvaged`, was unreachable BY
+    CONSTRUCTION. The doc comment said whole meant "passed its own trailer".
+    Found while reading the r15 HIGH above, not reported by it."""
+    body = _cs_method_body(API_CLIENT_CS, READ_OUTBOX_SIG)
+    assert "result.whole = trailed || (allowLegacy && !sawTrailer);" in body
+    assert "result.whole = true;" not in body, (
+        "whole is unconditional again, which makes salvaged imply whole"
+    )
+
+
+def test_load_and_persist_ask_one_question_about_which_copy_wins():
+    """Two independent recovery paths deciding which copy is authoritative is
+    what let persist answer it wrongly for as long as it did: it adopted a
+    generation number without ever asking what the file held. One rule, two
+    callers, and neither carries its own copy of it."""
+    src = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert src.count("ChooseOutboxCopy(") == 3, (
+        f"{src.count('ChooseOutboxCopy(')} references; expected the "
+        "declaration plus exactly two call sites"
+    )
+    rule = "stranded.generation > live.generation"
+    assert src.count(rule) == 1, (
+        f"the precedence rule appears {src.count(rule)} times; a second copy "
+        "is a second answer"
+    )
+    for name, signature in (("LoadOutbox", LOAD_OUTBOX_SIG),
+                            ("PersistOutbox", PERSIST_OUTBOX_SIG)):
+        body = _cs_method_body(API_CLIENT_CS, signature)
+        assert "ChooseOutboxCopy(" in body, f"{name} decides for itself again"
+
+
+def test_the_uncertainty_resolution_recovers_the_reports_not_just_the_number():
+    """r15 HIGH. When load could not read a queue file, persist re-probed it
+    and, on success, took its GENERATION and discarded its ENTRIES -- then
+    wrote memory-only state over it. A report queued before the lock cleared
+    was overwritten, and a match report carries a rating and a gold award.
+
+    The ordering is part of the fix and is asserted: recovering entries after
+    the buffer is built pulls them into memory and writes them out of
+    existence in the same call."""
+    body = _cs_method_body(API_CLIENT_CS, PERSIST_OUTBOX_SIG)
+    assert "foreach (var entry in recovered.entries)" in body
+    assert "_pendingReports.Add(entry);" in body
+
+    buffer_at = body.index("var sb = new StringBuilder();")
+    assert body.index("_outboxGenerationUncertain") < buffer_at, (
+        "the uncertainty resolution runs after the buffer is built, so "
+        "anything it recovers is written out of existence"
+    )
+    assert body.index("recovered.entries") < buffer_at
+
+    # The uncertainty may have been the TEMP's. Resolving it by reading only
+    # the live copy left a newer stranded generation unexamined.
+    assert "ReadOutboxFile(OutboxPath, true)" in body
+    assert "ReadOutboxFile(tmp, false)" in body
+
+
+def test_reports_are_not_declared_unreplayable_while_they_are_being_replayed():
+    """The incomplete-queue warning fired on `!chosen.whole`, which is exactly
+    the state the salvage path leaves behind -- so the one session that DID
+    recover reports announced that it could not."""
+    body = _cs_method_body(API_CLIENT_CS, LOAD_OUTBOX_SIG)
+    assert "if (!chosen.whole && !salvaging && File.Exists(OutboxPath))" in body
+
+
 def test_the_queued_body_is_one_constant_on_both_paths():
     """The outbox finds an entry by (url, body). A send that used a different
     body from the queued copy could never remove its own entry, and the report
@@ -1574,16 +1687,24 @@ def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
     assert "result.salvaged = true;" in reader_all, (
         "a trailerless temp is discarded rather than read as a last resort"
     )
-    assert "if (!live.whole && !stranded.whole && !takeStranded" in load, (
-        "salvage must be unreachable while any complete queue exists"
-    )
-    assert ("bool takeStranded = stranded.whole" in load
-            and "stranded.generation > live.generation" in load), (
+    # r15: the precedence rule moved into ChooseOutboxCopy, because persist
+    # needs the same answer and was giving itself a different one. The claims
+    # are unchanged and follow it.
+    choose = _cs_method_body(API_CLIENT_CS, CHOOSE_OUTBOX_SIG)
+    assert ("takeStranded = stranded.whole" in choose
+            and "stranded.generation > live.generation" in choose), (
         "the temp has to WIN on generation, not merely exist"
     )
-    assert "!live.whole || stranded.generation" in load, (
+    assert "!live.whole || stranded.generation" in choose, (
         "a first creation has no live copy for the temp to outrank"
     )
+    assert (choose.index("if (takeStranded) return stranded;")
+            < choose.index("salvaging = true;")
+            and choose.index("if (live.whole) return live;")
+            < choose.index("salvaging = true;")), (
+        "salvage must be unreachable while any complete queue exists"
+    )
+    assert "ChooseOutboxCopy(live, stranded, out takeStranded, out salvaging)" in load
     # recovered means promoted, and a loser is removed rather than re-weighed
     assert load.index("takeStranded") < load.index("File.Replace(tmp, OutboxPath, null);")
     assert "try { File.Delete(tmp); } catch { }" in load
@@ -1608,7 +1729,7 @@ def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
     assert "if (_outboxGenerationUncertain)" in persist, (
         "a write can still land on a queue whose generation is unknown"
     )
-    assert "var probe = ReadOutboxFile(OutboxPath, true);" in persist, (
+    assert "var live = ReadOutboxFile(OutboxPath, true);" in persist, (
         "the block must be re-derived per write, not latched -- a guard with no "
         "way back costs every report of the session"
     )
@@ -1616,8 +1737,8 @@ def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
 
     reader = _cs_method_body(
         API_CLIENT_CS, "private static OutboxGeneration ReadOutboxFile(string path, bool allowLegacy)")
-    assert "if (claimedCount != bodyLines) return result;" in reader, "truncation is not detected"
-    assert "if (parts[3] != OutboxHash(body.ToString())) return result;" in reader, (
+    assert "&& claimedCount == bodyLines" in reader, "truncation is not detected"
+    assert "&& parts[3] == OutboxHash(body.ToString());" in reader, (
         "a torn body is not detected"
     )
     assert "else if (!allowLegacy)" in reader and "return result;" in reader
@@ -1642,8 +1763,12 @@ def test_the_outbox_trailer_is_a_marker_that_exists_for_no_other_purpose():
     assert "StartsWith(OUTBOX_TRAILER, StringComparison.Ordinal)" in reader, (
         "the marker is matched by literal rather than through the constant"
     )
-    assert "if (parts.Length != 4) return result;" in reader, (
+    assert "trailed = parts.Length == 4" in reader, (
         "a trailer that is not the four fields this writes is not a trailer"
+    )
+    # r15: and failing that test no longer discards the body above it.
+    assert "if (parts.Length != 4) return result;" not in reader, (
+        "the early return is back; a torn trailer discards the whole queue"
     )
 def test_a_deadlock_victim_is_re_run_instead_of_being_handed_to_the_player(_stub_the_gates):
     """r12 MEDIUM. This endpoint locks the two participants and then the
