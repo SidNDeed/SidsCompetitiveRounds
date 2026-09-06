@@ -46,6 +46,9 @@ used to be, and the measurement that would settle it does not exist yet.
 
 import inspect
 import itertools
+import io
+import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -700,9 +703,126 @@ def test_the_issuance_records_the_pair_and_prunes():
     stmt = src[ins:src.index("return True", ins)]
     assert "player1_id, player2_id" in stmt, "issuance does not record the pair"
     assert '"a": my_pid, "b": opp_pid' in stmt, "the pair bound is not the issued pair"
-    assert "DELETE FROM issued_room_regions WHERE issued_at <" in stmt, (
+    # Asserted by PARTS, not as one literal. The statement is now a bounded
+    # range delete and the old single-substring assertion fired ON the fix --
+    # the correct response to which is to check the new shape, never to weaken
+    # the assertion until it passes.
+    assert "DELETE FROM issued_room_regions" in stmt, (
         "migration 292 promises rows are deleted past 30 days; nothing deletes them"
     )
+    assert "issued_at <" in stmt and "30 days" in stmt, "the age bound is gone"
+    assert "ORDER BY issued_at" in stmt, (
+        "an unordered LIMIT deletes an arbitrary 200 rows, so a backlog need "
+        "never drain -- the oldest are what must go first"
+    )
+    assert "SKIP LOCKED" in stmt
+    limit = re.search(r"LIMIT (\d+)", stmt)
+    assert limit, "the sweep is not bounded in rows"
+    assert 1 <= int(limit.group(1)) <= 1000, (
+        f"LIMIT {limit.group(1)} is not a bound this transaction can afford; "
+        "the stamp UPDATE above holds both queue rows' locks until commit"
+    )
+    assert "begin_nested" in stmt, (
+        "the sweep is not savepoint-isolated, so a statement error aborts the "
+        "room-issuance transaction it runs inside"
+    )
+
+
+def _main_code():
+    """main.py with COMMENT tokens blanked at preserved offsets.
+
+    Prose is not code: a phrase in a comment satisfied an occurrence count and
+    a `re.findall` here matched four "sweeps" for link_codes, three of which
+    were sentences. STRING tokens are KEPT on purpose - the SQL being asserted
+    about lives in them.
+    """
+    src = MAIN_PY.read_text(encoding="utf-8")
+    lines = src.splitlines(keepends=True)
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type != tokenize.COMMENT:
+            continue
+        (srow, scol), (erow, ecol) = tok.start, tok.end
+        assert srow == erow, "a comment token spanning lines"
+        ln = lines[srow - 1]
+        lines[srow - 1] = ln[:scol] + " " * (ecol - scol) + ln[ecol:]
+    return "".join(lines)
+
+
+# Each retention sweep, keyed by the age predicate that DISTINGUISHES it from
+# the table's ordinary deletes. link_codes in particular is deleted in three
+# other places for reasons that have nothing to do with retention, so "a DELETE
+# naming the table" is not the thing being counted here.
+_RETENTION_SWEEPS = (
+    ("issued_room_regions", "issued_at <"),
+    ("link_codes", "expires_at < now()"),
+    ("chat_mod_actions", "acked_at <"),
+)
+
+
+def test_every_in_request_retention_sweep_is_bounded():
+    """r14 LOW 6 is one line; the defect is a class (#432/#330).
+
+    An age-predicated maintenance DELETE executed inside a request transaction
+    is unbounded in rows and therefore unbounded in lock time, and this file
+    had three of them. They are swept together and each is asserted here, so a
+    fourth added later has a place it must appear.
+
+    The isolation deliberately DIFFERS between them, because the callers can
+    tolerate opposite things -- see each site's comment. What does not differ
+    is the bound.
+    """
+    src = _main_code()
+    for table, age in _RETENTION_SWEEPS:
+        found = []
+        at = src.find("DELETE FROM " + table)
+        while at != -1:
+            window = src[at:at + 500]
+            if age in window:
+                found.append(window)
+            at = src.find("DELETE FROM " + table, at + 1)
+        assert found, f"{table}: no age-predicated retention sweep found"
+        assert len(found) == 1, f"{table}: {len(found)} retention sweeps; expected one"
+        stmt = found[0]
+        assert "ctid IN (" in stmt, f"{table}: the bound is not applied to the delete"
+        assert "ORDER BY" in stmt, f"{table}: an unordered LIMIT need never drain a backlog"
+        assert "SKIP LOCKED" in stmt, f"{table}: sweep can queue behind another request"
+        limit = re.search(r"LIMIT (\d+)", stmt)
+        assert limit, f"{table}: sweep is not bounded in rows"
+        assert 1 <= int(limit.group(1)) <= 1000, f"{table}: LIMIT {limit.group(1)}"
+
+
+def test_the_retention_sweep_gate_can_fail():
+    """The negative control: an unbounded sweep of the shape this replaces must
+    not satisfy the gate above."""
+    stmt = "DELETE FROM issued_room_regions WHERE issued_at < NOW() - INTERVAL '30 days'"
+    assert "ctid IN (" not in stmt and "SKIP LOCKED" not in stmt
+    assert re.search(r"LIMIT (\d+)", stmt) is None
+
+
+def test_the_expired_code_lookup_does_not_depend_on_the_sweep():
+    """The link_codes sweep is throttled now, so it does NOT run on most calls
+    -- which is only safe because the lookup below it re-checks expiry itself.
+
+    That predicate was already there as belt-and-braces, with a comment saying
+    the ordering must not become load-bearing. Throttling the sweep is exactly
+    the change that comment warned about, so the predicate stops being
+    belt-and-braces and becomes the thing doing the work. It is asserted here
+    rather than trusted.
+    """
+    src = MAIN_PY.read_text(encoding="utf-8")
+    at = src.index("async def link_discord")
+    body = src[at:src.index("\n@app.", at + 10)]
+    assert "LinkCode.expires_at > func.now()" in body, (
+        "the expired-code sweep is throttled, so nothing but this predicate "
+        "stops an expired code being accepted"
+    )
+    # ...and the sweep must NOT be savepoint-isolated here: a rollback would
+    # leave the expired rows in place, which is the failure, not the recovery.
+    sweep = body[body.index("DELETE FROM link_codes"):]
+    assert "begin_nested" not in body[:body.index("DELETE FROM link_codes")], (
+        "isolating this sweep would hide a failure that leaves expired codes live"
+    )
+    assert "_link_codes_last_prune" in body, "the sweep is not throttled"
 
 
 def test_the_comment_no_longer_claims_no_client_supplied_the_region():

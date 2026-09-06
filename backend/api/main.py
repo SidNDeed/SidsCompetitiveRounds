@@ -187,6 +187,24 @@ def _replica_skip(name: str) -> None:
         _REPLICA_SKIPS_SEEN.add(name)
         print(f"[REPLICA] skipped write path {name!r} "
               f"(read replica; the primary owns this work)")
+
+
+# Retention sweeps that are allowed to fail announce themselves the same way,
+# and for the same reason: a refusal with no trace is invisible, and a line per
+# request buries the log once the cause is persistent. These sweeps are
+# best-effort by design, so this line and the table's own size are the ONLY
+# evidence that one has stopped running.
+_PRUNE_SKIPS_SEEN: set = set()
+
+# Monotonic throttle for the link_codes sweep (see link_discord).
+_link_codes_last_prune = 0.0
+
+
+def _prune_skip(table: str, exc: BaseException) -> None:
+    if table not in _PRUNE_SKIPS_SEEN:
+        _PRUNE_SKIPS_SEEN.add(table)
+        print(f"[PRUNE] retention sweep for {table!r} did not run: "
+              f"{type(exc).__name__}: {exc}")
 # Code-owned deliberately: the old env knob was never used intentionally,
 # .env is opaque to tooling, and a live pin could silently defeat a code
 # change (learning #190's persisted-default class).
@@ -11449,11 +11467,42 @@ async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_n
     # And the table is pruned HERE, on the path that adds to it. Migration 292
     # promised deletion past 30 days and nothing deleted anything: there is no
     # cron for this table and adding one would be a second thing to keep alive.
-    # The index on issued_at makes this a bounded range delete, and room
-    # issuance is the right frequency for it -- a handful a minute at peak, and
-    # nothing at all when nobody is queueing.
-    await db.execute(text(
-        "DELETE FROM issued_room_regions WHERE issued_at < NOW() - INTERVAL '30 days'"))
+    #
+    # BOUNDED and ISOLATED (r14 LOW 6). The previous version was a bare
+    # unbounded DELETE, and the comment above it called that "a bounded range
+    # delete" on the strength of the index alone -- an index bounds the SCAN,
+    # never the row count or the lock time. It ran here, after the UPDATE whose
+    # row locks are held until the caller commits, so one backlogged sweep
+    # extended every concurrent room issuance. Three properties, each answering
+    # a different way that fails:
+    #
+    #   ctid IN (... LIMIT)     a delete whose row count is unbounded is a lock
+    #                           window that is unbounded too. 200 per call
+    #                           against a table gaining a handful of rows a
+    #                           minute drains any backlog within an hour of
+    #                           queueing and never sweeps the whole table once;
+    #   FOR UPDATE SKIP LOCKED  two concurrent issuances must not serialise
+    #                           behind each other over ancient rows neither of
+    #                           them is about;
+    #   the savepoint           maintenance must never fail room issuance. A
+    #                           statement error would otherwise abort the whole
+    #                           transaction, so catching it without a savepoint
+    #                           would swallow the exception and still lose the
+    #                           issuance.
+    #
+    # The isolation covers THIS statement alone. The INSERT above is NOT
+    # best-effort: it is the binding a later match report is judged against, so
+    # widening the guard over it would silently undo the r14 HIGH repair and
+    # report success. That scoping is asserted by a test, not just written here.
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "DELETE FROM issued_room_regions WHERE ctid IN ("
+                " SELECT ctid FROM issued_room_regions"
+                " WHERE issued_at < NOW() - INTERVAL '30 days'"
+                " ORDER BY issued_at LIMIT 200 FOR UPDATE SKIP LOCKED)"))
+    except Exception as exc:
+        _prune_skip("issued_room_regions", exc)
     return True
 
 
@@ -14554,8 +14603,27 @@ async def link_discord(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="bot-only endpoint")
-    # Clean up expired codes
-    await db.execute(text("DELETE FROM link_codes WHERE expires_at < now()"))
+    # Clean up expired codes -- bounded and throttled (r14 LOW 6's class).
+    #
+    # Deliberately NOT savepoint-isolated, unlike the issued_room_regions
+    # sweep. The two callers can tolerate opposite things: there, losing the
+    # sweep is harmless and losing the issuance is not; here, a rollback that
+    # silently leaves expired codes in place is the failure, and the only thing
+    # between that and a stale code being accepted is the belt-and-braces
+    # predicate on the lookup below. So this one stays in the caller's failure
+    # domain, and that predicate is asserted by a test rather than trusted.
+    #
+    # The throttle is what makes the bound safe: with a row LIMIT and no
+    # throttle, a backlog larger than the limit would never drain, because
+    # every call would delete the same first 500 and stop.
+    global _link_codes_last_prune
+    _now_mono = _time_mod.monotonic()
+    if _now_mono - _link_codes_last_prune > 3600:
+        _link_codes_last_prune = _now_mono
+        await db.execute(text(
+            "DELETE FROM link_codes WHERE ctid IN ("
+            " SELECT ctid FROM link_codes WHERE expires_at < now()"
+            " ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED)"))
 
     # Find the code
     # The expires_at predicate is deliberate belt-and-braces: today this lookup
@@ -17521,14 +17589,18 @@ async def internal_chat_mod_actions_ack(
         " WHERE id = ANY(:ids) AND acked_at IS NULL RETURNING id"
     ), {"ids": ids, "u": undeliverable})).scalars().all()
     # Time-gated retention sweep: ACKED rows only, 7 days (the unacked feed
-    # never ages out by design).
+    # never ages out by design). Throttled already; the row bound and
+    # SKIP LOCKED were added with its two siblings (r14 LOW 6's class) -- the
+    # throttle bounds how OFTEN this runs, which is not the same as bounding
+    # how long it holds locks when it does.
     now = _time_mod.monotonic()
     if now - _mod_actions_last_prune > 3600:
         _mod_actions_last_prune = now
         await db.execute(text(
-            "DELETE FROM chat_mod_actions"
+            "DELETE FROM chat_mod_actions WHERE ctid IN ("
+            " SELECT ctid FROM chat_mod_actions"
             " WHERE acked_at IS NOT NULL AND acked_at < NOW() - INTERVAL '7 days'"
-        ))
+            " ORDER BY acked_at LIMIT 500 FOR UPDATE SKIP LOCKED)"))
     await db.commit()
     return {"status": "ok", "acked": len(acked)}
 
