@@ -88,8 +88,22 @@ namespace CompetitiveRounds
 
         private static void CloseIdle(string why, float idle)
         {
+            // Logged AFTER the close, not before it. This said "idle-close
+            // after Ns" and then called Close() inside a catch-all — so a close
+            // that threw left a log line asserting it had happened, and that
+            // line is the only evidence anyone reads afterwards. A swallowed
+            // failure that also reports success is worse than a noisy one.
+            try
+            {
+                NativeUI.Close();
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log?.LogWarning($"[NATIVE] idle-close ({why}) after {idle:F0}s FAILED: {ex.GetType().Name}");
+                wasOpen = false;
+                return;
+            }
             Plugin.Log?.LogInfo($"[NATIVE] idle-close ({why}) after {idle:F0}s without input");
-            try { NativeUI.Close(); } catch { }
             wasOpen = false;
         }
     }

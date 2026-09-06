@@ -1624,20 +1624,33 @@ def test_the_supervisor_is_owned_by_a_host_and_not_by_a_latch():
     lap = float(_re.search(r"OUTBOX_BEAT_TIMEOUT = (\d+(?:\.\d+)?)f;", src).group(1))
     assert lap >= 30.0, f"OUTBOX_BEAT_TIMEOUT={lap} is inside ordinary jitter"
 def test_the_changelog_states_the_retry_budget():
-    """r11. Two bullets promised the report is "retried until the server takes
-    it". The budget is twenty attempts on a linear-ish backoff capped at four
-    times the base minute — about seventy-five minutes — after which the entry
-    is dropped. A player reading "until" would expect a report that survives an
-    afternoon of server trouble; it does not."""
+    """r11, and r15 changed the number it has to state.
+
+    Two bullets once promised the report is "retried until the server takes it",
+    and a player reading "until" would expect one that survives an afternoon of
+    server trouble. It is bounded. The bound used to be twenty attempts on a
+    backoff capped at four times the base minute -- about seventy-five minutes
+    -- against a server that still accepts the report for six hours, so the
+    client was throwing away reports the server would have taken.
+
+    The bullet now states the six hours, and this RECOMPUTES the span from the
+    client's own constants rather than checking that an integer appears in two
+    files. What has to be true is that the ladder really lasts as long as the
+    prose says."""
     changelog = (Path(__file__).parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "retried until the server takes it" not in changelog, (
         "the unbounded promise is back"
     )
-    assert "twenty attempts" in changelog, "the bound has to be stated in the bullet"
-    # ...and twenty is the number the client actually uses
-    src = API_CLIENT_CS.read_text(encoding="utf-8")
-    assert "private const int OUTBOX_MAX_ATTEMPTS = 20;" in src, (
-        "the changelog says twenty; the code has to be where that comes from"
+    assert "six hours" in changelog, "the bound has to be stated in the bullet"
+    assert "twenty attempts" not in changelog, (
+        "a bullet still claims the old seventy-five-minute budget"
+    )
+    attempts = int(_api_client_const("OUTBOX_MAX_ATTEMPTS", "int"))
+    interval = _api_client_const("OUTBOX_RETRY_SECONDS", "float")
+    cap = _api_client_const("OUTBOX_RETRY_MAX_MULTIPLIER", "float")
+    hours = sum(interval * min(cap, n) for n in range(1, attempts + 1)) / 3600.0
+    assert 6.0 <= hours < 7.0, (
+        f"the bullet says six hours; the ladder spans {hours:.1f}"
     )
 
 
@@ -3091,3 +3104,79 @@ def test_the_ranked_post_attests_to_its_own_claim_and_not_the_stored_pair():
     assert "_pts" not in call, (
         "the attestation records the STORED pair, which both seats write: " + call
     )
+
+
+def _api_client_const(name, kind):
+    """A `private const` out of ApiClient.cs. The existing _cs_*_const helpers
+    read a different file and match `internal const`, so they cannot see these."""
+    source = API_CLIENT_CS.read_text(encoding="utf-8")
+    found = re.search(rf"private const {kind} {name} = (\d+(?:\.\d+)?)f?;", source)
+    assert found, f"{name} not found in {API_CLIENT_CS.name}"
+    return float(found.group(1))
+
+
+def test_the_outbox_ladder_outlasts_the_window_the_server_accepts_in():
+    """r15: the client gave up long before the server stopped listening.
+
+    The outbox exists so a queued report survives a lost response, a crash or a
+    quit -- and a match report carries a rating change and a gold award, so one
+    that is dropped is unrecoverable. The ladder was 20 attempts at
+    60s * min(4, attempts), about 74 minutes; the server accepts a disconnect
+    report for DC_LIVE_WINDOW_SECONDS, six hours. A report answered "not yet"
+    was deleted by the client at roughly a sixth of the time it had.
+
+    The span is RECOMPUTED here from the three constants that produce it rather
+    than compared against a copy of the answer, so the cap cannot be lowered,
+    the backoff cannot be widened, and the server's window cannot be extended
+    without this failing."""
+    attempts = int(_api_client_const("OUTBOX_MAX_ATTEMPTS", "int"))
+    interval = _api_client_const("OUTBOX_RETRY_SECONDS", "float")
+    cap = _api_client_const("OUTBOX_RETRY_MAX_MULTIPLIER", "float")
+    span = sum(interval * min(cap, n) for n in range(1, attempts + 1))
+
+    assert span >= main.DC_LIVE_WINDOW_SECONDS, (
+        f"the ladder spans {span:.0f}s but the server still accepts a report "
+        f"for {main.DC_LIVE_WINDOW_SECONDS}s; the client deletes reports the "
+        "server would have taken"
+    )
+    # ...and not absurdly beyond it, which would make the assertion above
+    # satisfiable by any large number and stop it saying anything (#441).
+    assert span <= 3 * main.DC_LIVE_WINDOW_SECONDS, (
+        f"the ladder spans {span:.0f}s against a {main.DC_LIVE_WINDOW_SECONDS}s "
+        "window; the cap is meant to be derived from the window, not merely "
+        "larger than it"
+    )
+
+    # The backoff must actually READ the multiplier this computed with. A
+    # literal there and a constant here is two numbers that agree today.
+    source = API_CLIENT_CS.read_text(encoding="utf-8")
+    assert "Math.Min(OUTBOX_RETRY_MAX_MULTIPLIER" in source, (
+        "the retry backoff does not use the multiplier this gate measures"
+    )
+    assert not re.search(r"Math\.Min\(\d+, p\.attempts\)", source), (
+        "the backoff cap is a literal again"
+    )
+
+
+def test_an_idle_close_is_logged_only_once_it_has_happened():
+    """r15: the log line was written before the close was attempted.
+
+    CloseIdle logged "idle-close after Ns" and then called NativeUI.Close()
+    inside a catch-all, so a close that threw still left a log line asserting it
+    had happened -- and on the broadcast seat that line is the only evidence
+    anyone reads afterwards. A swallowed failure that also reports success is
+    worse than a noisy one."""
+    source = (MAIN_PY.parents[2] / "plugin" / "OverlayIdleClose.cs").read_text(
+        encoding="utf-8")
+    body = source[source.index("private static void CloseIdle"):]
+    body = body[:body.index("\n        }") + 1]
+    close = body.index("NativeUI.Close();")
+    success = body.index('without input')
+    assert close < success, (
+        "the success line is still written before the close is attempted"
+    )
+    assert "FAILED" in body and "LogWarning" in body, (
+        "a close that throws is still indistinguishable from one that worked"
+    )
+    assert "catch { }" not in body, "the failure is still swallowed silently"
+

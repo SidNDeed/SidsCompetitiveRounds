@@ -733,8 +733,26 @@ namespace CompetitiveRounds
             }
             return false;
         }
-        private const int OUTBOX_MAX_ATTEMPTS = 20;
+        /// <summary>DERIVED from the window the server will still accept a
+        /// report in, not chosen. At the capped backoff below this ladder has
+        /// to outlast the server's DC_LIVE_WINDOW_SECONDS, or the client
+        /// deletes reports the server would have taken — which is the one
+        /// thing an outbox must not do.
+        ///
+        /// It was 20, which spanned about 74 minutes against a window of six
+        /// hours: a report that kept being answered "not yet" was dropped at
+        /// roughly a sixth of the time it had. 20 was an integer with no
+        /// relationship to anything the server does.
+        ///
+        /// `test_the_outbox_ladder_outlasts_the_window_the_server_accepts_in`
+        /// recomputes the span from these three constants and main.py's own
+        /// number, so raising the server's window or lowering this fails there
+        /// rather than quietly shortening the ladder.</summary>
+        private const int OUTBOX_MAX_ATTEMPTS = 94;
         private const float OUTBOX_RETRY_SECONDS = 60f;
+        /// <summary>The backoff stops widening here: every attempt after the
+        /// fourth waits OUTBOX_RETRY_SECONDS times this.</summary>
+        private const float OUTBOX_RETRY_MAX_MULTIPLIER = 4f;
 
         private static string OutboxPath
         {
@@ -1412,7 +1430,9 @@ namespace CompetitiveRounds
                 // Linear-ish backoff, capped at 4x the base interval. Measured
                 // from now rather than from the top of the pass — an earlier
                 // entry's attempt can have taken most of a minute.
-                p.nextAt = Time.realtimeSinceStartup + OUTBOX_RETRY_SECONDS * Math.Min(4, p.attempts);
+                p.nextAt = Time.realtimeSinceStartup
+                           + OUTBOX_RETRY_SECONDS
+                             * Math.Min(OUTBOX_RETRY_MAX_MULTIPLIER, (float)p.attempts);
                 bool done = false, ok = false; string resp = null;
                 yield return PostRequest(p.url, p.json, (s, r) => { done = true; ok = s; resp = r; });
                 while (!done) yield return null;

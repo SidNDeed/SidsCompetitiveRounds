@@ -65,6 +65,21 @@ _DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _BINDING_INDEX = {}
 
 
+def _is_script_guard(node):
+    """`if __name__ == ...:` -- a block that does not exist when the api imports
+    the module.
+
+    Indexed like any other guard until r15, which is how ordinary names from a
+    bracket self-test (rows, ids, extras, sus) ended up inside two hundred route
+    fingerprints: the cross-module walk resolves a handler's local name against
+    every module, and a script-only binding is a binding as far as the index is
+    concerned."""
+    return (isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and isinstance(node.test.left, ast.Name)
+            and node.test.left.id == "__name__")
+
+
 def _index_module(path):
     """{name: (kind, source segment, referenced names)} for every MODULE-SCOPE
     binding in one file.
@@ -75,12 +90,22 @@ def _index_module(path):
     inside its fingerprint.
 
     Module-level If/Try/With bodies are recursed into, which is not optional:
-    main binds `_PIL_AVAILABLE`/`_PILImage` inside a try/except and
-    tournament_bracket binds inside `if __name__`. A name bound more than once
-    at module scope CONCATENATES its segments rather than replacing them, so a
-    conditional rebinding cannot hide half its source. No name is rebound at
-    module scope today -- so that is a guard against a future edit, not a
-    workaround for a present one."""
+    main binds `_PIL_AVAILABLE`/`_PILImage` inside a try/except, and 4 routes
+    cover them. The block's CONTROLLING HEADER is prepended to every binding
+    inside it, because the condition a binding exists under is part of what was
+    reviewed -- without it the except clause deciding whether Pillow is
+    available could be rewritten with no fingerprint moving.
+
+    `if __name__ == "__main__":` is the one guard NOT recursed into. Its body
+    does not exist when the api imports the module, and tournament_bracket's
+    self-test binds ordinary names -- rows, ids, real, extras, s1, s2, sus --
+    that a handler's own locals reference. Measured before this exclusion: 1008
+    occurrences over 10 names, `sus` inside 194 route fingerprints. Editing a
+    bracket self-test moved two hundred routes.
+
+    A name bound more than once at module scope CONCATENATES its segments rather
+    than replacing them, so a conditional rebinding cannot hide half its
+    source."""
     source = path.read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
     table = {}
@@ -121,26 +146,33 @@ def _index_module(path):
                 names.add(sub.attr)
         return names
 
-    def bind(name, kind, node):
-        text, refs = segment(node), referenced(node)
+    def guard_header(node):
+        """The controlling line(s) of a module-level block -- `if ...:`,
+        `try:`, `with ...:` -- down to its first statement. Prepended to every
+        binding inside, including the ones in `else`/`except`/`finally`,
+        because one condition governs all of them."""
+        return "".join(lines[node.lineno - 1:node.body[0].lineno - 1])
+
+    def bind(name, kind, node, guard=""):
+        text, refs = guard + segment(node), referenced(node)
         if name in table:
             prev_kind, prev_text, prev_refs = table[name]
             table[name] = (prev_kind, prev_text + text, prev_refs | refs)
         else:
             table[name] = (kind, text, refs)
 
-    def visit(body):
+    def visit(body, guard=""):
         for node in body:
             if isinstance(node, _DEF_NODES):
-                bind(node.name, "def", node)
+                bind(node.name, "def", node, guard)
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
                     for sub in ast.walk(target):
                         if isinstance(sub, ast.Name):
-                            bind(sub.id, "data", node)
+                            bind(sub.id, "data", node, guard)
             elif isinstance(node, ast.AnnAssign):
                 if isinstance(node.target, ast.Name):
-                    bind(node.target.id, "data", node)
+                    bind(node.target.id, "data", node, guard)
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 # r15. An import binds a name, and WHICH object a name denotes
                 # is part of what a handler does. Removing a batch-added
@@ -152,13 +184,17 @@ def _index_module(path):
                 # inflates the CLOSURE without inflating the DRIFT, because
                 # import lines change far more rarely than code does.
                 for alias in node.names:
-                    bind(alias.asname or alias.name.split(".")[0], "import", node)
+                    bind(alias.asname or alias.name.split(".")[0], "import", node,
+                         guard)
             elif isinstance(node, (ast.If, ast.Try, ast.With)):
-                visit(node.body)
-                visit(getattr(node, "orelse", []))
-                visit(getattr(node, "finalbody", []))
+                if _is_script_guard(node):
+                    continue
+                inner = guard + guard_header(node)
+                visit(node.body, inner)
+                visit(getattr(node, "orelse", []), inner)
+                visit(getattr(node, "finalbody", []), inner)
                 for handler in getattr(node, "handlers", []):
-                    visit(handler.body)
+                    visit(handler.body, inner)
 
     visit(ast.parse(source).body)
     return {name: (kind, text, frozenset(refs))
@@ -972,6 +1008,8 @@ def test_the_admission_rule_is_computed_for_every_module_not_just_main():
                     for alias in node.names:
                         expected.add(alias.asname or alias.name.split(".")[0])
                 elif isinstance(node, (ast.If, ast.Try, ast.With)):
+                    if _is_script_guard(node):
+                        continue
                     collect(node.body)
                     collect(getattr(node, "orelse", []))
                     collect(getattr(node, "finalbody", []))
@@ -1434,3 +1472,62 @@ def test_no_dynamic_route_is_registered_ahead_of_a_literal_it_swallows():
     assert not _shadowing_pairs(list(reversed(planted))), (
         "the literal registered FIRST is correct and must not be flagged"
     )
+
+
+def test_a_module_level_guards_condition_is_part_of_what_it_guards():
+    """r15: the block's header was in nobody's segment.
+
+    main binds `_PIL_AVAILABLE` and `_PILImage` inside a try/except, and four
+    routes cover them. Without the header the except clause that decides
+    whether Pillow is importable could be rewritten with no route fingerprint
+    moving -- the condition under which a binding exists is part of what was
+    reviewed, not scaffolding around it."""
+    index = _binding_index()
+    assert "_PIL_AVAILABLE" in index["main"], (
+        "the try-guarded binding left the index entirely"
+    )
+    text = index["main"]["_PIL_AVAILABLE"][1]
+    assert text.lstrip().startswith("try:"), (
+        "the controlling header is not part of the binding's source: " + text[:80]
+    )
+
+    covering = _route_covering("main", "_PIL_AVAILABLE")
+    assert covering, "no route covers the Pillow availability flag"
+    before = _route_fingerprint(covering[0])
+    with _mutated_segment("main", "_PIL_AVAILABLE"):
+        assert _route_fingerprint(covering[0]) != before
+    assert _route_fingerprint(covering[0]) == before
+
+
+def test_a_script_only_block_is_in_no_routes_reviewed_surface():
+    """r15: `if __name__ == "__main__":` was indexed like any other guard.
+
+    tournament_bracket's self-test binds ordinary names — rows, ids, real,
+    extras, s1, s2, sus — and a handler's own locals reference names like those,
+    so the cross-module walk resolved routes into a block that never executes
+    under the api. Measured before the exclusion: 1008 occurrences over 10
+    names, `sus` in 194 route fingerprints. Editing a bracket self-test moved
+    two hundred routes."""
+    source = (API_DIR / "tournament_bracket.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    script_only = set()
+    for node in tree.body:
+        if not _is_script_guard(node):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Store):
+                script_only.add(inner.id)
+    # A positive control on the SAMPLE, not just on the absence: if the block
+    # stops being found, an empty set makes every assertion below vacuous.
+    assert len(script_only) >= 10, sorted(script_only)
+    assert {"rows", "ids", "extras"} <= script_only, sorted(script_only)
+
+    index = _binding_index()
+    top_level = {node.name for node in tree.body
+                 if isinstance(node, _DEF_NODES)}
+    leaked = sorted((script_only - top_level) & set(index["tournament_bracket"]))
+    assert not leaked, (
+        "script-only bindings are in the index and can be reached by a route: "
+        + ", ".join(leaked)
+    )
+

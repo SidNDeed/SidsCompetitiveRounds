@@ -77,7 +77,9 @@
   leave now survives a failed send. It records which series it belongs to and
   is retried in the background, across a restart if need be, so a single
   refused request no longer loses the record that feeds leave %. The retries
-  are bounded — twenty attempts, a little over an hour, and a relaunch gives a
+  are bounded, and the bound is now the same six hours the server itself will
+  still accept the report in — it used to run out after about an hour, which
+  threw away reports the server would have taken. A relaunch gives a
   still-queued report a fresh set rather than resuming a spent one. The
   server accepts one such report per series per player however many times it
   arrives. A report that names the wrong series is not thrown away: the server
@@ -107,7 +109,7 @@
   game keeps re-sending it after they drop out of the room. That refusal is now
   a retry while the sitting is live, and becomes permanent once the sitting has
   been quiet for hours. The server decides that, not the mod: a queued report
-  gets a fresh twenty attempts on every relaunch, so only the server can retire
+  gets a fresh set of attempts on every relaunch, so only the server can retire
   one that will never qualify.
   A leave seen in the moment between one game being recorded and the next
   starting has no series to name, and is still a single attempt.
