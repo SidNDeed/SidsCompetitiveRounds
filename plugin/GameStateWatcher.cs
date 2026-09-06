@@ -3454,7 +3454,13 @@ namespace CompetitiveRounds
                 // for. Carrying it across rooms would let the ranked-override at
                 // report time force-rank a later casual game vs an unrelated
                 // (possibly vanilla) opponent.
-                ApiClient.ClearActiveSeries();
+                // The POLLED exit, not the reliable callback: it clears the
+                // room-bound id (the documented casual->ranked flow relies on
+                // that) and moves no counter, so a poll observing an exit the
+                // callback already handled cannot retire an occupancy the
+                // callback has since opened. The two paths have distinct
+                // entry points precisely so calling the wrong one is visible.
+                ApiClient.OnRoomExitPolled();
                 // Bug 231: the tournament banner context binds to the same
                 // pairing/room as the series id — it dies here with it (#353).
                 ClearTournamentContext();
@@ -5696,8 +5702,11 @@ namespace CompetitiveRounds
             // after the room has closed, and an empty answer would then drop a
             // genuinely ranked game to casual. ActiveSeriesContradictedByRoom
             // asks the weaker question that has an answer in both states —
-            // "are we in a room this id was NOT published for" — so a stale id
-            // left by a failed join cannot upgrade the game we are actually in.
+            // "is there positive evidence this id is not this room's" — so a
+            // stale id left by a failed join cannot upgrade the game we are
+            // actually in. Out of a room it is not automatically false: a join
+            // stamp from a finished occupancy is evidence by itself, which is
+            // what covers a leave that produced no OnLeftRoom.
             if (shouldReport && !matchIsRanked
                 && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
                 && !ApiClient.ActiveSeriesContradictedByRoom()

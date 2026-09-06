@@ -22,10 +22,13 @@ the consumer still has a room to compare against:
   * `SeriesIdForThisRoom()` -- strict. Answers "" unless this seat is in the
     room the id was published for. For anything that WRITES against a series id.
   * `ActiveSeriesContradictedByRoom()` -- weak, and has an answer in both
-    states. Answers only "are we in a room this id was NOT published for". For a
-    consumer that would be made WORSE by a strict "": the report route can run
-    after the room has closed, and an empty answer there would drop a genuinely
-    ranked game to casual.
+    states. TRUE only with positive evidence that the id is not this room's, so
+    no evidence reads as FALSE. For a consumer that would be made WORSE by a
+    strict "": the report route can run after the room has closed, and an empty
+    answer there would drop a genuinely ranked game to casual. Out of a room it
+    is NOT automatically false -- a join stamp from a finished occupancy is
+    evidence by itself, which is what covers a leave that produced no
+    OnLeftRoom.
 
 The 2v2 live-points channel has been room-gated since review r1 find 5. This
 file is the 1v1 side of the same rule, plus a sweep (learning #432: a flag names
@@ -33,9 +36,10 @@ a line, the defect is a class) that keeps a new raw consumer from being added
 without a decision.
 """
 
+import re
 from pathlib import Path
 
-from _cs_structure import method_spans, strip_comments_only
+from _cs_structure import mask_code, method_spans, strip_comments_only
 
 PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 API_CLIENT_CS = PLUGIN / "ApiClient.cs"
@@ -74,10 +78,10 @@ def test_the_strict_fence_needs_the_room_and_the_occupancy_it_was_issued_for():
     everything the rule needs to decide. What the rule ANSWERS is decided by
     H2HRules.SelfTest, which runs the cases rather than reading them."""
     body = _cs_method_body(API_CLIENT_CS, "public static string SeriesIdForThisRoom()")
-    assert "H2HRules.SeriesForRoom(activeSeriesBinding" in body, (
+    assert "H2HRules.RoomSession.SeriesHere(roomSession" in body, (
         "the reader has to ask the rule, not compare a name of its own"
     )
-    for handed in ("PhotonNetwork.InRoom", "RoomIncarnation", "OpponentInRoomOrEmpty()"):
+    for handed in ("PhotonNetwork.InRoom", "roomSession", "OpponentInRoomOrEmpty()"):
         assert handed in body, f"the rule is not handed {handed}"
     assert 'catch { return ""; }' in body, "a throw must not become a named series"
 
@@ -93,7 +97,7 @@ def test_the_strict_fence_needs_the_room_and_the_occupancy_it_was_issued_for():
     assert rules.count("bound = new RoomBoundSeries") == 1, (
         "the record is built somewhere other than the publication transition"
     )
-    assert api.count("H2HRules.PublishSeries(ref activeSeriesBinding") == 1, (
+    assert api.count("H2HRules.RoomSession.OnSeriesPublished(ref roomSession") == 1, (
         "a second publish site would answer for a series without going through "
         "the transition that decides the stamp"
     )
@@ -103,20 +107,20 @@ def test_the_strict_fence_needs_the_room_and_the_occupancy_it_was_issued_for():
     # there is nothing to count, and a new assignment would not compile.
     _decl = api.index("public static string ActiveRankedSeriesId")
     _window = api[_decl:_decl + 400]
-    assert "get { return activeSeriesBinding.HasValue" in _window, (
+    assert "get { return roomSession.Bound.HasValue" in _window, (
         "the id is a stored field again; it can now disagree with its binding"
     )
     assert "set;" not in _window, "the id gained a setter"
 
 
-def test_the_weak_question_is_false_when_there_is_nothing_to_compare():
+def test_the_weak_question_answers_false_only_when_there_is_no_evidence():
     """This is the whole reason it is a second method. A consumer that runs
     after the room has closed must not read "no room" as "wrong room" -- that
     would drop a genuinely ranked game to casual, which is a worse error than
     the one the fence exists to prevent."""
     body = _cs_method_body(
         API_CLIENT_CS, "public static bool ActiveSeriesContradictedByRoom()")
-    assert "H2HRules.SeriesContradictedByRoom(activeSeriesBinding" in body
+    assert "H2HRules.RoomSession.ContradictedHere(roomSession" in body
     assert "catch { return false; }" in body, "a throw is not evidence of a wrong room"
     assert body.count("return true") == 0, (
         "the reader answers true only through the rule"
@@ -222,3 +226,127 @@ def test_the_sweep_can_actually_fail():
     assert not any(a in bad for a in ALLOWED_RAW_READS)
     assert "ApiClient.ActiveRankedSeriesId" in bad
     assert not bad.strip().startswith("//")
+
+
+# ── the counters: gate the OPERATION, not one spelling ───────────────────────
+
+def _static_method_spans(src):
+    """(name, body) for every static method declared in a C# source.
+
+    Structure comes from the mask, so a declaration inside a comment or a
+    string is not one.
+    """
+    masked = mask_code(src)
+    for m in re.finditer(
+        r"\b(?:private|internal|public|protected)\s+static\s+[\w\.\?<>,\[\]\s]+?\s(\w+)\s*\(",
+        masked,
+    ):
+        name = m.group(1)
+        open_brace = masked.find("{", m.end())
+        if open_brace == -1:
+            continue
+        # a declaration whose next non-space is ';' is not a body
+        between = masked[m.end():open_brace]
+        if ";" in between:
+            continue
+        depth = 0
+        for i in range(open_brace, len(masked)):
+            if masked[i] == "{":
+                depth += 1
+            elif masked[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    yield name, src[open_brace:i + 1]
+                    break
+
+
+# Any write, not just `++`: `+= 1`, `= x + 1`, and a decrement all count.
+_COUNTER_WRITE = re.compile(r"\b(Incarnation|PairIncarnation)\s*(\+\+|--|\+=|-=|=[^=])")
+
+
+def test_only_the_room_events_move_the_occupancy_counters():
+    """r14 HIGH was a counter written in the wrong place, so this asks WHICH
+    METHODS write them - not how many times one spelling appears.
+
+    A count of `s.Incarnation++` cannot see `s.Incarnation += 1`, cannot see a
+    write in a brand-new method, and cannot tell the two counters apart.
+    """
+    src = H2H_RULES_CS.read_text(encoding="utf-8")
+    writers = {"Incarnation": set(), "PairIncarnation": set()}
+    for name, body in _static_method_spans(src):
+        for match in _COUNTER_WRITE.finditer(mask_code(body)):
+            writers[match.group(1)].add(name)
+
+    assert writers["PairIncarnation"] == {"OnRoomJoined", "OnRoomLeftReliableEdge",
+                                          "OnPairInvalidated"}, writers["PairIncarnation"]
+    # `Incarnation` matches the tail of `PairIncarnation`, so the series
+    # counter's writers are those methods minus the ones that only touch the
+    # pair counter. Both room edges move it; nothing else may.
+    assert writers["Incarnation"] >= {"OnRoomJoined", "OnRoomLeftReliableEdge"}
+    assert writers["Incarnation"] <= {"OnRoomJoined", "OnRoomLeftReliableEdge",
+                                      "OnPairInvalidated"}, writers["Incarnation"]
+    invalidated = _cs_method_body(
+        H2H_RULES_CS, "internal static void OnPairInvalidated(ref RoomSessionState s)")
+    assert "s.Incarnation" not in invalidated, (
+        "the line's invalidation must not move the SERIES counter - two "
+        "questions with two lifetimes (r14 HIGH)"
+    )
+    polled = _cs_method_body(
+        H2H_RULES_CS, "internal static void OnRoomExitPolled(ref RoomSessionState s)")
+    assert not _COUNTER_WRITE.search(mask_code(polled)), (
+        "the polled exit is the lossy backup; moving a counter there would let "
+        "a late poll retire an occupancy the reliable callback has since opened"
+    )
+
+
+def test_the_counter_write_sweep_can_fail():
+    """Negative control: the pattern must catch the spellings a `++` count
+    misses, and must not fire on a read."""
+    assert _COUNTER_WRITE.search("s.Incarnation++")
+    assert _COUNTER_WRITE.search("s.Incarnation += 1")
+    assert _COUNTER_WRITE.search("s.PairIncarnation = s.PairIncarnation + 1")
+    assert _COUNTER_WRITE.search("s.Incarnation--")
+    assert not _COUNTER_WRITE.search("if (s.Incarnation == other)")
+    assert not _COUNTER_WRITE.search("return s.Incarnation;")
+
+
+def test_no_unity_side_code_writes_the_occupancy_counter():
+    """The counters are the room session's, and every write is an EVENT. A
+    plain assignment anywhere in the plugin would be a second decision-maker."""
+    offenders = []
+    for path in sorted(PLUGIN.glob("*.cs")):
+        if path.name == "H2HRules.cs":
+            continue
+        for n, line in enumerate(mask_code(path.read_text(encoding="utf-8")).splitlines(), 1):
+            if re.search(r"\bRoomIncarnation\s*(\+\+|--|\+=|-=|=[^=])", line):
+                offenders.append(f"{path.name}:{n}: {line.strip()}")
+    assert offenders == [], "the occupancy counter is written outside its transitions:\n" + "\n".join(offenders)
+
+
+def test_the_contract_text_states_the_polarity_it_implements():
+    """L2: the wrapper used to say an out-of-room check is always false, while
+    the rule deliberately answers TRUE on a stale stamp before it looks at
+    whether we are in a room at all. A caller following the documented polarity
+    would discard exactly the evidence the r14 repair depends on.
+
+    This gate fails on the old sentence, so the wording cannot drift back.
+    """
+    api = API_CLIENT_CS.read_text(encoding="utf-8")
+    decl = api.index("public static bool ActiveSeriesContradictedByRoom()")
+    # the summary block immediately above the declaration
+    doc = api[max(0, decl - 1600):decl]
+    assert "no record" in doc, "the no-evidence states are not enumerated"
+    assert "a throw" in doc, "the throw case is not stated"
+    assert "Out of a room the answer is NOT automatically false" in doc
+    assert "Outside a room there is nothing to compare against" not in doc, (
+        "the refuted sentence is back"
+    )
+    assert "only while" not in doc, (
+        "an 'only while' construction is how this became a false guarantee"
+    )
+    # the rule's own summary is the wording the wrapper was made to match
+    rules = H2H_RULES_CS.read_text(encoding="utf-8")
+    assert "TRUE only with positive evidence" in rules
+    assert "TRUE only with positive evidence" in doc, (
+        "the wrapper and the rule state different contracts again"
+    )

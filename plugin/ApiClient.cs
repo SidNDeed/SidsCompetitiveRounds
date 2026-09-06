@@ -9686,7 +9686,7 @@ namespace CompetitiveRounds
         /// tests it with IsNullOrEmpty and two of them print it with ?? .</summary>
         public static string ActiveRankedSeriesId
         {
-            get { return activeSeriesBinding.HasValue ? activeSeriesBinding.Value.SeriesId : null; }
+            get { return roomSession.Bound.HasValue ? roomSession.Bound.Value.SeriesId : null; }
         }
         /// <summary>r4 find 2: monotonic id for preflight requests. Bumped on
         /// every send; a callback whose captured value is no longer the latest
@@ -9714,7 +9714,25 @@ namespace CompetitiveRounds
         /// OnLeftRoom callbacks (synchronous, cannot be missed the way the
         /// 10 Hz polled edges can); every preflight captures it at send and
         /// its callback refuses to bind across a bump.</summary>
-        public static int RoomIncarnation;
+        /// Read-only here: every write is a room EVENT, and the events live on
+        /// H2HRules.RoomSession so their ordering is executable (r14 LOW 1).
+        public static int RoomIncarnation { get { return roomSession.Incarnation; } }
+
+        /// <summary>The head-to-head line's occupancy counter. A DIFFERENT
+        /// question from RoomIncarnation with a different lifetime, kept as
+        /// its own field: what r14 HIGH forbids is deciding both records from
+        /// one counter, and two named fields keep that split explicit.</summary>
+        internal static int PairIncarnation { get { return roomSession.PairIncarnation; } }
+
+        /// <summary>The one occupancy record: the series binding, the issued
+        /// pairing, both counters and the superseded-room tombstone. These
+        /// were five statics across this class and H2HSummary, and the order
+        /// their transitions ran in was a property of two call sites in
+        /// Plugin.OnJoinedRoom forty-one lines apart -- with an early return
+        /// between them, so on a seat where that fence fired the pairing was
+        /// retired and the series counter never moved at all.</summary>
+        private static H2HRules.RoomSessionState roomSession;
+
         public static QueuePollData LastPollData { get; private set; }
 
         /// <summary>Release B §1 (design r3 §1.2 MEDIUM): the server-attested
@@ -9737,7 +9755,6 @@ namespace CompetitiveRounds
         /// with, never which Photon actor that is, and the u_id it gets
         /// compared against is written by the peer's own game. H2HRules states
         /// exactly what the comparison buys.</summary>
-        private static H2HRules.IssuedPairState? issuedPair;
 
         /// <summary>The room whose issued pairing a later issuance replaced
         /// while this seat may still be sitting in it (review r8 MEDIUM 2).
@@ -9755,7 +9772,6 @@ namespace CompetitiveRounds
         /// (review r10). So the guarantee is about the room the seat is IN —
         /// that one stays suppressed until it is left — and NOT about every
         /// room ever superseded, of which only one is remembered.</summary>
-        private static string supersededIssuedRoom;
 
         /// <summary>The opponent the server paired this seat with for the room
         /// it just issued: the response's opponent_steam_id when present
@@ -9784,7 +9800,7 @@ namespace CompetitiveRounds
                 // room re-issued is not a supersession — it is the same
                 // pairing's own room, and a tombstone there would suppress the
                 // line for the room the pairing is FOR.
-                var previous = issuedPair;
+                var previous = roomSession.IssuedPair;
                 if (previous != null
                     && !string.IsNullOrEmpty(previous.Value.RoomName)
                     && !string.Equals(previous.Value.RoomName, room ?? "", StringComparison.Ordinal))
@@ -9803,26 +9819,26 @@ namespace CompetitiveRounds
                     string here = "";
                     try { here = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; }
                     catch { }
-                    bool slotHoldsOurRoom = !string.IsNullOrEmpty(supersededIssuedRoom)
+                    bool slotHoldsOurRoom = !string.IsNullOrEmpty(roomSession.SupersededIssuedRoom)
                         && !string.IsNullOrEmpty(here)
-                        && string.Equals(supersededIssuedRoom, here, StringComparison.Ordinal);
+                        && string.Equals(roomSession.SupersededIssuedRoom, here, StringComparison.Ordinal);
                     if (slotHoldsOurRoom)
                     {
                         Plugin.Log.LogInfo("[QUEUE] a later room was issued; the tombstone stays on the room this seat is in");
                     }
                     else
                     {
-                        supersededIssuedRoom = previous.Value.RoomName;
+                        roomSession.SupersededIssuedRoom = previous.Value.RoomName;
                         Plugin.Log.LogInfo("[QUEUE] a later room was issued; the room it replaced gets no H2H line");
                     }
                 }
                 if (string.IsNullOrEmpty(room) || !IsSteamId64(opp) || opp == me)
                 {
-                    issuedPair = null;
+                    roomSession.IssuedPair = null;
                     Plugin.Log.LogInfo("[QUEUE] issued room carries no usable opponent id — the H2H line will use the room's own resolver");
                     return;
                 }
-                issuedPair = new H2HRules.IssuedPairState { Gen = queueGen, RoomName = room, OpponentSteamId = opp,
+                roomSession.IssuedPair = new H2HRules.IssuedPairState { Gen = queueGen, RoomName = room, OpponentSteamId = opp,
                                                             BoundIncarnation = -1, BoundActor = -1,
                                                             JoinIncarnation = -1 };
                 // Both queue paths publish the series id for this room a few
@@ -9832,9 +9848,9 @@ namespace CompetitiveRounds
                 // without this the one term that separates two occupancies of
                 // a recurring room name was never filled in on the path that
                 // knew the answer.
-                H2HRules.RetainSeriesPairing(ref activeSeriesBinding, room, opp);
+                H2HRules.RoomSession.OnSeriesPairingRetained(ref roomSession, room, opp);
             }
-            catch { issuedPair = null; }
+            catch { roomSession.IssuedPair = null; }
         }
 
         /// <summary>H2HSummary's read. This method holds the state; the answer
@@ -9853,38 +9869,35 @@ namespace CompetitiveRounds
                                                                      int incarnation, int actor,
                                                                      out string opponentSteamId)
         {
-            return H2HRules.ConsultIssued(ref issuedPair, supersededIssuedRoom, queueGen, roomName,
+            return H2HRules.ConsultIssued(ref roomSession.IssuedPair, roomSession.SupersededIssuedRoom, queueGen, roomName,
                                           advertisedSteamId, incarnation, actor, out opponentSteamId);
         }
 
         /// <summary>H2HSummary.Invalidate, i.e. Photon's own OnLeftRoom and
         /// OnDisconnected: this seat is out of the room the tombstone was
-        /// protecting, so it stops answering for it.</summary>
-        internal static void ClearSupersededIssuedRoom()
+        /// protecting, so it stops answering for it, and the line's own
+        /// counter moves. One transition, in H2HRules, so the self-test drives
+        /// the same body the game does.</summary>
+        internal static void OnPairInvalidated()
         {
-            supersededIssuedRoom = null;
+            H2HRules.RoomSession.OnPairInvalidated(ref roomSession);
         }
 
-        /// <summary>H2HSummary.OnJoinedRoom, with the incarnation that join
-        /// just opened: the record describes exactly ONE join to the room it
-        /// names, and H2HRules.RetireOnJoin is where that is decided. A room
-        /// name alone would keep a pairing alive across a leave and a rejoin
-        /// of a same-named room, which is a different room (review r8
-        /// LOW 1 — the reason RoomIncarnation exists at all).</summary>
-        internal static void RetireIssuedPairUnless(string roomName, int incarnation)
+        /// <summary>The reliable Photon exit edge: OnLeftRoom and
+        /// OnDisconnected. Both counters move and both records stop
+        /// answering.</summary>
+        internal static void OnRoomLeftReliableEdge()
         {
-            // A join to anywhere but the superseded room means we are no
-            // longer in it; a join BACK to it keeps the tombstone, because its
-            // pairing is still the one that was replaced.
-            if (!string.IsNullOrEmpty(supersededIssuedRoom)
-                && !string.Equals(supersededIssuedRoom, roomName ?? "", StringComparison.Ordinal))
-                supersededIssuedRoom = null;
-            H2HRules.RetireOnJoin(ref issuedPair, roomName, incarnation);
-            // The series record is NOT decided here. It describes the same
-            // occupancy, but it is read against RoomIncarnation while this
-            // incarnation is H2HSummary's -- and this call runs before
-            // RoomIncarnation is even bumped. ApiClient.OnRoomJoinedForSeries
-            // is its join, from Plugin, after that bump.
+            H2HRules.RoomSession.OnRoomLeftReliableEdge(ref roomSession);
+        }
+
+        /// <summary>The 10 Hz polled exit: the lossy backup for the callback
+        /// above. It clears the room-bound id and moves NO counter, so a poll
+        /// observing an exit the callback already handled cannot retire an
+        /// occupancy the callback has since opened.</summary>
+        internal static void OnRoomExitPolled()
+        {
+            H2HRules.RoomSession.OnRoomExitPolled(ref roomSession);
         }
 
         private static bool IsSteamId64(string s)
@@ -18443,13 +18456,12 @@ namespace CompetitiveRounds
         /// join into a later room.</summary>
         public static string ActiveRankedSeriesRoom
         {
-            get { return activeSeriesBinding.HasValue ? (activeSeriesBinding.Value.RoomName ?? "") : ""; }
+            get { return roomSession.Bound.HasValue ? (roomSession.Bound.Value.RoomName ?? "") : ""; }
         }
 
         /// <summary>The room, the pairing and the ONE occupancy the held series
         /// id belongs to. A bare room name used to be the whole of it, and a
         /// name is reusable (r13 HIGH) -- see H2HRules.RoomBoundSeries.</summary>
-        private static H2HRules.RoomBoundSeries? activeSeriesBinding;
 
         /// <summary>Publish a series id for a room. The pairing comes from the
         /// queue's own record for that room where it has one; where it does
@@ -18458,16 +18470,8 @@ namespace CompetitiveRounds
         /// series id can start being answered for.</summary>
         public static void PublishActiveSeries(string seriesId, string room)
         {
-            string opponent = "";
             bool inRoomHere = false;
             string roomHere = null;
-            try
-            {
-                if (issuedPair.HasValue
-                    && string.Equals(issuedPair.Value.RoomName ?? "", room ?? "", StringComparison.Ordinal))
-                    opponent = issuedPair.Value.OpponentSteamId ?? "";
-            }
-            catch { }
             try
             {
                 inRoomHere = PhotonNetwork.InRoom;
@@ -18478,25 +18482,33 @@ namespace CompetitiveRounds
             // The queue publishes from the menu and the join stamps it; a
             // PREFLIGHT publishes from inside the room it is about, and no
             // further join is coming to stamp that one.
-            H2HRules.PublishSeries(ref activeSeriesBinding, seriesId, room, opponent,
-                                   inRoomHere, roomHere, RoomIncarnation);
+            H2HRules.RoomSession.OnSeriesPublished(ref roomSession, seriesId, room,
+                                                   inRoomHere, roomHere);
         }
 
-        /// <summary>Plugin.OnJoinedRoom, immediately after RoomIncarnation is
-        /// bumped. The series record is stamped and retired HERE and not
-        /// alongside the queue's pairing record: that one is decided from
-        /// H2HSummary's own incarnation counter, and this one is READ against
-        /// RoomIncarnation, so deciding them together stamped this record from
-        /// a counter nothing compares it to (r14 HIGH). Same room, first join:
-        /// stamped. Any later join: retired.</summary>
-        internal static void OnRoomJoinedForSeries(string roomName)
+        /// <summary>THE join. One call, before anything in Plugin.OnJoinedRoom
+        /// can return early, performing the whole ordering: the line's counter
+        /// moves, the queue's pairing is retired against it, the series
+        /// counter moves, and only then is the series record stamped or
+        /// dropped.
+        ///
+        /// The two records used to be decided at two sites forty-one lines
+        /// apart with a fence that returns between them, so a seat that took
+        /// the fence retired its pairing and never moved the series counter.
+        /// The ordering is now one body in H2HRules that the self-test drives.
+        ///
+        /// `roomNameKnown` is false when the caller could not read the name.
+        /// The caller MUST read it into a local first: an expression touching
+        /// Photon inside this argument list would let a throw skip the bumps,
+        /// which leaves the previous occupancy's records standing.</summary>
+        internal static void OnRoomJoined(string roomName, bool roomNameKnown)
         {
-            H2HRules.RetireSeriesOnJoin(ref activeSeriesBinding, roomName, RoomIncarnation);
+            H2HRules.RoomSession.OnRoomJoined(ref roomSession, roomName, roomNameKnown);
         }
 
         public static void ClearActiveSeries()
         {
-            activeSeriesBinding = null;
+            H2HRules.RoomSession.OnSeriesEnded(ref roomSession);
         }
 
         /// <summary>The opponent this seat can see in the room right now, or
@@ -18530,29 +18542,40 @@ namespace CompetitiveRounds
             {
                 string here = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
                     ? PhotonNetwork.CurrentRoom.Name : null;
-                return H2HRules.SeriesForRoom(activeSeriesBinding, PhotonNetwork.InRoom, here,
-                                              RoomIncarnation, OpponentInRoomOrEmpty());
+                return H2HRules.RoomSession.SeriesHere(roomSession, PhotonNetwork.InRoom, here,
+                                                       OpponentInRoomOrEmpty());
             }
             catch { return ""; }
         }
 
-        /// <summary>TRUE when this seat is in a room that the active series
-        /// id was demonstrably NOT published for — the id belongs to another
-        /// room. Outside a room there is nothing to compare against, so the
-        /// answer is FALSE: "not contradicted" is the honest reading of no
-        /// evidence, and it is what keeps a report submitted after the room
-        /// closed from losing its ranked routing. Consumers that FILE an
-        /// observation against a specific series want SeriesIdForThisRoom()
-        /// instead; this is for consumers that only need to know the id is not
-        /// from somewhere else.</summary>
+        /// <summary>TRUE only with positive evidence that the held id is not
+        /// this room's, so "no evidence" reads as FALSE. That polarity is the
+        /// point: this is used where an empty answer would cost ranked routing
+        /// rather than protect a series, and a report submitted after the room
+        /// closed must not be dropped to casual.
+        ///
+        /// Out of a room the answer is NOT automatically false. A join stamp
+        /// that no longer matches the current occupancy is evidence on its own
+        /// and is checked BEFORE the in-room question -- a leave that never
+        /// produced Photon's own callback leaves this seat believing it is
+        /// nowhere, and that is exactly the state the check has to survive.
+        ///
+        /// The five states with no evidence, all answering FALSE: no record;
+        /// a record with no id; a staged record no join has stamped yet; a
+        /// record stamped with THIS occupancy; and a throw while reading
+        /// Photon, reported false because a refusal here costs ranked routing.
+        ///
+        /// Consumers that FILE an observation against a specific series want
+        /// SeriesIdForThisRoom() instead; this is for consumers that only need
+        /// to know the id is not from somewhere else.</summary>
         public static bool ActiveSeriesContradictedByRoom()
         {
             try
             {
                 string here = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
                     ? PhotonNetwork.CurrentRoom.Name : null;
-                return H2HRules.SeriesContradictedByRoom(activeSeriesBinding, PhotonNetwork.InRoom, here,
-                                                         RoomIncarnation, OpponentInRoomOrEmpty());
+                return H2HRules.RoomSession.ContradictedHere(roomSession, PhotonNetwork.InRoom, here,
+                                                            OpponentInRoomOrEmpty());
             }
             catch { return false; }
         }

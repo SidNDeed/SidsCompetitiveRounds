@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Runs H2HRules.SelfTest under a plain compiler, with no Unity, Photon or
+    BepInEx. The rules file is kept free of those on purpose so that the
+    decisions behind the head-to-head line and the room-bound series id can be
+    EXECUTED by a test rather than asserted about as source text.
+
+    Until 2026-09-06 this harness existed only in a scratch directory, so the
+    "81/81, fail=0" it printed was a number nobody could reproduce from the
+    repository and no pytest run ever touched (r14 LOW 1).
+
+    net10.0 because that is the only runtime installed on the build seat -
+    the `list-runtimes` verb reports Microsoft.NETCore.App 10.0.11 alone. A
+    net8.0 target BUILDS here and then fails to launch, which is the sort of
+    green-looking nothing this harness exists to prevent; the pytest gate
+    asserts this TFM against the installed runtimes so the next SDK rotation
+    fails with a message that names the cause.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>h2h-harness</AssemblyName>
+    <RootNamespace>CompetitiveRounds.Harness</RootNamespace>
+    <!-- Only the two files named below. A default glob would drag in the
+         whole plugin tree, which does not compile without Unity. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Main.cs" />
+    <Compile Include="../../plugin/H2HRules.cs" />
+  </ItemGroup>
+
+</Project>

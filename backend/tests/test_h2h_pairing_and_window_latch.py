@@ -140,14 +140,14 @@ def test_the_tombstone_is_consulted_before_the_record_can_read_as_never_issued()
 
 def test_a_second_issuance_tombstones_the_room_it_took_the_pairing_from():
     body = _cs_method_body(API_CLIENT_CS, "private static void RetainIssuedPair(string room, string response)")
-    assert "supersededIssuedRoom = previous.Value.RoomName;" in body
+    assert "roomSession.SupersededIssuedRoom = previous.Value.RoomName;" in body
     # ...and only when it is a DIFFERENT room: the same room re-issued is the
     # pairing's own room, and a tombstone there would suppress the line the
     # pairing is for.
     assert "!string.Equals(previous.Value.RoomName, room ?? \"\", StringComparison.Ordinal)" in body
     # set BEFORE either path that overwrites or empties the slot
-    assert body.index("supersededIssuedRoom =") < body.index("issuedPair = null;")
-    assert body.index("supersededIssuedRoom =") < body.index("issuedPair = new H2HRules.IssuedPairState")
+    assert body.index("roomSession.SupersededIssuedRoom =") < body.index("roomSession.IssuedPair = null;")
+    assert body.index("roomSession.SupersededIssuedRoom =") < body.index("roomSession.IssuedPair = new H2HRules.IssuedPairState")
 
 
 def test_a_third_issuance_cannot_take_the_tombstone_from_the_room_we_are_in():
@@ -161,11 +161,11 @@ def test_a_third_issuance_cannot_take_the_tombstone_from_the_room_we_are_in():
     assert "PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? \"\") : \"\"" in body, (
         "the guard has to ask which room this seat is actually in"
     )
-    assert "bool slotHoldsOurRoom = !string.IsNullOrEmpty(supersededIssuedRoom)" in body
-    assert "string.Equals(supersededIssuedRoom, here, StringComparison.Ordinal)" in body
+    assert "bool slotHoldsOurRoom = !string.IsNullOrEmpty(roomSession.SupersededIssuedRoom)" in body
+    assert "string.Equals(roomSession.SupersededIssuedRoom, here, StringComparison.Ordinal)" in body
     # the write is reached only when the slot is NOT protecting our own room
-    assert body.index("slotHoldsOurRoom") < body.index("supersededIssuedRoom = previous.Value.RoomName;")
-    assert body.count("supersededIssuedRoom = previous.Value.RoomName;") == 1
+    assert body.index("slotHoldsOurRoom") < body.index("roomSession.SupersededIssuedRoom = previous.Value.RoomName;")
+    assert body.count("roomSession.SupersededIssuedRoom = previous.Value.RoomName;") == 1
     # an unavailable room name must not be read as "we are in the slot's room"
     assert "!string.IsNullOrEmpty(here)" in body
 
@@ -217,13 +217,28 @@ def test_no_artifact_promises_more_than_one_remembered_superseded_room():
 
 
 def test_the_tombstone_is_cleared_at_the_leave_edge_and_on_a_join_elsewhere():
+    # Both clears are now transitions in the Unity-free component, so the rule
+    # is executed by the self-test rather than only read here. What this gate
+    # still owns is that the Unity edges REACH those transitions.
     invalidate = _cs_method_body(H2H_SUMMARY_CS, "internal static void Invalidate()")
-    assert "ApiClient.ClearSupersededIssuedRoom();" in invalidate
-    retire = _cs_method_body(
-        API_CLIENT_CS, "internal static void RetireIssuedPairUnless(string roomName, int incarnation)"
+    assert "ApiClient.OnPairInvalidated();" in invalidate
+    rules = H2H_RULES_CS.read_text(encoding="utf-8")
+    pair_invalidated = _cs_method_body(
+        H2H_RULES_CS, "internal static void OnPairInvalidated(ref RoomSessionState s)")
+    assert "s.SupersededIssuedRoom = null;" in pair_invalidated
+    left = _cs_method_body(
+        H2H_RULES_CS, "internal static void OnRoomLeftReliableEdge(ref RoomSessionState s)")
+    assert "s.SupersededIssuedRoom = null;" in left
+    joined = _cs_method_body(
+        H2H_RULES_CS,
+        "internal static void OnRoomJoined(ref RoomSessionState s, string roomName, bool roomNameKnown)")
+    assert '!string.Equals(s.SupersededIssuedRoom, roomName ?? "", StringComparison.Ordinal)' in joined, (
+        "a join elsewhere must drop the tombstone"
     )
-    assert "supersededIssuedRoom = null;" in retire
-    assert "!string.Equals(supersededIssuedRoom, roomName ?? \"\", StringComparison.Ordinal)" in retire
+    # ...and the clear is not reachable from anywhere else: one owner per fact.
+    assert rules.count("SupersededIssuedRoom = null;") == 3, (
+        "a fourth writer of the tombstone would be a second place this is decided"
+    )
     # Invalidate is Photon's own leave/disconnect callback, not a polled edge
     plugin_src = PLUGIN_CS.read_text(encoding="utf-8")
     assert plugin_src.count("H2HSummary.Invalidate();") == 2
@@ -293,20 +308,33 @@ def test_a_pairing_describes_one_join_and_not_one_room_name():
     keeps a retained pairing alive across a leave and a rejoin."""
     rule = _cs_method_body(
         H2H_RULES_CS,
-        "internal static bool RetireOnJoin(ref IssuedPairState? pair, string roomName, int incarnation)",
+        "private static bool RetireOnJoin(ref IssuedPairState? pair, string roomName, int incarnation)",
     )
     assert "p.JoinIncarnation < 0" in rule           # first matching join stamps
     assert "p.JoinIncarnation == incarnation" in rule  # the same join is idempotent
     assert rule.count("pair = null;") == 2            # another room, and a later join
-    retire = _cs_method_body(
-        API_CLIENT_CS, "internal static void RetireIssuedPairUnless(string roomName, int incarnation)"
-    )
-    assert "H2HRules.RetireOnJoin(ref issuedPair, roomName, incarnation);" in retire
-    assert "issuedPair = null;" not in retire, "the decision belongs to the rule, not here"
-    joined = _cs_method_body(H2H_SUMMARY_CS, "internal static void OnJoinedRoom()")
-    assert "ApiClient.RetireIssuedPairUnless(room != null ? room.Name : null, incarnation);" in joined
-    assert joined.index("incarnation++") < joined.index("RetireIssuedPairUnless"), (
+    # The pairing is retired inside the join TRANSITION, against the counter
+    # that same transition just moved. It used to be a Unity-side method whose
+    # caller had to bump first and pass the result, and "the caller remembered"
+    # is what a source-shape assertion can only ever approximate - the self-test
+    # now executes the sequence (seq:join-stamps-with-the-series-counter).
+    joined_rule = _cs_method_body(
+        H2H_RULES_CS,
+        "internal static void OnRoomJoined(ref RoomSessionState s, string roomName, bool roomNameKnown)")
+    assert joined_rule.index("s.PairIncarnation++") < joined_rule.index("RetireOnJoin("), (
         "the join must be retired against the incarnation it opened"
+    )
+    assert "RetireOnJoin(ref s.IssuedPair, roomName, s.PairIncarnation);" in joined_rule, (
+        "the pairing must be retired against the LINE's counter, not the series one"
+    )
+    # ...and the series half is decided after its own counter moves, which is
+    # the r14 HIGH ordering stated as source: two counters, each record
+    # against its own.
+    assert joined_rule.index("RetireOnJoin(") < joined_rule.index("s.Incarnation++"), (
+        "the series counter must move after the pairing is retired, not before"
+    )
+    assert joined_rule.index("s.Incarnation++") < joined_rule.index("RetireSeriesOnJoin("), (
+        "the series record must be stamped against the counter its readers use"
     )
 
 
@@ -343,7 +371,7 @@ def test_the_issued_pair_reader_hands_the_rule_the_live_record():
         API_CLIENT_CS,
         "internal static H2HRules.IssuedOpponent TryGetIssuedOpponent(string roomName, string advertisedSteamId,",
     )
-    assert "H2HRules.ConsultIssued(ref issuedPair, supersededIssuedRoom, queueGen, roomName," in body
+    assert "H2HRules.ConsultIssued(ref roomSession.IssuedPair, roomSession.SupersededIssuedRoom, queueGen, roomName," in body
     assert "return IssuedOpponent" not in body, "the wrapper must not answer on its own"
 
 

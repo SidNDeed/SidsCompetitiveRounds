@@ -68,7 +68,7 @@ namespace CompetitiveRounds
         /// join whose name matches stamps its incarnation, and any later join
         /// -- same name or not -- retires the record. Returns true when it
         /// was retired.</summary>
-        internal static bool RetireSeriesOnJoin(ref RoomBoundSeries? bound, string roomName, int incarnation)
+        private static bool RetireSeriesOnJoin(ref RoomBoundSeries? bound, string roomName, int incarnation)
         {
             if (bound == null) return false;
             var b = bound.Value;
@@ -101,7 +101,7 @@ namespace CompetitiveRounds
         /// the room and took live points, named disconnect reports and
         /// attestations with it. A publication naming the room this seat is
         /// already in describes THIS occupancy and is stamped with it.</summary>
-        internal static void PublishSeries(ref RoomBoundSeries? bound, string seriesId, string room,
+        private static void PublishSeries(ref RoomBoundSeries? bound, string seriesId, string room,
                                            string opponent, bool inRoomHere, string roomHere,
                                            int incarnation)
         {
@@ -137,7 +137,7 @@ namespace CompetitiveRounds
         /// Only a pairing for the room the record already names binds; a
         /// pairing for anywhere else says nothing about this record, and the
         /// join is what retires it. Returns true when the record took it.</summary>
-        internal static bool RetainSeriesPairing(ref RoomBoundSeries? bound, string room, string opponent)
+        private static bool RetainSeriesPairing(ref RoomBoundSeries? bound, string room, string opponent)
         {
             if (bound == null) return false;
             if (string.IsNullOrEmpty(opponent)) return false;
@@ -214,7 +214,7 @@ namespace CompetitiveRounds
         /// whose name matches stamps its incarnation, and any later join,
         /// same name or not, retires it. Returns true when the record was
         /// retired.</summary>
-        internal static bool RetireOnJoin(ref IssuedPairState? pair, string roomName, int incarnation)
+        private static bool RetireOnJoin(ref IssuedPairState? pair, string roomName, int incarnation)
         {
             if (pair == null) return false;
             var p = pair.Value;
@@ -324,6 +324,179 @@ namespace CompetitiveRounds
             }
             attestedId = p.OpponentSteamId;
             return IssuedOpponent.Attested;
+        }
+
+        // ── the room session ───────────────────────────────────────────────
+
+        /// <summary>Everything that describes ONE occupancy of ONE room, in a
+        /// single value the self-test can drive through a real sequence.
+        ///
+        /// These five pieces lived as separate statics on two Unity classes,
+        /// and the ORDER their transitions run in was a property of two call
+        /// sites forty-one lines apart in Plugin.OnJoinedRoom with nothing
+        /// gating the gap. r14 HIGH was exactly that gap: the series record
+        /// was stamped from inside the pairing's retirement, with the PAIR
+        /// counter, before the series counter had been bumped -- so the stamp
+        /// could never equal the value its readers compare it against. The
+        /// repair moved the stamp; it did not make the ordering executable,
+        /// and a test that hand-builds a consistent record cannot see an
+        /// ordering fault at all (r14 LOW 1).
+        ///
+        /// The two counters stay SEPARATE fields on purpose. What r14 HIGH
+        /// forbids is deciding both records from one counter; two named fields
+        /// in one struct keep the split and make it inspectable, which is the
+        /// opposite of collapsing them.</summary>
+        internal struct RoomSessionState
+        {
+            /// <summary>The series record for this occupancy.</summary>
+            public RoomBoundSeries? Bound;
+            /// <summary>The occupancy counter the SERIES record is read
+            /// against. Bumped by the two reliable Photon room edges.</summary>
+            public int Incarnation;
+            /// <summary>The queue's attested pairing for the room.</summary>
+            public IssuedPairState? IssuedPair;
+            /// <summary>The occupancy counter the head-to-head LINE is read
+            /// against. A different question with a different lifetime, so a
+            /// different counter.</summary>
+            public int PairIncarnation;
+            /// <summary>The room whose issued pairing a later issuance
+            /// replaced while this seat may still be sitting in it.</summary>
+            public string SupersededIssuedRoom;
+            /// <summary>The incarnation a POLLED exit was last observed in.
+            /// Recorded rather than acted on: the polled edge is the lossy
+            /// backup for the reliable callback, so it must be distinguishable
+            /// from it by something a test can read. Without this the two exit
+            /// entry points had identical bodies and calling the wrong one was
+            /// invisible.</summary>
+            public int ExitObservedAt;
+        }
+
+        /// <summary>The room session's transitions, one method per EVENT.
+        ///
+        /// Each method is the whole ordering for its event, so a caller cannot
+        /// perform half of one. The fine-grained steps below are private for
+        /// the same reason: outside this type an out-of-order sequence stops
+        /// being a test failure and becomes something that will not compile.</summary>
+        internal static class RoomSession
+        {
+            /// <summary>A join, in the order the two records require.
+            ///
+            /// `roomNameKnown` is false when the caller could not read the
+            /// room's name -- Photon threw, or the room was gone by the time
+            /// it looked. Both counters still move, because we joined
+            /// SOMETHING and every record describing the previous occupancy is
+            /// now stale; the series binding is then dropped rather than
+            /// stamped, because we cannot prove this is the room it was
+            /// published for. That is the conservative direction: an unnamed
+            /// report the server resolves from the pair, rather than a report
+            /// filed against a series this seat may no longer be in.
+            ///
+            /// The caller must read the room name into a local BEFORE calling
+            /// this. An expression that touches Photon inside this call's
+            /// argument list would mean a throw skips the bumps too, which
+            /// leaves the previous occupancy's records standing -- the unsafe
+            /// direction.</summary>
+            internal static void OnRoomJoined(ref RoomSessionState s, string roomName, bool roomNameKnown)
+            {
+                s.PairIncarnation++;
+                // A join anywhere but the superseded room means we are no
+                // longer in it; a join BACK to it keeps the tombstone,
+                // because its pairing is still the one that was replaced.
+                if (!string.IsNullOrEmpty(s.SupersededIssuedRoom)
+                    && !string.Equals(s.SupersededIssuedRoom, roomName ?? "", StringComparison.Ordinal))
+                    s.SupersededIssuedRoom = null;
+                RetireOnJoin(ref s.IssuedPair, roomName, s.PairIncarnation);
+                s.Incarnation++;
+                if (!roomNameKnown)
+                {
+                    s.Bound = null;
+                    return;
+                }
+                RetireSeriesOnJoin(ref s.Bound, roomName, s.Incarnation);
+            }
+
+            /// <summary>Photon's own OnLeftRoom / OnDisconnected: the edge that
+            /// cannot be missed the way a 10 Hz poll can.</summary>
+            internal static void OnRoomLeftReliableEdge(ref RoomSessionState s)
+            {
+                s.PairIncarnation++;
+                s.SupersededIssuedRoom = null;
+                s.Incarnation++;
+                s.Bound = null;
+            }
+
+            /// <summary>The polled exit: the lossy backup for the callback
+            /// above. It clears the room-bound series id, which the documented
+            /// casual-to-ranked flow relies on, but it moves NO counter -- a
+            /// poll observing an exit the callback already handled must not
+            /// retire a fresh occupancy the callback has since opened.</summary>
+            internal static void OnRoomExitPolled(ref RoomSessionState s)
+            {
+                s.ExitObservedAt = s.Incarnation;
+                s.Bound = null;
+            }
+
+            /// <summary>A series id published for a room, staged or current.
+            /// Reads the issued pairing out of the session itself, so there is
+            /// no argument a caller can pass as null.</summary>
+            internal static void OnSeriesPublished(ref RoomSessionState s, string seriesId, string room,
+                                                   bool inRoomHere, string roomHere)
+            {
+                string opponent = s.IssuedPair != null
+                                  && string.Equals(s.IssuedPair.Value.RoomName ?? "", room ?? "",
+                                                   StringComparison.Ordinal)
+                                  ? s.IssuedPair.Value.OpponentSteamId
+                                  : "";
+                PublishSeries(ref s.Bound, seriesId, room, opponent, inRoomHere, roomHere, s.Incarnation);
+            }
+
+            /// <summary>The queue's pairing for the room, arriving after the
+            /// id was published for it.</summary>
+            internal static bool OnSeriesPairingRetained(ref RoomSessionState s, string room, string opponent)
+            {
+                return RetainSeriesPairing(ref s.Bound, room, opponent);
+            }
+
+            /// <summary>The series is over; the record stops answering.</summary>
+            internal static void OnSeriesEnded(ref RoomSessionState s)
+            {
+                s.Bound = null;
+            }
+
+            /// <summary>The head-to-head line's own invalidation.</summary>
+            internal static void OnPairInvalidated(ref RoomSessionState s)
+            {
+                s.PairIncarnation++;
+                s.SupersededIssuedRoom = null;
+            }
+
+            /// <summary>The series id an observation made HERE may be filed
+            /// under, or empty.</summary>
+            internal static string SeriesHere(RoomSessionState s, bool inRoom, string roomHere,
+                                              string opponentHere)
+            {
+                return SeriesForRoom(s.Bound, inRoom, roomHere, s.Incarnation, opponentHere);
+            }
+
+            /// <summary>Positive evidence that the held id is not this
+            /// room's.</summary>
+            internal static bool ContradictedHere(RoomSessionState s, bool inRoom, string roomHere,
+                                                  string opponentHere)
+            {
+                return SeriesContradictedByRoom(s.Bound, inRoom, roomHere, s.Incarnation, opponentHere);
+            }
+
+            /// <summary>One line describing the session, for the self-test:
+            /// the bound id, the stamp it carries, and the two counters.</summary>
+            internal static string Render(RoomSessionState s)
+            {
+                string id = s.Bound == null || string.IsNullOrEmpty(s.Bound.Value.SeriesId)
+                            ? "-" : s.Bound.Value.SeriesId;
+                string stamp = s.Bound == null ? "none"
+                               : (s.Bound.Value.JoinIncarnation < 0 ? "staged"
+                                  : s.Bound.Value.JoinIncarnation.ToString());
+                return id + "/" + stamp + "@" + s.Incarnation + "/p" + s.PairIncarnation;
+            }
         }
 
         // ── failure handling (review r6 LOW) ───────────────────────────────
@@ -492,7 +665,11 @@ namespace CompetitiveRounds
 
         // ── self-test ──────────────────────────────────────────────────────
 
-        internal const int SELFTEST_CASES = 81;
+        /// The number of cases the self-test is supposed to run. It is a
+        /// tripwire, not a result: it catches a case that stopped running
+        /// (an early return, a case commented out) which a pass count on its
+        /// own cannot. Update it deliberately when cases are added.
+        internal const int SELFTEST_CASES = 97;
 
         /// <summary>Every rule above against canned inputs. A case marked
         /// control expects the WRONG answer and passes only when the harness
@@ -629,6 +806,96 @@ namespace CompetitiveRounds
                                                               OpponentSteamId = OPP, JoinIncarnation = 4 };
                 Check("control:series:name-alone-answers", Series(ref sctl, "ranked_r", 9), "S2/no/4", control: true);
                 Check("control:series:staged-id-answers", Series(ref sb, "ranked_r", 4), "S1/no/none", control: true);
+
+                // ── the room session, driven as SEQUENCES ──────────────────
+                //
+                // Everything above hands a rule a record somebody built by
+                // hand. That cannot see an ORDERING fault, which is what r14
+                // HIGH actually was: the stamp was written with the pairing's
+                // counter, before the series counter had moved, so it could
+                // never equal what its readers compare it against. These cases
+                // run the real transitions, in the order the game runs them,
+                // against the state each one leaves behind.
+                //
+                // Rendered as id/stamp@seriesCounter/pPairCounter.
+                var s0 = new RoomSessionState();
+                Check("seq:menu-is-empty", RoomSession.Render(s0), "-/none@0/p0");
+
+                // The ordinary queue game: an id published from the menu for a
+                // room this seat has not joined, the pairing retained from the
+                // same response, then the join that stamps it.
+                RoomSession.OnSeriesPublished(ref s0, "S1", "ranked_r", false, null);
+                Check("seq:queue-publish-is-staged", RoomSession.Render(s0), "S1/staged@0/p0");
+                RoomSession.OnSeriesPairingRetained(ref s0, "ranked_r", OPP);
+                RoomSession.OnRoomJoined(ref s0, "ranked_r", true);
+                Check("seq:join-stamps-with-the-series-counter", RoomSession.Render(s0), "S1/1@1/p1");
+                Check("seq:and-the-id-answers-here",
+                      RoomSession.SeriesHere(s0, true, "ranked_r", OPP), "S1");
+                // The pairing retained BEFORE the join is what tells two
+                // occupancies of a recurring name apart; the wrong opponent in
+                // the room must not be able to file against this id.
+                Check("seq:another-opponent-in-that-room",
+                      RoomSession.SeriesHere(s0, true, "ranked_r", OTHER), "");
+
+                // A preflight publishes from INSIDE the room it is about --
+                // every game after the first, and every private/tournament
+                // room. No further join is coming to stamp it, so it is
+                // stamped with the occupancy it is published in (r14 HIGH).
+                var s1 = new RoomSessionState();
+                RoomSession.OnRoomJoined(ref s1, "code_room", true);
+                RoomSession.OnSeriesPublished(ref s1, "S2", "code_room", true, "code_room");
+                Check("seq:preflight-publish-is-current", RoomSession.Render(s1), "S2/1@1/p1");
+                Check("seq:and-it-answers-immediately",
+                      RoomSession.SeriesHere(s1, true, "code_room", ""), "S2");
+
+                // The same room name, left and re-entered: a different room.
+                RoomSession.OnRoomLeftReliableEdge(ref s1);
+                Check("seq:reliable-exit-moves-both-counters", RoomSession.Render(s1), "-/none@2/p2");
+                RoomSession.OnRoomJoined(ref s1, "code_room", true);
+                Check("seq:rejoining-the-name-answers-nothing",
+                      RoomSession.SeriesHere(s1, true, "code_room", ""), "");
+
+                // A join this seat cannot name still moves both counters and
+                // drops the binding: we joined something, and cannot prove it
+                // is the room the id was published for.
+                var s2 = new RoomSessionState();
+                RoomSession.OnSeriesPublished(ref s2, "S3", "ranked_r", false, null);
+                RoomSession.OnRoomJoined(ref s2, null, false);
+                Check("seq:join-with-an-unreadable-room-name", RoomSession.Render(s2), "-/none@1/p1");
+
+                // The polled exit is the lossy BACKUP for the callback. It
+                // clears the id and moves no counter, so a poll observing an
+                // exit the callback already handled cannot retire an occupancy
+                // the callback has since opened.
+                var s3 = new RoomSessionState();
+                RoomSession.OnRoomJoined(ref s3, "ranked_r", true);
+                RoomSession.OnRoomExitPolled(ref s3);
+                Check("seq:polled-exit-alone-does-not-bump", RoomSession.Render(s3), "-/none@1/p1");
+                RoomSession.OnRoomLeftReliableEdge(ref s3);
+                RoomSession.OnRoomJoined(ref s3, "ranked_r", true);
+                RoomSession.OnSeriesPublished(ref s3, "S4", "ranked_r", true, "ranked_r");
+                RoomSession.OnRoomExitPolled(ref s3);
+                Check("seq:polled-exit-after-the-reliable-edge-is-idempotent",
+                      RoomSession.Render(s3), "-/none@3/p3");
+
+                // The head-to-head line's own invalidation moves ITS counter
+                // and not the series one. Two questions, two lifetimes.
+                var s4 = new RoomSessionState();
+                RoomSession.OnRoomJoined(ref s4, "ranked_r", true);
+                RoomSession.OnPairInvalidated(ref s4);
+                Check("seq:pair-invalidation-is-not-a-series-event",
+                      RoomSession.Render(s4), "-/none@1/p2");
+
+                // Controls: each names a way the ordering could be wrong.
+                var c0 = new RoomSessionState();
+                RoomSession.OnSeriesPublished(ref c0, "S1", "ranked_r", false, null);
+                RoomSession.OnRoomJoined(ref c0, "ranked_r", true);
+                Check("control:seq:staged-join-stamped-with-the-pair-counter",
+                      RoomSession.Render(c0), "S1/0@1/p1", control: true);
+                Check("control:seq:unreadable-join-keeps-the-binding",
+                      RoomSession.Render(s2), "S3/staged@1/p1", control: true);
+                Check("control:seq:polled-exit-bumped-the-counter",
+                      RoomSession.Render(s3), "-/none@4/p4", control: true);
                 // an unknown opponent is permissive on purpose: the seat that
                 // files a leave is looking at a room the opponent has left
                 RoomBoundSeries? sopp = new RoomBoundSeries { SeriesId = "S3", RoomName = "ranked_r",

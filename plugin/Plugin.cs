@@ -3934,10 +3934,37 @@ namespace CompetitiveRounds
             // the next poll. Offline joins are not an end — the Sandbox is
             // where the probe runs.
             try { MusicStreamProbe.OnRoomJoined(); } catch { }
-            // Release B §1: a fresh head-to-head incarnation for every join,
-            // every role — the request itself is gated on the fighter/1v1
-            // rule at tick time, but the counter must move here so a late
-            // response from the previous room is discarded.
+            // THE join transition, before anything below can return early.
+            // Both occupancy counters move, the queue's pairing is retired
+            // against the line's counter, and the series record is stamped or
+            // dropped against the series counter — one ordering, one body, in
+            // H2HRules where the self-test executes it.
+            //
+            // The room name is read into locals FIRST and the read has its own
+            // guard: passing a Photon expression in the argument list would
+            // mean a throw skips the bumps as well, leaving the previous
+            // occupancy's records standing, which is the unsafe direction. A
+            // join we cannot name still moves both counters and drops the
+            // binding — we joined something, and we cannot prove it is the
+            // room the id was published for.
+            //
+            // This used to be two sites forty-one lines apart with the
+            // broadcast fence's `return` between them, so a seat that took
+            // that fence retired its pairing and never moved the series
+            // counter at all.
+            string joinedRoomName = null;
+            bool joinedRoomNameKnown = false;
+            try
+            {
+                joinedRoomName = Photon.Pun.PhotonNetwork.CurrentRoom?.Name;
+                joinedRoomNameKnown = joinedRoomName != null;
+            }
+            catch { }
+            try { ApiClient.OnRoomJoined(joinedRoomName, joinedRoomNameKnown); } catch { }
+            // Release B §1: the head-to-head line's per-incarnation cache,
+            // cleared after the transition above has moved the counter it is
+            // keyed by. The request itself is gated on the fighter/1v1 rule at
+            // tick time.
             try { H2HSummary.OnJoinedRoom(); } catch { }
             // Join-op settlement bookkeeping BEFORE anything can early-return
             // (broadcast r2 find 1): a room entry terminally resolves the one
@@ -3976,17 +4003,11 @@ namespace CompetitiveRounds
             // spectators just carry a cleared context.
             try
             {
-                // r2 find 2: retire every in-flight preflight from the
-                // PREVIOUS room incarnation — the name fence aliases when a
-                // code room is left and re-entered under the same code.
-                ApiClient.RoomIncarnation++;
-                // The series record's join, immediately after the bump it is
-                // read against. It used to be decided inside
-                // RetireIssuedPairUnless, called forty lines above this from
-                // H2HSummary.OnJoinedRoom -- with H2HSummary's counter, and
-                // before this bump, so the stamp could never equal the value
-                // its readers compare it to (r14 HIGH).
-                try { ApiClient.OnRoomJoinedForSeries(Photon.Pun.PhotonNetwork.CurrentRoom?.Name); } catch { }
+                // The incarnation bump and the series record's join both ran
+                // here until 2026-09-06. They now run in ApiClient.OnRoomJoined
+                // at the top of this method, above the broadcast fence's
+                // return, together with the pairing retirement they have to be
+                // ordered against.
                 GameStateWatcher.ClearTournamentContext();
                 string _rn = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
                 if (_rn.StartsWith("sct-", StringComparison.Ordinal)
@@ -4550,17 +4571,18 @@ namespace CompetitiveRounds
             // backup), and the incarnation bump retires every in-flight
             // preflight from the room we just left (r2 find 2 — a later
             // same-CODE room must not receive them).
-            try { ApiClient.RoomIncarnation++; } catch { }
+            try { ApiClient.OnRoomLeftReliableEdge(); } catch { }
             try { GameStateWatcher.ClearTournamentContext(); } catch { }
-            // r3 find 3: the series id is room-bound state and the polled
-            // exit already clears it unconditionally (GameStateWatcher's
-            // Left-room branch, #347's documented casual→ranked flow relies
-            // on exactly that clear) — mirroring it on the RELIABLE edge
-            // closes the fast same-code leave/rejoin where the stale id
-            // suppressed the new room's preflight and posted the new game's
-            // live points into the old pairing. Menu-time queue-staged ids
-            // are untouched: no room exit fires for them, same as today.
-            try { ApiClient.ClearActiveSeries(); } catch { }
+            // r3 find 3: the series id is room-bound state, and clearing it on
+            // the RELIABLE edge closes the fast same-code leave/rejoin where a
+            // stale id suppressed the new room's preflight and posted the new
+            // game's live points into the old pairing. The polled exit clears
+            // it too (GameStateWatcher's Left-room branch, which #347's
+            // documented casual→ranked flow relies on). That clear is now part
+            // of OnRoomLeftReliableEdge above, with the counter bumps it has to
+            // be ordered against, rather than a second statement here that
+            // could be dropped on its own. Menu-time queue-staged ids are
+            // untouched: no room exit fires for them, same as today.
             // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
             // materials die with the room too — Reset() previously had NO
             // caller, so the flush the r4 cap depends on never ran and a

@@ -654,12 +654,18 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
     api = API_CLIENT_CS.read_text(encoding="utf-8")
     fence = _cs_method_body(API_CLIENT_CS, "public static string SeriesIdForThisRoom()")
     assert "PhotonNetwork.InRoom" in fence
-    assert "H2HRules.SeriesForRoom(activeSeriesBinding" in fence, (
+    assert "H2HRules.RoomSession.SeriesHere(roomSession" in fence, (
         "r13 HIGH: the fence asks the occupancy rule, not a room name"
     )
-    assert "RoomIncarnation, OpponentInRoomOrEmpty());" in fence, (
-        "the fence has to hand the rule the occupancy and the pairing, not a name"
+    assert "OpponentInRoomOrEmpty());" in fence, (
+        "the fence has to hand the rule the pairing in the room, not just a name"
     )
+    # The occupancy counter is no longer passed alongside the record: it is a
+    # FIELD of the session the rule is handed, so the two cannot be supplied
+    # from different places. That is a stronger statement than the argument
+    # order this used to assert - there is no longer a call site that could
+    # pass a record and a counter that do not belong together.
+    assert "roomSession" in fence
     # The id and the room it was published for used to be two assignments a
     # caller had to remember to write together; r13 put both in ONE record and
     # this sweep checked that nothing wrote the id outside the two owners.
@@ -682,19 +688,24 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
         f"the series id is stored somewhere as well as derived: {strays}"
     )
     decl = api.index("public static string ActiveRankedSeriesId")
-    assert "get { return activeSeriesBinding.HasValue" in api[decl:decl + 400], (
+    assert "get { return roomSession.Bound.HasValue" in api[decl:decl + 400], (
         "the id is not derived from the binding it is supposed to describe"
     )
     publish = _cs_method_body(API_CLIENT_CS, "public static void PublishActiveSeries(string seriesId, string room)")
     clear = _cs_method_body(API_CLIENT_CS, "public static void ClearActiveSeries()")
-    assert "H2HRules.PublishSeries(ref activeSeriesBinding" in publish, (
+    assert "H2HRules.RoomSession.OnSeriesPublished(ref roomSession" in publish, (
         "publication no longer goes through the transition that decides the stamp"
     )
-    assert "activeSeriesBinding = null;" in clear, "clearing does not clear the record"
+    assert "H2HRules.RoomSession.OnSeriesEnded(ref roomSession);" in clear, (
+        "clearing does not clear the record"
+    )
 
     # ...and the callers are still the sites they were: 3 publishes (preflight,
-    # queue both_ready, queue poll) and 4 clears (two in ApiClient, the
-    # game-report boundary, the room-leave edge).
+    # queue both_ready, queue poll) and 4 clears (two in ApiClient at the
+    # game-report boundary, the POLLED room exit in GameStateWatcher, and the
+    # RELIABLE room-leave edge in Plugin). The two room edges reach the clear
+    # through their own transitions, which is why this census counts those
+    # entry points and not just one method name.
     sites = []
     for name, src in (("ApiClient.cs", api), ("GameStateWatcher.cs", gsw),
                       ("Plugin.cs", (PLUGIN / "Plugin.cs").read_text(encoding="utf-8"))):
@@ -704,9 +715,23 @@ def test_the_series_is_captured_at_the_observation_not_at_the_send():
                 continue
             if stripped.startswith("public static void ClearActiveSeries"):
                 continue
+            # ...and the two room-edge entry points' own declarations.
+            if stripped.startswith("internal static void OnRoomExitPolled"):
+                continue
+            if stripped.startswith("internal static void OnRoomLeftReliableEdge"):
+                continue
             if "PublishActiveSeries(" in ln:
                 sites.append((name, "publish"))
             elif "ClearActiveSeries()" in ln:
+                sites.append((name, "clear"))
+            # The two ROOM EDGES clear the binding through their own
+            # transitions rather than through ClearActiveSeries, so that the
+            # clear travels with the counter bumps it has to be ordered
+            # against. They are still clear sites and this census still owns
+            # them - counting only one spelling is how a site goes missing.
+            elif "OnRoomExitPolled()" in ln:
+                sites.append((name, "clear"))
+            elif "OnRoomLeftReliableEdge()" in ln:
                 sites.append((name, "clear"))
     assert sorted(sites) == sorted([
         ("ApiClient.cs", "publish"),        # preflight

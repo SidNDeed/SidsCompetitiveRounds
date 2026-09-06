@@ -109,7 +109,12 @@ namespace CompetitiveRounds
         private const int NAME_MAX = 24;
 
         private static State state = State.Idle;
-        private static int incarnation;
+        /// The line's own occupancy counter. It lives in the room session
+        /// (H2HRules.RoomSessionState.PairIncarnation) with the pairing it
+        /// keys, so that a join moves the counter and retires the pairing in
+        /// ONE transition rather than in two statements that a reader has to
+        /// hold in the right order.
+        private static int incarnation { get { return ApiClient.PairIncarnation; } }
         private static Photon.Realtime.Room boundRoom;
         private static string refusedToken;
         private static H2HRules.RetryBudget budget;
@@ -157,14 +162,12 @@ namespace CompetitiveRounds
         /// retire it here (review r8 LOW 1).</summary>
         internal static void OnJoinedRoom()
         {
-            incarnation++;
+            // The counter and the pairing's retirement are the room session's
+            // join transition, performed once by Plugin before anything can
+            // return early. What is left here is this class's own per-
+            // incarnation cache, cleared after that transition has moved the
+            // counter the cache is keyed by.
             ResetIncarnation();
-            try
-            {
-                var room = Photon.Pun.PhotonNetwork.CurrentRoom;
-                ApiClient.RetireIssuedPairUnless(room != null ? room.Name : null, incarnation);
-            }
-            catch { }
         }
 
         /// <summary>Plugin.OnLeftRoom / OnDisconnected, first statement. Any
@@ -172,12 +175,11 @@ namespace CompetitiveRounds
         /// reference after this.</summary>
         internal static void Invalidate()
         {
-            incarnation++;
+            // One transition: the counter moves and the tombstone for the room
+            // it was protecting is dropped (review r8 MEDIUM 2). This is the
+            // reliable edge — Photon's own callback, not a polled one.
+            try { ApiClient.OnPairInvalidated(); } catch { }
             ResetIncarnation();
-            // Out of the room the tombstone was protecting (review r8
-            // MEDIUM 2). This is the reliable edge — Photon's own callback,
-            // not a polled one.
-            try { ApiClient.ClearSupersededIssuedRoom(); } catch { }
         }
 
         private static void ResetIncarnation()
