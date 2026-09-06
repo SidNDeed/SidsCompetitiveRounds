@@ -141,6 +141,18 @@ def _index_module(path):
             elif isinstance(node, ast.AnnAssign):
                 if isinstance(node.target, ast.Name):
                     bind(node.target.id, "data", node)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                # r15. An import binds a name, and WHICH object a name denotes
+                # is part of what a handler does. Removing a batch-added
+                # `DBAPIError` import moved no fingerprint at all, while the
+                # deadlock path naming it stopped being a rollback-and-retry.
+                #
+                # Given their own kind so the affordability bound can count
+                # them separately: a route references ~40 imported names, which
+                # inflates the CLOSURE without inflating the DRIFT, because
+                # import lines change far more rarely than code does.
+                for alias in node.names:
+                    bind(alias.asname or alias.name.split(".")[0], "import", node)
             elif isinstance(node, (ast.If, ast.Try, ast.With)):
                 visit(node.body)
                 visit(getattr(node, "orelse", []))
@@ -238,13 +250,23 @@ def _binding_key(obj):
 def _walk_bindings(seeds):
     """{(module, name): kind} for every binding the seeds reach, seeds included.
 
-    TWO TIERS, and the second one is what keeps this affordable. A def or class
-    is EXPANDED THROUGH -- the names inside it are followed. A data binding is
-    INCLUDED but NOT expanded: its source is fingerprinted, the names inside it
-    are not followed. Expanding data bindings too makes `app = FastAPI(...)` a
-    hub that every decorator references, and the closure goes from a measured
-    median of 15 to a measured median of 179 -- a gate that drifts on every
-    commit is a gate nobody reads.
+    THREE TIERS, and the middle one is what keeps this affordable. A def or
+    class is EXPANDED THROUGH -- every name inside it is followed. A data
+    binding is followed only into OTHER DATA BINDINGS. An import is a leaf.
+
+    The middle tier is the whole cost control, not a compromise: letting a data
+    binding follow names of any kind makes `app = FastAPI(...)` a hub that every
+    route decorator references, and the measured median closure goes from 20 to
+    179 -- every route dragging in most of the app, a fingerprint that certifies
+    nothing because it always moves.
+
+    Data-into-data was missing until r15 found what it cost: a data binding
+    COMPOSED from other data bindings showed only the NAME of what it composed.
+    `_DC_ELIGIBLE_TERMS` is built by concatenating `_DC_EVIDENCE_TERM`, so
+    rewriting the rule that decides whether a disconnect report is accepted
+    moved NO route fingerprint -- measured, 0 of 309 routes covered it. That is
+    exactly the raw-SQL hole this method exists to close, one level of
+    indirection further down.
 
     A bare name is resolved in the module it is written in first and then in
     every other indexed module, and EVERY match is folded in rather than the
@@ -264,13 +286,18 @@ def _walk_bindings(seeds):
             continue
         kind, _text, refs = binding
         reached[key] = kind
-        if kind == "data":
+        if kind == "import":
+            # An import names something defined outside this api. Its own line
+            # is fingerprinted; there is nothing of ours beneath it to follow.
             continue
         order = [module] + [other for other in index if other != module]
         for ref in refs:
             for other in order:
-                if ref in index[other] and (other, ref) not in reached:
-                    frontier.append((other, ref))
+                if ref not in index[other] or (other, ref) in reached:
+                    continue
+                if kind == "data" and index[other][ref][0] != "data":
+                    continue
+                frontier.append((other, ref))
     return reached
 
 
@@ -484,6 +511,62 @@ def _route_identities(routes, prefix=""):
     )
 
 
+def _route_registration_order():
+    """Route identities in the order Starlette will try to match them.
+
+    r15. The manifest sorts, and sorting discards the one property that decides
+    WHICH handler a request reaches: first match wins. Moving a dynamic
+    `/players/{steam_id}` above a static `/players/search` leaves every identity
+    and every fingerprint in this file untouched, while `/players/search`
+    quietly starts being served as `steam_id="search"`.
+
+    Rendered as strings so a reordering shows up in a diff as the two lines that
+    swapped, rather than as a wall of moved JSON."""
+    order = []
+
+    def walk(routes, prefix=""):
+        for route in routes:
+            if isinstance(route, Mount):
+                walk(route.routes, _joined_path(prefix, route.path))
+                continue
+            if not isinstance(route, (APIRoute, APIWebSocketRoute)):
+                continue
+            path = _joined_path(prefix, route.path)
+            if not path.startswith("/api/v1/"):
+                continue
+            methods = ",".join(sorted(getattr(route, "methods", ()) or ())) or "WS"
+            order.append("%s %s -> %s.%s" % (methods, path,
+                                             route.endpoint.__module__,
+                                             route.endpoint.__qualname__))
+
+    walk(main.app.routes)
+    return order
+
+
+def _shadowing_pairs(order):
+    """Pairs where an earlier dynamic path can swallow a later literal one.
+
+    The concrete harm, not a general worry about ordering: `/a/{x}` registered
+    before `/a/search` means `/a/search` is dead."""
+    parsed = []
+    for position, line in enumerate(order):
+        methods, path = line.split(" ", 1)[0], line.split(" ")[1]
+        parsed.append((position, frozenset(methods.split(",")), path.split("/")))
+    pairs = []
+    for early, early_methods, early_parts in parsed:
+        if not any(part.startswith("{") for part in early_parts):
+            continue
+        for late, late_methods, late_parts in parsed:
+            if late <= early or not (early_methods & late_methods):
+                continue
+            if len(early_parts) != len(late_parts):
+                continue
+            if all(a == b or (a.startswith("{") and not b.startswith("{"))
+                   for a, b in zip(early_parts, late_parts)):
+                pairs.append((order[early], order[late]))
+    return pairs
+
+
 def _manifest_id(entry):
     return {key: entry[key] for key in ("path", "methods", "module", "qualname")}
 
@@ -653,12 +736,35 @@ def test_the_helper_closure_stays_affordable():
     routes = [r for r in main.app.routes
               if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
     assert routes
-    sizes = sorted(len(_reached(_route_seeds(r))) for r in routes)
     total = sum(len(names) for names in _binding_index().values())
-    median, p90 = sizes[len(sizes) // 2], sizes[min(len(sizes) - 1, int(len(sizes) * 0.9))]
-    assert median <= 24, f"median closure {median} of {total}"
-    assert p90 <= 75, f"p90 closure {p90} of {total}"
-    assert sizes[-1] <= 280, f"worst closure {sizes[-1]} of {total}"
+
+    def percentiles(counts):
+        counts = sorted(counts)
+        return (counts[len(counts) // 2],
+                counts[min(len(counts) - 1, int(len(counts) * 0.9))],
+                counts[-1])
+
+    reached = [_reached(_route_seeds(route)) for route in routes]
+    code_median, code_p90, code_worst = percentiles(
+        sum(1 for kind in r.values() if kind != "import") for r in reached)
+    all_median, all_p90, all_worst = percentiles(len(r) for r in reached)
+
+    # The CODE tier is the one that drifts, and the r15 repairs left its bounds
+    # alone: measured 20 / 55 / 198 with data-into-data expansion, against
+    # 16 / 48 / 191 before it.
+    assert code_median <= 24, f"median code closure {code_median} of {total}"
+    assert code_p90 <= 75, f"p90 code closure {code_p90} of {total}"
+    assert code_worst <= 280, f"worst code closure {code_worst} of {total}"
+
+    # Imports are counted separately rather than folded in or waved through.
+    # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
+    # honest, because a route really does reference ~40 imported names. What
+    # they do not triple is the DRIFT: an import line changes far more rarely
+    # than the code around it. A walk that has gone wrong still has to fail
+    # here, so the bound is real and not merely raised to fit.
+    assert all_median <= 90, f"median closure {all_median} of {total}"
+    assert all_p90 <= 150, f"p90 closure {all_p90} of {total}"
+    assert all_worst <= 380, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
@@ -862,6 +968,9 @@ def test_the_admission_rule_is_computed_for_every_module_not_just_main():
                 elif isinstance(node, ast.AnnAssign):
                     if isinstance(node.target, ast.Name):
                         expected.add(node.target.id)
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    for alias in node.names:
+                        expected.add(alias.asname or alias.name.split(".")[0])
                 elif isinstance(node, (ast.If, ast.Try, ast.With)):
                     collect(node.body)
                     collect(getattr(node, "orelse", []))
@@ -1220,4 +1329,108 @@ def test_an_imported_helper_moves_the_fingerprint_of_the_route_that_calls_it():
         after = _route_fingerprint(route)
     assert after != before, (
         f"editing {module}.{name} left {route.path} certified unchanged"
+    )
+
+
+def test_an_import_is_part_of_the_surface_a_route_was_reviewed_with():
+    """r15: which object a name denotes decides what the handler does.
+
+    A rollback-and-retry around a database deadlock names `DBAPIError`. Drop
+    that import and the retry becomes a NameError on the one path nothing
+    routinely exercises -- while every route SHA in this manifest is unchanged,
+    because imports were not part of the fingerprint at all."""
+    index = _binding_index()
+    assert index["main"]["DBAPIError"][0] == "import", (
+        "imports must be indexed, and as their own kind"
+    )
+    covering = _route_covering("main", "DBAPIError")
+    assert covering, "no route's fingerprint covers an import it depends on"
+
+    before = _route_fingerprint(covering[0])
+    with _mutated_segment("main", "DBAPIError"):
+        assert _route_fingerprint(covering[0]) != before, (
+            "editing an import moved no route fingerprint"
+        )
+    assert _route_fingerprint(covering[0]) == before
+
+
+def test_a_data_binding_composed_from_another_moves_the_fingerprint():
+    """r15: the raw-SQL hole, one level of indirection further down.
+
+    `_DC_ELIGIBLE_TERMS` is a SQL fragment built by concatenating
+    `_DC_EVIDENCE_TERM` -- the predicate deciding whether a disconnect report is
+    accepted. Because data bindings were included but never expanded, the
+    composed binding showed only the NAME of what it composed, and rewriting
+    that predicate moved nothing. Measured at the time: 0 of 309 routes."""
+    index = _binding_index()
+    assert index["main"]["_DC_EVIDENCE_TERM"][0] == "data"
+
+    covering = _route_covering("main", "_DC_EVIDENCE_TERM")
+    assert covering, (
+        "no route covers the disconnect evidence predicate -- the composed "
+        "binding is showing the name and not the text again"
+    )
+    before = _route_fingerprint(covering[0])
+    with _mutated_segment("main", "_DC_EVIDENCE_TERM"):
+        assert _route_fingerprint(covering[0]) != before
+    assert _route_fingerprint(covering[0]) == before
+
+
+def test_a_data_binding_does_not_drag_in_the_whole_app():
+    """The other half of the same rule, and the reason it is worth a test.
+
+    Data-into-data is safe only because it stops at data. `app = FastAPI(...)`
+    is a data binding that every route decorator references; letting it follow
+    the def it names would put most of the app inside every route's
+    fingerprint, which is the failure mode the affordability bound exists to
+    catch."""
+    index = _binding_index()
+    assert index["main"]["app"][0] == "data"
+    reached = _reached({("main", "app")})
+    assert all(kind == "data" for kind in reached.values()), sorted(
+        key for key, kind in reached.items() if kind != "data"
+    )[:5]
+
+
+def test_the_manifest_records_the_order_requests_are_matched_in():
+    """r15: sorting the manifest discards which handler actually answers.
+
+    Starlette matches in REGISTRATION order, first match wins. Every identity
+    and every fingerprint in this file survives a reordering intact, so without
+    this the manifest certifies that a route exists and stays silent about
+    whether it is reachable."""
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    recorded = document["route_order"]
+    live = _route_registration_order()
+
+    assert live == recorded, (
+        "route registration order changed; first match wins, so confirm the "
+        "moved route is still the one that answers before rebaselining"
+    )
+    assert sorted(recorded) != recorded or len(recorded) < 2, (
+        "the recorded order is sorted, which is the one order that proves "
+        "nothing -- it would survive any reordering of the real routes"
+    )
+    assert len(recorded) == len(_load_manifest()), (
+        "the order section and the identity groups disagree on route count"
+    )
+
+
+def test_no_dynamic_route_is_registered_ahead_of_a_literal_it_swallows():
+    """The concrete harm the order section exists to catch.
+
+    `/players/{steam_id}` ahead of `/players/search` makes the literal route
+    dead: it returns whatever the dynamic handler does with `steam_id="search"`,
+    with no error anywhere. Asserted as a real emptiness, and the detector is
+    checked against a constructed pair so an always-empty result cannot pass."""
+    live = _route_registration_order()
+    assert not _shadowing_pairs(live), _shadowing_pairs(live)[:3]
+
+    # Negative control. Without it this reads as "no shadowing" when what it
+    # may mean is that the detector never fires (#342/#441).
+    planted = ["GET /api/v1/players/{steam_id} -> main.a",
+               "GET /api/v1/players/search -> main.b"]
+    assert _shadowing_pairs(planted) == [(planted[0], planted[1])]
+    assert not _shadowing_pairs(list(reversed(planted))), (
+        "the literal registered FIRST is correct and must not be flagged"
     )
