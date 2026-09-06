@@ -55,10 +55,15 @@ load-bearing and this file exists to stop any of them drifting back:
     needed.
 """
 
+import functools
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
-from _cs_structure import method_spans, strip_comments_only
+from _cs_structure import (and_terms, cs_block, guard_chain, initialiser,
+                           method_spans, strip_comments_only)
 
 import pytest
 
@@ -181,65 +186,201 @@ def test_the_number_is_vanillas_own_branch_decision_not_a_distance():
     assert not re.search(r"driveSteps\s*\+=\s*step\b", tick)
 
 
+def _rounds_dir():
+    """The ROUNDS install this mod is COMPILED against.
+
+      $SCR_ROUNDS_DIR   an explicit override. Set-but-wrong raises; it must
+                        never fall through to a different install silently.
+      <RoundsDir>       read out of plugin/CompetitiveRounds.csproj.
+
+    The csproj value is authoritative because it is literally what MSBuild
+    resolves the type from: the probe's prefix takes a `PlayerVelocity
+    __instance` by compiled type reference, via
+    `$(RoundsDir)/Rounds_Data/Managed`. A gate reading any other install would
+    certify binary A about code compiled against binary B.
+
+    A Steam `libraryfolders.vdf` walk is deliberately NOT consulted. It can
+    only ever yield a DIFFERENT install than the one the build used, and the
+    only correct response to that is to fail — which not consulting it achieves
+    without the extra failure mode. The csproj is READ here, never written.
+    """
+    override = os.environ.get("SCR_ROUNDS_DIR")
+    if override:
+        d = Path(override)
+        if not (d / "Rounds_Data" / "Managed" / "Assembly-CSharp.dll").exists():
+            raise AssertionError(
+                f"SCR_ROUNDS_DIR={override!r} has no Rounds_Data/Managed/"
+                "Assembly-CSharp.dll. An explicit override that is wrong must "
+                "not fall back to another install."
+            )
+        return d
+    csproj = (PLUGIN / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
+    m = re.search(r"<RoundsDir>([^<]+)</RoundsDir>", csproj)
+    assert m, "CompetitiveRounds.csproj no longer declares <RoundsDir>"
+    return Path(m.group(1).strip())
+
+
+@functools.lru_cache(maxsize=1)
+def _decompile_player_velocity():
+    """`PlayerVelocity` decompiled from the installed assembly, during the run.
+
+    Memoised for the session: three gates read it, and a decompile is ~3s of
+    subprocess each. #513 is about a correct widening that quadrupled a suite's
+    runtime, and a gate slow enough to be excluded from the run is the same
+    outcome as a gate nobody reads.
+
+    What this replaces (r14 LOW 4): a snapshot committed under logs-snapshot/,
+    guarded by `snapshot.mtime >= dll.mtime`. Neither half was provenance. The
+    snapshot is gitignored, so on most seats the gate skipped and compared
+    nothing; the freshness check sat inside `if game_dll.exists()` against one
+    hardcoded path, so a non-default library bypassed it silently; and copying
+    or touching an old file satisfies an mtime comparison. A decompile taken
+    from the resolved assembly right now cannot be stale by construction, and
+    there is no artifact left to go stale.
+
+    Returns (source, provenance). Unavailable TOOL or DLL is a visible skip.
+    Anything else — a non-zero exit, an unparseable result — is a FAILURE, with
+    the decompiler version named, because a decompiler upgrade turning a real
+    gate into a silent skip is this same finding one level up.
+    """
+    dll = _rounds_dir() / "Rounds_Data" / "Managed" / "Assembly-CSharp.dll"
+    if not dll.exists():
+        pytest.skip(f"no ROUNDS assembly at {dll}; the copy could not be "
+                    "compared against vanilla on this seat")
+    ilspy = shutil.which("ilspycmd")
+    if ilspy is None:
+        pytest.skip("ilspycmd is not on this machine; the copy could not be "
+                    "compared against vanilla")
+
+    version = subprocess.run([ilspy, "--version"], capture_output=True, text=True,
+                             timeout=120).stdout.strip().replace("\n", " / ")
+    proc = subprocess.run([ilspy, "-t", "PlayerVelocity", str(dll)],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=300)
+    provenance = f"{version} on {dll}"
+    assert proc.returncode == 0, (
+        f"ilspycmd failed on the installed assembly ({provenance}):\n{proc.stderr[-2000:]}"
+    )
+    text = proc.stdout
+    # The type HarmonyX resolves is the global-namespace PlayerVelocity. If the
+    # decompiler starts emitting a namespace, or more than one declaration, the
+    # thing being compared is no longer certainly the thing being patched.
+    assert text.count("class PlayerVelocity") == 1, provenance
+    assert not [ln for ln in text.splitlines() if ln.startswith("namespace ")], (
+        f"PlayerVelocity is no longer a global-namespace type ({provenance})"
+    )
+    return text, provenance
+
+
+def _terms(expr):
+    """A boolean expression as its top-level conjuncts, normalised.
+
+    `and_terms` raises on a top-level `||`, which is the point: an `&&` quietly
+    becoming `||` changes the predicate completely and is invisible to any
+    substring assertion. Both sides of the comparison go through this same
+    function, so neither can be normalised into agreement on its own.
+    """
+    return {" ".join(t.split()).replace("__instance.", "") for t in and_terms(expr)}
+
+
+def _probe_terms():
+    """The prefix's predicate, as terms, with the defensive null guard removed.
+
+    `data != null` has no vanilla counterpart — vanilla dereferences `data`
+    unguarded — so it is dropped by exact match, and its ABSENCE is a failure:
+    dropping it silently is how the two sides would be made to agree by
+    deleting a guard rather than by matching vanilla.
+    """
+    expr = initialiser(PROBE_CS, "private static void Prefix(PlayerVelocity __instance)",
+                       "bool integrating")
+    terms = _terms(expr)
+    assert "data != null" in terms, (
+        "the prefix no longer null-guards `data`; vanilla dereferences it "
+        "unguarded, but the prefix runs on bodies vanilla may never reach"
+    )
+    return terms - {"data != null"}
+
+
 def test_the_restated_guard_still_matches_vanilla():
-    """Method 3 copies three of vanilla's fields, which is the class of thing
-    r11 caught going stale. Both sides of the contract are read here, so the
-    copy cannot drift silently: if ROUNDS changes the guard, this fails.
+    """Method 3 copies vanilla's guard, which is the class of thing r11 caught
+    going stale. Both sides are read STRUCTURALLY here and compared to each
+    other as term sets, so the copy cannot drift silently in either direction:
+    a term added to vanilla, a term dropped from the copy, or the copy's `&&`
+    becoming `||` all fail.
 
     Reachability is deliberately NOT in the copy — Unity does not call
-    FixedUpdate on a component that fails it, so the prefix does not run."""
-    vanilla = (Path(__file__).resolve().parents[2] / "logs-snapshot" / "decompiled"
-               / "full" / "PlayerVelocity.cs")
-    if not vanilla.exists():
-        # r13 LOW. This used to `return`, which a test runner reports as a
-        # PASS -- so the one gate that compares the copy against the original
-        # read green on every seat that does not have the original. The gate
-        # cannot RUN without its input, but it must not claim to have.
-        pytest.skip("no decompile at logs-snapshot/decompiled/full/PlayerVelocity.cs "
-                    "(gitignored); the copy could not be compared against vanilla")
+    FixedUpdate on a component that fails it, so the prefix does not run.
+    """
+    vanilla, provenance = _decompile_player_velocity()
 
-    # ...and a snapshot older than the binary it was taken from is not evidence
-    # about the binary. Only checkable where the game is installed; where it is
-    # not, say so rather than passing.
-    game_dll = Path(r"C:\Program Files (x86)\Steam\steamapps\common\ROUNDS"
-                    r"\Rounds_Data\Managed\Assembly-CSharp.dll")
-    if game_dll.exists():
-        assert vanilla.stat().st_mtime >= game_dll.stat().st_mtime, (
-            "the decompile predates the installed Assembly-CSharp.dll; it is a "
-            "snapshot of an older game and this comparison proves nothing about "
-            "the build the probe runs against"
-        )
+    # Vanilla's guard is NESTED, not a conjunction, and nesting is what makes
+    # the copy's flat `&&` equivalent. Text order plus increasing indentation
+    # does not prove nesting (r14 LOW 5): an already-closed `isPlaying` block
+    # followed by a deeper unrelated one satisfies both. `guard_chain` walks
+    # the mask and returns the conditions that actually DOMINATE the write.
+    dominators = guard_chain(vanilla, "private void FixedUpdate()",
+                             "base.transform.position +=")
+    assert dominators, f"the position write is unguarded in vanilla now ({provenance})"
+    vanilla_terms = set()
+    for condition in dominators:
+        vanilla_terms |= _terms(condition)
 
-    text = vanilla.read_text(encoding="utf-8")
-    body = text[text.index("private void FixedUpdate()"):]
-    body = body[:body.index("internal void AddForce")]
-    assert "if (data.isPlaying)" in body
-    assert "if (simulated && !isKinematic)" in body
-    assert "base.transform.position +=" in body
-
-    # The three terms being PRESENT is not the contract; their NESTING is. The
-    # probe reads `isPlaying && simulated && !isKinematic` as one predicate,
-    # which is only equivalent to vanilla while the second test sits inside the
-    # first and the integration sits inside both. Vanilla flattening these into
-    # siblings would leave every substring above satisfied and the probe
-    # counting a branch that no longer implies the position write.
-    outer = body.index("if (data.isPlaying)")
-    inner = body.index("if (simulated && !isKinematic)")
-    write = body.index("base.transform.position +=")
-    assert outer < inner < write, "the guards are no longer nested outer-to-inner"
-    outer_indent = len(body[:outer].rsplit(chr(10), 1)[-1])
-    inner_indent = len(body[:inner].rsplit(chr(10), 1)[-1])
-    write_indent = len(body[:write].rsplit(chr(10), 1)[-1])
-    assert outer_indent < inner_indent < write_indent, (
-        f"nesting flattened: isPlaying@{outer_indent} simulated@{inner_indent} "
-        f"write@{write_indent}"
+    probe_terms = _probe_terms()
+    assert probe_terms == vanilla_terms, (
+        f"the copied guard no longer matches vanilla ({provenance}).\n"
+        f"  vanilla dominators: {dominators}\n"
+        f"  vanilla terms:      {sorted(vanilla_terms)}\n"
+        f"  probe terms:        {sorted(probe_terms)}"
     )
+
     patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
-    for term in ("data.isPlaying", "__instance.simulated", "!__instance.isKinematic"):
-        assert term in patch, term
     assert "isActiveAndEnabled" not in patch, (
         "reachability is structural here; copying it is what went stale before"
     )
+
+
+def test_the_vanilla_comparison_can_fail():
+    """Negative controls for the gate above, on the probe's half — the half a
+    substring assertion could not see. Each mutation is applied in memory and
+    must break the comparison."""
+    vanilla, _ = _decompile_player_velocity()
+    vanilla_terms = set()
+    for condition in guard_chain(vanilla, "private void FixedUpdate()",
+                                 "base.transform.position +="):
+        vanilla_terms |= _terms(condition)
+    assert _probe_terms() == vanilla_terms, "precondition: the real gate passes"
+
+    probe = PROBE_CS.read_text(encoding="utf-8")
+    real = ("                bool integrating = data != null && data.isPlaying\n"
+            "                                   && __instance.simulated && !__instance.isKinematic;")
+    assert probe.count(real) == 1, "the predicate's shape moved; retarget these controls"
+
+    # (a) `&&` becoming `||` — the mutation that changes the predicate outright
+    flipped = probe.replace(real, real.replace("&& __instance.simulated", "|| __instance.simulated"), 1)
+    with pytest.raises(Exception):
+        _terms(initialiser(flipped, "private static void Prefix(PlayerVelocity __instance)",
+                           "bool integrating"))
+
+    # (b) a term dropped from the copy
+    dropped = probe.replace(real, real.replace(" && !__instance.isKinematic", ""), 1)
+    assert _terms(initialiser(dropped, "private static void Prefix(PlayerVelocity __instance)",
+                              "bool integrating")) - {"data != null"} != vanilla_terms
+
+    # (c) the null guard removed — the copy would otherwise be made to agree by
+    # deleting a guard instead of by matching vanilla
+    unguarded = probe.replace(real, real.replace("data != null && ", ""), 1)
+    assert "data != null" not in _terms(
+        initialiser(unguarded, "private static void Prefix(PlayerVelocity __instance)",
+                    "bool integrating"))
+
+    # (d) the predicate split across two statements, so the initialiser no
+    # longer carries all the terms
+    split = probe.replace(real,
+                          "                bool integrating = data != null && data.isPlaying;\n"
+                          "                integrating = integrating && __instance.simulated "
+                          "&& !__instance.isKinematic;", 1)
+    assert _terms(initialiser(split, "private static void Prefix(PlayerVelocity __instance)",
+                              "bool integrating")) - {"data != null"} != vanilla_terms
 
 
 def test_the_sample_is_taken_after_every_other_prefix_and_refuses_a_co_patched_method():
@@ -270,29 +411,113 @@ def test_the_sample_is_taken_after_every_other_prefix_and_refuses_a_co_patched_m
 
     census = _code(_cs_block(PROBE_CS, "private static void CensusCoPatches()"))
     assert "Harmony.GetPatchInfo(target)" in census
-    assert "info.Prefixes" in census and "info.Transpilers" in census
-    assert "info.Postfixes" not in census, (
-        "a postfix cannot change the branch vanilla already took"
-    )
-    assert "Plugin.ModId" in census, "our own patch would otherwise count as foreign"
-    assert "catch { coPatchCensusFailed = true; }" in census, (
-        '"we could not find out" must not read the same as "there is nothing there"'
-    )
-    assert "if (target == null) { coPatchCensusFailed = true; return; }" in census
 
-    # taken per WINDOW, not once per process: a mod that loads after us patches
-    # a method a startup census has already cleared
-    opened = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
-    assert "CensusCoPatches();" in opened
-    src = PROBE_CS.read_text(encoding="utf-8")
-    assert src.count("CensusCoPatches();") == 1, "the census has a second caller"
+    # r14 MEDIUM 8. EVERY category that can rewrite or replace the body, and
+    # HarmonyX has one plain Harmony does not: an IL manipulator can remove the
+    # integrating branch outright while the census, counting two categories,
+    # reported an uncontested method and the window banked as comparable.
+    for category in ("info.Prefixes", "info.Transpilers", "info.ILManipulators"):
+        assert f"CountForeign({category})" in census, category
+    for harmless in ("info.Postfixes", "info.Finalizers"):
+        assert harmless not in census, (
+            f"{harmless} cannot change the branch vanilla already took; counting it "
+            "would refuse windows for no reason"
+        )
+    counter = _code(_cs_block(PROBE_CS, "private static int CountForeign(ReadOnlyCollection<Patch> list)"))
+    assert "Plugin.ModId" in counter, "our own patch would otherwise count as foreign"
+
+    # "we could not find out" must not read the same as "there is nothing there"
+    assert "catch { failed = true; }" in census
+    assert "if (target == null) failed = true;" in census
+    assert "censusFailedAny = true;" in census
 
     close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
-    assert "bool uncoPatched = coPatches == 0 && !coPatchCensusFailed;" in close
+    assert "bool uncoPatched = !coPatchedAny && !censusFailedAny;" in close, (
+        "comparability must read the window's OR, not one sample"
+    )
     assert "&& uncoPatched" in close, "a co-patched window is still banked as comparable"
-    assert 'coPatchCensusFailed ? " coPatched=?"' in close, (
+    assert 'censusFailedAny ? " coPatched=?"' in close, (
         "a window that could not be censused has to say so"
     )
+
+
+def test_the_census_answers_for_the_whole_window_not_the_moment_it_opened():
+    """r14 MEDIUM 9. The census used to be one snapshot taken in OpenWindow,
+    and the test below it forbade a second caller — so a patch installed
+    lazily, after the open sample and before the steps being measured, left a
+    stale zero standing and the window banked as comparable.
+
+    Four sample points now, and the window's answer is the OR across them. The
+    important one is the physics prefix: `Plugin.cs`'s `modDisabled` return sits
+    ABOVE the call that ticks this probe, so on that seat a Tick-driven census
+    never runs — and that seat is one of the two the census exists for.
+    """
+    probe = PROBE_CS.read_text(encoding="utf-8")
+    assert probe.count("CensusCoPatches();") == 4, (
+        "the census is taken at open, per physics frame, per tick and at close"
+    )
+    for method in ("internal static void OpenWindow(string seat)",
+                   "internal static void Tick()",
+                   "internal static void NotePhysicsStep(int velId, bool willIntegrate)",
+                   "internal static void CloseWindow(string why)"):
+        assert "CensusCoPatches();" in _code(_cs_block(PROBE_CS, method)), method
+
+    # The per-step sampler is frame-gated, and the census is INSIDE that gate.
+    # An unconditional census here would call GetPatchInfo once per body per
+    # fixed step, which is the budget #364 is about.
+    step = _code(_cs_block(PROBE_CS, "internal static void NotePhysicsStep(int velId, bool willIntegrate)"))
+    guard = "if (!coPatchedAny && Time.frameCount != lastCensusFrame)"
+    assert guard in step, "the per-step census is not frame-gated"
+    spans = list(method_spans(step, guard))
+    assert spans, "no block follows the frame gate"
+    gate_open, gate_end = spans[0]
+    gated = step[gate_open:gate_end]
+    assert "lastCensusFrame = Time.frameCount;" in gated
+    assert "CensusCoPatches();" in gated, "the census sits outside its own gate"
+    assert step.count("CensusCoPatches();") == 1
+
+    # ...and the prefix class does not take a census of its own. Anything it
+    # did would run per body per step with no gate at all.
+    patch = _code(_cs_block(PROBE_CS, "internal static class PlayerVelocity_TeardownDrive_Patch"))
+    assert "GetPatchInfo" not in patch
+
+    # The latches are RAISED by the census and cleared in exactly one place.
+    # A reset anywhere else — the top of Tick's try, say — silently restores
+    # the single-snapshot behaviour this finding is about.
+    writes = re.findall(r"(coPatchedAny|censusFailedAny)\s*=\s*(true|false)", probe)
+    assert sorted(writes) == sorted([("coPatchedAny", "false"), ("coPatchedAny", "true"),
+                                     ("censusFailedAny", "false"), ("censusFailedAny", "true")]), writes
+    opened = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    assert "coPatchedAny = false;" in opened and "censusFailedAny = false;" in opened
+    raised = _code(_cs_block(PROBE_CS, "private static void CensusCoPatches()"))
+    assert "coPatchedAny = true;" in raised and "censusFailedAny = true;" in raised
+
+
+def test_the_census_window_gate_can_fail():
+    """The negative control for the gate above. A census hoisted out of its
+    frame gate, and a latch reset added to a second method, must both turn it
+    red — otherwise it is a gate over a source file that happens to say the
+    right words today."""
+    probe = PROBE_CS.read_text(encoding="utf-8")
+
+    hoisted = probe.replace(
+        "            if (!coPatchedAny && Time.frameCount != lastCensusFrame)\n"
+        "            {\n"
+        "                lastCensusFrame = Time.frameCount;\n"
+        "                CensusCoPatches();\n"
+        "            }\n",
+        "            CensusCoPatches();\n", 1)
+    assert hoisted != probe, "the frame gate's exact shape moved; retarget this control"
+    step = strip_comments_only(cs_block(hoisted, "internal static void NotePhysicsStep(int velId, bool willIntegrate)"))
+    assert "if (!coPatchedAny && Time.frameCount != lastCensusFrame)" not in step
+
+    reset = probe.replace(
+        "        internal static void Tick()\n        {\n            if (!open) return;\n",
+        "        internal static void Tick()\n        {\n            if (!open) return;\n"
+        "            coPatchedAny = false;\n", 1)
+    assert reset != probe, "Tick's opening moved; retarget this control"
+    writes = re.findall(r"(coPatchedAny|censusFailedAny)\s*=\s*(true|false)", reset)
+    assert len(writes) == 5, "the extra reset would not be counted"
 
 
 def test_nothing_reconstructs_the_step_any_more():
@@ -394,14 +619,15 @@ def test_a_window_the_patch_did_not_measure_is_not_reported_as_a_zero():
     assert "internal static int Runs { get { return runs; } }" in patch
     assert "bool bracketRan = PlayerVelocity_TeardownDrive_Patch.Runs > prefixRunsAtOpen;" in close
     assert "&& bracketRan" in close, "activity is not part of comparability"
-    assert "else if (!bracketLive || !bracketRan) t.notMeasured++;" in close
+    assert "if (!bracketLive) t.dropBracketDead++;" in close
+    assert "if (!bracketRan) t.dropBracketIdle++;" in close
     assert '.Append(bracketRan ? "" : " bracketRan=0")' in close, (
         "a window nothing ran in has to say so on its own line"
     )
     opened = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
     assert "prefixRunsAtOpen = PlayerVelocity_TeardownDrive_Patch.Runs;" in opened
-    heartbeat = _code(_cs_block(PROBE_CS, "private static void LogTotals()"))
-    assert "notMeasured=" in heartbeat, (
+    reasons = _code(_cs_block(PROBE_CS, "private static string DropReasons(SeatTotals t)"))
+    assert "dropBracketDead=" in reasons and "dropBracketIdle=" in reasons, (
         "the heartbeat has to say how many windows the instrument missed"
     )
 
@@ -737,6 +963,124 @@ def test_the_heartbeat_keeps_each_seats_numbers_apart():
     assert "totals.TryGetValue(seat, out t)" in close
     heartbeat = _code(_cs_block(PROBE_CS, "private static void LogTotals()"))
     assert "foreach (var kv in totals)" in heartbeat
-    for field in ("windows=", "comparable=", "notMeasured=", "physFrames=",
+    for field in ("windows=", "comparable=", "nonComparable=", "physFrames=",
                   "driveSteps=", "moved="):
         assert field in heartbeat, field
+    assert "DropReasons(t)" in heartbeat, "the drops are counted and never printed"
+
+
+# ── the drop tallies ─────────────────────────────────────────────────────────
+
+def _drop_branch(close):
+    """The `else` attached to `if (comparable)`, brace-walked.
+
+    Anchored to that `if` rather than to the first literal "else" in the
+    method: a search for the bare word finds whatever comes first, including
+    one inside an identifier, and would silently measure another block.
+    """
+    _, if_end = list(method_spans(close, "if (comparable)"))[0]
+    tail = close[if_end:]
+    spans = list(method_spans(tail, "else"))
+    assert spans, "the drop branch is not a braced else"
+    else_open, else_end = spans[0]
+    return tail[else_open:else_end]
+
+
+def test_every_comparability_conjunct_is_counted_when_it_drops_a_window():
+    """r14 LOW 3, and the class rather than the instance.
+
+    A window that fails comparability used to increment `notMeasured` on two of
+    the seven conjuncts and nothing at all on the other five, so it was counted
+    in `windows` and nowhere else. In one afternoon's field log that was 39 of
+    120 windows — a third of the evidence sitting in an unexplained gap between
+    two numbers on the heartbeat.
+
+    Counting today's seven by hand would close the instance. This derives the
+    list FROM the predicate, so a conjunct added later without a tally fails
+    here instead of quietly reopening the gap.
+    """
+    expr = initialiser(PROBE_CS, "internal static void CloseWindow(string why)",
+                       "bool comparable")
+    terms = and_terms(expr)          # raises on a top-level `||`
+    assert len(terms) >= 7, terms
+
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    branch = _drop_branch(close)
+
+    tallies = re.findall(r"t\.(drop[A-Za-z]+)\+\+;", branch)
+    assert len(tallies) == len(set(tallies)), f"a tally is incremented twice: {tallies}"
+    assert len(tallies) == len(terms), (
+        f"{len(terms)} conjuncts decide comparability but {len(tallies)} tallies "
+        f"count the drops: {terms} vs {tallies}. A conjunct with no tally is a "
+        "window dropped for a reason the totals never name."
+    )
+
+    # ...and each tally's own line has to name the term it answers for, so the
+    # pairing is checkable rather than positional.
+    lines = [ln.strip() for ln in branch.splitlines() if "++;" in ln and "t.drop" in ln]
+    for term in terms:
+        ident = re.findall(r"[A-Za-z_][A-Za-z_0-9]*", term)
+        assert ident, term
+        assert any(any(i in ln for i in ident) for ln in lines), (
+            f"no drop tally names anything in the conjunct {term!r}"
+        )
+
+    assert "t.nonComparable++;" in branch, "the dropped windows are not counted at all"
+    assert branch.count("t.nonComparable++;") == 1
+
+
+def test_the_drop_tally_gate_can_fail():
+    """The negative control. Appending a conjunct without a tally is the exact
+    regression this gate exists for, so it must turn red on that edit — and a
+    gate that only counts today's seven cannot see it."""
+    probe = PROBE_CS.read_text(encoding="utf-8")
+    widened = probe.replace("                                  && uncoPatched;",
+                            "                                  && uncoPatched\n"
+                            "                                  && somethingNew;", 1)
+    assert widened != probe, "the predicate's last conjunct moved; retarget this control"
+
+    expr = initialiser(widened, "internal static void CloseWindow(string why)", "bool comparable")
+    terms = and_terms(expr)
+    close = strip_comments_only(cs_block(widened, "internal static void CloseWindow(string why)"))
+    else_open, else_end = list(method_spans(close, "else"))[0]
+    tallies = re.findall(r"t\.(drop[A-Za-z]+)\+\+;", close[else_open:else_end])
+    assert len(terms) != len(tallies), (
+        "an extra conjunct did not change the count the real gate compares"
+    )
+
+
+def test_a_census_that_cannot_be_taken_says_so_once():
+    """#430 — a guard is judged by what its refusal costs, and this one's
+    refusal costs everything: while the census keeps throwing, no window in the
+    session can be comparable. Its only other trace is a `coPatched=?` token on
+    a line printed once per twenty windows, so a whole sitting can produce no
+    data and look quiet."""
+    census = _code(_cs_block(PROBE_CS, "private static void CensusCoPatches()"))
+    assert "censusUnavailableLogged" in census
+    assert "Plugin.Log?.LogWarning" in census
+    assert "co-patch census unavailable" in PROBE_CS.read_text(encoding="utf-8")
+
+    # one-shot: the flag is set before the log, so a throw inside logging
+    # cannot produce a second attempt every window
+    assert census.index("censusUnavailableLogged = true;") < census.index("Plugin.Log?.LogWarning")
+
+    # and NOT from Tick, which is per-frame and carries no logging by design
+    tick = _code(_cs_block(PROBE_CS, "internal static void Tick()"))
+    assert "Plugin.Log" not in tick
+
+
+def test_the_line_does_not_claim_an_arrival_the_open_sample_could_not_see():
+    """#351. `coPatchedMid=1` says a co-patch arrived DURING the window, which
+    is only knowable if the opening sample succeeded and read zero. When that
+    sample itself failed, the honest token is `?` — the alternative is a
+    definite claim about a moment nobody observed."""
+    close = _code(_cs_block(PROBE_CS, "internal static void CloseWindow(string why)"))
+    assert 'coPatchedAny && censusFailedAtOpen ? " coPatchedMid=?"' in close
+    assert 'coPatchedAny && coPatchesAtOpen == 0 ? " coPatchedMid=1"' in close
+    assert close.index("coPatchedMid=?") < close.index("coPatchedMid=1"), (
+        "the failed-sample case has to be tested first, or a failed open sample "
+        "reading zero is reported as a definite mid-window arrival"
+    )
+    opened = _code(_cs_block(PROBE_CS, "internal static void OpenWindow(string seat)"))
+    assert "censusFailedAtOpen = censusFailedAny;" in opened
+    assert "coPatchesAtOpen = coPatchedAny ? coPatchesFirst : 0;" in opened

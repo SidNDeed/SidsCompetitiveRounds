@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Text;
 using HarmonyLib;
 using UnityEngine;
@@ -152,7 +153,9 @@ namespace CompetitiveRounds
     /// seats showing the instrument was running. The totals line is made of
     /// exactly the windows that criterion names — the comparable ones — rather
     /// than of every window with a comparable COUNT beside it, so the two
-    /// seats' figures can be read against each other directly.
+    /// seats' figures can be read against each other directly. Every window
+    /// that did NOT make that cut is counted under the reason it failed, so
+    /// the gap between `windows` and `comparable` is always accounted for.
     ///
     /// Bounded on purpose: a broadcast seat sits in matches all day, so this
     /// logs the first MAX_REPORTS windows of a session and then a periodic
@@ -278,16 +281,60 @@ namespace CompetitiveRounds
         /// otherwise be banked as a measured zero (r13 LOW).</summary>
         private static int prefixRunsAtOpen;
 
-        /// <summary>Foreign prefixes and transpilers on PlayerVelocity.FixedUpdate
-        /// at the moment this window opened, and whether the census could be
+        /// <summary>What the co-patch census read, and whether it could be
         /// taken at all. Either one makes the window non-comparable: this probe
         /// reads the fields vanilla is about to read, and another patch that
         /// writes them after us, or rewrites the method body, or declines to
         /// run the original, makes "the branch vanilla took" a claim we are not
         /// in a position to make. Refusing loudly is the outcome this file
-        /// prefers over a number with an asterisk (r13 MEDIUM).</summary>
-        private static int coPatches;
-        private static bool coPatchCensusFailed;
+        /// prefers over a number with an asterisk (r13 MEDIUM).
+        ///
+        /// FIVE fields rather than two, because one snapshot at open answered a
+        /// different question than the one being asked (r14 MEDIUM 9). A patch
+        /// installed lazily -- by a mod that patches when its own feature first
+        /// fires, rather than at load -- lands AFTER the open sample and before
+        /// the steps being measured, and the stale zero let such a window bank
+        /// as comparable. The census is now taken at open, on every frame
+        /// carrying a physics step, on every Tick and at close, and the
+        /// window's answer is the OR across all of them:
+        ///
+        ///   coPatchedAny       some sample saw a foreign body-rewriting patch;
+        ///   censusFailedAny    some sample could not find out;
+        ///   coPatchesAtOpen    what the OPEN sample counted, and
+        ///   censusFailedAtOpen whether it counted anything at all -- kept so
+        ///                      the line can say a co-patch arrived DURING the
+        ///                      window, and can decline to say it when the open
+        ///                      sample itself failed (#351: a claim must not
+        ///                      outrun the sample it rests on);
+        ///   coPatchesFirst     the count read by the first sample that saw
+        ///                      any. Deliberately not a maximum: samples taken
+        ///                      at different moments are different
+        ///                      measurements and folding them into one number
+        ///                      is what #511 is about.</summary>
+        private static bool coPatchedAny;
+        private static bool censusFailedAny;
+        private static int coPatchesAtOpen;
+        private static bool censusFailedAtOpen;
+        private static int coPatchesFirst;
+
+        /// <summary>The frame the in-window sampler last censused on.
+        ///
+        /// That sampler is driven from the physics prefix rather than from
+        /// Tick, because the prefix is the only hook that is live inside the
+        /// window on EVERY seat: `Plugin.cs`'s `modDisabled` return sits above
+        /// the call that ticks this probe, so a Tick-driven census does not run
+        /// on one of the seats the census exists for. Frame-gated, so the
+        /// steady per-step cost is one int compare and one branch and the
+        /// GetPatchInfo allocation happens at most once per frame -- the rate
+        /// the design already accepted for Tick (#364's budget).</summary>
+        private static int lastCensusFrame = -1;
+
+        /// <summary>One-shot for the process. A census that cannot be taken
+        /// makes every window non-comparable for as long as it keeps failing,
+        /// and its only other trace is a token on a heartbeat printed once per
+        /// twenty windows -- so a whole sitting can produce no data and look
+        /// quiet. A refusal that costs everything has to say so once (#430).</summary>
+        private static bool censusUnavailableLogged;
 
         private static int reports;
 
@@ -304,7 +351,28 @@ namespace CompetitiveRounds
             internal int driveSteps;
             internal float moved;
             internal int comparable;    // the windows every other field is made of
-            internal int notMeasured;   // windows dropped because the patch was not live
+            internal int nonComparable; // and the rest; the two sum to windows
+
+            // One tally per conjunct of the comparability predicate, each
+            // named for the term it answers for.
+            //
+            // Until r14 LOW 3 there was a single `notMeasured`, incremented on
+            // two of the seven conjuncts, so a window dropped for any of the
+            // other five was counted in `windows` and nowhere else. In Sid's
+            // 2026-09-06 log that was 39 of 120 windows: a third of the
+            // evidence present as an unexplained gap between two numbers.
+            //
+            // A window can fail several conjuncts at once, so these OVERLAP and
+            // sum to at least nonComparable. They explain the drops; they do
+            // not partition them, and the identity that holds is
+            // comparable + nonComparable == windows.
+            internal int dropEarlyClose;
+            internal int dropRevived;
+            internal int dropNoFrames;
+            internal int dropNoBodies;
+            internal int dropBracketDead;
+            internal int dropBracketIdle;
+            internal int dropCoPatched;
         }
 
         private static readonly Dictionary<string, SeatTotals> totals =
@@ -338,7 +406,15 @@ namespace CompetitiveRounds
                 rosterIdsAtOpen.Clear();
                 rosterAtOpen = SnapshotRoster();
                 prefixRunsAtOpen = PlayerVelocity_TeardownDrive_Patch.Runs;
+                coPatchedAny = false;
+                censusFailedAny = false;
+                coPatchesFirst = 0;
+                lastCensusFrame = -1;
                 CensusCoPatches();
+                // Held apart from the running OR so the line can distinguish
+                // "it was already there" from "it arrived while we watched".
+                coPatchesAtOpen = coPatchedAny ? coPatchesFirst : 0;
+                censusFailedAtOpen = censusFailedAny;
                 windowsTotal++;
             }
             catch { open = false; }
@@ -355,6 +431,8 @@ namespace CompetitiveRounds
                     CloseWindow("horizon");
                     return;
                 }
+
+                CensusCoPatches();
 
                 var players = PlayerManager.instance != null ? PlayerManager.instance.players : null;
                 if (players == null) return;
@@ -506,6 +584,19 @@ namespace CompetitiveRounds
         internal static void NotePhysicsStep(int velId, bool willIntegrate)
         {
             if (!open) return;
+
+            // The in-window census (r14 MEDIUM 9), driven from here because
+            // this is the one hook that runs inside the window on every seat.
+            // Frame-gated for cost, and stopped once the OR is raised: a window
+            // already known non-comparable buys nothing from further sampling,
+            // which is also what bounds the work on a seat whose window stays
+            // open until the room is left.
+            if (!coPatchedAny && Time.frameCount != lastCensusFrame)
+            {
+                lastCensusFrame = Time.frameCount;
+                CensusCoPatches();
+            }
+
             StepCount c;
             if (!stepCounts.TryGetValue(velId, out c))
             {
@@ -552,15 +643,19 @@ namespace CompetitiveRounds
                 // COUNTING the comparable ones produced a figure nobody could
                 // evaluate.
                 //
-                // Four conditions, and the last one is the important one: a
+                // SEVEN conjuncts, and they make one point: a window whose
+                // number cannot be attributed to vanilla must not be banked as
+                // one that can. The sharpest case is the instrument itself -- a
                 // window measured by a patch that never attached, or by one
                 // that latched dead on an exception, reports zero integrating
-                // steps for the same reason a properly stopped body does. That
-                // is the failure direction this probe cannot have (#83), so
-                // such a window is banked nowhere and counted as notMeasured.
-                // Six conditions now, and the last three are all the same
-                // point: a window whose number cannot be attributed to vanilla
-                // must not be banked as one that can.
+                // steps for the same reason a properly stopped body does, which
+                // is the failure direction this probe cannot have (#83).
+                //
+                // A window that fails any of them is banked nowhere, counted in
+                // `nonComparable`, and counted again under each conjunct it
+                // failed. Do not add a conjunct here without adding its tally
+                // below: an unaccounted drop is invisible in the totals, and
+                // the count in this sentence is part of what a gate checks.
                 //
                 //   bracketLive     the patch attached at some point and has
                 //                   not latched dead;
@@ -575,9 +670,10 @@ namespace CompetitiveRounds
                 //                   after us, rewrites the body, or declines to
                 //                   run the original makes that reading a claim
                 //                   about somebody else's code.
+                CensusCoPatches();
                 bool bracketLive = PlayerVelocity_TeardownDrive_Patch.Alive;
                 bool bracketRan = PlayerVelocity_TeardownDrive_Patch.Runs > prefixRunsAtOpen;
-                bool uncoPatched = coPatches == 0 && !coPatchCensusFailed;
+                bool uncoPatched = !coPatchedAny && !censusFailedAny;
                 bool comparable = why == COMPARABLE_CLOSE
                                   && !revived
                                   && frames > 0
@@ -598,7 +694,20 @@ namespace CompetitiveRounds
                     t.driveSteps += driveSteps;
                     t.moved += totalMoved;
                 }
-                else if (!bracketLive || !bracketRan) t.notMeasured++;
+                else
+                {
+                    // One line per conjunct above, each naming its own term, so
+                    // a conjunct added without a tally is a hole a gate can
+                    // see rather than a silent gap in the totals (r14 LOW 3).
+                    t.nonComparable++;
+                    if (why != COMPARABLE_CLOSE) t.dropEarlyClose++;
+                    if (revived) t.dropRevived++;
+                    if (frames == 0) t.dropNoFrames++;
+                    if (bodies.Count == 0) t.dropNoBodies++;
+                    if (!bracketLive) t.dropBracketDead++;
+                    if (!bracketRan) t.dropBracketIdle++;
+                    if (!uncoPatched) t.dropCoPatched++;
+                }
 
                 if (reports >= MAX_REPORTS)
                 {
@@ -620,8 +729,13 @@ namespace CompetitiveRounds
                   .Append(rosterChanged ? " rosterChanged=1" : "")
                   .Append(" bracket=").Append(bracketLive ? "live" : "absent")
                   .Append(bracketRan ? "" : " bracketRan=0")
-                  .Append(coPatchCensusFailed ? " coPatched=?"
-                          : (coPatches > 0 ? " coPatched=" + coPatches : ""))
+                  .Append(censusFailedAny ? " coPatched=?"
+                          : (coPatchedAny ? " coPatched=" + coPatchesFirst : ""))
+                  // Whether it ARRIVED during the window. Only sayable when the
+                  // open sample succeeded and read zero; when that sample
+                  // failed, "mid" is a claim about a moment nobody observed.
+                  .Append(coPatchedAny && censusFailedAtOpen ? " coPatchedMid=?"
+                          : (coPatchedAny && coPatchesAtOpen == 0 ? " coPatchedMid=1" : ""))
                   .Append(" comparable=").Append(comparable ? "1" : "0")
                   .Append(revived ? " revived=1" : "")
                   .Append(" physFrames=").Append(physFrames).Append("/").Append(frames)
@@ -658,12 +772,20 @@ namespace CompetitiveRounds
         /// reading, so it cannot be split across lines whose seats are only
         /// known from when they happened to be written.
         ///
-        /// `windows` is every window the seat held; every other field is made
-        /// of the `comparable` subset only. A seat whose two numbers diverge is
-        /// telling you its windows are being cut short, and `notMeasured` says
-        /// how many of them were dropped because the instrument was not
-        /// running at all — which is worth knowing before reading anything
-        /// beside it.</summary>
+        /// `windows` is every window the seat held; every other measured
+        /// field is made of the `comparable` subset only. A seat whose two
+        /// numbers diverge is telling you its windows are being cut short, and
+        /// the `drop*` tallies say why — one per conjunct of the comparability
+        /// predicate, printed only where non-zero. They overlap, since a window
+        /// can fail several at once, so they sum to at least `nonComparable`
+        /// rather than to exactly it; the identity that holds is
+        /// `comparable + nonComparable == windows`.
+        ///
+        /// Before r14 LOW 3 the only account here was a `notMeasured` covering
+        /// two of the seven conjuncts, and windows failing the other five were
+        /// counted in `windows` and nowhere else — 39 of 120 in one afternoon's
+        /// log, which is not a rounding error but a third of the reading
+        /// sitting in a gap between two numbers.</summary>
         private static void LogTotals()
         {
             try
@@ -675,7 +797,8 @@ namespace CompetitiveRounds
                     sb.Append(" | ").Append(kv.Key)
                       .Append(": windows=").Append(t.windows)
                       .Append(" comparable=").Append(t.comparable)
-                      .Append(" notMeasured=").Append(t.notMeasured)
+                      .Append(" nonComparable=").Append(t.nonComparable)
+                      .Append(DropReasons(t))
                       .Append(" physFrames=").Append(t.physFrames).Append("/").Append(t.frames)
                       .Append(" driveSteps=").Append(t.driveSteps).Append("/").Append(t.steps)
                       .Append(" moved=").Append(t.moved.ToString("F2"));
@@ -683,6 +806,23 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogInfo(sb.ToString());
             }
             catch { }
+        }
+
+        /// <summary>Why the dropped windows were dropped, printed only where a
+        /// tally is non-zero so an ordinary heartbeat stays one readable line.
+        /// A seat whose `windows` and `comparable` diverge used to give no
+        /// account of the difference at all; this is that account.</summary>
+        private static string DropReasons(SeatTotals t)
+        {
+            var sb = new StringBuilder();
+            if (t.dropEarlyClose > 0) sb.Append(" dropEarlyClose=").Append(t.dropEarlyClose);
+            if (t.dropRevived > 0) sb.Append(" dropRevived=").Append(t.dropRevived);
+            if (t.dropNoFrames > 0) sb.Append(" dropNoFrames=").Append(t.dropNoFrames);
+            if (t.dropNoBodies > 0) sb.Append(" dropNoBodies=").Append(t.dropNoBodies);
+            if (t.dropBracketDead > 0) sb.Append(" dropBracketDead=").Append(t.dropBracketDead);
+            if (t.dropBracketIdle > 0) sb.Append(" dropBracketIdle=").Append(t.dropBracketIdle);
+            if (t.dropCoPatched > 0) sb.Append(" dropCoPatched=").Append(t.dropCoPatched);
+            return sb.ToString();
         }
 
         private static Vector3 SafePos(List<Player> players, int i)
@@ -720,35 +860,82 @@ namespace CompetitiveRounds
         /// applied by a mod that loads after us, and a census taken at startup
         /// would answer for a world that no longer exists.
         ///
-        /// Prefixes and transpilers only. A postfix cannot change the branch
-        /// vanilla took before it ran, so it does not invalidate the reading;
-        /// a prefix can write the three fields after us or decline to run the
-        /// original, and a transpiler can replace the branch outright.
+        /// EVERY category that can rewrite or replace the body: prefixes,
+        /// transpilers and IL MANIPULATORS. A postfix cannot change the branch
+        /// vanilla took before it ran, and a finalizer wraps the call rather
+        /// than rewriting it, so neither invalidates the reading; a prefix can
+        /// write the three fields after us or decline to run the original, and
+        /// a transpiler or an IL manipulator can replace the branch outright.
         ///
-        /// A census that THROWS is not a census: `coPatchCensusFailed` makes
-        /// the window non-comparable exactly as a positive count does, because
-        /// "we could not find out" and "there is nothing there" must not be the
-        /// same answer.</summary>
+        /// ILManipulators is a HarmonyX category that plain Harmony does not
+        /// have, and leaving it out let a foreign rewrite of the integrating
+        /// branch pass as an uncontested window (r14 MEDIUM 8). It is a public
+        /// field on `HarmonyLib.Patches` in the 0Harmony.dll this mod actually
+        /// references -- read out of that assembly rather than assumed from the
+        /// API surface of some other Harmony build (#123's class: a probe must
+        /// be checked against the artifact it will run against).
+        ///
+        /// A census that THROWS is not a census: `censusFailedAny` makes the
+        /// window non-comparable exactly as a positive count does, because "we
+        /// could not find out" and "there is nothing there" must not be the
+        /// same answer. Both are RAISED and never lowered here -- the window's
+        /// answer is the OR over every sample taken during it, and only
+        /// OpenWindow clears them.</summary>
         private static void CensusCoPatches()
         {
-            coPatches = 0;
-            coPatchCensusFailed = false;
+            int foreign = 0;
+            bool failed = false;
             try
             {
                 var target = AccessTools.Method(typeof(PlayerVelocity), "FixedUpdate");
-                if (target == null) { coPatchCensusFailed = true; return; }
-                var info = Harmony.GetPatchInfo(target);
-                if (info == null) return;
-                int foreign = 0;
-                if (info.Prefixes != null)
-                    foreach (var p in info.Prefixes)
-                        if (!string.Equals(p.owner, Plugin.ModId, StringComparison.Ordinal)) foreign++;
-                if (info.Transpilers != null)
-                    foreach (var p in info.Transpilers)
-                        if (!string.Equals(p.owner, Plugin.ModId, StringComparison.Ordinal)) foreign++;
-                coPatches = foreign;
+                if (target == null) failed = true;
+                else
+                {
+                    var info = Harmony.GetPatchInfo(target);
+                    if (info != null)
+                    {
+                        foreign += CountForeign(info.Prefixes);
+                        foreign += CountForeign(info.Transpilers);
+                        foreign += CountForeign(info.ILManipulators);
+                    }
+                }
             }
-            catch { coPatchCensusFailed = true; }
+            catch { failed = true; }
+
+            if (failed)
+            {
+                censusFailedAny = true;
+                if (!censusUnavailableLogged)
+                {
+                    censusUnavailableLogged = true;
+                    // Once, and from here rather than from Tick: Tick is
+                    // per-frame and carries no logging at all by design.
+                    try
+                    {
+                        Plugin.Log?.LogWarning("[SPEC-FREEZE] co-patch census unavailable; "
+                                               + "no window can be comparable this session");
+                    }
+                    catch { }
+                }
+            }
+            else if (foreign > 0)
+            {
+                if (!coPatchedAny) coPatchesFirst = foreign;
+                coPatchedAny = true;
+            }
+        }
+
+        /// <summary>Foreign entries in one patch category. `owner` is the
+        /// Harmony id that applied the patch; ours is not foreign. A null
+        /// category is an empty one, which is what HarmonyX returns for a
+        /// method nobody has patched in that way.</summary>
+        private static int CountForeign(ReadOnlyCollection<Patch> list)
+        {
+            if (list == null) return 0;
+            int n = 0;
+            foreach (var p in list)
+                if (!string.Equals(p.owner, Plugin.ModId, StringComparison.Ordinal)) n++;
+            return n;
         }
     }
 
