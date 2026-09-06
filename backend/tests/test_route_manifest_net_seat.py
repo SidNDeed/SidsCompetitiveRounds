@@ -8,9 +8,11 @@ from datetime import datetime, timezone
 from hashlib import sha1
 import ast
 import inspect
+import contextlib
 import sys
 import textwrap
 import json
+import typing
 from pathlib import Path
 from uuid import UUID
 
@@ -37,191 +39,392 @@ PINNED_FASTAPI = next(
     if line.startswith("fastapi==")
 )
 
-# Module-level helpers whose source is part of a handler's reviewed surface.
-#
-# r8 LOW 5 introduced this as a hand-written dict, and r11 found the hole that
-# shape always has: it held one entry, and the release that moved
-# _pick_room_region — which decides the region both seats of a pair are told to
-# connect to — left the two routes that return it certified unchanged, because
-# their own source had not moved. A list of exceptions fails precisely when
-# someone extracts a helper, which is the case it exists for.
-#
-# So the closure is computed instead. It is affordable: this api has 692
-# module-level functions and the transitive closure of a route is 6 of them at
-# the median, 21 at p90 and 92 at the worst (/api/v1/matches) -- a gate that
-# drifted on every commit would be a gate nobody reads. Re-measure these
-# numbers when the walk changes shape; they were 4/17/52 of 608 before r13 M8
-# widened it to imported helpers, and a stale figure here is the kind of claim
-# the gate itself exists to catch.
-_SERVED_MODULES = {}
-
-
-def _served_modules():
-    """Every module that DEFINES a route this gate enumerates.
-
-    r12 MEDIUM. The closure below used to be computed over `vars(main)` alone,
-    and `main` is not where all of this api lives: tournaments defines its own
-    routes and the helpers those routes delegate to. A change to a tournaments
-    helper -- `_build_current_response` composes what a tournament route
-    returns -- therefore moved no fingerprint at all, and the gate certified
-    every one of those handlers unchanged. Following helpers transitively
-    inside one module is not the same as following them, and this gate's whole
-    claim is that implementation drift forces a re-review.
-
-    Discovered from the app's own routes rather than listed, for the same
-    reason the closure is computed rather than curated: a list is wrong the
-    first time someone adds a router."""
-    if _SERVED_MODULES:
-        return _SERVED_MODULES
-    _SERVED_MODULES["main"] = main
-    stack = list(main.app.routes)
-    while stack:
-        route = stack.pop()
-        if isinstance(route, Mount):
-            stack.extend(route.routes)
-            continue
-        endpoint = getattr(route, "endpoint", None)
-        if endpoint is None:
-            continue
-        name = getattr(endpoint, "__module__", None)
-        module = sys.modules.get(name)
-        if module is not None:
-            _SERVED_MODULES.setdefault(name, module)
-    return _SERVED_MODULES
-
-
 API_DIR = (Path(__file__).parents[1] / "api").resolve()
 
+# ── The binding index ────────────────────────────────────────────────────
+#
+# r14 M7. Every previous version of this walk resolved a NAME to an OBJECT and
+# then asked `inspect` for that object's source. An object has already thrown
+# away the statement that bound it, and that erasure was the defect: a
+# dataclass default that decides every persisted bracket row survived only
+# because it happens to live inside a class, whose statement inspect can still
+# recover. A raw SQL string 32 routes execute, a rank-tier table, a rate-limit
+# tuple and a partial are the identical defect with no class to hide in -- all
+# of them outside every fingerprint while this gate reported all-clear.
+#
+# So the node type is a first-party module-level BINDING, not a first-party
+# object, and the source comes from parsing the module rather than from
+# introspecting a value. The rule then never has to ask what KIND of thing a
+# name denotes.
+#
+# Measured on this tree: 8 modules, 1282 bindings, ~5.3 s to build once per
+# process. Re-measure when the index changes shape; a stale figure here is the
+# kind of claim this gate exists to catch.
 
-def _is_ours(fn):
-    """Whether a function is part of THIS api's source rather than a library's.
+_DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_BINDING_INDEX = {}
 
-    The filter used to be `__module__ == <the module we found it in>`, which
-    silently meant "defined here". r13 MEDIUM: `tournaments` imports
-    `build_double_elim_bracket` from `tournament_bracket` and calls it from a
-    route, so under that rule the function that lays out a bracket was in no
-    route's fingerprint at all. What actually matters is whether the source is
-    ours to review, and the file says so."""
+
+def _index_module(path):
+    """{name: (kind, source segment, referenced names)} for every MODULE-SCOPE
+    binding in one file.
+
+    `kind` is "def" for FunctionDef/AsyncFunctionDef/ClassDef and "data" for
+    Assign/AnnAssign. A def's segment starts at its first DECORATOR line, so a
+    route's own decorator -- which carries its path and response_model -- is
+    inside its fingerprint.
+
+    Module-level If/Try/With bodies are recursed into, which is not optional:
+    main binds `_PIL_AVAILABLE`/`_PILImage` inside a try/except and
+    tournament_bracket binds inside `if __name__`. A name bound more than once
+    at module scope CONCATENATES its segments rather than replacing them, so a
+    conditional rebinding cannot hide half its source. No name is rebound at
+    module scope today -- so that is a guard against a future edit, not a
+    workaround for a present one."""
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    table = {}
+
+    def segment(node):
+        start = node.lineno
+        for decorator in getattr(node, "decorator_list", ()):
+            start = min(start, decorator.lineno)
+        # `ast` ends a node at its last STATEMENT, but a binding's SOURCE runs
+        # to the end of its block -- so a comment sitting after the last
+        # statement, still inside the function, is dropped. That is exactly
+        # where a rule gets written down, and the fidelity control below caught
+        # it on this file's first run. Absorb trailing lines that are blank or
+        # comments indented INSIDE the binding, and stop at the first line that
+        # is anything else; buffered, so trailing blanks alone are not swept in.
+        end = node.end_lineno
+        pending = []
+        for offset in range(node.end_lineno, len(lines)):
+            stripped = lines[offset].strip()
+            if not stripped:
+                pending.append(offset)
+                continue
+            indent = len(lines[offset]) - len(lines[offset].lstrip())
+            if stripped.startswith("#") and indent > node.col_offset:
+                pending.append(offset)
+                end = offset + 1
+                continue
+            break
+        del pending
+        return "".join(lines[start - 1:end])
+
+    def referenced(node):
+        names = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name):
+                names.add(sub.id)
+            elif isinstance(sub, ast.Attribute):
+                names.add(sub.attr)
+        return names
+
+    def bind(name, kind, node):
+        text, refs = segment(node), referenced(node)
+        if name in table:
+            prev_kind, prev_text, prev_refs = table[name]
+            table[name] = (prev_kind, prev_text + text, prev_refs | refs)
+        else:
+            table[name] = (kind, text, refs)
+
+    def visit(body):
+        for node in body:
+            if isinstance(node, _DEF_NODES):
+                bind(node.name, "def", node)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    for sub in ast.walk(target):
+                        if isinstance(sub, ast.Name):
+                            bind(sub.id, "data", node)
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name):
+                    bind(node.target.id, "data", node)
+            elif isinstance(node, (ast.If, ast.Try, ast.With)):
+                visit(node.body)
+                visit(getattr(node, "orelse", []))
+                visit(getattr(node, "finalbody", []))
+                for handler in getattr(node, "handlers", []):
+                    visit(handler.body)
+
+    visit(ast.parse(source).body)
+    return {name: (kind, text, frozenset(refs))
+            for name, (kind, text, refs) in table.items()}
+
+
+def _binding_index():
+    """{module stem: bindings} over every .py file in backend/api.
+
+    Discovered from the DIRECTORY rather than from the modules the app happens
+    to have imported: which files serve routes is a fact about today's routing
+    table, and a helper does not stop being ours because the route that reached
+    it moved."""
+    if not _BINDING_INDEX:
+        for path in sorted(API_DIR.glob("*.py")):
+            _BINDING_INDEX[path.stem] = _index_module(path)
+    return _BINDING_INDEX
+
+
+_SEGMENT_MEMO = {}
+
+
+def _segment(module, name):
+    """THE source-text seam.
+
+    Every byte that reaches a fingerprint comes through here, and every
+    mutation control in this file patches THIS rather than `inspect.getsource`.
+    That is what makes the controls test the shipped rule: a control that
+    patches a function the rule no longer calls passes for the wrong reason.
+    The memo is keyed, so a control evicts one key and restores it."""
+    key = (module, name)
+    if key not in _SEGMENT_MEMO:
+        binding = _binding_index().get(module, {}).get(name)
+        _SEGMENT_MEMO[key] = "" if binding is None else binding[1]
+    return _SEGMENT_MEMO[key]
+
+
+@contextlib.contextmanager
+def _mutated_segment(module, name):
+    """Edit ONE binding's source through the seam every fingerprint reads.
+
+    Every mutation control in this file uses this. The previous controls
+    patched `inspect.getsource`, which the rule called until this range and
+    does not call now -- so they would have gone on passing while testing
+    nothing at all. Patching the memo instead means a control can only pass if
+    the shipped rule really does read that binding's text."""
+    key = (module, name)
+    original = _segment(module, name)
+    assert original, f"{module}.{name} is not an indexed binding"
+    _SEGMENT_MEMO[key] = original + "\n# mutation\n"
     try:
-        path = Path(inspect.getfile(fn)).resolve()
+        yield
+    finally:
+        _SEGMENT_MEMO[key] = original
+
+
+def _route_fingerprint(route):
+    for entry in _route_identities([route]):
+        return entry["source_sha1"]
+    raise AssertionError("the route did not enumerate")
+
+
+def _binding_kind(module, name):
+    binding = _binding_index().get(module, {}).get(name)
+    return None if binding is None else binding[0]
+
+
+def _is_ours(obj):
+    """Whether an object's source is ours to review. Used only to turn the
+    app's own objects (endpoints, dependencies, response models, middleware)
+    into index keys -- never to decide what the walk may step through."""
+    try:
+        return Path(inspect.getfile(obj)).resolve().parent == API_DIR
     except (TypeError, OSError):
         return False
-    return path.parent == API_DIR
 
 
-_MODULE_FUNCTIONS_CACHE = {}
+def _binding_key(obj):
+    """(module, name) for a first-party object, or None."""
+    if not _is_ours(obj):
+        return None
+    module = getattr(obj, "__module__", None)
+    name = getattr(obj, "__name__", None)
+    if not module or not name:
+        return None
+    return (module, name)
 
 
-def _module_functions(extra_modules=()):
-    """{(module-as-seen, name): function} over every served module, plus any
-    module a walk has stepped into. Keyed by the module the NAME is spelled in,
-    which is how a reference resolves; the function it points at may be defined
-    anywhere in this api."""
-    modules = dict(_served_modules())
-    for mod_name in extra_modules:
-        module = sys.modules.get(mod_name)
-        if module is not None:
-            modules.setdefault(mod_name, module)
-    key = frozenset(modules)
-    cached = _MODULE_FUNCTIONS_CACHE.get(key)
-    if cached is not None:
-        return cached
-    table = {}
-    for mod_name, module in modules.items():
-        for name, obj in vars(module).items():
-            if inspect.isfunction(obj) and _is_ours(obj):
-                table[(mod_name, name)] = obj
-    _MODULE_FUNCTIONS_CACHE[key] = table
-    return table
+def _walk_bindings(seeds):
+    """{(module, name): kind} for every binding the seeds reach, seeds included.
 
+    TWO TIERS, and the second one is what keeps this affordable. A def or class
+    is EXPANDED THROUGH -- the names inside it are followed. A data binding is
+    INCLUDED but NOT expanded: its source is fingerprinted, the names inside it
+    are not followed. Expanding data bindings too makes `app = FastAPI(...)` a
+    hub that every decorator references, and the closure goes from a measured
+    median of 15 to a measured median of 179 -- a gate that drifts on every
+    commit is a gate nobody reads.
 
-def _identity(fn):
-    """What a helper IS, independent of the names it is imported under."""
-    return (getattr(fn, "__module__", "?"), getattr(fn, "__qualname__", "?"))
-
-
-_REFERENCED_NAMES_CACHE = {}
-
-
-def _referenced_names(fn):
-    """Every bare name and attribute name mentioned in a function's source.
-    Deliberately over-inclusive: a name that happens to match a module-level
-    function is folded in even if it was never called, which can only widen the
-    reviewed surface, never narrow it."""
-    cached = _REFERENCED_NAMES_CACHE.get(fn)
-    if cached is not None:
-        return cached
-    try:
-        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-    except (OSError, TypeError, SyntaxError, IndentationError):
-        _REFERENCED_NAMES_CACHE[fn] = frozenset()
-        return _REFERENCED_NAMES_CACHE[fn]
-    names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            names.add(node.attr)
-    # Frozen and cached: this is a pure function of the source on disk, and the
-    # walk asks it for the same helpers once per route.
-    _REFERENCED_NAMES_CACHE[fn] = frozenset(names)
-    return _REFERENCED_NAMES_CACHE[fn]
-
-
-def _walk_helper_functions(endpoint):
-    """{(defining module, qualname): function} for everything a route reaches.
-
-    A bare name is resolved in the module the referencing function is written
-    in first, and in any other module this walk knows after that -- on a name
-    two modules share, the second one is folded in as well, which widens the
-    reviewed surface rather than narrowing it. Keyed by what the helper IS, so
-    the same function imported under two names is one entry and its source is
-    appended once.
-
-    The walk STEPS INTO the modules it lands in: reaching a function defined in
-    tournament_bracket brings that module's own helpers into scope for the rest
-    of the walk, which is what makes this transitive across files and not just
-    across the two modules that happen to serve routes."""
-    walked = {"main"}
-    walked.update(_served_modules())
-    funcs = _module_functions(walked)
-    seen = {}
-    frontier = [endpoint]
+    A bare name is resolved in the module it is written in first and then in
+    every other indexed module, and EVERY match is folded in rather than the
+    first -- on a name two modules share, both enter. That widens the reviewed
+    surface rather than narrowing it, which is the only direction this gate may
+    be wrong in."""
+    index = _binding_index()
+    reached = {}
+    frontier = list(seeds)
     while frontier:
-        fn = frontier.pop()
-        origin = getattr(fn, "__module__", "main")
-        if origin not in walked and sys.modules.get(origin) is not None:
-            walked.add(origin)
-            funcs = _module_functions(walked)
-        lookup = [origin] + [m for m in walked if m != origin]
-        for name in _referenced_names(fn):
-            for mod_name in lookup:
-                helper = funcs.get((mod_name, name))
-                if helper is None:
-                    continue
-                ident = _identity(helper)
-                if ident not in seen:
-                    seen[ident] = helper
-                    frontier.append(helper)
-    return seen
+        key = frontier.pop()
+        if key in reached:
+            continue
+        module, name = key
+        binding = index.get(module, {}).get(name)
+        if binding is None:
+            continue
+        kind, _text, refs = binding
+        reached[key] = kind
+        if kind == "data":
+            continue
+        order = [module] + [other for other in index if other != module]
+        for ref in refs:
+            for other in order:
+                if ref in index[other] and (other, ref) not in reached:
+                    frontier.append((other, ref))
+    return reached
+
+
+def _route_seeds(route):
+    """Every first-party binding a route enters through, not just its handler.
+
+    Recovered computedly from the app, never listed. A route's behaviour is
+    also decided by the dependencies FastAPI resolves before the handler runs
+    and by the response model it serialises through, and neither of those is
+    referenced by name inside the handler body -- they are written in the
+    decorator and the signature."""
+    seeds = []
+    endpoint = getattr(route, "endpoint", None)
+    if endpoint is not None:
+        key = _binding_key(endpoint)
+        if key is not None:
+            seeds.append(key)
+    dependant = getattr(route, "dependant", None)
+    if dependant is not None:
+        stack = list(getattr(dependant, "dependencies", ()) or ())
+        while stack:
+            dependency = stack.pop()
+            call = getattr(dependency, "call", None)
+            if call is not None:
+                key = _binding_key(call)
+                if key is not None:
+                    seeds.append(key)
+            stack.extend(getattr(dependency, "dependencies", ()) or ())
+    model = getattr(route, "response_model", None)
+    if model is not None:
+        pending = [model]
+        while pending:
+            annotation = pending.pop()
+            args = typing.get_args(annotation)
+            if args:
+                pending.extend(a for a in args if a is not type(None))
+                continue
+            key = _binding_key(annotation)
+            if key is not None:
+                seeds.append(key)
+    return sorted(set(seeds))
 
 
 _CLOSURE_CACHE = {}
 
 
-def _helper_functions(endpoint):
-    """Memoised wrapper: the closure of one endpoint is asked for by the
-    manifest build, by the affordability test and by every assertion below."""
-    cached = _CLOSURE_CACHE.get(endpoint)
+def _reached(seeds):
+    """Memoised: the same seeds are asked for by the manifest build, by the
+    affordability bound and by several assertions below."""
+    key = tuple(seeds)
+    cached = _CLOSURE_CACHE.get(key)
     if cached is None:
-        cached = _walk_helper_functions(endpoint)
-        _CLOSURE_CACHE[endpoint] = cached
+        cached = _walk_bindings(seeds)
+        _CLOSURE_CACHE[key] = cached
     return cached
 
 
+def _fingerprint_text(seeds):
+    """The reviewed surface as text: every reached binding's segment, in a
+    fixed order so the fingerprint does not depend on walk order."""
+    return "".join(_segment(module, name)
+                   for module, name in sorted(_reached(seeds)))
+
+
 def _helper_closure(endpoint):
-    """The identities alone, sorted -- (defining module, qualname)."""
-    return sorted(_helper_functions(endpoint))
+    """The identities a ROUTE HANDLER reaches, sorted, excluding its own seeds.
+    Kept in this shape because several assertions below are written against
+    it."""
+    seeds = [_binding_key(endpoint)] if _binding_key(endpoint) else []
+    return sorted(set(_reached(seeds)) - set(seeds))
+
+
+# ── Entry points that are not routes ─────────────────────────────────────
+#
+# A route table is not the whole app. Middleware runs on every request,
+# exception handlers decide what a failure returns, and the lifespan starts
+# the background work. None of them appears in `app.routes`, so before this
+# range every one of them was outside every fingerprint: editing the
+# rate-limit gate moved nothing anywhere.
+
+
+def _middleware_entry_points():
+    """The first-party dispatch functions of the app's own middleware."""
+    keys = []
+    for middleware in getattr(main.app, "user_middleware", ()) or ():
+        dispatch = (getattr(middleware, "kwargs", None) or {}).get("dispatch")
+        if dispatch is not None:
+            key = _binding_key(dispatch)
+            if key is not None:
+                keys.append(key)
+    return sorted(set(keys))
+
+
+def _exception_handler_entry_points():
+    """First-party exception handlers.
+
+    This app registers NONE today -- all three handlers on the app are
+    FastAPI's own -- so this returns an empty list, and the assertion that
+    keeps it honest is not "non-empty" (which would be a check that cannot
+    pass) but the one in the test below: the RAW handler set must be non-empty,
+    proving the recovery still sees handlers at all. The day a first-party
+    handler is registered it enters the manifest, and its absence there fails
+    the exhaustiveness assertion."""
+    keys = []
+    for handler in (getattr(main.app, "exception_handlers", None) or {}).values():
+        key = _binding_key(handler)
+        if key is not None:
+            keys.append(key)
+    return sorted(set(keys))
+
+
+def _background_entry_points():
+    """The first-party lifespan, recovered through the wrappers FastAPI puts
+    around it.
+
+    `app.router.lifespan_context` is not the app's lifespan: FastAPI merges
+    lifespans, so what is stored is `merged_lifespan` closing over another
+    `merged_lifespan` closing over ours. A one-level `__closure__` read finds
+    nothing at all, which is a recovery that silently fingerprints an empty
+    set. The walk below descends through nested closures and through
+    `__wrapped__`/`func` wrappers, bounded by identity and depth."""
+    found, seen = [], set()
+
+    def descend(obj, depth):
+        if depth > 8 or id(obj) in seen or not callable(obj):
+            return
+        seen.add(id(obj))
+        key = _binding_key(obj)
+        if key is not None:
+            found.append(key)
+        for cell in (getattr(obj, "__closure__", None) or ()):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if callable(value):
+                descend(value, depth + 1)
+        for attribute in ("__wrapped__", "func"):
+            wrapped = getattr(obj, attribute, None)
+            if callable(wrapped):
+                descend(wrapped, depth + 1)
+
+    descend(getattr(main.app.router, "lifespan_context", None), 0)
+    return sorted(set(found))
+
+
+def _entry_point_sections():
+    """{section name: [(module, name)]} -- the three non-route sections."""
+    return {
+        "middleware": _middleware_entry_points(),
+        "exception_handlers": _exception_handler_entry_points(),
+        "background_entry_points": _background_entry_points(),
+    }
+
 
 MODULE_SRC = (Path(__file__).parents[1] / "api" / "main.py").read_text(encoding="utf-8")
 
@@ -255,16 +458,12 @@ def _route_identities(routes, prefix=""):
         if not path.startswith("/api/v1/"):
             continue
         endpoint = route.endpoint
-        # A handler's fingerprint covers the module-level helpers it delegates
-        # to, transitively — an extracted helper must not become a fingerprint
-        # hole. Sorted, so the fingerprint does not depend on walk order.
-        source_text = inspect.getsource(endpoint)
-        helpers = _helper_functions(endpoint)
-        for ident in sorted(helpers):
-            try:
-                source_text += inspect.getsource(helpers[ident])
-            except (OSError, TypeError):
-                continue
+        # A handler's fingerprint covers every module-level BINDING it reaches,
+        # transitively — an extracted helper must not become a fingerprint
+        # hole, and neither must a raw SQL string or a table of constants moved
+        # out of the body. Sorted inside _fingerprint_text, so the value does
+        # not depend on walk order.
+        source_text = _fingerprint_text(_route_seeds(route))
         identities.append(
             {
                 "path": path,
@@ -405,70 +604,374 @@ def test_the_helper_surface_is_computed_and_not_hand_curated():
 
 
 def test_a_helper_in_another_module_moves_its_routes_fingerprint():
-    """The mutation the previous test's shape is for. Rewrite the body of a
-    tournaments helper that a route delegates to and that route's source_sha1
-    must move; the negative control is the same route with nothing edited."""
-    import tournaments
-
+    """The mutation the previous test's shape is for. Edit a binding in
+    `tournaments` that a route reaches and that route's source_sha1 must move;
+    the negative control is the same route with nothing edited."""
     target = None
     for route in main.app.routes:
         if not isinstance(route, APIRoute):
             continue
         if getattr(route.endpoint, "__module__", "") != "tournaments":
             continue
-        helpers = [n for (m, n) in _helper_closure(route.endpoint) if m == "tournaments"]
-        if helpers:
-            target = (route, sorted(helpers)[0])
+        reached = [n for (m, n) in _helper_closure(route.endpoint) if m == "tournaments"]
+        if reached:
+            target = (route, sorted(reached)[0])
             break
-    assert target, "no tournaments route delegates to a tournaments helper"
-    route, helper_name = target
+    assert target, "no tournaments route reaches a tournaments binding"
+    route, name = target
 
-    def _fingerprint():
-        for entry in _route_identities([route]):
-            return entry["source_sha1"]
-        raise AssertionError("the route did not enumerate")
-
-    before = _fingerprint()
-    assert before == _fingerprint(), "negative control: unedited source must not move"
-
-    original = getattr(tournaments, helper_name)
-    real_source = inspect.getsource
-
-    def _mutated(obj):
-        if obj is original:
-            return real_source(obj) + "\n# mutation\n"
-        return real_source(obj)
-
-    inspect.getsource = _mutated
-    try:
-        after = _fingerprint()
-    finally:
-        inspect.getsource = real_source
+    before = _route_fingerprint(route)
+    assert before == _route_fingerprint(route), (
+        "negative control: unedited source must not move"
+    )
+    with _mutated_segment("tournaments", name):
+        after = _route_fingerprint(route)
     assert after != before, (
-        f"editing tournaments.{helper_name} left {route.path} certified unchanged"
+        f"editing tournaments.{name} left {route.path} certified unchanged"
+    )
+    assert _route_fingerprint(route) == before, (
+        "the mutation did not unwind -- every later assertion in this file "
+        "would be reading a poisoned memo"
     )
 
 
 def test_the_helper_closure_stays_affordable():
-    """A fingerprint that pulls half the module in drifts on every commit, and
-    a gate that always fires is a gate nobody reads. Measured at the shape this
-    file walks now: 6 helpers at the median of 692 module-level functions, 21 at
-    p90, 92 at the worst. The bounds below sit above those with room, so this
-    fails on a walk that has gone wrong rather than on ordinary growth.
+    """A fingerprint that pulls half the app in drifts on every commit, and a
+    gate that always fires is a gate nobody reads.
 
-    Cost is the other half of affordable, and it is not free: the same helpers
-    are reached from hundreds of routes, so both pure steps (`_referenced_names`
-    over a function's ast, `_module_functions` over a set of modules) are
-    memoised. Without those the widened walk took 287 s and this file was the
-    slowest thing in the suite by an order of magnitude; with them it is ~10 s.
-    Anything added to the walk belongs behind a memo too."""
+    MEASURED on this tree at the shipped two-tier rule: median 15, p90 49,
+    worst 190 (/api/v1/matches) of 1282 indexed bindings, with the walk itself
+    taking 0.1 s once the index is built (~5.3 s, once per process). The bounds
+    below sit above those with room, so this fails on a walk that has gone
+    wrong rather than on ordinary growth.
+
+    The second tier is exactly what these numbers pay for. Expanding data
+    bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
+    every route decorator references, and the same measurement gives median
+    179 / worst 279 -- every route dragging in most of the app, which is a
+    fingerprint that certifies nothing because it always moves."""
     routes = [r for r in main.app.routes
               if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
     assert routes
-    sizes = sorted(len(_helper_closure(r.endpoint)) for r in routes)
-    total = len(_module_functions())
-    assert sizes[len(sizes) // 2] <= 12, f"median closure {sizes[len(sizes) // 2]} of {total}"
-    assert sizes[-1] <= 120, f"worst closure {sizes[-1]} of {total}"
+    sizes = sorted(len(_reached(_route_seeds(r))) for r in routes)
+    total = sum(len(names) for names in _binding_index().values())
+    median, p90 = sizes[len(sizes) // 2], sizes[min(len(sizes) - 1, int(len(sizes) * 0.9))]
+    assert median <= 24, f"median closure {median} of {total}"
+    assert p90 <= 75, f"p90 closure {p90} of {total}"
+    assert sizes[-1] <= 280, f"worst closure {sizes[-1]} of {total}"
+
+
+def _route_covering(module, name):
+    """The routes whose reviewed surface contains one binding."""
+    return [r for r in main.app.routes
+            if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")
+            and (module, name) in _reached(_route_seeds(r))]
+
+
+def test_the_route_seed_recovery_still_sees_what_it_recovers():
+    """A route is entered through more than its handler: FastAPI resolves the
+    dependencies first and serialises through the response model, and neither
+    is called from the handler body.
+
+    MEASURED on this tree, both are REDUNDANT: every route names its response
+    model in its own decorator and its dependencies in its own signature, both
+    of which are inside the handler's segment, so the walk reaches them anyway
+    -- 0 of 309 routes gain a single binding from these seeds. That is why this
+    gate asserts the RECOVERY and not a fingerprint delta: deleting either seed
+    source moves no fingerprint anywhere, so a drift assertion for them is a
+    check that cannot fail, and both mutants proved exactly that.
+
+    They stay because the redundancy is a property of how these routes happen
+    to be written, not of the framework: a dependency declared on the router
+    rather than in a signature, or a response model composed at import time, is
+    named nowhere in the handler's own source."""
+    routes = [r for r in main.app.routes
+              if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
+    assert routes
+
+    models, dependencies = set(), set()
+    for route in routes:
+        endpoint_key = _binding_key(route.endpoint)
+        for key in _route_seeds(route):
+            if key == endpoint_key:
+                continue
+            if _binding_kind(*key) == "def" and key[0] == "schemas":
+                models.add(key)
+            else:
+                dependencies.add(key)
+
+    assert len(models) >= 25, (
+        f"only {len(models)} first-party response models were recovered from "
+        "309 routes; measured 29 -- the recovery has stopped seeing them"
+    )
+    assert ("database", "get_db") in dependencies, sorted(dependencies)
+    assert all(_binding_kind(*key) is not None for key in models | dependencies), (
+        "a recovered seed is not an indexed binding, so its source is not in "
+        "any fingerprint"
+    )
+
+
+def test_a_module_level_data_binding_moves_the_fingerprint_of_its_routes():
+    """r14 M7, GATE A -- the defect that motivated the whole method change.
+
+    `_PODIUM_QUERY` is a raw SQL string bound at module scope and executed by
+    32 routes. Under object introspection it was in no fingerprint at all:
+    resolving the name gave back a `str`, and a str has no source. Rewriting
+    the query -- changing what every one of those routes returns -- moved
+    nothing and this gate reported all-clear.
+
+    THE MUTATION THIS MUST FAIL ON: restricting expansion to def/class
+    bindings, i.e. the shape a fingerprint over objects can express. The sha
+    then stops moving."""
+    covering = _route_covering("main", "_PODIUM_QUERY")
+    assert len(covering) >= 20, (
+        f"only {len(covering)} routes reach _PODIUM_QUERY; measured 32 -- "
+        "either the query moved or the walk narrowed"
+    )
+    assert _binding_kind("main", "_PODIUM_QUERY") == "data", (
+        "the point of this gate is that it is NOT a def or a class"
+    )
+    route = covering[0]
+    before = _route_fingerprint(route)
+    assert before == _route_fingerprint(route), "negative control"
+    with _mutated_segment("main", "_PODIUM_QUERY"):
+        after = _route_fingerprint(route)
+    assert after != before, (
+        f"rewriting the SQL that {route.path} executes left it certified unchanged"
+    )
+
+
+def test_a_class_level_default_moves_the_fingerprint_of_the_route_that_persists_it():
+    """r14 M7, GATE B. `MatchRow` carries the field defaults every persisted
+    bracket row is built from. It survived the old rule only because it happens
+    to be a CLASS, whose statement `inspect` can still recover -- an accident of
+    what kind of value the name denotes, which is exactly what this method stops
+    depending on.
+
+    THE MUTATION THIS MUST FAIL ON: dropping ClassDef from the index. The
+    covering assertion then finds no route at all."""
+    covering = _route_covering("tournament_bracket", "MatchRow")
+    assert covering, "no route covers tournament_bracket.MatchRow"
+    assert _binding_kind("tournament_bracket", "MatchRow") == "def", (
+        "classes are indexed under the def tier and expanded through"
+    )
+    route = covering[0]
+    before = _route_fingerprint(route)
+    with _mutated_segment("tournament_bracket", "MatchRow"):
+        after = _route_fingerprint(route)
+    assert after != before, (
+        f"editing MatchRow left {route.path} certified unchanged"
+    )
+
+
+def _entry_point_sha(module, name):
+    return sha1(_fingerprint_text([(module, name)]).encode("utf-8")).hexdigest()
+
+
+def _load_entry_points():
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    sections = document["entry_points"]
+    assert set(sections) == {"middleware", "exception_handlers",
+                             "background_entry_points"}, sorted(sections)
+    return {name: [tuple(row) for row in rows] for name, rows in sections.items()}
+
+
+def test_the_manifest_covers_every_non_route_entry_point():
+    """r14 M7, GATE C. A route table is not the whole app.
+
+    Middleware runs on every request, exception handlers decide what a failure
+    returns, and the lifespan starts the background work -- and none of them
+    appears in `app.routes`, so before this range every one of them sat outside
+    every fingerprint. Editing the rate-limit gate moved nothing anywhere.
+
+    Each recovered set is compared to the manifest by identity AND by
+    fingerprint, so a reshaping of the app that stops the recovery seeing
+    anything fails loudly instead of certifying an empty set.
+
+    THE MUTATIONS THIS MUST FAIL ON: appending a comment to `rate_limit_gate`
+    (its sha must move -- today nothing anywhere moves), and making the
+    recovery return nothing (the non-empty assertions fire)."""
+    manifest = _load_entry_points()
+    live = _entry_point_sections()
+
+    assert live["middleware"], "no first-party middleware dispatch was recovered"
+    assert ("main", "rate_limit_gate") in live["middleware"], sorted(live["middleware"])
+    assert live["background_entry_points"], "the lifespan was not recovered"
+    assert live["background_entry_points"] == [("main", "lifespan")], (
+        sorted(live["background_entry_points"])
+    )
+
+    # This app registers no first-party exception handlers, so asserting that
+    # SECTION is non-empty would be a check that cannot pass. What must be
+    # non-empty is the raw recovery -- proof the mechanism still sees handlers
+    # at all, so that a first-party one added later is picked up rather than
+    # silently skipped.
+    raw_handlers = getattr(main.app, "exception_handlers", None) or {}
+    assert raw_handlers, "the exception-handler recovery sees nothing at all"
+    assert live["exception_handlers"] == [], (
+        "a first-party exception handler was registered -- it belongs in the "
+        "manifest, and this assertion is the thing that says so"
+    )
+
+    for section, entries in live.items():
+        recorded = [(m, n) for (m, n, _sha) in manifest[section]]
+        assert recorded == entries, f"{section}: manifest {recorded} vs live {entries}"
+        for module, name, sha in manifest[section]:
+            assert _entry_point_sha(module, name) == sha, (
+                f"{module}.{name} source fingerprint changed; re-review it"
+            )
+
+    before = _entry_point_sha("main", "rate_limit_gate")
+    with _mutated_segment("main", "rate_limit_gate"):
+        after = _entry_point_sha("main", "rate_limit_gate")
+    assert after != before, "editing the rate-limit gate moved no fingerprint"
+
+
+def test_the_admission_rule_is_computed_for_every_module_not_just_main():
+    """r14 M7, GATE D -- the assertion the old GATE 8 should have been.
+
+    The previous rule's coverage was decided by a hand-written notion of which
+    modules mattered, and every version of that shape has failed the same way:
+    it is right about the modules whoever wrote it was thinking of. This
+    re-derives each module's module-scope bindings with an INDEPENDENT parse
+    written here, and demands the index agree exactly -- so a carve-out added
+    anywhere in the admission rule fails on the module it carves out.
+
+    THE MUTATION THIS MUST FAIL ON: any name-conditional in the admission rule
+    (`and stem != "models"`), or dropping a node kind from it."""
+    files = {p.stem: p for p in sorted(API_DIR.glob("*.py"))}
+    index = _binding_index()
+    assert set(index) == set(files), (
+        f"indexed {sorted(set(index) ^ set(files))} differs from backend/api"
+    )
+    assert len(files) >= 8, f"only {len(files)} modules found in {API_DIR}"
+
+    for stem, path in files.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        expected = set()
+
+        def collect(body):
+            for node in body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    expected.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        for sub in ast.walk(target):
+                            if isinstance(sub, ast.Name):
+                                expected.add(sub.id)
+                elif isinstance(node, ast.AnnAssign):
+                    if isinstance(node.target, ast.Name):
+                        expected.add(node.target.id)
+                elif isinstance(node, (ast.If, ast.Try, ast.With)):
+                    collect(node.body)
+                    collect(getattr(node, "orelse", []))
+                    collect(getattr(node, "finalbody", []))
+                    for handler in getattr(node, "handlers", []):
+                        collect(handler.body)
+
+        collect(tree.body)
+        assert set(index[stem]) == expected, (
+            f"{stem}: index and an independent parse disagree on "
+            f"{sorted(set(index[stem]) ^ expected)[:8]}"
+        )
+        assert expected, f"{stem}: no module-scope bindings found at all"
+
+
+def test_a_name_bound_twice_keeps_both_halves_of_its_source(tmp_path):
+    """A conditional rebinding must not hide half its source.
+
+    Every module in backend/api binds each module-scope name once, so this
+    branch has no live case -- and an unexercised guard is one that is wrong on
+    the day it is first needed. Driven on a synthetic module rather than
+    asserted about. Also pins the two behaviours the index depends on that no
+    production file demonstrates: bindings inside a module-level `try` and
+    inside an `if` both count as module scope."""
+    module = tmp_path / "synthetic.py"
+    module.write_text(
+        "LIMIT = 1  # first\n"
+        "if True:\n"
+        "    LIMIT = 2  # second\n"
+        "try:\n"
+        "    GUARDED = 3\n"
+        "except Exception:\n"
+        "    GUARDED = 4\n"
+        "def only_here():\n"
+        "    return LIMIT\n",
+        encoding="utf-8",
+    )
+    bindings = _index_module(module)
+    assert set(bindings) == {"LIMIT", "GUARDED", "only_here"}, sorted(bindings)
+
+    kind, text, _refs = bindings["LIMIT"]
+    assert kind == "data"
+    assert "# first" in text and "# second" in text, (
+        "a rebound name kept only one of its two statements: " + repr(text)
+    )
+    guarded_kind, guarded_text, _ = bindings["GUARDED"]
+    assert "3" in guarded_text and "4" in guarded_text, guarded_text
+    assert bindings["only_here"][0] == "def"
+
+
+def test_the_indexed_segment_is_the_source_the_interpreter_would_show():
+    """r14 M7, the fidelity control. The index is only sound if the text it
+    hands back for a name is the text that name's statement really is.
+
+    Checked against `inspect.getsource` for every def/class binding in the
+    seven non-main modules, plus a fixed sample of main-defined classes. Only
+    main's getsource is expensive (measured ~4.8 s for one class, because it
+    re-tokenises a 25k-line file), which is why the sample there is fixed and
+    small rather than exhaustive.
+
+    NEGATIVE CONTROL: a segment sliced one line short must NOT compare equal --
+    otherwise this assertion is satisfied by any two strings."""
+    index = _binding_index()
+    compared = 0
+    for stem, bindings in sorted(index.items()):
+        if stem == "main":
+            continue
+        module = sys.modules.get(stem)
+        if module is None:
+            continue
+        for name, (kind, text, _refs) in sorted(bindings.items()):
+            if kind != "def":
+                continue
+            obj = getattr(module, name, None)
+            if obj is None or not _is_ours(obj):
+                continue
+            try:
+                actual = inspect.getsource(obj)
+            except (OSError, TypeError):
+                continue
+            assert text == actual, f"{stem}.{name}: indexed segment != real source"
+            compared += 1
+    assert compared >= 40, f"only {compared} bindings were actually compared"
+
+    # main's own classes, sampled rather than swept: `inspect.getsource` costs
+    # ~4.8 s per class there because it re-tokenises a 25k-line file, and three
+    # is enough to prove the same parse behaves the same way in the big module.
+    # The sample is COMPUTED, not listed -- the first attempt listed three
+    # names of which two are imported into main rather than defined in it, so
+    # it compared an empty segment against a real class and would have gone on
+    # doing that for as long as the names existed anywhere.
+    main_defined = sorted(
+        name for name, (kind, _t, _r) in index["main"].items()
+        if kind == "def" and _binding_key(getattr(main, name, None)) == ("main", name)
+        and inspect.isclass(getattr(main, name, None))
+    )
+    assert len(main_defined) >= 3, f"main defines only {len(main_defined)} classes"
+    for name in main_defined[:3]:
+        assert _segment("main", name) == inspect.getsource(getattr(main, name)), name
+
+    # The control that makes the equality above mean something.
+    source = (API_DIR / "glicko2.py").read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    tree = ast.parse(source)
+    node = next(n for n in tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+    short = "".join(lines[node.lineno - 1:node.end_lineno - 1])
+    assert short != _segment("glicko2", node.name), (
+        "a one-line-short slice compared equal -- this control proves nothing"
+    )
 
 
 def test_request_key_counterexample_is_rejected():
@@ -693,45 +1196,28 @@ def test_flag_and_review_formatters_do_not_consume_net_seat_columns():
 
 
 def test_an_imported_helper_moves_the_fingerprint_of_the_route_that_calls_it():
-    """r13 MEDIUM, mutation-proven on the case the finding names: a function
+    """r13 MEDIUM, mutation-proven on the case the finding names: a binding
     DEFINED in tournament_bracket and IMPORTED into tournaments, reached from a
     route. Editing it must move that route's fingerprint; the negative control
     is the same route with nothing edited."""
-    import tournament_bracket
-
     target = None
     for route in main.app.routes:
         if not isinstance(route, APIRoute):
             continue
-        idents = _helper_closure(route.endpoint)
-        outside = [i for i in idents if i[0] == "tournament_bracket"]
+        outside = [i for i in _helper_closure(route.endpoint)
+                   if i[0] == "tournament_bracket"]
         if outside:
             target = (route, sorted(outside)[0])
             break
-    assert target, "no route reaches a helper defined in tournament_bracket"
-    route, (mod_name, qualname) = target
-    original = getattr(tournament_bracket, qualname)
+    assert target, "no route reaches a binding defined in tournament_bracket"
+    route, (module, name) = target
 
-    def _fingerprint():
-        for entry in _route_identities([route]):
-            return entry["source_sha1"]
-        raise AssertionError("the route did not enumerate")
-
-    before = _fingerprint()
-    assert before == _fingerprint(), "negative control: unedited source must not move"
-
-    real_source = inspect.getsource
-
-    def _mutated(obj):
-        if obj is original:
-            return real_source(obj) + "\n# mutation\n"
-        return real_source(obj)
-
-    inspect.getsource = _mutated
-    try:
-        after = _fingerprint()
-    finally:
-        inspect.getsource = real_source
+    before = _route_fingerprint(route)
+    assert before == _route_fingerprint(route), (
+        "negative control: unedited source must not move"
+    )
+    with _mutated_segment(module, name):
+        after = _route_fingerprint(route)
     assert after != before, (
-        f"editing {mod_name}.{qualname} left {route.path} certified unchanged"
+        f"editing {module}.{name} left {route.path} certified unchanged"
     )
