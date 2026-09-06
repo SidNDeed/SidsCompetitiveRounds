@@ -71,46 +71,53 @@
 
 BEGIN;
 
+-- ONE selection, both directions.
+--
+-- This was two INSERT ... SELECT statements, and the comment below them
+-- concluded from BEGIN/COMMIT that no pair could end up with a grant in one
+-- direction only. That conflated atomicity with snapshot stability: under READ
+-- COMMITTED each STATEMENT takes its own fresh snapshot, so a series that was
+-- active for the first INSERT could complete, be invalidated, or have a bracket
+-- row decided before the second one read it. Both statements still committed
+-- together -- they had simply selected different rows. A grant carries no
+-- clock, so the surviving direction would have stayed nameable indefinitely.
+--
+-- MATERIALIZED is load-bearing, not decoration: without it PostgreSQL is free
+-- to inline the CTE into each arm of the union, which evaluates the selection
+-- twice again. Within one statement that is one snapshot rather than two, but
+-- the fence is cheap and the guarantee is then structural instead of resting on
+-- what the planner chose today.
+WITH eligible AS MATERIALIZED (
+    SELECT s.player1_id AS a,
+           s.player2_id AS b,
+           s.id         AS series_id,
+           COALESCE(s.last_activity_at, s.created_at) AS at
+      FROM ranked_series s
+     WHERE s.status = 'active'
+       AND s.invalidated_at IS NULL
+       AND s.player1_id IS NOT NULL
+       AND s.player2_id IS NOT NULL
+       -- A series with one account on both sides is not a pair. Excluded so
+       -- the UNION ALL below cannot emit the same (holder_id, series_id) twice
+       -- inside a single statement; production holds no such rows (checked on
+       -- the primary), so this removes nothing real.
+       AND s.player1_id <> s.player2_id
+       AND COALESCE(s.last_activity_at, s.created_at) >= NOW() - INTERVAL '6 hours'
+       AND NOT EXISTS (SELECT 1 FROM tournament_matches tm
+                        WHERE tm.series_id = s.id
+                          AND tm.status IN ('completed', 'forfeit',
+                                            'double_forfeit', 'bye_auto'))
+)
 INSERT INTO series_dc_grants (holder_id, counterparty_id, series_id, issued_at, last_seen_at)
-SELECT s.player1_id,
-       s.player2_id,
-       s.id,
-       COALESCE(s.last_activity_at, s.created_at),
-       COALESCE(s.last_activity_at, s.created_at)
-  FROM ranked_series s
- WHERE s.status = 'active'
-   AND s.invalidated_at IS NULL
-   AND s.player1_id IS NOT NULL
-   AND s.player2_id IS NOT NULL
-   AND COALESCE(s.last_activity_at, s.created_at) >= NOW() - INTERVAL '6 hours'
-   AND NOT EXISTS (SELECT 1 FROM tournament_matches tm
-                    WHERE tm.series_id = s.id
-                      AND tm.status IN ('completed', 'forfeit',
-                                        'double_forfeit', 'bye_auto'))
-ON CONFLICT (holder_id, series_id) DO NOTHING;
-
--- The other direction, same rows. Written as a second statement rather than a
--- two-row VALUES list so each side's conflict is resolved independently.
-INSERT INTO series_dc_grants (holder_id, counterparty_id, series_id, issued_at, last_seen_at)
-SELECT s.player2_id,
-       s.player1_id,
-       s.id,
-       COALESCE(s.last_activity_at, s.created_at),
-       COALESCE(s.last_activity_at, s.created_at)
-  FROM ranked_series s
- WHERE s.status = 'active'
-   AND s.invalidated_at IS NULL
-   AND s.player1_id IS NOT NULL
-   AND s.player2_id IS NOT NULL
-   AND COALESCE(s.last_activity_at, s.created_at) >= NOW() - INTERVAL '6 hours'
-   AND NOT EXISTS (SELECT 1 FROM tournament_matches tm
-                    WHERE tm.series_id = s.id
-                      AND tm.status IN ('completed', 'forfeit',
-                                        'double_forfeit', 'bye_auto'))
+SELECT a, b, series_id, at, at FROM eligible
+UNION ALL
+SELECT b, a, series_id, at, at FROM eligible
 ON CONFLICT (holder_id, series_id) DO NOTHING;
 
 COMMIT;
 
 -- `psql -f` does not wrap a file in a transaction (#340), which is why the
--- BEGIN/COMMIT above are written out: both directions land together or neither
--- does, so no pair can end up with a grant in one direction only.
+-- BEGIN/COMMIT above are written out. What makes the two directions agree is
+-- the single statement between them, NOT the transaction: they are projections
+-- of one CTE, so there is no window in which one direction's row qualifies and
+-- the other's does not.

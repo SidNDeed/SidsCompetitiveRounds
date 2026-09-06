@@ -960,9 +960,17 @@ SEAT_SURFACE_TEAM = "team"
 SEAT_SURFACE_FFA = "ffa"
 
 
-async def _record_seat_attestation(db, surface, subject_id, player_id, verdict) -> bool:
+async def _record_seat_attestation(db, surface, subject_id, player_id, verdict,
+                                   observed_points) -> bool:
     """Record that THIS seat posted an observation of THIS sitting. The ONE
     writer of series_progress; every live-points surface goes through it.
+
+    `observed_points` is what THIS POST claimed, never what the row now holds.
+    That distinction is the point of the column: the stored series totals are a
+    GREATEST of both seats' posts, so reading them back would re-admit the
+    counterparty-written evidence this table exists to exclude. Kept monotonic
+    per seat, because a seat that once observed two points of play has observed
+    them and a later 0-0 post does not un-observe it.
 
     Returns whether a row was written, so a caller can gate on the fact rather
     than infer it from the verdict a second time.
@@ -982,10 +990,10 @@ async def _record_seat_attestation(db, surface, subject_id, player_id, verdict) 
     run a ticket-auth client, and falls back to the pre-M4 rule for everyone
     else. Sparse-and-honest composes; dense-and-forgeable does not.
 
-    A repeat post from the same seat only moves last_seen_at. There is nothing
-    to un-prove: a seat that attested once in this sitting has attested, and its
-    next post arriving without a token (tokens lapse and are re-minted on a 60s
-    loop) simply records nothing new.
+    A repeat post from the same seat moves last_seen_at and can only RAISE
+    observed_points. There is nothing to un-prove: a seat that attested once in
+    this sitting has attested, and its next post arriving without a token
+    (tokens lapse and are re-minted on a 60s loop) simply records nothing new.
 
     Never raises. This runs on the betting hot path and an attestation that
     fails to record must cost the caller nothing — it degrades the DC evidence
@@ -1000,11 +1008,15 @@ async def _record_seat_attestation(db, surface, subject_id, player_id, verdict) 
     try:
         async with db.begin_nested():
             await db.execute(text(
-                "INSERT INTO series_progress (surface, subject_id, player_id)"
-                " VALUES (:sf, :sub, :pid)"
+                "INSERT INTO series_progress"
+                "  (surface, subject_id, player_id, observed_points)"
+                " VALUES (:sf, :sub, :pid, :obs)"
                 " ON CONFLICT (surface, subject_id, player_id) DO UPDATE"
-                "    SET last_seen_at = NOW()"),
-                {"sf": surface, "sub": subject_id, "pid": player_id})
+                "    SET last_seen_at = NOW(),"
+                "        observed_points = GREATEST(series_progress.observed_points,"
+                "                                   EXCLUDED.observed_points)"),
+                {"sf": surface, "sub": subject_id, "pid": player_id,
+                 "obs": int(observed_points or 0)})
         return True
     except Exception as ex:
         print(f"[DC-EVIDENCE] attestation not recorded ({surface}): {type(ex).__name__}")
@@ -1094,12 +1106,22 @@ _DC_BRACKET_TERM = (
 #           NOT make a leave honest; it makes a leave in a series that visibly
 #           progressed count the way it always has.
 #
-#   PLAY + CORROBORATION   the points threshold exactly as before, AND, for a
-#           player who can attest, that player's own verified attestation for
-#           this sitting. This is the arm the item exists for. A leave during
-#           game 1 leaves no match row, so the points sum was the only evidence
-#           — and a live-points post carries a shared HMAC and names its author
-#           in a query parameter, so the reporting seat could write it.
+#   THE ACCUSED'S OWN OBSERVATION   for a player who can attest: that player's
+#           own verified posts for this sitting reached the threshold. This is
+#           the arm the item exists for. A leave during game 1 leaves no match
+#           row, so the points sum was the only evidence — and a live-points
+#           post carries a shared HMAC and names its author in a query
+#           parameter, so the reporting seat could write it.
+#
+#           The threshold is asked of series_progress.observed_points, NOT of
+#           ranked_series.live_p*_points. The series columns are a GREATEST of
+#           both seats' posts, so asking them let the accused's single 0-0 post
+#           arm the corroboration while the COUNTERPARTY's posts carried the sum
+#           — presence standing in for observation, which is the substitution
+#           this arm exists to refuse. Narrower than the rule it replaces rather
+#           than merely different: the endpoint GREATESTs the same pair into
+#           those columns, so observed_points >= the threshold implies the
+#           series sum did too.
 #
 # WHY THE CORROBORATION IS SCOPED BY WHETHER THE ACCUSED CAN ATTEST AT ALL.
 # `players.steam_auth_seen_at` is the monotonic per-account arming column
@@ -1120,16 +1142,20 @@ _DC_BRACKET_TERM = (
 # game-1 leave needs the accused's verified post. It ships OFF and stays off
 # until verified sessions are broadly held (162 of 4663 accounts are armed
 # today; 19 of 308 active players hold a live verified session).
+# Three flat arms rather than a threshold shared between two of them, so each
+# arm names the evidence it stands on and no arm can borrow another's.
 _DC_EVIDENCE_TERM = (
     "(EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id)"
-    " OR (COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0) >= :min_points"
-    "     AND (EXISTS (SELECT 1 FROM series_progress sp"
-    "                   WHERE sp.surface = 'ranked' AND sp.subject_id = s.id"
-    "                     AND sp.player_id = :dp)"
-    "          OR (NOT CAST(:require_verified_seat AS boolean)"
-    "              AND NOT EXISTS (SELECT 1 FROM players pa"
-    "                               WHERE pa.id = :dp"
-    "                                 AND pa.steam_auth_seen_at IS NOT NULL)))))")
+    " OR EXISTS (SELECT 1 FROM series_progress sp"
+    "             WHERE sp.surface = 'ranked' AND sp.subject_id = s.id"
+    "               AND sp.player_id = :dp"
+    "               AND sp.observed_points >= :min_points)"
+    " OR (NOT CAST(:require_verified_seat AS boolean)"
+    "     AND NOT EXISTS (SELECT 1 FROM players pa"
+    "                      WHERE pa.id = :dp"
+    "                        AND pa.steam_auth_seen_at IS NOT NULL)"
+    "     AND COALESCE(s.live_p1_points, 0)"
+    "         + COALESCE(s.live_p2_points, 0) >= :min_points))")
 
 _DC_ELIGIBLE_TERMS = (
     "(" + _DC_GRANT_TERM + " OR " + _DC_LEGACY_TERM + ")"
@@ -14849,6 +14875,52 @@ async def _report_disconnect_once(
         "UPDATE players SET ranked_dc_count = COALESCE(ranked_dc_count, 0) + 1 "
         "WHERE id = :dp RETURNING ranked_dc_count"
     ), {"dp": disconnected.id})).scalar()
+
+    # The grant must STILL be the pair's newest, asked as late as it can be.
+    #
+    # _DC_GRANT_TERM makes only the newest grant authoritative, and the locked
+    # re-ask above answered that while holding both players rows and the series
+    # row. None of those locks stop a new grant appearing: a grant insert takes
+    # FOR KEY SHARE on players through its foreign keys, which does not conflict
+    # with FOR NO KEY UPDATE, and a row that does not exist yet cannot be locked
+    # at all. So that answer was about a set another writer could still add to,
+    # and the pair's next sitting could begin between the judgement and the
+    # write.
+    #
+    # This NARROWS the window to this statement; it does not close it. A grant
+    # committing between this read and the COMMIT below is still unobserved.
+    # Closing it needs a lock keyed on the PAIR rather than on a row (#207),
+    # taken by the publisher too — a new lock on a hot write path, which is not
+    # a change to make without a database to validate it against.
+    #
+    # The compatibility arm is untouched. A pair with no grant for this series
+    # makes the inner SELECT return no row, the comparison NULL, and this
+    # refuses nothing: only a report judged BY a grant can be refused for that
+    # grant's supersession.
+    #
+    # Labelled `AS superseded` because the fake session routes on markers that
+    # exist for no other purpose (#306) — recognising this statement by its
+    # table would collide with the resolver and the spend.
+    _superseded = (await db.execute(text(
+        "SELECT 1 AS superseded FROM series_dc_grants g2"
+        " WHERE g2.holder_id = :rp AND g2.counterparty_id = :dp"
+        "   AND (g2.last_seen_at, g2.series_id)"
+        "     > (SELECT g.last_seen_at, g.series_id FROM series_dc_grants g"
+        "         WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
+        "           AND g.series_id = CAST(:sid AS uuid))"
+        " LIMIT 1"
+    ), {"rp": reporter.id, "dp": disconnected.id,
+        "sid": str(resolved_series_id)})).first()
+    if _superseded is not None:
+        await db.rollback()
+        # 403 and not 503. Grants only move forward, so a superseded grant can
+        # never become authoritative again and a retry can only fail the same
+        # way. Settled, so the client stops spending its budget on it (#430).
+        raise HTTPException(
+            status_code=403,
+            detail="a newer sitting for this pair has superseded the one this "
+                   "report names")
+
     await db.commit()
 
     print(f"[DC] {reporter_steam_id} reported disconnect by {disconnected_steam_id} (total: {new_count})")
@@ -23945,7 +24017,11 @@ async def update_live_points(
     # This seat was here. Recorded in the SAME transaction as the points it
     # accompanies, so the two can never disagree about whether the post landed,
     # and inside a savepoint so a failure to record cannot lose the points.
-    await _record_seat_attestation(db, SEAT_SURFACE_RANKED, sid, reporter.id, _seat)
+    # The sum THIS post carried, not `_pts` -- `_pts` is the stored pair after
+    # GREATEST against whatever the counterparty had already written, which is
+    # exactly the evidence this attestation exists to be independent of.
+    await _record_seat_attestation(db, SEAT_SURFACE_RANKED, sid, reporter.id, _seat,
+                                   (new_p1 or 0) + (new_p2 or 0))
     await db.commit()
     series.live_p1_points, series.live_p2_points = _pts[0], _pts[1]
     # Aug 9 bet audit find 7: mirror the POST /bets predicate exactly. This
@@ -24027,7 +24103,8 @@ async def update_team_live_points(
     # Recorded after the UPDATE, because the UPDATE is where membership is
     # actually established on this surface (":pid IN (t1a_id, ...)" rides inside
     # it). Attesting before it would record a seat for a series it may not be in.
-    await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat)
+    await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
+                                   (t1_points or 0) + (t2_points or 0))
     await db.commit()
     return {
         "status": "ok",
@@ -24130,7 +24207,10 @@ async def update_ffa_live_points(
     # As on the 2v2 surface: membership is established by the UPDATE's own
     # ":pid = ANY(member_ids)", so the attestation is recorded only once that
     # statement has returned a row.
-    await _record_seat_attestation(db, SEAT_SURFACE_FFA, lid, reporter.id, _seat)
+    # 0, and not the game number: this surface reports which game is in
+    # progress, not a points pair, so there is no observation to record. No
+    # reader asks for one -- the evidence predicate is 'ranked' only.
+    await _record_seat_attestation(db, SEAT_SURFACE_FFA, lid, reporter.id, _seat, 0)
     await db.commit()
     return {
         "status": "ok",

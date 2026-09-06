@@ -48,10 +48,29 @@ CREATE TABLE IF NOT EXISTS series_progress (
     player_id     UUID        NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- The highest points sum THIS seat's own verified posts carried for this
+    -- sitting. The row's existence attests presence; this attests observation,
+    -- and the evidence rule needs the second. It used to read the threshold
+    -- from ranked_series.live_p*_points, which the COUNTERPARTY also writes --
+    -- so one 0-0 post from the accused armed a corroboration the other seat
+    -- then satisfied. Monotonic (GREATEST on conflict) for the same reason the
+    -- series columns are: a late or out-of-order post must not lower an
+    -- observation already made.
+    --
+    -- 0 on the 'ffa' surface by construction: that endpoint reports a game
+    -- number, not a points pair, so there is no observation to record and the
+    -- row's existence remains the whole attestation there.
+    observed_points INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT pk_series_progress PRIMARY KEY (surface, subject_id, player_id),
     CONSTRAINT ck_series_progress_surface
         CHECK (surface IN ('ranked', 'team', 'ffa'))
 );
+
+-- Idempotent for a tree that applied an earlier copy of this file: CREATE TABLE
+-- IF NOT EXISTS skips silently on an existing table and would leave the column
+-- behind.
+ALTER TABLE series_progress
+    ADD COLUMN IF NOT EXISTS observed_points INTEGER NOT NULL DEFAULT 0;
 
 -- The eligibility predicate looks up exactly one row by all three key columns,
 -- which the primary key serves. No other access pattern exists. No further

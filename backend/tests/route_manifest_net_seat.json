@@ -1024,7 +1024,7 @@
           ],
           "main",
           "update_live_points",
-          "f62d79e26227ea5bc1a85240ca84470dc5bb49ca"
+          "b28a6ca61954472f7ee5101b0790755b5b5f13df"
         ],
         [
           "/api/v1/team/all-series-paged",
@@ -1105,7 +1105,7 @@
           ],
           "main",
           "update_team_live_points",
-          "c5bfe0e3e24cbd38464ffbafa9675b3bff3b0d4b"
+          "49903db4fc843a5883996659ca712cd8da5b6545"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
@@ -1570,7 +1570,7 @@
           ],
           "main",
           "update_ffa_live_points",
-          "3e39b8eb15e469a30240b7ed9c071defc8ed5d6f"
+          "19d754230710ca71283c19a403536264f27c0382"
         ],
         [
           "/api/v1/ffa/lobby/create",
@@ -2380,7 +2380,7 @@
           ],
           "main",
           "report_disconnect",
-          "5cac4adfe7b2a5f5e61163b9988dc144e3c5de90"
+          "ad1cecf4fd7423ee4efce7174603754f387dfa86"
         ],
         [
           "/api/v1/settings/allow-spectators",

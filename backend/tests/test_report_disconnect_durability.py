@@ -118,7 +118,8 @@ class SeriesFixture:
     def __init__(self, grant_present=True, grant_is_newest=True,
                  any_grant_for_pair=True, completed=False, is_most_recent=True,
                  fresh=True, live_points=10, has_match=True,
-                 accused_attested=False, accused_armed=False):
+                 accused_attested=False, accused_armed=False,
+                 accused_observed_points=None):
         # AUTHORITY: the server put this pair into this sitting...
         self.grant_present = grant_present
         # ...and has not since put them into a newer one.
@@ -139,6 +140,13 @@ class SeriesFixture:
         # unverified kind: an unbound row is one the reporter could have
         # written, so none is recorded.
         self.accused_attested = accused_attested
+        # ...and what the accused's OWN posts observed. Defaults to the sitting's
+        # points, which is the ordinary case and keeps every scenario written
+        # before r15 saying what it meant. Set it BELOW live_points to model the
+        # case the column exists for: the accused posted, and the counterparty's
+        # posts are what carried the series total to the threshold.
+        self.accused_observed_points = (live_points if accused_observed_points is None
+                                        else accused_observed_points)
         # players.steam_auth_seen_at IS NOT NULL for the accused.
         self.accused_armed = accused_armed
 
@@ -168,27 +176,35 @@ class SeriesFixture:
         ev = []
         if "FROM matches m" in sql:
             ev.append(self.has_match)
+        if "sp.player_id = :dp" in sql:
+            # THE ACCUSED'S OWN OBSERVATION. Presence and observation are two
+            # different facts and this arm needs the second: the row says the
+            # accused posted, observed_points says what their own posts saw.
+            # Strip the threshold sub-clause and the arm is presence again --
+            # the state r15 found, and one a mutation can restore.
+            attested = self.accused_attested
+            if "sp.observed_points >= :min_points" in sql:
+                attested = attested and self.accused_observed_points >= min_points
+            ev.append(attested)
         if "live_p1_points" in sql:
-            # Read the THRESHOLD out of the statement, do not assume it. A
-            # model that carries its own copy of the number cannot notice the
-            # statement's copy being changed -- which is how a mutant that
-            # replaced `:min_points` with a literal 0 walked past every gate.
+            # THE UNARMED FALLBACK, and since r15 the only arm reading the
+            # series columns -- the ones BOTH seats write.
+            #
+            # Read the THRESHOLD out of the statement, do not assume it. A model
+            # carrying its own copy of the number cannot notice the statement's
+            # copy being changed -- which is how a mutant that replaced
+            # `:min_points` with a literal 0 walked past every gate.
             if ">= :min_points" in sql:
                 play = self.live_points >= min_points
             else:
                 bound = re.search(r"points, 0\) >= (\d+)", sql)
                 play = self.live_points >= int(bound.group(1)) if bound else True
-            if "sp.player_id = :dp" in sql:
-                corroborated = self.accused_attested
-                if "NOT CAST(:require_verified_seat AS boolean)" in sql                         and not require_verified_seat:
-                    # The fallback clause. Without the arming sub-clause it is
-                    # unconditional, i.e. the fence is gone entirely -- which is
-                    # a state a mutation can produce and this must model.
-                    if "steam_auth_seen_at" in sql:
-                        corroborated = corroborated or not self.accused_armed
-                    else:
-                        corroborated = True
-                play = play and corroborated
+            # Each gating sub-clause applies only if it is PRESENT, so deleting
+            # one widens this arm here exactly as it would in the database.
+            if "NOT CAST(:require_verified_seat AS boolean)" in sql:
+                play = play and not require_verified_seat
+            if "steam_auth_seen_at" in sql:
+                play = play and not self.accused_armed
             ev.append(play)
         if ev and not any(ev):
             return False
@@ -207,7 +223,7 @@ class FakeSession:
                  named_series=None, series_fresh=True, series_still_eligible=True,
                  deadlocks=0, lock_sqlstate="40P01", grant_series_id=None,
                  bracket_states=(), series_fixture=None, authority_ok=False,
-                 idle=False):
+                 idle=False, superseded_at_write=False):
         self.players = list(players)
         self.event_exists = event_exists
         self.insert_wins = insert_wins
@@ -257,6 +273,11 @@ class FakeSession:
         self.grant_series_id = grant_series_id
         self.bracket_states = tuple(bracket_states or ())
         self.series_fixture = series_fixture
+        # r15: whether the pair's next sitting was published between the locked
+        # judgement and the write. The row locks this endpoint holds do not
+        # prevent it -- a new grant is a row that did not exist to be locked.
+        self.superseded_at_write = superseded_at_write
+        self.supersession_rechecks = 0
         self.grant_lookups = 0
         self.bracket_locks = 0
         self.spent_marks = 0
@@ -284,6 +305,28 @@ class FakeSession:
             )
             self.grant_lookups += 1
             return _Result([(self.grant_series_id,)] if self.grant_series_id else [])
+        if sql.startswith("SELECT 1 AS superseded"):
+            # r15: the last question asked before the commit. Routed on its own
+            # label rather than on its table, which the resolver and the spend
+            # also name (#306).
+            assert "FOR" not in sql.split("WHERE")[0], (
+                "the re-check must not take a lock here: the lock that would "
+                "close this window is keyed on the pair, not on these rows"
+            )
+            # BOTH sides of the pair. With counterparty_id = :rp this asks
+            # whether the reporter holds a newer grant against themselves,
+            # which is always empty -- a refusal that cannot fire.
+            assert "g2.holder_id = :rp" in sql and "g2.counterparty_id = :dp" in sql, (
+                "the re-check does not name the pair it is asking about"
+            )
+            # ...and it must compare against THIS report's own grant, not
+            # against nothing: a bare EXISTS over the pair's grants is true
+            # whenever any grant exists, which refuses every report.
+            assert "g.series_id = CAST(:sid AS uuid)" in sql, (
+                "the re-check has no baseline to be newer THAN"
+            )
+            self.supersession_rechecks += 1
+            return _Result([(1,)] if self.superseded_at_write else [])
         if sql.startswith("SELECT tm.status FROM tournament_matches"):
             # The bracket lifecycle, re-asked while holding the rows.
             #
@@ -970,8 +1013,7 @@ def test_the_backfill_selects_exactly_what_the_rule_would_have():
     windows = set(re.findall(r"NOW\(\) - INTERVAL '(\d+) (hours|days|minutes)'", sql))
     assert len(windows) == 1, (
         f"294 uses {len(windows)} different freshness windows: {sorted(windows)}; "
-        "its two INSERTs must select the same rows or one direction of a grant "
-        "is written without the other"
+        "both directions are projections of one selection and must stay so"
     )
     amount, unit = windows.pop()
     seconds = int(amount) * {"minutes": 60, "hours": 3600, "days": 86400}[unit]
@@ -981,18 +1023,34 @@ def test_the_backfill_selects_exactly_what_the_rule_would_have():
         "of dead sittings made permanently nameable"
     )
 
-    # ...and EVERY direction excludes decided brackets by the same list.
+    # r15: the two directions are now ONE selection.
     #
-    # Parsed per statement and compared as sets. 294 carries the exclusion
-    # twice, one INSERT per direction of the grant, so a per-state substring
-    # check passes on a state deleted from ONE of them -- and the two
-    # directions then select different rows, which leaves a pair reportable
-    # from one seat and not the other.
+    # This asserted the exclusion appeared TWICE, one INSERT per direction,
+    # because two hand-copied lists could disagree. Two statements could also
+    # read two SNAPSHOTS -- under READ COMMITTED each statement takes its own,
+    # so a series decided between them got a grant in one direction only, which
+    # is what BEGIN/COMMIT was wrongly credited with preventing. Both INSERTs
+    # are now projections of one MATERIALIZED CTE, so the exclusion is written
+    # once and the disagreement it guarded against is unrepresentable.
+    #
+    # The count assertion stays exact rather than becoming >= 1: an exclusion
+    # parsed zero times, or a file that quietly grew a second selection, both
+    # have to fail here (#441).
+    assert sql.count("FROM ranked_series") == 1, (
+        "294 selects from ranked_series more than once; the two directions of a "
+        "grant must come from ONE snapshot, not from two statements that commit "
+        "together while having read different rows"
+    )
+    assert "AS MATERIALIZED" in sql, (
+        "the CTE must be materialised, or the planner may inline it into each "
+        "arm of the union and evaluate the selection twice"
+    )
     lists = [frozenset(re.findall(r"'([a-z_]+)'", g))
              for g in re.findall(r"tm\.status\s+IN\s*\(([^)]*)\)", sql)]
-    assert len(lists) == 2, (
-        f"294 has {len(lists)} bracket exclusions, expected one per direction; "
-        "a parse that stops matching is a check that cannot fail (#441)"
+    assert len(lists) == 1, (
+        f"294 has {len(lists)} bracket exclusions, expected exactly one shared "
+        "by both directions; a parse that stops matching is a check that cannot "
+        "fail (#441)"
     )
     for got in lists:
         assert got == frozenset(main._TM_DECIDED_STATES), (
@@ -2367,11 +2425,13 @@ def test_an_unbound_post_cannot_corroborate_anything():
     rec = _Recorder()
     for verdict in (main.SEAT_UNBOUND, main.SEAT_MISMATCH):
         assert asyncio.run(main._record_seat_attestation(
-            rec, main.SEAT_SURFACE_RANKED, NAMED_SERIES, LEAVER, verdict)) is False, verdict
+            rec, main.SEAT_SURFACE_RANKED, NAMED_SERIES, LEAVER, verdict,
+            main.DC_MIN_LIVE_POINTS)) is False, verdict
     assert written == [], "a post the transport could not bind wrote a record anyway"
     # ...and the positive control, so this is not passing because nothing writes.
     assert asyncio.run(main._record_seat_attestation(
-        rec, main.SEAT_SURFACE_RANKED, NAMED_SERIES, LEAVER, main.SEAT_VERIFIED)) is True
+        rec, main.SEAT_SURFACE_RANKED, NAMED_SERIES, LEAVER, main.SEAT_VERIFIED,
+        main.DC_MIN_LIVE_POINTS)) is True
     assert "INSERT INTO series_progress" in written[0]
 
 
@@ -2634,9 +2694,17 @@ def test_the_predicate_only_reads_columns_the_migration_creates():
     schema, so nothing here could have caught it. This can."""
     sql = PROGRESS_SQL.read_text(encoding="utf-8")
     create = sql[sql.index("CREATE TABLE"):sql.index(");", sql.index("CREATE TABLE"))]
-    columns = set(re.findall(r"^\s{4}([a-z_]+)\s+(?:TEXT|UUID|TIMESTAMPTZ|BOOLEAN)",
-                             create, re.M))
-    assert columns, "no columns could be parsed out of the migration"
+    # Any type, not a list of four. The alternation this replaces could not see
+    # an INTEGER column, so a column of any unlisted type was absent from
+    # `columns` and would have been reported as missing from a migration that
+    # creates it. A type list is a thing to keep in sync; "a lowercase name
+    # followed by an uppercase type word" is not.
+    columns = set(re.findall(r"^\s{4}([a-z_]+)\s+[A-Z]", create, re.M))
+    # A positive control on the PARSE, not merely on its non-emptiness: these
+    # three are the primary key and cannot leave the table while it has one, so
+    # a regex that has stopped matching fails here rather than quietly shrinking
+    # the set the comparison is made against (#441).
+    assert {"surface", "subject_id", "player_id"} <= columns, sorted(columns)
     read = set(re.findall(r"\bsp\d?\.([a-z_]+)", main._DC_EVIDENCE_TERM))
     # Without this the gate is decoration: an expression that matches nothing
     # yields an empty set, an empty difference and a passing assert forever.
@@ -2851,3 +2919,175 @@ def test_the_attestation_table_cascades_from_the_player():
     assert "REFERENCES ranked_series" not in sql, (
         "subject_id carries a foreign key to one of the three parent tables, "
         "so the other two surfaces cannot record anything at all")
+
+
+def test_the_accused_own_post_must_have_seen_the_play_not_merely_happened():
+    """r15: presence was standing in for observation.
+
+    The threshold used to be read from ranked_series.live_p*_points, which BOTH
+    seats write through an endpoint that names its author in a query parameter.
+    The attestation only established that the accused had posted at all -- so a
+    single 0-0 post from the accused armed the corroboration, and the
+    counterparty's own posts carried the sum to the threshold. The arm asked for
+    the accused's participation and accepted the accuser's evidence."""
+    fixture = SeriesFixture(has_match=False, accused_attested=True,
+                            accused_armed=True, live_points=10,
+                            accused_observed_points=0)
+    session = FakeSession(_players(), named_series=_series_row(),
+                          series_fixture=fixture)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 503, (
+        "an evidence failure is not-yet, not settled: the accused's next post "
+        "can still carry it over the threshold (#430)"
+    )
+
+
+def test_the_accused_own_post_is_accepted_once_it_has_seen_the_play():
+    """The negative control. The same fixture with the accused's OWN posts over
+    the threshold has to be accepted, or the test above is measuring something
+    other than observed_points."""
+    fixture = SeriesFixture(has_match=False, accused_attested=True,
+                            accused_armed=True, live_points=10,
+                            accused_observed_points=main.DC_MIN_LIVE_POINTS)
+    session = FakeSession(_players(), named_series=_series_row(),
+                          series_fixture=fixture)
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+
+
+def _top_level_or_arms(term):
+    """Split a parenthesised OR-chain into its top-level arms.
+
+    A real boundary, because the gate below used an INDEX instead and a mutant
+    walked straight through it: it sliced from "FROM series_progress sp", so a
+    mutant that put the series totals BEFORE that subquery moved them outside
+    the slice and the assertion looked at the wrong text (#441 -- a check whose
+    window is chosen by guessing where the defect will land)."""
+    inner = " ".join(term.split()).strip()
+    assert inner.startswith("(") and inner.endswith(")"), inner[:60]
+    inner = inner[1:-1]
+    arms, depth, start, i = [], 0, 0, 0
+    while i < len(inner):
+        if inner[i] == "(":
+            depth += 1
+        elif inner[i] == ")":
+            depth -= 1
+        elif depth == 0 and inner.startswith(" OR ", i):
+            arms.append(inner[start:i])
+            i += 4
+            start = i
+            continue
+        i += 1
+    arms.append(inner[start:])
+    return [a.strip() for a in arms]
+
+
+def test_the_attested_arm_no_longer_reads_a_column_both_seats_write():
+    """The structural half: the series totals may appear ONLY in the unarmed
+    fallback now. If the attested arm reads them again, an accused who posted
+    once is corroborated by their opponent's evidence -- which is the whole
+    defect, and it can come back as a one-line edit."""
+    arms = _top_level_or_arms(main._DC_EVIDENCE_TERM)
+    assert len(arms) == 3, (
+        "the evidence rule is meant to be three flat arms -- a match row, the "
+        "accused's own observation, the unarmed fallback -- so that no arm can "
+        "borrow another's evidence; found %d: %r" % (len(arms), arms)
+    )
+    attested = [a for a in arms if "series_progress" in a]
+    assert len(attested) == 1, attested
+    assert ("live_p1_points" not in attested[0]
+            and "live_p2_points" not in attested[0]), (
+        "the attested arm reads the series totals again -- an accused who "
+        "posted once is corroborated by their opponent's evidence"
+    )
+    assert "sp.observed_points >= :min_points" in attested[0], (
+        "the attested arm no longer asks what the accused's own posts saw"
+    )
+    # ...and the totals both seats write survive in exactly ONE arm: the
+    # fallback for an account that cannot attest at all.
+    totals = [a for a in arms if "live_p1_points" in a]
+    assert len(totals) == 1, totals
+    assert "steam_auth_seen_at" in totals[0], (
+        "the arm reading the series totals is no longer the unarmed fallback"
+    )
+    # ...and the writer records the POST's own claim, not the stored pair.
+    writer = inspect.getsource(main._record_seat_attestation)
+    statement = writer[writer.index("INSERT INTO series_progress"):]
+    assert "GREATEST(series_progress.observed_points" in statement, (
+        "the observation is not monotonic, so a later 0-0 post un-observes "
+        "play that was already seen"
+    )
+
+
+def test_a_sitting_superseded_before_the_write_is_refused_and_nothing_is_kept():
+    """r15: the pair's next sitting began between the judgement and the write.
+
+    The locked re-ask held both players rows and the series row, and none of
+    those locks stop a new grant row appearing -- an insert takes FOR KEY SHARE
+    through its foreign keys, which does not conflict with FOR NO KEY UPDATE,
+    and a row that does not exist cannot be locked. So the report has to ask
+    once more before it commits, and a superseded grant has to cost the
+    disconnected player nothing."""
+    session = FakeSession(_players(), named_series=_series_row(),
+                          superseded_at_write=True)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403, (
+        "settled, not retryable: grants only move forward, so a retry of this "
+        "report can only ever fail the same way (#430)"
+    )
+    assert session.supersession_rechecks == 1
+    assert session.commits == 0, "a superseded report must not commit"
+    assert session.rollbacks == 1, "the increment has to be given back"
+
+
+def test_the_same_report_is_recorded_when_the_grant_is_still_the_newest():
+    """The negative control. Without it the test above passes on a fixture that
+    refuses for some other reason, and the re-check itself is never measured."""
+    session = FakeSession(_players(), named_series=_series_row(),
+                          superseded_at_write=False)
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+    assert session.supersession_rechecks == 1, (
+        "the re-check must run on the accepting path too, or it is only asked "
+        "where it cannot change the answer"
+    )
+    assert session.commits == 1
+
+
+def test_the_supersession_recheck_is_the_last_question_before_the_commit():
+    """Position is the property, not presence.
+
+    Asked before the writes it would be the same read the locked re-ask already
+    did, with the same window after it. Its whole value is being the last thing
+    the transaction asks, so the window it leaves open is one statement wide
+    rather than the whole validate-then-write span."""
+    session = FakeSession(_players(), named_series=_series_row())
+    _call(session, str(NAMED_SERIES))
+    recheck = [i for i, sql in enumerate(session.statements)
+               if sql.startswith("SELECT 1 AS superseded")]
+    assert len(recheck) == 1, session.statements
+    increment = [i for i, sql in enumerate(session.statements)
+                 if sql.startswith("UPDATE players")]
+    assert increment and recheck[0] > increment[-1], (
+        "the re-check runs before the last write, so a grant committing "
+        "between them is still written under"
+    )
+    assert recheck[0] == len(session.statements) - 1, (
+        "something else is asked after it; the re-check must be the last "
+        "statement in the transaction"
+    )
+
+
+def test_the_ranked_post_attests_to_its_own_claim_and_not_the_stored_pair():
+    """`_pts` is the stored pair AFTER GREATEST against whatever the
+    counterparty had already written. Attesting to it would record the
+    opponent's evidence as the accused's own observation and put the whole
+    defect back, one identifier at a time -- and the fake models SQL by
+    substring, so no behavioural test here can see which variable was passed."""
+    source = MAIN_PY.read_text(encoding="utf-8")
+    start = source.index("_record_seat_attestation(db, SEAT_SURFACE_RANKED")
+    call = source[start:source.index("\n", source.index("))", start))]
+    assert "new_p1" in call and "new_p2" in call, call
+    assert "_pts" not in call, (
+        "the attestation records the STORED pair, which both seats write: " + call
+    )
