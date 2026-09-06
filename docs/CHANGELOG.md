@@ -84,12 +84,31 @@
   falls back to working out which series the two of you are in, exactly as it
   does for a report that names none. What it will not accept is a leave filed
   against a sitting the server has since replaced — because the two of you have
-  started a newer one — against a tournament match the bracket has already
-  decided, or against a series in which no game was played; the record it feeds
-  is about games that happened. A leave queued while the server was
-  unreachable is no longer refused for arriving late: it is judged on whether
-  that sitting is still the one you were last put into, not on how long the
-  report took to be delivered.
+  started a newer one — or against a tournament match the bracket has already
+  decided. A leave queued while the server was unreachable is no longer refused
+  for arriving late: it is judged on whether that sitting is still the one you
+  were last put into, not on how long the report took to be delivered.
+- **What counts as proof that a leave happened.** A leave reported before any
+  game in the series has finished used to be accepted on the running score
+  alone — and the running score is sent by your own game, so the score that
+  proved the match was real could come from the same player filing the report.
+  For that case the server now wants the score post from the LEAVER's game,
+  which the reporter has no way to send. It asks this only of accounts that
+  have signed in through Steam at least once, since those are the only ones
+  that can produce it; everyone else is judged exactly as before, and a leave
+  after any completed game is judged exactly as before either way. Nothing
+  changes for the ordinary case: both games send the score as it changes, so by
+  the time a leave is reportable, the leaver's own game has already said it was
+  there.
+- **A leave report is no longer thrown away for arriving before its proof.**
+  "The server has no record yet that anything happened here" used to be a
+  permanent refusal, and your mod deletes a permanent refusal — but the
+  leaver's own score post can still be in flight when you file, since their
+  game keeps re-sending it after they drop out of the room. That refusal is now
+  a retry while the sitting is live, and becomes permanent once the sitting has
+  been quiet for hours. The server decides that, not the mod: a queued report
+  gets a fresh twenty attempts on every relaunch, so only the server can retire
+  one that will never qualify.
   A leave seen in the moment between one game being recorded and the next
   starting has no series to name, and is still a single attempt.
 - The background queue of unsent match reports no longer stops for the rest of
@@ -119,8 +138,9 @@
   with a logged reason, and transport actions are not lever-driven.
 
 **Schema changes:** migrations **292** (`issued_room_regions` — the region and
-player pair this server issued for a ranked room) and **293**
-(`series_dc_grants` — which sitting the server last put a pair into) BEFORE the
+player pair this server issued for a ranked room), **293**
+(`series_dc_grants` — which sitting the server last put a pair into) and **295**
+(`series_progress` — which seat posted an observation of a sitting) BEFORE the
 API deploy. After it, in numeric order: **288** (client i18n keys for the new
 library strings), **289** (machine-translation proposals for es/ru/uk/sv for
 those keys), **290** (client i18n keys for the head-to-head and lag-notice
@@ -128,13 +148,27 @@ strings), **291** (their es/ru/uk/sv proposals) and **294** (one grant per
 sitting that was already live when 293 shipped). The same translations ship
 bundled in the client.
 
-**292 and 293 go first, and the order is not cosmetic.** The new match-report
-path SELECTs from `issued_room_regions`; `series_dc_grants` is wider than that
-— every path that puts a pair into a series writes a grant, so an API deployed
-ahead of 293 would fail **match reporting, queue ready, queue poll, preflight
-and leave reports** with `undefined_table` until the table landed. That is the
-whole ranked hot path, not one endpoint. The i18n seeds only add rows the
-client already carries bundled, which is why those four stay after.
+**292, 293 and 295 go first, and the order is not cosmetic.** The new
+match-report path SELECTs from `issued_room_regions`; `series_dc_grants` is
+wider than that — every path that puts a pair into a series writes a grant, so
+an API deployed ahead of 293 would fail **match reporting, queue ready, queue
+poll, preflight and leave reports** with `undefined_table` until the table
+landed. That is the whole ranked hot path, not one endpoint. `series_progress`
+is narrower — the leave-report predicate reads it and all three live-points
+endpoints write it — but an API ahead of 295 would fail every leave report on
+`undefined_table` and record no attestations, so it goes with the other two.
+The i18n seeds only add rows the client already carries bundled, which is why
+those four stay after.
+
+**Two switches ship OFF and are armed from `.env` plus a container restart.**
+`DC_REQUIRE_VERIFIED_SEAT` drops the fallback that judges accounts without a
+verified Steam session by the old rule; do not arm it until verified sessions
+are broadly held (162 of 4663 accounts have ever held one), or genuine reports
+start failing. `LIVE_POINTS_REFUSE_MISMATCHED_SEAT` refuses a live-points post
+whose session token names a different player than the post claims. Both are
+mapped under `api:` in `docker-compose.yml`, which is what actually delivers
+them: this project has no `env_file:`, so a key in `.env` that is not named
+there reaches compose and never reaches the process.
 
 **294 goes LAST, after the API is running on both boxes,** and that order is
 also load-bearing but in the opposite direction. It backfills a grant for every

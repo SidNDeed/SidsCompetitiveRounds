@@ -865,7 +865,8 @@ def test_the_deploy_block_orders_every_migration_it_names():
     # BEFORE the API: the tables its own statements read.
     before = block[:block.index("After it")] if "After it" in block else block
     for early, why in (("292", "the match-report path SELECTs issued_room_regions"),
-                       ("293", "every path that seats a pair writes series_dc_grants")):
+                       ("293", "every path that seats a pair writes series_dc_grants"),
+                       ("295", "the leave-report predicate SELECTs series_progress")):
         assert early in before, f"migration {early} is not ordered before the API — {why}"
     assert "BEFORE the API deploy" in block, "nothing is ordered before the API at all"
 

@@ -30,6 +30,7 @@ room could spend.
 """
 
 import asyncio
+import os
 import textwrap
 import inspect
 import ast
@@ -116,7 +117,8 @@ class SeriesFixture:
 
     def __init__(self, grant_present=True, grant_is_newest=True,
                  any_grant_for_pair=True, completed=False, is_most_recent=True,
-                 fresh=True, live_points=10, has_match=True):
+                 fresh=True, live_points=10, has_match=True,
+                 accused_attested=False, accused_armed=False):
         # AUTHORITY: the server put this pair into this sitting...
         self.grant_present = grant_present
         # ...and has not since put them into a newer one.
@@ -127,11 +129,20 @@ class SeriesFixture:
         self.completed = completed
         self.is_most_recent = is_most_recent
         self.fresh = fresh
-        # EVIDENCE.
+        # EVIDENCE. Two arms since M4: a committed match row, or the points
+        # threshold AND corroboration from the accused -- required only of an
+        # account that has provably run a ticket-auth client and can therefore
+        # produce it.
         self.live_points = live_points
         self.has_match = has_match
+        # A verified attestation by the ACCUSED for this sitting. There is no
+        # unverified kind: an unbound row is one the reporter could have
+        # written, so none is recorded.
+        self.accused_attested = accused_attested
+        # players.steam_auth_seen_at IS NOT NULL for the accused.
+        self.accused_armed = accused_armed
 
-    def evaluate(self, sql, min_points):
+    def evaluate(self, sql, min_points, require_verified_seat=False):
         """True if this fixture satisfies the predicate AS WRITTEN in `sql`."""
         arms = []
         if "FROM series_dc_grants g" in sql:
@@ -149,9 +160,38 @@ class SeriesFixture:
             return True
         if not any(arms):
             return False
-        if "live_p1_points" in sql or "FROM matches m" in sql:
-            if not (self.live_points >= min_points or self.has_match):
-                return False
+
+        # EVIDENCE, arm by arm, each applied only if its own clause is present.
+        # An empty list means the statement asks nothing about evidence at all —
+        # which is exactly what the refusal diagnostic is — so it disqualifies
+        # nothing rather than defaulting either way.
+        ev = []
+        if "FROM matches m" in sql:
+            ev.append(self.has_match)
+        if "live_p1_points" in sql:
+            # Read the THRESHOLD out of the statement, do not assume it. A
+            # model that carries its own copy of the number cannot notice the
+            # statement's copy being changed -- which is how a mutant that
+            # replaced `:min_points` with a literal 0 walked past every gate.
+            if ">= :min_points" in sql:
+                play = self.live_points >= min_points
+            else:
+                bound = re.search(r"points, 0\) >= (\d+)", sql)
+                play = self.live_points >= int(bound.group(1)) if bound else True
+            if "sp.player_id = :dp" in sql:
+                corroborated = self.accused_attested
+                if "NOT CAST(:require_verified_seat AS boolean)" in sql                         and not require_verified_seat:
+                    # The fallback clause. Without the arming sub-clause it is
+                    # unconditional, i.e. the fence is gone entirely -- which is
+                    # a state a mutation can produce and this must model.
+                    if "steam_auth_seen_at" in sql:
+                        corroborated = corroborated or not self.accused_armed
+                    else:
+                        corroborated = True
+                play = play and corroborated
+            ev.append(play)
+        if ev and not any(ev):
+            return False
         return True
 
 
@@ -166,7 +206,8 @@ class FakeSession:
     def __init__(self, players, event_exists=False, insert_wins=True, stored_count=4,
                  named_series=None, series_fresh=True, series_still_eligible=True,
                  deadlocks=0, lock_sqlstate="40P01", grant_series_id=None,
-                 bracket_states=(), series_fixture=None):
+                 bracket_states=(), series_fixture=None, authority_ok=False,
+                 idle=False):
         self.players = list(players)
         self.event_exists = event_exists
         self.insert_wins = insert_wins
@@ -177,6 +218,19 @@ class FakeSession:
         # it is asked after the unlocked reads, and answers "is this still true
         # now that nothing else can change it".
         self.series_still_eligible = series_still_eligible
+        # Whether the AUTHORITY arms alone would have passed. Only the refusal
+        # diagnostic asks this, and only after the full predicate has already
+        # said no, so it decides one thing: whether the refusal is settled (403)
+        # or not-yet (503). Defaults False because every scenario written before
+        # the split -- a superseded sitting, an invalidated series, a decided
+        # bracket -- is an authority failure, and those must stay settled.
+        self.authority_ok = authority_ok
+        # Whether the sitting has been idle past the live window. Only the
+        # diagnostic asks, and it decides whether an evidence failure is worth
+        # retrying or is finally settled.
+        self.idle = idle
+        self.authority_diagnostics = 0
+        self.authority_sql = None
         # r12 D: how many times the participant lock pass is aborted by the
         # database before it succeeds, and with which SQLSTATE. 40P01 is a
         # deadlock victim; anything else is a fault this endpoint must not
@@ -250,6 +304,29 @@ class FakeSession:
             self.bracket_locks += 1
             self.lock_order.append("bracket")
             return _Result([(st,) for st in self.bracket_states])
+        if sql.startswith("SELECT 1 AS authority_only"):
+            # The refusal diagnostic. Routed on a label that exists for no other
+            # purpose (#306): this statement is the shared predicate minus its
+            # evidence arm, so every other way of recognising it -- "no matches
+            # arm", "no series_progress" -- is a shape a MUTATION of the shared
+            # fragments could give one of the real asks, and the fake would then
+            # answer the wrong question about the wrong statement.
+            assert "FOR NO KEY UPDATE" not in sql, (
+                "the diagnostic must not take a lock: it runs after the real "
+                "ask has already failed and only picks the status code"
+            )
+            self.authority_diagnostics += 1
+            self.authority_sql = sql
+            # Whether the statement actually COMPUTES idleness, rather than
+            # merely containing the word. A mutant that replaced the expression
+            # with `false AS idle` kept the word and kept every gate green.
+            computes_idle = ("COALESCE(s.last_activity_at, s.created_at)" in sql
+                             and "AS idle" in sql)
+            ok = (self.series_fixture.evaluate(
+                      sql, main.DC_MIN_LIVE_POINTS,
+                      main._dc_require_verified_seat())
+                  if self.series_fixture is not None else self.authority_ok)
+            return _Result([(1, self.idle and computes_idle)] if ok else [])
         if sql.startswith("SELECT 1 FROM ranked_series"):
             assert "CAST(:sid AS uuid)" in sql, "the id bind must be typed (#448)"
             if "FOR NO KEY UPDATE" in sql:
@@ -258,7 +335,8 @@ class FakeSession:
                 self.lock_order.append("series")
                 if self.series_fixture is not None:
                     return _Result([(1,)] if self.series_fixture.evaluate(
-                        sql, main.DC_MIN_LIVE_POINTS) else [])
+                        sql, main.DC_MIN_LIVE_POINTS,
+                        main._dc_require_verified_seat()) else [])
                 return _Result([(1,)] if self.series_still_eligible else [])
             assert "CAST(:live_window AS interval)" in sql, (
                 "an interval bind has to be CAST, never concatenated (#448)"
@@ -266,7 +344,8 @@ class FakeSession:
             self.freshness_checks += 1
             if self.series_fixture is not None:
                 return _Result([(1,)] if self.series_fixture.evaluate(
-                    sql, main.DC_MIN_LIVE_POINTS) else [])
+                    sql, main.DC_MIN_LIVE_POINTS,
+                    main._dc_require_verified_seat()) else [])
             return _Result([(1,)] if self.series_fresh else [])
         if "FROM ranked_series" in sql:
             self.series_loads += 1
@@ -2116,3 +2195,534 @@ def test_the_grant_index_matches_the_order_the_resolver_reads():
         f"the index leads with {columns[:2]}, not the equality terms the "
         "resolver and the supersession subquery both filter on"
     )
+
+# ── M4: evidence the reporting seat did not author by itself ────────────────
+#
+# For a leave during game 1 there is no match row, so the ONLY evidence was
+# `ranked_series.live_p*_points` — columns written by a live-points POST that
+# authenticates with a secret every client holds and names its author in a query
+# parameter. The accusing seat could write its own corroboration.
+#
+# The first implementation of this fix recorded an attestation for every post,
+# marking it `session_verified=false` when no token rode along, so that the new
+# rule would have something to read while verified sessions are rare. A design
+# review holed it in one line: an unbound row naming a player is a row the OTHER
+# player can write, so the default configuration preserved the forgery exactly.
+# The record is now verified-only and small, and the RULE handles the sparsity —
+# it asks for corroboration only from an account that has provably run a
+# ticket-auth client. Several tests below are the negative controls for that.
+
+SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
+PROGRESS_SQL = SQL_DIR / "295_series_progress.sql"
+COMPOSE_YML = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+
+
+def test_an_unbound_post_cannot_corroborate_anything():
+    """THE blocker the design review found. With the shared HMAC and a
+    query-parameter identity, a seat can post live points CLAIMING to be its
+    opponent. If that wrote an attestation, the accuser would be writing the
+    accused's corroboration and the whole item would be inert in its default
+    configuration."""
+    written = []
+
+    class _Recorder:
+        async def execute(self, statement, params=None):
+            written.append(str(statement))
+            return _Result([])
+
+        def begin_nested(self):
+            class _Ctx:
+                async def __aenter__(self_inner):
+                    return None
+
+                async def __aexit__(self_inner, *a):
+                    return False
+            return _Ctx()
+
+    rec = _Recorder()
+    for verdict in (main.SEAT_UNBOUND, main.SEAT_MISMATCH):
+        assert asyncio.run(main._record_seat_attestation(
+            rec, main.SEAT_SURFACE_RANKED, NAMED_SERIES, LEAVER, verdict)) is False, verdict
+    assert written == [], "a post the transport could not bind wrote a record anyway"
+    # ...and the positive control, so this is not passing because nothing writes.
+    assert asyncio.run(main._record_seat_attestation(
+        rec, main.SEAT_SURFACE_RANKED, NAMED_SERIES, LEAVER, main.SEAT_VERIFIED)) is True
+    assert "INSERT INTO series_progress" in written[0]
+
+
+def test_the_record_has_no_column_that_is_true_of_every_row():
+    """`session_verified` was in the first draft and every row would now carry
+    it set — a column that is always true answers nothing, which is the same
+    defect as a column documented as written that nothing writes. The row's
+    EXISTENCE is the attestation."""
+    sql = PROGRESS_SQL.read_text(encoding="utf-8")
+    body = sql[sql.index("CREATE TABLE"):]
+    assert "session_verified" not in body and "verified_at" not in body, (
+        "the table still carries the always-true flag"
+    )
+    # Read the statement, not the docstring: the docstring explains why the
+    # column is gone, and a source-wide substring test would be satisfied by
+    # the explanation and fail on it in the same breath.
+    writer = inspect.getsource(main._record_seat_attestation)
+    statement = writer[writer.index("INSERT INTO series_progress"):]
+    assert "session_verified" not in statement and "verified_at" not in statement, (
+        "the writer still sets a column the table no longer has"
+    )
+
+
+def test_a_game_one_leave_needs_the_accused_own_post_when_they_can_make_one():
+    """The arm this item exists for. No match row yet, points on the record, and
+    an account that has provably run a ticket-auth client: its own attestation
+    is required, and the reporter has no way to write it."""
+    refused = FakeSession(_players(), authority_ok=True,
+                          series_fixture=SeriesFixture(
+                              has_match=False, live_points=10,
+                              accused_armed=True, accused_attested=False))
+    with pytest.raises(main.HTTPException):
+        _call(refused, str(NAMED_SERIES))
+    assert refused.inserts == 0 and refused.increments == 0
+
+    counted = FakeSession(_players(), series_fixture=SeriesFixture(
+        has_match=False, live_points=10,
+        accused_armed=True, accused_attested=True))
+    assert _call(counted, str(NAMED_SERIES))["status"] == "recorded"
+    assert counted.increments == 1
+
+
+def test_an_account_that_cannot_attest_is_judged_by_the_old_rule():
+    """#503/#276: a rule whose evidence must be EARNED has to say what the
+    not-yet-earned class competes against. 162 of 4663 accounts have ever held a
+    verified session; demanding corroboration from the other 4501 would refuse
+    almost every genuine report. Their leaves are judged exactly as before."""
+    session = FakeSession(_players(), series_fixture=SeriesFixture(
+        has_match=False, live_points=10,
+        accused_armed=False, accused_attested=False))
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+
+
+def test_the_fallback_is_keyed_on_the_accused_and_the_reporter_cannot_move_it():
+    """Both halves of the corroboration conjunct name :dp. Keyed on :rp, or on
+    a property of the sitting rather than of the accused, the reporting seat
+    could arrange the state that decides whether it must corroborate."""
+    sql = main._DC_EVIDENCE_TERM
+    assert "sp.player_id = :dp" in sql
+    assert "pa.id = :dp" in sql, (
+        "the arming fallback is not keyed on the accused, so it does not "
+        "describe whether the ACCUSED can attest"
+    )
+    assert ":rp" not in sql, (
+        "the evidence arm reads the reporter, so the seat filing the report is "
+        "part of what decides whether the report is believed"
+    )
+    assert "steam_auth_seen_at" in sql, (
+        "the fallback is not gated on the per-account arming column, so it is "
+        "either always open (no fence) or always closed (refuses everyone)"
+    )
+
+
+def test_the_minimum_gameplay_threshold_survived_the_rewrite():
+    """A design-review HIGH. Making corroboration its own OR-arm would have let
+    a single 1-0 post carry a report that today needs two points on the board.
+    The threshold is AND-ed with the corroboration, not replaced by it."""
+    thin = SeriesFixture(has_match=False, live_points=1,
+                         accused_armed=True, accused_attested=True)
+    assert not thin.evaluate(main._DC_ELIGIBLE_TERMS, main.DC_MIN_LIVE_POINTS)
+    thick = SeriesFixture(has_match=False, live_points=main.DC_MIN_LIVE_POINTS,
+                          accused_armed=True, accused_attested=True)
+    assert thick.evaluate(main._DC_ELIGIBLE_TERMS, main.DC_MIN_LIVE_POINTS)
+
+
+def test_a_finished_game_still_counts_the_way_it_always_did():
+    """The match arm is NOT gated on corroboration, and the comment says why in
+    plain terms rather than claiming an independence it does not have: it is
+    single-seat authored like everything else, but it moved both ratings and
+    left an auditable row. Gating it would hand an armed account a way to escape
+    every leave by suppressing its own live-points posts."""
+    session = FakeSession(_players(), series_fixture=SeriesFixture(
+        has_match=True, live_points=0,
+        accused_armed=True, accused_attested=False))
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+
+
+def test_arming_the_switch_removes_the_fallback_and_nothing_else(monkeypatch):
+    """The switch's whole job. With it on, an unarmed account's game-1 leave
+    needs corroboration too — and a switch that changes nothing in one of its
+    positions is not a switch, so both positions are asserted."""
+    unarmed = SeriesFixture(has_match=False, live_points=10,
+                            accused_armed=False, accused_attested=False)
+    sql = main._DC_ELIGIBLE_TERMS
+    assert unarmed.evaluate(sql, main.DC_MIN_LIVE_POINTS, False)
+    assert not unarmed.evaluate(sql, main.DC_MIN_LIVE_POINTS, True)
+    # ...and a finished game is still outside the switch's reach.
+    assert SeriesFixture(has_match=True, live_points=0).evaluate(
+        sql, main.DC_MIN_LIVE_POINTS, True)
+
+
+def test_the_verified_seat_requirement_ships_off():
+    """162 of 4663 accounts have ever held a verified session. Arming this on
+    day one would refuse the overwhelming majority of genuine game-1 reports,
+    which is the wrong direction for a fence whose failure costs another
+    player's public leave-%."""
+    for value in ("", "0", "no", "off", "  "):
+        os.environ["DC_REQUIRE_VERIFIED_SEAT"] = value
+        assert main._dc_require_verified_seat() is False
+    os.environ.pop("DC_REQUIRE_VERIFIED_SEAT", None)
+    assert main._dc_require_verified_seat() is False
+    os.environ["DC_REQUIRE_VERIFIED_SEAT"] = "1"
+    try:
+        assert main._dc_require_verified_seat() is True
+    finally:
+        os.environ.pop("DC_REQUIRE_VERIFIED_SEAT", None)
+
+
+def test_every_switch_this_file_reads_is_mapped_into_the_container():
+    """#438/#443, and docker-compose.yml says it in bold itself: this project
+    has no `env_file:`, so a key in .env reaches compose for interpolation and
+    NEVER reaches the process unless it is named under `environment:`. Both M4
+    switches would have shipped permanently inert, with every log line normal.
+
+    Read from the source rather than from a list of names, so a switch added
+    later is covered without anyone remembering this test exists."""
+    src = MAIN_PY.read_text(encoding="utf-8")
+    read = set(re.findall(r'os\.getenv\(\s*"([A-Z][A-Z0-9_]*)"', src))
+    compose = COMPOSE_YML.read_text(encoding="utf-8")
+    api = compose[compose.index("  api:"):compose.index("  bot:")]
+    mapped = set(re.findall(r"^\s{6}([A-Z][A-Z0-9_]*):", api, re.M))
+    # Names the process gets from somewhere other than this compose file.
+    exempt = {"PATH", "HOME", "HOSTNAME", "PYTHONUNBUFFERED", "TZ", "LANG"}
+    # PRE-EXISTING and frozen, found by this gate the first time it ran. Each of
+    # these is read with a non-empty code default and is passed to the container
+    # by nothing, so setting it in .env does nothing at all -- the override
+    # affordance is not real. They are NOT fixed here: mapping them as
+    # `${KEY:-}` would replace the code default with an empty string (os.getenv
+    # returns "" for a key that is set-but-empty), and mapping them with their
+    # defaults duplicates each default in two files. The fix is to move each
+    # default into compose and drop it from the code, one feature at a time,
+    # which is not this change. The set is frozen so a NEW one still fails.
+    known_unreachable = {
+        "SERIES_REUSE_WINDOW_MIN",
+        "RANKED_STREAMING_CHANNEL",
+        "BROADCAST_TWITCH_URL", "BROADCAST_TWITCH_VODS_URL",
+        "BROADCAST_YOUTUBE_URL", "BROADCAST_YOUTUBE_VODS_URL",
+    }
+    assert known_unreachable <= read, (
+        "this frozen list names keys main.py no longer reads: "
+        + ", ".join(sorted(known_unreachable - read))
+        + " -- shrink the list rather than leaving it to excuse a future one"
+    )
+    missing = sorted(read - mapped - exempt - known_unreachable)
+    assert not missing, (
+        "main.py reads these and docker-compose.yml does not pass them to the "
+        "api container, so os.getenv returns \"\" forever: " + ", ".join(missing)
+    )
+
+
+def test_the_mismatch_switch_is_named_for_what_it_does():
+    """It was REQUIRE_BOUND_SEAT, which overpromised: a post with no token at
+    all is still accepted, so it does not make posts caller-bound. Requiring
+    that would break the betting cutoff for every client without a verified
+    session."""
+    assert not hasattr(main, "_live_points_require_bound_seat")
+    doc = inspect.getdoc(main._live_points_refuse_mismatched_seat) or ""
+    assert "does not make a post caller-bound" in doc.replace("\n", " ")
+
+
+def test_the_session_read_cannot_take_down_the_write_it_rides_behind():
+    """Returning UNBOUND from an `except` is only fail-soft if the transaction
+    survives it, and under asyncpg a caught statement error leaves the whole
+    transaction ABORTED (#235). The read-only callers this classifier was
+    extracted from never noticed; the live-points write path would have."""
+    for fn in (main._seat_attestation_verdict, main._record_seat_attestation):
+        assert "begin_nested" in inspect.getsource(fn), fn.__name__
+
+
+# ── what a refusal costs, and how a doomed report is settled ────────────────
+
+
+def test_a_report_whose_evidence_has_not_arrived_yet_is_kept_not_deleted():
+    """The client deletes a 4xx and re-presents a 5xx. The accused's own
+    live-points post can still be in flight, or being re-sent by their client's
+    retry layer, which keeps running after they leave the Photon room."""
+    session = FakeSession(_players(), authority_ok=True,
+                          series_fixture=SeriesFixture(
+                              has_match=False, live_points=10,
+                              accused_armed=True, accused_attested=False))
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 503
+    assert session.authority_diagnostics >= 1
+
+
+def test_a_sitting_nothing_has_happened_in_for_hours_settles_instead():
+    """The server is the ONLY place a doomed report can be settled: the client's
+    twenty-attempt budget is per PROCESS — the outbox persists url and body and
+    reloads with attempts = 0 — so a permanently ineligible report would get a
+    fresh twenty attempts on every launch, forever."""
+    session = FakeSession(_players(), authority_ok=True, idle=True,
+                          series_fixture=SeriesFixture(
+                              has_match=False, live_points=10,
+                              accused_armed=True, accused_attested=False))
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403, (
+        "a sitting idle past the live window still answers retryable, so a "
+        "report that can never become eligible never leaves the client"
+    )
+    assert "CAST(:live_window AS interval)" in session.authority_sql, (
+        "the idle bound is not asked in SQL against the database clock (#448)"
+    )
+
+
+def test_the_idle_bound_is_computed_from_the_sitting_and_not_asserted_about():
+    """The behavioural test above can only see the bound if the statement
+    computes it, and `:live_window` appears in the predicate's legacy arm too --
+    so a substring test for the bind is satisfied by an occurrence that has
+    nothing to do with this. Name the EXPRESSION."""
+    src = inspect.getsource(main._refuse_named_series)
+    stmt = src[src.index("SELECT 1 AS authority_only"):src.index("LIMIT 1")]
+    assert "COALESCE(s.last_activity_at, s.created_at)" in stmt, (
+        "the diagnostic reports idleness without reading when anything last "
+        "happened in the sitting"
+    )
+    assert "CAST(:live_window AS interval)" in stmt, (
+        "the idle bound is not asked against the database clock, or is not "
+        "asked at all (#448)"
+    )
+    assert "AS idle" in stmt
+
+
+def test_the_gameplay_threshold_is_a_bind_and_not_a_literal():
+    """A hardcoded target is a check that cannot fail (#342). The threshold has
+    one definition, DC_MIN_LIVE_POINTS, and the statement must bind it."""
+    ev = main._DC_EVIDENCE_TERM
+    assert ">= :min_points" in ev, (
+        "the points comparison carries its own number, so the constant and the "
+        "statement can disagree about what counts as meaningful play"
+    )
+    assert not re.search(r"points, 0\) >= \d", ev)
+
+
+def test_the_predicate_only_reads_columns_the_migration_creates():
+    """Found by grep, not by this suite: the rewrite dropped `session_verified`
+    from the table and left the predicate reading it, which is undefined_column
+    on every leave report. The fake models SQL by substring and cannot see a
+    schema, so nothing here could have caught it. This can."""
+    sql = PROGRESS_SQL.read_text(encoding="utf-8")
+    create = sql[sql.index("CREATE TABLE"):sql.index(");", sql.index("CREATE TABLE"))]
+    columns = set(re.findall(r"^\s{4}([a-z_]+)\s+(?:TEXT|UUID|TIMESTAMPTZ|BOOLEAN)",
+                             create, re.M))
+    assert columns, "no columns could be parsed out of the migration"
+    read = set(re.findall(r"\bsp\d?\.([a-z_]+)", main._DC_EVIDENCE_TERM))
+    # Without this the gate is decoration: an expression that matches nothing
+    # yields an empty set, an empty difference and a passing assert forever.
+    # It landed exactly that way once -- a shell ate the \b and wrote a literal
+    # backspace -- and the mutant walked straight through (#342/#441).
+    assert read, "no series_progress column reads were found in the predicate"
+    missing = sorted(read - columns)
+    assert not missing, (
+        "the disconnect predicate reads series_progress columns migration 295 "
+        "does not create: " + ", ".join(missing)
+    )
+
+
+def test_an_authority_refusal_stays_settled():
+    """The negative control for both of the above: a sitting the server has
+    superseded is not going to become nameable."""
+    session = FakeSession(_players(), series_fixture=SeriesFixture(
+        grant_is_newest=False, has_match=True))
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+
+
+def test_a_diagnostic_that_cannot_answer_keeps_the_report():
+    """The two errors are not symmetric. A wrongly settled report is deleted and
+    unrecoverable; a wrongly retried one costs bounded requests and is settled
+    by the idle bound as soon as the lookup works again. The first draft had
+    this backwards."""
+    src = inspect.getsource(main._refuse_named_series)
+    body = src[src.index("except Exception"):src.index("if authority_ok")]
+    assert "authority_ok, idle = True, False" in body, (
+        "the diagnostic's own failure deletes a report it could not classify"
+    )
+
+
+def test_the_diagnostic_asks_the_same_authority_question_as_the_predicate():
+    assert main._DC_AUTHORITY_ONLY_TERMS in main._DC_ELIGIBLE_TERMS, (
+        "the diagnostic is not a prefix of the predicate it explains, so the "
+        "two can answer differently about the same sitting"
+    )
+    assert main._DC_EVIDENCE_TERM not in main._DC_AUTHORITY_ONLY_TERMS, (
+        "the diagnostic still carries the evidence arm, so it can only ever "
+        "agree with the predicate and no refusal is ever retryable"
+    )
+
+
+def test_the_locked_sites_diagnostic_carries_the_row_terms_too():
+    """A diagnostic that asks a WIDER question than the statement it explains
+    will call a settled refusal retryable."""
+    src = inspect.getsource(main._report_disconnect_once)
+    assert "row_terms=_DC_LOCKED_ROW_TERMS" in src
+    session = FakeSession(_players(),
+                          series_fixture=SeriesFixture(grant_is_newest=False))
+    with pytest.raises(main.HTTPException):
+        _call(session)
+    assert session.authority_diagnostics == 1
+    assert "s.player1_id = :rp" in session.authority_sql, (
+        "the diagnostic omits the pair check, so a report naming a series "
+        "belonging to two other players is answered 'try again'"
+    )
+    assert "s.invalidated_at IS NULL" in session.authority_sql
+
+
+def test_the_locked_statement_and_its_diagnostic_share_the_row_terms():
+    src = inspect.getsource(main._report_disconnect_once)
+    assert "(s.player1_id = :rp" not in src, (
+        "the locked statement carries its own copy of the row terms again, so "
+        "the statement and the diagnostic explaining it can drift apart"
+    )
+    assert src.count("_DC_LOCKED_ROW_TERMS") >= 2
+
+
+def test_the_diagnostic_takes_no_lock_and_runs_only_on_refusal():
+    accepted = FakeSession(_players(), series_fixture=SeriesFixture())
+    _call(accepted, str(NAMED_SERIES))
+    assert accepted.authority_diagnostics == 0
+    assert "series" in accepted.lock_order
+
+
+# ── the attestation writers ─────────────────────────────────────────────────
+
+
+def _live_points_endpoints():
+    """Every function serving a live-points POST — the operation that CREATES
+    the obligation to attest, per #515. Counting calls to the writer instead
+    counts the calls the fix wrote and is blind to the endpoint it forgot."""
+    tree = ast.parse(MAIN_PY.read_text(encoding="utf-8"))
+    found = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in fn.decorator_list:
+            if not isinstance(dec, ast.Call) or not dec.args:
+                continue
+            route = dec.args[0]
+            if isinstance(route, ast.Constant) and isinstance(route.value, str) \
+                    and route.value.endswith("/live-points"):
+                found.append(fn)
+    return found
+
+
+def test_every_live_points_endpoint_records_who_posted():
+    endpoints = _live_points_endpoints()
+    assert len(endpoints) >= 3, (
+        "the live-points surfaces cannot be enumerated from the routes, so "
+        "this gate is not measuring the thing it claims to measure"
+    )
+    missing = [fn.name for fn in endpoints
+               if "_record_seat_attestation" not in {
+                   n.func.id for n in ast.walk(fn)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}]
+    assert not missing, (
+        "live-points endpoints that store points but record no attestation: "
+        + ", ".join(missing))
+
+
+def test_every_live_points_endpoint_asks_who_is_posting_before_it_writes():
+    missing = []
+    for fn in _live_points_endpoints():
+        gate = [n.lineno for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_seat_gate_for_live_points"]
+        record = [n.lineno for n in ast.walk(fn)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id == "_record_seat_attestation"]
+        if not gate or not record or min(gate) > min(record):
+            missing.append(fn.name)
+    assert not missing, (
+        "the seat verdict is taken after the attestation is written (or not at "
+        "all) in: " + ", ".join(missing))
+
+
+def test_the_endpoints_take_the_request_the_verdict_is_read_from():
+    """A handler with no Request parameter cannot see a header, so every post
+    would be UNBOUND forever — a substrate shipping inert while every log line
+    says it is working (#438/#443)."""
+    for fn in _live_points_endpoints():
+        names = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
+        assert "request" in names, f"{fn.name} never receives the request"
+
+
+def test_the_verdict_distinguishes_cannot_tell_from_checked_and_wrong():
+    """#499. Folding "no token" together with "a token that names someone else"
+    loses the only fact that justifies withholding a record."""
+    assert main.SEAT_UNBOUND != main.SEAT_MISMATCH
+    src = inspect.getsource(main._seat_attestation_verdict)
+    mismatch_at = src.index("return SEAT_MISMATCH")
+    for later in ('row["expires_at"]', 'row["verified"]'):
+        assert src.index(later) > mismatch_at, (
+            "a token that names someone else is classified as merely unbound "
+            "once it expires, and the fact a caller acts on is lost"
+        )
+
+
+def test_the_privilege_check_still_answers_only_for_a_verified_seat():
+    src = inspect.getsource(main._strict_steam_session_ok)
+    assert "SELECT steam_id, verified, expires_at" not in src, (
+        "the privilege check kept its own copy of the session read (#432)"
+    )
+    assert "_seat_attestation_verdict" in src and "SEAT_VERIFIED" in src
+    assert "SEAT_UNBOUND" not in src and "SEAT_MISMATCH" not in src, (
+        "the privilege check treats one of the negative verdicts as a pass"
+    )
+
+
+def test_the_mismatch_refusal_ships_off_and_fires_only_on_mismatch():
+    os.environ.pop("LIVE_POINTS_REFUSE_MISMATCHED_SEAT", None)
+    assert main._live_points_refuse_mismatched_seat() is False
+
+    async def _verdict(request, steam_id, db):
+        return request
+
+    saved = main._seat_attestation_verdict
+    try:
+        main._seat_attestation_verdict = _verdict
+        os.environ["LIVE_POINTS_REFUSE_MISMATCHED_SEAT"] = "1"
+        for benign in (main.SEAT_VERIFIED, main.SEAT_UNBOUND):
+            assert asyncio.run(main._seat_gate_for_live_points(
+                benign, "76561198000000011", None)) == benign
+        with pytest.raises(main.HTTPException) as caught:
+            asyncio.run(main._seat_gate_for_live_points(
+                main.SEAT_MISMATCH, "76561198000000011", None))
+        assert caught.value.status_code == 403
+        os.environ["LIVE_POINTS_REFUSE_MISMATCHED_SEAT"] = "0"
+        assert asyncio.run(main._seat_gate_for_live_points(
+            main.SEAT_MISMATCH, "76561198000000011", None)) == main.SEAT_MISMATCH
+    finally:
+        main._seat_attestation_verdict = saved
+        os.environ.pop("LIVE_POINTS_REFUSE_MISMATCHED_SEAT", None)
+
+
+def test_the_surfaces_the_code_writes_are_the_surfaces_the_table_admits():
+    """A CHECK listing surfaces the code never writes is decoration; a code path
+    writing a surface the constraint rejects records nothing. Compare the SETS
+    (#205)."""
+    sql = PROGRESS_SQL.read_text(encoding="utf-8")
+    declared = re.search(r"surface IN \(([^)]*)\)", sql)
+    assert declared, "the surface column admits anything at all"
+    admitted = {s.strip().strip("'") for s in declared.group(1).split(",")}
+    used = {main.SEAT_SURFACE_RANKED, main.SEAT_SURFACE_TEAM, main.SEAT_SURFACE_FFA}
+    assert admitted == used, (
+        f"the table admits {sorted(admitted)} and the code writes {sorted(used)}")
+    assert set(re.findall(r"sp\d?\.surface = '(\w+)'", main._DC_EVIDENCE_TERM)) \
+        == {main.SEAT_SURFACE_RANKED}, (
+        "the 1v1 evidence rule reads attestations from another surface")
+
+
+def test_the_attestation_table_cascades_from_the_player():
+    sql = PROGRESS_SQL.read_text(encoding="utf-8")
+    assert re.search(r"player_id\s+UUID\s+NOT NULL REFERENCES players\(id\) ON DELETE CASCADE",
+                     sql), "player_id does not cascade"
+    assert "REFERENCES ranked_series" not in sql, (
+        "subject_id carries a foreign key to one of the three parent tables, "
+        "so the other two surfaces cannot record anything at all")

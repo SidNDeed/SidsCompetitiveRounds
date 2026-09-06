@@ -952,6 +952,65 @@ async def _newest_grant_series_id(db, holder_id, counterparty_id):
     return row[0] if row is not None else None
 
 
+# Which live-points surface an attestation belongs to. There are three, with
+# three different parent tables, which is why series_progress carries a
+# discriminator instead of a foreign key (295).
+SEAT_SURFACE_RANKED = "ranked"
+SEAT_SURFACE_TEAM = "team"
+SEAT_SURFACE_FFA = "ffa"
+
+
+async def _record_seat_attestation(db, surface, subject_id, player_id, verdict) -> bool:
+    """Record that THIS seat posted an observation of THIS sitting. The ONE
+    writer of series_progress; every live-points surface goes through it.
+
+    Returns whether a row was written, so a caller can gate on the fact rather
+    than infer it from the verdict a second time.
+
+    ONLY a SEAT_VERIFIED post writes a row, and that is the whole design.
+
+    The first draft recorded UNBOUND posts too, with session_verified false, so
+    that the evidence rule would have something to read while verified sessions
+    are rare. That put the forgery straight back: this endpoint's identity is a
+    QUERY PARAMETER signed with a secret every client holds, so an UNBOUND row
+    naming a player is a row the OTHER player could have written. An attestation
+    that the counterparty can write is not a missing answer, it is a wrong one —
+    the same defect class as a column documented as written that nothing writes.
+
+    So the record stays small and true, and the evidence rule handles its own
+    sparsity: it asks for an attestation only from an account that has provably
+    run a ticket-auth client, and falls back to the pre-M4 rule for everyone
+    else. Sparse-and-honest composes; dense-and-forgeable does not.
+
+    A repeat post from the same seat only moves last_seen_at. There is nothing
+    to un-prove: a seat that attested once in this sitting has attested, and its
+    next post arriving without a token (tokens lapse and are re-minted on a 60s
+    loop) simply records nothing new.
+
+    Never raises. This runs on the betting hot path and an attestation that
+    fails to record must cost the caller nothing — it degrades the DC evidence
+    rule toward its bootstrap arm, never the availability of the write it rides
+    behind. The isolation is a SAVEPOINT and not a bare try/except, because
+    under asyncpg a caught statement error still leaves the whole TRANSACTION
+    aborted (#235): swallowing the exception without one would take down the
+    points write this is supposed to be harmless to, and the 503 it produced
+    would be blamed on betting."""
+    if verdict != SEAT_VERIFIED:
+        return False
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO series_progress (surface, subject_id, player_id)"
+                " VALUES (:sf, :sub, :pid)"
+                " ON CONFLICT (surface, subject_id, player_id) DO UPDATE"
+                "    SET last_seen_at = NOW()"),
+                {"sf": surface, "sub": subject_id, "pid": player_id})
+        return True
+    except Exception as ex:
+        print(f"[DC-EVIDENCE] attestation not recorded ({surface}): {type(ex).__name__}")
+        return False
+
+
 # ── the eligibility predicate, in fragments both askers share ──────────────
 #
 # Two statements ask it: the unlocked validation of a NAMED series, and the
@@ -1013,16 +1072,214 @@ _DC_BRACKET_TERM = (
     "               AND tm.status IN ('completed', 'forfeit',"
     "                                 'double_forfeit', 'bye_auto'))")
 
-# EVIDENCE. Something has to have happened in the sitting: live points on the
-# server's own record, or a committed match row.
+# EVIDENCE. Something has to have happened in the sitting — and, since M4, it
+# has to be something the REPORTING SEAT DID NOT AUTHOR BY ITSELF.
+#
+# The arm this replaces read ranked_series.live_p1_points / live_p2_points. Those
+# columns are written by POST /series/{id}/live-points, which authenticates with
+# a secret every client holds and takes the poster's identity from a QUERY
+# PARAMETER — so "the server's own record that a sitting happened" was a record
+# the accusing seat could write. That is not a corroboration; it is the same
+# claim twice.
+#
+# Two arms. The FIRST is unchanged from before M4; the corroboration lives
+# inside the second, because that is the one the accuser could satisfy alone.
+#
+#   MATCH   a committed match row for the series. Say what this is: it is
+#           authored by ONE seat (the lower Steam id reports matches), so it is
+#           not independent testimony either. What it is instead is expensive
+#           and auditable — it moved both ratings and left a row anyone can
+#           read afterwards — and it is unchanged from the rule that was here
+#           before, so nothing about a finished game gets harder. This arm does
+#           NOT make a leave honest; it makes a leave in a series that visibly
+#           progressed count the way it always has.
+#
+#   PLAY + CORROBORATION   the points threshold exactly as before, AND, for a
+#           player who can attest, that player's own verified attestation for
+#           this sitting. This is the arm the item exists for. A leave during
+#           game 1 leaves no match row, so the points sum was the only evidence
+#           — and a live-points post carries a shared HMAC and names its author
+#           in a query parameter, so the reporting seat could write it.
+#
+# WHY THE CORROBORATION IS SCOPED BY WHETHER THE ACCUSED CAN ATTEST AT ALL.
+# `players.steam_auth_seen_at` is the monotonic per-account arming column
+# _check_steam_session already uses: it is stamped at the first verified mint
+# and never cleared. An account that has provably run a ticket-auth client must
+# corroborate its own game-1 leave; an account that never has falls back to the
+# rule that was already here. That keeps the fence off the ~96% of accounts
+# that cannot yet produce the evidence it asks for (#276/#503 — a rule whose
+# evidence must be EARNED has to say what the not-yet-earned class competes
+# against), and it cannot be worked by the REPORTER, who can neither write the
+# accused's attestation nor clear the accused's arming stamp.
+#
+# WHAT THE ACCUSED CAN DO: an armed account that suppresses its own live-points
+# posts escapes a GAME-1 leave count. It escapes nothing once a game finishes —
+# that is the match arm, and it is why the match arm is not gated the same way.
+#
+# DC_REQUIRE_VERIFIED_SEAT removes the unarmed fallback entirely, so every
+# game-1 leave needs the accused's verified post. It ships OFF and stays off
+# until verified sessions are broadly held (162 of 4663 accounts are armed
+# today; 19 of 308 active players hold a live verified session).
 _DC_EVIDENCE_TERM = (
-    "(COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0) >= :min_points"
-    " OR EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id))")
+    "(EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id)"
+    " OR (COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0) >= :min_points"
+    "     AND (EXISTS (SELECT 1 FROM series_progress sp"
+    "                   WHERE sp.surface = 'ranked' AND sp.subject_id = s.id"
+    "                     AND sp.player_id = :dp)"
+    "          OR (NOT CAST(:require_verified_seat AS boolean)"
+    "              AND NOT EXISTS (SELECT 1 FROM players pa"
+    "                               WHERE pa.id = :dp"
+    "                                 AND pa.steam_auth_seen_at IS NOT NULL)))))")
 
 _DC_ELIGIBLE_TERMS = (
     "(" + _DC_GRANT_TERM + " OR " + _DC_LEGACY_TERM + ")"
     " AND " + _DC_BRACKET_TERM +
     " AND " + _DC_EVIDENCE_TERM)
+
+# The same question with the evidence arm removed. A report that fails only the
+# evidence arm has not been REFUSED — the evidence can arrive seconds later (the
+# disconnect-win match row commits after the report that caused it; the accused's
+# last live-points post is still in flight) — so it must be answered with
+# something the client keeps rather than something it deletes. Built from the
+# same fragments as the full predicate so the two cannot come to disagree about
+# authority, which is the whole reason the fragments exist.
+_DC_AUTHORITY_ONLY_TERMS = (
+    "(" + _DC_GRANT_TERM + " OR " + _DC_LEGACY_TERM + ")"
+    " AND " + _DC_BRACKET_TERM)
+
+
+# The conditions the LOCKED re-ask adds on top of the shared predicate: the row
+# really is this pair's, and its integrity invalidation (if any) is the
+# janitor's own no-match-reported. Both are authority-class, so the diagnostic
+# below has to carry them too — a diagnostic that asks a WIDER question than the
+# statement it is explaining will call a settled refusal retryable.
+_DC_LOCKED_ROW_TERMS = (
+    "((s.player1_id = :rp AND s.player2_id = :dp)"
+    "  OR (s.player1_id = :dp AND s.player2_id = :rp))"
+    " AND (s.invalidated_at IS NULL OR s.invalidation_reason = :exempt)")
+
+
+def _dc_require_verified_seat() -> bool:
+    """Whether the accused's attestation must be session-bound. Read from the
+    environment at call time, like STEAM_AUTH_ENFORCE, so arming it is a restart
+    and not a release."""
+    return os.getenv("DC_REQUIRE_VERIFIED_SEAT", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _live_points_refuse_mismatched_seat() -> bool:
+    """Whether a live-points post whose session token names a DIFFERENT player
+    than the post claims is refused outright.
+
+    NAMED FOR WHAT IT DOES. The first name was REQUIRE_BOUND_SEAT, which
+    overpromised: this does not make a post caller-bound, because a post with no
+    token at all is still accepted. Requiring a bound seat would refuse the
+    betting cutoff for every client without a verified session, which is most of
+    them — that is the same arming sequence DC_REQUIRE_VERIFIED_SEAT waits on,
+    and it is not this switch.
+
+    What it does buy is narrow and safe: no honest client can produce the case
+    it refuses, since the client signs with the id whose token it holds.
+
+    Separate from DC_REQUIRE_VERIFIED_SEAT and separately armable, because the
+    two protect different things: that one decides whether a leave is counted,
+    this one guards a BETTING cutoff, and gold is the consumer that crosses the
+    integrity bar a leave-% does not.
+
+    Ships OFF."""
+    return os.getenv("LIVE_POINTS_REFUSE_MISMATCHED_SEAT", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+async def _seat_gate_for_live_points(request, steam_id: str, db: AsyncSession) -> str:
+    """The transport verdict for a live-points post, plus the one refusal that
+    is armed from it. Three surfaces call this — 1v1, 2v2 and FFA — so the rule
+    is written once and a mismatch cannot come to mean different things on
+    different endpoints (#432: the flag names a line, the defect is a class)."""
+    verdict = await _seat_attestation_verdict(request, steam_id, db)
+    if verdict == SEAT_MISMATCH and _live_points_refuse_mismatched_seat():
+        raise HTTPException(
+            status_code=403,
+            detail="session token does not name the reporting seat")
+    return verdict
+
+
+async def _refuse_named_series(db, series_id, reporter_id, disconnected_id,
+                               detail, row_terms="", extra_binds=None):
+    """Refuse a disconnect report, with the status code its REASON deserves.
+    Always raises.
+
+    Every eligibility failure used to be a 403, and the client treats a 4xx as
+    settled: it deletes the queued report. That is right for an authority
+    failure — the server has put this pair into a newer sitting, or the bracket
+    has decided the match, and no number of retries changes either. It is wrong
+    for an evidence failure, because evidence can still ARRIVE:
+
+      * the accused's own live-points post is in flight, or is being re-sent by
+        their client's retry layer, which keeps running after they leave the
+        Photon room;
+      * the sitting is resumed later and they post again.
+
+    NOT for the reason the first draft gave. That said the disconnect-win match
+    row commits after the report that caused it — it does not: the client emits
+    a leave report only while both scores are below match point, and submits a
+    disconnect win only at match point, so the two are mutually exclusive on the
+    stock client. The claim was wrong and is recorded here rather than quietly
+    dropped, because it was the stated justification for this whole split.
+
+    So this re-asks the same question with the evidence arm removed, from the
+    same fragments the predicate itself is built from, and asks one more thing:
+    whether anything has happened in the sitting recently. Authority satisfied,
+    sitting still live → 503, which the client keeps and re-presents. Authority
+    satisfied but the sitting has been idle past the live window → 403, because
+    evidence for a sitting nothing has happened in for six hours is not coming.
+
+    THAT BOUND IS NOT COSMETIC. The client's twenty-attempt budget is per
+    PROCESS: the outbox persists url and body but reloads with attempts = 0, so
+    a permanently ineligible report gets a fresh twenty attempts on every launch,
+    forever. The server is therefore the only place a doomed report can be
+    settled, and this is where. (Note it is NOT the delivery clock r14 removed
+    from the authority arm — that decided whether a report could be FILED. This
+    decides only how a refusal is spent.)
+
+    A diagnostic that cannot answer says 503, not 403. The two errors are not
+    symmetric: a wrongly settled report is deleted and unrecoverable, a wrongly
+    retried one costs bounded requests and is settled by the idle bound above as
+    soon as the lookup works again.
+
+    The diagnostic is a plain read. At the locked site the caller already holds
+    the row; taking a second, weaker lock on it here would say nothing and the
+    answer is only used to pick a status code for a request that is about to
+    fail either way."""
+    binds = {"sid": str(series_id), "rp": reporter_id, "dp": disconnected_id,
+             "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS}
+    binds.update(extra_binds or {})
+    try:
+        row = (await db.execute(text(
+            # The label exists to be recognised and for no other reason (#306).
+            # This statement is the shared predicate MINUS its evidence arm, so
+            # it is otherwise textually a subset of the two real asks — nothing
+            # in it could identify it that a mutation of the fragments could not
+            # also produce in one of them.
+            "SELECT 1 AS authority_only,"
+            "       (COALESCE(s.last_activity_at, s.created_at)"
+            "        < NOW() - CAST(:live_window AS interval)) AS idle"
+            "  FROM ranked_series s"
+            " WHERE s.id = CAST(:sid AS uuid)"
+            + (("   AND " + row_terms) if row_terms else "") +
+            "   AND " + _DC_AUTHORITY_ONLY_TERMS +
+            " LIMIT 1"
+        ), binds)).first()
+        authority_ok = row is not None
+        idle = bool(row[1]) if row is not None else False
+    except Exception as ex:
+        print(f"[DC] refusal diagnostic failed (kept as retryable): {type(ex).__name__}")
+        authority_ok, idle = True, False
+    if authority_ok and not idle:
+        raise HTTPException(
+            status_code=503,
+            detail="not enough recorded evidence for this sitting yet; retry")
+    raise HTTPException(status_code=403, detail=detail)
 
 
 async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
@@ -11286,26 +11543,74 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
             "verified": verified}
 
 
+SEAT_VERIFIED = "verified"
+SEAT_UNBOUND = "unbound"
+SEAT_MISMATCH = "mismatch"
+
+
+async def _seat_attestation_verdict(request, steam_id: str, db: AsyncSession) -> str:
+    """What the transport can say about WHO sent this request, in one indexed
+    read. Three answers, and the middle one is the point:
+
+      SEAT_VERIFIED   a session token rode along, is known, unexpired, verified,
+                      and names the same steam_id the request claims.
+      SEAT_MISMATCH   a token rode along and names a DIFFERENT steam_id. This is
+                      the only outcome carrying positive evidence that the
+                      claimed identity is not the sender's.
+      SEAT_UNBOUND    everything else — no token, unknown token, expired,
+                      unverified, or the lookup itself failed. It means "the
+                      transport cannot say", NOT "the claim is false": the
+                      ordinary client today holds no verified session at all.
+
+    Never raises, and never enforces. #499 is the rule it serves — a check that
+    soft-fails by design cannot be read as evidence unless it records its
+    verdict — so this returns the verdict instead of a boolean that would fold
+    "we could not tell" together with "we checked and it was wrong".
+
+    MISMATCH is classified BEFORE expiry and verification deliberately. A token
+    that names someone else names someone else whether or not it is still valid,
+    and that fact is the one a caller acts on.
+
+    The read is inside a SAVEPOINT. Returning UNBOUND from an `except` is only
+    fail-soft if the transaction survives it, and under asyncpg a caught
+    statement error still leaves the whole transaction ABORTED (#235) — so
+    without one, a blip on this lookup would take down the very write this is
+    supposed to be harmless to, and the caller's next statement would raise. The
+    read-only callers this function was extracted from never noticed; the
+    live-points write path would have."""
+    try:
+        token = request.headers.get("X-Session-Token") if request is not None else None
+        if not token:
+            return SEAT_UNBOUND
+        async with db.begin_nested():
+            row = (await db.execute(text(
+                "SELECT steam_id, verified, expires_at FROM steam_sessions "
+                "WHERE token_hash = :th"
+            ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
+        if row is None:
+            return SEAT_UNBOUND
+        if row["steam_id"] != steam_id:
+            return SEAT_MISMATCH
+        if row["expires_at"] is not None and row["expires_at"] < _utc_now():
+            return SEAT_UNBOUND
+        if not row["verified"]:
+            return SEAT_UNBOUND
+        return SEAT_VERIFIED
+    except Exception:
+        return SEAT_UNBOUND
+
+
 async def _strict_steam_session_ok(request, steam_id: str, db: AsyncSession) -> bool:
     """Fail-CLOSED session validity — for privilege checks (admin rate-limit
     exemption), NOT the compatibility write-path gate below. Every failure
     (missing token, unknown/expired/unverified row, id mismatch, infra error)
-    returns False; there are no soft/grace carve-outs here by design."""
-    try:
-        token = request.headers.get("X-Session-Token") if request is not None else None
-        if not token:
-            return False
-        row = (await db.execute(text(
-            "SELECT steam_id, verified, expires_at FROM steam_sessions "
-            "WHERE token_hash = :th"
-        ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
-        if row is None or not row["verified"]:
-            return False
-        if row["expires_at"] is not None and row["expires_at"] < _utc_now():
-            return False
-        return row["steam_id"] == steam_id
-    except Exception:
-        return False
+    returns False; there are no soft/grace carve-outs here by design.
+
+    One read, one classifier: this is `_seat_attestation_verdict` with the two
+    negative verdicts collapsed. It used to carry its own copy of the same
+    SELECT and the same four conditions, which is how two readings of one
+    question come to disagree (#432)."""
+    return await _seat_attestation_verdict(request, steam_id, db) == SEAT_VERIFIED
 
 
 def _mark_session_verified(request, ok):
@@ -14320,7 +14625,19 @@ async def _report_disconnect_once(
         #   BRACKET    a forfeit terminalises the tournament match and leaves
         #              the RankedSeries active on purpose, so no row-shape test
         #              could see that the match was already decided.
-        #   EVIDENCE   something happened here: live points, or a match row.
+        #   EVIDENCE   a committed match row, OR the points threshold together
+        #              with corroboration from the ACCUSED - required of an
+        #              account that has provably run a ticket-auth client and
+        #              can therefore produce it. The corroboration is the M4
+        #              addition and it applies exactly where the old rule was
+        #              weakest: a leave during game 1 leaves no match row, so
+        #              the points columns were the only evidence, and they are
+        #              written by an endpoint that names its author in a query
+        #              parameter - the accuser's own testimony.
+        #
+        # A refusal by the evidence arm is NOT settled and does not answer 403
+        # while the sitting is still live - see _refuse_named_series. Evidence
+        # can still arrive; authority cannot.
         #
         # NOTE WHAT IS NOT IN THE AUTHORITY ARM: a clock. The delivery-time
         # freshness bound survives only on the legacy arm, for pairs the server
@@ -14337,11 +14654,11 @@ async def _report_disconnect_once(
             " LIMIT 1"
         ), {"sid": str(series.id), "rp": reporter.id, "dp": disconnected.id,
             "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+            "require_verified_seat": _dc_require_verified_seat(),
             "min_points": DC_MIN_LIVE_POINTS})).first()
         if nameable is None:
-            raise HTTPException(
-                status_code=403,
-                detail="named series is not one this report can be filed against")
+            await _refuse_named_series(db, series.id, reporter.id, disconnected.id,
+                                       "named series is not one this report can be filed against")
     if series is None:
         # ONE resolver, and it asks the same question the predicate judges.
         # Resolving "the pair's current series" one way here and judging it
@@ -14404,21 +14721,23 @@ async def _report_disconnect_once(
     still_eligible = (await db.execute(text(
         "SELECT 1 FROM ranked_series s"
         " WHERE s.id = CAST(:sid AS uuid)"
-        "   AND ((s.player1_id = :rp AND s.player2_id = :dp)"
-        "     OR (s.player1_id = :dp AND s.player2_id = :rp))"
-        "   AND (s.invalidated_at IS NULL OR s.invalidation_reason = :exempt)"
+        "   AND " + _DC_LOCKED_ROW_TERMS +
         "   AND " + _DC_ELIGIBLE_TERMS +
         " FOR NO KEY UPDATE OF s"
     ), {"sid": str(resolved_series_id), "rp": reporter.id, "dp": disconnected.id,
         "exempt": PRUNE_REASON_NO_MATCH,
         "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+        "require_verified_seat": _dc_require_verified_seat(),
         "min_points": DC_MIN_LIVE_POINTS})).first()
     if still_eligible is None:
-        # 403 and not 409: from the client's side this is the same settled
-        # refusal as the unlocked checks above, and it must not be retried.
-        raise HTTPException(
-            status_code=403,
-            detail="series is no longer eligible for a DC report")
+        # Settled or not-yet, decided by WHICH arm failed — see
+        # _refuse_named_series. Authority is settled and answers 403; evidence
+        # is not, and answers 503 so the outbox keeps the report.
+        await _refuse_named_series(
+            db, resolved_series_id, reporter.id, disconnected.id,
+            "series is no longer eligible for a DC report",
+            row_terms=_DC_LOCKED_ROW_TERMS,
+            extra_binds={"exempt": PRUNE_REASON_NO_MATCH})
 
     # ── The bracket lifecycle, under a lock, over EVERY row ────────────────
     #
@@ -23530,6 +23849,7 @@ async def series_preflight(
 @app.post("/api/v1/series/{series_id}/live-points", tags=["Series"])
 async def update_live_points(
     series_id: str,
+    request: Request,
     p1_points: int = Query(..., ge=0, le=10),
     p2_points: int = Query(..., ge=0, le=10),
     reporter_steam_id: str = Query(...),
@@ -23572,6 +23892,11 @@ async def update_live_points(
     reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
     if reporter is None or reporter.id not in (series.player1_id, series.player2_id):
         raise HTTPException(status_code=403, detail="Reporter is not in this series")
+
+    # WHO is posting, as far as the transport can tell. Asked before the write
+    # so the armed refusal (M4) happens before anything is stored, and reused
+    # after it to record the attestation the DC evidence rule reads.
+    _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
 
     # Aug 31 (review r1 find 2, CONFIRMED): NO reporter swap. The client reads
     # GM_ArmsRace's p1/p2 point fields, which are GLOBAL team-slot values —
@@ -23617,6 +23942,10 @@ async def update_live_points(
     if _pts is None:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Series is not active")
+    # This seat was here. Recorded in the SAME transaction as the points it
+    # accompanies, so the two can never disagree about whether the post landed,
+    # and inside a savepoint so a failure to record cannot lose the points.
+    await _record_seat_attestation(db, SEAT_SURFACE_RANKED, sid, reporter.id, _seat)
     await db.commit()
     series.live_p1_points, series.live_p2_points = _pts[0], _pts[1]
     # Aug 9 bet audit find 7: mirror the POST /bets predicate exactly. This
@@ -23637,6 +23966,7 @@ async def update_live_points(
 @app.post("/api/v1/team/series/{series_id}/live-points", tags=["Betting"])
 async def update_team_live_points(
     series_id: str,
+    request: Request,
     t1_points: int = Query(..., ge=0, le=10),
     t2_points: int = Query(..., ge=0, le=10),
     reporter_steam_id: str = Query(...),
@@ -23677,6 +24007,7 @@ async def update_team_live_points(
     if team_subjects is None:
         raise HTTPException(status_code=404, detail="Series not found")
     await _assert_no_service_subject(db, affected_player_ids=list(team_subjects))
+    _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
 
     # Participants only, and only while the series is genuinely live. Both
     # predicates ride INSIDE the UPDATE so a completion committing mid-request
@@ -23693,6 +24024,10 @@ async def update_team_live_points(
         await db.rollback()
         raise HTTPException(status_code=409,
                             detail="Series is not active, or reporter is not in it")
+    # Recorded after the UPDATE, because the UPDATE is where membership is
+    # actually established on this surface (":pid IN (t1a_id, ...)" rides inside
+    # it). Attesting before it would record a seat for a series it may not be in.
+    await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat)
     await db.commit()
     return {
         "status": "ok",
@@ -23705,6 +24040,7 @@ async def update_team_live_points(
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
 async def update_ffa_live_points(
     lobby_id: str,
+    request: Request,
     game_number: int = Query(..., ge=1, le=99),
     total_points: int = Query(..., ge=0, le=200),
     reporter_steam_id: str = Query(...),
@@ -23751,6 +24087,7 @@ async def update_ffa_live_points(
     if ffa_subjects is None:
         raise HTTPException(status_code=404, detail="Lobby not found")
     await _assert_no_service_subject(db, affected_player_ids=list(ffa_subjects or []))
+    _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
 
     # A NEW game resets the figure (its own game_number replaces the stored
     # one); the SAME game only ever ratchets upward. Both cases are one
@@ -23790,6 +24127,10 @@ async def update_ffa_live_points(
         raise HTTPException(status_code=409,
                             detail="Lobby is not live, reporter is not a member, "
                                    "or that game is not the one in progress")
+    # As on the 2v2 surface: membership is established by the UPDATE's own
+    # ":pid = ANY(member_ids)", so the attestation is recorded only once that
+    # statement has returned a row.
+    await _record_seat_attestation(db, SEAT_SURFACE_FFA, lid, reporter.id, _seat)
     await db.commit()
     return {
         "status": "ok",

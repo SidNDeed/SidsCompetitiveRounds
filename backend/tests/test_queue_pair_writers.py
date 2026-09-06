@@ -434,6 +434,17 @@ def test_strict_session_gate_is_fail_closed_for_the_poll():
     class _S:
         def __init__(self, row):
             self.row = row
+            # _Savepoint counts on its session, so the double has to carry the
+            # two fields it touches.
+            self.savepoints = 0
+            self.in_savepoint = False
+
+        def begin_nested(self):
+            # The classifier reads inside a SAVEPOINT so that returning
+            # "unbound" from its except is genuinely fail-soft: under asyncpg a
+            # caught statement error still leaves the TRANSACTION aborted
+            # (#235), and this gate now runs on a write path.
+            return _Savepoint(self)
 
         async def execute(self, statement, params):
             assert "FROM steam_sessions" in str(statement)

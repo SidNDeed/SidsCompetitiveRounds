@@ -1401,9 +1401,23 @@ namespace CompetitiveRounds
                     //     put this pair into a newer one;
                     //   * a series whose integrity invalidation is not the
                     //     janitor's own no-match-reported;
-                    //   * a series with no gameplay on the server's own
-                    //     record — no live points, no recorded match;
-                    //   * a tournament match the bracket has already decided.
+                    //   * a tournament match the bracket has already decided;
+                    //   * a sitting nothing has happened in for hours whose
+                    //     record still shows no gameplay — see below for why
+                    //     this one is only sometimes permanent.
+                    //
+                    // "The server has no record that anything happened in it"
+                    // is no longer permanent BY ITSELF. It is a statement about
+                    // what has ARRIVED, and the leaver's own score post can
+                    // still land after we file — their client keeps re-sending
+                    // it after they leave the Photon room. So the server keeps
+                    // that refusal retryable while the sitting is live and
+                    // settles it once the sitting has been quiet for hours.
+                    //
+                    // Also new, and worth knowing when reading a 403 here: for
+                    // a leave BEFORE any game in the series finished, the
+                    // server wants the leaver's own score post, not ours. Ours
+                    // says what we saw; theirs is the part we cannot write.
                     //
                     // NOT on that list any more: "nothing has happened in it
                     // for hours". The delivery clock was removed from the
@@ -1422,8 +1436,17 @@ namespace CompetitiveRounds
                     //
                     // A 503 is not a refusal and is retried. The server sends
                     // one when it cannot judge the report yet — a tournament
-                    // series whose bracket row has not appeared. "We could not
-                    // decide" must not spend the report the way "no" does.
+                    // series whose bracket row has not appeared, or a sitting
+                    // whose evidence has not landed. "We could not decide" must
+                    // not spend the report the way "no" does.
+                    //
+                    // The twenty-attempt budget below does NOT bound this
+                    // across launches: the outbox persists url and body and
+                    // reloads with attempts = 0, so a report that can never be
+                    // judged would get a fresh twenty every session. What
+                    // actually retires one is the server, which turns the same
+                    // refusal into a 403 once the sitting has been idle past
+                    // its live window.
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")

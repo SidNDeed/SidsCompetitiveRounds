@@ -128,8 +128,23 @@ def _series_oriented(s, vid):
     return s["p2_series_wins"], s["p1_series_wins"]
 
 
+class _Savepoint:
+    """Minimal async savepoint. The session classifier reads inside one so its
+    fail-soft return is genuinely soft -- a caught statement error otherwise
+    leaves the whole asyncpg transaction aborted (#235)."""
+
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class FakeSession:
     """Emulates every statement the handler can issue, in Python."""
+
+    def begin_nested(self):
+        return _Savepoint()
 
     def __init__(self, session_row=None, players=(), matches=(), series=()):
         self.session_row = session_row
@@ -617,11 +632,24 @@ def test_the_suite_holds_on_any_date_because_production_reads_the_frozen_seam(mo
     assert r.last_played_at == day_start - timedelta(minutes=1)
     assert r.last_played_days_ago == 1 and r.played_today is True
     assert (r.games_won, r.games_lost) == (1, 1)
-    # the seam is the only wall clock either reader consults
-    for fn in (main.h2h_summary, main._strict_steam_session_ok):
+    # The seam is the only wall clock either reader consults. The session gate
+    # reads it one level down since M4: _strict_steam_session_ok is now the
+    # verdict classifier with its negative answers collapsed, and the classifier
+    # is where the expiry comparison lives. Both are listed, and the one that
+    # does the comparison is the one required to use the seam -- following the
+    # delegation rather than deleting the assertion, because the behaviour above
+    # (a 2020 session accepted while the real clock says 2026) is what it is
+    # really protecting.
+    for fn in (main.h2h_summary, main._seat_attestation_verdict):
         src = inspect.getsource(fn)
         assert "_utc_now()" in src, fn.__name__
         assert "datetime.now(" not in src and "utcnow(" not in src, fn.__name__
+    gate = inspect.getsource(main._strict_steam_session_ok)
+    assert "datetime.now(" not in gate and "utcnow(" not in gate
+    assert "_seat_attestation_verdict" in gate, (
+        "the strict gate no longer delegates, so it needs its own clock read "
+        "and this test is no longer checking the function that expires sessions"
+    )
     # ...while the debounce window stays on the monotonic clock, untouched by the freeze
     assert "time.monotonic()" in inspect.getsource(main.h2h_summary)
 
