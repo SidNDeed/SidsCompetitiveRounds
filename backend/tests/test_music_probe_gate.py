@@ -30,6 +30,8 @@ because widening the seat is exactly when those refusals start to matter.
 import re
 from pathlib import Path
 
+from _cs_structure import method_spans, strip_comments_only
+
 import pytest
 
 
@@ -39,28 +41,29 @@ PLUGIN_CS = PLUGIN / "Plugin.cs"
 
 
 def _cs_method_body(path, signature):
-    src = path.read_text(encoding="utf-8")
-    start = src.index(signature)
-    open_brace = src.index("{", start)
-    depth = 0
-    for i in range(open_brace, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[open_brace : i + 1]
-    raise AssertionError(f"unbalanced braces after {signature}")
+    """The braces-matched body of one C# member, so an assertion about a
+    method cannot be satisfied by a match elsewhere in the file.
+
+    Structure is decided on a mask (`_cs_structure`), so a brace inside a
+    comment, a string, a char literal or an inactive `#if` branch is not
+    counted. The raw walk this replaces returned the wrong block on any file
+    carrying one - `plugin/Plugin.cs` has raw brace balance +2 from a doc
+    comment alone, and `plugin/ApiClient.cs` +22 from JSON inside strings.
+    """
+    spans = list(method_spans(path, signature))
+    if not spans:
+        raise AssertionError(f"signature not found: {signature}")
+    open_brace, end = spans[0]
+    return path.read_text(encoding="utf-8")[open_brace:end]
 
 
 def _code(block):
-    out = []
-    for line in block.splitlines():
-        s = line.strip()
-        if s.startswith("//") or s.startswith("///"):
-            continue
-        out.append(line)
-    return "\n".join(out)
+    """Strip comments so a phrase in prose cannot satisfy a code assertion.
+
+    Unlike the line-prefix stripper this replaces, a TRAILING comment is
+    removed too: `foo(); // bar` no longer satisfies an assertion for `bar`.
+    """
+    return strip_comments_only(block)
 
 
 # ── the gate ─────────────────────────────────────────────────────────────────
@@ -311,7 +314,23 @@ def test_the_pause_mask_is_taken_at_the_call_and_not_at_the_next_poll():
     # leaving: cleared BEFORE the resume, which cannot lose one — a paused
     # source produces no callbacks at all.
     assert "MaskCallbacks(false);\n                    _src.UnPause();" in controls
-    assert "MaskCallbacks(false);   // the natural end is an intended silence, not a gap" in controls
+    # The natural end clears the mask too, and it is asserted by the CODE
+    # around it. Until 2026-09-06 this assertion carried the site's trailing
+    # COMMENT in the needle, so the comment text was what satisfied it - a
+    # code assertion a comment could keep alive on its own (#342/#431/#441).
+    # The two sites are told apart by what they restart with: UnPause resumes
+    # a paused source, Play restarts one that reached its end.
+    assert controls.count("MaskCallbacks(false);") == 2, (
+        "two sites clear the mask: the resume, and the natural end"
+    )
+    natural_end = re.search(
+        r"_src\.loop = true; _src\.time = 0f;\s*MaskCallbacks\(false\);\s*_src\.Play\(\);",
+        controls,
+    )
+    assert natural_end, (
+        "the natural end must clear the mask BEFORE restarting play, so the "
+        "intended silence is not differenced against as a dropout"
+    )
     # and the audio thread still clears the clock for a callback that DOES
     # arrive while the flag is set
     tap = _code(_cs_method_body(PROBE_CS, "private sealed class ProbeTap : MonoBehaviour"))

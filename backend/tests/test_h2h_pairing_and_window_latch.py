@@ -33,6 +33,8 @@ against that mutation (scratchpad/mutate_m3.py) rather than assumed to.
 import re
 from pathlib import Path
 
+from _cs_structure import method_spans, strip_comments_only
+
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin"
@@ -47,19 +49,19 @@ CHANGELOG = REPO / "docs" / "CHANGELOG.md"
 
 def _cs_method_body(path, signature):
     """The braces-matched body of one C# member, so an assertion about a
-    method cannot be satisfied by a match elsewhere in the file."""
-    src = path.read_text(encoding="utf-8")
-    start = src.index(signature)
-    open_brace = src.index("{", start)
-    depth = 0
-    for i in range(open_brace, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[open_brace : i + 1]
-    raise AssertionError(f"unbalanced braces after {signature}")
+    method cannot be satisfied by a match elsewhere in the file.
+
+    Structure is decided on a mask (`_cs_structure`), so a brace inside a
+    comment, a string, a char literal or an inactive `#if` branch is not
+    counted. The raw walk this replaces returned the wrong block on any file
+    carrying one - `plugin/Plugin.cs` has raw brace balance +2 from a doc
+    comment alone, and `plugin/ApiClient.cs` +22 from JSON inside strings.
+    """
+    spans = list(method_spans(path, signature))
+    if not spans:
+        raise AssertionError(f"signature not found: {signature}")
+    open_brace, end = spans[0]
+    return path.read_text(encoding="utf-8")[open_brace:end]
 
 
 # ── M1: the claim ────────────────────────────────────────────────────────────

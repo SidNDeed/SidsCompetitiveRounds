@@ -58,6 +58,8 @@ load-bearing and this file exists to stop any of them drifting back:
 import re
 from pathlib import Path
 
+from _cs_structure import method_spans, strip_comments_only
+
 import pytest
 
 
@@ -69,30 +71,28 @@ PLUGIN_CS = PLUGIN / "Plugin.cs"
 
 
 def _cs_block(path, signature):
-    """The brace-balanced block that follows `signature`."""
-    src = path.read_text(encoding="utf-8")
-    start = src.index(signature)
-    open_brace = src.index("{", start)
-    depth = 0
-    for i in range(open_brace, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[open_brace : i + 1]
-    raise AssertionError(f"unbalanced braces after {signature}")
+    """The brace-balanced block that follows `signature`.
+
+    Structure is decided on a mask (`_cs_structure`), so a brace inside a
+    comment, a string, a char literal or an inactive `#if` branch is not
+    counted as structure. The raw walk this replaces returned the wrong block
+    on any file carrying one - `plugin/Plugin.cs` has raw brace balance +2 from
+    a doc comment alone, and `plugin/ApiClient.cs` +22 from JSON in strings.
+    """
+    spans = list(method_spans(path, signature))
+    if not spans:
+        raise AssertionError(f"signature not found: {signature}")
+    open_brace, end = spans[0]
+    return path.read_text(encoding="utf-8")[open_brace:end]
 
 
 def _code(block):
-    """Strip comments so a phrase in prose cannot satisfy a code assertion."""
-    out = []
-    for line in block.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("//") or stripped.startswith("///"):
-            continue
-        out.append(line)
-    return "\n".join(out)
+    """Strip comments so a phrase in prose cannot satisfy a code assertion.
+
+    Unlike the line-prefix stripper this replaces, a TRAILING comment is
+    removed too: `foo(); // bar` no longer satisfies an assertion for `bar`.
+    """
+    return strip_comments_only(block)
 
 
 # ── the window edges ─────────────────────────────────────────────────────────
@@ -442,17 +442,10 @@ def test_only_comparable_windows_feed_the_seat_totals():
     assert not close[head + len("if (comparable)"):brace].strip(), (
         "the banking must be a braced block attached to the condition"
     )
-    depth = 0
-    for i in range(brace, len(close)):
-        if close[i] == "{":
-            depth += 1
-        elif close[i] == "}":
-            depth -= 1
-            if depth == 0:
-                guarded = close[brace:i + 1]
-                break
-    else:
-        raise AssertionError("unbalanced braces after if (comparable)")
+    spans = list(method_spans(close, "if (comparable)"))
+    assert spans, "no block follows if (comparable)"
+    guarded_open, guarded_end = spans[0]
+    guarded = close[guarded_open:guarded_end]
     assert "t.driveSteps += driveSteps;" in guarded
     assert "t.steps += physSteps;" in guarded
     assert "t.moved += totalMoved;" in guarded
@@ -704,17 +697,12 @@ def test_the_probe_is_ticked_from_the_per_frame_update():
     # Plugin.cs has several Update() hosts. Brace-match forward from each and
     # keep the one that also ticks the overlay idle close — the established
     # per-frame host this call was placed beside.
-    for m in re.finditer(r"private void Update\(\)", src):
-        open_brace = src.index("{", m.end())
-        depth = 0
-        for i in range(open_brace, len(src)):
-            if src[i] == "{":
-                depth += 1
-            elif src[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    body = src[open_brace : i + 1]
-                    break
+    # `method_spans` raises on an unbalanced crossing rather than falling out
+    # of the walk. The loop this replaces had no else-clause, so an overrun
+    # left the PREVIOUS iteration's `body` bound and the assertion below was
+    # then made against a different method entirely.
+    for open_brace, end in method_spans(src, "private void Update()"):
+        body = src[open_brace:end]
         if "OverlayIdleClose.Tick()" in body:
             update = body
             break
