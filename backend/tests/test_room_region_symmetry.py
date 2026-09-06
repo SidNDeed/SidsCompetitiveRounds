@@ -841,11 +841,56 @@ def test_the_comment_no_longer_claims_no_client_supplied_the_region():
     )
 
 
-def test_the_deploy_block_puts_292_before_the_api():
-    """The report path SELECTs from `issued_room_regions`. An API deployed
-    ahead of the table fails every match report with undefined_table."""
+def test_the_deploy_block_orders_every_migration_it_names():
+    """Each table this release adds is SELECTed by the new API, so an API
+    deployed ahead of one fails those requests with undefined_table -- and 294
+    is the mirror image, a backfill only the new API's writes make meaningful,
+    so it has to come after.
+
+    Anchored on the heading rather than on the sentence that follows it. The
+    first version of this gate matched the literal
+    `"**Schema changes:** migration **292**"`, so adding a second migration to
+    that sentence ("migration" -> "migrations") made the anchor miss and the
+    gate raised ValueError instead of checking anything. A gate keyed to prose
+    that is expected to change is a gate that breaks on every legitimate edit
+    (#441), which is how gates come to be deleted.
+    """
     changelog = (Path(__file__).resolve().parents[2] / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
-    block = changelog[changelog.index("**Schema changes:** migration **292**"):][:1200]
-    assert "BEFORE the API deploy" in block, "292 is not ordered before the API"
-    for seed in ("288", "289", "290", "291"):
-        assert seed in block, f"migration {seed} dropped from the deploy block"
+    start = changelog.index("**Schema changes:**")
+    # Whitespace-normalised: the CHANGELOG is hard-wrapped, so any phrase long
+    # enough to be worth asserting is liable to straddle a line break and a raw
+    # substring test would be asserting about where the wrap happens to fall.
+    block = " ".join(changelog[start:][:2400].split())
+
+    # BEFORE the API: the tables its own statements read.
+    before = block[:block.index("After it")] if "After it" in block else block
+    for early, why in (("292", "the match-report path SELECTs issued_room_regions"),
+                       ("293", "every path that seats a pair writes series_dc_grants")):
+        assert early in before, f"migration {early} is not ordered before the API — {why}"
+    assert "BEFORE the API deploy" in block, "nothing is ordered before the API at all"
+
+    # AFTER it: seeds the client already carries, and the backfill.
+    #
+    # Read from the ORDERED LIST, not from the block as a whole and not even
+    # from everything after the pivot. Both wider slices were satisfied by 294's
+    # own explanatory paragraph further down, so deleting it from the list left
+    # the gate green through two attempts. The list is what a deploy is read
+    # off; the prose beneath it explains the list and cannot stand in for it.
+    tail_marker = "bundled in the client."
+    assert tail_marker in block, (
+        "the deploy block no longer ends its migration list where this gate "
+        "expects, so the list cannot be isolated from the prose explaining it"
+    )
+    after = block[block.index("After it"):block.index(tail_marker)]
+    for late in ("288", "289", "290", "291", "294"):
+        assert late in after, (
+            f"migration {late} dropped from the list of what runs AFTER the API"
+        )
+        assert late not in before, (
+            f"migration {late} is ordered before the API deploy; only the tables "
+            "the new code reads belong there"
+        )
+    assert "294 goes LAST" in block, (
+        "294 backfills sittings only the new API keeps current — run before the "
+        "deploy it leaves out exactly the pairs who were mid-series in the gap"
+    )

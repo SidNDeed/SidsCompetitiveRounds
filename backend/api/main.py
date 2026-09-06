@@ -848,6 +848,183 @@ def _series_pair_filter(pid_a, pid_b):
     )
 
 
+# The bracket states in which a tournament match has been DECIDED. A forfeit or
+# double-forfeit terminal deliberately leaves its RankedSeries active -- bracket
+# status owns that outcome, not series status -- so "the series is still active"
+# is not the same question as "the match is still open", and the two must not be
+# answered by the same column. One tuple, so the two places that ask cannot
+# drift apart.
+#
+# DECIDED and not OPEN, which is the whole point of the tuple:
+#
+#   * 'pending' is the column default (models.py, TournamentMatch.status).
+#     EVERY bracket row starts there. An open-state list is a list somebody has
+#     to remember to add to, and the first draft of this one forgot exactly
+#     that state -- which made a leave in a not-yet-readied tournament match a
+#     permanent refusal, and a permanent refusal is a report the client deletes.
+#   * Enumerating decided states puts the unhandled case on the safe side. A
+#     bracket state added next year is read as still-open, so the report
+#     survives and is judged by the authority, evidence and dedup gates like any
+#     other; the alternative reading deletes it (#276).
+#
+# These four are the same four the rest of main.py already names as decided
+# (the room-binding lookup, the preflight, the pair-history check and the
+# tournament-room resolver). `test_the_decided_states_are_the_ones_the_rest_of_
+# the_server_already_names` holds them together.
+_TM_DECIDED_STATES = ("completed", "forfeit", "double_forfeit", "bye_auto")
+
+
+async def _publish_pair_sitting(db, series) -> None:
+    """Record that the server has THIS pair in THIS sitting, as of now.
+
+    ONE function, because the two writes it makes must never diverge. #509 is
+    the entry: the series id and its room binding were two assignments a caller
+    had to remember to write together, and a grep of the two files that looked
+    relevant missed a seventh call site the compiler then found. The same trap
+    is available here -- an activity stamp without a grant is a sitting the
+    freshness bound calls live and the authority record has never heard of.
+
+    The two writes:
+
+      last_activity_at   the freshness bound the LEGACY eligibility arm reads.
+      series_dc_grants   the authority the new arm reads: the server put this
+                         pair here, and here is when it last saw them.
+
+    Both directions of the grant are written, because they are judged
+    separately -- the holder is whoever's report is being weighed, and a lookup
+    should never have to know which side of the pair it is on. Two rows with
+    different primary keys, so the upsert cannot affect one row twice.
+
+    Idempotent by construction: a resume re-stamps `last_seen_at` and the
+    sitting becomes newest again. There is no retire step, and therefore no
+    un-retire step to forget.
+
+    LOCKS. The grant INSERT has foreign keys to `players` and `ranked_series`,
+    so it takes `FOR KEY SHARE` on both referenced rows automatically -- a lock
+    no ordering discipline written in this file can see (#202). Checked rather
+    than assumed, because a new foreign key enrols its parents in every lock
+    graph that touches them:
+
+      * KEY SHARE conflicts with exactly ONE mode, `FOR UPDATE`. Nothing in
+        this codebase takes `FOR UPDATE` on `players`; every participant lock
+        is `FOR NO KEY UPDATE`, which is KEY-SHARE-compatible. So the grant's
+        share on a player row never waits, and cannot be the edge that closes
+        a cycle.
+      * On `ranked_series` the share is redundant: the statement immediately
+        above already holds that row at `FOR NO KEY UPDATE` strength (a plain
+        non-key UPDATE takes exactly that), so the INSERT adds no wait the
+        UPDATE had not already taken.
+
+    The one `FOR UPDATE` on a ranked_series row (the admin restoration path)
+    locks its players FIRST and the series second -- the same direction as
+    every other writer -- so it waits on a publish rather than racing it.
+    """
+    await db.execute(text(
+        "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
+        {"sid": series.id})
+    await db.execute(text(
+        "INSERT INTO series_dc_grants (holder_id, counterparty_id, series_id)"
+        " VALUES (:a, :b, :sid), (:b, :a, :sid)"
+        " ON CONFLICT (holder_id, series_id) DO UPDATE SET last_seen_at = NOW()"),
+        {"a": series.player1_id, "b": series.player2_id, "sid": series.id})
+
+
+async def _newest_grant_series_id(db, holder_id, counterparty_id):
+    """The sitting the server most recently put this pair into, or None.
+
+    The SAME question the eligibility predicate's supersession term asks, asked
+    once and answered in one place. Resolving "the pair's current series" a
+    different way than the predicate judges it is how a room-aware answer and a
+    room-blind answer came to disagree about the same pair.
+
+    Ordered by (last_seen_at, series_id) to match the predicate EXACTLY.
+    `last_seen_at` alone is not unique within a pair -- the backfill stamps each
+    sitting with its own last activity, and `NOW()` is the transaction
+    timestamp -- so a sort on it can tie, and a tie resolved arbitrarily here
+    while the predicate resolves it by series_id is a resolver that hands the
+    judge a sitting the judge will refuse.
+    """
+    row = (await db.execute(text(
+        "SELECT series_id FROM series_dc_grants"
+        " WHERE holder_id = :h AND counterparty_id = :c"
+        " ORDER BY last_seen_at DESC, series_id DESC LIMIT 1"
+    ), {"h": holder_id, "c": counterparty_id})).first()
+    return row[0] if row is not None else None
+
+
+# ── the eligibility predicate, in fragments both askers share ──────────────
+#
+# Two statements ask it: the unlocked validation of a NAMED series, and the
+# locked re-ask that holds its answer to the insert (#208). They were two
+# hand-written SQL strings that had drifted apart once already, and two clusters
+# of this review were each rewriting one of them -- applied independently, the
+# second would have overwritten the first. They are now one definition.
+
+# AUTHORITY. The server put this pair into this sitting, and has not since put
+# them into a newer one.
+#
+# The tuple comparison is what makes "newer" TOTAL. `last_seen_at` is not
+# unique within one (holder, counterparty): 294 stamps each backfilled sitting
+# with its own last activity, so two of a pair's sittings whose activity landed
+# in the same instant carry the same value, and `NOW()` is the TRANSACTION
+# timestamp, so any two publishes for one pair inside a single transaction tie
+# exactly. On a tie, "no strictly greater row exists" is true of BOTH rows --
+# the term stops bounding anything and two different sittings are nameable at
+# once. `_newest_grant_series_id` sorts by the same tuple for the same reason:
+# a judge and a resolver that break ties differently disagree about one pair.
+_DC_GRANT_TERM = (
+    "EXISTS (SELECT 1 FROM series_dc_grants g"
+    "         WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
+    "           AND g.series_id = s.id"
+    "           AND NOT EXISTS (SELECT 1 FROM series_dc_grants g2"
+    "                            WHERE g2.holder_id = g.holder_id"
+    "                              AND g2.counterparty_id = g.counterparty_id"
+    "                              AND (g2.last_seen_at, g2.series_id)"
+    "                                > (g.last_seen_at, g.series_id)))")
+
+# COMPATIBILITY. Reachable ONLY for a pair the server has no grant record for
+# at all -- a sitting that predates this table, or one whose publish nobody
+# swept. It extinguishes itself the first time that pair is published.
+#
+# It is not a weaker rule kept for convenience: without it, every pair mid-
+# sitting at deploy time loses its queued reports, which is the deploy-window
+# deletion this arm exists to prevent. Its freshness bound is kept because a
+# pair with no grant has no authority record to lean on, so recency is all
+# there is. The grant arm deliberately has NO clock -- see the docstring on
+# report_disconnect.
+_DC_LEGACY_TERM = (
+    "(NOT EXISTS (SELECT 1 FROM series_dc_grants g3"
+    "              WHERE g3.holder_id = :rp AND g3.counterparty_id = :dp)"
+    " AND (s.completed_at IS NULL"
+    "   OR s.id = (SELECT s2.id FROM ranked_series s2"
+    "               WHERE ((s2.player1_id = :rp AND s2.player2_id = :dp)"
+    "                   OR (s2.player1_id = :dp AND s2.player2_id = :rp))"
+    "               ORDER BY s2.created_at DESC LIMIT 1))"
+    " AND COALESCE(s.last_activity_at, s.created_at)"
+    "     >= NOW() - CAST(:live_window AS interval))")
+
+# BRACKET. A forfeit or double-forfeit terminalises the tournament match and
+# deliberately leaves the RankedSeries active, so every row-shape test above
+# still called such a series nameable and a post-result accusation could be
+# filed against a match that was already decided (r14 MEDIUM 3).
+_DC_BRACKET_TERM = (
+    "NOT EXISTS (SELECT 1 FROM tournament_matches tm"
+    "             WHERE tm.series_id = s.id"
+    "               AND tm.status IN ('completed', 'forfeit',"
+    "                                 'double_forfeit', 'bye_auto'))")
+
+# EVIDENCE. Something has to have happened in the sitting: live points on the
+# server's own record, or a committed match row.
+_DC_EVIDENCE_TERM = (
+    "(COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0) >= :min_points"
+    " OR EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id))")
+
+_DC_ELIGIBLE_TERMS = (
+    "(" + _DC_GRANT_TERM + " OR " + _DC_LEGACY_TERM + ")"
+    " AND " + _DC_BRACKET_TERM +
+    " AND " + _DC_EVIDENCE_TERM)
+
+
 async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
     """The pair's CURRENT in-progress series, shared by every find-or-create
     site (match report, queue ready/poll, preflight) so they can't diverge.
@@ -6256,6 +6433,22 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
 
         # Link match to series
         match.series_id = series.id
+
+        # ...and stamp the series ACTIVE (r14 MEDIUM 5). The DC path's
+        # freshness bound reads COALESCE(last_activity_at, created_at), and
+        # this path -- the one that proves a game was actually played -- was
+        # the one path that never stamped it. A delayed game-2 report could
+        # advance an old resumable series to 1-1 and then the queued game-3 DC
+        # was refused as stale, with a match row committed seconds earlier in
+        # this same transaction. The contract said accepted reports stamp
+        # activity; nothing did.
+        #
+        # RAW UPDATE, not `series.last_activity_at = ...`: the column is
+        # deliberately NOT declared on the RankedSeries model (see the note
+        # there), so an ORM assignment would land in __dict__, emit no SQL and
+        # raise nothing -- a silent no-op (#346). Same statement as
+        # /queue/ready's both-ready branch and the preflight resume.
+        await _publish_pair_sitting(db, series)
 
         # Increment series wins for the match winner
         if winner.id == series.player1_id:
@@ -13307,9 +13500,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             # there), so an ORM assignment would land in __dict__, emit no SQL,
             # and raise nothing — a silent no-op. Review round 1 caught exactly
             # that here.
-            await db.execute(text(
-                "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
-                {"sid": series.id})
+            await _publish_pair_sitting(db, series)
             await db.commit()
             # Room JUST issued (gated — this both-ready branch replays every
             # poll until the clients join, Codex find 6) — both players are
@@ -13697,9 +13888,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         # meaningful for every series regardless of how it was born.
         # RAW UPDATE — see the note on the RankedSeries model: the column is
         # intentionally unmapped, so an ORM assignment here would be silent.
-        await db.execute(text(
-            "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
-            {"sid": existing_series.id})
+        await _publish_pair_sitting(db, existing_series)
 
         await db.commit()
         # Room just issued — the pair is committed to a 1v1 game; drop their
@@ -14116,29 +14305,35 @@ async def _report_disconnect_once(
                 and (series.invalidation_reason or "") != PRUNE_REASON_NO_MATCH):
             raise HTTPException(status_code=403, detail="named series was invalidated")
     if series is not None:
-        # Points 1 and 2, asked as one predicate, in SQL against the database
-        # clock rather than against a python "now" - an api container with a
-        # skewed clock must not be able to widen or narrow either bound. The
-        # intervals are literals, not binds.
+        # Asked in SQL against the DATABASE clock rather than a python "now" -
+        # an api container with a skewed clock must not be able to widen or
+        # narrow any bound - and asked from the shared fragments above, so this
+        # and the locked re-ask below cannot drift apart. They already had.
         #
-        # The first term is REACHABILITY: not completed, or the pair's most
-        # recent series. The second is FRESHNESS, and it is asked of the end
-        # rather than of the beginning: a series with neither completed_at nor
-        # invalidated_at is running, and a running series has no age at which
-        # it stops being the one a leave happened in.
+        # What the terms are, and why the shape changed (r14 MEDIUM 3/6):
+        #
+        #   AUTHORITY  the server put this pair into this sitting and has not
+        #              since put them into a newer one. This replaces
+        #              "uncompleted, or the pair's most recent series", which
+        #              was a question about RECENCY - and two players who meet,
+        #              leave and meet again make either sitting answer it.
+        #   BRACKET    a forfeit terminalises the tournament match and leaves
+        #              the RankedSeries active on purpose, so no row-shape test
+        #              could see that the match was already decided.
+        #   EVIDENCE   something happened here: live points, or a match row.
+        #
+        # NOTE WHAT IS NOT IN THE AUTHORITY ARM: a clock. The delivery-time
+        # freshness bound survives only on the legacy arm, for pairs the server
+        # has no grant for at all. A grant ends when the server observes the
+        # sitting end - a newer publish for the pair, or the bracket row going
+        # terminal - not when a client failed to get its report delivered
+        # quickly enough. That fence refused a legitimate report queued during
+        # an outage and delivered on the next launch, which is precisely what
+        # the outbox exists to make survivable.
         nameable = (await db.execute(text(
             "SELECT 1 FROM ranked_series s"
             " WHERE s.id = CAST(:sid AS uuid)"
-            "   AND (s.completed_at IS NULL"
-            "     OR s.id = (SELECT s2.id FROM ranked_series s2"
-            "                 WHERE ((s2.player1_id = :rp AND s2.player2_id = :dp)"
-            "                     OR (s2.player1_id = :dp AND s2.player2_id = :rp))"
-            "                 ORDER BY s2.created_at DESC LIMIT 1))"
-            "   AND COALESCE(s.last_activity_at, s.created_at)"
-            "       >= NOW() - CAST(:live_window AS interval)"
-            "   AND (COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0)"
-            "        >= :min_points"
-            "     OR EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id))"
+            "   AND " + _DC_ELIGIBLE_TERMS +
             " LIMIT 1"
         ), {"sid": str(series.id), "rp": reporter.id, "dp": disconnected.id,
             "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
@@ -14148,7 +14343,21 @@ async def _report_disconnect_once(
                 status_code=403,
                 detail="named series is not one this report can be filed against")
     if series is None:
-        series = await _find_current_active_series(db, reporter.id, disconnected.id)
+        # ONE resolver, and it asks the same question the predicate judges.
+        # Resolving "the pair's current series" one way here and judging it
+        # another way below is how a room-aware answer and a room-blind answer
+        # came to disagree about the same pair; the grant is the authority in
+        # both places.
+        _granted_id = await _newest_grant_series_id(db, reporter.id, disconnected.id)
+        if _granted_id is not None:
+            series = (await db.execute(
+                select(RankedSeries).where(RankedSeries.id == _granted_id)
+            )).scalar_one_or_none()
+        if series is None:
+            # Only for a pair with no grant at all - the same condition the
+            # legacy arm of the predicate is reachable under, so the resolver
+            # and the judge agree about which regime this report is in.
+            series = await _find_current_active_series(db, reporter.id, disconnected.id)
         if series is None:
             raise HTTPException(status_code=403, detail="no current shared ranked series for this DC report")
     resolved_series_id = series.id
@@ -14185,26 +14394,20 @@ async def _report_disconnect_once(
     # — the series it resolves is active. The FRESHNESS bound is deliberately
     # not re-asked: it is a property of the clock, not of a row another writer
     # can move underneath this one.
+    #
+    # THE UNNAMED PATH IS BOUND BY THIS TOO, which is why the whole predicate is
+    # asked here and not only where a name is validated: resolving "the pair's
+    # current sitting" says which series, never that anything happened in it or
+    # that the server still considers the pair to be in it. Both paths reach
+    # this statement, and it is built from the SAME fragments as the unlocked
+    # ask above so the two can never say different things.
     still_eligible = (await db.execute(text(
         "SELECT 1 FROM ranked_series s"
         " WHERE s.id = CAST(:sid AS uuid)"
         "   AND ((s.player1_id = :rp AND s.player2_id = :dp)"
         "     OR (s.player1_id = :dp AND s.player2_id = :rp))"
         "   AND (s.invalidated_at IS NULL OR s.invalidation_reason = :exempt)"
-        "   AND (s.completed_at IS NULL"
-        "     OR s.id = (SELECT s2.id FROM ranked_series s2"
-        "                 WHERE ((s2.player1_id = :rp AND s2.player2_id = :dp)"
-        "                     OR (s2.player1_id = :dp AND s2.player2_id = :rp))"
-        "                 ORDER BY s2.created_at DESC LIMIT 1))"
-        # THE UNNAMED PATH IS BOUND BY THESE TOO, which is why they are asked
-        # here and not only where a name is validated: resolving "the pair's
-        # current series" says which series, never that anything happened in
-        # it or that it is still live. Both paths reach this statement.
-        "   AND COALESCE(s.last_activity_at, s.created_at)"
-        "       >= NOW() - CAST(:live_window AS interval)"
-        "   AND (COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0)"
-        "        >= :min_points"
-        "     OR EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id))"
+        "   AND " + _DC_ELIGIBLE_TERMS +
         " FOR NO KEY UPDATE OF s"
     ), {"sid": str(resolved_series_id), "rp": reporter.id, "dp": disconnected.id,
         "exempt": PRUNE_REASON_NO_MATCH,
@@ -14216,6 +14419,43 @@ async def _report_disconnect_once(
         raise HTTPException(
             status_code=403,
             detail="series is no longer eligible for a DC report")
+
+    # ── The bracket lifecycle, under a lock, over EVERY row ────────────────
+    #
+    # The predicate's bracket term is a NOT EXISTS read without a lock, so a
+    # terminalisation committing between it and the insert would not be seen.
+    # This re-asks it holding the rows.
+    #
+    # LOCK ORDER: players -> ranked_series -> tournament_matches. That is the
+    # order `_acquire_tournament_match_action_gate` already takes (it locks the
+    # series FOR NO KEY UPDATE and then the bracket row FOR UPDATE), so this
+    # pass nests inside the same direction and cannot form a cycle with it.
+    # Taking the bracket first would have inverted that and produced one.
+    #
+    # EVERY row, not LIMIT 1: a series can carry more than one bracket row, and
+    # a locked pass that reads a different subset than the unlocked term did is
+    # not a re-ask of the same question (#205 - compare the SET, not a sample).
+    if getattr(series, "is_tournament", False):
+        _bracket_states = (await db.execute(text(
+            "SELECT tm.status FROM tournament_matches tm"
+            " WHERE tm.series_id = CAST(:sid AS uuid)"
+            " ORDER BY tm.id FOR UPDATE"
+        ), {"sid": str(resolved_series_id)})).scalars().all()
+        if not _bracket_states:
+            # 503, NOT 409 or 403. A tournament series whose bracket row has
+            # not appeared yet is a question this server cannot answer, and the
+            # two refusals differ in what they COST: the client treats 4xx as
+            # settled and deletes the report, spending nothing and losing
+            # everything, while a 503 leaves it in the outbox with its retry
+            # budget intact. "We could not judge this" and "the answer is no"
+            # must not be the same reply (#430).
+            raise HTTPException(
+                status_code=503,
+                detail="tournament bracket row not available yet; retry")
+        if any(st in _TM_DECIDED_STATES for st in _bracket_states):
+            raise HTTPException(
+                status_code=403,
+                detail="the tournament match for this series is already decided")
 
     # Per-series dedup: one DC increment per (series, disconnected player). A
     # FlaggedMatch-style marker row would be heavier; reuse AdminAction's audit
@@ -14266,6 +14506,23 @@ async def _report_disconnect_once(
         await db.rollback()
         return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
                 "ranked_dc_count": _committed if _committed is not None else 0}
+
+    # The grant this report was judged by has now been used. Written only on the
+    # branch that WON the insert, so the count and the mark cannot disagree, and
+    # only for the reporter's own direction -- that is the row the predicate
+    # read. `spent_at IS NULL` keeps it first-write-wins, so a replay that
+    # somehow reached here cannot move a timestamp that already means something.
+    #
+    # Nothing reads this in a predicate and nothing should: one accepted report
+    # per (series, leaver) is already enforced by uq_dc_event_series_player, and
+    # a second bound that can disagree with the first is a second thing to keep
+    # correct. It exists so "was this grant ever used" is answerable from the
+    # data instead of from a join that re-derives which grant applied.
+    await db.execute(text(
+        "UPDATE series_dc_grants SET spent_at = NOW()"
+        " WHERE holder_id = :rp AND series_id = CAST(:sid AS uuid)"
+        "   AND spent_at IS NULL"
+    ), {"rp": reporter.id, "sid": str(resolved_series_id)})
 
     # A DELTA, never an absolute write (learning #326): the read-modify-write
     # this replaces was computed from a row read before the insert decided.
@@ -23149,9 +23406,7 @@ async def series_preflight(
         # invisible as before.
         # RAW UPDATE — see the note on the RankedSeries model: the column is
         # intentionally unmapped, so an ORM assignment here would be silent.
-        await db.execute(text(
-            "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
-            {"sid": existing.id})
+        await _publish_pair_sitting(db, existing)
         await db.commit()
         # Aug 9 (Sid): a rated ROOMCODE game's only server touchpoints are
         # this preflight and the match report — neither evicted, so both
@@ -23241,6 +23496,13 @@ async def series_preflight(
     )
     db.add(series)
     await db.flush()
+    # The server has just put this pair into this sitting, so it says so -- in
+    # the same transaction as the row itself, before the commit. The reuse
+    # branch above publishes; this branch is where a series is BORN, and a
+    # sitting born without a grant is unreportable for any pair who has ever
+    # played together before: the authority arm sees their older grant, and the
+    # compatibility arm is gated on having no grant at all, so both refuse.
+    await _publish_pair_sitting(db, series)
     await db.commit()
     # Aug 9 (Sid): see the eviction note on the reuse branch above.
     try:

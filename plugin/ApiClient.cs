@@ -1384,17 +1384,46 @@ namespace CompetitiveRounds
                     //
                     // The disconnect report reaches this branch too, and its
                     // refusals are the ones that MUST be permanent. WHICH ones
-                    // those are narrowed in r13 (this comment named three and
-                    // two of them have moved): a name that belongs to another
-                    // pair, or resolves to nothing, is no longer a refusal at
-                    // all — the server falls back to resolving the pair's
-                    // current series, because a wrong name tells it nothing it
-                    // did not already know without one. What still answers 403
-                    // is a series this report may not be filed against: one
-                    // whose integrity invalidation is not the janitor's, one
-                    // nothing has happened in for hours, one with no gameplay
-                    // on the server's own record. Retrying changes none of
-                    // those. A 503 is not one of them and is retried.
+                    // those are has now been narrowed twice; this comment has
+                    // named a rule the server had stopped enforcing on both
+                    // previous readings, so take the list below as the current
+                    // one and nothing more.
+                    //
+                    // Not a refusal at all: a name belonging to another pair,
+                    // or resolving to nothing. The server falls back to
+                    // working out which sitting the pair is in, because a
+                    // wrong name tells it nothing it did not already know
+                    // without one.
+                    //
+                    // Still 403, and permanent, because retrying changes none
+                    // of them:
+                    //   * a sitting the server has since superseded — it has
+                    //     put this pair into a newer one;
+                    //   * a series whose integrity invalidation is not the
+                    //     janitor's own no-match-reported;
+                    //   * a series with no gameplay on the server's own
+                    //     record — no live points, no recorded match;
+                    //   * a tournament match the bracket has already decided.
+                    //
+                    // NOT on that list any more: "nothing has happened in it
+                    // for hours". The delivery clock was removed from the
+                    // authoritative path, because a report queued during an
+                    // outage and delivered on the next launch is exactly what
+                    // this outbox exists for, and refusing it was the fence
+                    // working against the durability it sits inside.
+                    //
+                    // One exception, and it is transitional rather than a
+                    // second rule: for a pair the server holds no sitting
+                    // record for at all, it has nothing to be authoritative
+                    // WITH, so it falls back to recency and the hours bound
+                    // still applies. That arm closes for a pair the first time
+                    // the server puts them into a sitting, and the one-off
+                    // backfill closes it for everyone already playing.
+                    //
+                    // A 503 is not a refusal and is retried. The server sends
+                    // one when it cannot judge the report yet — a tournament
+                    // series whose bracket row has not appeared. "We could not
+                    // decide" must not spend the report the way "no" does.
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")

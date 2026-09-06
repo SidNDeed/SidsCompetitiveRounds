@@ -81,6 +81,17 @@ class _Result:
         row = self._rows[0]
         return row[0] if isinstance(row, tuple) else row
 
+    def scalars(self):
+        return _Scalars([r[0] if isinstance(r, tuple) else r for r in self._rows])
+
+
+class _Scalars:
+    def __init__(self, values):
+        self._values = list(values)
+
+    def all(self):
+        return list(self._values)
+
 
 class _ScriptedAbort(Exception):
     """Stands in for asyncpg's error object: SQLAlchemy wraps it and the
@@ -89,6 +100,59 @@ class _ScriptedAbort(Exception):
     def __init__(self, sqlstate):
         super().__init__("scripted %s" % sqlstate)
         self.sqlstate = sqlstate
+
+
+class SeriesFixture:
+    """What the database would say about the named sitting.
+
+    One field per conjunct of the eligibility predicate. `evaluate` applies a
+    field's disqualification ONLY IF the clause that reads it is present in the
+    SQL -- so a conjunct deleted from main.py stops disqualifying anything, a
+    fixture built to be refused is accepted, and the test asserting the refusal
+    fails. That is the negative control a boolean knob cannot provide: a knob
+    answers the question the fake was told to answer, whatever the statement
+    actually asks.
+    """
+
+    def __init__(self, grant_present=True, grant_is_newest=True,
+                 any_grant_for_pair=True, completed=False, is_most_recent=True,
+                 fresh=True, live_points=10, has_match=True):
+        # AUTHORITY: the server put this pair into this sitting...
+        self.grant_present = grant_present
+        # ...and has not since put them into a newer one.
+        self.grant_is_newest = grant_is_newest
+        # Whether the pair has ANY grant, which is what gates the legacy arm.
+        self.any_grant_for_pair = any_grant_for_pair
+        # The legacy arm's own row-shape terms.
+        self.completed = completed
+        self.is_most_recent = is_most_recent
+        self.fresh = fresh
+        # EVIDENCE.
+        self.live_points = live_points
+        self.has_match = has_match
+
+    def evaluate(self, sql, min_points):
+        """True if this fixture satisfies the predicate AS WRITTEN in `sql`."""
+        arms = []
+        if "FROM series_dc_grants g" in sql:
+            arms.append(self.grant_present
+                        and (self.grant_is_newest or "g2.last_seen_at" not in sql))
+        if "ORDER BY s2.created_at DESC LIMIT 1" in sql:
+            legacy = (not self.any_grant_for_pair) or "series_dc_grants g3" not in sql
+            legacy = legacy and (not self.completed or self.is_most_recent)
+            if "CAST(:live_window AS interval)" in sql:
+                legacy = legacy and self.fresh
+            arms.append(legacy)
+        if not arms:
+            # Neither arm present at all: the predicate no longer decides
+            # anything about which sitting may be named.
+            return True
+        if not any(arms):
+            return False
+        if "live_p1_points" in sql or "FROM matches m" in sql:
+            if not (self.live_points >= min_points or self.has_match):
+                return False
+        return True
 
 
 class FakeSession:
@@ -101,7 +165,8 @@ class FakeSession:
 
     def __init__(self, players, event_exists=False, insert_wins=True, stored_count=4,
                  named_series=None, series_fresh=True, series_still_eligible=True,
-                 deadlocks=0, lock_sqlstate="40P01"):
+                 deadlocks=0, lock_sqlstate="40P01", grant_series_id=None,
+                 bracket_states=(), series_fixture=None):
         self.players = list(players)
         self.event_exists = event_exists
         self.insert_wins = insert_wins
@@ -133,6 +198,14 @@ class FakeSession:
         self.count_reads = 0
         self.insert_params = None
         self.dedup_params = None
+        # r14 MEDIUM 3/6. The grant is the authority the predicate reads, and
+        # the bracket rows are the lifecycle it re-asks while holding them.
+        self.grant_series_id = grant_series_id
+        self.bracket_states = tuple(bracket_states or ())
+        self.series_fixture = series_fixture
+        self.grant_lookups = 0
+        self.bracket_locks = 0
+        self.spent_marks = 0
 
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
@@ -146,17 +219,54 @@ class FakeSession:
                 raise DBAPIError(sql, params, _ScriptedAbort(self.lock_sqlstate))
             self.lock_order.append(str((params or {}).get("pid")))
             return _Result([(1,)])
+        if sql.startswith("SELECT series_id FROM series_dc_grants"):
+            # The resolver for the UNNAMED path. It must ask the same question
+            # the predicate's supersession term asks, in the same total order:
+            # both directions of a grant are stamped by one statement and share
+            # a timestamp, so a "newest" that can tie is not an ordering.
+            assert "ORDER BY last_seen_at DESC, series_id DESC" in sql, (
+                "the resolver breaks ties differently from the predicate, so it "
+                "can hand the judge a sitting the judge will then refuse"
+            )
+            self.grant_lookups += 1
+            return _Result([(self.grant_series_id,)] if self.grant_series_id else [])
+        if sql.startswith("SELECT tm.status FROM tournament_matches"):
+            # The bracket lifecycle, re-asked while holding the rows.
+            #
+            # Keyed on the statement's own PREFIX, not on a substring: the
+            # eligibility statement now contains a NOT EXISTS over this same
+            # table, so `"FROM tournament_matches" in sql` routed the
+            # eligibility read here and asserted a FOR UPDATE it will never
+            # have.
+            assert "FOR UPDATE" in sql, (
+                "the locked re-ask does not hold the rows it reads, so a "
+                "terminalisation committing in the window is not seen"
+            )
+            assert "LIMIT" not in sql, (
+                "the locked pass must read EVERY bracket row for the series, "
+                "not a sample -- comparing a different subset than the unlocked "
+                "term read is not a re-ask of the same question (#205)"
+            )
+            self.bracket_locks += 1
+            self.lock_order.append("bracket")
+            return _Result([(st,) for st in self.bracket_states])
         if sql.startswith("SELECT 1 FROM ranked_series"):
             assert "CAST(:sid AS uuid)" in sql, "the id bind must be typed (#448)"
             if "FOR NO KEY UPDATE" in sql:
                 self.eligibility_locks += 1
                 self.eligibility_sql = sql
                 self.lock_order.append("series")
+                if self.series_fixture is not None:
+                    return _Result([(1,)] if self.series_fixture.evaluate(
+                        sql, main.DC_MIN_LIVE_POINTS) else [])
                 return _Result([(1,)] if self.series_still_eligible else [])
             assert "CAST(:live_window AS interval)" in sql, (
                 "an interval bind has to be CAST, never concatenated (#448)"
             )
             self.freshness_checks += 1
+            if self.series_fixture is not None:
+                return _Result([(1,)] if self.series_fixture.evaluate(
+                    sql, main.DC_MIN_LIVE_POINTS) else [])
             return _Result([(1,)] if self.series_fresh else [])
         if "FROM ranked_series" in sql:
             self.series_loads += 1
@@ -177,6 +287,17 @@ class FakeSession:
             self.inserts += 1
             self.insert_params = dict(params or {})
             return _Result([(1,)] if self.insert_wins else [])
+        if sql.startswith("UPDATE series_dc_grants"):
+            assert "spent_at IS NULL" in sql, (
+                "the mark is not first-write-wins, so a replay can move a "
+                "timestamp that already means something"
+            )
+            assert ":rp" in sql and ":dp" not in sql, (
+                "the grant marked spent must be the REPORTER's own direction -- "
+                "that is the row the predicate read"
+            )
+            self.spent_marks += 1
+            return _Result([])
         if sql.startswith("UPDATE players"):
             assert "ranked_dc_count = COALESCE(ranked_dc_count, 0) + 1" in sql, (
                 "the increment must be a delta, never an absolute write (#326)"
@@ -231,9 +352,10 @@ def _call(session, series_id=None):
 
 
 def _series_row(player1=REPORTER, player2=LEAVER, invalidated=None, sid=NAMED_SERIES,
-                reason=None):
+                reason=None, is_tournament=False):
     return SimpleNamespace(id=sid, player1_id=player1, player2_id=player2,
-                           invalidated_at=invalidated, invalidation_reason=reason)
+                           invalidated_at=invalidated, invalidation_reason=reason,
+                           is_tournament=is_tournament)
 
 
 def test_the_request_that_inserts_the_row_is_the_one_that_counts():
@@ -527,10 +649,38 @@ def test_the_name_reaches_one_series_that_is_live_and_has_been_played():
     client, so an authenticated participant could report an opponent at 0-0 in a
     series where nothing had happened. The same bar is asked of live_p*_points,
     or satisfied by a recorded match."""
-    sql = MAIN_PY.read_text(encoding="utf-8")
-    start = sql.index("SELECT 1 FROM ranked_series s")
-    query = sql[start:start + 1600]
-    assert "s.completed_at IS NULL" in query
+    # Read from the ASSEMBLED predicate rather than from a text slice of
+    # main.py. The two askers now share one definition, so the value below is
+    # what actually runs in both of them -- a source slice would be asserting
+    # about whichever of the two happened to appear first in the file.
+    # Whitespace-normalised: the fragments are line-wrapped for reading, so a
+    # term that spans two concatenated string literals carries the padding of
+    # the second one. Asserting against the raw text would be asserting about
+    # the indentation.
+    def _norm(fragment):
+        return " ".join(fragment.split())
+
+    query = _norm(main._DC_ELIGIBLE_TERMS)
+
+    # AUTHORITY replaced "uncompleted, or the pair's most recent series" as the
+    # primary term (r14 MEDIUM 3): recency is not authority, and a pair that
+    # meets, leaves and meets again satisfies the old test about either
+    # sitting. The old shape survives ONLY as the compatibility arm, reachable
+    # for a pair the server holds no grant for at all.
+    assert "FROM series_dc_grants g" in query, (
+        "the predicate no longer asks which sitting the server put this pair in"
+    )
+    assert "(g2.last_seen_at, g2.series_id) > (g.last_seen_at, g.series_id)" in query, (
+        "supersession compares a TUPLE because last_seen_at alone is not unique "
+        "within a pair -- the backfill stamps each sitting with its own last "
+        "activity and NOW() is the transaction timestamp -- and on a tie 'no "
+        "strictly newer grant exists' is true of both rows, so two sittings are "
+        "nameable at once"
+    )
+    assert "NOT EXISTS (SELECT 1 FROM series_dc_grants g3" in query, (
+        "the compatibility arm is not gated on the pair having no grant, so it "
+        "is reachable for pairs the authority record covers"
+    )
     assert "ORDER BY s2.created_at DESC LIMIT 1" in query, (
         "the pair's most recent series is the one completed series a name reaches"
     )
@@ -540,6 +690,31 @@ def test_the_name_reaches_one_series_that_is_live_and_has_been_played():
     assert "CAST(:live_window AS interval)" in query, (
         "an interval bind has to be CAST, never concatenated (#448)"
     )
+
+    # ...and the delivery clock is on the COMPATIBILITY arm only. A grant ends
+    # when the server observes the sitting end, not when a client failed to get
+    # its report delivered quickly enough (r14 MEDIUM 6).
+    grant_arm = _norm(main._DC_GRANT_TERM)
+    assert "live_window" not in grant_arm, (
+        "the authority arm has a delivery-time fence again: a report queued "
+        "during an outage and delivered on the next launch is refused, which "
+        "is the case the outbox exists to make survivable"
+    )
+    assert "live_window" in _norm(main._DC_LEGACY_TERM), (
+        "the compatibility arm has no authority record to lean on, so recency "
+        "is all it has -- removing its bound makes it unbounded"
+    )
+
+    # BRACKET: a forfeit terminalises the match and deliberately leaves the
+    # series active, so no row-shape term could see the match was decided.
+    assert "FROM tournament_matches tm" in query and "tm.status IN" in query, (
+        "a decided tournament match can still receive a post-result accusation"
+    )
+    assert "tm.status NOT IN" not in query, (
+        "the bracket term enumerates OPEN states again, so a state nobody "
+        "listed reads as decided and its reports are refused permanently"
+    )
+
     assert "COALESCE(s.live_p1_points, 0) + COALESCE(s.live_p2_points, 0)" in query
     assert "EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id)" in query
     assert "INTERVAL '7 days'" not in query, (
@@ -547,6 +722,205 @@ def test_the_name_reaches_one_series_that_is_live_and_has_been_played():
     )
     # asked of the database clock, never compared to a python now
     assert "NOW()" in query and "datetime.now" not in query
+
+
+def test_both_askers_are_built_from_the_one_definition():
+    """The reason the fragments exist at all.
+
+    The unlocked validation of a named series and the locked re-ask that holds
+    its answer to the insert are two statements asking the same question, and
+    they had already drifted apart once. Two clusters of this review were each
+    rewriting one of them; applied independently, the second would have
+    silently overwritten the first. The test above reads the assembled value,
+    which proves the DEFINITION is right and nothing about who uses it.
+    """
+    code = MAIN_PY.read_text(encoding="utf-8")
+    uses = code.count('"   AND " + _DC_ELIGIBLE_TERMS +')
+    assert uses == 2, (
+        f"{uses} askers build from the shared predicate, not 2 -- a hand-written "
+        "copy is exactly the drift the fragments were extracted to end"
+    )
+
+
+def test_the_two_places_that_name_a_decided_bracket_state_agree():
+    """One fact, two readers: the unlocked NOT EXISTS spells the decided states
+    as a SQL literal, the locked pass compares against the python tuple. A state
+    added to one and not the other makes the locked re-ask answer a different
+    question than the term it exists to re-ask."""
+    # Compared as SETS, not as a joined substring: a substring test passes on
+    # a PREFIX of the right answer, so dropping the last state from the tuple
+    # left this assertion green while the two readers had genuinely diverged.
+    named = frozenset(re.findall(r"'([a-z_]+)'", main._DC_BRACKET_TERM))
+    tupled = frozenset(main._TM_DECIDED_STATES)
+    assert named, "the bracket term names no states at all"
+    assert named == tupled, (
+        "the unlocked term and the locked re-ask disagree about which states "
+        f"are decided: SQL says {sorted(named)}, the tuple says "
+        f"{sorted(tupled)}"
+    )
+
+
+def test_the_decided_states_are_the_ones_the_rest_of_the_server_already_names():
+    """Not a list I chose -- the list main.py already had.
+
+    Four other statements enumerate the decided bracket states, and a fifth
+    that quietly disagreed would mean the DC path calls a match open that the
+    room binding calls finished. The sweep is over the OPERATION (any
+    tm.status enumeration), not over a line, so a fork shows up as a count that
+    moved (#432).
+    """
+    src = MAIN_PY.read_text(encoding="utf-8")
+    # Adjacent python string literals are glued so a SQL list wrapped across
+    # two of them is read as one set rather than as two truncated ones.
+    glued = re.sub(r'"\s*\n\s*"', "", src)
+    groups = re.findall(r"tm\.status\s+(?:NOT\s+)?IN\s*\(([^)]*)\)", glued)
+    sets = [frozenset(re.findall(r"'([a-z_]+)'", g)) for g in groups]
+    assert len(sets) >= 6, (
+        f"the sweep found only {len(sets)} bracket-status enumerations; a "
+        "regex that stops matching is a check that cannot fail (#441)"
+    )
+    canonical = frozenset(main._TM_DECIDED_STATES)
+    assert canonical in sets, (
+        f"no statement in main.py enumerates {sorted(canonical)}; the DC path "
+        "is asking a question the rest of the server does not ask"
+    )
+    # A count threshold would let a single forked site hide under the others.
+    # The claim is sharper than that: any statement asking the FULL decided
+    # question must ask it identically. Narrower sweeps that deliberately ask
+    # less -- the forfeit-only repair pass, the ready/scheduled actionable-now
+    # lookups -- do not contain both anchors and are left alone.
+    forks = sorted(sorted(s) for s in sets
+                   if {"completed", "forfeit"} <= s and s != canonical)
+    assert not forks, (
+        f"these statements enumerate the decided states differently: {forks}; "
+        "the DC path and the rest of the server disagree about which matches "
+        "are already finished"
+    )
+
+
+def test_the_column_default_is_never_a_decided_state():
+    """The specific error this list was shipped with.
+
+    'pending' is what TournamentMatch.status defaults to, so every bracket row
+    exists in that state before anything happens to it. The first draft
+    enumerated OPEN states and forgot it, which made a leave in a match that
+    had not been readied yet a permanent 403 -- and a permanent refusal is a
+    report the client deletes rather than retries. Read from models.py, not
+    from my memory of it.
+    """
+    models = (MAIN_PY.parent / "models.py").read_text(encoding="utf-8")
+    start = models.index("class TournamentMatch")
+    block = models[start:start + 4000]
+    # Line-wise, not a paren-balanced regex: the column reads
+    # `Column(String(16), nullable=False, default="pending")` and a `[^)]*`
+    # cannot cross String(16)'s own closing paren -- which is how the first
+    # draft of this test matched nothing and asserted its way to red.
+    line = next((ln for ln in block.splitlines()
+                 if re.match(r"\s*status\s*=\s*Column\(", ln)), None)
+    assert line, "TournamentMatch declares no status column to read a default from"
+    found = re.search(r'default="([a-z_]+)"', line)
+    assert found, "TournamentMatch.status has no literal default to check against"
+    assert found.group(1) not in main._TM_DECIDED_STATES, (
+        f"the bracket column defaults to {found.group(1)!r}, which this list "
+        "calls decided -- every match refuses reports before it is readied"
+    )
+
+
+def test_a_bracket_state_nobody_listed_is_read_as_open_not_decided():
+    """The failure DIRECTION, which is the reason for the polarity.
+
+    A state added after this code was written is unhandled either way. Read as
+    decided, every report against it is refused permanently and deleted by the
+    client -- unrecoverable. Read as open, the report still has to pass the
+    authority, evidence and dedup gates, and a wrong acceptance is visible and
+    reversible on the server. #276.
+    """
+    session = FakeSession(
+        _players(), named_series=_series_row(is_tournament=True),
+        bracket_states=("a_state_from_2027",))
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+    assert session.bracket_locks == 1
+
+
+def test_a_pending_bracket_row_does_not_refuse_the_report():
+    """The prod-measured case: 'pending' rows exist on the primary right now."""
+    session = FakeSession(
+        _players(), named_series=_series_row(is_tournament=True),
+        bracket_states=("pending",))
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+
+
+def test_every_decided_state_refuses_the_report():
+    """...and the control for the three above: each decided state, one at a
+    time, so a list that is right in aggregate but wrong in one entry cannot
+    hide behind the others."""
+    # A loop over the tuple under test cannot notice the tuple shrinking, so
+    # the floor is asserted before the loop: an empty or truncated list would
+    # otherwise make this test pass by visiting nothing.
+    assert len(main._TM_DECIDED_STATES) >= 4, (
+        f"only {len(main._TM_DECIDED_STATES)} decided states; this loop proves "
+        "nothing about the ones that were removed"
+    )
+    for state in main._TM_DECIDED_STATES:
+        session = FakeSession(
+            _players(), named_series=_series_row(is_tournament=True),
+            bracket_states=(state,))
+        with pytest.raises(main.HTTPException) as caught:
+            _call(session, str(NAMED_SERIES))
+        assert caught.value.status_code == 403, state
+        assert session.inserts == 0, state
+
+
+def test_the_backfill_selects_exactly_what_the_rule_would_have():
+    """294 mints a grant for every sitting that was live at deploy time, and a
+    grant carries NO clock -- so anything it selects that the rule would not
+    have becomes permanently nameable rather than expiring.
+
+    Two properties, one per way the selection can be wrong:
+
+      * the freshness window is the compatibility arm's own. Wider does not
+        merely add rows, it converts sittings the old rule had already stopped
+        accepting reports for into sittings that accept them indefinitely, and
+        it must be identical in BOTH directions or a pair ends up reportable
+        from one seat and not the other;
+      * the decided-bracket exclusion is the same list the predicate decides
+        on, in every direction.
+    """
+    sql = (MAIN_PY.parent.parent / "sql" / "294_backfill_series_dc_grants.sql"
+           ).read_text(encoding="utf-8")
+    windows = set(re.findall(r"NOW\(\) - INTERVAL '(\d+) (hours|days|minutes)'", sql))
+    assert len(windows) == 1, (
+        f"294 uses {len(windows)} different freshness windows: {sorted(windows)}; "
+        "its two INSERTs must select the same rows or one direction of a grant "
+        "is written without the other"
+    )
+    amount, unit = windows.pop()
+    seconds = int(amount) * {"minutes": 60, "hours": 3600, "days": 86400}[unit]
+    assert seconds == main.DC_LIVE_WINDOW_SECONDS, (
+        f"294 backfills {amount} {unit} ({seconds}s) but the compatibility arm "
+        f"only reaches {main.DC_LIVE_WINDOW_SECONDS}s; the difference is a set "
+        "of dead sittings made permanently nameable"
+    )
+
+    # ...and EVERY direction excludes decided brackets by the same list.
+    #
+    # Parsed per statement and compared as sets. 294 carries the exclusion
+    # twice, one INSERT per direction of the grant, so a per-state substring
+    # check passes on a state deleted from ONE of them -- and the two
+    # directions then select different rows, which leaves a pair reportable
+    # from one seat and not the other.
+    lists = [frozenset(re.findall(r"'([a-z_]+)'", g))
+             for g in re.findall(r"tm\.status\s+IN\s*\(([^)]*)\)", sql)]
+    assert len(lists) == 2, (
+        f"294 has {len(lists)} bracket exclusions, expected one per direction; "
+        "a parse that stops matching is a check that cannot fail (#441)"
+    )
+    for got in lists:
+        assert got == frozenset(main._TM_DECIDED_STATES), (
+            f"294 excludes {sorted(got)} but the rule decides on "
+            f"{sorted(main._TM_DECIDED_STATES)}; the backfill and the predicate "
+            "disagree about which matches are already finished"
+        )
     # and the window is a number this module owns, not a literal in a string
     assert main.DC_LIVE_WINDOW_SECONDS <= 24 * 3600, (
         "a day-wide window would let a name walk back through the pair's history"
@@ -1430,4 +1804,315 @@ def test_the_queue_is_read_from_disk_once_per_process():
     remove = _cs_method_body(API_CLIENT_CS, "private static void RemovePendingReport(string url, string json)")
     assert "pending.url != url || pending.json != json" in remove, (
         "the removal side changed its idea of identity; the merge must follow"
+    )
+
+
+# ── authority, not recency (r14 MEDIUM 3/6) ─────────────────────────────────
+
+def test_a_sitting_the_server_has_replaced_cannot_be_named():
+    """The rule the row-shape test could not express.
+
+    Two players meet, leave, and meet again. Both sittings were "the pair's
+    most recent series" at some point, and a series that never completed
+    satisfies "not completed" forever -- so the old predicate let a report
+    aim at whichever of the two suited it. The server knows which sitting it
+    last put them in, and that is now the question being asked.
+    """
+    session = FakeSession(
+        _players(), named_series=_series_row(),
+        series_fixture=SeriesFixture(grant_present=True, grant_is_newest=False))
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+    assert session.inserts == 0 and session.increments == 0
+
+
+def test_the_supersession_term_is_what_refuses_it():
+    """The control. The fixture above is refused because the SQL asks about
+    supersession -- so with that sub-term removed the SAME fixture must be
+    accepted. If it is refused either way, the test above is measuring the
+    fixture rather than the predicate."""
+    fixture = SeriesFixture(grant_present=True, grant_is_newest=False)
+    real = " ".join(main._DC_ELIGIBLE_TERMS.split())
+    assert not fixture.evaluate(real, main.DC_MIN_LIVE_POINTS)
+    without = real.replace("g2.last_seen_at", "g2_removed")
+    assert fixture.evaluate(without, main.DC_MIN_LIVE_POINTS), (
+        "the fixture refuses this sitting for a reason that is not in the SQL"
+    )
+
+
+def test_a_pair_the_server_has_no_record_for_is_still_judged():
+    """The compatibility arm. A sitting that predates this table has no grant,
+    and refusing every such report would delete the queued reports of exactly
+    the players who were mid-game when it deployed -- the deploy-window
+    deletion this arm exists to prevent."""
+    session = FakeSession(
+        _players(), named_series=_series_row(),
+        series_fixture=SeriesFixture(any_grant_for_pair=False, grant_present=False))
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+
+
+def test_the_compatibility_arm_closes_once_the_server_has_a_record():
+    """...and it is not a second, weaker rule left lying around. Once the pair
+    has ANY grant, the row-shape arm is unreachable: a sitting the server did
+    not put them in is refused even though every old term would pass it."""
+    fixture = SeriesFixture(any_grant_for_pair=True, grant_present=False,
+                            completed=False, is_most_recent=True, fresh=True)
+    real = " ".join(main._DC_ELIGIBLE_TERMS.split())
+    assert not fixture.evaluate(real, main.DC_MIN_LIVE_POINTS)
+    # the control: without the gate, the legacy arm admits it again
+    ungated = real.replace("NOT EXISTS (SELECT 1 FROM series_dc_grants g3", "(SELECT true FROM x g3")
+    assert fixture.evaluate(ungated, main.DC_MIN_LIVE_POINTS), (
+        "the legacy arm is not actually gated on the pair having no grant"
+    )
+
+
+def test_a_report_delivered_late_is_not_refused_for_being_late():
+    """r14 MEDIUM 6. The delivery-time fence contradicted the durability it sat
+    inside: a report queued during an outage, with the game then closed for
+    longer than the window, was refused on its first later launch and deleted
+    without having spent a single retry.
+
+    The authority arm carries no clock. Staleness is decided by the server
+    observing the sitting END -- a newer publish, or the bracket closing -- not
+    by how long delivery took.
+    """
+    stale = SeriesFixture(grant_present=True, grant_is_newest=True, fresh=False)
+    real = " ".join(main._DC_ELIGIBLE_TERMS.split())
+    assert stale.evaluate(real, main.DC_MIN_LIVE_POINTS), (
+        "a delivery clock still refuses a sitting the server has not replaced"
+    )
+    # ...and the pair with no record is still bounded by it, because recency is
+    # all that arm has.
+    stale_legacy = SeriesFixture(any_grant_for_pair=False, grant_present=False, fresh=False)
+    assert not stale_legacy.evaluate(real, main.DC_MIN_LIVE_POINTS)
+
+
+def test_a_decided_tournament_match_refuses_the_report():
+    """r14 MEDIUM 3. A forfeit or double-forfeit terminalises the bracket row
+    and deliberately leaves the RankedSeries active with both terminal
+    timestamps null -- bracket status owns that outcome. Every row-shape test
+    therefore still called such a series nameable, and each one was worth a
+    post-result accusation."""
+    session = FakeSession(
+        _players(), named_series=_series_row(is_tournament=True),
+        bracket_states=("completed",))
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 403
+    assert session.bracket_locks == 1, "the bracket was never re-asked under a lock"
+    assert session.inserts == 0
+
+
+def test_a_tournament_series_with_no_bracket_row_is_retryable_not_settled():
+    """503, not 4xx, and the difference is what the refusal COSTS.
+
+    The client treats a 4xx as settled and deletes the report; a 503 leaves it
+    in the outbox with its retry budget intact. "We cannot judge this yet" and
+    "the answer is no" must not be the same reply (#430)."""
+    session = FakeSession(
+        _players(), named_series=_series_row(is_tournament=True), bracket_states=())
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 503, (
+        "a report the server could not judge is being deleted by the client"
+    )
+    assert session.inserts == 0
+
+
+def test_an_open_bracket_row_does_not_refuse_the_report():
+    """The control for the two above: a match still to be played must pass."""
+    session = FakeSession(
+        _players(), named_series=_series_row(is_tournament=True),
+        bracket_states=("ready",))
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+    assert session.bracket_locks == 1
+
+
+def test_the_bracket_lock_is_taken_after_the_series_and_never_before():
+    """Lock order: players -> ranked_series -> tournament_matches.
+
+    `_acquire_tournament_match_action_gate` already takes the series FOR NO KEY
+    UPDATE and then the bracket row FOR UPDATE, so this pass has to nest in the
+    same direction. Taking the bracket first would invert it against a live
+    writer and make a cycle out of two individually correct orders (#505)."""
+    session = FakeSession(
+        _players(), named_series=_series_row(is_tournament=True),
+        bracket_states=("scheduled",))
+    _call(session, str(NAMED_SERIES))
+    assert "series" in session.lock_order and "bracket" in session.lock_order
+    assert session.lock_order.index("series") < session.lock_order.index("bracket"), (
+        f"lock order inverted against the tournament writer: {session.lock_order}"
+    )
+
+
+def test_the_unnamed_path_resolves_from_the_same_authority_it_is_judged_by(_stub_the_gates):
+    """One resolver, asked once. Resolving "the pair's current sitting" one way
+    and judging it another is how a room-aware answer and a room-blind answer
+    came to disagree about the same pair -- so the unnamed path asks the grant
+    first, and only falls back for a pair that has no grant at all."""
+    session = FakeSession(_players(), grant_series_id=NAMED_SERIES,
+                          named_series=_series_row())
+    assert _call(session)["status"] == "recorded"
+    assert session.grant_lookups == 1, "the unnamed path did not ask the authority"
+    assert _stub_the_gates["find_current"] == 0, (
+        "it fell back to the row-shape resolver despite holding a grant"
+    )
+
+
+def test_the_unnamed_path_still_falls_back_when_there_is_no_grant(_stub_the_gates):
+    """The control. A pair the server has no record for must still resolve, or
+    the compatibility arm is unreachable in practice."""
+    session = FakeSession(_players(), grant_series_id=None)
+    assert _call(session)["status"] == "recorded"
+    assert session.grant_lookups == 1
+    assert _stub_the_gates["find_current"] == 1
+
+
+# ── publishing writes both halves or neither ────────────────────────────────
+
+def test_publishing_a_sitting_stamps_activity_and_the_grant_together():
+    """#509's lesson applied before it costs a round: the activity stamp and
+    the authority record are two writes that must never diverge, so they are
+    one function. An activity stamp without a grant is a sitting the freshness
+    bound calls live and the authority record has never heard of."""
+    seen = []
+
+    class _Rec:
+        async def execute(self, statement, params=None):
+            seen.append((" ".join(str(statement).split()), dict(params or {})))
+            return _Result([])
+
+    series = SimpleNamespace(id=NAMED_SERIES, player1_id=REPORTER, player2_id=LEAVER)
+    asyncio.run(main._publish_pair_sitting(_Rec(), series))
+    assert len(seen) == 2, seen
+    stamp, grant = seen[0][0], seen[1][0]
+    assert "UPDATE ranked_series SET last_activity_at = NOW()" in stamp
+    assert "INSERT INTO series_dc_grants" in grant
+    assert "ON CONFLICT (holder_id, series_id) DO UPDATE SET last_seen_at = NOW()" in grant, (
+        "a resume must re-stamp the sitting rather than fail or duplicate"
+    )
+    # BOTH directions, because holder and counterparty are judged separately.
+    assert "(:a, :b, :sid), (:b, :a, :sid)" in grant, (
+        "only one direction of the grant is written, so one seat's report is "
+        "judged by a record that does not exist"
+    )
+    assert seen[1][1]["a"] == REPORTER and seen[1][1]["b"] == LEAVER
+
+
+def test_the_activity_stamp_exists_in_exactly_one_place():
+    """A second raw stamp is a sitting the freshness bound calls live and the
+    authority record has never heard of."""
+    code = MAIN_PY.read_text(encoding="utf-8")
+    raw = code.count('"UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"')
+    assert raw == 1, (
+        f"{raw} raw activity stamps; every one but the helper's own is a "
+        "sitting published without an authority record"
+    )
+
+
+def test_every_series_that_is_born_is_published():
+    """Counted from the CONSTRUCTIONS, which is the half that can be missing.
+
+    The first version of this gate asserted `_publish_pair_sitting` appears
+    four times -- and four is exactly the number the defect produces, because
+    the missing call site is by definition not among the calls you counted. A
+    count of what you wrote cannot see what you did not write (#509).
+
+    So: walk the AST, and for every `RankedSeries(...)` construction demand a
+    publish AFTER it in the same function. A sitting born without a grant is
+    unreportable for any pair who has played together before -- their newest
+    grant names an older series, and the compatibility arm is reachable only
+    for a pair with no grant at all, so both arms refuse and the client deletes
+    the report.
+
+    BOTH FILES. Tournament series are pre-created at bracket activation in
+    tournaments.py, so a sweep of main.py alone would have found five sites and
+    silently blessed the sixth -- the one where a leave matters most.
+    """
+    def _calls(node, name):
+        return sorted(n.lineno for n in ast.walk(node)
+                      if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Name) and n.func.id == name)
+
+    unpublished = []
+    births = 0
+    for path in (MAIN_PY, MAIN_PY.parent / "tournaments.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            made = _calls(fn, "RankedSeries")
+            if not made:
+                continue
+            published = _calls(fn, "_publish_pair_sitting")
+            for line in made:
+                births += 1
+                if not any(p > line for p in published):
+                    unpublished.append("%s:%s:%d" % (path.name, fn.name, line))
+
+    assert births >= 5, (
+        f"the sweep found only {births} series constructions; a walk that stops "
+        "finding them is a check that cannot fail (#441)"
+    )
+    assert not unpublished, (
+        f"these series are created without being published: {unpublished}. A "
+        "sitting with no grant refuses every leave report from a pair that has "
+        "played before, permanently, and the client deletes what it is refused"
+    )
+
+
+
+def test_an_accepted_report_marks_the_grant_it_was_judged_by():
+    """293 says the column is written when a report is accepted. A column that
+    is always NULL answers "no report has ever been accepted", which is a wrong
+    answer rather than a missing one -- so the claim is gated, not just made."""
+    session = FakeSession(_players(), named_series=_series_row())
+    assert _call(session, str(NAMED_SERIES))["status"] == "recorded"
+    assert session.spent_marks == 1, "the accepted report left no mark"
+    assert session.inserts == 1 and session.increments == 1
+
+
+def test_a_report_that_lost_the_insert_marks_nothing():
+    """The control, and the ordering claim. A replay whose ON CONFLICT matched
+    an existing row wrote nothing, so it must not stamp a grant either -- the
+    count and the mark are written on one branch or neither."""
+    session = FakeSession(_players(), insert_wins=False, named_series=_series_row())
+    assert _call(session, str(NAMED_SERIES))["status"] == "already_recorded"
+    assert session.spent_marks == 0, (
+        "a report that recorded nothing still marked its grant used"
+    )
+    assert session.increments == 0 and session.commits == 0
+
+
+
+def test_the_grant_index_matches_the_order_the_resolver_reads():
+    """Both halves read from their own file, so neither can drift unnoticed.
+
+    An index serves an ORDER BY forwards, or backwards with EVERY direction
+    reversed. A trailing ASC column against a DESC sort is a mismatch no error
+    reports -- the planner simply sorts, and the comment claiming the index was
+    built for this query stays there being wrong.
+    """
+    sql = (MAIN_PY.parent.parent / "sql" / "293_series_dc_grants.sql"
+           ).read_text(encoding="utf-8")
+    declared = re.search(
+        r"CREATE INDEX IF NOT EXISTS ix_grant_pair_seen\s*"
+        r"ON series_dc_grants \(([^)]*)\)", sql)
+    assert declared, "the pair index is not declared under the name it is discussed by"
+    columns = [c.strip() for c in declared.group(1).split(",")]
+
+    resolver = inspect.getsource(main._newest_grant_series_id)
+    ordering = re.search(r"ORDER BY ([a-z_]+ DESC(?:, [a-z_]+ DESC)*)", resolver)
+    assert ordering, "the resolver has no descending ORDER BY to match against"
+    wanted = [t.strip() for t in ordering.group(1).split(",")]
+
+    assert columns[-len(wanted):] == wanted, (
+        f"the index trails {columns[-len(wanted):]} but the resolver sorts by "
+        f"{wanted}; the index cannot serve that order and the comment saying it "
+        "was built for this query is false"
+    )
+    assert columns[:2] == ["holder_id", "counterparty_id"], (
+        f"the index leads with {columns[:2]}, not the equality terms the "
+        "resolver and the supersession subquery both filter on"
     )

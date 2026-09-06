@@ -83,8 +83,13 @@
   arrives. A report that names the wrong series is not thrown away: the server
   falls back to working out which series the two of you are in, exactly as it
   does for a report that names none. What it will not accept is a leave filed
-  against a series that is over, that nothing has happened in for hours, or in
-  which no game was played — the record it feeds is about games that happened.
+  against a sitting the server has since replaced — because the two of you have
+  started a newer one — against a tournament match the bracket has already
+  decided, or against a series in which no game was played; the record it feeds
+  is about games that happened. A leave queued while the server was
+  unreachable is no longer refused for arriving late: it is judged on whether
+  that sitting is still the one you were last put into, not on how long the
+  report took to be delivered.
   A leave seen in the moment between one game being recorded and the next
   starting has no series to name, and is still a single attempt.
 - The background queue of unsent match reports no longer stops for the rest of
@@ -113,19 +118,31 @@
   on the Music tab and the seat idle at the menu; anything else is refused
   with a logged reason, and transport actions are not lever-driven.
 
-**Schema changes:** migration **292** (`issued_room_regions` — the region and
-player pair this server issued for a ranked room) BEFORE the API deploy, then
-migrations **288** (client i18n keys for the new library strings), **289**
-(machine-translation proposals for es/ru/uk/sv for those keys), **290** (client
-i18n keys for the head-to-head and lag-notice strings) and **291** (their
-es/ru/uk/sv proposals) after it, in numeric order. The same translations ship
+**Schema changes:** migrations **292** (`issued_room_regions` — the region and
+player pair this server issued for a ranked room) and **293**
+(`series_dc_grants` — which sitting the server last put a pair into) BEFORE the
+API deploy. After it, in numeric order: **288** (client i18n keys for the new
+library strings), **289** (machine-translation proposals for es/ru/uk/sv for
+those keys), **290** (client i18n keys for the head-to-head and lag-notice
+strings), **291** (their es/ru/uk/sv proposals) and **294** (one grant per
+sitting that was already live when 293 shipped). The same translations ship
 bundled in the client.
 
-**292 goes first and the order is not cosmetic:** the new match-report path
-SELECTs from `issued_room_regions`, so an API deployed ahead of the table would
-fail every match report with `undefined_table` until the migration landed. The
-i18n seeds only add rows the client already carries bundled, which is why those
-four stay after.
+**292 and 293 go first, and the order is not cosmetic.** The new match-report
+path SELECTs from `issued_room_regions`; `series_dc_grants` is wider than that
+— every path that puts a pair into a series writes a grant, so an API deployed
+ahead of 293 would fail **match reporting, queue ready, queue poll, preflight
+and leave reports** with `undefined_table` until the table landed. That is the
+whole ranked hot path, not one endpoint. The i18n seeds only add rows the
+client already carries bundled, which is why those four stay after.
+
+**294 goes LAST, after the API is running on both boxes,** and that order is
+also load-bearing but in the opposite direction. It backfills a grant for every
+sitting that was live at deploy time, and only the new API writes grants — run
+before the deploy, every pair who started a series in the gap would have none,
+which is the exact window the backfill exists to close. It is idempotent
+(`ON CONFLICT DO NOTHING`), so re-running it cannot disturb a sitting the live
+code has since re-stamped.
 
 ## v1.40.1 — 2026-09-03
 
