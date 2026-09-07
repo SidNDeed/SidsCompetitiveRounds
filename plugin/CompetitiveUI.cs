@@ -287,7 +287,9 @@ namespace CompetitiveRounds
             // backdrop-less, so a click outside their box would otherwise reach
             // the very rows they exist to guard.
             || SpectatorHud.MenuOpen
-            || confirmOpen;
+            || confirmOpen
+            // Sept 6 mail: the report-reason picker (IMGUI, backdrop-less).
+            || MailUI.ModalOpen;
 
         // AnyModalOwnsInput — the above PLUS every modal that raises its own
         // uGUI backdrop. A backdrop absorbs EventSystem clicks; NOTHING absorbs
@@ -379,6 +381,7 @@ namespace CompetitiveRounds
             DrawArtistInput();
             DrawArtistPicker();
             DrawPlayerSearch();
+            MailUI.DrawImgui();   // Sept 6 mail: composer fields over their uGUI anchors + the report modal
             DrawCosmeticTestPreview();
             DrawCosmeticReview();
             DrawCosmeticReleaseQueue();
@@ -6531,7 +6534,9 @@ namespace CompetitiveRounds
                 // Aug 23 r2: the Info library search field, same contract.
                 || infoSearchFocused
                 // Aug 31: the Card Stats search field, same contract.
-                || cardStatsSearchFocused) { quickChatOpen = false; DwClose(); CloseChatInput(discardDraft: false); return; }
+                || cardStatsSearchFocused
+                // Sept 6: the mail composer's subject/body fields, same contract (design B-4).
+                || MailUI.AnyFieldFocused) { quickChatOpen = false; DwClose(); CloseChatInput(discardDraft: false); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -7038,7 +7043,8 @@ namespace CompetitiveRounds
             if (chatInputOpen || AnyModalOwnsInput || quickChatOpen
                 || compareSearchFocused || lbSearchFocused
                 || histSearchFocused || infoSearchFocused
-                || pickerSearchFocused || cardStatsSearchFocused) { DwClose(); return; }
+                || pickerSearchFocused || cardStatsSearchFocused
+                || MailUI.AnyFieldFocused) { DwClose(); return; }
             if (IsVanillaChatTyping()) { DwClose(); return; }
 
             var ev = Event.current;
@@ -7324,7 +7330,8 @@ namespace CompetitiveRounds
                 || histSearchFocused
                 || infoSearchFocused
                 || pickerSearchFocused
-                || cardStatsSearchFocused) { QcClose(); return; }
+                || cardStatsSearchFocused
+                || MailUI.AnyFieldFocused) { QcClose(); return; }
             if (IsVanillaChatTyping()) { QcClose(); return; }
 
             bool inRoom = false;
