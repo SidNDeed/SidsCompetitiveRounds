@@ -37,8 +37,10 @@ namespace CompetitiveRounds
     ///    5 min at the main menu while connected and not in a live room; every
     ///    90 s while the 1v1 queue is searching; at JoinQueue when the last map
     ///    is older than 5 min (serves the NEXT join — a join never waits on
-    ///    pings). Never while PUN's RegionHandler is pinging (its sweep has
-    ///    priority; ours never touches RegionHandler state). Aborted when a
+    ///    pings). Never started while PUN's RegionHandler is pinging, and a
+    ///    running sweep yields to it (the worker waits in 50 ms steps behind
+    ///    a flag the main thread mirrors every frame) — PUN's sample has
+    ///    priority; ours never touches RegionHandler state. Aborted when a
     ///    room join begins or a live room appears.
     ///
     /// Publication is main-thread only: LastMap / LastCompletedAt / Revision.
@@ -67,6 +69,7 @@ namespace CompetitiveRounds
         const int MAX_MS = 700;
         const int HEADER_POLLS = 3;
         const int DEFAULT_PORT = 5055;
+        const int YIELD_STEP_MS = 50;
 
         sealed class Target
         {
@@ -95,6 +98,7 @@ namespace CompetitiveRounds
             public volatile bool Abort;
             public volatile bool Finished;
             public volatile string Error;
+            public volatile int YieldedMs;   // written by the worker only; the main thread logs it at Finish
         }
 
         sealed class DnsEntry
@@ -110,6 +114,7 @@ namespace CompetitiveRounds
         static float nextPollRt;
         static int announcedRevision;
         static int headerSendsLeft;
+        static volatile bool punPinging;   // RegionHandler.IsPinging, mirrored by Tick for the worker (impl r1 M3)
         static readonly Dictionary<string, DnsEntry> dnsCache = new Dictionary<string, DnsEntry>(StringComparer.OrdinalIgnoreCase);
         static readonly object dnsLock = new object();
 
@@ -144,6 +149,11 @@ namespace CompetitiveRounds
         /// the scheduled and cadence triggers.</summary>
         public static void Tick()
         {
+            // Impl r1 M3 (3.2(f)): mirror PUN's own pinging flag every frame for
+            // the worker, which never touches PUN's live objects (NetworkingClient,
+            // RegionHandler) itself.
+            try { punPinging = PhotonNetwork.NetworkingClient?.RegionHandler?.IsPinging ?? false; }
+            catch { punPinging = false; }
             float rt = Time.realtimeSinceStartup;
             if (rt < nextPollRt) return;
             nextPollRt = rt + POLL_S;
@@ -284,15 +294,24 @@ namespace CompetitiveRounds
                     Plugin.Log?.LogWarning($"[REGION-PINGS] skipped why={why}: previous sweep thread still alive");
                     return;
                 }
-                int port = RegionHandler.PortToPingOverride != 0 ? RegionHandler.PortToPingOverride : DEFAULT_PORT;
+                int portOverride = RegionHandler.PortToPingOverride;
                 var targets = new List<Target>(Math.Min(MAX_TARGETS, rh.EnabledRegions.Count));
                 foreach (var region in rh.EnabledRegions)
                 {
                     if (targets.Count >= MAX_TARGETS) break;
                     if (region == null) continue;
                     string code = SafeCode(region.Code);
-                    string host = HostOf(region.HostAndPort);
-                    if (code == null || host == null) continue;
+                    string host; int addrPort; bool webSocket;
+                    if (code == null || !ParseHostAndPort(region.HostAndPort, out host, out addrPort, out webSocket)) continue;
+                    // 7/3-4, refined (impl r1 M2): the override first; else the port the
+                    // address carries when it is a UDP address (on Photon Cloud that is
+                    // the master's 5055 PingMono assumes; a self-hosted server's own
+                    // port otherwise); else 5055. A ws:// or wss:// port is a TCP/TLS
+                    // listener, never a UDP ping target — PUN's PingMono pings UDP 5055
+                    // on those hosts too, and so do we.
+                    int port = portOverride != 0 ? portOverride
+                             : (!webSocket && addrPort != 0) ? addrPort
+                             : DEFAULT_PORT;
                     bool dup = false;
                     foreach (var t in targets) if (t.Code == code) { dup = true; break; }
                     if (dup) continue;
@@ -320,7 +339,10 @@ namespace CompetitiveRounds
                 th.Start();
                 lastThread = th;
                 current = sweep;
-                Plugin.Log?.LogInfo($"[REGION-PINGS] sweep started why={why} n={targets.Count} port={port}");
+                int port0 = targets[0].Port;
+                bool mixedPorts = false;
+                foreach (var t in targets) if (t.Port != port0) { mixedPorts = true; break; }
+                Plugin.Log?.LogInfo($"[REGION-PINGS] sweep started why={why} n={targets.Count} port={(mixedPorts ? "mixed" : port0.ToString())}");
             }
             catch (Exception ex)
             {
@@ -384,12 +406,15 @@ namespace CompetitiveRounds
                 sb.Append(" rev=").Append(Revision);
             }
             Plugin.Log?.LogInfo(sb.ToString());
+            int yielded = s.YieldedMs;
+            if (yielded > 0) Plugin.Log?.LogInfo($"[REGION-PINGS] yielded to PUN pinging for {yielded} ms");
         }
 
         // ── the sweep thread ──
 
         /// <summary>Resolves every host (cached), then runs all targets'
-        /// attempts concurrently. Writes only into the sweep's own boxes; every
+        /// attempts concurrently, yielding to PUN's own region ping before each
+        /// target (impl r1 M3). Writes only into the sweep's own boxes; every
         /// box is marked Done in <c>finally</c>, so an exception can never
         /// strand the main-thread poll.</summary>
         static void Worker(Sweep s)
@@ -403,6 +428,7 @@ namespace CompetitiveRounds
                 var ips = new IPAddress[n];
                 for (int i = 0; i < n; i++)
                 {
+                    YieldToPun(s);
                     if (s.Abort) return;
                     try
                     {
@@ -424,6 +450,20 @@ namespace CompetitiveRounds
                     int pending = 0;
                     for (int i = 0; i < n; i++)
                     {
+                        if (punPinging)
+                        {
+                            // M3: PUN's own ping began mid-round. Drop what this round
+                            // has already sent (a reply that waited through the yield
+                            // would inflate its sample), wait it out, then start the
+                            // round over; Abort (the 8 s deadline, a room join) ends
+                            // the wait and the round.
+                            DisposeRound(pings);
+                            pending = 0;
+                            YieldToPun(s);
+                            if (s.Abort) break;
+                            i = -1;
+                            continue;
+                        }
                         settled[i] = false;
                         pings[i] = null;
                         if (ips[i] == null) continue;
@@ -464,13 +504,7 @@ namespace CompetitiveRounds
                             }
                         }
                     }
-                    for (int i = 0; i < n; i++)
-                    {
-                        var p = pings[i];
-                        if (p == null) continue;
-                        try { p.Dispose(); } catch { }
-                        pings[i] = null;
-                    }
+                    DisposeRound(pings);
                     if (round < ATTEMPTS - 1 && !s.Abort) Thread.Sleep(BETWEEN_ROUNDS_MS);
                 }
             }
@@ -482,6 +516,34 @@ namespace CompetitiveRounds
             {
                 for (int i = 0; i < n; i++) boxes[i].Done = true;
                 s.Finished = true;
+            }
+        }
+
+        /// <summary>Impl r1 M3 (3.2(f)): while PUN's own region ping runs, wait
+        /// in 50 ms steps — its sample has priority. Reads only the flag Tick
+        /// mirrors; Abort (the main-thread deadline or a room join) ends the
+        /// wait. The waited time accrues on the sweep as it passes, so the main
+        /// thread can report it even when the deadline cuts a wait short.</summary>
+        static void YieldToPun(Sweep s)
+        {
+            if (!punPinging) return;
+            int before = s.YieldedMs;
+            var sw = Stopwatch.StartNew();
+            while (punPinging && !s.Abort)
+            {
+                Thread.Sleep(YIELD_STEP_MS);
+                s.YieldedMs = before + (int)sw.ElapsedMilliseconds;
+            }
+        }
+
+        static void DisposeRound(RegionPing[] pings)
+        {
+            for (int i = 0; i < pings.Length; i++)
+            {
+                var p = pings[i];
+                if (p == null) continue;
+                try { p.Dispose(); } catch { }
+                pings[i] = null;
             }
         }
 
@@ -568,16 +630,59 @@ namespace CompetitiveRounds
             return c;
         }
 
-        /// <summary>"host:port" -> host (RegionPinger.Start's own rule: strip
-        /// from the LAST ':' when it is past position 1). The ping port is
-        /// PortToPingOverride or 5055, never the master port.</summary>
-        static string HostOf(string hostAndPort)
+        /// <summary>Photon's <c>Region.HostAndPort</c> -> host, the port the
+        /// address carries (0 when none) and whether it was a WebSocket
+        /// address (impl r1 M2). Mirrors the shipped RegionPinger (Start strips
+        /// the port after the LAST ':'; ResolveHost strips a leading ws:// or
+        /// wss://) plus the two shapes PUN's rule mangles: a bracketed IPv6
+        /// literal (<c>[2001:db8::1]:5055</c> -> the literal without brackets,
+        /// the port after <c>]:</c>) and a bare IPv6 literal, kept whole (its
+        /// last ':' is not a port). Anything from the first '/' after the host
+        /// is dropped; an unbracketed single ':' splits only when what follows
+        /// is all digits. Pure: no I/O, no state.</summary>
+        internal static bool ParseHostAndPort(string hostAndPort, out string host, out int port, out bool webSocket)
         {
-            if (string.IsNullOrEmpty(hostAndPort)) return null;
+            host = null; port = 0; webSocket = false;
+            if (string.IsNullOrEmpty(hostAndPort)) return false;
             string h = hostAndPort.Trim();
-            int colon = h.LastIndexOf(':');
-            if (colon > 1) h = h.Substring(0, colon);
-            return h.Length == 0 ? null : h;
+            if (h.StartsWith("wss://", StringComparison.OrdinalIgnoreCase)) { h = h.Substring(6); webSocket = true; }
+            else if (h.StartsWith("ws://", StringComparison.OrdinalIgnoreCase)) { h = h.Substring(5); webSocket = true; }
+            int slash = h.IndexOf('/');
+            if (slash >= 0) h = h.Substring(0, slash);
+            string tail;
+            if (h.StartsWith("[", StringComparison.Ordinal))
+            {
+                int close = h.IndexOf(']');
+                if (close < 2) return false;                       // "[]" or no closing bracket
+                host = h.Substring(1, close - 1);
+                tail = h.Substring(close + 1);                     // "" or ":port"
+                if (tail.Length == 0) return true;
+                if (tail[0] != ':') return false;
+                tail = tail.Substring(1);
+            }
+            else
+            {
+                int first = h.IndexOf(':');
+                if (first < 0 || first != h.LastIndexOf(':') || !AllDigits(h, first + 1))
+                {
+                    host = h;                                      // no port, a bare IPv6 literal, or a non-numeric tail
+                    return h.Length > 0;
+                }
+                host = h.Substring(0, first);
+                tail = h.Substring(first + 1);
+            }
+            if (host.Length == 0) return false;
+            int p;
+            if (tail.Length > 0 && tail.Length <= 5 && AllDigits(tail, 0) && int.TryParse(tail, out p) && p >= 1 && p <= 65535)
+                port = p;
+            return true;
+        }
+
+        static bool AllDigits(string s, int from)
+        {
+            if (from >= s.Length) return false;
+            for (int i = from; i < s.Length; i++) if (s[i] < '0' || s[i] > '9') return false;
+            return true;
         }
     }
 

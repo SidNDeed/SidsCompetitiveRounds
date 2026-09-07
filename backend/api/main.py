@@ -14588,6 +14588,18 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                      WHERE player_id = :pid"""),
             {"pid": my_pid, "region_pings": _hdr_pings, "region_pings_age": _hdr_age},
         )
+        # Impl review r1 M1 (7/3-1): issuance in THIS request must see what the
+        # statement just wrote. `entry` is the snapshot taken under the locks
+        # BEFORE the heartbeat, so the chooser below would otherwise judge the
+        # map and stamp this poll has just replaced. Overlay the validated map
+        # and its stamp onto that snapshot — the values the UPDATE bound, the
+        # stamp dated `now - age` as the statement dates the row (the chooser
+        # judges the window on its own clock a few ms later) — rather than
+        # re-selecting: no extra statement, the lock set and order untouched.
+        # The opponent's map is read below, after this UPDATE, from its own row.
+        entry = dict(entry)
+        entry["region_pings"] = _hdr_pings
+        entry["region_pings_at"] = now - timedelta(seconds=_hdr_age)
     else:
         await db.execute(
             text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),

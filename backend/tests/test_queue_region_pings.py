@@ -3,7 +3,9 @@
 A client sends its region ping map with /queue/join (body) and, while it keeps
 polling, as the X-Region-Pings header; ONE validator admits both. The map is
 stored on the queue row off-ORM (migration 301) by the join's single INSERT ...
-ON CONFLICT and by the poll's heartbeat UPDATE (only with a valid header). At
+ON CONFLICT and by the poll's heartbeat UPDATE (only with a valid header); the
+poll that carries a valid header also overlays it onto its own row snapshot, so
+issuance in that same request judges the refreshed map (impl review r1 M1). At
 room issuance both seats' maps are re-read under the ordered locks and
 `_pick_region_by_pings` (rung 0) may replace the ladder's answer — only by a
 region that costs NEITHER seat more than 20 ms over its own baseline.
@@ -359,6 +361,12 @@ class FakeIssuanceSession:
             return _Result([{c: row[c] for c in cols}])
         if sql.startswith("UPDATE ranked_queue SET last_polled = NOW()"):
             self.heartbeats.append((sql, params))
+            # a valid header's statement lands on the ROW (what a later re-read
+            # returns); the snapshot the handler took earlier is untouched
+            if "region_pings" in params:
+                row = self.rows[params["pid"]]
+                row["region_pings"] = params["region_pings"]
+                row["region_pings_at"] = datetime.now(timezone.utc) - timedelta(seconds=params["region_pings_age"])
             return _Result([])
         if sql.startswith("SELECT") and "FROM players" in sql:
             pid = self.by_steam[self.me_steam]
@@ -529,6 +537,68 @@ def test_queue_poll_leaves_the_heartbeat_alone_without_a_valid_header(issuance, 
     assert params == {"pid": ME}
     assert not any("region_pings" in s and s.startswith("UPDATE") for s, _ in session.statements), \
         "a poll never writes the columns without a valid header, and never NULLs them"
+
+
+# ── the header and issuance in the SAME poll (impl review r1 M1, 7/3-1) ──────
+# `entry` is captured under the locks before the heartbeat; a valid header's
+# map and stamp must be what the chooser judges in that request. Each positive
+# test here fails when the overlay after the heartbeat UPDATE is removed (#391).
+
+def test_a_valid_header_refreshes_the_stale_map_issuance_sees_in_the_same_poll(issuance):
+    """The review's scenario: A's stored stamp is past the window, B's is fresh,
+    both ready, and A polls with a fresh header. The heartbeat has just replaced
+    A's map, so the room goes by the pair's pings — the pre-heartbeat snapshot
+    alone would have said stale and handed the pair to the ladder."""
+    stale = _now() - timedelta(seconds=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1)
+    fresh = _now() - timedelta(seconds=10)
+    session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, stale, fresh), ME_STEAM)
+    resp = _poll(session, {"x-region-pings": "us=100,eu=30;age=0"})
+    assert resp.status == "ready_join"
+    assert resp.photon_region == "eu"
+    assert issuance == [(ME, PARTNER, resp.room_name, "eu")]
+    assert len(session.heartbeats) == 1 and "region_pings" in session.heartbeats[0][1]
+
+
+def test_a_valid_header_replaces_the_stored_map_issuance_sees_in_the_same_poll(issuance):
+    """The map half, independent of staleness: the stored map prefers us, the
+    header's prefers eu, both stamps fresh — the header's map decides."""
+    fresh = _now() - timedelta(seconds=10)
+    session = FakeIssuanceSession(_pair({"us": 30, "eu": 100}, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
+    assert _poll(session, {"x-region-pings": "us=100,eu=30;age=5"}).photon_region == "eu"
+    assert [s[3] for s in issuance] == ["eu"]
+
+
+def test_the_header_stamp_is_what_the_issuance_window_judges(issuance):
+    """The stamp half: the UPDATE dates the row now() - age, so a valid header
+    whose age is past the window leaves A stale although the STORED stamp was
+    fresh — issuance agrees with what the row now holds, not with the snapshot."""
+    fresh = _now() - timedelta(seconds=10)
+    session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
+    age = main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1
+    assert _poll(session, {"x-region-pings": f"us=100,eu=30;age={age}"}).photon_region == "us"
+    assert [s[3] for s in issuance] == ["us"]
+
+
+@pytest.mark.parametrize("headers", [{}, {"x-region-pings": "us=100,eu=30;age=-1"}, {"x-region-pings": "garbage"}])
+def test_control_a_stale_snapshot_stays_stale_without_a_valid_header(issuance, headers):
+    """Negative control (#391): an absent or refused header overlays nothing —
+    the stale stored map stays stale and the ladder answers."""
+    stale = _now() - timedelta(seconds=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1)
+    fresh = _now() - timedelta(seconds=10)
+    session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, stale, fresh), ME_STEAM)
+    resp = _poll(session, headers)
+    assert resp.photon_region == "us"
+    assert issuance == [(ME, PARTNER, resp.room_name, "us")]
+    assert not any("region_pings" in p for _, p in session.heartbeats)
+
+
+def test_the_overlay_sits_between_the_header_heartbeat_and_the_chooser():
+    src = inspect.getsource(main.queue_poll)
+    heartbeat = src.index("make_interval(secs => :region_pings_age)")
+    overlay = src.index('entry["region_pings_at"] = now - timedelta(seconds=_hdr_age)')
+    chooser = src.index("chosen_region = _pick_room_region(")
+    assert heartbeat < overlay < chooser
+    assert src.count('entry["region_pings"] = _hdr_pings') == 1
 
 
 def test_queue_poll_parses_the_header_after_the_session_gate_and_before_any_statement():
