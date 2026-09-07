@@ -62,7 +62,7 @@ namespace CompetitiveRounds
         private static int PageCount() => SessionReportModel.FIXED_PAGES + Mathf.Max(1, buildPages);
 
         private static bool stylesReady;
-        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny;
+        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny, stCards;
         private static readonly Color BACKDROP = new Color(0.04f, 0.05f, 0.08f, 0.95f);
         private static readonly Color PANEL = new Color(1f, 1f, 1f, 0.05f);
         private static readonly Color GRID = new Color(1f, 1f, 1f, 0.08f);
@@ -423,20 +423,44 @@ namespace CompetitiveRounds
         /// body still gets a page of its own — so every block is reachable and
         /// nothing is discarded. Sets buildPages, which the pager reads.</summary>
         private static readonly List<int> buildStarts = new List<int>();
+        // Per-block measured heights, index-aligned with m.Builds and filled by
+        // MeasureBuildPages: the card list wraps to the column width, so its
+        // height is measured with the style that draws it, never assumed
+        // (review r2). Re-measured only when the model or the body size
+        // changes; the pager and the draw path read the same numbers.
+        private static readonly List<float> blockH = new List<float>();
+        private static readonly List<float> blockCardsH = new List<float>();
+        private static SessionReportModel.Model measuredModel;
+        private static float measuredW = -1f, measuredH = -1f;
 
         private static void MeasureBuildPages(Rect body, SessionReportModel.Model m)
         {
+            if (ReferenceEquals(m, measuredModel) && body.width == measuredW && body.height == measuredH
+                && buildStarts.Count > 0 && blockH.Count == m.Builds.Count)
+                return;
             buildStarts.Clear();
             buildStarts.Add(0);
+            blockH.Clear();
+            blockCardsH.Clear();
+            measuredModel = m; measuredW = body.width; measuredH = body.height;
             if (m.BuildsMissing != null || m.Builds.Count == 0) { buildPages = 1; return; }
+            EnsureStyles();
             int cols = Mathf.Clamp(m.Players.Count, 1, 4);
+            float colW = (body.width - 16f) / cols;
+            float textW = Mathf.Max(40f, colW - 20f);     // the card label's width in DrawBuilds
+            for (int i = 0; i < m.Builds.Count; i++)
+            {
+                float cardsH = CardsHeight(m.Builds[i], textW);
+                blockCardsH.Add(cardsH);
+                blockH.Add(BlockHeight(m.Builds[i], cardsH));
+            }
             float usable = body.height - 16f;
             float used = 0f;
             for (int i = 0; i < m.Builds.Count; i += cols)
             {
                 float rowH = 0f;
                 for (int c = 0; c < cols && i + c < m.Builds.Count; c++)
-                    rowH = Mathf.Max(rowH, BlockHeight(m.Builds[i + c]));
+                    rowH = Mathf.Max(rowH, blockH[i + c]);
                 if (used > 0f && used + rowH > usable)
                 {
                     buildStarts.Add(i);
@@ -457,7 +481,7 @@ namespace CompetitiveRounds
                 GUI.Label(body, "<color=#8FA3B8>" + (m.BuildsMissing ?? "") + "</color>", stCenter);
                 return;
             }
-            if (buildStarts.Count == 0) MeasureBuildPages(body, m);
+            MeasureBuildPages(body, m);                 // cached unless the model or the body changed
             int cols = Mathf.Clamp(m.Players.Count, 1, 4);
             float colW = (body.width - 16f) / cols;
             sub = Mathf.Clamp(sub, 0, buildPages - 1);
@@ -468,22 +492,31 @@ namespace CompetitiveRounds
             {
                 float rowH = 0f;
                 for (int c = 0; c < cols && i + c < end; c++)
-                    rowH = Mathf.Max(rowH, BlockHeight(m.Builds[i + c]));
+                    rowH = Mathf.Max(rowH, blockH[i + c]);
                 for (int c = 0; c < cols && i + c < end; c++)
                 {
                     var b = m.Builds[i + c];
+                    float cardsH = blockCardsH[i + c];
                     var r = new Rect(body.x + 8f + c * colW, y, colW - 8f, rowH - 6f);
                     Fill(r, ROW);
                     GUI.Label(new Rect(r.x + 6f, r.y + 2f, r.width - 12f, 22f), b.Title, stBody);
-                    GUI.Label(new Rect(r.x + 6f, r.y + 24f, r.width - 12f, 40f), b.Cards, stSmall);
+                    GUI.Label(new Rect(r.x + 6f, r.y + 24f, r.width - 12f, cardsH), b.Cards, stCards);
                     if (b.Stats.Length > 0)
-                        GUI.Label(new Rect(r.x + 6f, r.y + 66f, r.width - 12f, r.height - 70f), b.Stats, stTiny);
+                        GUI.Label(new Rect(r.x + 6f, r.y + 26f + cardsH, r.width - 12f, r.height - 30f - cardsH), b.Stats, stTiny);
                 }
                 y += rowH;
             }
         }
 
-        private static float BlockHeight(SessionReportModel.BuildBlock b)
+        /// <summary>The wrapped height of a block's card list at the width the
+        /// draw path gives it, measured with the style that draws it.</summary>
+        private static float CardsHeight(SessionReportModel.BuildBlock b, float textW)
+        {
+            if (string.IsNullOrEmpty(b.Cards)) return 18f;
+            return Mathf.Max(18f, Mathf.Ceil(stCards.CalcHeight(new GUIContent(b.Cards), textW)));
+        }
+
+        private static float BlockHeight(SessionReportModel.BuildBlock b, float cardsH)
         {
             int lines = 0;
             if (b.Stats.Length > 0)
@@ -491,7 +524,8 @@ namespace CompetitiveRounds
                 lines = 1;
                 for (int i = 0; i < b.Stats.Length; i++) if (b.Stats[i] == '\n') lines++;
             }
-            return 74f + lines * 15f;
+            // title row (24) + the measured card list + gap (2) + stats lines + bottom pad (8)
+            return 24f + cardsH + 2f + lines * 15f + 8f;
         }
 
         // ── primitives / styles ──────────────────────────────────────────────
@@ -508,6 +542,8 @@ namespace CompetitiveRounds
             stSmall = Mk(14, TextAnchor.MiddleLeft, FontStyle.Bold);
             stSmallR = Mk(13, TextAnchor.MiddleRight, FontStyle.Bold);
             stTiny = Mk(12, TextAnchor.UpperLeft, FontStyle.Bold);
+            // The build card list: UpperLeft is the wrapping anchor in Mk.
+            stCards = Mk(14, TextAnchor.UpperLeft, FontStyle.Bold);
             stCell = Mk(15, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCellHead = Mk(13, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCenter = Mk(18, TextAnchor.MiddleCenter, FontStyle.Bold);

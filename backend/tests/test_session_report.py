@@ -767,7 +767,9 @@ def test_migration_299_shape():
     assert "LATERAL" not in body.upper()
     assert body.count("rs.status = 'completed'") == 2 and body.count("rs.invalidated_at IS NULL") == 2
     assert "UNION ALL" in body, "one row per (series, player): an equality join, not an OR"
-    assert "ROW_NUMBER() OVER (PARTITION BY rh.id ORDER BY s.completed_at DESC)" in body
+    assert "ORDER BY s.completed_at DESC, s.series_id) AS rn" in body, "deterministic numbering"
+    assert "COUNT(*) OVER (PARTITION BY rh.id, s.completed_at) AS same_instant" in body
+    assert "AND cand.same_instant = 1;" in body, "a same-instant tie stays NULL instead of being guessed (r2)"
     assert "s.completed_at <= rh.period_end" in body and "interval '10 minutes'" in body
 
 
@@ -803,7 +805,7 @@ BIG_END_STATS = "1|" + "|".join(["1234567.123"] * 21)
 LONG_NAME = "N" * 40
 
 
-def _worst_1v1_world(n_games=30):
+def _worst_1v1_world(n_games=30, card_prefix=None):
     """30 casual games under one uuid (the envelope keeps 24), every stream
     300 samples of six-digit values, 200 point events, 400 cards each with
     40-character names, maximal end stats and long display names."""
@@ -823,7 +825,7 @@ def _worst_1v1_world(n_games=30):
         matches.append(row)
         for k in range(400):
             for pid in (PID_A, PID_B):
-                cards.append({"match_id": mid, "player_id": pid, "card_name": f"Card{k:03d}" + "x" * 60,
+                cards.append({"match_id": mid, "player_id": pid, "card_name": (f"{k:03d}" + card_prefix) if card_prefix else f"Card{k:03d}" + "x" * 60,
                               "pick_order": k + 1, "round_number": k, "rolled": False})
     players = [{"id": PID_A, "steam_id": CALLER, "display_name": LONG_NAME},
                {"id": PID_B, "steam_id": OPP, "display_name": LONG_NAME}]
@@ -855,7 +857,7 @@ def _worst_team_world():
     return FakeDb(team_series_row=team_row, team_matches=matches, team_tele=tele, players=players, gold=[]), series
 
 
-def _worst_ffa_world():
+def _worst_ffa_world(card_prefix=None):
     """One FFA game with the ten-player maximum, nine streams of 300 samples
     each, a 400-token half-point list and 400 cards per player."""
     pids = [PID_A] + [str(uuid.uuid4()) for _ in range(9)]
@@ -872,7 +874,7 @@ def _worst_ffa_world():
                               blocks_successful=999999, keys_pressed=9999999, active_seconds=3599.9, kills=999))
     timeline = ",".join(f"{i % 10}{'R' if i % 3 == 0 else ''}" for i in range(400))
     ffa_match = dict(FFA_MATCH, duration_s=3600, timeline=timeline)
-    cards = [{"match_id": FFA1, "player_id": pid, "card_name": f"Card{k:03d}" + "x" * 60,
+    cards = [{"match_id": FFA1, "player_id": pid, "card_name": (f"{k:03d}" + card_prefix) if card_prefix else f"Card{k:03d}" + "x" * 60,
               "pick_order": k + 1, "round_number": k, "rolled": k % 2 == 0}
              for pid in pids for k in range(400)]
     players = [{"id": p, "steam_id": s, "display_name": LONG_NAME} for p, s in zip(pids, steams)]
@@ -935,12 +937,17 @@ def test_envelope_stays_under_the_documented_bound_for_worst_case_shapes(session
 
 def test_control_without_the_caps_the_same_world_breaks_the_bound(session_ok, monkeypatch):
     """Negative control (#391): lift the budgets and the identical fixture
-    serialises far past the bound — the caps are what hold it."""
+    serialises far past the bound BEFORE the fit step — the caps are what
+    size it. With the fit step in place even the uncapped world fits, because
+    the fit is the guarantee and the caps are the sizing (r2)."""
     monkeypatch.setattr(main, "_REPORT_SAMPLES_MIN", 10 ** 6)
     monkeypatch.setattr(main, "_REPORT_SAMPLES_MAX", 10 ** 6)
     monkeypatch.setattr(main, "_REPORT_CARDS_MIN", 10 ** 6)
     monkeypatch.setattr(main, "_REPORT_CARDS_MAX", 10 ** 6)
     monkeypatch.setattr(main, "_REPORT_DEATHS_MAX", 10 ** 6)
+    fitted = _call(_worst_1v1_world(), CALLER, session=BIG_SESSION)
+    assert _wire_bytes(fitted) <= main._REPORT_MAX_BYTES and fitted["truncated"] is True, _wire_bytes(fitted)
+    monkeypatch.setattr(main, "_report_fit", lambda env: env)
     resp = _call(_worst_1v1_world(), CALLER, session=BIG_SESSION)
     assert _wire_bytes(resp) > 2 * main._REPORT_MAX_BYTES
     assert _pairs(resp) > main._REPORT_SAMPLE_PAIRS_BUDGET and _picks(resp) > main._REPORT_CARD_BUDGET
@@ -1067,6 +1074,7 @@ def test_the_1v2_history_rows_carry_a_session_control():
     assert 'OpenSessionReport("series"' in refresh
     assert "ovtRecentSessionKeys" in refresh and "ovtRecentSessionBtns" in refresh
     assert "MatchTracker.LocalSteamId" in refresh
+    assert refresh.count("!string.IsNullOrEmpty(s.series_id)") == 1, "an empty series id disarms the control (r2 mutation pin)"
     assert "solo_steam" in refresh and "duo_a_steam" in refresh and "duo_b_steam" in refresh
     assert 'I18n.Tr("Session")' in refresh
     build = _cs_body(src, "private static void BuildPage(Transform canvasParent)")
@@ -1086,6 +1094,9 @@ def test_the_builds_page_continues_instead_of_discarding_rows():
     builds = _cs_body(src, "private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)")
     assert "buildPages" in builds and "sub" in builds
     assert "showing {0} of {1}" not in builds, "the discard notice is gone with the discard"
+    measure = _cs_body(src, "private static void MeasureBuildPages(Rect body, SessionReportModel.Model m)")
+    assert measure.count("buildStarts.Add(i)") == 1, "the page break is recorded exactly once in the method (#284)"
+    assert "blockH[" in builds and "blockH.Add(" in measure, "the draw path pages with the heights it measured"
     model = PLUGIN / "SessionReportModel.cs"
     assert "FIXED_PAGES = 3" in strip_comments_only(model.read_text(encoding="utf-8"))
 
@@ -1116,3 +1127,40 @@ def test_dividers_and_diagnostics_are_translated():
     assert err.count("I18n.Tr") >= 6
     fetched = _cs_body(view, "private static void OnFetched(int g, bool ok, string body)")
     assert "Plugin.Log.LogWarning" in fetched and "ERR_" in fetched
+
+
+def test_the_bound_is_enforced_not_estimated(session_ok, monkeypatch):
+    """PARTIAL (r2): the caps count code points, so 1,008 non-rolled card names
+    of 40 four-byte code points in both `picks` and `end_build` put the 1v1
+    worst case far over _REPORT_MAX_BYTES. The envelope is measured on the way
+    out exactly as FastAPI emits it and the OLDEST games are dropped until it
+    fits, counted in `games_omitted`. A single maximal ten-player FFA game fits
+    without dropping - the loop's precondition. Negative control: with the fit
+    step disabled the same 1v1 world is over the bound (#391)."""
+    wide = "\U0001F600" * 60            # cut to _REPORT_CARD_NAME_MAX code points, 4 B each
+    world = _worst_1v1_world(card_prefix=wide)          # ONE world: the game ids must match below
+    fitted = _call(world, CALLER, session=BIG_SESSION)
+    monkeypatch.setattr(main, "_report_fit", lambda env: env)
+    raw = _call(world, CALLER, session=BIG_SESSION)
+    assert len(raw["games"]) == 24 and _wire_bytes(raw) > main._REPORT_MAX_BYTES, _wire_bytes(raw)
+    assert _wire_bytes(fitted) <= main._REPORT_MAX_BYTES, _wire_bytes(fitted)
+    kept = len(fitted["games"])
+    assert 1 < kept < 24, kept
+    assert fitted["games_omitted"] == 30 - kept and fitted["truncated"] is True
+    assert fitted["games"] == raw["games"][-kept:], "the newest games survive; the oldest are dropped"
+    ffa = _call(_worst_ffa_world(card_prefix=wide), CALLER, match=FFA1)
+    assert len(ffa["games"]) == 1 and _wire_bytes(ffa) <= main._REPORT_MAX_BYTES, _wire_bytes(ffa)
+
+
+def test_build_blocks_measure_their_card_text():
+    """LOW (r2): the card list wraps to the column width and the block height
+    is measured from it, not a fixed 40 px strip; the draw path reads the same
+    measured height it paged with."""
+    src = PLUGIN / "SessionReportView.cs"
+    cards = _cs_body(src, "private static float CardsHeight(SessionReportModel.BuildBlock b, float textW)")
+    assert "CalcHeight(" in cards
+    draw = _cs_body(src, "private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)")
+    assert "blockCardsH[" in draw and "stCards" in draw
+    assert ", 40f), b.Cards" not in draw, "the fixed 40 px card strip is gone"
+    styles = _cs_body(src, "private static void EnsureStyles()")
+    assert "stCards = Mk(14, TextAnchor.UpperLeft" in styles, "UpperLeft is the wrapping anchor in Mk"

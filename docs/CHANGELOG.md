@@ -173,6 +173,21 @@
   one-click mute, ban or dismiss; each click is re-checked against the
   clicker's current grant. A retention sweep removes old mail. Migration 297.
 
+**Session reports**
+
+- A Session button on the ranked, casual, 2v2, FFA and 1v2 history rows opens
+  a per-game report of that sitting for its participants: damage and score
+  over time, DPS, hit and block rates, ping and FPS, totals and builds. Games
+  from one sitting are grouped without exposing any room information; only
+  games the viewer played, with one consistent roster, are shown, and FFA
+  players who had left are not counted as players. The rating line is tied to
+  the exact series; FFA rows carry damage, kills, score and rolled-out picks;
+  long sittings page their builds instead of cutting them off; the newest
+  games are shown, at most 24 and fewer when the report would exceed its size
+  limit, and the report says how many older ones were left out. Requires
+  Steam sign-in; games recorded before telemetry show what exists. Migrations
+  298 and 299.
+
 **Rating graph axes**
 
 - Rating graphs now compare players over time on a common footing. In-game,

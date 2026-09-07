@@ -26,7 +26,12 @@
 -- (the writer stamps period_end milliseconds after completed_at in the same
 -- request, so two series 30 s apart resolve to their own snapshots). Rows
 -- outside that window — the 097/104 backfills and anything anomalous — stay
--- NULL rather than be guessed. The series rows are unpivoted to one row per
+-- NULL rather than be guessed, and so does a snapshot whose latest candidate
+-- is not unique: two series of one player completed at the same instant are
+-- indistinguishable by time, so `same_instant` refuses the guess and the
+-- report shows that set delta-only (review r2). The ORDER BY tie-break only
+-- makes the numbering deterministic; it never decides between tied rows.
+-- The series rows are unpivoted to one row per
 -- (series, player) first so the join is an equality on player_id (hash-
 -- joinable) rather than an OR across two columns. Dry-run the SELECT half
 -- against the primary before applying (#313/#340); CTEs, no LATERAL.
@@ -52,7 +57,9 @@ WITH seats AS (
 ), cand AS (
     SELECT rh.id AS rh_id,
            s.series_id,
-           ROW_NUMBER() OVER (PARTITION BY rh.id ORDER BY s.completed_at DESC) AS rn
+           ROW_NUMBER() OVER (PARTITION BY rh.id
+                              ORDER BY s.completed_at DESC, s.series_id) AS rn,
+           COUNT(*) OVER (PARTITION BY rh.id, s.completed_at) AS same_instant
       FROM rating_history rh
       JOIN seats s
         ON s.player_id = rh.player_id
@@ -64,6 +71,7 @@ UPDATE rating_history rh
    SET series_id = cand.series_id
   FROM cand
  WHERE cand.rh_id = rh.id
-   AND cand.rn = 1;
+   AND cand.rn = 1
+   AND cand.same_instant = 1;
 
 COMMIT;

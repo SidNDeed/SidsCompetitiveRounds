@@ -46186,9 +46186,14 @@ _REPORT_MAX_GAMES = 24
 _REPORT_NOT_FOUND = "not_found"
 
 # ── the byte budget ───────────────────────────────────────────────────────
-# Documented bound: one envelope serialises to AT MOST _REPORT_MAX_BYTES
-# (compact JSON, the shape FastAPI emits). A typical BO3 is ~40 KB; the bound
-# is for the worst reachable shapes, which the test suite builds and measures:
+# Bound: one envelope serialises to AT MOST _REPORT_MAX_BYTES (compact JSON,
+# the shape FastAPI emits). The caps below SIZE the envelope for the worst
+# shapes the test suite builds; the bound itself is ENFORCED on the way out by
+# _report_fit, which measures the assembled envelope exactly as it will be
+# emitted and drops the OLDEST games until it fits. (Review r2: the caps count
+# code points, not bytes, so 40 four-byte code points per card name put the
+# 1v1 worst case far past 512 KB - cap arithmetic can only estimate; the fit
+# step is what makes the number true.) A typical BO3 is ~40 KB; the sizing:
 #   sample pairs  <= _REPORT_SAMPLE_PAIRS_BUDGET (12,288 x <= 17 B = ~209 KB).
 #       Per stream per game the cap is
 #       clamp(budget // (games x players x 8), _REPORT_SAMPLES_MIN, _REPORT_SAMPLES_MAX):
@@ -46208,8 +46213,12 @@ _REPORT_NOT_FOUND = "not_found"
 # Worst cases measured from the test worlds (compact JSON, 2026-09-06):
 # 24-game 1v1 387,940 B (~379 KB), 24-game 2v2 221,508 B (~216 KB), 10-player
 # FFA 215,425 B (~210 KB), an ordinary BO3 5,621 B — all under the 512 KB bound
-# with headroom. Change a constant here and the test's literal bound is what
-# tells you the truth.
+# with headroom. With maximal four-byte card names the same 1v1 world is
+# 611,716 B before the fit step and keeps 20 games (509,817 B) after it, while
+# one maximal FFA game is 268,705 B and still fits (the loop's precondition):
+# both are measured by test_the_bound_is_enforced_not_estimated (2026-09-06).
+# Change a constant here and the
+# test's literal bound is what tells you the truth.
 _REPORT_MAX_BYTES = 512 * 1024
 _REPORT_SAMPLE_PAIRS_BUDGET = 12288
 _REPORT_SAMPLES_MAX = 128
@@ -46707,6 +46716,31 @@ def _report_take(rows):
     return list(reversed(rows[:_REPORT_MAX_GAMES])), total
 
 
+def _report_wire_bytes(payload):
+    """The size FastAPI's JSONResponse puts on the wire: compact separators,
+    UTF-8, non-ASCII unescaped (test_session_report._wire_bytes is its twin)."""
+    return len(_json.dumps(payload, separators=(",", ":"), ensure_ascii=False,
+                           default=str).encode("utf-8"))
+
+
+def _report_fit(envelope):
+    """ENFORCES _REPORT_MAX_BYTES on the assembled envelope: while it is over
+    the bound and more than one game remains, the OLDEST game (games are
+    oldest-first) is dropped and counted in `games_omitted`. Bounded: at most
+    _REPORT_MAX_GAMES - 1 passes, each one dumps of a shrinking payload. The
+    per-game caps keep any single game under the bound (the test measures a
+    maximal ten-player FFA game), so the loop always ends under it - the cap
+    arithmetic in the constants above is sizing; this is the guarantee."""
+    games = envelope["games"]
+    omitted = int(envelope["games_omitted"])
+    while len(games) > 1 and _report_wire_bytes(envelope) > _REPORT_MAX_BYTES:
+        del games[0]
+        omitted += 1
+    envelope["games_omitted"] = omitted
+    envelope["truncated"] = omitted > 0
+    return envelope
+
+
 async def _report_load_1v1(db, selector, key, cpid):
     rows = await _report_rows(db, _REPORT_1V1_SQL.format(where=_REPORT_1V1_WHERE[selector]),
                               {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
@@ -47117,7 +47151,7 @@ async def get_set_report(request: Request, steam_id: str = "",
     cards = await _report_load_cards(db, mode, [g["id"] for g in games])
     games_json = [_report_game_json(g, sid_of, cards, sample_cap, card_cap) for g in games]
     set_summary = await _report_set_summary(db, kind, selector, key, set_row, games, roster)
-    return {
+    return _report_fit({
         "v": 1,
         "kind": kind,
         "players": [{"id": r["id"], "name": r["name"], "color": r["color"], "team": r["team"]}
@@ -47126,7 +47160,7 @@ async def get_set_report(request: Request, steam_id: str = "",
         "set_summary": set_summary,
         "truncated": games_omitted > 0,
         "games_omitted": games_omitted,
-    }
+    })
 
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
 
