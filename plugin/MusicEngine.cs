@@ -102,9 +102,9 @@ namespace CompetitiveRounds
         /// engine lives, and nothing is disposed at quit (D1/D6). A key is
         /// requested once per process; a later selection reuses its resident
         /// entry (D3); the bound is the catalog (D2). The one dispose left is
-        /// a request that failed BEFORE GetContent was invoked (D10: no clip
-        /// can depend on it). Static (survives host respawn) per the hazards
-        /// list.</summary>
+        /// a request that failed BEFORE GetContent was invoked and whose
+        /// reads never threw (D10/R16: no clip can depend on it). Static
+        /// (survives host respawn) per the hazards list.</summary>
         private sealed class ClipEntry
         {
             public string Key;
@@ -113,14 +113,16 @@ namespace CompetitiveRounds
             public bool Failed;
             public bool Downloaded;           // request completed; the open runs on a following tick (one per frame)
             public bool GetContentInvoked;    // D10: set BEFORE GetContent is called; from then on Req is retained for the process
+            public bool ReadThrew;            // R16: a read of Req.isDone/result/error/downloadHandler threw — the request's state is ambiguous; it roots (sticky), never disposes
             public int RequestedFrame;
         }
 
         /// <summary>D10: a key whose open failed AFTER GetContent was invoked
         /// — it threw, returned null, or returned a clip the playability
         /// check rejects — and every ambiguous case (a DataProcessingError
-        /// read, a null download handler, a SendWebRequest that threw after
-        /// the request existed, a request dispose that threw). The request
+        /// read, a request-property read that threw [R16], a null download
+        /// handler, a SendWebRequest that threw after the request existed, a
+        /// request dispose that threw). The request
         /// and any returned clip are rooted here for the process: never
         /// played, never bound to a source, never released (retention is the
         /// conservative direction, #276), counted on every [MUSIC-RESIDENCY]
@@ -278,11 +280,13 @@ namespace CompetitiveRounds
         // D11/D12: the residency figures beside the entry counts — opens the
         // stream probe made (its pairs are retained too), the compressed bytes
         // every retained request holds (catalog sizes), and the native
-        // allocator counter sampled before the engine's first request, so
-        // native_delta_mb is a process figure prod logs carry.
+        // allocator counter sampled ONCE before the engine's first request
+        // (R17: the epoch never moves — a failed sample latches the process as
+        // unmeasured), so native_delta_mb is a process figure prod logs carry.
         private static int _probeOpens;
         private static long _compressedBytes;
         private static long _nativeBaseline = -1L;
+        private static bool _nativeBaselineUnmeasured;   // R17: the one epoch sample failed; never retried
         private static readonly HashSet<string> OnceKeys = new HashSet<string>(StringComparer.Ordinal);
         private static readonly System.Random Rng = new System.Random();
 
@@ -390,7 +394,7 @@ namespace CompetitiveRounds
                 if (!SuppressionPatchLive)
                 {
                     _patchDead = true;
-                    Plugin.Log?.LogError("[MUSIC] suppression prefixes did NOT attach — custom music disabled this session (vanilla music untouched)");
+                    SafeLog(LogLevel.Error, "[MUSIC] suppression prefixes did NOT attach — custom music disabled this session (vanilla music untouched)");
                 }
                 try { Application.quitting += () => _quitting = true; } catch { }
                 try { MusicEntitlements.Changed += OnEntitlementsChanged; } catch (Exception ex) { LogOnce("ent-sub", "[MUSIC] entitlement subscribe failed: " + ex.Message, true); }
@@ -404,7 +408,7 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log?.LogError($"[MUSIC] Initialize failed: {ex.Message}");
+                SafeLog(LogLevel.Error, $"[MUSIC] Initialize failed: {ex.Message}");
             }
         }
 
@@ -626,8 +630,8 @@ namespace CompetitiveRounds
                     return;
                 }
                 if (S.previewTrack.HasValue) StopPreviewAndRestoreInternal("transport");
-                if (!IsTrackKnown(t)) { Plugin.Log?.LogInfo($"[MUSIC] PlayTrack: unknown track {t}"); return; }
-                if (!IsAlbumPlayable(albumSku)) { Plugin.Log?.LogInfo($"[MUSIC] PlayTrack refused — album not owned: {albumSku}"); return; }
+                if (!IsTrackKnown(t)) { SafeLog(LogLevel.Info, $"[MUSIC] PlayTrack: unknown track {t}"); return; }
+                if (!IsAlbumPlayable(albumSku)) { SafeLog(LogLevel.Info, $"[MUSIC] PlayTrack refused — album not owned: {albumSku}"); return; }
                 ClearFaultForUserAction("PlayTrack");
                 // An explicit request is also an explicit retry for a clip
                 // that previously failed to open.
@@ -916,7 +920,7 @@ namespace CompetitiveRounds
                 var album = MusicCatalog.Get(albumSku);
                 if (album == null || IsVanillaSku(albumSku) || album.Tracks == null || trackIdx < 0 || trackIdx >= album.Tracks.Length)
                 {
-                    Plugin.Log?.LogInfo($"[MUSIC] TogglePreview: no preview for {albumSku}/{trackIdx}");
+                    SafeLog(LogLevel.Info, $"[MUSIC] TogglePreview: no preview for {albumSku}/{trackIdx}");
                     return;
                 }
                 // lag-332 v6 §2.2/§2.4 previewSlot: ownership changes ONLY once
@@ -939,7 +943,7 @@ namespace CompetitiveRounds
                     // reset the 30 s timer to "never started".
                     if (s.previewPending.HasValue && s.previewPending.Value.Equals(t) && !IsFailedKey(pkey))
                     {
-                        Plugin.Log?.LogInfo($"[MUSIC] preview {t} still pending (unchanged)");
+                        SafeLog(LogLevel.Info, $"[MUSIC] preview {t} still pending (unchanged)");
                         return;
                     }
                     // An explicit Preview click on a tombstoned key is its retry (r3 MEDIUM 2).
@@ -954,7 +958,7 @@ namespace CompetitiveRounds
                     s.previewPending = t;
                     s.previewPendingRt = Time.realtimeSinceStartup;   // §7 2-3: the 30 s timeout counts from the click
                     ReconcileResidency();       // the transaction {current, P, Q} requests Q now; the successor yields meanwhile
-                    Plugin.Log?.LogInfo($"[MUSIC] preview pending {t} — starts once its file is read");
+                    SafeLog(LogLevel.Info, $"[MUSIC] preview pending {t} — starts once its file is read");
                     return;
                 }
                 if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("preview-replace");   // Q is resident: atomic swap
@@ -1080,7 +1084,7 @@ namespace CompetitiveRounds
             {
                 // A throwing reconcile must fail TOWARD vanilla, through the
                 // single durable-fault funnel [I1].
-                try { Plugin.Log?.LogError($"[MUSIC] Reconcile({reason}) threw: {ex}"); } catch { }
+                try { SafeLog(LogLevel.Error, $"[MUSIC] Reconcile({reason}) threw: {ex}"); } catch { }
                 EnterDurableFaultNoThrow("reconcile: " + ex.Message);
             }
             finally { _inReconcile = false; }
@@ -1099,7 +1103,7 @@ namespace CompetitiveRounds
                 s.faultDurable = true;
                 s.faultPending = false;
                 if (!wasDurable)
-                    Plugin.Log?.LogError($"[MUSIC] entering durable Fault ({s.faultReason}) — vanilla music active until an explicit retry");
+                    SafeLog(LogLevel.Error, $"[MUSIC] entering durable Fault ({s.faultReason}) — vanilla music active until an explicit retry");
             }
             TickBroadcastEdges();
             RefreshDerivedState();
@@ -1254,7 +1258,7 @@ namespace CompetitiveRounds
                 s.suppress = false;         // non-owned → non-owned: vanilla already audible
             }
 
-            Plugin.Log?.LogInfo($"[MUSIC] mode {prev} -> {desired} ({reason}, ctx={s.ctx}{(s.menuParked ? ", parked" : s.menuSilenced ? ", menu-silent" : "")})");
+            SafeLog(LogLevel.Info, $"[MUSIC] mode {prev} -> {desired} ({reason}, ctx={s.ctx}{(s.menuParked ? ", parked" : s.menuSilenced ? ", menu-silent" : "")})");
         }
 
         /// <summary>Same-mode Reconcile: heal any suppress/ownership drift
@@ -1356,7 +1360,7 @@ namespace CompetitiveRounds
             switch (state)
             {
                 case OracleState.Playing:
-                    Plugin.Log?.LogInfo($"[MUSIC-WD] vanilla re-entered ctx={s.ctx} (verified Playing, attempt {s.reentryAttempts})");
+                    SafeLog(LogLevel.Info, $"[MUSIC-WD] vanilla re-entered ctx={s.ctx} (verified Playing, attempt {s.reentryAttempts})");
                     s.reentryAttempts = 0;
                     return true;
                 case OracleState.Delayed:
@@ -1573,7 +1577,7 @@ namespace CompetitiveRounds
                     s.suppress = false;
                     s.faultPending = true;
                     if (OnceKeys.Add("handoff-fault"))
-                        Plugin.Log?.LogError("[MUSIC] menu-handoff pause failed — source hard-silenced, engine faulting");
+                        SafeLog(LogLevel.Error, "[MUSIC] menu-handoff pause failed — source hard-silenced, engine faulting");
                 }
                 // v6 §2.3: the menu park is a Waiting exit (restart at zero on resume).
                 if (s.waiting) { s.resumePositionSec = 0f; ExitWaiting("menu-park"); }
@@ -1600,38 +1604,44 @@ namespace CompetitiveRounds
                 StopSourcesNoThrow();
                 s.faultPending = true;
                 if (OnceKeys.Add("prefix-fault"))
-                    Plugin.Log?.LogError($"[MUSIC] suppression prefix threw at {site} — vanilla restored, engine faulting: {ex}");
+                    SafeLog(LogLevel.Error, $"[MUSIC] suppression prefix threw at {site} — vanilla restored, engine faulting: {ex}");
             }
             catch { }
         }
 
         /// <summary>[I1] The single durable-fault funnel for every owned
-        /// playback, transition, or host failure — no-throw by construction.
-        /// Publishes durable Fault (BEFORE clearing pending [I7]), silences
-        /// both plugin sources (a throwing Stop is hard-silenced: mute +
-        /// volume 0 + Stop retry), releases suppression, and REQUESTS
-        /// context-correct vanilla re-entry — a failed request arms
-        /// vanillaReentryPending and the tick retries it until a call lands
-        /// [I1-residual]; the fault never claims vanilla was restored once.
+        /// playback, transition, or host failure — no-throw by construction,
+        /// STATE-FIRST (R15): (1) the plain field writes that cannot throw —
+        /// faultDurable = true (published BEFORE pending clears [I7]),
+        /// suppress = false, mode = Fault, the playback stamps — so the
+        /// published state is already "Fault, vanilla unsuppressed" when the
+        /// first call below runs, whatever that call does; (2) then the
+        /// calls, EACH in its own try/catch: the both-sources stop (its
+        /// ExitWaiting sits in its own guard inside StopSources; a throwing
+        /// Stop is hard-silenced: mute + volume 0 + Stop retry), then the
+        /// context-correct vanilla re-entry REQUEST — a failed or throwing
+        /// request leaves vanillaReentryPending armed and the tick retries
+        /// it until a call lands [I1-residual]; the fault never claims
+        /// vanilla was restored once; (3) the log line, last, swallow-all.
         /// Recovery is ONLY the explicit user retry (ClearFaultForUserAction)
         /// — no automatic reacquisition.</summary>
         private static void EnterDurableFaultNoThrow(string reason)
         {
-            try
-            {
-                var s = S;
-                s.faultDurable = true;
-                s.faultPending = false;
-                s.faultReason = reason;
-                StopSourcesNoThrow();
-                s.suppress = false;
-                s.mode = MusicMode.Fault;
-                s.mainPausedByUs = false; s.currentStarted = false;
-                s.reentryAttempts = 0;   // r1 MEDIUM 11: every independent re-entry arc starts its own attempt budget
-                s.vanillaReentryPending = !ReenterVanillaForContext();
-                Plugin.Log?.LogError($"[MUSIC] durable Fault ({reason}) — vanilla re-entry {(s.vanillaReentryPending ? "pending (tick retries)" : "issued")}; custom music waits for an explicit retry");
-            }
-            catch { }
+            var s = S;
+            // (1) fields — no call sits above these.
+            s.faultDurable = true;
+            s.faultPending = false;
+            s.faultReason = reason;
+            s.suppress = false;
+            s.mode = MusicMode.Fault;
+            s.mainPausedByUs = false; s.currentStarted = false;
+            s.reentryAttempts = 0;   // r1 MEDIUM 11: every independent re-entry arc starts its own attempt budget
+            s.vanillaReentryPending = true;   // armed until the request below reports that it landed
+            // (2) calls — each bulkheaded.
+            try { StopSourcesNoThrow(); } catch { }
+            try { s.vanillaReentryPending = !ReenterVanillaForContext(); } catch { }
+            // (3) the line.
+            SafeLog(LogLevel.Error, $"[MUSIC] durable Fault ({reason}) — vanilla re-entry {(s.vanillaReentryPending ? "pending (tick retries)" : "issued")}; custom music waits for an explicit retry");
         }
 
         // ── engine tick (host Update — BepInEx never calls Plugin.Update) ─
@@ -1708,7 +1718,7 @@ namespace CompetitiveRounds
                 {
                     // Second half of the [MUSIC-OPEN] measurement: the frame AFTER
                     // an open (its unscaledDeltaTime is the open frame's wall length).
-                    try { Plugin.Log?.LogInfo($"[MUSIC-OPEN-NEXT] key={_openLogNextFrame} nextFrameDtMs={(Time.unscaledDeltaTime * 1000f).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}"); } catch { }
+                    try { SafeLog(LogLevel.Info, $"[MUSIC-OPEN-NEXT] key={_openLogNextFrame} nextFrameDtMs={(Time.unscaledDeltaTime * 1000f).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}"); } catch { }
                     _openLogNextFrame = null;
                 }
                 // Completion polling + at most ONE open per frame (a Pending
@@ -1731,7 +1741,7 @@ namespace CompetitiveRounds
                     bool failed = IsFailedKey(ppk);
                     if (failed || (s.previewPendingRt >= 0f && rt - s.previewPendingRt > 30f))
                     {
-                        Plugin.Log?.LogInfo($"[MUSIC] preview pending {s.previewPending.Value} dropped ({(failed ? "request failed" : "timeout")})");
+                        SafeLog(LogLevel.Info, $"[MUSIC] preview pending {s.previewPending.Value} dropped ({(failed ? "request failed" : "timeout")})");
                         s.previewPending = null;
                         ReconcileResidency();
                     }
@@ -1824,7 +1834,7 @@ namespace CompetitiveRounds
                             s.currentPrematureRetried = true;
                             s.currentStarted = false;   // EnsureMainPlaying resumes from resumePositionSec (Stop + Play for a still-"playing" stalled source)
                             _prematureResumeCount++;
-                            Plugin.Log?.LogWarning($"[MUSIC] main source {cause} at {s.resumePositionSec:F1}s of {(clip != null ? clip.length : 0f):F1}s{(stalled ? " (" + _lastStallDetail + ")" : "")} — attempting one resume");
+                            SafeLog(LogLevel.Warning, $"[MUSIC] main source {cause} at {s.resumePositionSec:F1}s of {(clip != null ? clip.length : 0f):F1}s{(stalled ? " (" + _lastStallDetail + ")" : "")} — attempting one resume");
                             EnsureMainPlaying();
                         }
                         else
@@ -1843,7 +1853,12 @@ namespace CompetitiveRounds
                     else
                     {
                         s.currentEnded = true;
-                        if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
+                        // R15: a latched fault is read BEFORE any re-adoption —
+                        // no successor adopt, no Waiting loop while it is set;
+                        // the recompute routes to Fault ([I7] in
+                        // ComputeDesiredMode) and its release drops suppression.
+                        if (s.faultDurable || s.faultPending) Reconcile("natural-end-fault");
+                        else if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
                         // v6 §2.3: no resident successor with loop on → Waiting
                         // (restart the finished current at zero and loop it)
                         // instead of a Loading detour into vanilla.
@@ -1891,11 +1906,16 @@ namespace CompetitiveRounds
                         else if (rt - s.customSilentSinceRt > CUSTOM_SILENCE_BOUND_SEC)
                         {
                             s.customSilentSinceRt = -1f;
-                            Plugin.Log?.LogWarning(
+                            SafeLog(LogLevel.Warning,
                                 $"[MUSIC] Custom held with no audio for {CUSTOM_SILENCE_BOUND_SEC:F0}s — dislodging"
                                 + $" (current={(s.current.HasValue ? s.current.Value.ToString() : "none")}, stopIntent={s.stopIntent})");
                             if (s.current.HasValue) s.currentEnded = true;
-                            if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
+                            // R15: never re-adopt under a latched fault — the
+                            // start paths refuse it ([I7]), so an adopt here
+                            // would only re-arm this bound every 8 s; go
+                            // straight to the recompute, which routes to Fault.
+                            if (s.faultDurable || s.faultPending) Reconcile("custom-silence-bound-fault");
+                            else if (AdvanceToNext(userSkip: false)) { s.currentStarted = false; EnsureMainPlaying(); }
                             else Reconcile(s.stopIntent ? "playlist-end" : "custom-silence-bound");
                         }
                     }
@@ -1923,7 +1943,7 @@ namespace CompetitiveRounds
                             if (h.Main != null && h.Main.clip == e.Clip)
                             {
                                 _previewShareRefusals++;
-                                Plugin.Log?.LogWarning($"[MUSIC] preview {key} refused: its clip is bound to Main");
+                                SafeLog(LogLevel.Warning, $"[MUSIC] preview {key} refused: its clip is bound to Main");
                                 StopPreviewAndRestoreInternal("preview-clip-shared");
                                 return;
                             }
@@ -2046,7 +2066,7 @@ namespace CompetitiveRounds
                 // lease so menu/idle playback ticks while unfocused [F18].
                 try { if (!MusicAssets.TierReady(MusicTier.Full)) MusicAssets.EnsureTier(MusicTier.Full, "broadcast-identity"); } catch { }
                 try { S.broadcastHeld = RunInBackgroundLease.Acquire("broadcast-music"); } catch { }
-                Plugin.Log?.LogInfo("[MUSIC] broadcast custom-music predicate ON");
+                SafeLog(LogLevel.Info, "[MUSIC] broadcast custom-music predicate ON");
             }
             else if (S.broadcastHeld)
             {
@@ -2055,7 +2075,7 @@ namespace CompetitiveRounds
                 // branch above retries the Release on every subsequent tick
                 // until it lands (this edge branch runs only once per flip).
                 try { if (RunInBackgroundLease.Release("broadcast-music")) S.broadcastHeld = false; } catch { }
-                Plugin.Log?.LogInfo("[MUSIC] broadcast custom-music predicate OFF");
+                SafeLog(LogLevel.Info, "[MUSIC] broadcast custom-music predicate OFF");
             }
             RepairAfterBroadcastEdge(now);
             return true;
@@ -2216,7 +2236,7 @@ namespace CompetitiveRounds
             // made against, not to transport history.
             if (s.takeoverKey != null && s.takeoverSelectionSig != null && !string.Equals(sig, s.takeoverSelectionSig, StringComparison.Ordinal))
             {
-                Plugin.Log?.LogInfo($"[MUSIC] takeover of {s.takeoverKey} released (selection changed)");
+                SafeLog(LogLevel.Info, $"[MUSIC] takeover of {s.takeoverKey} released (selection changed)");
                 s.takeoverKey = null;
             }
             s.queueSignature = sig;
@@ -2424,7 +2444,7 @@ namespace CompetitiveRounds
             if (!LoopEffective() && !userSkip && s.queueIndex >= 0)
             {
                 s.stopIntent = true;
-                Plugin.Log?.LogInfo("[MUSIC] playlist ended (loop off)");
+                SafeLog(LogLevel.Info, "[MUSIC] playlist ended (loop off)");
                 return false;
             }
             if (ShuffleEffective())
@@ -2495,7 +2515,7 @@ namespace CompetitiveRounds
             s.currentStarted = false;
             s.mainPausedByUs = false;
             s.currentPrematureRetried = false;
-            Plugin.Log?.LogInfo($"[MUSIC] adopt {t} (queue {i + 1}/{s.queue.Count})");
+            SafeLog(LogLevel.Info, $"[MUSIC] adopt {t} (queue {i + 1}/{s.queue.Count})");
             // v6 §2.2 / D4: the desired set moved (new current/successor) —
             // the successor's request starts synchronously in this call. The
             // entry that left the desired set stays resident (D1: nothing is
@@ -2528,10 +2548,12 @@ namespace CompetitiveRounds
         /// <summary>The ONLY entry into Waiting: loop the current track on
         /// itself because its successor is not resident. An already-stopped
         /// source restarts at zero with fresh classifier stamps and WITHOUT
-        /// consuming currentPrematureRetried.</summary>
+        /// consuming currentPrematureRetried. Refused under a latched fault
+        /// ([I7]/R15: a loop-restart is a re-adoption of the current).</summary>
         private static void EnterWaiting(string why)
         {
             var s = S;
+            if (s.faultPending || s.faultDurable) return;   // [I7]/R15
             var h = _host;
             if (h == null || h.Main == null || !s.current.HasValue) return;
             var m = h.Main;
@@ -2553,7 +2575,7 @@ namespace CompetitiveRounds
                 if (!s.waiting)
                 {
                     s.waiting = true;
-                    Plugin.Log?.LogInfo($"[MUSIC] waiting for next ({why}) — looping {s.current.Value}");
+                    SafeLog(LogLevel.Info, $"[MUSIC] waiting for next ({why}) — looping {s.current.Value}");
                 }
             }
             catch (Exception ex) { EnterDurableFaultNoThrow("enter-waiting: " + ex.Message); }
@@ -2570,7 +2592,7 @@ namespace CompetitiveRounds
             try { var h = _host; if (h != null && h.Main != null) h.Main.loop = false; } catch { }
             if (!s.waiting) return;
             s.waiting = false;
-            Plugin.Log?.LogInfo($"[MUSIC] waiting ended ({why})");
+            SafeLog(LogLevel.Info, $"[MUSIC] waiting ended ({why})");
         }
 
         private static bool SuccessorResident()
@@ -2800,14 +2822,18 @@ namespace CompetitiveRounds
         }
 
         /// <summary>D10, the PRE-GetContent class: the read finished with a
-        /// ConnectionError or ProtocolError result and GetContent was never
-        /// invoked, so no clip can depend on the buffer — the request is
-        /// disposed at once and the key gets a RETRYABLE tombstone; the
-        /// hollow entry stays in Clips as the failed marker until an explicit
-        /// click clears it (the status line counts it once). A Dispose that
-        /// throws is an ambiguous case: the request is rooted instead.</summary>
+        /// ConnectionError or ProtocolError result, GetContent was never
+        /// invoked AND no request read threw (R16), so no clip can depend on
+        /// the buffer — the request is disposed at once and the key gets a
+        /// RETRYABLE tombstone; the hollow entry stays in Clips as the failed
+        /// marker until an explicit click clears it (the status line counts
+        /// it once). A Dispose that throws is an ambiguous case: the request
+        /// is rooted instead. The R16 gate is enforced HERE as well as at the
+        /// call site: an entry with ReadThrew or GetContentInvoked set is
+        /// rooted, never disposed (#276, the conservative direction).</summary>
         private static void FailBeforeOpen(ClipEntry e)
         {
+            if (e.ReadThrew || e.GetContentInvoked) { RootFailed(e, e.Req, null, e.ReadThrew ? "pre-open disposition refused: a request read threw" : "pre-open disposition refused: GetContent was invoked"); return; }
             var req = e.Req;
             e.Req = null; e.Downloaded = false;
             if (req != null)
@@ -2980,15 +3006,23 @@ namespace CompetitiveRounds
             try { return UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong(); } catch { return -1L; }
         }
 
-        /// <summary>D12/R11: the native allocator counter is sampled once, at
-        /// the ENGINE's first request creation (EnsureClipLoading, before it
-        /// allocates); every residency line prints the delta since then.
-        /// Probe allocations before it are excluded — the probe keeps its own
-        /// baseline for its own rows — so `native_delta_mb=?` on a probe line
-        /// means the engine has not requested yet.</summary>
+        /// <summary>D12/R11/R17: the native allocator counter is sampled
+        /// EXACTLY ONCE per process, at the ENGINE's single request-creation
+        /// site (EnsureClipLoading) before that site allocates anything for
+        /// its first request; every residency line prints the delta since
+        /// that epoch. The epoch never moves: a sample that fails (-1)
+        /// latches the process as unmeasured and is never retried, so no
+        /// later request can quietly become the baseline and exclude the
+        /// first allocation. Probe allocations before the epoch are excluded
+        /// — the probe keeps its own baseline for its own rows. Text: `?` =
+        /// the engine has not requested yet (no epoch); `unmeasured` = the
+        /// epoch sample failed, or the counter is unreadable now.</summary>
         private static void SeedNativeBaseline()
         {
-            if (_nativeBaseline < 0L) _nativeBaseline = NativeAlloc();
+            if (_nativeBaseline >= 0L || _nativeBaselineUnmeasured) return;
+            long v = NativeAlloc();
+            if (v < 0L) _nativeBaselineUnmeasured = true;
+            else _nativeBaseline = v;
         }
 
         private static double NativeDeltaMb()
@@ -3001,8 +3035,10 @@ namespace CompetitiveRounds
 
         private static string NativeDeltaMbText()
         {
+            if (_nativeBaselineUnmeasured) return "unmeasured";
+            if (_nativeBaseline < 0L) return "?";
             double d = NativeDeltaMb();
-            return double.IsNaN(d) ? "?" : d.ToString("+0.0;-0.0;0.0", System.Globalization.CultureInfo.InvariantCulture);
+            return double.IsNaN(d) ? "unmeasured" : d.ToString("+0.0;-0.0;0.0", System.Globalization.CultureInfo.InvariantCulture);
         }
 
         /// <summary>The tail every [MUSIC-RESIDENCY] line carries (D12): the
@@ -3184,6 +3220,7 @@ namespace CompetitiveRounds
             // lag-332 v6 §2.2: a request may only exist for a desired key.
             if (!selfTest && !IsDesiredKey(key)) return;
             if (resident) DuplicateRequests++;   // R5: a second request for a key that already holds one (the guard above removed, or s4neg)
+            SeedNativeBaseline();   // R17: the epoch — attempted once per process, here, before this site allocates anything for its first request
             // r1 MEDIUM 12: ownership is established in the counted set BEFORE
             // any throwing operation, so a request that throws mid-construction
             // can never exist uncounted; the failure path roots the handle (D10).
@@ -3195,7 +3232,6 @@ namespace CompetitiveRounds
                 string url;
                 try { url = new Uri(path).AbsoluteUri; }
                 catch { url = "file:///" + path.Replace('\\', '/'); }
-                SeedNativeBaseline();   // D12: before the first allocation
                 req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
                 entry.Req = req;
                 OpenCounts[key] = (OpenCounts.TryGetValue(key, out var oc) ? oc : 0) + 1;   // D15: requests created per key since init (diagnostic)
@@ -3220,7 +3256,9 @@ namespace CompetitiveRounds
                 // ambiguous case — rooted with a sticky tombstone, never
                 // disposed. The current recovers at the next Tick entry (r7
                 // MEDIUM 1: this runs inside a residency pass). R7: the
-                // disposition first, the line after.
+                // disposition first, the line after. R16: the try above reads
+                // Req.downloadHandler, so every throw here flags ReadThrew.
+                entry.ReadThrew = true;
                 RootFailed(entry, req, null, "request-start: " + ex.Message);
                 NoteKeyFailedDeferred(entry, "request-start");
                 LogOnce("load:" + key, $"[MUSIC] clip load start failed for {key}: {ex.Message}", true);
@@ -3257,12 +3295,14 @@ namespace CompetitiveRounds
                 if (e.GetContentInvoked) { (revisited ?? (revisited = new List<ClipEntry>())).Add(e); continue; }
                 if (!e.Downloaded)
                 {
-                    // R6: a request property that throws is an ambiguous case
-                    // (D10) — rooted below, outside the enumeration, never
-                    // re-read on a later frame.
+                    // R6/R16: a request property that throws is an ambiguous
+                    // case (D10) — flagged ReadThrew, so the disposition below
+                    // roots it whatever a second read of result/error returns;
+                    // rooted outside the enumeration, never re-read on a
+                    // later frame.
                     bool done, ok;
                     try { done = e.Req.isDone; ok = done && e.Req.result == UnityWebRequest.Result.Success; }
-                    catch { done = true; ok = false; }
+                    catch { done = true; ok = false; e.ReadThrew = true; }
                     if (!done) continue;
                     if (!ok)
                     {
@@ -3292,13 +3332,16 @@ namespace CompetitiveRounds
                     UnityWebRequest.Result result;
                     string error;
                     try { result = e.Req.result; error = e.Req.error; }
-                    catch (Exception ex) { result = UnityWebRequest.Result.DataProcessingError; error = "result read threw: " + ex.Message; }
-                    // D10: a transport or HTTP failure with GetContent never
-                    // invoked is the PRE class — disposed now, retryable; a
-                    // DataProcessingError (or anything else) is ambiguous —
-                    // rooted, sticky. R7: the disposition first, the line after.
-                    if (!e.GetContentInvoked && (result == UnityWebRequest.Result.ConnectionError || result == UnityWebRequest.Result.ProtocolError)) FailBeforeOpen(e);
-                    else RootFailed(e, e.Req, null, "read: " + result);
+                    catch (Exception ex) { result = UnityWebRequest.Result.DataProcessingError; error = "result read threw: " + ex.Message; e.ReadThrew = true; }   // R16
+                    // D10/R16: a transport or HTTP failure with GetContent never
+                    // invoked and no request read having thrown is the PRE
+                    // class — disposed now, retryable; a DataProcessingError, a
+                    // read that threw (ReadThrew — whatever a second read of
+                    // result/error returned) or anything else is ambiguous —
+                    // rooted, sticky (#276). R7: the disposition first, the
+                    // line after.
+                    if (!e.ReadThrew && !e.GetContentInvoked && (result == UnityWebRequest.Result.ConnectionError || result == UnityWebRequest.Result.ProtocolError)) FailBeforeOpen(e);
+                    else RootFailed(e, e.Req, null, "read: " + result + (e.ReadThrew ? " (a request read threw)" : ""));
                     NoteKeyFailedDeferred(e, "download");   // r7 MEDIUM 1 recovery (drained below)
                     LogOnce("clipfail:" + e.Key, $"[MUSIC] clip read failed for {e.Key}: {error} ({result})", true);
                 }
@@ -3575,7 +3618,7 @@ namespace CompetitiveRounds
             bool ok = true;
             // v6 §2.3 backstop: no stopped source may keep a Waiting loop.
             try { var m = h.Main; if (m != null) m.loop = false; } catch { }
-            ExitWaiting("stop-sources");   // r6 LOW 9: the one writer of waiting=false
+            try { ExitWaiting("stop-sources"); } catch { }   // r6 LOW 9: the one writer of waiting=false; R15: its own guard, so the Stops below always run
             try { var m = h.Main; if (m != null) m.Stop(); }
             catch { HardSilenceMainNoThrow(); ok = false; }
             try { var p = h.Preview; if (p != null) p.Stop(); }
@@ -3758,18 +3801,18 @@ namespace CompetitiveRounds
                 s.vanillaLogSignature = signature;
                 if (found.Count == 0)
                 {
-                    Plugin.Log?.LogError("[MUSIC] vanilla album enumeration yielded ZERO _Game clips — vanilla OST album absent; engine fails open to vanilla behavior");
+                    SafeLog(LogLevel.Error, "[MUSIC] vanilla album enumeration yielded ZERO _Game clips — vanilla OST album absent; engine fails open to vanilla behavior");
                     // Diagnostic (#117 discipline): say what the walk actually saw,
                     // one shot per signature, so a miss is debuggable from one log.
                     try
                     {
                         object ev = AccessTools.Field(typeof(SoundMusicManager), "musicIngame")?.GetValue(mgr);
-                        if (ev == null) Plugin.Log?.LogError("[MUSIC-DIAG] musicIngame field is NULL on this manager instance");
+                        if (ev == null) SafeLog(LogLevel.Error, "[MUSIC-DIAG] musicIngame field is NULL on this manager instance");
                         else
                         {
                             object arr = AccessTools.Field(ev.GetType(), "soundContainerArray")?.GetValue(ev);
                             var en = arr as System.Collections.IEnumerable;
-                            if (arr == null) Plugin.Log?.LogError($"[MUSIC-DIAG] event type {ev.GetType().FullName} has no/null soundContainerArray");
+                            if (arr == null) SafeLog(LogLevel.Error, $"[MUSIC-DIAG] event type {ev.GetType().FullName} has no/null soundContainerArray");
                             else
                             {
                                 int nCont = 0; var names = new StringBuilder();
@@ -3784,16 +3827,16 @@ namespace CompetitiveRounds
                                     foreach (var c in ce) { nc++; var cl = c as AudioClip; if (cl != null && names.Length < 900) names.Append(cl.name).Append(';'); }
                                     if (nc == 0 && names.Length < 900) names.Append(((UnityEngine.Object)sc).name).Append(":<0 clips>;");
                                 }
-                                Plugin.Log?.LogError($"[MUSIC-DIAG] containers={nCont} clipsSeen=[{names}]");
+                                SafeLog(LogLevel.Error, $"[MUSIC-DIAG] containers={nCont} clipsSeen=[{names}]");
                             }
                         }
                     }
-                    catch (Exception dx) { Plugin.Log?.LogError("[MUSIC-DIAG] walk diag threw: " + dx.Message); }
+                    catch (Exception dx) { SafeLog(LogLevel.Error, "[MUSIC-DIAG] walk diag threw: " + dx.Message); }
                 }
                 else
-                    Plugin.Log?.LogInfo($"[MUSIC] vanilla album observed: {found.Count} combat clips [{signature}]");
+                    SafeLog(LogLevel.Info, $"[MUSIC] vanilla album observed: {found.Count} combat clips [{signature}]");
                 if (menuClip == null)
-                    Plugin.Log?.LogWarning("[MUSIC] menu theme enumeration found no clip — menu-only row omitted");
+                    SafeLog(LogLevel.Warning, "[MUSIC] menu theme enumeration found no clip — menu-only row omitted");
             }
         }
 
@@ -3876,7 +3919,7 @@ namespace CompetitiveRounds
                     {
                         s.manualTakeover = false;
                         s.vanillaPreferred = true;
-                        Plugin.Log?.LogInfo("[MUSIC] entitlement loss emptied the effective selection — releasing to vanilla");
+                        SafeLog(LogLevel.Info, "[MUSIC] entitlement loss emptied the effective selection — releasing to vanilla");
                     }
                 }
                 Reconcile("entitlements-changed");
@@ -4003,7 +4046,7 @@ namespace CompetitiveRounds
                 try
                 {
                     float rt = Time.realtimeSinceStartup;
-                    if (rt - _hostLessLogRt >= 5f) { _hostLessLogRt = rt; Plugin.Log?.LogError($"[MUSIC] host spawn failed: {ex.Message} (retried every frame)"); }
+                    if (rt - _hostLessLogRt >= 5f) { _hostLessLogRt = rt; SafeLog(LogLevel.Error, $"[MUSIC] host spawn failed: {ex.Message} (retried every frame)"); }
                 }
                 catch { }
             }
@@ -4201,12 +4244,15 @@ namespace CompetitiveRounds
 
         // ── misc ─────────────────────────────────────────────────────────
 
-        /// <summary>R7: logging never changes media state. Every log call in
-        /// the open path, the failure tail, RootFailed, FailBeforeOpen, the
-        /// tombstone writers, the residency line and the probe's teardown
-        /// goes through here — a logger that throws (a broken sink, a
-        /// formatter) is swallowed, so no transition and no recovery call is
-        /// skipped by the line that describes it.</summary>
+        /// <summary>R15 (class rule; was R7's site list): logging never
+        /// changes media state. EVERY log call in MusicEngine.cs and
+        /// MusicStreamProbe.cs goes through here — the BepInEx log source is
+        /// named nowhere else in either file (grep-asserted each round) — so
+        /// a logger that throws (a broken sink, a formatter) is swallowed and
+        /// no transition and no recovery call is skipped by the line that
+        /// describes it. Callers' rule (R7): state writes and recovery calls
+        /// before the line that describes them. The message itself is built
+        /// by the caller, outside this swallow.</summary>
         internal static void SafeLog(LogLevel level, string msg)
         {
             try { Plugin.Log?.Log(level, msg); } catch { }
@@ -4362,7 +4408,7 @@ namespace CompetitiveRounds
                 }
                 _tsIdx = 0; _tsNo = 0; _tsPass = 0; _tsFail = 0; _tsAlbum = null; _tsFirstFailReason = null;
                 TsSnapshot();
-                Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] start steps={_tsSteps.Count} script='{raw}' snapshot: deselected={(_tsSnapDeselected != null ? _tsSnapDeselected.Count : -1)} loop={_tsSnapLoop} shuffle={_tsSnapShuffle}");
+                SafeLog(LogLevel.Info, $"[MUSIC-SELFTEST] start steps={_tsSteps.Count} script='{raw}' snapshot: deselected={(_tsSnapDeselected != null ? _tsSnapDeselected.Count : -1)} loop={_tsSnapLoop} shuffle={_tsSnapShuffle}");
                 TsBegin();
                 return;
             }
@@ -4419,7 +4465,7 @@ namespace CompetitiveRounds
                     else _tsFirstFailReason = name;
                 }
             }
-            Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] step={_tsNo} {name} {(pass ? "pass" : "fail")} {detail}");
+            SafeLog(LogLevel.Info, $"[MUSIC-SELFTEST] step={_tsNo} {name} {(pass ? "pass" : "fail")} {detail}");
         }
 
         private static void TsEnd(bool pass, string detail)
@@ -4434,7 +4480,7 @@ namespace CompetitiveRounds
             if (_tsIdx >= _tsSteps.Count)
             {
                 TsRestore();
-                Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] end pass={_tsPass} fail={_tsFail} reason={_tsFirstFailReason ?? "none"}");
+                SafeLog(LogLevel.Info, $"[MUSIC-SELFTEST] end pass={_tsPass} fail={_tsFail} reason={_tsFirstFailReason ?? "none"}");
                 _tsIdx = -1;
                 return;
             }
@@ -4450,7 +4496,7 @@ namespace CompetitiveRounds
                 _tsSnapLoop = LoopEnabled;
                 _tsSnapShuffle = ShuffleEnabled;
             }
-            catch (Exception ex) { _tsSnapDeselected = null; Plugin.Log?.LogWarning("[MUSIC-SELFTEST] snapshot failed: " + ex.Message); }
+            catch (Exception ex) { _tsSnapDeselected = null; SafeLog(LogLevel.Warning, "[MUSIC-SELFTEST] snapshot failed: " + ex.Message); }
         }
 
         /// <summary>impl2 r1 L1: restore EXACTLY the snapshot — the deselected
@@ -4466,7 +4512,7 @@ namespace CompetitiveRounds
                 var tap = TsTap(); if (tap != null) tap.Frozen = false;
                 if (S.previewTrack.HasValue || S.previewPending.HasValue) StopPreviewAndRestoreInternal("self-test-end");
                 var snap = _tsSnapDeselected;
-                if (snap == null) Plugin.Log?.LogWarning("[MUSIC-SELFTEST] no snapshot — selection left as the script set it");
+                if (snap == null) SafeLog(LogLevel.Warning, "[MUSIC-SELFTEST] no snapshot — selection left as the script set it");
                 else
                 {
                     RefreshDeselectedCache();
@@ -4481,9 +4527,9 @@ namespace CompetitiveRounds
                 }
                 if (LoopEnabled != _tsSnapLoop) LoopEnabled = _tsSnapLoop;
                 if (ShuffleEnabled != _tsSnapShuffle) ShuffleEnabled = _tsSnapShuffle;
-                Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] restored: deselected={S.deselected.Count} loop={LoopEnabled} shuffle={ShuffleEnabled}");
+                SafeLog(LogLevel.Info, $"[MUSIC-SELFTEST] restored: deselected={S.deselected.Count} loop={LoopEnabled} shuffle={ShuffleEnabled}");
             }
-            catch (Exception ex) { Plugin.Log?.LogWarning("[MUSIC-SELFTEST] restore failed: " + ex.Message); }
+            catch (Exception ex) { SafeLog(LogLevel.Warning, "[MUSIC-SELFTEST] restore failed: " + ex.Message); }
         }
 
         private static MusicAlbumDef TsAlbumDef()
@@ -5001,10 +5047,13 @@ namespace CompetitiveRounds
         // + preview) one per frame — PollClipLoads opens one per frame — wait
         // until each is Ready or failed, settle TS_LEDGER_SETTLE_SEC, print the
         // gate line, which evaluates its own bar (R9): fresh AND entries +
-        // rooted_failed == keys AND native_delta_mb <= 120, where fresh = no
-        // entry, no rooted record, no probe open (and no engine baseline)
-        // existed when the verb began; a non-fresh run prints bar=fail
-        // reason=not-fresh. A gate failure on either seat -> B2, never a patch.
+        // rooted_failed == keys AND native_delta_mb <= 120, where fresh (R14)
+        // = nothing but the engine's own Initialize opens existed when the verb
+        // began (no rooted record, no probe open, no duplicate); a non-fresh
+        // run prints bar=fail reason=not-fresh, and an unmeasured native epoch
+        // (R17) prints bar=fail reason=native-unmeasured (reason= names the
+        // first failing check: fresh, entries, native-unmeasured, native-delta).
+        // A gate failure on either seat -> B2, never a patch.
         private static List<KeyValuePair<string, string>> _tsOpenAll;   // key, path
         private static bool _tsOpenAllFresh;
         private static void TsRunOpenAll(float rt)
@@ -5042,12 +5091,12 @@ namespace CompetitiveRounds
                         // opens (at most two) exist: no rooted record, no probe open,
                         // no duplicate, and every request created so far belongs to a
                         // resident entry (a hollow marker an explicit click cleared
-                        // would leave requests > entries). The native baseline was
-                        // sampled at the first of those requests (R11), so the delta
-                        // below covers every resident key.
+                        // would leave requests > entries). The native epoch was
+                        // sampled before the first of those requests (R11/R17) and
+                        // never moves, so the delta below covers every resident key.
                         int requestsSoFar = 0; foreach (var oc0 in OpenCounts.Values) requestsSoFar += oc0;
                         _tsOpenAllFresh = Clips.Count <= 2 && requestsSoFar == Clips.Count && RootedFailed.Count == 0 && _probeOpens == 0 && DuplicateRequests == 0;
-                        Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] openall begin keys={_tsOpenAll.Count} fresh={(_tsOpenAllFresh ? 1 : 0)} resident_at_start={residentAtStart} sticky={StickyTombstones.Count} {ResidencyFields()}");
+                        SafeLog(LogLevel.Info, $"[MUSIC-SELFTEST] openall begin keys={_tsOpenAll.Count} fresh={(_tsOpenAllFresh ? 1 : 0)} resident_at_start={residentAtStart} sticky={StickyTombstones.Count} {ResidencyFields()}");
                         _tsT1 = rt; _tsPhase = 1; return;
                     }
                 case 1:
@@ -5085,7 +5134,7 @@ namespace CompetitiveRounds
                         string reason = !fresh ? "not-fresh" : !countOk ? "entries" : double.IsNaN(delta) ? "native-unmeasured" : !memOk ? "native-delta" : "none";
                         // R9: the gate line evaluates its own bar; the runner's
                         // end line carries the same fail count.
-                        Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] openall keys={keys} entries={entries} rooted_failed={rooted} compressed_mb={compressed} native_delta_mb={deltaText} fresh={(fresh ? 1 : 0)} bar={(bar ? "pass" : "fail")} fail={(bar ? 0 : 1)} reason={reason}");
+                        SafeLog(LogLevel.Info, $"[MUSIC-SELFTEST] openall keys={keys} entries={entries} rooted_failed={rooted} compressed_mb={compressed} native_delta_mb={deltaText} fresh={(fresh ? 1 : 0)} bar={(bar ? "pass" : "fail")} fail={(bar ? 0 : 1)} reason={reason}");
                         TsEnd(bar, $"reason={reason} entries + rooted_failed = {entries + rooted} (want {keys}) native_delta_mb={deltaText} (bound 120) fresh={(fresh ? 1 : 0)} probe_opens={_probeOpens}; {TsState()}");
                         return;
                     }

@@ -324,12 +324,12 @@ namespace CompetitiveRounds
         private static void Start(string raw, float now)
         {
             string[] parts = raw.Split(':');
-            if (parts.Length < 2) { Plugin.Log?.LogWarning("[MUSIC-PROBE] bad lever '" + raw + "' (want sku:idx[:stress|:churn])"); return; }
+            if (parts.Length < 2) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] bad lever '" + raw + "' (want sku:idx[:stress|:churn])"); return; }
             var album = MusicCatalog.Get(parts[0]);
             int idx;
             if (album == null || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out idx)
                 || idx < 0 || idx >= album.Tracks.Length)
-            { Plugin.Log?.LogWarning("[MUSIC-PROBE] unknown album/track '" + raw + "'"); return; }
+            { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] unknown album/track '" + raw + "'"); return; }
             // A misspelled suffix used to run the DEFAULT mode silently, so an
             // operator asked for a stress run, got a two-minute normal one, and
             // the log said mode=Normal in a line nobody re-reads. The lever is a
@@ -340,7 +340,7 @@ namespace CompetitiveRounds
             Mode wanted = Mode.Normal;
             if (parts.Length > 3)
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] too many fields in '" + raw + "' (want sku:idx[:stress|:churn])");
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] too many fields in '" + raw + "' (want sku:idx[:stress|:churn])");
                 return;
             }
             if (parts.Length > 2)
@@ -349,7 +349,7 @@ namespace CompetitiveRounds
                 else if (string.Equals(parts[2], "churn", StringComparison.OrdinalIgnoreCase)) wanted = Mode.Churn;
                 else
                 {
-                    Plugin.Log?.LogWarning("[MUSIC-PROBE] unknown mode '" + parts[2] + "' in '" + raw + "' (want stress or churn)");
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] unknown mode '" + parts[2] + "' in '" + raw + "' (want stress or churn)");
                     return;
                 }
             }
@@ -381,7 +381,7 @@ namespace CompetitiveRounds
                 : null;
             if (refuse != null)
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] refused key=" + key + " reason=" + refuse + " context=" + ctx + " vanilla_guards=" + vanilla);
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] refused key=" + key + " reason=" + refuse + " context=" + ctx + " vanilla_guards=" + vanilla);
                 return;
             }
             _gen++;
@@ -402,7 +402,7 @@ namespace CompetitiveRounds
             _controlsPass = 0; _controlsFail = 0; _churnCycles = 0; _getContentMs = 0f; _requestMs = 0f; _openBlockMs = 0f;
             _firstSampleMs = -1f; _deficitPeakMs = 0f; _controlsDone = false; _runSilentRunStarts.Clear(); _runSilentRunsUnstamped = 0; _scriptedWindows.Clear();
             _wallFromTicks = 0L; _wallAccruing = false;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
                 + " cores=" + Environment.ProcessorCount + " (bots/opponents are the operator's responsibility; the log cannot see them)");
             LogMemory("baseline", _key);
             _mgd0 = GC.GetTotalMemory(false); _nat0 = NativeAlloc(); _res0 = NativeReserved(); _proc0 = ProcessPrivate();
@@ -510,15 +510,15 @@ namespace CompetitiveRounds
                 _requestMs = kept.RequestMs; _getContentMs = kept.GetContentMs;
                 if ((object)kept.Clip == null || kept.Clip == null)
                 {
-                    Plugin.Log?.LogWarning("[MUSIC-PROBE] refused key=" + _key + " reason=retained-open-has-no-clip (opened once already; a key is never requested twice)");
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] refused key=" + _key + " reason=retained-open-has-no-clip (opened once already; a key is never requested twice)");
                     return false;
                 }
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] reselect key=" + _key + " mode=" + _mode + " (retained pair; request_ms/getcontent_ms are the first open's)");
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] reselect key=" + _key + " mode=" + _mode + " (retained pair; request_ms/getcontent_ms are the first open's)");
                 BindAndPlay(kept.Clip, now, null);
                 return true;
             }
             string path = MusicAssets.PathFor(track.OggFile);
-            if (path == null) { Plugin.Log?.LogWarning("[MUSIC-PROBE] file not ready for " + _key + " (full tier not installed?)"); return false; }
+            if (path == null) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] file not ready for " + _key + " (full tier not installed?)"); return false; }
             string url;
             try { url = new Uri(path).AbsoluteUri; }
             catch { url = "file:///" + path.Replace('\\', '/'); }
@@ -547,7 +547,7 @@ namespace CompetitiveRounds
                 MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] request failed key=" + _key + ": " + failed + " (record kept clip-less; key refused from now on)");
                 return false;
             }
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] request key=" + _key + " stream=1 mode=" + _mode + " warm=0");
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] request key=" + _key + " stream=1 mode=" + _mode + " warm=0");
             return true;
         }
 
@@ -667,7 +667,10 @@ namespace CompetitiveRounds
                 // binds a retained clip and must cost nothing: 0 +/- 0.5 MB —
                 // a second request would show here as +MBs (D3). Judged where
                 // it is measured; a bar row on the broadcast seat only (impl2
-                // r1 M4: the seat that can exclude other activity).
+                // r1 M4: the seat that can exclude other activity). R17: the
+                // row's baseline was sampled just before this open and is not
+                // resampled; a counter unreadable on either side prints the
+                // row as unmeasured, which is a failed bar row, never a pass.
                 long nat = NativeAlloc();
                 bool natAvail = nat >= 0 && _natOpen0 >= 0;
                 long d = natAvail ? nat - _natOpen0 : 0L;
@@ -676,17 +679,17 @@ namespace CompetitiveRounds
                 double boundMb = _warm ? 0.5 : _oggSize / 1048576.0 * 1.5 + 1.0;
                 bool pass = natAvail && (_warm ? Math.Abs(dMb) <= boundMb : dMb <= boundMb);
                 string boundText = _warm ? "+/-0.5" : F1((float)boundMb);
-                string verdict = !natAvail ? "unavailable" : !BroadcastMode.IsBroadcastIdentity ? "measured-only" : pass ? "pass" : "FAIL";
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] opened key=" + _key + " warm=" + (_warm ? 1 : 0)
+                string verdict = !natAvail ? "unmeasured" : !BroadcastMode.IsBroadcastIdentity ? "measured-only" : pass ? "pass" : "FAIL";
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] opened key=" + _key + " warm=" + (_warm ? 1 : 0)
                     + " request_ms=" + F0(_requestMs) + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs)
                     + " open_frame_max_ms=" + F1(_openFrameMax)
                     + " loadState=" + _clip.loadState + " loadType=" + _clip.loadType
                     + " length_s=" + F1(_clip.length) + " freq=" + _clip.frequency + " ch=" + _clip.channels
-                    + " " + rowName + "=" + (natAvail ? Dmb(d) : "?") + " bound=" + boundText + " verdict=" + verdict);
+                    + " " + rowName + "=" + (natAvail ? Dmb(d) : "unmeasured") + " bound=" + boundText + " verdict=" + verdict);
                 // The end record carries the run's LAST opened row: the only
                 // one of a normal/stress run, the tenth re-selection's of a
                 // churn run (each cycle prints its own line above).
-                _nativeOpenRow = rowName + "=" + (!natAvail ? "unavailable"
+                _nativeOpenRow = rowName + "=" + (!natAvail ? "unmeasured"
                     : !BroadcastMode.IsBroadcastIdentity ? Dmb(d) + "(measured-only)"
                     : pass ? Dmb(d)
                     : Dmb(d) + ">" + boundText);
@@ -760,7 +763,7 @@ namespace CompetitiveRounds
                 _tap.FirstSampleLogged = true;
                 double ms = (_tap.FirstSampleTicks - _playStartTicks) * 1000.0 / Stopwatch.Frequency;
                 _firstSampleMs = (float)ms;
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] started key=" + _key + " first_sample_ms=" + F1((float)ms));
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] started key=" + _key + " first_sample_ms=" + F1((float)ms));
             }
             if (_mode == Mode.Stress && _busy == null && _busyStartAt > 0f && now >= _busyStartAt) StartBusy(now);
             if (_mode == Mode.Churn) { PumpChurn(now); return; }
@@ -791,7 +794,7 @@ namespace CompetitiveRounds
             if (now >= _nextLog || now >= _endAt)
             {
                 _nextLog = now + 5f;
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] play key=" + _key + " t=" + F1(t) + " wraps=" + _wraps
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] play key=" + _key + " t=" + F1(t) + " wraps=" + _wraps
                     + " drift_ms=" + F0(drift * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
                     + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f)
                     + " silent_run=" + _tap.SilentRun + " silent_run_max=" + _tap.SilentRunMax + " buffers=" + _tap.Buffers
@@ -815,7 +818,7 @@ namespace CompetitiveRounds
             {
                 case 0:
                     if (now < _stepAt) return;
-                    if (len < 20f) { Plugin.Log?.LogInfo("[MUSIC-PROBE] controls key=" + _key + " skipped (track shorter than 20 s)"); _step = 7; return; }
+                    if (len < 20f) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] controls key=" + _key + " skipped (track shorter than 20 s)"); _step = 7; return; }
                     _stepTarget = len - 8f;
                     NoteScriptedWindow(0f);
                     _src.time = _stepTarget;
@@ -928,7 +931,7 @@ namespace CompetitiveRounds
                     return;
                 case 6:
                     _controlsDone = true;
-                    Plugin.Log?.LogInfo("[MUSIC-PROBE] controls key=" + _key + " pass=" + _controlsPass + " fail=" + _controlsFail);
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] controls key=" + _key + " pass=" + _controlsPass + " fail=" + _controlsFail);
                     _step = 7;
                     return;
                 default:
@@ -968,14 +971,14 @@ namespace CompetitiveRounds
         private static void Judge(string name, bool ok, string detail)
         {
             if (ok) _controlsPass++; else _controlsFail++;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] control key=" + _key + " " + name + "=" + (ok ? "pass" : "FAIL") + " " + detail);
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] control key=" + _key + " " + name + "=" + (ok ? "pass" : "FAIL") + " " + detail);
         }
 
         private static void PumpChurn(float now)
         {
             if (now < _churnPlayUntil) return;
             _churnCycles++;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] churn key=" + _key + " cycle=" + _churnCycles + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs) + " request_ms=" + F0(_requestMs));
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] churn key=" + _key + " cycle=" + _churnCycles + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs) + " request_ms=" + F0(_requestMs));
             if (_churnCycles >= 10) { Stop("churn done"); return; }
             // D11: this cycle's source, tap and host object go without ending
             // the run; the retained pair is re-selected onto a fresh source.
@@ -999,7 +1002,7 @@ namespace CompetitiveRounds
             }
             _busyUntil = now + 60f;
             _busyStartAt = -1f;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] busy key=" + _key + " threads=" + n + " for 60 s");
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] busy key=" + _key + " threads=" + n + " for 60 s");
         }
 
         private static void BusyLoop()
@@ -1020,12 +1023,16 @@ namespace CompetitiveRounds
         private static long NativeReserved() { try { return Profiler.GetTotalReservedMemoryLong(); } catch { return -1; } }
         private static long ProcessPrivate() { try { return Process.GetCurrentProcess().PrivateMemorySize64; } catch { return -1; } }
 
+        /// <summary>R17: the run's native baselines (_nat0/_res0) are sampled
+        /// once at Start, before the run's first allocation, and never
+        /// resampled; a counter that read -1 on either side prints that
+        /// native field as `unmeasured`, never a delta against -1.</summary>
         private static void LogMemory(string phase, string key)
         {
             long mgd = GC.GetTotalMemory(false), nat = NativeAlloc(), res = NativeReserved(), proc = ProcessPrivate();
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] mem key=" + key + " phase=" + phase
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] mem key=" + key + " phase=" + phase
                 + " managed_mb=" + Mb(mgd) + " native_alloc_mb=" + Mb(nat) + " native_reserved_mb=" + Mb(res) + " process_private_mb=" + (proc > 0 ? Mb(proc) : "?")
-                + (phase == "baseline" ? "" : " d_managed_mb=" + Dmb(mgd - _mgd0) + " d_native_alloc_mb=" + Dmb(nat - _nat0) + " d_native_reserved_mb=" + Dmb(res - _res0) + " d_process_mb=" + (proc > 0 && _proc0 > 0 ? Dmb(proc - _proc0) : "?")));
+                + (phase == "baseline" ? "" : " d_managed_mb=" + Dmb(mgd - _mgd0) + " d_native_alloc_mb=" + DmbOr(nat, _nat0) + " d_native_reserved_mb=" + DmbOr(res, _res0) + " d_process_mb=" + (proc > 0 && _proc0 > 0 ? Dmb(proc - _proc0) : "?")));
         }
 
         // ── teardown ─────────────────────────────────────────────────────
@@ -1321,8 +1328,9 @@ namespace CompetitiveRounds
 
         private static string F0(float v) { return v.ToString("F0", CultureInfo.InvariantCulture); }
         private static string F1(float v) { return v.ToString("F1", CultureInfo.InvariantCulture); }
-        private static string Mb(long b) { return b < 0 ? "?" : (b / 1048576.0).ToString("F1", CultureInfo.InvariantCulture); }
+        private static string Mb(long b) { return b < 0 ? "unmeasured" : (b / 1048576.0).ToString("F1", CultureInfo.InvariantCulture); }
         private static string Dmb(long b) { return (b / 1048576.0).ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture); }
+        private static string DmbOr(long now, long baseline) { return now < 0 || baseline < 0 ? "unmeasured" : Dmb(now - baseline); }   // R17
 
         /// <summary>Audio-thread tap on the probe source's output: counts
         /// buffers, the current and longest run of all-zero buffers, and the
