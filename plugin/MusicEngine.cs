@@ -5037,10 +5037,16 @@ namespace CompetitiveRounds
                         _tsI0 = 0;
                         int residentAtStart = 0;
                         foreach (var kv in _tsOpenAll) if (Clips.TryGetValue(kv.Key, out var e) && (e.Clip != null || e.Req != null)) residentAtStart++;
-                        // R9: judged NOW, before this verb requests anything. The
-                        // baseline term catches a hollow marker an explicit click
-                        // cleared (Clips empty again, an earlier request made).
-                        _tsOpenAllFresh = Clips.Count == 0 && RootedFailed.Count == 0 && _probeOpens == 0 && _nativeBaseline < 0L;
+                        // R9 + R14: judged NOW, before this verb requests anything.
+                        // Fresh = nothing but the engine's own Initialize desired-set
+                        // opens (at most two) exist: no rooted record, no probe open,
+                        // no duplicate, and every request created so far belongs to a
+                        // resident entry (a hollow marker an explicit click cleared
+                        // would leave requests > entries). The native baseline was
+                        // sampled at the first of those requests (R11), so the delta
+                        // below covers every resident key.
+                        int requestsSoFar = 0; foreach (var oc0 in OpenCounts.Values) requestsSoFar += oc0;
+                        _tsOpenAllFresh = Clips.Count <= 2 && requestsSoFar == Clips.Count && RootedFailed.Count == 0 && _probeOpens == 0 && DuplicateRequests == 0;
                         Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] openall begin keys={_tsOpenAll.Count} fresh={(_tsOpenAllFresh ? 1 : 0)} resident_at_start={residentAtStart} sticky={StickyTombstones.Count} {ResidencyFields()}");
                         _tsT1 = rt; _tsPhase = 1; return;
                     }
