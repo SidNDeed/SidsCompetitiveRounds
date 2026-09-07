@@ -2817,6 +2817,7 @@ namespace CompetitiveRounds
             try { OverlayIdleClose.Tick(); } catch { }
             try { MusicStreamProbe.Tick(); } catch { }
             try { SpectatorTeardownProbe.Tick(); } catch { }
+            try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
@@ -2962,6 +2963,8 @@ namespace CompetitiveRounds
             // MusicAssets contract), then the engine's static init/host spawn.
             try { MusicAssets.Initialize(); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC] assets init failed: {ex.Message}"); }
             try { MusicEngine.Initialize(); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC] engine init failed: {ex.Message}"); }
+            // Bug 333 step 2: colour-emoji atlas (levers, cache dir, starting state; no decode or download here).
+            try { EmojiSprites.Initialize(); } catch (Exception ex) { Plugin.Log.LogWarning($"[EMOJI] init failed: {ex.Message}"); }
             CompetitiveUI.CacheRaycasters(); // No-op but kept for compat
             initialized = true;
 
