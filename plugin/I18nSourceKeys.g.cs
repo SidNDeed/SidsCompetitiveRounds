@@ -2239,6 +2239,7 @@ namespace CompetitiveRounds
             "Typing: {0}  (Alt to change)",
             "Umber",
             "Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 240 FPS growth clock.",
+            "Unavailable until the game restarts",
             "Unban",
             "Unblock",
             "Unblocked {0}.",

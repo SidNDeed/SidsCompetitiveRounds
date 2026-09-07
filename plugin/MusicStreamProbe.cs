@@ -305,16 +305,18 @@ namespace CompetitiveRounds
                     Start(raw, now);
                     return;
                 }
-                // The key going false mid-run must END the run, not strand it:
-                // returning early here would leave the request, clip, source and
-                // host object retained with nothing left to release them.
+                // The key going false mid-run must END the run (Stop: the
+                // source stops, the tap and the host object are destroyed, the
+                // end record is written) rather than strand it mid-flight. The
+                // request and the clip are retained either way (D11): a
+                // disabled run keeps them on the key's record, by design.
                 if (!SeatAllowed()) { Stop("probe key turned off"); return; }
                 if (_req != null) { PumpRequest(now); return; }
                 if (_src != null) PumpPlayback(now);
             }
             catch (Exception ex)
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] tick threw: " + ex.Message);
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] tick threw: " + ex.Message);   // R4: a throwing logger must not skip the Stop
                 Stop("exception");
             }
         }
@@ -521,23 +523,46 @@ namespace CompetitiveRounds
             try { url = new Uri(path).AbsoluteUri; }
             catch { url = "file:///" + path.Replace('\\', '/'); }
             _warm = false;
-            MusicEngine.NoteProbeOpen(_key, track.OggSize);   // D11: probe_opens= on the residency line; seeds the engine's native baseline BEFORE this allocation
-            _req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
-            var dh = _req.downloadHandler as DownloadHandlerAudioClip;
-            if (dh != null) dh.streamAudio = true;
-            _req.SendWebRequest();
+            // R8: the key's record exists BEFORE any allocation (state:
+            // attempting — no request, no clip). An allocation that throws
+            // leaves it clip-less, i.e. refused (D-m), so a later command for
+            // the same key never allocates again; probe_opens counts records.
+            var rec = new RetainedOpen();
+            _opened[_key] = rec;
+            long bytes = 0L;
+            string failed = null;
+            try
+            {
+                _req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
+                var dh = _req.downloadHandler as DownloadHandlerAudioClip;
+                if (dh != null) dh.streamAudio = true;
+                _req.SendWebRequest();
+                bytes = track.OggSize;
+            }
+            catch (Exception ex) { failed = ex.Message; }
+            MusicEngine.NoteProbeOpen(_key, bytes);   // D11: probe_opens= on the residency line — the record, whatever the allocation did (R11: no engine baseline seeding)
+            if (failed != null)
+            {
+                rec.Req = _req; _req = null;   // a request that exists is retained on the record (D-m); nothing is disposed
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] request failed key=" + _key + ": " + failed + " (record kept clip-less; key refused from now on)");
+                return false;
+            }
             Plugin.Log?.LogInfo("[MUSIC-PROBE] request key=" + _key + " stream=1 mode=" + _mode + " warm=0");
             return true;
         }
 
-        /// <summary>D11: the pair enters the retained store — once per key,
+        /// <summary>D11/R8: the pair fills the key's record — the record was
+        /// written at BeginOpen, before the allocation — once per key,
         /// whatever GetContent returned, and clip-less for a request the run
         /// ended before it completed (InProgress at teardown is the retain
-        /// class). Nothing ever leaves the store.</summary>
+        /// class). A record that already holds a request or a clip is never
+        /// overwritten; nothing ever leaves the store.</summary>
         private static void RetainOpen(UnityWebRequest req, AudioClip clip)
         {
-            if (_key == null || _opened.ContainsKey(_key)) return;
-            _opened[_key] = new RetainedOpen { Req = req, Clip = clip, RequestMs = _requestMs, GetContentMs = _getContentMs };
+            if (_key == null) return;
+            if (!_opened.TryGetValue(_key, out var rec)) { rec = new RetainedOpen(); _opened[_key] = rec; }
+            if (rec.Req != null || (object)rec.Clip != null) return;
+            rec.Req = req; rec.Clip = clip; rec.RequestMs = _requestMs; rec.GetContentMs = _getContentMs;
         }
 
         private static void PumpRequest(float now)
@@ -551,12 +576,12 @@ namespace CompetitiveRounds
             if (refuseOpen != null) { Stop(refuseOpen); return; }
             if (!_req.isDone)
             {
-                if (now - _startRt > 30f) { Plugin.Log?.LogWarning("[MUSIC-PROBE] request timeout (request retained, key refused from now on)"); Stop("timeout"); }
+                if (now - _startRt > 30f) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] request timeout (request retained, key refused from now on)"); Stop("timeout"); }   // R4 class: no logger ahead of a Stop may skip it
                 return;
             }
             if (!string.IsNullOrEmpty(_req.error))
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] request error: " + _req.error + " (request retained, key refused from now on)");
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] request error: " + _req.error + " (request retained, key refused from now on)");
                 Stop("error");
                 return;
             }
@@ -569,13 +594,13 @@ namespace CompetitiveRounds
             var sw = Stopwatch.StartNew();
             AudioClip clip = null;
             try { clip = DownloadHandlerAudioClip.GetContent(_req); }
-            catch (Exception ex) { Plugin.Log?.LogWarning("[MUSIC-PROBE] GetContent threw: " + ex.Message); }
+            catch (Exception ex) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] GetContent threw: " + ex.Message); }   // R4 class: the record below must be filled whatever the logger does
             sw.Stop();
             _getContentMs = (float)sw.Elapsed.TotalMilliseconds;
             // D11: the pair is retained from here whatever GetContent returned.
             var req = _req; _req = null;
             RetainOpen(req, clip);
-            if (clip == null) { Plugin.Log?.LogWarning("[MUSIC-PROBE] GetContent returned no clip (request retained, key refused from now on)"); Stop("null clip"); return; }
+            if (clip == null) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] GetContent returned no clip (request retained, key refused from now on)"); Stop("null clip"); return; }
             BindAndPlay(clip, now, block);
         }
 
@@ -810,7 +835,7 @@ namespace CompetitiveRounds
                     return;
                 case 3:
                     if (now - _stepAt < 3f) return;
-                    Judge("pause_holds", Mathf.Abs(_src.time - _stepTarget) < 0.05f && !_src.isPlaying, "t=" + F1(_src.time) + " held=" + F1(_stepTarget) + " playing=" + (_src.isPlaying ? 1 : 0));
+                    Judge("pause_holds", Mathf.Abs(_src.time - _stepTarget) < 0.05f && !_src.isPlaying, "t=" + F1(_src.time) + " retained=" + F1(_stepTarget) + " playing=" + (_src.isPlaying ? 1 : 0));
                     _src.time = 10f;
                     NoteScriptedWindow(0f);
                     MaskCallbacks(false);
@@ -987,7 +1012,7 @@ namespace CompetitiveRounds
         {
             _busyRun = false;
             _busy = null;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] busy key=" + _key + " released");
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] busy key=" + _key + " released");   // R4: teardown logging is swallow-all
         }
 
         // ── memory ───────────────────────────────────────────────────────
@@ -1019,8 +1044,10 @@ namespace CompetitiveRounds
             {
                 // Keep the handle for a bounded retry rather than dropping it:
                 // three more attempts on later ticks, then abandoned and logged.
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] release failed (" + what + "): " + ex.Message);
+                // R4: the handle is kept BEFORE any logging, and the logger is
+                // swallow-all — a throw in either cannot abort the teardown.
                 _retry.Add(new RetryHandle { Handle = h, Attempts = 1, What = what });
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] release failed (" + what + "): " + ex.Message);
             }
         }
 
@@ -1038,7 +1065,7 @@ namespace CompetitiveRounds
                 {
                     r.Attempts++;
                     if (r.Attempts < 4) _retry.Add(r);
-                    else Plugin.Log?.LogWarning("[MUSIC-PROBE] handle abandoned after 4 attempts (" + r.What + "): " + ex.Message + " — this handle is NOT released");
+                    else MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] handle abandoned after 4 attempts (" + r.What + "): " + ex.Message + " — this handle is NOT released");
                 }
             }
         }
@@ -1062,7 +1089,7 @@ namespace CompetitiveRounds
                 if (!QuiesceTap(_tap))
                 {
                     _runTapQuiesceTimeouts++;
-                    Plugin.Log?.LogWarning("[MUSIC-PROBE] tap still inside a callback " + TAP_QUIESCE_MS + " ms after the disarm — the fold below may miss a run; counted against the bar");
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] tap still inside a callback " + TAP_QUIESCE_MS + " ms after the disarm — the fold below may miss a run; counted against the bar");
                 }
                 // Fold BEFORE the release, or a churn cycle's gaps and delivered
                 // frames leave with the tap that recorded them.
@@ -1185,7 +1212,7 @@ namespace CompetitiveRounds
                 if (!pass && BroadcastMode.IsBroadcastIdentity) fails.Add(row);
                 bar = fails.Count == 0 ? "pass" : "FAIL[" + string.Join(",", fails.ToArray()) + "]";
             }
-            Plugin.Log?.LogInfo(rec + " " + row + " bar=" + bar);
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, rec + " " + row + " bar=" + bar);   // R4
         }
 
         /// <summary>The longest interval between two consecutive audio

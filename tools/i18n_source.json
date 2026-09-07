@@ -2233,6 +2233,7 @@
   "Typing: {0}  (Alt to change)",
   "Umber",
   "Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 240 FPS growth clock.",
+  "Unavailable until the game restarts",
   "Unban",
   "Unblock",
   "Unblocked {0}.",
@@ -13827,6 +13828,11 @@
   "Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 240 FPS growth clock.": {
    "surface": "InfoViz",
    "location": "BuildGrowCurve",
+   "kind": "Tr"
+  },
+  "Unavailable until the game restarts": {
+   "surface": "MusicEngine",
+   "location": "MusicStatusLine",
    "kind": "Tr"
   },
   "Unban": {

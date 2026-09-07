@@ -8,6 +8,7 @@ global using MusicMode = CompetitiveRounds.MusicEngine.MusicMode;
 using System;
 using System.Collections.Generic;
 using System.Text;
+using BepInEx.Logging;
 using HarmonyLib;
 using SoundImplementation;
 using UnityEngine;
@@ -287,12 +288,18 @@ namespace CompetitiveRounds
 
         private static MusicEngineHost _host;
         /// <summary>D13: the GameObject of the host whose OnDestroy last ran
-        /// while it was the adopted host. PollHost respawns only once this
-        /// reads Unity-null on a LATER frame (Destroy is deferred to end of
-        /// frame, #278), so the resident clip is bound on the new host only —
-        /// one reader per streamed clip. One field; no host list.</summary>
+        /// while it was the adopted host. PollHost respawns once this reads
+        /// Unity-null on a LATER frame (Destroy is deferred to end of frame,
+        /// #278), so the resident clip is bound on the new host only — one
+        /// reader per streamed clip — or, R2, once the wait hits its 15 s
+        /// bound (`host-dying-stuck`: the object is abandoned, the respawn
+        /// binds nothing and the durable fault releases suppression). One
+        /// field; no host list.</summary>
         private static GameObject _dying;
         private static float _dyingSinceRt;
+        private static int _dyingRetryStage;              // R2: Destroy re-issued at 5 s (1) and 10 s (2) of the dying wait
+        private static bool _spawnWithoutRehydrate;       // R2: the host-dying-stuck respawn adopts without rebinding playback
+        private static float _intruderLogRt = -999f;      // R3: duplicate-host line, at most once per 5 s
         private static float _hostLessLogRt = -999f;
         private static bool _initialized;
         private static bool _patchDead;      // suppression prefixes failed to attach (#83) — engine may never own
@@ -607,8 +614,18 @@ namespace CompetitiveRounds
             if (!_initialized) return;
             try
             {
-                if (S.previewTrack.HasValue) StopPreviewAndRestoreInternal("transport");
                 var t = new TrackRef(albumSku, trackIdx);
+                // R10: a STICKY key (its open failed at or after GetContent,
+                // D10) is refused BEFORE any state change — the current stays,
+                // no preview is stopped, no fault is cleared, nothing is
+                // opened; one line. The tab shows "Unavailable until the game
+                // restarts" for it.
+                if (!IsVanillaSku(albumSku) && StickyTombstones.Contains(t.ToString()))
+                {
+                    SafeLog(LogLevel.Info, $"[MUSIC] PlayTrack refused — {t} failed at its open earlier this session (unavailable until the game restarts)");
+                    return;
+                }
+                if (S.previewTrack.HasValue) StopPreviewAndRestoreInternal("transport");
                 if (!IsTrackKnown(t)) { Plugin.Log?.LogInfo($"[MUSIC] PlayTrack: unknown track {t}"); return; }
                 if (!IsAlbumPlayable(albumSku)) { Plugin.Log?.LogInfo($"[MUSIC] PlayTrack refused — album not owned: {albumSku}"); return; }
                 ClearFaultForUserAction("PlayTrack");
@@ -888,6 +905,13 @@ namespace CompetitiveRounds
             {
                 var s = S;
                 var t = new TrackRef(albumSku, trackIdx);
+                // R10: a STICKY preview key is refused before any state change
+                // (it can never be the playing preview: it never opened).
+                if (StickyTombstones.Contains("p:" + t))
+                {
+                    SafeLog(LogLevel.Info, $"[MUSIC] preview refused — {t} failed at its open earlier this session (unavailable until the game restarts)");
+                    return;
+                }
                 if (s.previewTrack.HasValue && s.previewTrack.Value.Equals(t)) { StopPreviewAndRestoreInternal("toggle"); return; }
                 var album = MusicCatalog.Get(albumSku);
                 if (album == null || IsVanillaSku(albumSku) || album.Tracks == null || trackIdx < 0 || trackIdx >= album.Tracks.Length)
@@ -2752,7 +2776,7 @@ namespace CompetitiveRounds
                 // advances off it the moment anything becomes playable.
                 s.currentEnded = true;
                 s.hasReadyTrack = false;
-                Plugin.Log?.LogInfo($"[MUSIC] failed current {key} parked as an ended cursor ({why}) — no successor is ready yet");
+                SafeLog(LogLevel.Info, $"[MUSIC] failed current {key} parked as an ended cursor ({why}) — no successor is ready yet");   // R7: after the transitions it describes
             }
             Reconcile("current-failed:" + why);
         }
@@ -2799,7 +2823,7 @@ namespace CompetitiveRounds
         {
             e.Failed = true;
             ClipStateGeneration++;
-            if (e.Key != null && !StickyTombstones.Contains(e.Key) && Tombstones.Add(e.Key)) Plugin.Log?.LogInfo($"[MUSIC] tombstone {e.Key} (failed before its open — retry only by an explicit click)");
+            if (e.Key != null && !StickyTombstones.Contains(e.Key) && Tombstones.Add(e.Key)) SafeLog(LogLevel.Info, $"[MUSIC] tombstone {e.Key} (failed before its open — retry only by an explicit click)");
         }
 
         /// <summary>D10, the POST-GetContent class (and every ambiguous case):
@@ -2817,19 +2841,21 @@ namespace CompetitiveRounds
             ClipStateGeneration++;
             if (e.Key == null) return;
             Tombstones.Remove(e.Key);
-            if (StickyTombstones.Add(e.Key)) Plugin.Log?.LogInfo($"[MUSIC] tombstone {e.Key} (failed at or after its open: {why} — request{(clip != null ? " and clip" : "")} rooted for the session, never retried; rooted_failed={RootedFailed.Count})");
+            if (StickyTombstones.Add(e.Key)) SafeLog(LogLevel.Info, $"[MUSIC] tombstone {e.Key} (failed at or after its open: {why} — request{(clip != null ? " and clip" : "")} rooted for the session, never retried; rooted_failed={RootedFailed.Count})");
         }
 
         /// <summary>The explicit-click path (D10): clears a RETRYABLE
         /// tombstone and drops the hollow marker entry a pre-open failure
         /// left, so the key can be requested again. A STICKY key stays
-        /// unavailable and nothing is opened; an entry on which GetContent
-        /// was invoked is never disposed here or anywhere.</summary>
+        /// unavailable and nothing is opened — PlayTrack and TogglePreview
+        /// refuse it before reaching here (R10); the check below is the
+        /// backstop for any other caller. An entry on which GetContent was
+        /// invoked is never disposed here or anywhere.</summary>
         private static void ClearTombstone(string key)
         {
             if (key == null) return;
-            if (StickyTombstones.Contains(key)) { Plugin.Log?.LogInfo($"[MUSIC] {key} failed at its open earlier this session — stays unavailable (nothing opened)"); return; }
-            if (Tombstones.Remove(key)) Plugin.Log?.LogInfo($"[MUSIC] retry {key} (tombstone cleared by an explicit click)");
+            if (StickyTombstones.Contains(key)) { SafeLog(LogLevel.Info, $"[MUSIC] {key} failed at its open earlier this session — stays unavailable (nothing opened)"); return; }
+            if (Tombstones.Remove(key)) SafeLog(LogLevel.Info, $"[MUSIC] retry {key} (tombstone cleared by an explicit click)");
             if (Clips.TryGetValue(key, out var e) && e.Failed)
             {
                 if (e.GetContentInvoked || e.Req != null || e.Clip != null) return;   // holds objects: retained for the process (D1)
@@ -2954,10 +2980,12 @@ namespace CompetitiveRounds
             try { return UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong(); } catch { return -1L; }
         }
 
-        /// <summary>D12: the native allocator counter is sampled once, before
-        /// the engine's (or the probe's) first request; every residency line
-        /// prints the delta since then. Called by every request creator
-        /// BEFORE it allocates.</summary>
+        /// <summary>D12/R11: the native allocator counter is sampled once, at
+        /// the ENGINE's first request creation (EnsureClipLoading, before it
+        /// allocates); every residency line prints the delta since then.
+        /// Probe allocations before it are excluded — the probe keeps its own
+        /// baseline for its own rows — so `native_delta_mb=?` on a probe line
+        /// means the engine has not requested yet.</summary>
         private static void SeedNativeBaseline()
         {
             if (_nativeBaseline < 0L) _nativeBaseline = NativeAlloc();
@@ -2986,17 +3014,18 @@ namespace CompetitiveRounds
             return $"entries={EntryCount()} live={LiveObjectCount()} rooted_failed={RootedFailed.Count} probe_opens={_probeOpens} compressed_mb={(_compressedBytes / 1048576.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} native_delta_mb={NativeDeltaMbText()}";
         }
 
-        /// <summary>D11: the stream probe reports each key it requests (it
-        /// retains its pair like the engine does). Called BEFORE the probe
-        /// allocates, so the native baseline covers its first request too.</summary>
+        /// <summary>D11/R8: the stream probe reports each open RECORD it
+        /// writes (one per key per process, written before it allocates; a
+        /// record whose allocation threw is counted too and holds no bytes).
+        /// It retains its pair like the engine does. R11: this does NOT seed
+        /// the engine's native baseline — that is the engine's first request.</summary>
         internal static void NoteProbeOpen(string probeKey, long compressedBytes)
         {
             try
             {
-                SeedNativeBaseline();
                 _probeOpens++;
                 _compressedBytes += Math.Max(0L, compressedBytes);
-                Plugin.Log?.LogInfo($"[MUSIC-RESIDENCY] probe {probeKey} {ResidencyFields()}");
+                SafeLog(LogLevel.Info, $"[MUSIC-RESIDENCY] probe {probeKey} {ResidencyFields()}");
             }
             catch { }
         }
@@ -3007,12 +3036,12 @@ namespace CompetitiveRounds
         /// changes nothing — the ledger never refuses anything (§7 2-3).</summary>
         private static void AuditLedger()
         {
-            int held = EntryCount() + RootedFailed.Count + _probeOpens;
-            if (held <= RESIDENT_ENTRY_BOUND) return;
+            int count = EntryCount() + RootedFailed.Count + _probeOpens;
+            if (count <= RESIDENT_ENTRY_BOUND) return;
             float rt = Time.realtimeSinceStartup;
             if (rt - _ledgerOverBoundLogRt < 60f) return;
             _ledgerOverBoundLogRt = rt;
-            Plugin.Log?.LogWarning($"[MUSIC-RESIDENCY] over-bound held={held} bound={RESIDENT_ENTRY_BOUND} {ResidencyFields()}");
+            SafeLog(LogLevel.Warning, $"[MUSIC-RESIDENCY] over-bound count={count} bound={RESIDENT_ENTRY_BOUND} {ResidencyFields()}");   // R12: `count=` (no pair state exists to be `held`)
         }
 
         /// <summary>D4: the desired set's OPEN job only — every desired key
@@ -3056,8 +3085,9 @@ namespace CompetitiveRounds
         /// <summary>Music-tab status line (design v2 §2.3.2 — replaces the
         /// Prepare affordance): what the desired set's requests are doing for the
         /// desired custom keys. null = nothing to say (every desired key is
-        /// open). Not a control: a failed key is retried by that track's own
-        /// Play (ClearTombstone), the tier install by the Shop.</summary>
+        /// open). Not a control: a RETRYABLE failed key is retried by that
+        /// track's own Play (ClearTombstone), the tier install by the Shop; a
+        /// STICKY key (D10) has its own line and nothing retries it (R10).</summary>
         internal static string MusicStatusLine()
         {
             try
@@ -3079,13 +3109,18 @@ namespace CompetitiveRounds
                     progress += Mathf.Clamp01(p);
                 }
                 // r3 MEDIUM 2 / r5 MEDIUM 6: EVERY failed non-preview key counts
-                // exactly once — tombstoned (either class, D10) or holding a
-                // Failed entry.
+                // exactly once — a RETRYABLE tombstone or a Failed entry on the
+                // retry line; a STICKY tombstone (D10) on its own line (R10:
+                // a click retries nothing, so the line promises nothing). The
+                // retry line wins while any retryable key exists (it is the
+                // actionable one); the sticky line shows once none is left.
                 var failedKeys = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var tk in Tombstones) if (!tk.StartsWith("p:", StringComparison.Ordinal)) failedKeys.Add(tk);
-                foreach (var tk in StickyTombstones) if (!tk.StartsWith("p:", StringComparison.Ordinal)) failedKeys.Add(tk);
-                foreach (var kv in Clips) if (kv.Value.Failed && !kv.Key.StartsWith("p:", StringComparison.Ordinal)) failedKeys.Add(kv.Key);
+                var stickyKeys = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var tk in StickyTombstones) if (!tk.StartsWith("p:", StringComparison.Ordinal)) stickyKeys.Add(tk);
+                foreach (var tk in Tombstones) if (!tk.StartsWith("p:", StringComparison.Ordinal) && !stickyKeys.Contains(tk)) failedKeys.Add(tk);
+                foreach (var kv in Clips) if (kv.Value.Failed && !kv.Key.StartsWith("p:", StringComparison.Ordinal) && !stickyKeys.Contains(kv.Key)) failedKeys.Add(kv.Key);
                 if (failedKeys.Count > 0) return I18n.TrF("Music failed to load ({0}) — play the track to retry", failedKeys.Count);
+                if (stickyKeys.Count > 0) return I18n.Tr("Unavailable until the game restarts");
                 if (total == 0 || ready == total) return null;
                 if (loading > 0)
                 {
@@ -3131,15 +3166,24 @@ namespace CompetitiveRounds
             return true;
         }
 
-        /// <summary>D3: one request per key per process — an existing entry
-        /// returns at once (it is registered BEFORE any throwing call), so a
-        /// re-selection binds the resident clip and never requests again.
-        /// `selfTest` (the openall verb only) skips the desired-key gate.</summary>
+        /// <summary>D3: one request per key per process — a key that already
+        /// holds an entry (registered BEFORE any throwing call) or a rooted
+        /// record (D10) returns at once, so a re-selection binds the resident
+        /// clip and never requests again. This is THE request-creation site
+        /// and the guard lives here (R5): a creation that finds the key
+        /// resident counts on DuplicateRequests — the once-only oracle S3/S4
+        /// assert reads 0 — and is reachable only through the s4neg hook.
+        /// `selfTest` (the openall and s4neg verbs only) skips the desired-key
+        /// gate.</summary>
         private static void EnsureClipLoading(string key, string path, bool selfTest = false)
         {
-            if (Clips.ContainsKey(key)) return;
+            bool resident = Clips.ContainsKey(key) || HasRootedRecord(key);
+            bool forced = _tsForceDuplicateOnce;
+            _tsForceDuplicateOnce = false;
+            if (resident && !forced) return;
             // lag-332 v6 §2.2: a request may only exist for a desired key.
             if (!selfTest && !IsDesiredKey(key)) return;
+            if (resident) DuplicateRequests++;   // R5: a second request for a key that already holds one (the guard above removed, or s4neg)
             // r1 MEDIUM 12: ownership is established in the counted set BEFORE
             // any throwing operation, so a request that throws mid-construction
             // can never exist uncounted; the failure path roots the handle (D10).
@@ -3168,18 +3212,29 @@ namespace CompetitiveRounds
                 if (dh == null) throw new InvalidOperationException("no audio download handler on the request");
                 dh.streamAudio = true;
                 req.SendWebRequest();
-                Plugin.Log?.LogInfo($"[MUSIC-RESIDENCY] request {key} {ResidencyFields()}");
+                SafeLog(LogLevel.Info, $"[MUSIC-RESIDENCY] request {key} {ResidencyFields()}");   // R7: a throwing logger cannot root a healthy request
             }
             catch (Exception ex)
             {
                 // D10: a request that exists but never completed cleanly is an
                 // ambiguous case — rooted with a sticky tombstone, never
                 // disposed. The current recovers at the next Tick entry (r7
-                // MEDIUM 1: this runs inside a residency pass).
-                LogOnce("load:" + key, $"[MUSIC] clip load start failed for {key}: {ex.Message}", true);
+                // MEDIUM 1: this runs inside a residency pass). R7: the
+                // disposition first, the line after.
                 RootFailed(entry, req, null, "request-start: " + ex.Message);
                 NoteKeyFailedDeferred(entry, "request-start");
+                LogOnce("load:" + key, $"[MUSIC] clip load start failed for {key}: {ex.Message}", true);
             }
+        }
+
+        /// <summary>R5: whether a rooted record (D10) exists for the key — the
+        /// second half of the creation-site guard (a sticky key is not in
+        /// Clips).</summary>
+        private static bool HasRootedRecord(string key)
+        {
+            for (int i = 0; i < RootedFailed.Count; i++)
+                if (string.Equals(RootedFailed[i].Key, key, StringComparison.Ordinal)) return true;
+            return false;
         }
 
         /// <summary>Polls in-flight requests (no coroutines: a host respawn
@@ -3193,15 +3248,23 @@ namespace CompetitiveRounds
         {
             ClipEntry candidate = null;
             bool candidateIsPendingPreview = false;
-            List<ClipEntry> failed = null;
+            List<ClipEntry> failed = null;      // a read that finished without Success, or a request property that threw
+            List<ClipEntry> revisited = null;   // R6: GetContentInvoked and not Ready — rooted without a second GetContent
             foreach (var kv in Clips)
             {
                 var e = kv.Value;
                 if (e.Req == null || e.Clip != null || e.Failed) continue;
+                if (e.GetContentInvoked) { (revisited ?? (revisited = new List<ClipEntry>())).Add(e); continue; }
                 if (!e.Downloaded)
                 {
-                    if (!e.Req.isDone) continue;
-                    if (e.Req.result != UnityWebRequest.Result.Success)
+                    // R6: a request property that throws is an ambiguous case
+                    // (D10) — rooted below, outside the enumeration, never
+                    // re-read on a later frame.
+                    bool done, ok;
+                    try { done = e.Req.isDone; ok = done && e.Req.result == UnityWebRequest.Result.Success; }
+                    catch { done = true; ok = false; }
+                    if (!done) continue;
+                    if (!ok)
                     {
                         (failed ?? (failed = new List<ClipEntry>())).Add(e);
                         continue;
@@ -3212,6 +3275,15 @@ namespace CompetitiveRounds
                 bool pp = s_previewPendingIs(e.Key);
                 if (candidate == null || (pp && !candidateIsPendingPreview)) { candidate = e; candidateIsPendingPreview = pp; }
             }
+            if (revisited != null)
+            {
+                for (int i = 0; i < revisited.Count; i++)
+                {
+                    var e = revisited[i];
+                    RootFailed(e, e.Req, null, "open-revisited: GetContent was invoked and the entry is not Ready");
+                    NoteKeyFailedDeferred(e, "open-revisited");
+                }
+            }
             if (failed != null)
             {
                 for (int i = 0; i < failed.Count; i++)
@@ -3221,14 +3293,14 @@ namespace CompetitiveRounds
                     string error;
                     try { result = e.Req.result; error = e.Req.error; }
                     catch (Exception ex) { result = UnityWebRequest.Result.DataProcessingError; error = "result read threw: " + ex.Message; }
-                    LogOnce("clipfail:" + e.Key, $"[MUSIC] clip read failed for {e.Key}: {error} ({result})", true);
                     // D10: a transport or HTTP failure with GetContent never
                     // invoked is the PRE class — disposed now, retryable; a
                     // DataProcessingError (or anything else) is ambiguous —
-                    // rooted, sticky.
+                    // rooted, sticky. R7: the disposition first, the line after.
                     if (!e.GetContentInvoked && (result == UnityWebRequest.Result.ConnectionError || result == UnityWebRequest.Result.ProtocolError)) FailBeforeOpen(e);
                     else RootFailed(e, e.Req, null, "read: " + result);
                     NoteKeyFailedDeferred(e, "download");   // r7 MEDIUM 1 recovery (drained below)
+                    LogOnce("clipfail:" + e.Key, $"[MUSIC] clip read failed for {e.Key}: {error} ({result})", true);
                 }
             }
             // Current track died: the ONE recovery path (r7 MEDIUM 1) — optional
@@ -3248,53 +3320,68 @@ namespace CompetitiveRounds
         /// request is never disposed from here on; on success the clip joins
         /// it in the entry for the process (D1) and the readiness bridge runs
         /// here; a throw, a null or an unplayable clip roots request and clip
-        /// (sticky tombstone). §7 2-6: two hosts ticking in one frame produce
-        /// one open (the frame guard).</summary>
+        /// (sticky tombstone). R6: ONE try/catch covers everything from
+        /// "request exists" to "entry Ready" — the GetContent call, the open
+        /// line, the length/channels/frequency reads and the playability
+        /// check — so any exception anywhere roots the entry exactly once and
+        /// nothing between the request and Ready is retried (PollClipLoads
+        /// roots an entry it revisits with GetContentInvoked set). §7 2-6: two
+        /// hosts ticking in one frame produce one open (the frame guard).</summary>
         private static void OpenStreamedClip(ClipEntry e)
         {
             if (_lastOpenFrame == Time.frameCount) return;
             _lastOpenFrame = Time.frameCount;
             AudioClip clip = null;
+            string what = null;
             e.GetContentInvoked = true;   // D10: BEFORE the call — a throwing GetContent may already have created FMOD state on the buffer
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            bool threw = false;
-            try { clip = DownloadHandlerAudioClip.GetContent(e.Req); } catch { threw = true; }
             try
             {
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                try { clip = DownloadHandlerAudioClip.GetContent(e.Req); }
+                catch (Exception ex) { what = "GetContent threw: " + ex.Message; }
                 double openMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
                 try { NetworkSeatTelemetry.NoteMusicOpenMs(openMs); } catch { }   // frame-component ledger (bundle-only): its own cause slot — no decode happens here (impl2 r1 L2)
-                Plugin.Log?.LogInfo($"[MUSIC-OPEN] key={e.Key} getContentMs={openMs.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} lengthS={(clip != null ? clip.length : 0f).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} ch={(clip != null ? clip.channels : 0)} hz={(clip != null ? clip.frequency : 0)} entries={EntryCount()} live={LiveObjectCount() + (clip != null ? 1 : 0)}");
+                float lengthS = 0f; int ch = 0, hz = 0;
+                if (what == null && clip == null) what = "null clip";
+                if (clip != null) { lengthS = clip.length; ch = clip.channels; hz = clip.frequency; }   // R6: a throw here is the outer catch's — rooted
+                if (what == null && lengthS <= 0.1f) what = "empty clip";
+                SafeLog(LogLevel.Info, $"[MUSIC-OPEN] key={e.Key} getContentMs={openMs.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} lengthS={lengthS.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} ch={ch} hz={hz} entries={EntryCount()} live={LiveObjectCount() + (clip != null ? 1 : 0)}");
                 _openLogNextFrame = e.Key;
+                if (what == null)
+                {
+                    e.Clip = clip;   // Ready. Req stays: the streamed clip reads its buffer — both live for the process (D1)
+                    e.Downloaded = false;
+                    ClipStateGeneration++;
+                }
             }
-            catch { }
-            if (clip != null && clip.length > 0.1f)
+            catch (Exception ex) { what = what ?? ("open threw: " + ex.Message); }
+            if (what == null)
             {
-                e.Clip = clip;   // Req stays: the streamed clip reads its buffer — both live for the process (D1)
-                e.Downloaded = false;
-                ClipStateGeneration++;
                 // Completion bridge (moved verbatim from the click path, §2.3.1):
                 // a Pending preview takes ownership now; readiness re-derives;
-                // one reconcile publishes the edge.
+                // one reconcile publishes the edge. Past Ready, so outside R6's
+                // try: an exception here is the tick's policy, not a root.
                 if (s_previewPendingIs(e.Key)) StartPendingPreviewOwnership();
                 bool ready = ScanHasReadyTrack();
                 if (ready != S.hasReadyTrack) S.hasReadyTrack = ready;
                 Reconcile("load-complete");
                 return;
             }
-            string what = threw ? "GetContent threw" : clip == null ? "null clip" : "empty clip";
-            LogOnce("clipfail:" + e.Key, $"[MUSIC] clip open failed for {e.Key}: {what}", true);
             // D10 POST: request and any returned clip rooted, sticky tombstone
             // (a rejected NON-null clip is a native object; it is kept with
             // its request, never destroyed under a possible reader).
             RootFailed(e, e.Req, clip, what);
             // §7 2-1: the failure tail, verbatim — a failed CURRENT advances to a
             // ready successor or parks at Loading; anything else reconciles.
+            // R7: the transitions and the recovery call run BEFORE the line
+            // that describes them.
             bool readyAfterFail = ScanHasReadyTrack();
             if (readyAfterFail != S.hasReadyTrack) S.hasReadyTrack = readyAfterFail;
             if (S.current.HasValue && string.Equals(S.current.Value.ToString(), e.Key, StringComparison.Ordinal))
                 RecoverFailedCurrent(e.Key, "open");
             else
                 Reconcile("open-failed");
+            LogOnce("clipfail:" + e.Key, $"[MUSIC] clip open failed for {e.Key}: {what}", true);
         }
 
         private static bool s_previewPendingIs(string key)
@@ -3811,7 +3898,7 @@ namespace CompetitiveRounds
             s.faultPending = false;
             s.faultDurable = false;
             s.faultReason = "";
-            Plugin.Log?.LogInfo($"[MUSIC] fault cleared by user transport ({action}) — retrying");
+            SafeLog(LogLevel.Info, $"[MUSIC] fault cleared by user transport ({action}) — retrying");   // R7 class: the flags above are cleared; a throw here would skip the caller's Reconcile
         }
 
         // ── deselected-set persistence ───────────────────────────────────
@@ -3933,11 +4020,16 @@ namespace CompetitiveRounds
         /// engine can run without one. Spawns whenever no host is adopted and
         /// the last dying host's GameObject reads Unity-null (its Destroy is
         /// end-of-frame, #278, so that is necessarily a later frame — the
-        /// observed-null rule with one field instead of a list). A respawn
-        /// that fails enters the durable fault once (suppression released:
-        /// vanilla plays at the game's next own transition, design v3 §2.8)
-        /// and is retried every frame; the fault's pending vanilla re-entry
-        /// lands once a host ticks again.</summary>
+        /// observed-null rule with one field instead of a list). R2 bounds
+        /// that wait: Destroy is issued again at 5 s and 10 s, and at 15 s the
+        /// object is given up on (`host-dying-stuck`) — a host is spawned
+        /// WITHOUT rehydrating playback and the durable fault releases
+        /// suppression, so owned silence lasts at most 15 s and a streamed
+        /// clip the abandoned object may still hold gets no second reader. A
+        /// respawn that fails enters the durable fault once (suppression
+        /// released: vanilla plays at the game's next own transition, design
+        /// v3 §2.8) and is retried every frame; the fault's pending vanilla
+        /// re-entry lands once a host ticks again.</summary>
         internal static void PollHost()
         {
             if (!_initialized || _quitting || Plugin.modDisabled) return;
@@ -3949,16 +4041,39 @@ namespace CompetitiveRounds
                 {
                     // Not yet observed destroyed: routine for exactly one frame
                     // (the end-of-frame Destroy). Longer means that Destroy
-                    // never landed — said so every 5 s, log only.
+                    // never landed — re-issued at 5 s and 10 s (one line each),
+                    // given up on at 15 s.
                     float rt = Time.realtimeSinceStartup;
-                    if (rt - _dyingSinceRt > 1f && rt - _hostLessLogRt >= 5f)
+                    float age = rt - _dyingSinceRt;
+                    if (age < 15f)
                     {
-                        _hostLessLogRt = rt;
-                        try { Plugin.Log?.LogWarning($"[MUSIC] host-less for {rt - _dyingSinceRt:F0} s: the dying host's GameObject is still not observed destroyed — no respawn until it is"); } catch { }
+                        int stage = age >= 10f ? 2 : age >= 5f ? 1 : 0;
+                        if (stage > _dyingRetryStage)
+                        {
+                            _dyingRetryStage = stage;
+                            string outcome;
+                            try { UnityEngine.Object.Destroy(dying); outcome = "Destroy issued again"; }
+                            catch (Exception ex) { outcome = "Destroy threw again: " + ex.Message; }
+                            SafeLog(LogLevel.Warning, $"[MUSIC] host-less for {age:F0} s: the dying host's GameObject is still not observed destroyed — {outcome} (given up on at 15 s)");
+                        }
+                        return;
                     }
+                    // R2, the bound: the object is abandoned (its sources were
+                    // silenced best-effort in OnHostDestroyed), a host is
+                    // spawned WITHOUT rehydrating playback — nothing is bound
+                    // on it — and the durable fault releases suppression;
+                    // custom music waits for an explicit retry.
+                    _dying = null;
+                    _dyingRetryStage = 0;
+                    SafeLog(LogLevel.Error, $"[MUSIC] host-dying-stuck: the dying host's GameObject was not observed destroyed within {age:F0} s — abandoned; respawning without rehydration, entering the durable fault");
+                    _spawnWithoutRehydrate = true;
+                    try { SpawnHost(); }
+                    finally { _spawnWithoutRehydrate = false; }
+                    EnterDurableFaultNoThrow("host-dying-stuck");
                     return;
                 }
                 _dying = null;
+                _dyingRetryStage = 0;
             }
             SpawnHost();
             if (_host == null && !S.faultDurable) EnterDurableFaultNoThrow("host-respawn-failed");
@@ -3966,17 +4081,45 @@ namespace CompetitiveRounds
 
         internal static void OnHostAwake(MusicEngineHost host)
         {
+            // R3: ONE adopted host. A component that wakes while a live host is
+            // adopted is an intruder (nothing in this engine spawns while _host
+            // is set — PollHost and Initialize spawn only when it is null):
+            // its GameObject is destroyed at once, nothing is adopted or bound,
+            // said so at most once per 5 s. Its OnDestroy hands nothing over
+            // (OnHostDestroyed acts only for the adopted host).
+            if (_host != null && !ReferenceEquals(_host, host))
+            {
+                try { UnityEngine.Object.Destroy(host.gameObject); } catch { }
+                float rt = 0f;
+                try { rt = Time.realtimeSinceStartup; } catch { }
+                if (rt - _intruderLogRt >= 5f)
+                {
+                    _intruderLogRt = rt;
+                    SafeLog(LogLevel.Warning, "[MUSIC] duplicate host component woke while a host is adopted — destroyed, not adopted (one host, one reader)");
+                }
+                return;
+            }
             _host = host;
             var s = S;
             RouteSources();
             if (!s.everHosted) { s.everHosted = true; return; }
+            if (_spawnWithoutRehydrate)
+            {
+                // R2: the host-dying-stuck respawn adopts and routes only — no
+                // rebind, no Reconcile — so a clip the abandoned object may
+                // still hold has no second reader; the durable fault that
+                // follows releases suppression, and the explicit retry that
+                // clears it re-derives everything on this host.
+                SafeLog(LogLevel.Info, $"[MUSIC] host respawned after host-dying-stuck — adopted without rehydration (mode={s.mode})");
+                return;
+            }
             // Rehydration [F19]: the durable state object is authoritative; a
             // fresh host just re-derives its component state from it — the
             // resident clip is rebound on THIS host only (the dying host was
             // observed destroyed before PollHost spawned this one, D13).
             try
             {
-                Plugin.Log?.LogInfo($"[MUSIC] host respawned — rehydrating (mode={s.mode})");
+                SafeLog(LogLevel.Info, $"[MUSIC] host respawned — rehydrating (mode={s.mode})");   // R7 class: a throwing logger must not enter the fault below
                 if (s.previewTrack.HasValue) StopPreviewAndRestoreInternal("host-respawn");
                 ExitWaiting("host-respawn");   // v6 §2.3: the new Main starts loop-off; Waiting re-arms from TickPlayback if still needed
                 s.currentStarted = false;
@@ -4000,10 +4143,11 @@ namespace CompetitiveRounds
         /// AudioSources alive; destroying it kills the sources at end of
         /// frame, #278), and the finally ALWAYS hands the respawn to PollHost:
         /// `_dying = gameObject; _host = null`. Nothing here spawns; the poll
-        /// does, once the object reads Unity-null on a later frame. Only the
-        /// adopted host hands over — a component this engine did not adopt
-        /// (an object whose Awake did not adopt, a duplicate) is silenced and
-        /// destroyed but leaves the adopted host in place.</summary>
+        /// does, once the object reads Unity-null on a later frame — or at
+        /// the 15 s bound (R2, host-dying-stuck). Only the adopted host hands
+        /// over — a component this engine did not adopt (an object whose
+        /// Awake did not adopt, an R3 intruder) is silenced and destroyed but
+        /// leaves the adopted host in place.</summary>
         internal static void OnHostDestroyed(MusicEngineHost dying)
         {
             bool adopted = ReferenceEquals(_host, dying);
@@ -4022,6 +4166,7 @@ namespace CompetitiveRounds
                 if (adopted)
                 {
                     _dying = go;
+                    _dyingRetryStage = 0;
                     try { _dyingSinceRt = Time.realtimeSinceStartup; } catch { }
                     _host = null;
                 }
@@ -4056,15 +4201,21 @@ namespace CompetitiveRounds
 
         // ── misc ─────────────────────────────────────────────────────────
 
+        /// <summary>R7: logging never changes media state. Every log call in
+        /// the open path, the failure tail, RootFailed, FailBeforeOpen, the
+        /// tombstone writers, the residency line and the probe's teardown
+        /// goes through here — a logger that throws (a broken sink, a
+        /// formatter) is swallowed, so no transition and no recovery call is
+        /// skipped by the line that describes it.</summary>
+        internal static void SafeLog(LogLevel level, string msg)
+        {
+            try { Plugin.Log?.Log(level, msg); } catch { }
+        }
+
         private static void LogOnce(string key, string msg, bool warn)
         {
             if (!OnceKeys.Add(key)) return;
-            try
-            {
-                if (warn) Plugin.Log?.LogWarning(msg);
-                else Plugin.Log?.LogInfo(msg);
-            }
-            catch { }
+            SafeLog(warn ? LogLevel.Warning : LogLevel.Info, msg);
         }
 
         // ── delivery heartbeat (design v2 §2.3.5; §7 2-2 / 2-7) ──────────
@@ -4077,6 +4228,13 @@ namespace CompetitiveRounds
         // Self-test counters (TickTestScript reads the deltas; diagnostic only).
         private static int _prematureResumeCount, _stallFaultCount, _noReadyTrackCount, _previewShareRefusals;
         private static readonly Dictionary<string, int> OpenCounts = new Dictionary<string, int>(StringComparer.Ordinal);   // D15: requests created per key since init (EnsureClipLoading)
+        /// <summary>R5: requests the creation site made for a key that already
+        /// held an entry or a rooted record — reachable only with
+        /// EnsureClipLoading's guard removed, or through the s4neg hook. The
+        /// once-only oracle (TsOnceOnly) asserts 0 at the end of S3 and S4.</summary>
+        private static int DuplicateRequests;
+        private static bool _tsForceDuplicateOnce;   // R5 / s4neg: the test-only hook — the next EnsureClipLoading bypasses the guard once
+        private static readonly List<ClipEntry> _tsDisplaced = new List<ClipEntry>();   // s4neg: the entry a forced duplicate displaced, rooted so its request (the playing clip's buffer) is never finalized
 
         private static long DspNowUs()
         {
@@ -4141,16 +4299,24 @@ namespace CompetitiveRounds
 
         // ── [Music] TestScript — engine exercise (design v2 §2.5; oracles §7 2-8) ──
         // Broadcast identity only (TestOpenTab's gate; that tick re-reads the cfg
-        // file every 2 s). One script runs per DISTINCT cfg value; the value
-        // present at launch runs too (a value written before launch runs at
-        // startup). Steps run one at a time; a step ends when its
-        // oracle is decided and logs `[MUSIC-SELFTEST] step=<n> <name> pass|fail <detail>`.
+        // file every 2 s) — EXCEPT a script of nothing but `openall`, which runs
+        // on any seat (R1: the D12 gate opens requests and clips and plays
+        // nothing; the desktop owner-run gate must be reachable). One script
+        // runs per DISTINCT cfg value; the value present at launch runs too (a
+        // value written before launch runs at startup). Steps run one at a
+        // time; a step ends when its oracle is decided and logs
+        // `[MUSIC-SELFTEST] step=<n> <name> pass|fail <detail>`; the run ends
+        // with `[MUSIC-SELFTEST] end pass=<n> fail=<m> reason=<first failure's
+        // reason|none>`.
         // Named steps: s1 successor handoff, s2 tombstoned successor (loop off),
-        // s3 preview over Main (per-key reuse, D15), s4 four keys with no
-        // release (D15), s5 suppression (Sandbox + broadcast music; its release
-        // half waits for the Sandbox to end), s6 stall injection, s6neg its
-        // negative control, openall every catalog key resident at once (the
-        // D12 cumulative gate; run it from a fresh process). Verbs: album:<sku>,
+        // s3 preview over Main (per-key reuse, once-only oracle, R5), s4 four
+        // keys with no release (same oracle), s4neg the once-only oracle's
+        // negative control (forces a duplicate request; must END fail=1
+        // reason=duplicate-request), s5 suppression (Sandbox + broadcast music;
+        // its release half waits for the Sandbox to end), s6 stall injection,
+        // s6neg its negative control, openall every catalog key resident at
+        // once (the D12 cumulative gate; run it from a fresh process — R9: a
+        // non-fresh run prints bar=fail reason=not-fresh). Verbs: album:<sku>,
         // play:<sku>/<idx>, preview:<sku>/<idx>, fail:<sku>/<idx>, seek:len-<n>,
         // loop:on|off, shuffle:on|off, select:<sku>:<i,j,..>|all, stall, unstall,
         // stop, play-pause, skip, prev, use-vanilla, stop-preview, wait:<sec>, reset.
@@ -4173,7 +4339,6 @@ namespace CompetitiveRounds
         internal static void TickTestScript()
         {
             if (!_initialized || _host == null) return;
-            if (!BroadcastMode.IsBroadcastIdentity) return;
             var cfg = Plugin.MusicTestScript;
             if (cfg == null) return;
             string raw;
@@ -4186,7 +4351,16 @@ namespace CompetitiveRounds
                 _tsSteps.Clear();
                 foreach (var part in raw.Split(';')) { var p = part.Trim(); if (p.Length > 0) _tsSteps.Add(p); }
                 if (_tsSteps.Count == 0) return;
-                _tsIdx = 0; _tsNo = 0; _tsPass = 0; _tsFail = 0; _tsAlbum = null;
+                // R1: the broadcast-identity guard applies to every verb EXCEPT
+                // openall, judged once here at the script's start (a script is
+                // admitted whole; identity is fixed for the process).
+                if (!BroadcastMode.IsBroadcastIdentity && !TsOpenAllOnly())
+                {
+                    LogOnce("ts-seat:" + raw, "[MUSIC-SELFTEST] ignored on this seat: only a script of nothing but `openall` runs outside the broadcast identity", true);
+                    _tsSteps.Clear();
+                    return;
+                }
+                _tsIdx = 0; _tsNo = 0; _tsPass = 0; _tsFail = 0; _tsAlbum = null; _tsFirstFailReason = null;
                 TsSnapshot();
                 Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] start steps={_tsSteps.Count} script='{raw}' snapshot: deselected={(_tsSnapDeselected != null ? _tsSnapDeselected.Count : -1)} loop={_tsSnapLoop} shuffle={_tsSnapShuffle}");
                 TsBegin();
@@ -4203,6 +4377,14 @@ namespace CompetitiveRounds
         private static bool TsStartedOn(string key) => S.mode == MusicMode.Custom && S.currentStarted && TsCurrentKey() == key && TsMainPlaying();
         private static MusicDeliveryTap TsTap() { var h = _host; return h != null ? h.Tap : null; }
         private static int TsOpens(string key) => OpenCounts.TryGetValue(key, out var n) ? n : 0;
+        /// <summary>R1: true when every step of the parsed script is the
+        /// `openall` verb (no argument) — the one script any seat runs.</summary>
+        private static bool TsOpenAllOnly()
+        {
+            for (int i = 0; i < _tsSteps.Count; i++)
+                if (!string.Equals(_tsSteps[i].Trim(), "openall", StringComparison.OrdinalIgnoreCase)) return false;
+            return _tsSteps.Count > 0;
+        }
         private static string TsKey(int idx) => _tsAlbum + "/" + idx;
         private static bool TsSandboxLive() { try { var gt = GM_Test.instance; return gt != null && gt.isActiveAndEnabled; } catch { return false; } }
         private static string TsVanilla(bool menu)
@@ -4216,9 +4398,27 @@ namespace CompetitiveRounds
             return $"mode={S.mode} current={TsCurrentKey()} started={S.currentStarted} playing={TsMainPlaying()} t={TsMainTime():F1} suppress={S.suppress} waiting={S.waiting} stopIntent={S.stopIntent} fault={(S.faultDurable ? S.faultReason : "none")} entries={EntryCount()} live={LiveObjectCount()} rooted={RootedFailed.Count} tapCallbacks={(tap != null ? tap.Callbacks : -1)} admissible={MusicAdmission.AtAdmissibleMenu}";
         }
 
+        private static string _tsFirstFailReason;   // R5/R9: the end line carries the first failure's reason token
         private static void TsLog(bool pass, string name, string detail)
         {
-            if (pass) _tsPass++; else _tsFail++;
+            if (pass) _tsPass++;
+            else
+            {
+                _tsFail++;
+                if (_tsFirstFailReason == null)
+                {
+                    // A detail that starts with `reason=<token>` names its own
+                    // reason (the once-only oracle, openall); any other failure
+                    // is named by its step.
+                    string d = detail ?? "";
+                    if (d.StartsWith("reason=", StringComparison.Ordinal))
+                    {
+                        int sp = d.IndexOf(' ');
+                        _tsFirstFailReason = sp < 0 ? d.Substring(7) : d.Substring(7, sp - 7);
+                    }
+                    else _tsFirstFailReason = name;
+                }
+            }
             Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] step={_tsNo} {name} {(pass ? "pass" : "fail")} {detail}");
         }
 
@@ -4234,7 +4434,7 @@ namespace CompetitiveRounds
             if (_tsIdx >= _tsSteps.Count)
             {
                 TsRestore();
-                Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] end pass={_tsPass} fail={_tsFail}");
+                Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] end pass={_tsPass} fail={_tsFail} reason={_tsFirstFailReason ?? "none"}");
                 _tsIdx = -1;
                 return;
             }
@@ -4340,7 +4540,7 @@ namespace CompetitiveRounds
         /// TsSetup clears it without a second request.</summary>
         private static void TsFailKey(string key)
         {
-            if (Tombstones.Add(key)) Plugin.Log?.LogInfo($"[MUSIC] tombstone {key} (self-test fail verb)");
+            if (Tombstones.Add(key)) SafeLog(LogLevel.Info, $"[MUSIC] tombstone {key} (self-test fail verb)");
             ClipStateGeneration++;
             if (TsCurrentKey() == key) RecoverFailedCurrent(key, "self-test"); else Reconcile("self-test-fail");
         }
@@ -4410,7 +4610,7 @@ namespace CompetitiveRounds
                 case "wait":
                     if (!float.TryParse(_tsArg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _tsF0)) _tsF0 = 1f;
                     return;   // TsRun ends it
-                case "s1": case "s2": case "s3": case "s4": case "s5": case "s6": case "s6neg": case "openall":
+                case "s1": case "s2": case "s3": case "s4": case "s4neg": case "s5": case "s6": case "s6neg": case "openall":
                     return;   // multi-tick: TsRun drives the phases from phase 0
                 default:
                     TsEnd(false, "unknown step"); return;
@@ -4429,6 +4629,7 @@ namespace CompetitiveRounds
                 case "s2": TsRunS2(rt); return;
                 case "s3": TsRunS3(rt); return;
                 case "s4": TsRunS4(rt); return;
+                case "s4neg": TsRunS4Neg(rt); return;
                 case "s5": case "s5-release": TsRunS5(rt); return;
                 case "s6": TsRunS6(rt, true); return;
                 case "s6neg": TsRunS6(rt, false); return;
@@ -4659,7 +4860,8 @@ namespace CompetitiveRounds
                         float t = TsMainTime();
                         bool posOk = t >= 0f && Mathf.Abs(t - _tsF0) <= 2f;
                         string why = TsKeysReused(new[] { k0, k1, kp }, out int grew, out string opens);
-                        TsEnd(posOk && why == null, $"Main+successor+preview reused/ready {_tsF1:F2}s after the preview start (bound {TS_LEDGER_SETTLE_SEC:F0}); {opens}; Clips grew by {Clips.Count - _tsI2} = the {grew} key(s) that had no entry; identity kept{(why != null ? " FAILED: " + why : "")}; Main resumed at {t:F1}s (paused near {_tsF0:F1}s, want within 2 s); shareRefusals delta {_previewShareRefusals - _tsI0}; {TsState()}");
+                        string once = TsOnceOnly();   // R5: the absolute once-only invariant, at the step's end
+                        TsEnd(posOk && why == null && once == null, (once != null ? once + " " : "") + $"Main+successor+preview reused/ready {_tsF1:F2}s after the preview start (bound {TS_LEDGER_SETTLE_SEC:F0}); {opens}; Clips grew by {Clips.Count - _tsI2} = the {grew} key(s) that had no entry; identity kept{(why != null ? " FAILED: " + why : "")}; once-only {(once == null ? "holds" : "FAILED")} (duplicate_requests={DuplicateRequests}); Main resumed at {t:F1}s (paused near {_tsF0:F1}s, want within 2 s); shareRefusals delta {_previewShareRefusals - _tsI0}; {TsState()}");
                         return;
                     }
                     if (rt - _tsT1 > 10f) TsEnd(false, "Main did not resume within 10 s of the preview stop: " + TsState());
@@ -4671,9 +4873,12 @@ namespace CompetitiveRounds
         // as its key became Ready is still Unity-non-null and still its
         // entry's clip after the 4th key started (an eviction that survived
         // Destroys it: the mutation this catches), every entry still holds
-        // its request, and a re-selection of a resident key (track 0 again)
-        // creates no second request (the early return in EnsureClipLoading
-        // removed -> the count moves).
+        // its request, a re-selection of a resident key (track 0 again)
+        // creates no second request, and the once-only oracle holds (R5:
+        // every key in Clips has OpenCounts == 1, DuplicateRequests == 0). A
+        // re-selection never reaches EnsureClipLoading (KickDesiredLoads skips
+        // a resident key), so the guard-removed mutation is exercised by
+        // s4neg at runtime, not by this step's re-selection.
         private static void TsRunS4(float rt)
         {
             switch (_tsPhase)
@@ -4713,8 +4918,9 @@ namespace CompetitiveRounds
                     {
                         string lost = TsClipsRetained();
                         int n = TsOpens(TsKey(0));
-                        bool ok = lost == null && n == _tsI2;
-                        TsEnd(ok, $"4 tracks in sequence, no release: {_tsClipSeen.Count} clips saved, all Unity-non-null and retained with their requests{(lost != null ? " FAILED: " + lost : "")}; re-selected {TsKey(0)} opens={n} (was {_tsI2}: reuse, no second request); {TsState()}");
+                        string once = TsOnceOnly();   // R5: absolute — every key in Clips requested exactly once this process, no duplicate at the creation site
+                        bool ok = lost == null && n == _tsI2 && once == null;
+                        TsEnd(ok, (once != null ? once + " " : "") + $"4 tracks in sequence, no release: {_tsClipSeen.Count} clips saved, all Unity-non-null and retained with their requests{(lost != null ? " FAILED: " + lost : "")}; re-selected {TsKey(0)} opens={n} (was {_tsI2}: reuse, no second request); once-only {(once == null ? "holds" : "FAILED")} (duplicate_requests={DuplicateRequests}); {TsState()}");
                         return;
                     }
                     if (rt - _tsT1 > 20f) TsEnd(false, "track 0 did not restart within 20 s of its re-selection: " + TsState());
@@ -4722,12 +4928,85 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>R5: the ABSOLUTE once-only invariant, per process — every
+        /// key in Clips was requested exactly once (OpenCounts == 1; a key
+        /// resident from an earlier run reads 1 too) and the creation site
+        /// never made a request for a key that already held an entry or a
+        /// rooted record (DuplicateRequests == 0). null when it holds, else
+        /// the violation, `reason=duplicate-request` first so the end line
+        /// carries it. Asserted at the end of S3 and S4; s4neg is its
+        /// negative control (#391). (A pre-open failure retried by an
+        /// explicit click legitimately requests its key again; the named
+        /// steps make none.)</summary>
+        private static string TsOnceOnly()
+        {
+            if (DuplicateRequests > 0) return $"reason=duplicate-request duplicate_requests={DuplicateRequests} (want 0)";
+            foreach (var kv in Clips)
+            {
+                int n = TsOpens(kv.Key);
+                if (n != 1) return $"reason=duplicate-request {kv.Key} requested {n} time(s) this process (want 1)";
+            }
+            return null;
+        }
+
+        // s4neg (R5, #391): the once-only oracle's negative control. Track 0
+        // is played (resident, Ready); then the test-only hook forces a SECOND
+        // request for that resident key through the creation site — what
+        // removing EnsureClipLoading's guard would do — and the same oracle is
+        // asserted at once: the step must FAIL with reason=duplicate-request
+        // and the run END `fail=1 reason=duplicate-request`. A step that
+        // passes here means the oracle is decoration. The process carries the
+        // duplicate afterwards (OpenCounts 2, DuplicateRequests 1, the
+        // displaced entry's objects retained off the ledger): run s4neg last,
+        // or in its own process.
+        private static void TsRunS4Neg(float rt)
+        {
+            string k0 = TsKey(0);
+            switch (_tsPhase)
+            {
+                case 0:
+                    {
+                        string err = TsSetup(new[] { 0, 1, 2 }, 2);
+                        if (err != null) { TsEnd(false, err); return; }
+                        PlayTrack(_tsAlbum, 0); _tsT1 = rt; _tsPhase = 1; return;
+                    }
+                case 1:
+                    if (TsStartedOn(k0))
+                    {
+                        string before = TsOnceOnly();
+                        if (before != null) { TsEnd(false, "once-only oracle already violated before the hook (not a control result): " + before + "; " + TsState()); return; }
+                        var a = TsAlbumDef();
+                        string path = null;
+                        try { path = a != null ? MusicAssets.PathFor(a.Tracks[0].OggFile) : null; } catch { }
+                        if (path == null) { TsEnd(false, "no file path for track 0"); return; }
+                        int opens0 = TsOpens(k0), dup0 = DuplicateRequests;
+                        // The duplicate replaces the resident entry in Clips; the
+                        // displaced one stays rooted here (its request backs the
+                        // clip Main is still playing — an unreferenced request
+                        // could be finalized under that reader, D1).
+                        if (Clips.TryGetValue(k0, out var displaced)) _tsDisplaced.Add(displaced);
+                        _tsForceDuplicateOnce = true;
+                        try { EnsureClipLoading(k0, path, selfTest: true); }
+                        finally { _tsForceDuplicateOnce = false; }
+                        string why = TsOnceOnly();
+                        TsEnd(why == null, (why ?? "the once-only oracle still holds after a forced duplicate request — the oracle is NOT load-bearing;") + $" opens[{k0}]={TsOpens(k0)} (was {opens0}) duplicate_requests={DuplicateRequests} (was {dup0}); {TsState()}");
+                        return;
+                    }
+                    if (rt - _tsT1 > 20f) TsEnd(false, "track 0 did not start within 20 s: " + TsState());
+                    return;
+            }
+        }
+
         // openall (D12): from a fresh process, request every catalog key (full
         // + preview) one per frame — PollClipLoads opens one per frame — wait
         // until each is Ready or failed, settle TS_LEDGER_SETTLE_SEC, print the
-        // gate line. Bar: entries + rooted_failed == keys AND native_delta_mb
-        // <= 120. A gate failure on either seat -> B2, never a patch.
+        // gate line, which evaluates its own bar (R9): fresh AND entries +
+        // rooted_failed == keys AND native_delta_mb <= 120, where fresh = no
+        // entry, no rooted record, no probe open (and no engine baseline)
+        // existed when the verb began; a non-fresh run prints bar=fail
+        // reason=not-fresh. A gate failure on either seat -> B2, never a patch.
         private static List<KeyValuePair<string, string>> _tsOpenAll;   // key, path
+        private static bool _tsOpenAllFresh;
         private static void TsRunOpenAll(float rt)
         {
             switch (_tsPhase)
@@ -4758,7 +5037,11 @@ namespace CompetitiveRounds
                         _tsI0 = 0;
                         int residentAtStart = 0;
                         foreach (var kv in _tsOpenAll) if (Clips.TryGetValue(kv.Key, out var e) && (e.Clip != null || e.Req != null)) residentAtStart++;
-                        Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] openall begin keys={_tsOpenAll.Count} resident_at_start={residentAtStart} sticky={StickyTombstones.Count} {ResidencyFields()}");
+                        // R9: judged NOW, before this verb requests anything. The
+                        // baseline term catches a hollow marker an explicit click
+                        // cleared (Clips empty again, an earlier request made).
+                        _tsOpenAllFresh = Clips.Count == 0 && RootedFailed.Count == 0 && _probeOpens == 0 && _nativeBaseline < 0L;
+                        Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] openall begin keys={_tsOpenAll.Count} fresh={(_tsOpenAllFresh ? 1 : 0)} resident_at_start={residentAtStart} sticky={StickyTombstones.Count} {ResidencyFields()}");
                         _tsT1 = rt; _tsPhase = 1; return;
                     }
                 case 1:
@@ -4789,10 +5072,15 @@ namespace CompetitiveRounds
                         double delta = NativeDeltaMb();
                         string deltaText = NativeDeltaMbText();
                         string compressed = (_tsL0 / 1048576.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-                        Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] openall keys={keys} entries={entries} rooted_failed={rooted} compressed_mb={compressed} native_delta_mb={deltaText}");
+                        bool fresh = _tsOpenAllFresh;
                         bool countOk = entries + rooted == keys;
                         bool memOk = !double.IsNaN(delta) && delta <= 120.0;
-                        TsEnd(countOk && memOk, $"entries + rooted_failed = {entries + rooted} (want {keys}) native_delta_mb={deltaText} (bound 120) probe_opens={_probeOpens}; {TsState()}");
+                        bool bar = fresh && countOk && memOk;
+                        string reason = !fresh ? "not-fresh" : !countOk ? "entries" : double.IsNaN(delta) ? "native-unmeasured" : !memOk ? "native-delta" : "none";
+                        // R9: the gate line evaluates its own bar; the runner's
+                        // end line carries the same fail count.
+                        Plugin.Log?.LogInfo($"[MUSIC-SELFTEST] openall keys={keys} entries={entries} rooted_failed={rooted} compressed_mb={compressed} native_delta_mb={deltaText} fresh={(fresh ? 1 : 0)} bar={(bar ? "pass" : "fail")} fail={(bar ? 0 : 1)} reason={reason}");
+                        TsEnd(bar, $"reason={reason} entries + rooted_failed = {entries + rooted} (want {keys}) native_delta_mb={deltaText} (bound 120) fresh={(fresh ? 1 : 0)} probe_opens={_probeOpens}; {TsState()}");
                         return;
                     }
             }

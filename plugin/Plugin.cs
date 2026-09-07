@@ -944,7 +944,7 @@ namespace CompetitiveRounds
             );
             MusicTestScript = Config.Bind(
                 "Music", "TestScript", "",
-                "Broadcast seat only (Sept 7 design v2 section 2.5): a ';'-separated music-engine exercise, run once per distinct value (including the value present at startup) and logged as [MUSIC-SELFTEST] lines. Named steps s1..s6 and s6neg, plus album:<sku>, play:<sku>/<idx>, preview:<sku>/<idx>, fail:<sku>/<idx>, seek:len-<n>, loop:on|off, shuffle:on|off, select:<sku>:<i,j,..>|all, stall, unstall, wait:<sec>, stop, reset. Ignored on every other seat; clear it when done."
+                "A ';'-separated music-engine exercise (Sept 7 design v2 section 2.5), run once per distinct value (including the value present at startup) and logged as [MUSIC-SELFTEST] lines. Named steps s1..s6, s4neg, s6neg and openall, plus album:<sku>, play:<sku>/<idx>, preview:<sku>/<idx>, fail:<sku>/<idx>, seek:len-<n>, loop:on|off, shuffle:on|off, select:<sku>:<i,j,..>|all, stall, unstall, wait:<sec>, stop, reset. Broadcast seat only, except a script of nothing but openall (the design v3 D12 gate), which runs on any seat; clear it when done."
             );
             MusicShuffle = Config.Bind(
                 "Music", "MusicShuffle", false,
