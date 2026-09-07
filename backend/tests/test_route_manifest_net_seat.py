@@ -703,7 +703,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 311   # Sept 6 item k: +2 rating-preview routes (309 before)
+    assert len(manifest) == 334   # Sept 6 Group 4: +22 mail and moderation routes and get_set_report (311 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -714,7 +714,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 310   # Sept 6 item k: +2 rating-preview routes (308 before)
+    assert len(static) == 333   # Sept 6 Group 4: +22 mail and moderation routes and get_set_report (310 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {

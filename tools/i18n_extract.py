@@ -99,6 +99,16 @@ FILES = [
     # Lag notices (Sept 4, Release B §4) — the four corner-notice texts at
     # I18n.Tr/TrF sites; its [LAG-NOTICE] log lines are not user-visible.
     "LagNotices.cs",
+    # Sept 6 batch, Group 4 (all at I18n.Tr/TrF sites): the hover profile card,
+    # the in-game mail client + screens, the session report model + view and
+    # the rating-graph axes. The list is FIXED, so every new source file with
+    # display strings must be named here or its strings ship untranslated
+    # (found by the Sept 6 integration: 195 sites in six unnamed files).
+    "ProfileCard.cs", "MailClient.cs", "MailUI.cs",
+    "SessionReportModel.cs", "SessionReportView.cs", "RatingGraphAxis.cs",
+    # Older omissions found by the same sweep: the minimised-chat suffix
+    # (Sept 6 Group 2, bug 333) and the team-colour point announcements.
+    "ChatOverlayTmp.cs", "TeamColorIdentity.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

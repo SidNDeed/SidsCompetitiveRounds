@@ -45,8 +45,10 @@
   "* <color=#C8C8C8>2nd</color> - {0}g / {1} XP / Runner Up role",
   "* <color=#D4894A>3rd</color> - {0}g / {1} XP / 3rd Place role (loser of LB final)",
   "* <color=#FFE580>1st</color> - {0}g / {1} XP / Winner role",
+  "+ Add",
   "+ {0} more artists",
   "+{0} gold",
+  "+{0} more",
   "+{0} more bets",
   "+{0} more lines",
   "0 in queue",
@@ -60,6 +62,8 @@
   "1v2 - UNRATED",
   "1v2 Series: Duo {0} - {1} Solo",
   "1v2 Series: You {0} - {1} Duo",
+  "1v2 as duo",
+  "1v2 as solo",
   "1v2 lobby never filled — returning to menu. Requeue when ready.",
   "1v2 match found, but you're in a game — removed from the 1v2 queue.",
   "1v2 series complete: {0}",
@@ -67,6 +71,7 @@
   "1v2 — Solo vs Duo",
   "1v2: leaving ends your sitting; there is no automatic forfeit.",
   "2V2: ONE SERIES, TWO TEAMS",
+  "2v2 (opposite teams)",
   "2v2 - How It Works",
   "2v2 Podium",
   "2v2 QUEUE",
@@ -196,6 +201,8 @@
   "<color=#7788AA><i>search cards...</i></color>",
   "<color=#7788AA><i>search players...</i></color>",
   "<color=#7788AA><i>search...</i></color>",
+  "<color=#7788AA><i>subject</i></color>",
+  "<color=#7788AA><i>write your message... (plain text, no formatting)</i></color>",
   "<color=#7FD4FF>1v2 History</color>",
   "<color=#7FD4FF>1v2:</color> {0}W/{1}L",
   "<color=#7FE8C3>=  CHARACTER COSMETICS  =</color>",
@@ -474,8 +481,11 @@
   "Action Log",
   "Action Log...",
   "Active",
+  "Add a subject.",
   "Add an underline to your name. Stackable with other name styles.",
+  "Add at least one recipient.",
   "Add extra character spacing.",
+  "Add recipient",
   "Adjust Placement...",
   "Admin",
   "Admin action",
@@ -505,6 +515,7 @@
   "Allow spectators: <color=#88FF88>ON</color>",
   "Allow spectators: <color=#FF9966>OFF</color>",
   "Allow the mod to report your match results and stats to the community server.",
+  "Already a recipient.",
   "Amber",
   "Amber Name",
   "Amethyst",
@@ -513,6 +524,7 @@
   "Animated cosmetics: <color=#88FF88>ON</color>",
   "Animated cosmetics: <color=#FF9966>OFF</color>",
   "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = everything freezes on a static frame.",
+  "Announcement",
   "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and histories aren't affected. You will no longer appear on leaderboards.\n<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches from this account will show as [Deleted User] and won't count toward stats.",
   "Another Round",
   "Anti-cheat",
@@ -536,6 +548,7 @@
   "Aurora",
   "Aurora Gradient",
   "Average FPS",
+  "Average game length: {0}",
   "Avg Cards / Game",
   "Avg Cards per Game  (lower = stronger)",
   "Avg FPS",
@@ -549,6 +562,7 @@
   "Azure Comet",
   "B (in a lobby) - add a practice bot",
   "Babel",
+  "Back",
   "Back in the Quick Match queue — searching for an opponent.",
   "Balance: -",
   "Balance: <color=#FFD94D>{0}</color> gold",
@@ -592,13 +606,20 @@
   "Blitz",
   "Blk {0}%",
   "Block",
+  "Block %",
   "Block CD",
   "Block a Player...",
   "Block debug overlay (corner): blocks you started vs blocks that actually absorbed a hit, plus why each one missed (too early / too slow / unblockable).",
   "Block debug overlay: <color=#88FF88>ON</color>",
   "Block debug overlay: <color=#FF9966>OFF</color>",
   "Block rate - {0}",
+  "Block sender",
   "Block {0}%",
+  "Block {0}? Their mail will no longer reach you. You can unblock them in Settings.",
+  "Blocked senders ({0})",
+  "Blocked senders: loading...",
+  "Blocked senders: show",
+  "Blocked {0}.",
   "Blocking",
   "Blocks",
   "Blood Gradient",
@@ -633,6 +654,7 @@
   "Bug report sent. Thanks! (#{0})",
   "Build Types",
   "Build at game end",
+  "Builds",
   "Builds that stacked 2+ copies (all players)",
   "Built for ranked.",
   "Bullet Hell",
@@ -653,6 +675,7 @@
   "COMPLETED SERIES",
   "CONFIRM LEAVE",
   "CRASH",
+  "Calendar",
   "Calm forest-green tint with low saturation.",
   "Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. Off = a perfectly steady camera. Local only.",
   "Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.",
@@ -673,6 +696,7 @@
   "Casicorn's Eyes",
   "Casual",
   "Casual (games)",
+  "Casual 1v1",
   "Casual Conqueror",
   "Casual History",
   "Casual Opponents Who Quit on You % (higher is better)",
@@ -765,6 +789,8 @@
   "Cool teal body color.",
   "Cool teal wake, fresh from the shallows.",
   "Cooled lava — volcanic oxblood at the edge of black.",
+  "Copied to clipboard.",
+  "Copy",
   "Coral",
   "Coral Name",
   "Corner notices when your frames drop, your ping is high or the opponent's updates arrive late. 1v1 only.",
@@ -777,6 +803,8 @@
   "Could not cancel: {0}",
   "Could not decode one of the animation frames.",
   "Could not join as spectator - the game may have ended.",
+  "Could not load this report",
+  "Could not load this report (error {0})",
   "Could not open that cosmetic preview.",
   "Could not spectate this game.",
   "Couldn't change Appear offline - try again",
@@ -830,6 +858,7 @@
   "DOT TICKS VS THE BLOCK WINDOW",
   "DPS",
   "Damage",
+  "Damage dealt (cumulative per game)",
   "Damage types & buffs",
   "Dance is on cooldown - try again in a moment.",
   "Dances",
@@ -839,6 +868,8 @@
   "Dark red blocks on a dim warm backdrop.",
   "Dark steel walls with amber window glow against a black-navy sky, city lights twinkling behind.",
   "Data & Privacy",
+  "Data sharing is disabled in your settings",
+  "Data sharing is off - allow it in Settings to use mail.",
   "Date Earned",
   "Date format",
   "Date format: <color=#88CCFF>{0}</color>",
@@ -846,6 +877,7 @@
   "Deadlines & forfeits",
   "Deal Conditional damage",
   "Deal damage",
+  "Deaths",
   "Decent",
   "Decline",
   "Decline (offline mode)",
@@ -862,11 +894,13 @@
   "Default",
   "Default (random)",
   "Default start: <color=#AABBEE>{0}</color>   Signups close: {1}",
+  "Delete",
   "Delete Chat Message...",
   "Delete My Data",
   "Delete My Data...",
   "Delete a chat message - type to search",
   "Delete chat message",
+  "Delete this message?",
   "Demolitionist",
   "Demon Wings",
   "Despawn off-screen bullets — host clears bullets that exit the camera viewport.",
@@ -876,11 +910,13 @@
   "Detail: cozy star-studded earmuffs. Equip in the Character editor.",
   "Detail: heavy is the head. Equip in the Character editor.",
   "Details",
+  "Details (optional)",
   "Devil Horns",
   "Diagram of Spirit's research, 'On Damage Types and Buff Activation'.",
   "Different players who have picked this card",
   "Disable",
   "Discard",
+  "Discard this draft?",
   "Disco Fever",
   "Discord",
   "Discord Link",
@@ -930,8 +966,7 @@
   "Effects",
   "Electric sparks snap and dart around you.",
   "Electric-cyan neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
-  "Elo over games",
-  "Elo over time",
+  "Elo",
   "Ember",
   "Ember Gradient",
   "Embers",
@@ -970,6 +1005,7 @@
   "Eyes: lovestruck hearts. Equip in the Character editor.",
   "F5 - open / close the competitive menu",
   "FFA",
+  "FFA (placed above / below)",
   "FFA - How It Works",
   "FFA - {0} players - first to {1} points!",
   "FFA Average Kills per Game",
@@ -978,8 +1014,7 @@
   "FFA Avg Placement",
   "FFA DPS",
   "FFA Damage per Second",
-  "FFA Elo over games",
-  "FFA Elo over time",
+  "FFA Elo",
   "FFA Podium",
   "FFA STARTING IN {0}...",
   "FFA VICTORY!",
@@ -1042,6 +1077,7 @@
   "Frames per second, top-left corner. Handy for checking whether a setting actually helped.",
   "Free-for-all for 3-10 players. Every player is their own team.\nStandard ROUNDS scoring - first to {0} points takes the game.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- There is no Elo band. Joining a lobby is consent to play.\n\n- Create a lobby, or join an open one from the browser.\n  The HOST presses Start once at least 3 players are in\n  (up to 10). Several lobbies can be open at once.\n\n- If the host leaves, the longest-waiting member becomes\n  the new host automatically.\n\n- After each point, everyone except the point winner\n  picks a card at the same time.\n\n- The pick timer is shown on screen. A pick landing\n  near the end grants everyone a little extra time.\n  When your timer hits zero, your highlighted card is\n  picked for you automatically - walking away never\n  skips your pick. Only a pick that misses the window\n  entirely (a freeze, a crash, or the final split\n  second) yields no card, with a toast saying so.\n\n- You hold up to {1} cards.\n  Picking one more replaces your oldest card.\n\n<color=#FFD94D><b>HOST SETTINGS</b></color>\n\n- The host can tune the lobby before starting: score\n  target (3-10), opening draws, cards offered per\n  draw (1-5), max cards held (3-5 ranked, up to 6\n  casual), the Same Cards rule, and ranked/casual.\n\n- Same Cards rule: everyone's Nth card draw offers the\n  SAME candidates, in the same order - if you and a rival\n  were offered identical cards all game, no result can be\n  blamed on draw luck. One-copy cards (like Phoenix)\n  appear at most once per game for everyone.\n\n- After a settings change the lobby cannot start for 60\n  seconds (and briefly after someone new joins), so\n  everyone can read what changed. Casual lobbies pay\n  reduced rewards and never touch ratings.\n\n<color=#FFD94D><b>RATING</b></color>\n\n- FFA is ranked with its own Glicko rating.\n\n- Placement uses points, then all round wins earned\n  (spent ones included), then kills.\n  Remaining ties share a place using competition\n  order: 1, 2, 2, 4.\n\n- Your rating is scored against the players placed\n  nearest to you (up to 4 of them), so one game can't\n  swing your rating several times harder in a 10-player\n  lobby than in a 3-player one. One extra comparison\n  can join those four: the biggest 250+ rating gap\n  that finished upside down outside them.\n\n- A tied placement counts as a draw. New ratings move\n  fast and settle down as you play more.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Pay is metered on the FIGHTING, not on flat per-game\n  numbers: decisive rounds are the work unit, and\n  elapsed time caps how fast they cash in - stall\n  tactics are held to a bounded edge, and longer,\n  bigger games pay more.\n\n- Bigger lobbies pay a better rate per minute, and a\n  10-player FFA is the best gold rate in the game.\n\n- Your placement shapes your share: 1st earns about\n  five times last place's cut. Part pays as XP, part as\n  Placement Gold, and a stronger opposing field\n  multiplies the pot (the usual tier bonus).\n\n- XP converts to Gold at 100 XP = 1 Gold, and level-ups\n  pay their usual bonus Gold. A level-up landing during\n  a game shows up inside that game's +g number - that is\n  how a last place can occasionally out-earn the winner.\n\n- Spectators can bet Gold on FFA lobbies from this tab.\n\n<color=#FFD94D><b>READING THE RECENT FFAS LIST</b></color>\n\n<color=#7FD4FF>Dots + N(P)</color> - Full points won.\n<color=#7FD4FF>Half dots + N(H)</color> - Round wins that\n  did not become one of that player's full points.\n<color=#7FD4FF>Nk</color> - Kills.\n<color=#7FD4FF>+xp +g</color> - That game's XP and Gold\n  (including any level-up bonus).\n<color=#7FD4FF>Green/red number</color> - FFA rating change.\n<color=#7FD4FF>Cards</color> - The hand held at game end.\n  <color=#FF6666>+N replaced</color> counts picks that were\n  pushed out by the card cap - hover the line to see\n  every pick in order.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n<color=#7FD4FF>Rank</color> - Position in the currently selected sort.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>Rating</color> - The player's separate FFA Glicko rating.\n<color=#7FD4FF>Games</color> - Recorded FFA games played.\n<color=#7FD4FF>Wins</color> - Games finished in 1st place.\n<color=#7FD4FF>Top3</color> - Games finished in 1st, 2nd, or 3rd.\n<color=#7FD4FF>AvgPl</color> - Average finishing place. Lower is\n  better - 1.0 means winning every game.\n<color=#7FD4FF>WR</color> - Share of games won outright.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving mid-game is recorded. A leaver keeps their\n  tallies and is placed and rated for the game they\n  left - unless they left before the field had scored\n  2 half points while their own tally was still zero,\n  in which case that game does not rate them.",
   "From the art of the \"Healing Field\" card",
+  "From:",
   "Frost",
   "Full log...",
   "Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second track previews; after buying, pick tracks and control playback in the Music tab.",
@@ -1061,6 +1097,9 @@
   "Game {0}   {1} {2} {3}",
   "Game {0} - {1} players",
   "Game {0} score progression",
+  "Game {0}: solo {1}-{2} duo",
+  "Game {0}: team 1 {1}-{2} team 2",
+  "Game {0}: {1}",
   "Game {0}: {1}-{2}",
   "Games",
   "Gentle soap bubbles float up around you.",
@@ -1120,6 +1159,7 @@
   "HOW SURE THE SYSTEM IS",
   "HUMAN REVIEW",
   "Halo",
+  "Harassment",
   "Hard to hit",
   "Hasty",
   "He/him",
@@ -1142,6 +1182,7 @@
   "Highest Single Hit",
   "Hips one way, arms the other - the classic. Dancing locks your controls for the duration.",
   "Hit",
+  "Hit %",
   "Hit % vs Block %",
   "Hit / Block %",
   "Hit rate - {0}",
@@ -1185,6 +1226,8 @@
   "In-game chat overlay: <color=#88CCFF>PINNED</color>",
   "In-game chat overlay: <color=#88FF88>ON</color>",
   "In-game chat overlay: <color=#FF9966>OFF</color>",
+  "Inbox",
+  "Inbox ({0})",
   "Indigo Name",
   "Industrial steel grey with the warmth bled out.",
   "Info",
@@ -1213,7 +1256,9 @@
   "Keep watching",
   "Keys / Game",
   "Keys / Sec",
+  "Keys/s",
   "Kick",
+  "Kills",
   "Kingslayer",
   "Knight Great-Helm",
   "Knockback",
@@ -1237,8 +1282,10 @@
   "Language / Idioma / Язык / Мова / Språk",
   "Language: <color=#88CCFF>{0}</color>",
   "Last game for me",
+  "Last met: {0}  -  {1}  -  {2}",
   "Last played {0} · H2H {1}-{2} · Ranked series {3}",
   "Last played {0} · also played today · H2H {1}-{2} · Ranked series {3}",
+  "Last seen {0}",
   "Latest Releases",
   "Lavender",
   "Leaderboard",
@@ -1293,6 +1340,7 @@
   "Longest Game",
   "Lose a ranked FFA holding 10 or more half points that never became a point",
   "Losers",
+  "Loss",
   "Lost",
   "Lowercase letters render as smaller capitals.",
   "Luckiest (rare draws)",
@@ -1314,6 +1362,9 @@
   "Machine translation - the English notes are on GitHub.",
   "Magical Hat",
   "Magma",
+  "Mail",
+  "Mail ({0})",
+  "Mail needs a secure connection to the server - it is unavailable on this connection.",
   "Main menu music: Default = ROUNDS' own theme, My playlist = your selected custom music, None = silence. Matches always use your picks.",
   "Manage your cosmetics and earn 30% on each paid purchase - gifts and your own buys pay nothing. Size or placement changes return to admin review; unsuitable art may be rejected or adjusted.",
   "Manual restoration marked complete.",
@@ -1361,6 +1412,7 @@
   "Monochrome",
   "Month/Day/Year (US)",
   "Moonlit",
+  "More",
   "More ranked than not.",
   "More than 10",
   "More...",
@@ -1418,9 +1470,12 @@
   "Neon Pink",
   "Neon Toxic",
   "Neon Violet",
+  "Net rating vs them: {0}",
   "Netcode & Photon",
   "New",
   "New here? The glowing Search Ranked button up top queues you for your first match.",
+  "New mail from {0}: {1}",
+  "New message",
   "Newest Cosmetics",
   "Next",
   "Next >",
@@ -1435,9 +1490,12 @@
   "No achievement data.",
   "No active tournament",
   "No articles match your search.",
+  "No blocked senders.",
   "No games recorded for this session yet.",
   "No games this session",
+  "No games together yet",
   "No leaderboard data",
+  "No mail yet.",
   "No matches.",
   "No messages in this channel yet.",
   "No opponent has enough ranked series against this group yet.",
@@ -1448,10 +1506,13 @@
   "Nobody in a ROUNDS match is the host. Every game runs through Photon's cloud servers, every player simulates the fight locally, and each shooter is the referee of their own bullets. This page is how all of that fits together.\n\n<color=#FFD94D><b>HOW A CONNECTION HAPPENS</b></color>\n\n- Your client first talks to a Photon name server, pings the 15 regions (us, eu, asia, au and the rest), and picks the best one. The result is cached between launches.\n- It then connects to that region's master server, which handles matchmaking. Joining or creating a room hands you off to a game server in that region, and the room lives THERE: all traffic is you, up to Photon, down to the other players. There is never a direct link between players' PCs.\n- Quickplay only matches players in your current region. If you sit alone in a search for 15 seconds, the game hops regions on its own, trading a little ping for a bigger player pool.\n\n<color=#FFD94D><b>ROOM CODES AND CROSS-REGION PLAY</b></color>\n\nA private room code is 6 letters: the FIRST letter encodes the host's region, the other 5 are random. Joining by code reads that letter and moves you to the host's region before searching, which is why friends on different continents can always join each other. Steam invites carry the region the same way. Mod queue rooms skip all of this: the server names the room and picks ONE region for everyone it matched, so a queued pair can never split across regions.\n\n<color=#FFD94D><b>THE MASTER CLIENT</b></color>\n\nOne player in every room is the master client - initially whoever created the room (in 1v1, the orange player). The master is not a host; their machine just gets the tie-breaking jobs:\n\n- rolls the next map and announces it,\n- announces every point and round result - every client applies the master's score verbatim, so the scoreboard cannot disagree between screens,\n- owns and physically simulates the crates, saws and moving platforms; everyone else receives their positions as a stream, and your pushes on a crate are sent to the master as requests.\n\nIf the master leaves, Photon appoints a new one - though in vanilla 1v1 that hardly matters, because any player leaving ends the match for everyone.\n\n<color=#FFD94D><b>WHAT TRAVELS THE WIRE, WHAT STAYS LOCAL</b></color>\n\n- <color=#7FD4FF>Player movement</color> - streamed. Your machine sends your position, inputs and velocity up to 30 times a second, and the other players' copies of you replay that stream. A remote copy of a player never reads input.\n- <color=#7FD4FF>Blocks</color> - instant on your own screen, relayed to everyone else as an event. Their copy of your shield turns on when the event arrives.\n- <color=#7FD4FF>Bullets</color> - spawned once, then simulated separately on every machine, frame by frame, with no mid-flight correction (a few guided cards excepted). The bullet on your screen and the same bullet on theirs are two slowly diverging copies.\n- <color=#7FD4FF>Damage</color> - computed once, on the shooter's machine, and sent as a final number. Health is never re-synchronized; screens agree only because everyone applies the same damage events. <color=#8A8A93>(The one exception is the mod's poison sync, where the VICTIM's client judges the ticks - see <color=#7FD4FF>Poison & damage over time</color>.)</color>\n\n<color=#FFD94D><b>DAMAGE AUTHORITY</b></color>\n\nOnly a bullet's owner can declare a hit. When the shooter's copy of their bullet touches you, their machine checks its copy of your shield and your position, rules blocked or not, and broadcasts the result. Your machine applies it without a vote.\n\nEverything defensive you do therefore counts only once it has ARRIVED on the shooter's screen. Press block, and it protects you there about half your ping plus half theirs later than it protected you at home. This one rule explains the classics: 'I blocked on time and still got hit' - your press had not reached them yet (see <color=#7FD4FF>Blocking</color>); and 'I got hit around the corner' - on their screen you were not behind the corner yet, because their copy of your position runs late by the same delay plus up to one 33 ms movement tick. The consolation is symmetry: your bullets are ruled on YOUR screen.\n\n<color=#FFD94D><b>WHAT PING ACTUALLY MEASURES</b></color>\n\nThe ping number (the mod shows it in the corner overlay, next to your region) is the round trip between YOU and the Photon server - not between you and your opponent. The delay you feel against another player is roughly half your ping plus half theirs, plus up to one 33 ms movement tick. Two players at 40 ms each play a tighter game than a 20 ms player against a 150 ms player, even though that 20 looks beautiful.\n\n<color=#FFD94D><b>WHAT FRAME RATE CHANGES</b></color>\n\n- Bullets integrate their movement once per rendered frame, so different frame rates produce slightly different trajectories for the SAME bullet on different machines - a small but structural divergence.\n- Player movement runs on a fixed physics step and is far less frame-rate sensitive.\n- The extreme case is the Grow card, whose damage compounds per frame on the shooter's machine (see <color=#7FD4FF>Grow</color>).\n- Below about 30 FPS your machine drains the incoming movement stream slower than it arrives, so enemy copies get visibly choppier.\n- <color=#8A8A93>A game can feel awful while both FPS and ping graphs read flat - stutter in the replicated stream is invisible to both numbers.</color>",
   "Noobie",
   "Northern Lights",
+  "Not allowed.",
   "Not enough players to continue the FFA - returning to menu.",
+  "Not found - it may have been deleted.",
   "Not great. Not terrible.",
   "Not in queue.",
   "Nothing playing",
+  "Nothing sent yet.",
   "Now Playing: {0} - {1}",
   "Now spectating.",
   "Nuclear glasses",
@@ -1470,7 +1531,9 @@
   "Olive",
   "On Fire",
   "On-screen pop-ups for incoming chat and XP/level notifications. The chat log on the Home tab updates either way.",
+  "One of the recipients could not be found.",
   "One solo player faces a duo in a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- This is a consent queue with no Elo band and no ready-up.\n- The server assigns one solo and two duo players.\n- Solo Extra Initial Pick is optional: the solo draws\n  2 cards on the opening pick. In the random queue any\n  player's opt-in turns it on; in a hosted lobby the\n  host's setting decides.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first side to win 2 games wins the series.\n- 1v2 is an UNRANKED beta. No rating is applied yet.\n- Games are recorded and will count when ranked play launches.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Base XP is 500 per game, x1.5 on a win - then a\n  difficulty multiplier scales it, capped at x4\n  (the win bonus sits on top of the cap):\n  the solo earns x1.5 (and x1.20 more when the extra\n  pick is off), a duo facing a buffed solo earns x1.10,\n  and the opponents' rating tier multiplies up to x3.\n  Facing a top-3 1v2 player adds x1.35, win or lose.\n- Series end: 40 base Gold per winner, 20 per loser,\n  scaled by the opponents' rating tier.\n- Game XP converts to Gold at 100 XP = 1 Gold, and\n  level-ups pay their usual bonus Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n- The tab has separate Solo and Duo boards.\n- You appear only on boards for roles you have played.\n<color=#7FD4FF>Rank</color> - Activity order: wins, then WR, then games.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>W-L</color> - Games won and lost in that role only.\n<color=#7FD4FF>WR</color> - Win rate for games in that role.\n- These are activity boards. They are not sorted by Gold.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving while locked with no games played cancels the\n  series; a leave mid-game leaves the result to the\n  normal match report. The beta has no leave counter.",
+  "Online",
   "Only the host can change lobby settings.",
   "Only the host can kick players.",
   "Only the host decides this.",
@@ -1496,6 +1559,7 @@
   "Orange-to-yellow gradient that sears the arena.",
   "Orchid Gradient",
   "Other",
+  "Other\u0004report reason",
   "Overall Series: {0}",
   "Override the default orange/blue team color with a tint of your choice. Only visible to modded players. Premium tiers (Prismatic, Chrome) animate during combat.",
   "PHOTON CLOUD",
@@ -1655,7 +1719,9 @@
   "Ranked (series)",
   "Ranked 1v1",
   "Ranked 1v1 - 2v2 - tournaments - cosmetics   <color=#666>v{0}</color>",
+  "Ranked 1v1 games",
   "Ranked 1v1 is the mod's core mode: best-of-3 series, one Glicko rating, and two ways to start a rated series - the queue, or a private room where both players run the mod. This page covers the queue from Search to room, how a private lobby becomes rated, and exactly what a disconnect does.\n\n<color=#FFD94D><b>FINDING AN OPPONENT</b></color>\n\n- Clicking Search is itself the ranked opt-in - joining the queue turns Ranked on for your account.\n- Your search band starts at 100 rating in either direction and widens as you wait: 200 after 30 seconds, 400 after 60, 800 after 120. It never widens past 800.\n- The overlap is <color=#7FD4FF>two-sided</color>: you must be inside your opponent's band AND they must be inside yours. A 2-minute waiter with a wide band can't grab a fresh joiner whose narrow band excludes them.\n- Among valid candidates, the closest rating wins.\n- Players you declined in the last 5 minutes, players you've blocked (in either direction) and banned accounts are never offered.\n- Searching while playing casual is fine - vanilla quickplay and ordinary casual rooms never cancel your search. Joining any mod-issued room (a tournament, 2v2, 1v2 or FFA) does, immediately.\n- After 30 minutes of searching you're removed from the queue. <color=#8A8A93>Rejoin if you're still there - the 1v1 client never rejoins for you.</color>\n\n<color=#FFD94D><b>READY-UP, DECLINE AND THE ROOM</b></color>\n\n- On a match you get a MATCH FOUND banner with your opponent's name and rating, a sound, and a taskbar flash. You must click Ready - there is no auto-ready.\n- You have 90 seconds, and when either player clicks Ready the window resets to a fresh 90 for both - a slow alt-tabber always gets full time. If it runs out, both of you go back to searching.\n- Decline puts both of you back in the queue and blocks the two of you from re-pairing for 5 minutes. Once the room has been issued, decline no longer works.\n- When both are ready the server issues a private ranked room and picks the Photon region: if both clients report the same home region, that wins; otherwise it falls back through the players' live regions, then either home region, then US.\n- Your client pins that region before joining, so both of you land in one room instead of two same-named rooms on two continents.\n- If your opponent never arrives: a warning at 25 seconds, then an automatic return to the menu at 60. <color=#7FE87F>No penalty for either side.</color>\n\n<color=#FFD94D><b>RANKED IN A PRIVATE ROOM</b></color>\n\n- A room-code game is rated when three things are true: your Ranked toggle is on, your opponent has Ranked enabled, and your opponent runs the mod. An opponent who has never run the mod can never make a game rated. (One deliberate exception: a live unfinished series from an earlier sitting keeps its ranked status when you meet again.)\n- The moment both mods see each other, the client registers the series with the server (the <color=#7FD4FF>preflight</color>) - so the series exists, and is bettable, during game 1.\n- If either player has Ranked disabled, the server refuses the series and you get one toast: the match plays out as casual. Casual games are still recorded - they just never touch rating.\n- Queue and tournament rooms skip these checks entirely: queueing was the consent.\n\n<color=#FFD94D><b>THE SERIES</b></color>\n\n- First to 2 game wins takes the series. <color=#7FE87F>Rating moves only when a series completes</color> - the whole series is one rating outcome, and individual games never move rating on their own.\n- An undecided series - at least one game played, nobody at 2 wins - <color=#7FE87F>never expires</color>. Play the same opponent tomorrow or next week and game 1 still stands; your HUD picks up the standing score instead of restarting at 0-0.\n- That no-expiry rule is deliberate: an expiry window let a player down 0-1 abandon the series and wait out the clock to dodge the loss.\n- A non-tournament series where no game was ever finished is abandoned after 30 minutes; the next meeting starts fresh. Tournament series wait for their bracket instead.\n- Bets on a series stalled for 60 minutes are refunded (tournament series excepted) - the series itself stays resumable.\n- During round 1 of each game, the client reports live points to the server. Betting locks once 2 total points have been scored in game 1 (a 1-1 counts) - or the moment any game of the series is decided.\n\n<color=#FFD94D><b>DISCONNECTS</b></color>\n\nWhat a DC does depends on the score, and it is judged by the player who STAYED:\n\n- You were at match point (4 rounds) when your opponent dropped: you win the game at the standing score.\n- 4-4: you take the game, recorded as 5-4.\n- Anywhere else - including an opponent who drops while AHEAD - the game is canceled. Nobody gets a win, nobody gets a loss.\n- Leaving a game to join your own queued ranked match is announced in advance and never counted against you.\n\nThe anti-abuse rules:\n\n- Only the player who stayed in the room and watched the other leave can claim a DC win. <color=#7FE87F>A leaver's own client can never award itself anything.</color>\n- If the opponent reconnects before you leave, the claim is dropped.\n- If BOTH players drop, nobody stayed to observe: no win, no leave mark. With a completed game on the board the series stays active and resumes whenever you next meet.\n- <color=#FF6666>A canceled game doesn't wipe the series</color> - completed games stand, and the series resumes as above.\n\n<color=#FFD94D><b>LEAVE PERCENT</b></color>\n\n- A ranked DC with meaningful play behind it (2 or more points, or a completed round, in the CURRENT game), with neither side at match point, is recorded as a leave against the leaver - at most one per player per series.\n- <color=#7FD4FF>Leave %</color> = ranked DCs divided by ranked series wins + losses + DCs. Under 5 percent shows green, 5 to under 15 amber, 15 and up red - visible to everyone on the leaderboard.\n- A DC at match point becomes a DC win for the other player instead, not a leave mark.\n\nFor the full is-this-recorded decision tree, see <color=#7FD4FF>When a game counts</color>.",
+  "Ranked 1v1 series",
   "Ranked DPS",
   "Ranked Damage per Second",
   "Ranked Form  <color={0}>{1}W-{2}L</color>",
@@ -1676,9 +1742,9 @@
   "Rare\u0004card rarity",
   "Rarest Hand",
   "Rarity",
+  "Rates",
   "Rating",
-  "Rating History  ({0} Elo)",
-  "Rating History  ({0} Elo, {1} games)",
+  "Rating History  ({0} Elo, {1} rating updates)",
   "Ratings & Rewards",
   "Ratings (Glicko-2)",
   "Ratings, gold and the series result all settle when someone takes their 2nd game.",
@@ -1687,6 +1753,7 @@
   "Reach 2330 rating in ranked (1v1 or 2v2)",
   "Ready Up",
   "Ready-up failed — retrying search",
+  "Reason",
   "Reason (optional)",
   "Reborn after defeat",
   "Recent Async Tournaments",
@@ -1721,10 +1788,18 @@
   "Render your name at 160% size.",
   "Render your name at 80% size.",
   "Rendering card art {0}/{1}...",
+  "Reply",
+  "Reply all",
+  "Reply all is not available for this message.",
+  "Reply to all",
+  "Report",
   "Report a bug",
   "Report approved for recovery - an ordered replay is still required.",
   "Report dismissed for good.",
   "Report failed to send - try again in a moment.",
+  "Report this message",
+  "Reported - thank you. A moderator will review it.",
+  "Request failed - try again.",
   "Requeue",
   "Reset the window",
   "Restore the vanilla random map color rotation.",
@@ -1746,6 +1821,9 @@
   "Rise from the Ashes",
   "Rising Star",
   "Riveted steel great-helm with a T-slit visor.",
+  "Rolling DPS (15 s window)",
+  "Rolling block % (15 s window)",
+  "Rolling hit % (15 s window)",
   "Rose",
   "Rose Quartz",
   "Rosetta",
@@ -1783,6 +1861,7 @@
   "Scarlet",
   "Score",
   "Score progression",
+  "Score race (points per game)",
   "Screen shake: <color={0}>{1}</color>",
   "Search Random",
   "Search Ranked",
@@ -1806,12 +1885,19 @@
   "Self-Death %",
   "Self-Inflicted Deaths % (boundary + own bullet)",
   "Self-awareness is a virtue.",
+  "Send",
   "Send a bug report straight to the mod team — description, severity, and optionally your game logs. Use the Preview button to see what gets attached.",
   "Send ping",
+  "Send report",
+  "Sending...",
+  "Sent",
+  "Sent.",
   "Series",
   "Series ID (UUID)",
   "Series Score: {0} - {1}",
   "Series complete: {0}",
+  "Series streak: them x{0}",
+  "Series streak: you x{0}",
   "Series {0}  vs {1}  (in progress)",
   "Series {0} (in progress)",
   "Series {0} {1}",
@@ -1820,10 +1906,12 @@
   "Series: {0}",
   "Server Alert...",
   "Server alert",
+  "Session",
   "Session Info",
   "Session Series: {0}",
   "Session games",
   "Session games ({0})",
+  "Session report",
   "Session series",
   "Session series ({0})",
   "Session {0}-{1}",
@@ -1832,6 +1920,7 @@
   "Set Active",
   "Set RefreshValid to false",
   "Set RefreshValid to true",
+  "Set summary",
   "Settings",
   "Severity:",
   "Shades for those who want to show that they are the true genius of the battlefield",
@@ -1846,6 +1935,7 @@
   "Shop listing name only - the Music tab and now-playing keep the compiled album name (max 64 chars)",
   "Shop sales",
   "Shortest Game",
+  "Shots",
   "Show Discord on leaderboard: <color=#888>link Discord first</color>",
   "Show Discord on leaderboard: <color=#88FF88>ON</color>",
   "Show Discord on leaderboard: <color=#FF9966>OFF</color>",
@@ -1853,7 +1943,7 @@
   "Show inactive players (90d+): <color=#88FF88>ON</color>",
   "Show inactive players (90d+): <color=#FF9966>OFF</color>",
   "Showing {0} of {1}",
-  "Showing: Elo over games",
+  "Showing: Elo",
   "Showing: {0}",
   "Shows a small bottom-left credit line naming the track and artist whenever a custom song starts.",
   "Shows community chat in the corner while you play. Press T to type a reply, or M in game to cycle normal / pinned / muted.",
@@ -1868,6 +1958,7 @@
   "Sienna",
   "Sign Up for Tournament",
   "Sign up to unlock force-start",
+  "Sign-in is not ready yet - try again in a moment.",
   "Sign-in still pending - try again in a moment.",
   "Signed up for tournament",
   "Signup failed",
@@ -1875,6 +1966,7 @@
   "Silence only: every other Silence produces a Refresh",
   "Silent Assassin",
   "Silly Drill",
+  "Since first",
   "Sinister Smile",
   "Size",
   "Skip MenuControllerHandler.Update during an active match.",
@@ -1908,6 +2000,7 @@
   "Sort:",
   "Sovereign",
   "Soviet",
+  "Spam",
   "Sparks",
   "Speacial eyes for the feline enthused",
   "Spectate is settling - try again in a moment.",
@@ -1938,7 +2031,9 @@
   "Status: <color=#FF9966>Denied</color> - mod runs offline. No data leaves your machine.",
   "Steam ID copied to clipboard",
   "Steam ID not ready yet — try again in a few seconds",
+  "Steam identity is not available yet",
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.",
+  "Steam sign-in is required to view session reports",
   "Steam sign-in still pending - try again in a moment.",
   "Steel Gradient",
   "Still joining - one moment...",
@@ -1959,6 +2054,7 @@
   "Strike through your name. Stackable with other name styles.",
   "Stun null-guard",
   "StunPlayer null-guard — stops NRE spam when a player is destroyed mid-stun.",
+  "Subject",
   "Submit",
   "Submit Report",
   "Submitting...",
@@ -1978,6 +2074,7 @@
   "Sync Finalist",
   "Synchronizing - viewing begins next battle",
   "Syncing...",
+  "System notices cannot be reported.",
   "T - open in-game chat",
   "TAB",
   "TAB (hold, in a match) - live scoreboard",
@@ -2012,12 +2109,15 @@
   "Team: <color=#FFB347>1</color>",
   "Team: Any",
   "Teams will rebalance next match!",
+  "Tell the moderators why. The message is attached to the report as it was sent.",
   "Thanks for testing the mod during beta. Free, removed after beta ends.",
   "Thanks!",
   "That FFA lobby is private — enter its password.",
   "That amounts to all my current understanding of Conditional damage. My model of what is going on behind the scenes is entirely a construction (I have not seen the source code), but it correctly predicts all currently tested behaviour, and I have been thorough. Still, there are limits: I do not know whether the RefreshValid bool is held by the attacker or the target - that is, whether every player has a cap on the Refreshes they can trigger for themselves, or every target has a cap on the Refreshes they can trigger for others. In a 1v1 this makes no difference, but in an FFA it would. If only there was a free-to-play type gamemode I could use to test this feature out!\n\n<color=#FFD94D><b>CONCLUSION</b></color>\n\nNow, as beautifully complex as this system is, I do have to ask how on earth the developers thought it would be a good idea. What is it supposed to be balancing? Why does the amount of damage dictate Refreshes? How was anyone supposed to know any of this? Questions only the warped mind who dreamt up this system can answer.\n\nI do appreciate the subtleties of the system, but from a gameplay perspective it is abominable. No real human is going to accurately calculate their RefreshValid state in the middle of a fight - that is, if you ever actually get a build where this information matters. The chances that my findings here will affect your next 30 matches range from low to non-existent. At the end of the day, the player experience this system produces is one of confusion, frustration, and randomness. Yet, all of that said, I would not want it changed. Why? Because if it was, the last week of my life would have been wasted.\n\nThank you for reading my ramblings. I hope you will at least find the table useful.\n\n<color=#8A8A93>Related reading: <color=#7FD4FF>Blocking</color> covers what a block actually does and which cards ride it; <color=#7FD4FF>Poison & damage over time</color> covers how tick damage lands and syncs.</color>",
   "That game is no longer live.",
+  "That player could not be found.",
   "That {0} lobby is private — enter its password.",
+  "That's you - pick someone else.",
   "The Bounce",
   "The Challenger",
   "The Comeback Kid",
@@ -2037,29 +2137,48 @@
   "The guarantee: only your nametag styling and the quick-chat phrases you send can ever reach a non-modded opponent.",
   "The host removed you from this lobby.",
   "The match is already running.",
+  "The message contains a word that is not allowed.",
+  "The message contains characters that are not allowed.",
+  "The message is too long ({0} characters max).",
+  "The message repeats one character too many times.",
   "The mod changes vanilla gameplay only where every player agreed to it. This page explains exactly how it decides, and what is guaranteed when you play with non-modded people.\n\n<color=#FFD94D><b>THE GUARANTEE</b></color>\n\n<color=#7FE87F>A non-modded player always gets pure vanilla gameplay, and any gate that can't prove a change is safe leaves it off.</color> Whole-room changes fail closed for everyone identically. The one per-player feature is poison sync, which follows the poisoned player - an unmodded victim's poison stays vanilla.\n\nIf the mod can't prove a feature is safe to run, it runs vanilla.\n\n<color=#FFD94D><b>HOW ROOMS ARE CLASSIFIED</b></color>\n\nMode-tied gameplay runs only in rooms the mod itself created, and the room's name says which mode issued it:\n\n- <color=#7FD4FF>ranked_</color> - 1v1 ranked queue rooms\n- <color=#7FD4FF>team_</color> (or the 2v2 room marker) - 2v2 rooms\n- <color=#7FD4FF>sct-</color> - sync tournament rooms\n- <color=#7FD4FF>ovt_</color> - 1v2 rooms\n- <color=#7FD4FF>ffa_</color> - FFA rooms, and only while the FFA lobby engine is actually active\n\nA public quickplay room or a normal 6-character room code matches none of these, so every mode-tied gameplay change stays off there.\n\n<color=#FFD94D><b>CAPABILITY GATES</b></color>\n\nChanges to the shared simulation go a step further: each player's mod advertises a capability tag BEFORE joining the room, so any client that can even see you has already received your tag. Then:\n\n- <color=#7FD4FF>Grow normalization</color>, <color=#7FD4FF>FFA map-object scaling</color> and the <color=#7FD4FF>FFA same-card dealer</color> require EVERY fighter's tag. <color=#7FE87F>One vanilla player, one outdated mod, or one player whose mod disabled itself switches the feature off for the whole room - symmetrically, on every screen at once.</color> Nobody plays by a different rule than their opponent.\n- <color=#7FD4FF>Poison sync</color> activates per victim, in any online room: a current victim's own client judges their poison; an unmodded victim's poison stays vanilla. The mixed-room details live in <color=#7FD4FF>Poison & damage over time</color>.\n- Spectators never count toward or against these checks.\n- If a feature's patch fails to install, that client never advertises the tag. If any other BepInEx mod is detected at startup, the whole mod disables itself and revokes its tags - full vanilla behavior.\n\n<color=#FFD94D><b>TWO KINDS OF FIXES</b></color>\n\nNot everything is gated, and the distinction matters:\n\n<color=#7FD4FF>Crash prevention</color> - always on, everywhere, quickplay included. These guards stop vanilla bugs like the frozen-inputs-at-match-found crash, the permanently dead Escape key, and the Phoenix revive crash. They change no rule: each one replaces a crash or a broken state with what the game intended.\n\n<color=#7FD4FF>Gameplay changes</color> - gated as above. Mode logic needs its mod-issued room; Grow and the FFA features need the full-room capability check; poison authority is per-victim as described.\n\nBetween the two sits a band of local repairs (re-registering vanilla's own broken bullet effects, clearing a stuck auto-fire flag between games) that run in any game - but these only repair your own screen's bookkeeping toward what the bullet's owner already decided. They never change a rule, and can't create a disagreement vanilla didn't already have. The full inventory is in <color=#7FD4FF>Bug fixes the mod ships</color>.\n\n<color=#FFD94D><b>QUICKPLAY WITH THE MOD</b></color>\n\nPlaying quickplay or a room code with the mod installed, you get vanilla rules plus tracking: your casual results and stats still record, and achievements can still unlock. <color=#8A8A93>A recovery guard can also restart a dead quickplay search for you - that is connection plumbing, not gameplay.</color>\n\nTwo fairness fixes can reach quickplay and room-code games: <color=#7FD4FF>Grow normalization</color> (every fighter current, everyone's Ranked on at connect - both sides always agree on it) and the per-victim poison sync, which follows the poisoned player wherever they play (see <color=#7FD4FF>Poison & damage over time</color> for the mixed-room details).\n\n<color=#7FE87F>And your opponent never has to know the mod is there unless you talk to them: the only things a non-modded player can ever see of it are nametag styling and quick-chat messages you send</color> (see <color=#7FD4FF>What unmodded players see</color>).",
   "The mod never rebinds anything - every vanilla control works exactly as it always has, and the competitive keys are added AROUND them. The board below shows every key that does something during competitive play: gold keys belong to the mod, blue keys to the base game, purple to both.",
   "The mod ships 50 achievements. Each unlocks exactly once per account and pays gold on the spot - <color=#7FE87F>100 gold</color> by default, up to <color=#7FE87F>1000</color> for the hardest; every line below shows its payout. Browse them under <color=#7FD4FF>My Stats - Achievements</color> in the F5 menu: each row shows the condition, your unlock date, the percentage of known mod players who have it, and its gold. Click a row to see who has earned it (the first 500, in unlock order).\n\n<color=#FFD94D><b>HOW THEY ARE CHECKED</b></color>\n\n- Two checkers exist. 14 achievements are judged by your own game the moment a game ends; the other 36 are judged by the server - most when a match, series or rating update lands, the three translator tiers when translation work is approved. <color=#8A8A93>Server-side unlocks can pop a moment after the game - that's normal.</color>\n- Client-checked achievements need a real online game. Sandbox, offline play and spectating never award anything.\n- Every condition tracker is per-game and resets when a new game starts - a rematch is a clean slate, so damage taken in game 1 can't spoil Untouchable in game 2. (Streak counters, by design, are the exception: they span games.)\n- The input trackers (Pacifist, Immovable Object, Grounded) only sample your keys while you are alive and fighting. Card picks, the pick phase and time spent dead never count against you, and neither does typing in the mod's chat or the F5 menu.\n- Client-checked achievements run in 1v1, 2v2 and 1v2 games. They never fire from FFA games - FFA has its own six, checked by the server.\n- A client-checked <color=#7FD4FF>sweep</color> means you win with the opponent on 0 rounds. In a room set to a shorter round target, a 3-0 still counts. <color=#FF6666>The server-checked 5-0 achievements demand the opponent on 0 with at least 5 rounds won.</color>\n\n<color=#FFD94D><b>CLIENT-CHECKED: PRECISION RUNS</b></color>\n\n- <color=#7FD4FF>Untouchable</color> - win a game in which your health never dropped, even once. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Pacifist</color> - win without ever holding the fire button during live combat. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Immovable Object</color> - win without ever holding a movement or jump key during live combat. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Grounded</color> - win without ever holding a jump key (Space, W, Up). <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Instinct</color> - win with 3 or more card picks, taking the pre-highlighted left-most card on every pick without ever moving the selection. <color=#8A8A93>Only checked in queue and sync-tournament rooms - room-code games, async tournament matches included, skip it.</color> <color=#7FE87F>100g</color>\n\n<color=#FFD94D><b>CLIENT-CHECKED: SWEEPS AND STUNTS</b></color>\n\n- <color=#7FD4FF>Silent Assassin</color> - sweep with Sneaky (or Sneaky Bullets) in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Total Mayhem</color> - sweep with Mayhem in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Fragile Perfection</color> - sweep with Glass Cannon in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>No Escape</color> - sweep with Chase in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Rise from the Ashes</color> - sweep with Phoenix in your build, without dying and without a Phoenix revive ever firing. <color=#7FE87F>500g</color>\n- <color=#7FD4FF>The Comeback Kid</color> - win after the rounds ever stood at you 0, opponent 4 or more. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Stacked Deck</color> - finish a game holding 5 or more copies of one card. No win required. <color=#7FE87F>300g</color>\n- <color=#7FD4FF>God Build</color> - win with Shields Up in your build, ending the game on a gun with 1 ammo or less that reloads in 1 second or less. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Into the Deep End</color> - take Abyssal Countdown as your FIRST pick of the game, trigger it in every round, and win. <color=#7FE87F>300g</color>\n\n<color=#FFD94D><b>SERVER-CHECKED 1v1 BUILDS</b></color>\n\nJudged from the reported match. You must be the game's winner unless a line says otherwise.\n\n- <color=#7FD4FF>Bullet Hell</color> - win 5-0 with Barrage in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Spray and Pray</color> - win 5-0 with Spray. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Demolitionist</color> - win 5-0 with Explosive Bullet. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Controlled Burst</color> - win 5-0 with Burst. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Field Medic</color> - win 5-0 with Healing Field. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Double Nova</color> - win with 2 or more Supernovas. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Lumberjack</color> - win with 2 or more Saws. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Pristine Perfection</color> - win with 2 or more copies of Pristine Perseverance. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Living on the Edge</color> - win with 2 or more Glass Cannons. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Silly Drill</color> - win with Sneaky and Drill together. <color=#7FE87F>300g</color>\n- <color=#7FD4FF>Sustained Power</color> - win with Empower and Healing Field together. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Collector</color> - win with 4 or more copies of any one card. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Clutch</color> - win after the score ever stood at 0 points for you against 6 or more for the opponent - that is, down 0-3 in rounds. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Twins!</color> - both players finish with exactly 5 cards each and identical builds, copy counts included. Both unlock it; nobody needs to win. <color=#7FE87F>500g</color>",
+  "The report could not be read",
+  "The report details are too long.",
+  "The report details contain characters that are not allowed.",
+  "The report details repeat one character too many times.",
+  "The report request could not be started",
   "The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\n\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\n\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\n- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)\n\n<color=#FFD94D><b>RANKED OR CASUAL</b></color>\n\n- Either player's Ranked toggle off in a room-code game - it plays as CASUAL. Still fully recorded with stats and XP; it never touches rating (see <color=#7FD4FF>How games are tracked</color>).\n- Opponent has never run the mod - always casual, never upgraded. (A live unfinished series from an earlier sitting is the one thing that keeps ranked status across a gap.)\n- Toggling Ranked off MID-SERIES does not void the series. The running best-of-3 is your consent record; its games stay ranked.\n- A game reported as casual is UPGRADED to ranked when the server can see both players are modded, both have Ranked on, and the sitting is live.\n- A ranked-banned participant forces a 1v1 casual at report time - even in a queue room, even mid-series. (The other modes shut banned players out at the door instead.)\n- Mod-issued rooms are consented by definition; queueing is consent. The ranked queue, 2v2 and tournaments rate; ranked FFA lobbies rate while casual ones don't; 1v2 records without rating.\n\n<color=#FFD94D><b>DISCONNECTS - 1V1</b></color>\n\n- You leave a game to join a queued ranked match - the game you left is canceled: nothing recorded, no leave logged.\n- Opponent DCs at 4-4 - you get the win, recorded 5-4.\n- Opponent DCs while you hold 4 rounds - you get the win at the standing score.\n- Any other DC - <color=#FF6666>the game is canceled and no result is recorded</color>, even when the leaver was ahead. Nobody gets a free win and nobody eats an unfair loss (the leave itself can still be logged - see below).\n- Ranked leave %: a DC is logged against the leaver when the CURRENT game had meaningful play (2 or more points scored, or a completed round) and neither side was at 4 rounds. One DC per player per series. The stat is your DCs divided by your ranked series played plus your DCs.\n- Casual rage quits: ANY mid-game leave in a casual 1v1 is logged, even at 4-0. It feeds the Rage Quit % stat (how often opponents walk out on you) - never rating. (A survivor already at 4 rounds still takes the casual win and its XP.)\n\n<color=#FFD94D><b>DISCONNECTS - 2V2 AND FFA</b></color>\n\n- 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.\n- Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.\n- FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.\n- FFA early-leave grace: a leaver who left before the field had scored 2 half points, with a zero tally of their own, is unrated for that game - nothing was decided yet.\n- An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.\n\n<color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>\n\n- <color=#7FE87F>An undecided best-of-3 resumes with no time limit.</color> Meet the same opponent tomorrow or next week and game 1 still stands. An expiry existed once - leavers waited it out to bank rating, so it was removed.\n- Rating moves ONLY when a series completes (first to 2 game wins). Games of a series that never completes keep their match rows, XP and gold; the rating change just never happens.\n- A series with no game recorded 30 minutes after it was created is abandoned and its bets are refunded.\n- A mid-series stall of an hour refunds the bets, but the series itself stays active and resumable.\n- Tournament series are exempt from this pruning - the bracket owns their lifecycle. A tournament match decided by forfeit can't be bet on.\n\n<color=#FFD94D><b>THROWN OUT AFTER THE FACT</b></color>\n\n- The one AUTOMATIC invalidation in the whole mod: a repeated pattern of implausibly short matches between the same two players inside a short window. The current match AND the earlier short ones are invalidated together, their gold and XP reversed, their series voided.\n- Admin reversal: an admin can void a series - rating changes subtracted, gold clawed back, every match in it invalidated, unsettled bets refunded. Invalidated matches disappear from every board and stat.\n- Quarantine (2v2 and FFA): a report that arrives for a lobby that's no longer active isn't deleted - it's held for admin review, and an admin can still accept it into the record or discard it.\n\n<color=#FFD94D><b>IF THE REPORT CAN'T SEND</b></color>\n\n- A failed report goes to a persistent outbox: retried in the background and saved to disk, so it's re-sent on your next launch even if you quit right after the game. You'll see 'Couldn't record the match - retrying in the background', then 'Match recorded' when it lands.\n- 1v1 reporter crashes before the report exists - the surviving opponent's disconnect path usually records the result instead.\n- FFA elects its reporter among the players still present, so a crashed reporter is never elected. A winner who quits before the report is still recorded from their frozen tallies.\n- A 2v2 game that ends without its series id retries the lookup and defers the send; if that also fails, the game is not recorded.",
   "The same actions in a different order",
   "The selected cosmetic is still loading.",
+  "The server refused this request ({0}).",
+  "The subject contains characters that are not allowed.",
+  "The subject is too long ({0} characters max).",
+  "The subject must be a single line.",
+  "The subject repeats one character too many times.",
   "The white line is your rating; the band is the rating deviation - it shrinks as you play, and your rating moves less once it is narrow.",
   "They already left the lobby.",
   "They/them",
   "Thicker menu text. Uses the game's own font at a heavier weight - not a different typeface.",
   "Thicker menu text: <color=#88FF88>ON</color>",
   "Thicker menu text: <color=#FF9966>OFF</color>",
+  "This account cannot send mail.",
+  "This account is not ready for mail yet - try again later.",
   "This account isn't registered as an artist.",
   "This is so sad. Please give this man a break",
   "This mod sends data to a private server run by the mod author to power the leaderboard and ranked matchmaking.\n\nWhat gets recorded if you allow:\n  • Your Steam ID and in-game display name\n  • Your Discord ID and username, ONLY if you link your Discord via the in-game link code\n  • Each match you play: rounds won, points, duration, cards picked, cards offered, opponent\n  • Your Glicko-2 rating history\n\nWhat you can do later:\n  • Revoke consent anytime (F5 → Settings → Revoke). Reporting stops.\n  • Delete your data (F5 → Settings → Delete my data). Steam ID, display name, and Discord link are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\nChoose Allow to use the leaderboard. Choose Decline to run the mod fully offline.",
   "This release only ships a zip — opening the releases page to update manually",
+  "This report is not available",
   "Thorn Crown",
   "Three orbiting spheres of raw energy. ANIMATED.",
   "Thunderstore",
   "Tidepool",
+  "Tie",
   "Tier",
   "Time to show them who is the coolest dude around! A pair of glasses that takes up the eye slot",
   "Time's up - {0} picked automatically.",
+  "Timeline",
   "Times Offered",
   "Times Picked",
   "Times offered",
@@ -2069,6 +2188,13 @@
   "Titan",
   "Titles",
   "Titles are the short labels that render beside your name across the mod - leaderboard rows, Recent Series, Records, Compare, and every T-chat message you send. You can own any number of them, but only one is active at a time: pick it in the Shop tab with <color=#7FD4FF>Set Active</color>.\n\n<color=#FFD94D><b>CURRENT RANK - FREE FOR EVERYONE</b></color>\n\n<color=#7FD4FF>Current Rank</color> costs 0 gold and sits in the shop for every player. It's dynamic: wherever it renders, it shows your live 1v1 rank name in that rank's color, resolved fresh at render time. Rank up and the title upgrades itself; rank down and it follows you there too. The ladder behind it runs 25 rungs, from Beginner I at 0 rating to Grand Master V at 2610.\n\n<color=#FFD94D><b>PODIUM TITLES</b></color>\n\nThere are three podium titles, one per ranked ladder: 1v1, 2v2 and FFA. Each is granted the moment you enter that board's visible top 3, and taken back the moment you fall out of it <color=#8A8A93>(the position check runs on a cached board, so both directions can trail the actual standings by a minute or two)</color>. A board only lists players who have at least one counted series - or, for FFA, one recorded game - so a fresh account can't hold a podium.\n\nThe rendering is the interesting part:\n\n- While you hold a podium spot, the title renders live as <color=#FFD700>1st Place</color>, <color=#C0C0C0>2nd Place</color> or <color=#CD7F32>3rd Place</color> in gold, silver or bronze - always your CURRENT position, with a 1v1, 2v2 or FFA prefix everywhere except that ladder's own board.\n- <color=#FF6666>Off the podium, the title leaves your inventory entirely</color> until you climb back into the top 3. You hold it exactly as long as you hold the spot.\n\nPodium titles never rotate on a schedule and can never be bought. The only way in is the top 3.\n\n<color=#FFD94D><b>SLAYER TITLES</b></color>\n\nTwo legendary trophies for beating the names on the door:\n\n<color=#7FD4FF>Sid Slayer</color> - win a completed ranked 1v1 series where Sid is the loser. Renders <color=#FF4655>red</color>.\n<color=#7FD4FF>Stan Slayer</color> - win a completed ranked 1v1 series where Stan is the loser. Renders <color=#00E5FF>cyan</color>.\n\nEach arrives attached to its achievement, which also pays <color=#7FE87F>1000 gold</color> (see <color=#7FD4FF>Achievement guide</color>). Taking a single game off them isn't enough - the series has to complete with you as the winner.\n\n<color=#FFD94D><b>TRANSLATOR TITLES</b></color>\n\nVerified translation work through the translation portal earns three tiers. The unit is a live string: an approved translation where you were the proposer or the reviewer - doing both jobs on the same string still counts once.\n\n<color=#7FD4FF>Rosetta</color> (rare) - 10 live strings. Pays 100 gold.\n<color=#7FD4FF>Dragoman</color> (epic) - 100 live strings. Pays 300 gold.\n<color=#7FD4FF>Babel</color> (legendary) - 1000 live strings. Pays 1000 gold.\n\n<color=#FFD94D><b>PURCHASED TITLES</b></color>\n\nRegular titles sit in the shop with a gold price and work like any other cosmetic: buy once, own forever, wear it whenever you feel like it.\n\n<color=#FFD94D><b>EQUIPPING AND WHERE TITLES SHOW</b></color>\n\n- Earned titles (podium, slayer, translator) are hidden from the public shop listing, but every one YOU own appears in your own shop view with its Set Active button. <color=#FF6666>Buying them is always refused</color> - earning the moment is the only currency they accept.\n- Equipping a new title replaces the old one; titles never stack.\n- Titles show on the mod's own surfaces: the leaderboard, Recent Series, Records, Compare, the stats panels, your T-chat messages (in the title's color), and the Discord chat bridge.\n- Titles do NOT appear on the overhead in-game nametag, and players without the mod never see them - every title surface lives in the mod's UI or on Discord.",
+  "To: {0}",
+  "To: {0} and {1} others",
+  "Too many messages - try again in {0} hours.",
+  "Too many messages - try again in {0} minutes.",
+  "Too many messages - try again in {0} seconds.",
+  "Too many messages - wait a minute and try again.",
+  "Too many recipients for one message.",
   "Top Pickers",
   "Top Streaks",
   "Top Winners",
@@ -2077,6 +2203,7 @@
   "Total Mayhem",
   "Total XP",
   "Total: {0} ({1}W / {2}L)  <color=#FFD94D>Gold: {3}</color>",
+  "Totals",
   "Touch Grass",
   "Tournament Bets",
   "Tournament in progress - your next match will connect automatically. Keep ROUNDS open.",
@@ -2113,6 +2240,7 @@
   "Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 240 FPS growth clock.",
   "Unban",
   "Unblock",
+  "Unblocked {0}.",
   "Unclosed quote — usage: /report \"Multi Word Name\" [reason]",
   "Uncommon",
   "Uncommon\u0004card rarity",
@@ -2140,6 +2268,8 @@
   "Update failed — couldn't start the updater. Update manually from GitHub.",
   "Update failed — that release has no download attached. Update manually from GitHub.",
   "Update failed — the download didn't finish. Try again.",
+  "Update the mod to use mail.",
+  "Updates",
   "Upload a Cosmetic...",
   "Usage: /report [name] [reason]",
   "Usage: /report [name] [reason]  (quote multi-word names: /report \"Bad Actor\" reason)",
@@ -2188,9 +2318,14 @@
   "Which channel for {0}?",
   "Which language for {0}?",
   "White Cursor",
+  "Who can mail me: <color=#88FF88>Everyone</color>",
+  "Who can mail me: <color=#FF9966>Nobody</color>",
+  "Who can mail me: <color=#FFD94D>People I have played</color>",
+  "Who may send you in-game mail. Blocked senders never reach you.",
   "Who picks these cards the most",
   "Why are they being muted?",
   "Why is {0} being muted?",
+  "Win",
   "Win %",
   "Win 100 casual games in a row",
   "Win 100 ranked series in a row",
@@ -2246,6 +2381,7 @@
   "Worst Cards",
   "Wrap your name in <b>bold</b>. Stackable with other name styles.",
   "Wrap your name in <i>italic</i>. Stackable with other name styles.",
+  "Write a message first.",
   "Wrong password - try again",
   "Wrong password — try again.",
   "XL Name",
@@ -2257,7 +2393,10 @@
   "Yellow Cursor",
   "Yes",
   "Yin & Yang",
+  "You",
+  "You are muted - mail is unavailable while the mute lasts.",
   "You can't kick yourself.",
+  "You cannot block yourself.",
   "You don't own any dances yet - check the Shop's DANCES section!",
   "You should join Competitive Rounds, it's a discord community",
   "You show up.",
@@ -2270,6 +2409,7 @@
   "Your FFA lobby closed.",
   "Your FFA match continued without you - you've been removed from it.",
   "Your Hit Rate",
+  "Your block list is full - unblock someone first.",
   "Your game is dropping frames (worst {0} ms)",
   "Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>",
   "Your message was removed and you are muted for {0} minutes (auto-moderation).",
@@ -2321,8 +2461,12 @@
   "confirmed - admin tools: ban, reversal",
   "cursor color",
   "custom 2v2 lobby",
+  "date ->",
+  "days since first rating update ->",
   "default orange / blue",
   "discord.gg/comp-rounds",
+  "dmg",
+  "dmg/s",
   "does not trigger",
   "duo",
   "duo: the whole right half",
@@ -2338,14 +2482,15 @@
   "final 24h check-in",
   "finished series: result stands",
   "first team to 2 games",
+  "fps",
   "game 1 starts",
   "game in last 45 min: wait",
   "game server relay",
-  "games ->",
   "impossibly fast series",
   "invalidated outright, gold and XP reversed",
   "is elected reporter",
   "jump within 0.1s: up and away",
+  "just now",
   "kill boundary",
   "legendary",
   "level",
@@ -2361,18 +2506,23 @@
   "nametag",
   "no - casual",
   "no - stop",
+  "no build recorded for these games",
   "no card data",
+  "no cards recorded",
   "no data",
   "no data yet",
   "no debt, no double buys",
   "no direct PC link",
   "no opponent has taken 3+ series from them",
   "no profit at these odds",
+  "no rating or gold recorded for this set",
   "nobody - your screen only, never networked",
   "nobody yet",
   "none yet",
   "not blocking: 51 damage + return impulse",
   "not enough data (4+ picks)",
+  "not recorded (older block format)",
+  "not recorded for this mode",
   "nothing",
   "nothing - vanilla has no surface for them",
   "now: <b>{0}</b>",
@@ -2403,9 +2553,11 @@
   "point won",
   "press",
   "private",
+  "pts",
   "ranked 1v1 series vs anyone in the selection, minimum 5 series",
   "ranked or casual",
   "rare",
+  "rating updates ->",
   "recent: worst frame {0} ms  resends {1}  discards {2}",
   "recently online",
   "recordable setting?",
@@ -2413,13 +2565,17 @@
   "regular (converged)",
   "replica age est. n/a",
   "replica age est. {0} ms one-way (peer-reported input)",
+  "report version {0} - some panels may be missing",
   "reset if LB wins",
+  "rolled out: {0}",
   "room code",
   "room type?",
   "same-card",
   "series created",
   "series ends",
   "short-match farming pattern",
+  "showing the newest {0} games of this sitting",
+  "showing the newest {0} games of this sitting ({1} not shown)",
   "showing {0} of {1}",
   "solo: the outer-left point",
   "stackable",
@@ -2462,25 +2618,31 @@
   "{0}  {1}%  ({2} picks)",
   "{0} ({1} ratings, {2} listeners)",
   "{0} + {1} more",
+  "{0} - {1} games - {2} played",
   "{0} / {1} unlocked",
   "{0} <b>won</b> {1}-{2}",
   "{0} Block Rate",
   "{0} Blocks",
+  "{0} GOT A POINT",
+  "{0} GOT HALF A POINT",
   "{0} Hit Rate",
   "{0} active players (90d)",
   "{0} and {1} more",
   "{0} can now translate {1}.",
+  "{0} d ago",
   "{0} days ago",
   "{0} dps",
   "{0} elo",
   "{0} games    {1}W - {2}L    {3}",
   "{0} games  {1} wins  Top3 {2}%  Avg place {3}",
+  "{0} h ago",
   "{0} half-point events",
   "{0} item(s), {1} cop(ies) out there.",
   "{0} keys/s",
   "{0} kills   {1} dmg",
   "{0} lost {1}",
   "{0} matches ({1}W / {2}L)  WR: {3}%",
+  "{0} min ago",
   "{0} months ago",
   "{0} of {1} left",
   "{0} of {1} players",
@@ -2496,6 +2658,7 @@
   "{0} total",
   "{0} tracks",
   "{0} tracks - {1} - {2}",
+  "{0} unread",
   "{0} weeks ago",
   "{0} winning picks",
   "{0} wins the game!",
@@ -2504,6 +2667,9 @@
   "{0}-player FFA starting in 5 seconds!",
   "{0}: <color=#888>(not bound)</color>",
   "{0}: <color=#FF9966>OFF</color>",
+  "{0}: rating {1}",
+  "{0}: rating {1} -> {2} ({3})",
+  "{0}: {1} gold",
   "{0}h ago",
   "{0}ms opp (peer-reported)"
  ],
@@ -2728,6 +2894,11 @@
    "location": "RefreshTournaments",
    "kind": "TrF"
   },
+  "+ Add": {
+   "surface": "MailUI",
+   "location": "BuildComposerView",
+   "kind": "Tr"
+  },
   "+ {0} more artists": {
    "surface": "NativeUI",
    "location": "BuildCompareShopSalesPanel",
@@ -2736,6 +2907,11 @@
   "+{0} gold": {
    "surface": "ApiClient",
    "location": "ReportMatch",
+   "kind": "TrF"
+  },
+  "+{0} more": {
+   "surface": "MailUI, SessionReportModel",
+   "location": "AddresseeNames, FfaScoreLabel",
    "kind": "TrF"
   },
   "+{0} more bets": {
@@ -2803,6 +2979,16 @@
    "location": "RefreshMatchStatusCache",
    "kind": "TrF"
   },
+  "1v2 as duo": {
+   "surface": "ProfileCard",
+   "location": "Render",
+   "kind": "Tr"
+  },
+  "1v2 as solo": {
+   "surface": "ProfileCard",
+   "location": "Render",
+   "kind": "Tr"
+  },
   "1v2 lobby never filled — returning to menu. Requeue when ready.": {
    "surface": "GameStateWatcher",
    "location": "PollRoomState",
@@ -2836,6 +3022,11 @@
   "2V2: ONE SERIES, TWO TEAMS": {
    "surface": "InfoViz",
    "location": "BuildTeamFormat",
+   "kind": "Tr"
+  },
+  "2v2 (opposite teams)": {
+   "surface": "ProfileCard",
+   "location": "Render",
    "kind": "Tr"
   },
   "2v2 - How It Works": {
@@ -2974,9 +3165,9 @@
    "kind": "CreateButton"
   },
   "< Prev": {
-   "surface": "NativeUI",
-   "location": "BuildAchievementsTab, BuildLeaderboardTab, BuildMyStatsTab",
-   "kind": "CreateButton"
+   "surface": "NativeUI, SessionReportView",
+   "location": "BuildAchievementsTab, BuildLeaderboardTab, BuildMyStatsTab +1",
+   "kind": "CreateButton, Tr"
   },
   "<b>2v2 Leaderboard</b>": {
    "surface": "NativeUI",
@@ -3481,6 +3672,16 @@
   "<color=#7788AA><i>search...</i></color>": {
    "surface": "CompetitiveUI",
    "location": "DrawInfoSearch, DrawPickerSearch",
+   "kind": "Tr"
+  },
+  "<color=#7788AA><i>subject</i></color>": {
+   "surface": "MailUI",
+   "location": "DrawComposerFields",
+   "kind": "Tr"
+  },
+  "<color=#7788AA><i>write your message... (plain text, no formatting)</i></color>": {
+   "surface": "MailUI",
+   "location": "DrawComposerFields",
    "kind": "Tr"
   },
   "<color=#7FD4FF>1v2 History</color>": {
@@ -4873,15 +5074,30 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Add a subject.": {
+   "surface": "MailClient, MailUI",
+   "location": "ErrorDetail, SendCurrent",
+   "kind": "Tr"
+  },
   "Add an underline to your name. Stackable with other name styles.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Add at least one recipient.": {
+   "surface": "MailClient, MailUI",
+   "location": "ErrorDetail, SendCurrent",
+   "kind": "Tr"
+  },
   "Add extra character spacing.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Add recipient": {
+   "surface": "MailUI",
+   "location": "AddRecipient",
+   "kind": "Tr"
   },
   "Adjust Placement...": {
    "surface": "NativeUI",
@@ -5028,6 +5244,11 @@
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
   },
+  "Already a recipient.": {
+   "surface": "MailUI",
+   "location": "AddRecipient",
+   "kind": "Tr"
+  },
   "Amber": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -5067,6 +5288,11 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
+  },
+  "Announcement": {
+   "surface": "MailUI",
+   "location": "PaintReader, RowLabel",
+   "kind": "Tr"
   },
   "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and histories aren't affected. You will no longer appear on leaderboards.\n<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches from this account will show as [Deleted User] and won't count toward stats.": {
    "surface": "NativeUI",
@@ -5183,6 +5409,11 @@
    "location": "BuildCompareBarChart",
    "kind": "Tr"
   },
+  "Average game length: {0}": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "TrF"
+  },
   "Avg Cards / Game": {
    "surface": "NativeUI",
    "location": "TrMetric",
@@ -5247,6 +5478,11 @@
    "surface": "ApiClient, shop catalog",
    "location": "AchievementDefs, cosmetic name/description",
    "kind": "shop, table"
+  },
+  "Back": {
+   "surface": "MailUI",
+   "location": "BuildReaderView",
+   "kind": "Tr"
   },
   "Back in the Quick Match queue — searching for an opponent.": {
    "surface": "GameStateWatcher",
@@ -5463,6 +5699,11 @@
    "location": "BuildCompareBarChart",
    "kind": "Tr"
   },
+  "Block %": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "Tr"
+  },
   "Block CD": {
    "surface": "TabStatsOverlay",
    "location": "EnsureLocaleStrings",
@@ -5493,9 +5734,39 @@
    "location": "AddPairCell, BuildCells2v2Game, BuildCellsFfaGame",
    "kind": "TrF"
   },
+  "Block sender": {
+   "surface": "MailUI",
+   "location": "BuildReaderView",
+   "kind": "Tr"
+  },
   "Block {0}%": {
    "surface": "NativeUI, PostSessionReport",
    "location": "BuildFfaRecentRowText, FillRow, SideStats",
+   "kind": "TrF"
+  },
+  "Block {0}? Their mail will no longer reach you. You can unblock them in Settings.": {
+   "surface": "MailUI",
+   "location": "BlockCurrentSender",
+   "kind": "TrF"
+  },
+  "Blocked senders ({0})": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "TrF"
+  },
+  "Blocked senders: loading...": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Blocked senders: show": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Blocked {0}.": {
+   "surface": "MailUI",
+   "location": "BlockCurrentSender",
    "kind": "TrF"
   },
   "Blocking": {
@@ -5504,8 +5775,8 @@
    "kind": "Tr"
   },
   "Blocks": {
-   "surface": "TabStatsOverlay",
-   "location": "EnsureLocaleStrings",
+   "surface": "SessionReportModel, TabStatsOverlay",
+   "location": "BuildTotals, EnsureLocaleStrings",
    "kind": "Tr"
   },
   "Blood Gradient": {
@@ -5668,6 +5939,11 @@
    "location": "BuildStatsTipBlock",
    "kind": "Tr"
   },
+  "Builds": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "Builds that stacked 2+ copies (all players)": {
    "surface": "NativeUI",
    "location": "BuildCompareCardMetric",
@@ -5768,6 +6044,11 @@
    "location": "BugChoiceLabel",
    "kind": "Tr"
   },
+  "Calendar": {
+   "surface": "RatingGraphAxis",
+   "location": "Label",
+   "kind": "Tr"
+  },
   "Calm forest-green tint with low saturation.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -5784,8 +6065,8 @@
    "kind": "ShowNotification"
   },
   "Cancel": {
-   "surface": "CompetitiveUI, NativeUI",
-   "location": "BuildRankedRow, BuildSettingsTab, DrawAdminPrompt +7",
+   "surface": "CompetitiveUI, MailUI, NativeUI",
+   "location": "BuildRankedRow, BuildSettingsTab, DrawAdminPrompt +8",
    "kind": "CreateButton, Tr"
   },
   "Cannot spectate: {0}": {
@@ -5859,13 +6140,18 @@
    "kind": "shop"
   },
   "Casual": {
-   "surface": "NativeUI",
-   "location": "BuildCardStatsTab, RefreshFfaTab",
+   "surface": "NativeUI, SessionReportModel",
+   "location": "BuildCardStatsTab, KindLabel, RefreshFfaTab",
    "kind": "SetText, Tr"
   },
   "Casual (games)": {
    "surface": "NativeUI",
    "location": "BuildCompareBarChart",
+   "kind": "Tr"
+  },
+  "Casual 1v1": {
+   "surface": "ProfileCard",
+   "location": "ModeName, Render",
    "kind": "Tr"
   },
   "Casual Conqueror": {
@@ -6139,8 +6425,8 @@
    "kind": "CreateText"
   },
   "Close": {
-   "surface": "CompetitiveUI, NativeUI",
-   "location": "DrawLogViewerModal, ShowPicker, ShowRecentTournamentsPopup +1",
+   "surface": "CompetitiveUI, NativeUI, SessionReportView",
+   "location": "DrawFooter, DrawLogViewerModal, ShowPicker +2",
    "kind": "CreateButton, Tr"
   },
   "Clown": {
@@ -6328,6 +6614,16 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Copied to clipboard.": {
+   "surface": "MailUI",
+   "location": "CopyCurrent",
+   "kind": "Tr"
+  },
+  "Copy": {
+   "surface": "MailUI",
+   "location": "BuildReaderView",
+   "kind": "Tr"
+  },
   "Coral": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6387,6 +6683,16 @@
    "surface": "SpectatorJoiner",
    "location": "Fail",
    "kind": "Tr"
+  },
+  "Could not load this report": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
+   "kind": "Tr"
+  },
+  "Could not load this report (error {0})": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
+   "kind": "TrF"
   },
   "Could not open that cosmetic preview.": {
    "surface": "CompetitiveUI",
@@ -6649,8 +6955,13 @@
    "kind": "Tr"
   },
   "Damage": {
-   "surface": "TabStatsOverlay",
-   "location": "EnsureLocaleStrings",
+   "surface": "SessionReportModel, TabStatsOverlay",
+   "location": "BuildTotals, EnsureLocaleStrings",
+   "kind": "Tr"
+  },
+  "Damage dealt (cumulative per game)": {
+   "surface": "SessionReportModel",
+   "location": "Build",
    "kind": "Tr"
   },
   "Damage types & buffs": {
@@ -6698,6 +7009,16 @@
    "location": "BuildSettingsTab",
    "kind": "CreateText"
   },
+  "Data sharing is disabled in your settings": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
+   "kind": "Tr"
+  },
+  "Data sharing is off - allow it in Settings to use mail.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "Date Earned": {
    "surface": "NativeUI",
    "location": "BuildAchievementsTab",
@@ -6731,6 +7052,11 @@
   "Deal damage": {
    "surface": "InfoViz",
    "location": "BuildRefreshFlow, TextFallback",
+   "kind": "Tr"
+  },
+  "Deaths": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
    "kind": "Tr"
   },
   "Decent": {
@@ -6813,6 +7139,11 @@
    "location": "RefreshTournaments",
    "kind": "TrF"
   },
+  "Delete": {
+   "surface": "MailUI",
+   "location": "BuildReaderView",
+   "kind": "Tr"
+  },
   "Delete Chat Message...": {
    "surface": "NativeUI",
    "location": "BuildAdminTab",
@@ -6837,6 +7168,11 @@
    "surface": "NativeUI",
    "location": "OpenChatDeletePicker",
    "kind": "ShowInfoPopup"
+  },
+  "Delete this message?": {
+   "surface": "MailUI",
+   "location": "DeleteCurrent",
+   "kind": "Tr"
   },
   "Demolitionist": {
    "surface": "ApiClient",
@@ -6883,6 +7219,11 @@
    "location": "BuildAdminFlagRow",
    "kind": "CreateButton"
   },
+  "Details (optional)": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "Tr"
+  },
   "Devil Horns": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6904,9 +7245,14 @@
    "kind": "CreateButton"
   },
   "Discard": {
-   "surface": "NativeUI",
-   "location": "BuildAdminQuarantineRow",
-   "kind": "CreateButton"
+   "surface": "MailUI, NativeUI",
+   "location": "BuildAdminQuarantineRow, BuildComposerView",
+   "kind": "CreateButton, Tr"
+  },
+  "Discard this draft?": {
+   "surface": "MailUI",
+   "location": "DiscardCurrent",
+   "kind": "Tr"
   },
   "Disco Fever": {
    "surface": "shop catalog",
@@ -7153,12 +7499,7 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
-  "Elo over games": {
-   "surface": "NativeUI",
-   "location": "TrMetric",
-   "kind": "Tr"
-  },
-  "Elo over time": {
+  "Elo": {
    "surface": "NativeUI",
    "location": "TrMetric",
    "kind": "Tr"
@@ -7349,8 +7690,13 @@
    "kind": "Tr"
   },
   "FFA": {
-   "surface": "InfoLibrary, NativeUI",
-   "location": "(file scope)",
+   "surface": "InfoLibrary, NativeUI, ProfileCard +1",
+   "location": "(file scope), KindLabel, ModeName",
+   "kind": "Tr"
+  },
+  "FFA (placed above / below)": {
+   "surface": "ProfileCard",
+   "location": "Render",
    "kind": "Tr"
   },
   "FFA - How It Works": {
@@ -7393,12 +7739,7 @@
    "location": "BuildCompareBarChart",
    "kind": "Tr"
   },
-  "FFA Elo over games": {
-   "surface": "NativeUI",
-   "location": "TrMetric",
-   "kind": "Tr"
-  },
-  "FFA Elo over time": {
+  "FFA Elo": {
    "surface": "NativeUI",
    "location": "TrMetric",
    "kind": "Tr"
@@ -7479,8 +7820,8 @@
    "kind": "Tr"
   },
   "FPS": {
-   "surface": "PostSessionReport",
-   "location": "BuildCells1v1, BuildCells2v2Game, BuildCellsFfaGame",
+   "surface": "PostSessionReport, SessionReportModel",
+   "location": "Build, BuildCells1v1, BuildCells2v2Game +1",
    "kind": "Tr"
   },
   "FPS counter: <color=#88FF88>ON</color>": {
@@ -7713,6 +8054,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "From:": {
+   "surface": "MailUI",
+   "location": "PaintReader",
+   "kind": "Tr"
+  },
   "Frost": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -7784,8 +8130,8 @@
    "kind": "Tr"
   },
   "Game {0}": {
-   "surface": "NativeUI, PostSessionReport",
-   "location": "BuildBracketHoverBody, BuildFfaRecentRowText, BuildOvtRecentRowText +1",
+   "surface": "NativeUI, PostSessionReport, SessionReportModel",
+   "location": "Build, BuildBracketHoverBody, BuildFfaRecentRowText +4",
    "kind": "TrF"
   },
   "Game {0}   {1} players": {
@@ -7806,6 +8152,21 @@
   "Game {0} score progression": {
    "surface": "NativeUI",
    "location": "ParseFfaTimeline",
+   "kind": "TrF"
+  },
+  "Game {0}: solo {1}-{2} duo": {
+   "surface": "SessionReportModel",
+   "location": "TeamScoreLabel",
+   "kind": "TrF"
+  },
+  "Game {0}: team 1 {1}-{2} team 2": {
+   "surface": "SessionReportModel",
+   "location": "TeamScoreLabel",
+   "kind": "TrF"
+  },
+  "Game {0}: {1}": {
+   "surface": "SessionReportModel",
+   "location": "FfaScoreLabel",
    "kind": "TrF"
   },
   "Game {0}: {1}-{2}": {
@@ -8103,6 +8464,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Harassment": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "Tr"
+  },
   "Hard to hit": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -8211,6 +8577,11 @@
   "Hit": {
    "surface": "NativeUI",
    "location": "BuildCompareBarChart",
+   "kind": "Tr"
+  },
+  "Hit %": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
    "kind": "Tr"
   },
   "Hit % vs Block %": {
@@ -8428,6 +8799,16 @@
    "location": "RefreshSettings",
    "kind": "SetText"
   },
+  "Inbox": {
+   "surface": "MailUI",
+   "location": "BuildHeader, PaintNav",
+   "kind": "Tr"
+  },
+  "Inbox ({0})": {
+   "surface": "MailUI",
+   "location": "PaintNav",
+   "kind": "TrF"
+  },
   "Indigo Name": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -8568,10 +8949,20 @@
    "location": "TrMetric",
    "kind": "Tr"
   },
+  "Keys/s": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "Tr"
+  },
   "Kick": {
    "surface": "NativeUI",
    "location": "CreateLobbyMemberRow",
    "kind": "CreateButton"
+  },
+  "Kills": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "Tr"
   },
   "Kingslayer": {
    "surface": "shop catalog",
@@ -8688,6 +9079,11 @@
    "location": "Phrases",
    "kind": "table"
   },
+  "Last met: {0}  -  {1}  -  {2}": {
+   "surface": "ProfileCard",
+   "location": "Render",
+   "kind": "TrF"
+  },
   "Last played {0} · H2H {1}-{2} · Ranked series {3}": {
    "surface": "H2HSummary",
    "location": "BuildLine",
@@ -8696,6 +9092,11 @@
   "Last played {0} · also played today · H2H {1}-{2} · Ranked series {3}": {
    "surface": "H2HSummary",
    "location": "BuildLine",
+   "kind": "TrF"
+  },
+  "Last seen {0}": {
+   "surface": "ProfileCard",
+   "location": "Render",
    "kind": "TrF"
   },
   "Latest Releases": {
@@ -8919,9 +9320,9 @@
    "kind": "Tr"
   },
   "Loading...": {
-   "surface": "NativeUI",
-   "location": "BuildCompareCardLeaders, BuildCompareCardMetric, BuildCompareCardPickers +16",
-   "kind": "CreateText, SetText, Tr"
+   "surface": "MailUI, NativeUI, SessionReportView",
+   "location": "BuildCompareCardLeaders, BuildCompareCardMetric, BuildCompareCardPickers +19",
+   "kind": "CreateButton, CreateText, SetText +1"
   },
   "Locks the map to ROUNDS' Gold palette (warm yellow).": {
    "surface": "shop catalog",
@@ -8968,6 +9369,11 @@
    "location": "RefreshTournaments",
    "kind": "Tr"
   },
+  "Loss": {
+   "surface": "ProfileCard",
+   "location": "ResultName",
+   "kind": "Tr"
+  },
   "Lost": {
    "surface": "NativeUI",
    "location": "BuildCompareBarChart",
@@ -9009,8 +9415,8 @@
    "kind": "table"
   },
   "Lv {0}": {
-   "surface": "NativeUI",
-   "location": "BuildCompareBarChart",
+   "surface": "NativeUI, ProfileCard",
+   "location": "BuildCompareBarChart, Render",
    "kind": "TrF"
   },
   "M - cycle the chat overlay mode": {
@@ -9072,6 +9478,21 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Mail": {
+   "surface": "MailUI, NativeUI",
+   "location": "(file scope), BuildHeader, TabLabel",
+   "kind": "CreateText, Tr"
+  },
+  "Mail ({0})": {
+   "surface": "MailUI",
+   "location": "TabLabel",
+   "kind": "TrF"
+  },
+  "Mail needs a secure connection to the server - it is unavailable on this connection.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
   },
   "Main menu music: Default = ROUNDS' own theme, My playlist = your selected custom music, None = silence. Matches always use your picks.": {
    "surface": "NativeUI",
@@ -9307,6 +9728,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "More": {
+   "surface": "MailUI",
+   "location": "PaintList",
+   "kind": "CreateButton, Tr"
   },
   "More ranked than not.": {
    "surface": "shop catalog",
@@ -9593,6 +10019,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Net rating vs them: {0}": {
+   "surface": "ProfileCard",
+   "location": "Render",
+   "kind": "TrF"
+  },
   "Netcode & Photon": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -9608,6 +10039,16 @@
    "location": "TickRankedHint",
    "kind": "ShowNotification"
   },
+  "New mail from {0}: {1}": {
+   "surface": "MailUI",
+   "location": "OnStatus",
+   "kind": "TrF"
+  },
+  "New message": {
+   "surface": "MailUI",
+   "location": "BuildComposerView, BuildHeader, PaintComposer",
+   "kind": "CreateText, Tr"
+  },
   "Newest Cosmetics": {
    "surface": "NativeUI",
    "location": "BuildHomeTab",
@@ -9619,9 +10060,9 @@
    "kind": "Tr"
   },
   "Next >": {
-   "surface": "NativeUI",
-   "location": "BuildAchievementsTab, BuildLeaderboardTab, BuildMyStatsTab",
-   "kind": "CreateButton"
+   "surface": "NativeUI, SessionReportView",
+   "location": "BuildAchievementsTab, BuildLeaderboardTab, BuildMyStatsTab +1",
+   "kind": "CreateButton, Tr"
   },
   "Next tournament match vs {0} in {1}{2}": {
    "surface": "CompetitiveUI",
@@ -9678,6 +10119,11 @@
    "location": "BuildInfoTab",
    "kind": "CreateText"
   },
+  "No blocked senders.": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "CreateText"
+  },
   "No games recorded for this session yet.": {
    "surface": "PostSessionReport",
    "location": "Compose2v2, ComposeFfa, ComposeGameRows1v1",
@@ -9688,10 +10134,20 @@
    "location": "BuildMyStatsTab, RefreshSession",
    "kind": "CreateText, SetText"
   },
+  "No games together yet": {
+   "surface": "ProfileCard",
+   "location": "Render",
+   "kind": "Tr"
+  },
   "No leaderboard data": {
    "surface": "NativeUI",
    "location": "RefreshLeaderboard",
    "kind": "SetText"
+  },
+  "No mail yet.": {
+   "surface": "MailUI",
+   "location": "PaintList",
+   "kind": "Tr"
   },
   "No matches.": {
    "surface": "NativeUI",
@@ -9743,10 +10199,20 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Not allowed.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "Not enough players to continue the FFA - returning to menu.": {
    "surface": "FfaMode",
    "location": "EndSittingBelowMinimum, FfaDoStartGame",
    "kind": "ShowNotification"
+  },
+  "Not found - it may have been deleted.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
   },
   "Not great. Not terrible.": {
    "surface": "shop catalog",
@@ -9761,6 +10227,11 @@
   "Nothing playing": {
    "surface": "NativeUI",
    "location": "RefreshMusicTab",
+   "kind": "Tr"
+  },
+  "Nothing sent yet.": {
+   "surface": "MailUI",
+   "location": "PaintList",
    "kind": "Tr"
   },
   "Now Playing: {0} - {1}": {
@@ -9853,9 +10324,19 @@
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
   },
+  "One of the recipients could not be found.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "One solo player faces a duo in a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- This is a consent queue with no Elo band and no ready-up.\n- The server assigns one solo and two duo players.\n- Solo Extra Initial Pick is optional: the solo draws\n  2 cards on the opening pick. In the random queue any\n  player's opt-in turns it on; in a hosted lobby the\n  host's setting decides.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first side to win 2 games wins the series.\n- 1v2 is an UNRANKED beta. No rating is applied yet.\n- Games are recorded and will count when ranked play launches.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Base XP is 500 per game, x1.5 on a win - then a\n  difficulty multiplier scales it, capped at x4\n  (the win bonus sits on top of the cap):\n  the solo earns x1.5 (and x1.20 more when the extra\n  pick is off), a duo facing a buffed solo earns x1.10,\n  and the opponents' rating tier multiplies up to x3.\n  Facing a top-3 1v2 player adds x1.35, win or lose.\n- Series end: 40 base Gold per winner, 20 per loser,\n  scaled by the opponents' rating tier.\n- Game XP converts to Gold at 100 XP = 1 Gold, and\n  level-ups pay their usual bonus Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n- The tab has separate Solo and Duo boards.\n- You appear only on boards for roles you have played.\n<color=#7FD4FF>Rank</color> - Activity order: wins, then WR, then games.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>W-L</color> - Games won and lost in that role only.\n<color=#7FD4FF>WR</color> - Win rate for games in that role.\n- These are activity boards. They are not sorted by Gold.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving while locked with no games played cancels the\n  series; a leave mid-game leaves the result to the\n  normal match report. The beta has no leave counter.": {
    "surface": "ModeInfoText",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "Online": {
+   "surface": "ProfileCard",
+   "location": "Render",
    "kind": "Tr"
   },
   "Only the host can change lobby settings.": {
@@ -9979,9 +10460,14 @@
    "kind": "shop"
   },
   "Other": {
-   "surface": "InfoViz, NativeUI",
-   "location": "(file scope), BuildCompareGenericPie, GoldBucketName",
-   "kind": "Tr"
+   "surface": "InfoViz, MailUI, NativeUI",
+   "location": "(file scope), BuildCompareGenericPie, DrawReportModal +1",
+   "kind": "Tr, TrC fallback"
+  },
+  "Other\u0004report reason": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "TrC:report reason"
   },
   "Overall Series: {0}": {
    "surface": "SpectatorHud",
@@ -10029,8 +10515,8 @@
    "kind": "shop, table"
   },
   "Page {0}/{1}": {
-   "surface": "NativeUI",
-   "location": "BuildCompareRecordsPanel",
+   "surface": "NativeUI, SessionReportView",
+   "location": "BuildCompareRecordsPanel, DrawFooter",
    "kind": "TrF"
   },
   "Pale icy blue, like a winter sky.": {
@@ -10244,8 +10730,8 @@
    "kind": "shop"
   },
   "Ping": {
-   "surface": "PostSessionReport",
-   "location": "BuildCells1v1, BuildCells2v2Game, BuildCellsFfaGame",
+   "surface": "PostSessionReport, SessionReportModel",
+   "location": "Build, BuildCells1v1, BuildCells2v2Game +1",
    "kind": "Tr"
   },
   "Ping / region display: <color=#88FF88>ON</color>": {
@@ -10309,8 +10795,8 @@
    "kind": "Tr"
   },
   "Player": {
-   "surface": "NativeUI",
-   "location": "BuildCompareNemesisPanel, BuildFfaTab, BuildLeaderboardTab +4",
+   "surface": "NativeUI, SessionReportModel",
+   "location": "BuildCompareNemesisPanel, BuildFfaTab, BuildLeaderboardTab +5",
    "kind": "Tr"
   },
   "Player Nemesis": {
@@ -10759,8 +11245,8 @@
    "kind": "TrF"
   },
   "Ranked": {
-   "surface": "NativeUI",
-   "location": "BuildCardStatsTab, BuildFfaTab, RefreshFfaTab",
+   "surface": "NativeUI, SessionReportModel",
+   "location": "BuildCardStatsTab, BuildFfaTab, KindLabel +1",
    "kind": "CreateButton, SetText, Tr"
   },
   "Ranked (series)": {
@@ -10769,8 +11255,8 @@
    "kind": "Tr"
   },
   "Ranked 1v1": {
-   "surface": "InfoLibrary",
-   "location": "(file scope)",
+   "surface": "InfoLibrary, ProfileCard",
+   "location": "(file scope), ModeName",
    "kind": "Tr"
   },
   "Ranked 1v1 - 2v2 - tournaments - cosmetics   <color=#666>v{0}</color>": {
@@ -10778,9 +11264,19 @@
    "location": "BuildHomeTab",
    "kind": "TrF"
   },
+  "Ranked 1v1 games": {
+   "surface": "ProfileCard",
+   "location": "Render",
+   "kind": "Tr"
+  },
   "Ranked 1v1 is the mod's core mode: best-of-3 series, one Glicko rating, and two ways to start a rated series - the queue, or a private room where both players run the mod. This page covers the queue from Search to room, how a private lobby becomes rated, and exactly what a disconnect does.\n\n<color=#FFD94D><b>FINDING AN OPPONENT</b></color>\n\n- Clicking Search is itself the ranked opt-in - joining the queue turns Ranked on for your account.\n- Your search band starts at 100 rating in either direction and widens as you wait: 200 after 30 seconds, 400 after 60, 800 after 120. It never widens past 800.\n- The overlap is <color=#7FD4FF>two-sided</color>: you must be inside your opponent's band AND they must be inside yours. A 2-minute waiter with a wide band can't grab a fresh joiner whose narrow band excludes them.\n- Among valid candidates, the closest rating wins.\n- Players you declined in the last 5 minutes, players you've blocked (in either direction) and banned accounts are never offered.\n- Searching while playing casual is fine - vanilla quickplay and ordinary casual rooms never cancel your search. Joining any mod-issued room (a tournament, 2v2, 1v2 or FFA) does, immediately.\n- After 30 minutes of searching you're removed from the queue. <color=#8A8A93>Rejoin if you're still there - the 1v1 client never rejoins for you.</color>\n\n<color=#FFD94D><b>READY-UP, DECLINE AND THE ROOM</b></color>\n\n- On a match you get a MATCH FOUND banner with your opponent's name and rating, a sound, and a taskbar flash. You must click Ready - there is no auto-ready.\n- You have 90 seconds, and when either player clicks Ready the window resets to a fresh 90 for both - a slow alt-tabber always gets full time. If it runs out, both of you go back to searching.\n- Decline puts both of you back in the queue and blocks the two of you from re-pairing for 5 minutes. Once the room has been issued, decline no longer works.\n- When both are ready the server issues a private ranked room and picks the Photon region: if both clients report the same home region, that wins; otherwise it falls back through the players' live regions, then either home region, then US.\n- Your client pins that region before joining, so both of you land in one room instead of two same-named rooms on two continents.\n- If your opponent never arrives: a warning at 25 seconds, then an automatic return to the menu at 60. <color=#7FE87F>No penalty for either side.</color>\n\n<color=#FFD94D><b>RANKED IN A PRIVATE ROOM</b></color>\n\n- A room-code game is rated when three things are true: your Ranked toggle is on, your opponent has Ranked enabled, and your opponent runs the mod. An opponent who has never run the mod can never make a game rated. (One deliberate exception: a live unfinished series from an earlier sitting keeps its ranked status when you meet again.)\n- The moment both mods see each other, the client registers the series with the server (the <color=#7FD4FF>preflight</color>) - so the series exists, and is bettable, during game 1.\n- If either player has Ranked disabled, the server refuses the series and you get one toast: the match plays out as casual. Casual games are still recorded - they just never touch rating.\n- Queue and tournament rooms skip these checks entirely: queueing was the consent.\n\n<color=#FFD94D><b>THE SERIES</b></color>\n\n- First to 2 game wins takes the series. <color=#7FE87F>Rating moves only when a series completes</color> - the whole series is one rating outcome, and individual games never move rating on their own.\n- An undecided series - at least one game played, nobody at 2 wins - <color=#7FE87F>never expires</color>. Play the same opponent tomorrow or next week and game 1 still stands; your HUD picks up the standing score instead of restarting at 0-0.\n- That no-expiry rule is deliberate: an expiry window let a player down 0-1 abandon the series and wait out the clock to dodge the loss.\n- A non-tournament series where no game was ever finished is abandoned after 30 minutes; the next meeting starts fresh. Tournament series wait for their bracket instead.\n- Bets on a series stalled for 60 minutes are refunded (tournament series excepted) - the series itself stays resumable.\n- During round 1 of each game, the client reports live points to the server. Betting locks once 2 total points have been scored in game 1 (a 1-1 counts) - or the moment any game of the series is decided.\n\n<color=#FFD94D><b>DISCONNECTS</b></color>\n\nWhat a DC does depends on the score, and it is judged by the player who STAYED:\n\n- You were at match point (4 rounds) when your opponent dropped: you win the game at the standing score.\n- 4-4: you take the game, recorded as 5-4.\n- Anywhere else - including an opponent who drops while AHEAD - the game is canceled. Nobody gets a win, nobody gets a loss.\n- Leaving a game to join your own queued ranked match is announced in advance and never counted against you.\n\nThe anti-abuse rules:\n\n- Only the player who stayed in the room and watched the other leave can claim a DC win. <color=#7FE87F>A leaver's own client can never award itself anything.</color>\n- If the opponent reconnects before you leave, the claim is dropped.\n- If BOTH players drop, nobody stayed to observe: no win, no leave mark. With a completed game on the board the series stays active and resumes whenever you next meet.\n- <color=#FF6666>A canceled game doesn't wipe the series</color> - completed games stand, and the series resumes as above.\n\n<color=#FFD94D><b>LEAVE PERCENT</b></color>\n\n- A ranked DC with meaningful play behind it (2 or more points, or a completed round, in the CURRENT game), with neither side at match point, is recorded as a leave against the leaver - at most one per player per series.\n- <color=#7FD4FF>Leave %</color> = ranked DCs divided by ranked series wins + losses + DCs. Under 5 percent shows green, 5 to under 15 amber, 15 and up red - visible to everyone on the leaderboard.\n- A DC at match point becomes a DC win for the other player instead, not a leave mark.\n\nFor the full is-this-recorded decision tree, see <color=#7FD4FF>When a game counts</color>.": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "Ranked 1v1 series": {
+   "surface": "ProfileCard",
+   "location": "Render",
    "kind": "Tr"
   },
   "Ranked DPS": {
@@ -10883,17 +11379,17 @@
    "location": "BuildAchievementsTab, BuildCardStatsTab, RefreshCardStats",
    "kind": "CreateButton, Tr"
   },
+  "Rates": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "Rating": {
    "surface": "NativeUI",
    "location": "BuildFfaTab, BuildLeaderboardTab, BuildTeamTab +3",
    "kind": "Tr"
   },
-  "Rating History  ({0} Elo)": {
-   "surface": "NativeUI",
-   "location": "BuildFormGraph",
-   "kind": "TrF"
-  },
-  "Rating History  ({0} Elo, {1} games)": {
+  "Rating History  ({0} Elo, {1} rating updates)": {
    "surface": "NativeUI",
    "location": "BuildFormGraph",
    "kind": "TrF"
@@ -10937,6 +11433,11 @@
    "surface": "ApiClient",
    "location": "ReadyUp, ReadyUpTeam",
    "kind": "ShowNotification"
+  },
+  "Reason": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "Tr"
   },
   "Reason (optional)": {
    "surface": "NativeUI",
@@ -11108,6 +11609,31 @@
    "location": "ExportTierListCoroutine",
    "kind": "TrF"
   },
+  "Reply": {
+   "surface": "MailUI",
+   "location": "BuildReaderView, PaintComposer",
+   "kind": "Tr"
+  },
+  "Reply all": {
+   "surface": "MailUI",
+   "location": "BuildReaderView",
+   "kind": "Tr"
+  },
+  "Reply all is not available for this message.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "Reply to all": {
+   "surface": "MailUI",
+   "location": "PaintComposer",
+   "kind": "Tr"
+  },
+  "Report": {
+   "surface": "MailUI",
+   "location": "BuildReaderView",
+   "kind": "Tr"
+  },
   "Report a bug": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -11127,6 +11653,21 @@
    "surface": "NativeUI",
    "location": "HandleReportCommand",
    "kind": "AppendSystemChatLine"
+  },
+  "Report this message": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "Tr"
+  },
+  "Reported - thank you. A moderator will review it.": {
+   "surface": "MailUI",
+   "location": "SubmitReport",
+   "kind": "Tr"
+  },
+  "Request failed - try again.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
   },
   "Requeue": {
    "surface": "CompetitiveUI",
@@ -11232,6 +11773,21 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Rolling DPS (15 s window)": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
+  "Rolling block % (15 s window)": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
+  "Rolling hit % (15 s window)": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
   },
   "Rose": {
    "surface": "shop catalog",
@@ -11418,6 +11974,11 @@
    "location": "ParseFfaTimeline",
    "kind": "Tr"
   },
+  "Score race (points per game)": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "Screen shake: <color={0}>{1}</color>": {
    "surface": "NativeUI",
    "location": "RefreshSettings",
@@ -11533,6 +12094,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Send": {
+   "surface": "MailUI",
+   "location": "BuildComposerView",
+   "kind": "Tr"
+  },
   "Send a bug report straight to the mod team — description, severity, and optionally your game logs. Use the Preview button to see what gets attached.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -11541,6 +12107,26 @@
   "Send ping": {
    "surface": "CompetitiveUI",
    "location": "DrawLfpPrompt",
+   "kind": "Tr"
+  },
+  "Send report": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "Tr"
+  },
+  "Sending...": {
+   "surface": "MailUI",
+   "location": "DrawReportModal, SendCurrent",
+   "kind": "Tr"
+  },
+  "Sent": {
+   "surface": "MailUI",
+   "location": "BuildHeader",
+   "kind": "Tr"
+  },
+  "Sent.": {
+   "surface": "MailUI",
+   "location": "SendCurrent",
    "kind": "Tr"
   },
   "Series": {
@@ -11561,6 +12147,16 @@
   "Series complete: {0}": {
    "surface": "ApiClient",
    "location": "ReportTeamMatch",
+   "kind": "TrF"
+  },
+  "Series streak: them x{0}": {
+   "surface": "ProfileCard",
+   "location": "Render",
+   "kind": "TrF"
+  },
+  "Series streak: you x{0}": {
+   "surface": "ProfileCard",
+   "location": "Render",
    "kind": "TrF"
   },
   "Series {0}  vs {1}  (in progress)": {
@@ -11603,6 +12199,11 @@
    "location": "BuildAdminTab",
    "kind": "Tr"
   },
+  "Session": {
+   "surface": "NativeUI",
+   "location": "CreateFfaRecentMatchRow, CreateHistoryRow, CreateTeamHistRow +1",
+   "kind": "Tr"
+  },
   "Session Info": {
    "surface": "NativeUI",
    "location": "BuildMyStatsTab",
@@ -11622,6 +12223,11 @@
    "surface": "PostSessionReport",
    "location": "ComposeFfa, ComposeGameRows1v1",
    "kind": "TrF"
+  },
+  "Session report": {
+   "surface": "SessionReportView",
+   "location": "Draw",
+   "kind": "Tr"
   },
   "Session series": {
    "surface": "PostSessionReport",
@@ -11661,6 +12267,11 @@
   "Set RefreshValid to true": {
    "surface": "InfoViz",
    "location": "BuildRefreshFlow, BuildRefreshGate, TextFallback",
+   "kind": "Tr"
+  },
+  "Set summary": {
+   "surface": "SessionReportView",
+   "location": "DrawTotals",
    "kind": "Tr"
   },
   "Settings": {
@@ -11733,6 +12344,11 @@
    "location": "RecordBoardHeading",
    "kind": "Tr"
   },
+  "Shots": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "Tr"
+  },
   "Show Discord on leaderboard: <color=#888>link Discord first</color>": {
    "surface": "NativeUI",
    "location": "RefreshSettings",
@@ -11768,7 +12384,7 @@
    "location": "RebuildPickerList",
    "kind": "TrF"
   },
-  "Showing: Elo over games": {
+  "Showing: Elo": {
    "surface": "NativeUI",
    "location": "BuildCompareTab",
    "kind": "CreateButton"
@@ -11843,6 +12459,11 @@
    "location": "RefreshTournaments",
    "kind": "Tr"
   },
+  "Sign-in is not ready yet - try again in a moment.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "Sign-in still pending - try again in a moment.": {
    "surface": "ApiClient",
    "location": "RequestSpectateGrantCore",
@@ -11877,6 +12498,11 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Since first": {
+   "surface": "RatingGraphAxis",
+   "location": "Label",
+   "kind": "Tr"
   },
   "Sinister Smile": {
    "surface": "shop catalog",
@@ -12043,6 +12669,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Spam": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "Tr"
+  },
   "Sparks": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -12193,9 +12824,19 @@
    "location": "BuildTeamTab",
    "kind": "ShowNotification"
   },
+  "Steam identity is not available yet": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
+   "kind": "Tr"
+  },
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.": {
    "surface": "ApiClient",
    "location": "UpdateQueuePoll",
+   "kind": "Tr"
+  },
+  "Steam sign-in is required to view session reports": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
    "kind": "Tr"
   },
   "Steam sign-in still pending - try again in a moment.": {
@@ -12298,6 +12939,11 @@
    "location": "BuildSettingsTab",
    "kind": "Tr"
   },
+  "Subject": {
+   "surface": "MailUI",
+   "location": "BuildComposerView",
+   "kind": "CreateText"
+  },
   "Submit": {
    "surface": "CompetitiveUI",
    "location": "DrawAdminPrompt, DrawArtistInput",
@@ -12391,6 +13037,11 @@
   "Syncing...": {
    "surface": "SpectatorHud",
    "location": "DrawLiveBar",
+   "kind": "Tr"
+  },
+  "System notices cannot be reported.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
    "kind": "Tr"
   },
   "T - open in-game chat": {
@@ -12563,6 +13214,11 @@
    "location": "ReportTeamMatch",
    "kind": "ShowNotification"
   },
+  "Tell the moderators why. The message is attached to the report as it was sent.": {
+   "surface": "MailUI",
+   "location": "DrawReportModal",
+   "kind": "Tr"
+  },
   "Thanks for testing the mod during beta. Free, removed after beta ends.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -12588,10 +13244,20 @@
    "location": "RequestSpectateGrantCore",
    "kind": "Tr"
   },
+  "That player could not be found.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "That {0} lobby is private — enter its password.": {
    "surface": "ApiClient",
    "location": "EnrollResult",
    "kind": "TrF"
+  },
+  "That's you - pick someone else.": {
+   "surface": "MailUI",
+   "location": "AddRecipient",
+   "kind": "Tr"
   },
   "The Bounce": {
    "surface": "shop catalog",
@@ -12688,6 +13354,26 @@
    "location": "DrawBlackout",
    "kind": "Tr"
   },
+  "The message contains a word that is not allowed.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "The message contains characters that are not allowed.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "The message is too long ({0} characters max).": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "TrF"
+  },
+  "The message repeats one character too many times.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "The mod changes vanilla gameplay only where every player agreed to it. This page explains exactly how it decides, and what is guaranteed when you play with non-modded people.\n\n<color=#FFD94D><b>THE GUARANTEE</b></color>\n\n<color=#7FE87F>A non-modded player always gets pure vanilla gameplay, and any gate that can't prove a change is safe leaves it off.</color> Whole-room changes fail closed for everyone identically. The one per-player feature is poison sync, which follows the poisoned player - an unmodded victim's poison stays vanilla.\n\nIf the mod can't prove a feature is safe to run, it runs vanilla.\n\n<color=#FFD94D><b>HOW ROOMS ARE CLASSIFIED</b></color>\n\nMode-tied gameplay runs only in rooms the mod itself created, and the room's name says which mode issued it:\n\n- <color=#7FD4FF>ranked_</color> - 1v1 ranked queue rooms\n- <color=#7FD4FF>team_</color> (or the 2v2 room marker) - 2v2 rooms\n- <color=#7FD4FF>sct-</color> - sync tournament rooms\n- <color=#7FD4FF>ovt_</color> - 1v2 rooms\n- <color=#7FD4FF>ffa_</color> - FFA rooms, and only while the FFA lobby engine is actually active\n\nA public quickplay room or a normal 6-character room code matches none of these, so every mode-tied gameplay change stays off there.\n\n<color=#FFD94D><b>CAPABILITY GATES</b></color>\n\nChanges to the shared simulation go a step further: each player's mod advertises a capability tag BEFORE joining the room, so any client that can even see you has already received your tag. Then:\n\n- <color=#7FD4FF>Grow normalization</color>, <color=#7FD4FF>FFA map-object scaling</color> and the <color=#7FD4FF>FFA same-card dealer</color> require EVERY fighter's tag. <color=#7FE87F>One vanilla player, one outdated mod, or one player whose mod disabled itself switches the feature off for the whole room - symmetrically, on every screen at once.</color> Nobody plays by a different rule than their opponent.\n- <color=#7FD4FF>Poison sync</color> activates per victim, in any online room: a current victim's own client judges their poison; an unmodded victim's poison stays vanilla. The mixed-room details live in <color=#7FD4FF>Poison & damage over time</color>.\n- Spectators never count toward or against these checks.\n- If a feature's patch fails to install, that client never advertises the tag. If any other BepInEx mod is detected at startup, the whole mod disables itself and revokes its tags - full vanilla behavior.\n\n<color=#FFD94D><b>TWO KINDS OF FIXES</b></color>\n\nNot everything is gated, and the distinction matters:\n\n<color=#7FD4FF>Crash prevention</color> - always on, everywhere, quickplay included. These guards stop vanilla bugs like the frozen-inputs-at-match-found crash, the permanently dead Escape key, and the Phoenix revive crash. They change no rule: each one replaces a crash or a broken state with what the game intended.\n\n<color=#7FD4FF>Gameplay changes</color> - gated as above. Mode logic needs its mod-issued room; Grow and the FFA features need the full-room capability check; poison authority is per-victim as described.\n\nBetween the two sits a band of local repairs (re-registering vanilla's own broken bullet effects, clearing a stuck auto-fire flag between games) that run in any game - but these only repair your own screen's bookkeeping toward what the bullet's owner already decided. They never change a rule, and can't create a disagreement vanilla didn't already have. The full inventory is in <color=#7FD4FF>Bug fixes the mod ships</color>.\n\n<color=#FFD94D><b>QUICKPLAY WITH THE MOD</b></color>\n\nPlaying quickplay or a room code with the mod installed, you get vanilla rules plus tracking: your casual results and stats still record, and achievements can still unlock. <color=#8A8A93>A recovery guard can also restart a dead quickplay search for you - that is connection plumbing, not gameplay.</color>\n\nTwo fairness fixes can reach quickplay and room-code games: <color=#7FD4FF>Grow normalization</color> (every fighter current, everyone's Ranked on at connect - both sides always agree on it) and the per-victim poison sync, which follows the poisoned player wherever they play (see <color=#7FD4FF>Poison & damage over time</color> for the mixed-room details).\n\n<color=#7FE87F>And your opponent never has to know the mod is there unless you talk to them: the only things a non-modded player can ever see of it are nametag styling and quick-chat messages you send</color> (see <color=#7FD4FF>What unmodded players see</color>).": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -12701,6 +13387,31 @@
   "The mod ships 50 achievements. Each unlocks exactly once per account and pays gold on the spot - <color=#7FE87F>100 gold</color> by default, up to <color=#7FE87F>1000</color> for the hardest; every line below shows its payout. Browse them under <color=#7FD4FF>My Stats - Achievements</color> in the F5 menu: each row shows the condition, your unlock date, the percentage of known mod players who have it, and its gold. Click a row to see who has earned it (the first 500, in unlock order).\n\n<color=#FFD94D><b>HOW THEY ARE CHECKED</b></color>\n\n- Two checkers exist. 14 achievements are judged by your own game the moment a game ends; the other 36 are judged by the server - most when a match, series or rating update lands, the three translator tiers when translation work is approved. <color=#8A8A93>Server-side unlocks can pop a moment after the game - that's normal.</color>\n- Client-checked achievements need a real online game. Sandbox, offline play and spectating never award anything.\n- Every condition tracker is per-game and resets when a new game starts - a rematch is a clean slate, so damage taken in game 1 can't spoil Untouchable in game 2. (Streak counters, by design, are the exception: they span games.)\n- The input trackers (Pacifist, Immovable Object, Grounded) only sample your keys while you are alive and fighting. Card picks, the pick phase and time spent dead never count against you, and neither does typing in the mod's chat or the F5 menu.\n- Client-checked achievements run in 1v1, 2v2 and 1v2 games. They never fire from FFA games - FFA has its own six, checked by the server.\n- A client-checked <color=#7FD4FF>sweep</color> means you win with the opponent on 0 rounds. In a room set to a shorter round target, a 3-0 still counts. <color=#FF6666>The server-checked 5-0 achievements demand the opponent on 0 with at least 5 rounds won.</color>\n\n<color=#FFD94D><b>CLIENT-CHECKED: PRECISION RUNS</b></color>\n\n- <color=#7FD4FF>Untouchable</color> - win a game in which your health never dropped, even once. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Pacifist</color> - win without ever holding the fire button during live combat. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Immovable Object</color> - win without ever holding a movement or jump key during live combat. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Grounded</color> - win without ever holding a jump key (Space, W, Up). <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Instinct</color> - win with 3 or more card picks, taking the pre-highlighted left-most card on every pick without ever moving the selection. <color=#8A8A93>Only checked in queue and sync-tournament rooms - room-code games, async tournament matches included, skip it.</color> <color=#7FE87F>100g</color>\n\n<color=#FFD94D><b>CLIENT-CHECKED: SWEEPS AND STUNTS</b></color>\n\n- <color=#7FD4FF>Silent Assassin</color> - sweep with Sneaky (or Sneaky Bullets) in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Total Mayhem</color> - sweep with Mayhem in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Fragile Perfection</color> - sweep with Glass Cannon in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>No Escape</color> - sweep with Chase in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Rise from the Ashes</color> - sweep with Phoenix in your build, without dying and without a Phoenix revive ever firing. <color=#7FE87F>500g</color>\n- <color=#7FD4FF>The Comeback Kid</color> - win after the rounds ever stood at you 0, opponent 4 or more. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Stacked Deck</color> - finish a game holding 5 or more copies of one card. No win required. <color=#7FE87F>300g</color>\n- <color=#7FD4FF>God Build</color> - win with Shields Up in your build, ending the game on a gun with 1 ammo or less that reloads in 1 second or less. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Into the Deep End</color> - take Abyssal Countdown as your FIRST pick of the game, trigger it in every round, and win. <color=#7FE87F>300g</color>\n\n<color=#FFD94D><b>SERVER-CHECKED 1v1 BUILDS</b></color>\n\nJudged from the reported match. You must be the game's winner unless a line says otherwise.\n\n- <color=#7FD4FF>Bullet Hell</color> - win 5-0 with Barrage in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Spray and Pray</color> - win 5-0 with Spray. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Demolitionist</color> - win 5-0 with Explosive Bullet. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Controlled Burst</color> - win 5-0 with Burst. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Field Medic</color> - win 5-0 with Healing Field. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Double Nova</color> - win with 2 or more Supernovas. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Lumberjack</color> - win with 2 or more Saws. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Pristine Perfection</color> - win with 2 or more copies of Pristine Perseverance. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Living on the Edge</color> - win with 2 or more Glass Cannons. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Silly Drill</color> - win with Sneaky and Drill together. <color=#7FE87F>300g</color>\n- <color=#7FD4FF>Sustained Power</color> - win with Empower and Healing Field together. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Collector</color> - win with 4 or more copies of any one card. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Clutch</color> - win after the score ever stood at 0 points for you against 6 or more for the opponent - that is, down 0-3 in rounds. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Twins!</color> - both players finish with exactly 5 cards each and identical builds, copy counts included. Both unlock it; nobody needs to win. <color=#7FE87F>500g</color>": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "The report could not be read": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
+   "kind": "Tr"
+  },
+  "The report details are too long.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "The report details contain characters that are not allowed.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "The report details repeat one character too many times.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "The report request could not be started": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
    "kind": "Tr"
   },
   "The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\n\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\n\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\n- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)\n\n<color=#FFD94D><b>RANKED OR CASUAL</b></color>\n\n- Either player's Ranked toggle off in a room-code game - it plays as CASUAL. Still fully recorded with stats and XP; it never touches rating (see <color=#7FD4FF>How games are tracked</color>).\n- Opponent has never run the mod - always casual, never upgraded. (A live unfinished series from an earlier sitting is the one thing that keeps ranked status across a gap.)\n- Toggling Ranked off MID-SERIES does not void the series. The running best-of-3 is your consent record; its games stay ranked.\n- A game reported as casual is UPGRADED to ranked when the server can see both players are modded, both have Ranked on, and the sitting is live.\n- A ranked-banned participant forces a 1v1 casual at report time - even in a queue room, even mid-series. (The other modes shut banned players out at the door instead.)\n- Mod-issued rooms are consented by definition; queueing is consent. The ranked queue, 2v2 and tournaments rate; ranked FFA lobbies rate while casual ones don't; 1v2 records without rating.\n\n<color=#FFD94D><b>DISCONNECTS - 1V1</b></color>\n\n- You leave a game to join a queued ranked match - the game you left is canceled: nothing recorded, no leave logged.\n- Opponent DCs at 4-4 - you get the win, recorded 5-4.\n- Opponent DCs while you hold 4 rounds - you get the win at the standing score.\n- Any other DC - <color=#FF6666>the game is canceled and no result is recorded</color>, even when the leaver was ahead. Nobody gets a free win and nobody eats an unfair loss (the leave itself can still be logged - see below).\n- Ranked leave %: a DC is logged against the leaver when the CURRENT game had meaningful play (2 or more points scored, or a completed round) and neither side was at 4 rounds. One DC per player per series. The stat is your DCs divided by your ranked series played plus your DCs.\n- Casual rage quits: ANY mid-game leave in a casual 1v1 is logged, even at 4-0. It feeds the Rage Quit % stat (how often opponents walk out on you) - never rating. (A survivor already at 4 rounds still takes the casual win and its XP.)\n\n<color=#FFD94D><b>DISCONNECTS - 2V2 AND FFA</b></color>\n\n- 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.\n- Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.\n- FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.\n- FFA early-leave grace: a leaver who left before the field had scored 2 half points, with a zero tally of their own, is unrated for that game - nothing was decided yet.\n- An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.\n\n<color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>\n\n- <color=#7FE87F>An undecided best-of-3 resumes with no time limit.</color> Meet the same opponent tomorrow or next week and game 1 still stands. An expiry existed once - leavers waited it out to bank rating, so it was removed.\n- Rating moves ONLY when a series completes (first to 2 game wins). Games of a series that never completes keep their match rows, XP and gold; the rating change just never happens.\n- A series with no game recorded 30 minutes after it was created is abandoned and its bets are refunded.\n- A mid-series stall of an hour refunds the bets, but the series itself stays active and resumable.\n- Tournament series are exempt from this pruning - the bracket owns their lifecycle. A tournament match decided by forfeit can't be bet on.\n\n<color=#FFD94D><b>THROWN OUT AFTER THE FACT</b></color>\n\n- The one AUTOMATIC invalidation in the whole mod: a repeated pattern of implausibly short matches between the same two players inside a short window. The current match AND the earlier short ones are invalidated together, their gold and XP reversed, their series voided.\n- Admin reversal: an admin can void a series - rating changes subtracted, gold clawed back, every match in it invalidated, unsettled bets refunded. Invalidated matches disappear from every board and stat.\n- Quarantine (2v2 and FFA): a report that arrives for a lobby that's no longer active isn't deleted - it's held for admin review, and an admin can still accept it into the record or discard it.\n\n<color=#FFD94D><b>IF THE REPORT CAN'T SEND</b></color>\n\n- A failed report goes to a persistent outbox: retried in the background and saved to disk, so it's re-sent on your next launch even if you quit right after the game. You'll see 'Couldn't record the match - retrying in the background', then 'Match recorded' when it lands.\n- 1v1 reporter crashes before the report exists - the surviving opponent's disconnect path usually records the result instead.\n- FFA elects its reporter among the players still present, so a crashed reporter is never elected. A winner who quits before the report is still recorded from their frozen tallies.\n- A 2v2 game that ends without its series id retries the lookup and defers the send; if that also fails, the game is not recorded.": {
@@ -12717,6 +13428,31 @@
    "surface": "NativeUI",
    "location": "StartCosmeticPlacementAdjustment",
    "kind": "ShowNotification"
+  },
+  "The server refused this request ({0}).": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "TrF"
+  },
+  "The subject contains characters that are not allowed.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "The subject is too long ({0} characters max).": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "TrF"
+  },
+  "The subject must be a single line.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "The subject repeats one character too many times.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
   },
   "The white line is your rating; the band is the rating deviation - it shrinks as you play, and your rating moves less once it is narrow.": {
    "surface": "InfoViz",
@@ -12748,6 +13484,16 @@
    "location": "RefreshSettings",
    "kind": "SetText"
   },
+  "This account cannot send mail.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "This account is not ready for mail yet - try again later.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "This account isn't registered as an artist.": {
    "surface": "NativeUI",
    "location": "RefreshArtistTab",
@@ -12767,6 +13513,11 @@
    "surface": "ApiClient",
    "location": "DoAutoUpdate",
    "kind": "ShowNotification"
+  },
+  "This report is not available": {
+   "surface": "SessionReportView",
+   "location": "ErrorMessage",
+   "kind": "Tr"
   },
   "Thorn Crown": {
    "surface": "shop catalog",
@@ -12788,6 +13539,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Tie": {
+   "surface": "ProfileCard",
+   "location": "ResultName",
+   "kind": "Tr"
+  },
   "Tier": {
    "surface": "NativeUI",
    "location": "BuildCardStatsTab, RefreshCardStats",
@@ -12802,6 +13558,11 @@
    "surface": "FfaMode",
    "location": "FfaLocalPickUI",
    "kind": "TrF"
+  },
+  "Timeline": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
   },
   "Times Offered": {
    "surface": "NativeUI",
@@ -12848,6 +13609,41 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "To: {0}": {
+   "surface": "MailUI",
+   "location": "PaintComposer",
+   "kind": "TrF"
+  },
+  "To: {0} and {1} others": {
+   "surface": "MailUI",
+   "location": "PaintComposer",
+   "kind": "TrF"
+  },
+  "Too many messages - try again in {0} hours.": {
+   "surface": "MailClient",
+   "location": "RateLimitText",
+   "kind": "TrF"
+  },
+  "Too many messages - try again in {0} minutes.": {
+   "surface": "MailClient",
+   "location": "RateLimitText",
+   "kind": "TrF"
+  },
+  "Too many messages - try again in {0} seconds.": {
+   "surface": "MailClient",
+   "location": "RateLimitText",
+   "kind": "TrF"
+  },
+  "Too many messages - wait a minute and try again.": {
+   "surface": "MailClient",
+   "location": "RateLimitText",
+   "kind": "Tr"
+  },
+  "Too many recipients for one message.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "Top Pickers": {
    "surface": "NativeUI",
    "location": "TrMetric",
@@ -12887,6 +13683,11 @@
    "surface": "NativeUI",
    "location": "RefreshMyStats",
    "kind": "TrF"
+  },
+  "Totals": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
   },
   "Touch Grass": {
    "surface": "ApiClient",
@@ -13068,6 +13869,11 @@
    "location": "GetOrCreateArtistBlockRow",
    "kind": "CreateButton"
   },
+  "Unblocked {0}.": {
+   "surface": "MailUI",
+   "location": "Unblock",
+   "kind": "TrF"
+  },
   "Unclosed quote — usage: /report \"Multi Word Name\" [reason]": {
    "surface": "NativeUI",
    "location": "HandleReportCommand",
@@ -13139,8 +13945,8 @@
    "kind": "TrC:card rarity"
   },
   "Unknown player": {
-   "surface": "H2HSummary",
-   "location": "BuildLine",
+   "surface": "H2HSummary, ProfileCard",
+   "location": "BuildLine, Render",
    "kind": "Tr"
   },
   "Unlock chat everywhere": {
@@ -13202,6 +14008,16 @@
    "surface": "ApiClient",
    "location": "DoAutoUpdate",
    "kind": "ShowNotification"
+  },
+  "Update the mod to use mail.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "Updates": {
+   "surface": "RatingGraphAxis",
+   "location": "Label",
+   "kind": "Tr"
   },
   "Upload a Cosmetic...": {
    "surface": "NativeUI",
@@ -13443,6 +14259,26 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Who can mail me: <color=#88FF88>Everyone</color>": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Who can mail me: <color=#FF9966>Nobody</color>": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Who can mail me: <color=#FFD94D>People I have played</color>": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Who may send you in-game mail. Blocked senders never reach you.": {
+   "surface": "MailUI",
+   "location": "BuildSettingsRow",
+   "kind": "CreateText"
+  },
   "Who picks these cards the most": {
    "surface": "NativeUI",
    "location": "BuildCompareCardPickers",
@@ -13457,6 +14293,11 @@
    "surface": "NativeUI",
    "location": "StartChatMuteFlow",
    "kind": "TrF"
+  },
+  "Win": {
+   "surface": "ProfileCard",
+   "location": "ResultName",
+   "kind": "Tr"
   },
   "Win %": {
    "surface": "NativeUI",
@@ -13733,6 +14574,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Write a message first.": {
+   "surface": "MailClient, MailUI",
+   "location": "ErrorDetail, SendCurrent",
+   "kind": "Tr"
+  },
   "Wrong password - try again": {
    "surface": "ApiClient",
    "location": "EnrollResult, FfaEnrollResult",
@@ -13788,9 +14634,24 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "You": {
+   "surface": "MailUI",
+   "location": "PaintReader",
+   "kind": "Tr"
+  },
+  "You are muted - mail is unavailable while the mute lasts.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
+   "kind": "Tr"
+  },
   "You can't kick yourself.": {
    "surface": "ApiClient",
    "location": "KickRefusalText",
+   "kind": "Tr"
+  },
+  "You cannot block yourself.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
    "kind": "Tr"
   },
   "You don't own any dances yet - check the Shop's DANCES section!": {
@@ -13851,6 +14712,11 @@
   "Your Hit Rate": {
    "surface": "CompetitiveUI",
    "location": "PaintPairGraph",
+   "kind": "Tr"
+  },
+  "Your block list is full - unblock someone first.": {
+   "surface": "MailClient",
+   "location": "ErrorDetail",
    "kind": "Tr"
   },
   "Your game is dropping frames (worst {0} ms)": {
@@ -14108,6 +14974,16 @@
    "location": "RefreshTeamTab",
    "kind": "Tr"
   },
+  "date ->": {
+   "surface": "RatingGraphAxis",
+   "location": "Caption",
+   "kind": "Tr"
+  },
+  "days since first rating update ->": {
+   "surface": "RatingGraphAxis",
+   "location": "Caption",
+   "kind": "Tr"
+  },
   "default orange / blue": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
@@ -14117,6 +14993,16 @@
    "surface": "QuickChat",
    "location": "Phrases",
    "kind": "table"
+  },
+  "dmg": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
+  "dmg/s": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
   },
   "does not trigger": {
    "surface": "InfoViz",
@@ -14193,6 +15079,11 @@
    "location": "BuildTeamFormat",
    "kind": "Tr"
   },
+  "fps": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "game 1 starts": {
    "surface": "InfoViz",
    "location": "BuildBetWindow",
@@ -14206,11 +15097,6 @@
   "game server relay": {
    "surface": "InfoViz",
    "location": "BuildNetcodeMap",
-   "kind": "Tr"
-  },
-  "games ->": {
-   "surface": "NativeUI",
-   "location": "BuildCompareGraph",
    "kind": "Tr"
   },
   "impossibly fast series": {
@@ -14231,6 +15117,11 @@
   "jump within 0.1s: up and away": {
    "surface": "InfoViz",
    "location": "BuildMovementWindow",
+   "kind": "Tr"
+  },
+  "just now": {
+   "surface": "ProfileCard",
+   "location": "Ago",
    "kind": "Tr"
   },
   "kill boundary": {
@@ -14308,9 +15199,19 @@
    "location": "BuildWhenCounts",
    "kind": "Tr"
   },
+  "no build recorded for these games": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "no card data": {
    "surface": "NativeUI",
    "location": "BuildCompareCardGrid",
+   "kind": "Tr"
+  },
+  "no cards recorded": {
+   "surface": "SessionReportModel",
+   "location": "Build",
    "kind": "Tr"
   },
   "no data": {
@@ -14343,6 +15244,11 @@
    "location": "ApplyBetRow, ApplyTeamBetRow",
    "kind": "Tr"
   },
+  "no rating or gold recorded for this set": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "Tr"
+  },
   "nobody - your screen only, never networked": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
@@ -14366,6 +15272,16 @@
   "not enough data (4+ picks)": {
    "surface": "NativeUI",
    "location": "BuildCompareCardGrid",
+   "kind": "Tr"
+  },
+  "not recorded (older block format)": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
+  "not recorded for this mode": {
+   "surface": "SessionReportModel",
+   "location": "Build",
    "kind": "Tr"
   },
   "nothing": {
@@ -14518,6 +15434,11 @@
    "location": "RenderHostLobbySection",
    "kind": "Tr"
   },
+  "pts": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "ranked 1v1 series vs anyone in the selection, minimum 5 series": {
    "surface": "NativeUI",
    "location": "BuildCompareNemesisPanel",
@@ -14531,6 +15452,11 @@
   "rare": {
    "surface": "NativeUI",
    "location": "TrRarity",
+   "kind": "Tr"
+  },
+  "rating updates ->": {
+   "surface": "RatingGraphAxis",
+   "location": "Caption",
    "kind": "Tr"
   },
   "recent: worst frame {0} ms  resends {1}  discards {2}": {
@@ -14568,10 +15494,20 @@
    "location": "DrawFPS",
    "kind": "TrF"
   },
+  "report version {0} - some panels may be missing": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "TrF"
+  },
   "reset if LB wins": {
    "surface": "InfoViz",
    "location": "BuildBracketFlow",
    "kind": "Tr"
+  },
+  "rolled out: {0}": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "TrF"
   },
   "room code": {
    "surface": "InfoViz",
@@ -14602,6 +15538,16 @@
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
    "kind": "Tr"
+  },
+  "showing the newest {0} games of this sitting": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "TrF"
+  },
+  "showing the newest {0} games of this sitting ({1} not shown)": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "TrF"
   },
   "showing {0} of {1}": {
    "surface": "PostSessionReport",
@@ -14813,6 +15759,11 @@
    "location": "BuildTerminalLine",
    "kind": "TrF"
   },
+  "{0} - {1} games - {2} played": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "TrF"
+  },
   "{0} / {1} unlocked": {
    "surface": "NativeUI",
    "location": "GetAchievementText, RefreshAchievements",
@@ -14833,6 +15784,16 @@
    "location": "PaintPairGraph",
    "kind": "TrF"
   },
+  "{0} GOT A POINT": {
+   "surface": "TeamColorIdentity",
+   "location": "AfterDoShowPoints",
+   "kind": "TrF"
+  },
+  "{0} GOT HALF A POINT": {
+   "surface": "TeamColorIdentity",
+   "location": "AfterDoShowPoints",
+   "kind": "TrF"
+  },
   "{0} Hit Rate": {
    "surface": "CompetitiveUI",
    "location": "PaintPairGraph",
@@ -14851,6 +15812,11 @@
   "{0} can now translate {1}.": {
    "surface": "NativeUI",
    "location": "BuildAdminTab",
+   "kind": "TrF"
+  },
+  "{0} d ago": {
+   "surface": "ProfileCard",
+   "location": "Ago",
    "kind": "TrF"
   },
   "{0} days ago": {
@@ -14876,6 +15842,11 @@
   "{0} games  {1} wins  Top3 {2}%  Avg place {3}": {
    "surface": "PostSessionReport",
    "location": "ComposeFfaMiniPanel",
+   "kind": "TrF"
+  },
+  "{0} h ago": {
+   "surface": "ProfileCard",
+   "location": "Ago",
    "kind": "TrF"
   },
   "{0} half-point events": {
@@ -14906,6 +15877,11 @@
   "{0} matches ({1}W / {2}L)  WR: {3}%": {
    "surface": "NativeUI",
    "location": "RefreshLeaderboard",
+   "kind": "TrF"
+  },
+  "{0} min ago": {
+   "surface": "ProfileCard",
+   "location": "Ago",
    "kind": "TrF"
   },
   "{0} months ago": {
@@ -14983,6 +15959,11 @@
    "location": "ApplyShopRow",
    "kind": "TrF"
   },
+  "{0} unread": {
+   "surface": "MailUI",
+   "location": "PaintNav",
+   "kind": "TrF"
+  },
   "{0} weeks ago": {
    "surface": "H2HSummary",
    "location": "Ago",
@@ -15021,6 +16002,21 @@
   "{0}: <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
    "location": "RefreshSettings",
+   "kind": "TrF"
+  },
+  "{0}: rating {1}": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "TrF"
+  },
+  "{0}: rating {1} -> {2} ({3})": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
+   "kind": "TrF"
+  },
+  "{0}: {1} gold": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotals",
    "kind": "TrF"
   },
   "{0}h ago": {
