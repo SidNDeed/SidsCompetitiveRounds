@@ -4,6 +4,7 @@ These define the JSON shape of data going in and out of the API.
 """
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -812,6 +813,13 @@ class QueueJoinRequest(BaseModel):
     # working; the room-region pick prefers two AGREEING home regions.
     home_region: str | None = Field(None, max_length=8)
     ranked_only: bool = False
+    # Sept 7 item 3: the client's own Photon ping map ({"us": 42, ...})
+    # and how many seconds old it was when the join was sent. Typed
+    # loosely on purpose: a malformed map must not 422 the join —
+    # main._region_pings_validate refuses it and the row stores NULL.
+    # Absent from clients that predate the sweep.
+    region_pings: Any | None = None
+    region_pings_age_s: Any | None = None
 
 
 class QueuePollResponse(BaseModel):

@@ -321,8 +321,13 @@
   evidence — which includes every pick made shortly after a server restart — or
   when both do, the tie falls to a fixed order: still arbitrary,
   but identical for both of you and no longer an advantage for the faster
-  connection. This does not try to pick the BEST region for a cross-region
-  pair — nothing here measures ping between the two of you yet.
+  connection. For the 1v1 ranked queue there is now a measurement too: at the
+  menu and while you wait in the queue, the game pings each Photon region
+  itself and sends the numbers with your queue entry. When both of you have
+  recent numbers, the room goes to the region with the lowest worst-case ping
+  between you, provided that costs neither of you more than 20 ms by your own
+  measurements; otherwise the rules above stand. 2v2 and FFA rooms are
+  unchanged.
 
 **Diagnostics and small fixes**
 
