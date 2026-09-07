@@ -639,6 +639,10 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
             // v1.29: always-on presence ping (mod-clients-online counter).
             Plugin.Instance.StartCoroutine(PresenceLoop());
+            // Sept 6 (in-game mail): unread/revision status poll — 60 s cadence
+            // anchored 30 s off the presence ping (design B-6), plugin-level so
+            // it keeps running with the F5 page closed (#50).
+            Plugin.Instance.StartCoroutine(MailClient.StatusLoop());
             // July 22: mint the Steam session ASAP. Enforced actions (toggle
             // ranked, match report, queue join) 401 without one, and the
             // presence loop's first tick is 15s out — too long a window. This
@@ -19498,6 +19502,65 @@ namespace CompetitiveRounds
             return request.responseCode > 0
                 ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}"
                 : request.error;
+        }
+
+        // ── Sept 6 (Sid, in-game mail): request + slicer aliases for MailClient.cs ──
+        // The mail transport and parser live in their own file; these expose the
+        // string-aware slicers (#156: any slice over a region that can carry
+        // user-authored strings must be string-aware) and the session-stamped
+        // request coroutines without moving them. SendRequest is the PUT/DELETE
+        // twin of PostRequest — same consent, transport, version-gate and session
+        // handling, same "HTTP <code>: <body>" error format.
+        public static string BaseUrl => baseUrl;
+        public static int FindMatchingBracketStringAwarePublic(string s, int openPos) => FindMatchingBracketStringAware(s, openPos);
+        public static int FindMatchingBraceStringAwarePublic(string s, int openPos) => FindMatchingBraceStringAware(s, openPos);
+        public static bool TryTopLevelMembersPublic(string obj, out Dictionary<string, string> members) => TryTopLevelMembers(obj, out members);
+        public static string JsonEscapeFullPublic(string s) => JsonEscapeFull(s);
+
+        public static void SessionGet(string url, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null) { callback?.Invoke(false, "not ready"); return; }
+            Plugin.Instance.StartCoroutine(GetRequest(url, callback, detailedErrors: true, sessionAware: true));
+        }
+
+        public static void SessionPost(string url, string json, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null) { callback?.Invoke(false, "not ready"); return; }
+            Plugin.Instance.StartCoroutine(PostRequest(url, json, callback));
+        }
+
+        public static void SessionSend(string method, string url, string json, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null) { callback?.Invoke(false, "not ready"); return; }
+            Plugin.Instance.StartCoroutine(SendRequest(method, url, json, callback));
+        }
+
+        private static IEnumerator SendRequest(string method, string url, string json, Action<bool, string> callback)
+        {
+            if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            if (SensitiveTransportBlocked(url, json, callback)) yield break;
+            NoteAttempt();
+            using (var request = new UnityWebRequest(url, method))
+            {
+                if (!string.IsNullOrEmpty(json))
+                {
+                    byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
+                    request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+                    request.SetRequestHeader("Content-Type", "application/json");
+                }
+                request.downloadHandler = new DownloadHandlerBuffer();
+                StampVersionHeader(request);
+                string _sentTok = SteamAuth.SessionToken;
+                request.timeout = 20;
+
+                yield return request.SendWebRequest();
+
+                if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                HandleSessionReject(request, _sentTok);
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                callback(success, success ? request.downloadHandler.text : FormatRequestError(request));
+            }
         }
 
         /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).</summary>
