@@ -175,6 +175,23 @@ namespace CompetitiveRounds
         private static int _openLogFrame = -1;
         private static bool _openPending, _warm;
         private static long _playStartTicks;
+        // §2.4 / §7 2-9 PASS bar (impl2 r1 M4): retained across the run for the
+        // end line's verdict (BarVerdict) — every row of the bar is judged there
+        // or, for the post-cleanup memory row, where it is measured.
+        private static float _firstSampleMs = -1f;   // -1 = no audible sample was ever observed
+        private static float _deficitPeakMs;          // max of DeficitMs() sampled every playing tick
+        private static bool _controlsDone;            // the scripted sequence reached its summary line
+        private static long _runSilentRunMaxStart;    // Stopwatch stamp of the first buffer of the run's longest silent run
+        // Scripted windows [from, to] in Stopwatch ticks: Play, each seek /
+        // resume / restart, and the natural end. A silent run that STARTS
+        // inside one is "at a scripted seek" (§2.4); one outside fails the bar.
+        private static readonly List<KeyValuePair<long, long>> _scriptedWindows = new List<KeyValuePair<long, long>>();
+        // Wall accrual after a Play/UnPause: the first accruing tick charges
+        // the time since that call, not the whole frame (which began before
+        // it) — with the deficit now judged per tick, a one-frame overcharge
+        // at every start would read as starvation.
+        private static long _wallFromTicks;
+        private static bool _wallAccruing;
         // drift reference (reset after every control action)
         private static double _dspRef;
         private static float _timeRef, _lastTime, _lastDrift, _stallMax, _driftPeak;
@@ -255,6 +272,18 @@ namespace CompetitiveRounds
                         _cleanupGcAt = -1f;
                         try { GC.Collect(); GC.WaitForPendingFinalizers(); } catch { }
                         LogMemory("after_cleanup_gc", _cleanupKey);
+                        // §2.4 bar row "native delta after cleanup <= 1 MB where the
+                        // probe is the only activity (VM)", judged where it is
+                        // measured (impl2 r1 M4). The seat that can exclude other
+                        // activity is the broadcast identity; elsewhere the figure
+                        // is printed as measured-only, never as a pass.
+                        long natNow = NativeAlloc();
+                        bool natAvail = natNow >= 0 && _nat0 >= 0;
+                        long natDelta = natAvail ? natNow - _nat0 : 0L;
+                        string natVerdict = !BroadcastMode.IsBroadcastIdentity ? "measured-only(not the broadcast seat: other activity is not excluded)"
+                            : !natAvail ? "FAIL(native allocation unavailable)"
+                            : natDelta <= 1048576L ? "pass" : "FAIL";
+                        Plugin.Log?.LogInfo("[MUSIC-PROBE] bar-memory key=" + _cleanupKey + " d_native_alloc_mb=" + (natAvail ? Dmb(natDelta) : "?") + " bound=+1.0 verdict=" + natVerdict);
                     }
                 }
                 if (_req == null && _src == null)
@@ -381,6 +410,8 @@ namespace CompetitiveRounds
             // request so a failed open reports zeros, not the previous run.
             _stallMax = 0f; _stalls = 0; _wraps = 0; _driftPeak = 0f; _lastDrift = 0f; _frameMax = 0f;
             _controlsPass = 0; _controlsFail = 0; _churnCycles = 0; _getContentMs = 0f; _requestMs = 0f; _openBlockMs = 0f;
+            _firstSampleMs = -1f; _deficitPeakMs = 0f; _controlsDone = false; _runSilentRunMaxStart = 0L; _scriptedWindows.Clear();
+            _wallFromTicks = 0L; _wallAccruing = false;
             Plugin.Log?.LogInfo("[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
                 + " cores=" + Environment.ProcessorCount + " (bots/opponents are the operator's responsibility; the log cannot see them)");
             LogMemory("baseline", _key);
@@ -537,6 +568,8 @@ namespace CompetitiveRounds
             string refuseAtPlay = RefusalNow();
             if (refuseAtPlay != null) { Stop(refuseAtPlay); return; }
             _playStartTicks = Stopwatch.GetTimestamp();
+            NoteScriptedWindow(0f);   // the buffers before the first sample are scripted silence
+            _wallFromTicks = _playStartTicks;
             _src.Play();
             block.Stop();
             _openBlockMs = (float)block.Elapsed.TotalMilliseconds;
@@ -598,7 +631,21 @@ namespace CompetitiveRounds
             // compared against. Gating it on the content mask would excuse the
             // very interval the split above exists to measure.
             if (_tap != null && !_tap.CallbacksPaused && _src.isPlaying)
-                _audioWallSeconds += Time.unscaledDeltaTime;
+            {
+                if (_wallAccruing) _audioWallSeconds += Time.unscaledDeltaTime;
+                else
+                {
+                    float since = (float)((Stopwatch.GetTimestamp() - _wallFromTicks) / (double)Stopwatch.Frequency);
+                    _audioWallSeconds += Mathf.Clamp(since, 0f, Time.unscaledDeltaTime);
+                    _wallAccruing = true;
+                }
+            }
+            else _wallAccruing = false;
+            // impl2 r1 M4 (§7 2-9): the peak deficit is retained per tick, not
+            // only at the 5 s records — a transient starvation between two
+            // records is exactly what the row exists to catch. Read from the
+            // same expression as the end line's figure.
+            { float d = DeficitMs(); if (d > _deficitPeakMs) _deficitPeakMs = d; }
             float t = _src.time;
             float len = _clip.length;
             // Wrap-aware: a drop of more than half the clip is a loop wrap.
@@ -628,6 +675,7 @@ namespace CompetitiveRounds
             {
                 _tap.FirstSampleLogged = true;
                 double ms = (_tap.FirstSampleTicks - _playStartTicks) * 1000.0 / Stopwatch.Frequency;
+                _firstSampleMs = (float)ms;
                 Plugin.Log?.LogInfo("[MUSIC-PROBE] started key=" + _key + " first_sample_ms=" + F1((float)ms));
             }
             if (_mode == Mode.Stress && _busy == null && _busyStartAt > 0f && now >= _busyStartAt) StartBusy(now);
@@ -663,7 +711,7 @@ namespace CompetitiveRounds
                     + " drift_ms=" + F0(drift * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
                     + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f)
                     + " silent_run=" + _tap.SilentRun + " silent_run_max=" + _tap.SilentRunMax + " buffers=" + _tap.Buffers
-                    + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs())
+                    + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs()) + " audio_deficit_peak_ms=" + F0(_deficitPeakMs)
                     + " frame_max_ms=" + F1(_frameMax) + " fps=" + (Time.smoothDeltaTime > 0f ? F0(1f / Time.smoothDeltaTime) : "?")
                     + " busy=" + (_busy != null ? 1 : 0) + " playing=" + (_src.isPlaying ? 1 : 0) + " step=" + _step + " context=" + SeatContext());
                 _frameMax = 0f;
@@ -685,6 +733,7 @@ namespace CompetitiveRounds
                     if (now < _stepAt) return;
                     if (len < 20f) { Plugin.Log?.LogInfo("[MUSIC-PROBE] controls key=" + _key + " skipped (track shorter than 20 s)"); _step = 7; return; }
                     _stepTarget = len - 8f;
+                    NoteScriptedWindow(0f);
                     _src.time = _stepTarget;
                     _maskUntil = now + 0.5f;
                     _stepAt = now; _stepDeadline = now + 9f;
@@ -704,7 +753,9 @@ namespace CompetitiveRounds
                     if (now - _stepAt < 3f) return;
                     Judge("pause_holds", Mathf.Abs(_src.time - _stepTarget) < 0.05f && !_src.isPlaying, "t=" + F1(_src.time) + " held=" + F1(_stepTarget) + " playing=" + (_src.isPlaying ? 1 : 0));
                     _src.time = 10f;
+                    NoteScriptedWindow(0f);
                     MaskCallbacks(false);
+                    _wallFromTicks = Stopwatch.GetTimestamp();
                     _src.UnPause();
                     // The drift reference is from before the pause and the
                     // seek, so it is meaningless now. Step 4 is AUDIBLE and its
@@ -720,6 +771,7 @@ namespace CompetitiveRounds
                     if (now - _stepAt < 1f) return;
                     Judge("seek_paused_resume", _src.isPlaying && Mathf.Abs(_src.time - (10f + (now - _stepAt))) < 0.5f, "t=" + F1(_src.time) + " want~" + F1(10f + (now - _stepAt)));
                     _src.loop = false;
+                    NoteScriptedWindow(0f);
                     _src.time = len - 5f;
                     _maskUntil = now + 0.5f;
                     ResetDriftRef();
@@ -735,6 +787,9 @@ namespace CompetitiveRounds
                     if (_src.isPlaying) _timeAtDeath = _src.time;   // last position seen alive (§2.3.6)
                     if (!_src.isPlaying)
                     {
+                        // The natural end is scripted silence too: the buffers
+                        // up to half a second before the observed stop.
+                        NoteScriptedWindow(0.5f);
                         // r9 MEDIUM: the seek was to len-5, so a genuine
                         // natural end arrives about five seconds later. An
                         // immediate !isPlaying is a source that stopped for
@@ -772,7 +827,9 @@ namespace CompetitiveRounds
                               "t=" + (_timeAtDeath < 0f ? "unavailable" : F1(_timeAtDeath)) + " len=" + F1(len)
                               + " gap=" + (_timeAtDeath < 0f ? "?" : F1(len - _timeAtDeath)) + " (want <= 4)");
                         _src.loop = true; _src.time = 0f;
+                        NoteScriptedWindow(0f);
                         MaskCallbacks(false);   // the natural end is an intended silence, not a gap
+                        _wallFromTicks = Stopwatch.GetTimestamp();
                         _src.Play();
                         _maskUntil = now + 0.5f;
                         ResetDriftRef();
@@ -786,6 +843,7 @@ namespace CompetitiveRounds
                     }
                     return;
                 case 6:
+                    _controlsDone = true;
                     Plugin.Log?.LogInfo("[MUSIC-PROBE] controls key=" + _key + " pass=" + _controlsPass + " fail=" + _controlsFail);
                     _step = 7;
                     return;
@@ -929,7 +987,7 @@ namespace CompetitiveRounds
             if ((object)_tap != null)
             {
                 if (_tap.MaxGapTicks > _runMaxGapTicks) _runMaxGapTicks = _tap.MaxGapTicks;
-                if (_tap.SilentRunMax > _runSilentRunMax) _runSilentRunMax = _tap.SilentRunMax;
+                if (_tap.SilentRunMax > _runSilentRunMax) { _runSilentRunMax = _tap.SilentRunMax; _runSilentRunMaxStart = _tap.SilentRunMaxStartTicks; }
                 _runHadTap = true;
                 _runFramesDelivered += _tap.FramesDelivered;
             }
@@ -965,12 +1023,17 @@ namespace CompetitiveRounds
             if (_busy != null) StopBusy();
             _openPending = false;
             CloseObjects();
+            // The bar is judged AFTER CloseObjects: the run totals (delivered
+            // frames, gaps, the silent-run start) are folded there.
+            string bar = BarVerdict(why, silentRunMax);
             Plugin.Log?.LogInfo("[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
                 + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
-                + " silent_run_max=" + silentRunMax
-                + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs())
-                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail
-                + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath)));
+                + " silent_run_max=" + silentRunMax + " silent_run_scripted=" + (silentRunMax <= 0 ? "n/a" : (SilentRunIsScripted(_runSilentRunMaxStart) ? "1" : "0"))
+                + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs()) + " audio_deficit_peak_ms=" + F0(_deficitPeakMs)
+                + " open_block_ms=" + F1(_openBlockMs) + " first_sample_ms=" + (_firstSampleMs < 0f ? "?" : F1(_firstSampleMs))
+                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail + " controls_done=" + (_controlsDone ? 1 : 0)
+                + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath))
+                + " bar=" + bar);
             _cleanupKey = _key;
             _cleanupSampleAt = Time.realtimeSinceStartup + 2f;
             _cleanupGcAt = Time.realtimeSinceStartup + 5f;
@@ -1029,6 +1092,51 @@ namespace CompetitiveRounds
             return (float)(delivered / (double)rate);
         }
 
+        /// <summary>A scripted window opens now: [now - backSec, now + 1 s].
+        /// Every Play / seek / resume / restart calls this before the action;
+        /// the natural end calls it with half a second of look-back, because
+        /// its silent buffers precede the observed stop.</summary>
+        private static void NoteScriptedWindow(float backSec)
+        {
+            long now = Stopwatch.GetTimestamp();
+            long back = (long)(backSec * Stopwatch.Frequency);
+            _scriptedWindows.Add(new KeyValuePair<long, long>(now - back, now + Stopwatch.Frequency));
+        }
+
+        private static bool SilentRunIsScripted(long startTicks)
+        {
+            if (startTicks == 0L) return false;
+            for (int i = 0; i < _scriptedWindows.Count; i++)
+                if (startTicks >= _scriptedWindows[i].Key && startTicks <= _scriptedWindows[i].Value) return true;
+            return false;
+        }
+
+        /// <summary>The §2.4 + §7 2-9 PASS bar, judged on the end line (impl2 r1
+        /// M4). Every row is enforced: a run that did not reach its budget, a
+        /// control sequence that did not complete, or a first sample never
+        /// observed cannot pass. The native-after-cleanup row is judged where
+        /// it is measured (the post-GC sample); the time_at_death bound is a
+        /// control (§2.3.6) and rides the controls row. Churn runs have no bar.</summary>
+        private static string BarVerdict(string why, int silentRunMax)
+        {
+            if (_mode == Mode.Churn) return "n/a(churn)";
+            var fail = new List<string>();
+            if (why != "budget") fail.Add("ended=" + why);
+            if (_stalls != 0) fail.Add("stalls=" + _stalls);
+            if (_driftPeak * 1000f > 60f) fail.Add("drift_peak=" + F0(_driftPeak * 1000f) + ">60");
+            if (silentRunMax < 0 || silentRunMax > 2) fail.Add("silent_run_max=" + silentRunMax + (silentRunMax < 0 ? "(no tap)" : ">2"));
+            else if (silentRunMax > 0 && !SilentRunIsScripted(_runSilentRunMaxStart)) fail.Add("silent_run_unscripted");
+            if (MaxGapMs() > 100f) fail.Add("audio_gap_max=" + F1(MaxGapMs()) + ">100");
+            if (DeficitMs() > 100f) fail.Add("audio_deficit_end=" + F0(DeficitMs()) + ">100");
+            if (_deficitPeakMs > 100f) fail.Add("audio_deficit_peak=" + F0(_deficitPeakMs) + ">100");
+            if (!_controlsDone) fail.Add("controls=incomplete");
+            else if (_controlsFail != 0) fail.Add("controls_fail=" + _controlsFail);
+            if (_openBlockMs > 20f) fail.Add("open_block=" + F1(_openBlockMs) + ">20");
+            if (_firstSampleMs < 0f) fail.Add("first_sample=none");
+            else if (_firstSampleMs > 50f) fail.Add("first_sample=" + F1(_firstSampleMs) + ">50");
+            return fail.Count == 0 ? "pass" : "FAIL[" + string.Join(",", fail.ToArray()) + "]";
+        }
+
         private static string F0(float v) { return v.ToString("F0", CultureInfo.InvariantCulture); }
         private static string F1(float v) { return v.ToString("F1", CultureInfo.InvariantCulture); }
         private static string Mb(long b) { return b < 0 ? "?" : (b / 1048576.0).ToString("F1", CultureInfo.InvariantCulture); }
@@ -1055,11 +1163,17 @@ namespace CompetitiveRounds
             /// shows up in: it supplies no zero-filled buffer, so silent_run
             /// stays at zero however starved the path is (review r9).</summary>
             public long LastCallbackTicks, MaxGapTicks, FramesDelivered;
+            /// <summary>Stopwatch stamp of the first buffer of the longest
+            /// silent run — where the bar decides whether that run sat at a
+            /// scripted transition (impl2 r1 M4).</summary>
+            public long SilentRunMaxStartTicks;
+            private long _silentRunStartTicks;
             public void Reset()
             {
                 Buffers = 0; SilentRun = 0; SilentRunMax = 0;
                 FirstSampleTicks = 0; FirstSampleLogged = false;
                 LastCallbackTicks = 0; MaxGapTicks = 0; FramesDelivered = 0;
+                SilentRunMaxStartTicks = 0; _silentRunStartTicks = 0;
                 CallbacksPaused = false; SilenceExpected = false;
             }
             /// <summary>The scripted PAUSE, where Unity stops calling the
@@ -1104,7 +1218,12 @@ namespace CompetitiveRounds
                 if (SilenceExpected) { SilentRun = 0; return; }
                 bool silent = true;
                 for (int i = 0; i < data.Length; i++) { if (data[i] != 0f) { silent = false; break; } }
-                if (silent) { SilentRun++; if (SilentRun > SilentRunMax) SilentRunMax = SilentRun; }
+                if (silent)
+                {
+                    if (SilentRun == 0) _silentRunStartTicks = stamp;
+                    SilentRun++;
+                    if (SilentRun > SilentRunMax) { SilentRunMax = SilentRun; SilentRunMaxStartTicks = _silentRunStartTicks; }
+                }
                 else { SilentRun = 0; if (FirstSampleTicks == 0) FirstSampleTicks = Stopwatch.GetTimestamp(); }
             }
             private void OnDestroy() { if (Gen == _gen) HostDestroyed = true; }
