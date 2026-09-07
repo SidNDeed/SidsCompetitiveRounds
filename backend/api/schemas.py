@@ -225,6 +225,13 @@ class MatchReport(BaseModel):
     local_obs_phoenix_intervals: int | None = Field(None, ge=0, le=1_000_000)
     local_obs_batches: int | None = Field(None, ge=0, le=1_000_000)
     local_net_worst_frame_tags: str | None = Field(None, max_length=48)
+    # Sept 6 batch (Group 4 item c): reporter-minted opaque session id — a
+    # UUID v4 the reporting seat generated when it joined the room, repeated on
+    # every game of that sitting so the server can group them into one report.
+    # OPTIONAL and ADVISORY: outside the frozen 7-field HMAC canonical, never
+    # derived from the room name, and a value that is not a UUID is a 422 like
+    # any other schema error. Stored as matches.session_uuid (migration 298).
+    session_uuid: UUID | None = None
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -757,6 +764,11 @@ class MatchHistoryEntry(BaseModel):
     # build of zeroes (#257).
     player_end_stats: str | None = None
     opp_end_stats: str | None = None
+    # Sept 6 batch (Group 4 item c): the reporter-minted session id this game
+    # was filed under (matches.session_uuid, migration 298) — the history box
+    # groups consecutive casual games by it for the "Session" button. An
+    # opaque UUID string, NOT a room identifier; None on every row without one.
+    session_uuid: str | None = None
 
     model_config = {"from_attributes": True}
 

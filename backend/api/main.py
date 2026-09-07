@@ -6397,6 +6397,11 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # ADVISORY, outside the frozen 7-field HMAC canonical (hard rule #5).
         p1_end_stats=_clean_end_stats(report.player1.end_stats),
         p2_end_stats=_clean_end_stats(report.player2.end_stats),
+        # Sept 6 batch (Group 4 item c, migration 298): the reporter-minted
+        # session id, already a UUID-or-None by the schema. Stored as sent;
+        # ADVISORY, outside the frozen 7-field HMAC canonical, groups nothing
+        # here — the report endpoint resolves sittings from this column only.
+        session_uuid=report.session_uuid,
         **_match_net_seat_values(report, reporter_is_p1),
     )
     db.add(match)
@@ -9607,6 +9612,7 @@ async def get_player_matches(
             m.ended_at,
             m.winner_id,
             m.is_ranked,
+            m.session_uuid,
             CASE WHEN m.player1_id = :pid THEN m.p1_rounds_won ELSE m.p2_rounds_won END AS player_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p2_rounds_won ELSE m.p1_rounds_won END AS opp_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p1_points_total ELSE m.p2_points_total END AS player_points,
@@ -9819,6 +9825,11 @@ async def get_player_matches(
             # Aug 12 item 1 — end-of-game builds, viewer-relative.
             player_end_stats=row["pl_end_stats"],
             opp_end_stats=row["op_end_stats"],
+            # Sept 6 batch (Group 4 item c): the opaque session id the game was
+            # filed under (migration 298) — an additive column so the history
+            # box can group a casual sitting for its "Session" button. None on
+            # every row without one; never a room identifier.
+            session_uuid=str(row["session_uuid"]) if row["session_uuid"] else None,
         ))
 
     return entries
@@ -45983,3 +45994,744 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
     """), {"v": bool(req.allow), "sid": req.steam_id})
     await db.commit()
     return {"status": "ok", "allow_spectators": bool(req.allow)}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Sept 6 batch — Group 4 item c: the session report envelope.
+#
+#   GET /api/v1/report?steam_id=<caller>&series=<uuid>
+#                                       | &match=<uuid>
+#                                       | &session=<uuid>
+#
+# ONE versioned envelope behind the client's interactive "Session" report.
+# It replaces nothing: the history endpoints keep their rows and the broadcast
+# renderer keeps its own feeds. The rules that shaped it (design v2 §c):
+#   - strict Steam session (fail-closed, checked before any other statement)
+#     and PARTICIPANT-ONLY: a caller whose steam id is not in the set's roster
+#     receives the same 404 as a set that does not exist, so the endpoint
+#     confirms nothing about ids it will not serve;
+#   - exactly one selector, each a UUID: `series` resolves a ranked_series,
+#     team_series or ovt_series id; `match` one game in any of the four match
+#     tables; `session` the games sharing a reporter-minted
+#     matches.session_uuid (migration 298). Grouping is by that column ONLY —
+#     never by room, never by room+date;
+#   - NO room identifier of any kind is selected, let alone serialised (#463):
+#     every statement below names its columns and the serialiser builds each
+#     object field by field (test_session_report.py pins both);
+#   - every statistic is keyed by the player's steam id as a string and there
+#     is no viewer-relative field — the client decides what to colour;
+#   - stored sample series carry no timestamps of their own (fixed-cadence,
+#     decimated cumulative counters — #318), so sample i of n is stamped
+#     t = (i + 1) * duration_s / n: spread over the game it was recorded in.
+#     Point events keep their real seconds. Per-game `available` lists the
+#     streams that exist so a missing panel renders "not recorded"; per-game
+#     `totals` carries each player's stored counters (shots, hits, blocks,
+#     blocks_ok, keys, active_s, damage, deaths, kills) SPARSELY — an absent
+#     key is "not recorded", never zero (#257);
+#   - set_summary is computed ONCE per set from the set's own row(s), never
+#     summed over match rows (C-7).
+# Read-only: no writes, no session-state mutation. Primary-only until the
+# edge's replica read list names it (deploy note, not code).
+# ══════════════════════════════════════════════════════════════════════════
+
+_REPORT_PALETTE = ("#99B3E6", "#E69988", "#8FD18F", "#E6C866",
+                   "#C48CFF", "#66D9E6", "#FFB347", "#F28CC8")
+# Games per envelope. A sitting can run longer; the NEWEST games are kept and
+# the envelope says so (`truncated`), because a 3-hour x-axis is unreadable
+# anyway and 24 games of 128-sample streams is already ~100 KB of JSON.
+_REPORT_MAX_GAMES = 24
+_REPORT_NOT_FOUND = "not_found"
+
+# (stream name, slot column, pair index) — the pair index selects one side of
+# a "left:right" cumulative pair series; None means a plain integer series.
+_REPORT_SLOT_STREAMS = (
+    ("damage", "dmg", None),
+    ("shots", "hit", 0), ("hits", "hit", 1),
+    ("blocks", "block", 0), ("blocks_ok", "block", 1),
+    ("fps", "fps", None), ("ping", "ping", None),
+)
+
+_REPORT_1V1_SQL = """
+    SELECT m.id, m.is_ranked, m.series_id, m.session_uuid,
+           m.started_at, m.ended_at, m.created_at,
+           COALESCE(m.duration_seconds, m.match_duration, 0) AS duration_s,
+           m.player1_id, m.player2_id,
+           m.p1_rounds_won, m.p2_rounds_won, m.p1_points_total, m.p2_points_total,
+           m.point_timeline, m.point_times,
+           m.p1_fps_timeline, m.p2_fps_timeline,
+           m.p1_ping_timeline, m.p2_ping_timeline,
+           m.p1_hit_timeline, m.p2_hit_timeline,
+           m.p1_block_timeline, m.p2_block_timeline,
+           m.p1_damage_timeline, m.p2_damage_timeline,
+           m.p1_end_stats, m.p2_end_stats,
+           m.p1_bullets_fired, m.p1_bullets_hit, m.p1_blocks_activated, m.p1_blocks_successful,
+           m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
+           m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
+           m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths
+      FROM matches m
+     WHERE {where} AND m.invalidated_at IS NULL
+     ORDER BY COALESCE(m.started_at, m.ended_at, m.created_at) DESC, m.created_at DESC
+     LIMIT :lim
+"""
+_REPORT_1V1_WHERE = {
+    "series": "m.series_id = CAST(:key AS uuid)",
+    "session": "m.session_uuid = CAST(:key AS uuid)",
+    "match": "m.id = CAST(:key AS uuid)",
+}
+_REPORT_RS_SQL = """
+    SELECT rs.id, rs.player1_id, rs.player2_id, rs.status, rs.completed_at,
+           rs.invalidated_at, rs.p1_rating_change, rs.p2_rating_change
+      FROM ranked_series rs
+     WHERE rs.id = CAST(:key AS uuid)
+"""
+_REPORT_TS_SQL = """
+    SELECT ts.id, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id, ts.status,
+           ts.completed_at, ts.invalidated_at,
+           ts.t1a_rating_change, ts.t1b_rating_change,
+           ts.t2a_rating_change, ts.t2b_rating_change
+      FROM team_series ts
+     WHERE ts.id = CAST(:key AS uuid)
+"""
+_REPORT_TEAM_SQL = """
+    SELECT tm.id, tm.series_id, tm.started_at, tm.ended_at,
+           COALESCE(tm.duration_seconds, 0) AS duration_s,
+           tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id,
+           tm.t1_rounds_won, tm.t2_rounds_won, tm.t1_points_total, tm.t2_points_total,
+           tm.t1a_end_stats, tm.t1b_end_stats, tm.t2a_end_stats, tm.t2b_end_stats
+      FROM team_matches tm
+     WHERE {where} AND tm.invalidated_at IS NULL
+     ORDER BY COALESCE(tm.started_at, tm.ended_at) DESC
+     LIMIT :lim
+"""
+_REPORT_TEAM_WHERE = {
+    "series": "tm.series_id = CAST(:key AS uuid)",
+    "match": "tm.id = CAST(:key AS uuid)",
+}
+_REPORT_TEAM_TELE_SQL = """
+    SELECT tt.match_id, tt.player_id, tt.fps_timeline, tt.ping_timeline,
+           tt.hit_timeline, tt.block_timeline, tt.damage_dealt_timeline,
+           tt.bullets_fired, tt.bullets_hit, tt.blocks_activated, tt.blocks_successful,
+           tt.keys_pressed, tt.active_seconds
+      FROM team_match_telemetry tt
+     WHERE tt.match_id = ANY(CAST(:mids AS uuid[]))
+"""
+_REPORT_OS_SQL = """
+    SELECT os.id, os.solo_id, os.duo_a_id, os.duo_b_id, os.status,
+           os.completed_at, os.invalidated_at,
+           os.solo_rating_change, os.duo_a_rating_change, os.duo_b_rating_change,
+           os.solo_gold_earned, os.duo_a_gold_earned, os.duo_b_gold_earned
+      FROM ovt_series os
+     WHERE os.id = CAST(:key AS uuid)
+"""
+_REPORT_OVT_SQL = """
+    SELECT om.id, om.series_id, om.started_at, om.ended_at,
+           COALESCE(om.duration_seconds, 0) AS duration_s,
+           om.solo_id, om.duo_a_id, om.duo_b_id,
+           om.solo_rounds_won, om.duo_rounds_won, om.solo_points_total, om.duo_points_total,
+           om.solo_damage_timeline, om.duo_a_damage_timeline, om.duo_b_damage_timeline,
+           om.solo_end_stats, om.duo_a_end_stats, om.duo_b_end_stats
+      FROM ovt_matches om
+     WHERE {where} AND om.invalidated_at IS NULL
+     ORDER BY COALESCE(om.started_at, om.ended_at) DESC
+     LIMIT :lim
+"""
+_REPORT_OVT_WHERE = {
+    "series": "om.series_id = CAST(:key AS uuid)",
+    "match": "om.id = CAST(:key AS uuid)",
+}
+_REPORT_FFA_SQL = """
+    SELECT fm.id, fm.started_at, fm.ended_at,
+           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s
+      FROM ffa_matches fm
+     WHERE fm.id = CAST(:key AS uuid) AND fm.invalidated_at IS NULL
+"""
+_REPORT_FFA_PLAYERS_SQL = """
+    SELECT fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
+           fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained,
+           fp.fps_timeline, fp.ping_timeline, fp.hit_timeline, fp.block_timeline,
+           fp.end_stats, fp.color_hex,
+           fp.bullets_fired, fp.bullets_hit, fp.blocks_activated, fp.blocks_successful,
+           fp.keys_pressed, fp.active_seconds, fp.kills
+      FROM ffa_match_players fp
+     WHERE fp.match_id = CAST(:key AS uuid)
+     ORDER BY fp.placement ASC, fp.slot ASC
+"""
+_REPORT_ROSTER_SQL = """
+    SELECT p.id, p.steam_id, p.display_name
+      FROM players p
+     WHERE p.id = ANY(CAST(:pids AS uuid[]))
+"""
+_REPORT_GOLD_SQL = """
+    SELECT gt.player_id, SUM(gt.amount) AS amount
+      FROM gold_transactions gt
+     WHERE gt.reason = ANY(CAST(:reasons AS text[]))
+       AND gt.reference_id = ANY(CAST(:refs AS text[]))
+     GROUP BY gt.player_id
+"""
+_REPORT_RATING_SQL = """
+    SELECT rh.player_id, rh.rating, rh.period_end
+      FROM rating_history rh
+     WHERE rh.player_id = ANY(CAST(:pids AS uuid[]))
+       AND rh.period_end >= CAST(:t0 AS timestamptz) - make_interval(secs => 60)
+       AND rh.period_end <= CAST(:t0 AS timestamptz) + make_interval(mins => 10)
+     ORDER BY rh.period_end ASC
+"""
+# Card tables share the (match_id, player_id, card_name, pick_order) core;
+# the 1v2 table has no round_number. Table names come from THIS tuple only.
+_REPORT_CARD_TABLES = {
+    "1v1": ("match_cards", True),
+    "team": ("team_match_cards", True),
+    "ovt": ("ovt_match_cards", False),
+    "ffa": ("ffa_match_cards", True),
+}
+
+
+def _report_parse_uuid(raw):
+    """Canonical lowercase UUID string, or None for anything that is not one."""
+    try:
+        return str(uuid.UUID(str(raw).strip()))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _report_iso(dt):
+    try:
+        return dt.isoformat() if dt else None
+    except Exception:
+        return None
+
+
+def _report_samples(csv, duration_s, part=None):
+    """Delimited cumulative sample series -> [[t, v], ...], or None when the
+    column is empty or the game has no duration to spread the samples over.
+    Sample i of n is stamped (i + 1) * duration_s / n (#318: after decimation
+    only the SPAN is known, not the stride). `part` picks one side of a
+    "left:right" pair series; malformed tokens are skipped, not zero-filled."""
+    if not csv or not isinstance(csv, str):
+        return None
+    toks = [t for t in csv.split(",") if t != ""]
+    n = len(toks)
+    try:
+        dur = float(duration_s or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if n == 0 or dur <= 0:
+        return None
+    out = []
+    for i, tok in enumerate(toks):
+        piece = tok
+        if part is not None:
+            bits = tok.split(":")
+            if len(bits) <= part:
+                continue
+            piece = bits[part]
+        try:
+            v = int(float(piece))
+        except (TypeError, ValueError):
+            continue
+        out.append([round((i + 1) * dur / n, 1), v])
+    return out or None
+
+
+def _report_points(point_times, point_timeline, sid_a, sid_b):
+    """1v1 point events ("12,47" + "1:0,1:1") -> the two sides' cumulative
+    score streams plus the deaths they imply: in 1v1 a point ends when the
+    other fighter dies, so the side that did NOT score died at that second."""
+    if not point_times or not point_timeline:
+        return None, None, []
+    times = str(point_times).split(",")
+    totals = str(point_timeline).split(",")
+    n = min(len(times), len(totals))
+    score_a, score_b, deaths = [], [], []
+    prev_a = prev_b = 0
+    for i in range(n):
+        try:
+            t = round(float(times[i]), 1)
+            a_s, b_s = totals[i].split(":")[:2]
+            a, b = int(a_s), int(b_s)
+        except (TypeError, ValueError):
+            continue
+        score_a.append([t, a])
+        score_b.append([t, b])
+        if a > prev_a:
+            deaths.append({"t": t, "id": sid_b})
+        if b > prev_b:
+            deaths.append({"t": t, "id": sid_a})
+        prev_a, prev_b = a, b
+    if not score_a:
+        return None, None, []
+    return score_a, score_b, deaths
+
+
+def _report_slot(pid, rounds, points, fps=None, ping=None, hit=None, block=None,
+                 dmg=None, end_stats=None, totals=None):
+    return {"pid": str(pid) if pid is not None else None, "rounds": rounds, "points": points,
+            "fps": fps, "ping": ping, "hit": hit, "block": block, "dmg": dmg,
+            "end_stats": end_stats, "totals": totals or {}}
+
+
+def _report_totals(shots=None, hits=None, blocks=None, blocks_ok=None, keys=None,
+                   active_s=None, damage=None, deaths=None, kills=None):
+    """Per-game per-player counters as stored (page-3 totals strip). SPARSE:
+    a column that is NULL is simply absent, never zero (#257) — the client
+    renders an absent key as "not recorded". `blocks` doubles as the client's
+    era check for block pairs (v2 pairs end at the stored activations)."""
+    out = {}
+    for key, val in (("shots", shots), ("hits", hits), ("blocks", blocks),
+                     ("blocks_ok", blocks_ok), ("keys", keys), ("damage", damage),
+                     ("deaths", deaths), ("kills", kills)):
+        if val is None:
+            continue
+        try:
+            out[key] = int(val)
+        except (TypeError, ValueError):
+            continue
+    if active_s is not None:
+        try:
+            out["active_s"] = round(float(active_s), 1)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _report_game_json(game, sid_of, cards_by_match):
+    """One game of the envelope, every field keyed by steam id string. Only
+    the listed keys are ever copied out of `game` — nothing is passed through."""
+    duration_s = int(game.get("duration_s") or 0)
+    slots = game["slots"]
+    scores, points, timelines, end_build, end_stats, totals = {}, {}, {}, {}, {}, {}
+    available = set()
+    for s in slots:
+        sid = sid_of.get(s["pid"])
+        if sid is None:
+            continue
+        scores[sid] = int(s.get("rounds") or 0)
+        points[sid] = int(s.get("points") or 0)
+        if s.get("totals"):
+            totals[sid] = dict(s["totals"])
+        tl = {}
+        for key, col, part in _REPORT_SLOT_STREAMS:
+            series = _report_samples(s.get(col), duration_s, part)
+            if series:
+                tl[key] = series
+                available.add(key)
+        timelines[sid] = tl
+        end_build[sid] = []
+        es = _clean_end_stats(s.get("end_stats"))
+        if es:
+            end_stats[sid] = es
+    deaths = []
+    if game.get("point_times") and len(slots) == 2:
+        sid_a, sid_b = sid_of.get(slots[0]["pid"]), sid_of.get(slots[1]["pid"])
+        if sid_a and sid_b:
+            sa, sb, deaths = _report_points(game.get("point_times"), game.get("point_timeline"),
+                                            sid_a, sid_b)
+            if sa:
+                timelines.setdefault(sid_a, {})["score"] = sa
+                timelines.setdefault(sid_b, {})["score"] = sb
+                available.add("score")
+    picks = []
+    for pid, card, _pick_order, _round_number in cards_by_match.get(str(game["id"]), []):
+        sid = sid_of.get(str(pid))
+        if sid is None or not card:
+            continue
+        # No pick timestamp is recorded in any mode: t is null and the client
+        # draws the tick on the game divider, in pick order.
+        picks.append({"t": None, "id": sid, "card": str(card)})
+        end_build.setdefault(sid, []).append(str(card))
+    return {
+        "match_id": str(game["id"]),
+        "started_at": _report_iso(game.get("started_at")),
+        "duration_s": duration_s,
+        "scores": scores,
+        "points": points,
+        "timelines": timelines,
+        "available": sorted(available),
+        "picks": picks,
+        "deaths": deaths,
+        "end_build": end_build,
+        "end_stats": end_stats,
+        "totals": totals,
+    }
+
+
+async def _report_rows(db, sql, params):
+    return (await db.execute(text(sql), params)).mappings().all()
+
+
+def _report_take(rows):
+    """Newest-first rows (LIMIT max+1) -> (oldest-first games, truncated)."""
+    truncated = len(rows) > _REPORT_MAX_GAMES
+    return list(reversed(rows[:_REPORT_MAX_GAMES])), truncated
+
+
+async def _report_load_1v1(db, selector, key):
+    rows = await _report_rows(db, _REPORT_1V1_SQL.format(where=_REPORT_1V1_WHERE[selector]),
+                              {"key": key, "lim": _REPORT_MAX_GAMES + 1})
+    rows, truncated = _report_take(rows)
+    games = []
+    for r in rows:
+        games.append({
+            "id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+            "is_ranked": bool(r["is_ranked"]), "series_id": r["series_id"],
+            "point_times": r["point_times"], "point_timeline": r["point_timeline"],
+            "slots": [
+                _report_slot(r["player1_id"], r["p1_rounds_won"], r["p1_points_total"],
+                             r["p1_fps_timeline"], r["p1_ping_timeline"], r["p1_hit_timeline"],
+                             r["p1_block_timeline"], r["p1_damage_timeline"], r["p1_end_stats"],
+                             _report_totals(r["p1_bullets_fired"], r["p1_bullets_hit"],
+                                            r["p1_blocks_activated"], r["p1_blocks_successful"],
+                                            r["p1_keys_pressed"], r["p1_active_seconds"],
+                                            r["p1_damage_dealt"], r["p1_deaths"])),
+                _report_slot(r["player2_id"], r["p2_rounds_won"], r["p2_points_total"],
+                             r["p2_fps_timeline"], r["p2_ping_timeline"], r["p2_hit_timeline"],
+                             r["p2_block_timeline"], r["p2_damage_timeline"], r["p2_end_stats"],
+                             _report_totals(r["p2_bullets_fired"], r["p2_bullets_hit"],
+                                            r["p2_blocks_activated"], r["p2_blocks_successful"],
+                                            r["p2_keys_pressed"], r["p2_active_seconds"],
+                                            r["p2_damage_dealt"], r["p2_deaths"])),
+            ],
+        })
+    return games, truncated
+
+
+async def _report_load_team(db, selector, key):
+    rows = await _report_rows(db, _REPORT_TEAM_SQL.format(where=_REPORT_TEAM_WHERE[selector]),
+                              {"key": key, "lim": _REPORT_MAX_GAMES + 1})
+    rows, truncated = _report_take(rows)
+    games = []
+    if rows:
+        tele = await _report_rows(db, _REPORT_TEAM_TELE_SQL,
+                                  {"mids": [str(r["id"]) for r in rows]})
+        tele_by = {(str(t["match_id"]), str(t["player_id"])): t for t in tele}
+    for r in rows:
+        slots = []
+        for slot, team, rounds, points in (
+                ("t1a", 1, r["t1_rounds_won"], r["t1_points_total"]),
+                ("t1b", 1, r["t1_rounds_won"], r["t1_points_total"]),
+                ("t2a", 2, r["t2_rounds_won"], r["t2_points_total"]),
+                ("t2b", 2, r["t2_rounds_won"], r["t2_points_total"])):
+            pid = r[f"{slot}_id"]
+            if pid is None:
+                continue
+            t = tele_by.get((str(r["id"]), str(pid))) or {}
+            s = _report_slot(pid, rounds, points, t.get("fps_timeline"), t.get("ping_timeline"),
+                             t.get("hit_timeline"), t.get("block_timeline"),
+                             t.get("damage_dealt_timeline"), r[f"{slot}_end_stats"],
+                             _report_totals(t.get("bullets_fired"), t.get("bullets_hit"),
+                                            t.get("blocks_activated"), t.get("blocks_successful"),
+                                            t.get("keys_pressed"), t.get("active_seconds")))
+            s["team"] = team
+            slots.append(s)
+        games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+                      "series_id": r["series_id"], "slots": slots})
+    return games, truncated
+
+
+async def _report_load_ovt(db, selector, key):
+    rows = await _report_rows(db, _REPORT_OVT_SQL.format(where=_REPORT_OVT_WHERE[selector]),
+                              {"key": key, "lim": _REPORT_MAX_GAMES + 1})
+    rows, truncated = _report_take(rows)
+    games = []
+    for r in rows:
+        slots = []
+        for slot, team, rounds, points in (
+                ("solo", 1, r["solo_rounds_won"], r["solo_points_total"]),
+                ("duo_a", 2, r["duo_rounds_won"], r["duo_points_total"]),
+                ("duo_b", 2, r["duo_rounds_won"], r["duo_points_total"])):
+            pid = r[f"{slot}_id"]
+            if pid is None:
+                continue
+            s = _report_slot(pid, rounds, points, dmg=r[f"{slot}_damage_timeline"],
+                             end_stats=r[f"{slot}_end_stats"])
+            s["team"] = team
+            slots.append(s)
+        games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+                      "series_id": r["series_id"], "slots": slots})
+    return games, truncated
+
+
+async def _report_load_ffa(db, key):
+    rows = await _report_rows(db, _REPORT_FFA_SQL, {"key": key})
+    if not rows:
+        return [], []
+    r = rows[0]
+    fps = await _report_rows(db, _REPORT_FFA_PLAYERS_SQL, {"key": key})
+    slots = []
+    for fp in fps:
+        s = _report_slot(fp["player_id"], fp["rounds_won"], fp["points_total"],
+                         fp["fps_timeline"], fp["ping_timeline"], fp["hit_timeline"],
+                         fp["block_timeline"], None, fp["end_stats"],
+                         _report_totals(fp["bullets_fired"], fp["bullets_hit"],
+                                        fp["blocks_activated"], fp["blocks_successful"],
+                                        fp["keys_pressed"], fp["active_seconds"],
+                                        kills=fp["kills"]))
+        s["placement"] = fp["placement"]
+        s["rating_before"] = fp["rating_before"]
+        s["rating_after"] = fp["rating_after"]
+        s["rating_change"] = fp["rating_change"]
+        s["gold_gained"] = fp["gold_gained"]
+        s["color_hex"] = fp["color_hex"]
+        slots.append(s)
+    game = {"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+            "slots": slots}
+    return [game], slots
+
+
+async def _report_load_cards(db, mode, mids):
+    """{match_id str: [(player_id, card_name, pick_order, round_number), ...]}
+    in pick order (round first where the table records one)."""
+    if not mids:
+        return {}
+    table, with_round = _REPORT_CARD_TABLES[mode]
+    round_col = "c.round_number" if with_round else "NULL AS round_number"
+    order = "c.round_number NULLS FIRST, c.pick_order" if with_round else "c.pick_order"
+    rows = await _report_rows(db, f"""
+        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}
+          FROM {table} c
+         WHERE c.match_id = ANY(CAST(:mids AS uuid[]))
+         ORDER BY c.match_id, {order}""", {"mids": [str(m) for m in mids]})
+    out = {}
+    for r in rows:
+        out.setdefault(str(r["match_id"]), []).append(
+            (r["player_id"], r["card_name"], r["pick_order"], r["round_number"]))
+    return out
+
+
+async def _report_roster(db, pids_in_order, team_of=None, color_of=None):
+    """Ordered, de-duplicated roster: [{pid, id (steam id), name, color, team}].
+    Colours come from the roster index (FFA rows may carry their own)."""
+    uniq = []
+    for p in pids_in_order:
+        if p is None:
+            continue
+        p = str(p)
+        if p not in uniq:
+            uniq.append(p)
+    if not uniq:
+        return []
+    rows = await _report_rows(db, _REPORT_ROSTER_SQL, {"pids": uniq})
+    by_id = {str(r["id"]): r for r in rows}
+    roster = []
+    for i, p in enumerate(uniq):
+        r = by_id.get(p)
+        if r is None:
+            continue
+        color = (color_of or {}).get(p) or _REPORT_PALETTE[i % len(_REPORT_PALETTE)]
+        roster.append({"pid": p, "id": str(r["steam_id"]), "name": r["display_name"] or "",
+                       "color": color, "team": (team_of or {}).get(p)})
+    return roster
+
+
+async def _report_gold(db, reasons, refs):
+    """{player_id str: gold} for the named reasons against the named references
+    — one statement per set, whatever the number of games."""
+    if not refs:
+        return {}
+    rows = await _report_rows(db, _REPORT_GOLD_SQL,
+                              {"reasons": list(reasons), "refs": [str(x) for x in refs]})
+    return {str(r["player_id"]): int(r["amount"] or 0) for r in rows}
+
+
+async def _report_rating_after(db, pids, completed_at):
+    """{player_id str: rating} from the rating_history snapshot the series
+    completion wrote (the FIRST snapshot in a bounded window around
+    completed_at: the row is written in the same request, so anything later
+    belongs to a later series). Empty when the set never completed."""
+    if completed_at is None or not pids:
+        return {}
+    rows = await _report_rows(db, _REPORT_RATING_SQL,
+                              {"pids": [str(p) for p in pids], "t0": completed_at})
+    out = {}
+    for r in rows:
+        k = str(r["player_id"])
+        if k not in out and r["rating"] is not None:
+            out[k] = float(r["rating"])
+    return out
+
+
+def _report_rating_entry(after, delta):
+    """before/after/delta from an authoritative delta and the post-series
+    snapshot: before = after - delta, so the three always agree to 0.1."""
+    d = round(float(delta), 1)
+    if after is None:
+        return {"before": None, "after": None, "delta": d}
+    a = round(float(after), 1)
+    return {"before": round(a - d, 1), "after": a, "delta": d}
+
+
+async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
+    """rating {sid: {before, after, delta}} and gold {sid: n}, computed ONCE
+    per set from the set's own row(s) (C-7). Rating entries exist only where
+    the set is rated and completed; gold entries only where a ledger row
+    exists — an absent key means "not recorded", never zero."""
+    rating, gold = {}, {}
+    sid_of = {r["pid"]: r["id"] for r in roster}
+    if kind == "ranked" and selector == "series" and set_row is not None:
+        deltas = {str(set_row["player1_id"]): set_row["p1_rating_change"],
+                  str(set_row["player2_id"]): set_row["p2_rating_change"]}
+        after = {}
+        if set_row["status"] == "completed":
+            after = await _report_rating_after(db, list(deltas.keys()), set_row["completed_at"])
+        for pid, d in deltas.items():
+            sid = sid_of.get(pid)
+            if sid is None or d is None:
+                continue
+            rating[sid] = _report_rating_entry(after.get(pid), d)
+        g = await _report_gold(db, ("series_win", "series_loss"), [key])
+        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+    elif kind == "team" and selector == "series" and set_row is not None:
+        for slot in ("t1a", "t1b", "t2a", "t2b"):
+            pid = set_row[f"{slot}_id"]
+            d = set_row[f"{slot}_rating_change"]
+            sid = sid_of.get(str(pid)) if pid is not None else None
+            if sid is None or d is None:
+                continue
+            # 2v2 ratings keep no history snapshots: the delta is the only
+            # authoritative number, before/after stay null ("not recorded").
+            rating[sid] = _report_rating_entry(None, d)
+        g = await _report_gold(db, ("team_series_win", "team_series_loss"), [key])
+        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+    elif kind == "ovt" and selector == "series" and set_row is not None:
+        for slot in ("solo", "duo_a", "duo_b"):
+            pid = set_row[f"{slot}_id"]
+            sid = sid_of.get(str(pid)) if pid is not None else None
+            if sid is None:
+                continue
+            d = set_row[f"{slot}_rating_change"]
+            if d is not None:
+                rating[sid] = _report_rating_entry(None, d)
+            gold[sid] = int(set_row[f"{slot}_gold_earned"] or 0)
+    elif kind == "ffa":
+        for s in (games[0]["slots"] if games else []):
+            sid = sid_of.get(s["pid"])
+            if sid is None:
+                continue
+            if s.get("rating_change") is not None:
+                d = round(float(s["rating_change"]), 1)
+                rb = s.get("rating_before")
+                ra = s.get("rating_after")
+                rating[sid] = {"before": round(float(rb), 1) if rb is not None else None,
+                               "after": round(float(ra), 1) if ra is not None else None,
+                               "delta": d}
+            if s.get("gold_gained") is not None:
+                gold[sid] = int(s["gold_gained"])
+    else:
+        # One game or a casual sitting: no rating is at stake; gold is the
+        # per-game XP/level ledger, fetched ONCE for every game id in the set.
+        reasons = {"ovt": ("ovt_xp", "level_reward"),
+                   "team": ("team_xp", "level_reward")}.get(kind, ("xp", "level_reward"))
+        if kind in ("ranked", "casual", "ovt", "team"):
+            g = await _report_gold(db, reasons, [str(gm["id"]) for gm in games])
+            gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+    return {"rating": rating, "gold": gold}
+
+
+@app.get("/api/v1/report", tags=["Players"])
+async def get_set_report(request: Request, steam_id: str = "",
+                         series: str | None = None, match: str | None = None,
+                         session: str | None = None,
+                         db: AsyncSession = Depends(get_db)):
+    """The session report envelope (v1) for one set — see the block comment
+    above. Errors: 401 "session_required" (fail-closed session check, first
+    statement); 400 "bad_request" for zero or several selectors or a selector
+    that is not a UUID; 404 "not_found" for an unknown, invalidated or empty
+    set AND for a caller who is not in its roster (one detail for both)."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    chosen = [(name, val) for name, val in
+              (("series", series), ("match", match), ("session", session)) if val]
+    if len(chosen) != 1:
+        raise HTTPException(status_code=400, detail="bad_request")
+    selector, raw = chosen[0]
+    key = _report_parse_uuid(raw)
+    if key is None:
+        raise HTTPException(status_code=400, detail="bad_request")
+
+    kind, mode, games, truncated = None, None, [], False
+    set_row, roster_pids, team_of, color_of = None, [], {}, {}
+
+    if selector == "series":
+        rs = await _report_rows(db, _REPORT_RS_SQL, {"key": key})
+        if rs:
+            set_row = rs[0]
+            if set_row["invalidated_at"] is not None:
+                raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+            kind, mode = "ranked", "1v1"
+            games, truncated = await _report_load_1v1(db, "series", key)
+            roster_pids = [set_row["player1_id"], set_row["player2_id"]]
+        else:
+            ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
+            if ts:
+                set_row = ts[0]
+                if set_row["invalidated_at"] is not None:
+                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+                kind, mode = "team", "team"
+                games, truncated = await _report_load_team(db, "series", key)
+                roster_pids = [set_row["t1a_id"], set_row["t1b_id"], set_row["t2a_id"], set_row["t2b_id"]]
+                team_of = {str(set_row["t1a_id"]): 1, str(set_row["t1b_id"]): 1,
+                           str(set_row["t2a_id"]): 2, str(set_row["t2b_id"]): 2}
+            else:
+                os_ = await _report_rows(db, _REPORT_OS_SQL, {"key": key})
+                if not os_:
+                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+                set_row = os_[0]
+                if set_row["invalidated_at"] is not None:
+                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+                kind, mode = "ovt", "ovt"
+                games, truncated = await _report_load_ovt(db, "series", key)
+                roster_pids = [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]]
+                team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
+                           str(set_row["duo_b_id"]): 2}
+    elif selector == "session":
+        kind, mode = "casual", "1v1"
+        games, truncated = await _report_load_1v1(db, "session", key)
+        if games and all(g["is_ranked"] for g in games):
+            kind = "ranked"
+        for g in games:
+            roster_pids.extend(s["pid"] for s in g["slots"])
+    else:  # match
+        games, truncated = await _report_load_1v1(db, "match", key)
+        if games:
+            mode = "1v1"
+            kind = "ranked" if games[0]["is_ranked"] else "casual"
+            roster_pids = [s["pid"] for s in games[0]["slots"]]
+        else:
+            games, truncated = await _report_load_team(db, "match", key)
+            if games:
+                kind, mode = "team", "team"
+                roster_pids = [s["pid"] for s in games[0]["slots"]]
+                team_of = {s["pid"]: s["team"] for s in games[0]["slots"]}
+            else:
+                games, truncated = await _report_load_ovt(db, "match", key)
+                if games:
+                    kind, mode = "ovt", "ovt"
+                    roster_pids = [s["pid"] for s in games[0]["slots"]]
+                    team_of = {s["pid"]: s["team"] for s in games[0]["slots"]}
+                else:
+                    games, ffa_slots = await _report_load_ffa(db, key)
+                    if games:
+                        kind, mode = "ffa", "ffa"
+                        roster_pids = [s["pid"] for s in ffa_slots]
+                        color_of = {s["pid"]: s["color_hex"] for s in ffa_slots if s.get("color_hex")}
+    if not games:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+
+    roster = await _report_roster(db, roster_pids, team_of, color_of)
+    # PARTICIPANT-ONLY, and indistinguishable from "no such set" on purpose.
+    if steam_id not in {r["id"] for r in roster}:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    sid_of = {r["pid"]: r["id"] for r in roster}
+
+    cards = await _report_load_cards(db, mode, [g["id"] for g in games])
+    games_json = [_report_game_json(g, sid_of, cards) for g in games]
+    set_summary = await _report_set_summary(db, kind, selector, key, set_row, games, roster)
+    return {
+        "v": 1,
+        "kind": kind,
+        "players": [{"id": r["id"], "name": r["name"], "color": r["color"], "team": r["team"]}
+                    for r in roster],
+        "games": games_json,
+        "set_summary": set_summary,
+        "truncated": truncated,
+    }

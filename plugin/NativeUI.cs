@@ -1256,11 +1256,69 @@ namespace CompetitiveRounds
             return _historyCardsFull ? I18n.Tr("Cards: <color=#88FF88>FULL</color>")
                                      : I18n.Tr("Cards: <color=#FFCC66>chips</color>");
         }
-        private class HistoryRow{public GameObject root,seriesGO,btnId;public string currentMatchId,opponentSteamId;/* Sept 6 item a: the row's opponent, captured in FillRow, for the hover profile card */public object txtResult,txtOpp,txtFps,txtPing,txtXP,txtDate,txtCards,txtOppCards,txtSeriesHead,txtSeriesElo,txtStats,txtHitYou,txtBlockYou,txtKpsYou,txtHitOpp,txtBlockOpp,txtKpsOpp,txtDpsYou,txtDpsOpp;}
+        private class HistoryRow{public GameObject root,seriesGO,btnId,btnSession;public string currentMatchId,sessionSel,sessionKey,opponentSteamId;/* Sept 6 item a: the row's opponent, captured in FillRow, for the hover profile card */public object txtResult,txtOpp,txtFps,txtPing,txtXP,txtDate,txtCards,txtOppCards,txtSeriesHead,txtSeriesElo,txtStats,txtHitYou,txtBlockYou,txtKpsYou,txtHitOpp,txtBlockOpp,txtKpsOpp,txtDpsYou,txtDpsOpp;}
 
         // July 22 item 6: short game code — first 12 hex of the match UUID,
         // dashes stripped, uppercase (same convention as ranked_/sct- rooms).
         private static string GameCode(string matchId){if(string.IsNullOrEmpty(matchId))return null;var hx=matchId.Replace("-","");return hx.Substring(0,Math.Min(12,hx.Length)).ToUpperInvariant();}
+
+        /// <summary>Sept 6 batch (Group 4 item c): arm (or hide) a history row's
+        /// "Session" button. The binding lives ON the row and is read at click
+        /// time (#265) — never an index into a cache that a refresh may reorder.
+        /// `sel` is series / match / session; null hides the button.</summary>
+        private static void SetSessionButton(HistoryRow row,string sel,string key){if(row==null)return;bool on=!string.IsNullOrEmpty(sel)&&!string.IsNullOrEmpty(key);row.sessionSel=on?sel:null;row.sessionKey=on?key:null;if(row.btnSession!=null&&row.btnSession.activeSelf!=on)row.btnSession.SetActive(on);}
+
+        /// <summary>Sept 6 item c: open the interactive session report (F5-owned
+        /// IMGUI pager, SessionReportView) on one set. Shared by the Ranked/Casual
+        /// rows, the 2v2 series headers and the FFA recent rows.</summary>
+        internal static void OpenSessionReport(string sel,string key){if(string.IsNullOrEmpty(sel)||string.IsNullOrEmpty(key))return;try{SessionReportView.Open(sel,key);}catch(Exception ex){Plugin.Log.LogWarning($"[SESSION-REPORT] open: {ex.Message}");}}
+
+        /// <summary>Sept 6 item c: is the pointer over this ACTIVE control? Same
+        /// world-corner -> screen test as ClickHandler.ContainsScreenPoint (ROUNDS'
+        /// ScreenSpaceCamera canvas needs WorldToScreenPoint). Used by a row-level
+        /// raw-poll handler to yield to the button drawn on top of it.</summary>
+        private static bool PointerOverActive(GameObject go)
+        {
+            try
+            {
+                if (go == null || !go.activeInHierarchy) return false;
+                var rt = go.GetComponent<RectTransform>();
+                if (rt == null) return false;
+                Camera cam = null;
+                Transform t = rt;
+                while (t != null)
+                {
+                    var cc = UIFactory.tCanvas != null ? t.GetComponent(UIFactory.tCanvas) : null;
+                    if (cc != null)
+                    {
+                        try
+                        {
+                            var bf = BindingFlags.Public | BindingFlags.Instance;
+                            int rm = (int)UIFactory.tCanvas.GetProperty("renderMode", bf).GetValue(cc);
+                            if (rm != 0)
+                            {
+                                cam = UIFactory.tCanvas.GetProperty("worldCamera", bf)?.GetValue(cc) as Camera;
+                                if (cam == null) cam = Camera.main;   // ClickHandler's own fallback
+                            }
+                        }
+                        catch { }
+                        break;
+                    }
+                    t = t.parent;
+                }
+                var corners = new Vector3[4];
+                rt.GetWorldCorners(corners);
+                float minX = float.PositiveInfinity, minY = float.PositiveInfinity, maxX = float.NegativeInfinity, maxY = float.NegativeInfinity;
+                for (int i = 0; i < 4; i++)
+                {
+                    Vector3 c = cam != null ? cam.WorldToScreenPoint(corners[i]) : corners[i];
+                    minX = Mathf.Min(minX, c.x); minY = Mathf.Min(minY, c.y); maxX = Mathf.Max(maxX, c.x); maxY = Mathf.Max(maxY, c.y);
+                }
+                Vector3 mp = Input.mousePosition;
+                return mp.x >= minX && mp.x <= maxX && mp.y >= minY && mp.y <= maxY;
+            }
+            catch { return false; }
+        }
         /* Review [0]: NO ClickGuard here — both callers already claimed their
          * per-control key this frame (the ID button via CreateButton's wrapper,
          * the 2v2 row via Claim(row.root)); a same-frame re-claim on the same
@@ -1366,7 +1424,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
+        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
         public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;PageGeneration++;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -1512,6 +1570,10 @@ namespace CompetitiveRounds
                 TeardownOverlaySurfaces();
                 return;
             }
+            // Sept 6 item c: an open session report owns Escape — one press closes
+            // the report, the next closes the page. Consumed here in Update so no
+            // OnGUI consumer sees the same press (the view itself is IMGUI).
+            if(SessionReportView.Active&&Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;SessionReportView.Close();return;}
             if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;/* Sept 6 item a: a PINNED profile card is the topmost surface — Escape unpins it and the page stays. */if(ProfileCard.ConsumeEscape())return;Close();return;}
             try{ProfileCard.Tick();}catch(Exception ex){VanillaFixSupport.DiagLimited("ProfileCard","tick failed: "+ex.Message,5);}/* Sept 6 item a: name-hover dwell, open, follow, pin */
             // r8 find 1: a bet-row refresh deferred by the mid-click guard
@@ -2539,6 +2601,7 @@ namespace CompetitiveRounds
         private sealed class FfaRecentMatchRow
         {
             public GameObject root, btnId;
+            public GameObject btnSession;   // Sept 6 item c: one-game session report
             public RectTransform headerRect;
             // The list viewport (mask) that owns THIS row. With two recent
             // lists (ranked + casual) a single static viewport would clip
@@ -3203,6 +3266,13 @@ namespace CompetitiveRounds
             row.btnId=UIFactory.CreateButton("ID",header.transform,"ID",12f,C_DIM,C_BTN,
                 ()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(30,21));
             SetFfaLayoutWidth(row.btnId,30f,0f,30f);
+            // Sept 6 batch (Group 4 item c): one-game session report for this FFA
+            // match (FFA has no multi-game sets) -> ?match=. Reads the row's own
+            // binding at click time (#265).
+            row.btnSession=UIFactory.CreateButton("Ses",header.transform,I18n.Tr("Session"),12f,C_DIM,C_BTN,
+                ()=>OpenSessionReport("match",row.currentMatchId),sizeDelta:new Vector2(66,21));
+            SetFfaLayoutWidth(row.btnSession,66f,0f,66f);
+            row.btnSession.SetActive(false);
             row.root.SetActive(false);
             return row;
         }
@@ -3437,6 +3507,7 @@ namespace CompetitiveRounds
             if(match==null||row==null)return;
             row.currentMatchId=match.match_id;
             if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(match.match_id));
+            if(row.btnSession!=null)row.btnSession.SetActive(!string.IsNullOrEmpty(match.match_id));   // Sept 6 item c
             string date="";
             if(!string.IsNullOrEmpty(match.ended_at)&&DateTime.TryParse(match.ended_at,
                 System.Globalization.CultureInfo.InvariantCulture,
@@ -6334,7 +6405,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
         var right=new GameObject("Right");right.transform.SetParent(panel.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);var rkBox=UIFactory.CreatePanel("RkB",right.transform,C_PANEL);UIFactory.AddVLG(rkBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(rkBox,flexH:1);UIFactory.CreateText("RkH",rkBox.transform,"Ranked History",21f,C_GOLD,sizeDelta:new Vector2(250,30));/* Bug 263 (Stan): opponent-name search — the 4th instance of the IMGUI-over-anchor field (CompetitiveUI.DrawHistorySearch draws over HSLbl; focus-mutexed vs T-chat). One box filters the ranked AND casual lists. No flexW:1 spacers (learning #132). */var hSr=new GameObject("HistSearch");hSr.transform.SetParent(rkBox.transform,false);hSr.AddComponent<RectTransform>();UIFactory.AddHLG(hSr,spacing:6);UIFactory.AddLE(hSr,prefH:24,flexH:0,flexW:0);UIFactory.CreateText("HSc",hSr.transform,"<color=#8899AA>Search</color>",13f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(52,22));histSearchField=UIFactory.CreateText("HSLbl",hSr.transform,"",13f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,22));UIFactory.CreateButton("HSClr",hSr.transform,"Clear",11f,C_LABEL,new Color(0.25f,0.3f,0.4f,0.9f),()=>{HistorySearch="";},sizeDelta:new Vector2(48,20));txtOppSummary=UIFactory.CreateText("OS",rkBox.transform,"",15f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(500,22));var rkSV=UIFactory.CreateScrollView("RkSV",rkBox.transform,spacing:1);UIFactory.AddLE(rkSV.scrollGO,flexH:1);rankedContainer=rkSV.content;for(int i=0;i<15;i++)rankedRows.Add(CreateHistoryRow(rankedContainer.transform,$"rr{i}"));var rPg=new GameObject("RPg");rPg.transform.SetParent(rkBox.transform,false);rPg.AddComponent<RectTransform>();UIFactory.AddHLG(rPg,spacing:6,forceExpandH:true);UIFactory.AddLE(rPg,prefH:20,flexH:0);var rS1=new GameObject("S");rS1.transform.SetParent(rPg.transform,false);rS1.AddComponent<RectTransform>();UIFactory.AddLE(rS1,flexW:1);rPrev=UIFactory.CreateButton("rP",rPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(rankedPage>0){rankedPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtRankedPage=UIFactory.CreateText("rPI",rPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));rNext=UIFactory.CreateButton("rN",rPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{rankedPage++;dirty=true;},sizeDelta:new Vector2(50,18));var rS2=new GameObject("S");rS2.transform.SetParent(rPg.transform,false);rS2.AddComponent<RectTransform>();UIFactory.AddLE(rS2,flexW:1);/* Aug-3 item: ES "Cartas: COMPLETO" is ~110px at the 12pt floor and Truncate cut it to "Cartas: COMPLE". The pager row's two flexW:1 spacers hold ~700px of surplus, so widening costs nothing. */rCardModeBtn=UIFactory.CreateButton("rCm",rPg.transform,"",10f,C_LABEL,C_BTN,ToggleHistoryCardMode,sizeDelta:new Vector2(150,18));rCardModeTxt=UIFactory.GetButtonText(rCardModeBtn);
         var csBox=UIFactory.CreatePanel("CsB",right.transform,C_PANEL);UIFactory.AddVLG(csBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(csBox,flexH:1);UIFactory.CreateText("CsH",csBox.transform,"Casual History",21f,C_SUB,sizeDelta:new Vector2(250,30));var csSV=UIFactory.CreateScrollView("CsSV",csBox.transform,spacing:1);UIFactory.AddLE(csSV.scrollGO,flexH:1);casualContainer=csSV.content;for(int i=0;i<12;i++)casualRows.Add(CreateHistoryRow(casualContainer.transform,$"cr{i}"));var cPg=new GameObject("CPg");cPg.transform.SetParent(csBox.transform,false);cPg.AddComponent<RectTransform>();UIFactory.AddHLG(cPg,spacing:6,forceExpandH:true);UIFactory.AddLE(cPg,prefH:20,flexH:0);var cS1=new GameObject("S");cS1.transform.SetParent(cPg.transform,false);cS1.AddComponent<RectTransform>();UIFactory.AddLE(cS1,flexW:1);cPrev=UIFactory.CreateButton("cP",cPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(casualPage>0){casualPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtCasualPage=UIFactory.CreateText("cPI",cPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));cNext=UIFactory.CreateButton("cN",cPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{casualPage++;dirty=true;},sizeDelta:new Vector2(50,18));var cS2=new GameObject("S");cS2.transform.SetParent(cPg.transform,false);cS2.AddComponent<RectTransform>();UIFactory.AddLE(cS2,flexW:1);/* Same widening as the ranked pager above (item: "Cartas: COMPLE"). */cCardModeBtn=UIFactory.CreateButton("cCm",cPg.transform,"",10f,C_LABEL,C_BTN,ToggleHistoryCardMode,sizeDelta:new Vector2(150,18));cCardModeTxt=UIFactory.GetButtonText(cCardModeBtn);return outer;}
 
-        private static HistoryRow CreateHistoryRow(Transform parent,string name){var row=new HistoryRow();row.seriesGO=new GameObject(name+"s");row.seriesGO.transform.SetParent(parent,false);row.seriesGO.AddComponent<RectTransform>();UIFactory.AddHLG(row.seriesGO,spacing:4,padL:4);UIFactory.AddLE(row.seriesGO,prefH:25);row.txtSeriesHead=UIFactory.CreateText("sh",row.seriesGO.transform,"",19f,C_GREEN,sizeDelta:new Vector2(500,25));row.txtSeriesElo=UIFactory.CreateText("se",row.seriesGO.transform,"",19f,C_GREEN,UIFactory.AlignMidRight,sizeDelta:new Vector2(160,25));/* item 7c: 19pt in a 25px box — an OS-fallback (Cyrillic) line does not fit and Truncate drops it whole. Both carry translated text ("Series {0} {1}  vs {2}", "{0} elo"). */UIFactory.FitOneLine(row.txtSeriesHead);UIFactory.FitOneLine(row.txtSeriesElo);row.seriesGO.SetActive(false);row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddVLG(row.root,spacing:0,padL:4);var main=new GameObject("m");main.transform.SetParent(row.root.transform,false);main.AddComponent<RectTransform>();UIFactory.AddHLG(main,spacing:4);UIFactory.AddLE(main,prefH:25);/* Feedback item 4: txtResult width hugs the score text (was 200 — the dead right half pushed the ID button visually next to "vs Player" instead of the score). */row.txtResult=UIFactory.CreateText("r",main.transform,"",19f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(132,25));/* July 22 item 6: tiny click-to-copy game-ID button. Sits OUTSIDE txtResult's rect so the score hover graph keeps its region. Ordered FIRST (before the score) in both ranked and casual history — next to the scoring column, not the "vs Player" text. Setting the sibling index here, at creation, is deliberate: doing it from BuildPage instead would silently no-op if tab construction ever became lazy or reordered (learning #91/#158). Later-created children append after it, so index 0 stays index 0. */row.btnId=UIFactory.CreateButton("id",main.transform,"ID",9f,C_DIM,C_BTN,()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(24,17));row.btnId.transform.SetSiblingIndex(0);row.btnId.SetActive(false);row.txtOpp=UIFactory.CreateText("o",main.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(296,25));/* Sept 6 (item i): 240 -> 296. The row HLG had ~66px of surplus in its flex spacer (the txtXP note below: ~966 usable, 900 preferred); this takes 56 of it and leaves ~10. NOT the 330 first proposed: that over-budgets the row by ~24px, and an over-budget HLG compresses every cell and paints overflow across neighbours (#199/#245). Text is fitted by PIXELS in ComposeOpponentCell (HIST_OPP_ROW_PX). *//* item 7c: opponent names are user-authored and routinely Cyrillic — 18pt in 25px is under the fallback line box. */UIFactory.FitOneLine(row.txtOpp);row.txtFps=UIFactory.CreateText("fp",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(120,25));var spFp=new GameObject("Sfp");spFp.transform.SetParent(main.transform,false);spFp.AddComponent<RectTransform>();UIFactory.AddLE(spFp,prefW:22,flexW:0);row.txtPing=UIFactory.CreateText("pg",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(150,25));/* July 22: FPS and Ping are SEPARATE hover targets, spaced apart */var sp=new GameObject("S");sp.transform.SetParent(main.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);/* Aug-3 item 14 (per-game gold vanished): cd73a96 made TMP Truncate the
+        private static HistoryRow CreateHistoryRow(Transform parent,string name){var row=new HistoryRow();row.seriesGO=new GameObject(name+"s");row.seriesGO.transform.SetParent(parent,false);row.seriesGO.AddComponent<RectTransform>();UIFactory.AddHLG(row.seriesGO,spacing:4,padL:4);UIFactory.AddLE(row.seriesGO,prefH:25);row.txtSeriesHead=UIFactory.CreateText("sh",row.seriesGO.transform,"",19f,C_GREEN,sizeDelta:new Vector2(500,25));row.txtSeriesElo=UIFactory.CreateText("se",row.seriesGO.transform,"",19f,C_GREEN,UIFactory.AlignMidRight,sizeDelta:new Vector2(160,25));/* item 7c: 19pt in a 25px box — an OS-fallback (Cyrillic) line does not fit and Truncate drops it whole. Both carry translated text ("Series {0} {1}  vs {2}", "{0} elo"). */UIFactory.FitOneLine(row.txtSeriesHead);UIFactory.FitOneLine(row.txtSeriesElo);row.seriesGO.SetActive(false);row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddVLG(row.root,spacing:0,padL:4);var main=new GameObject("m");main.transform.SetParent(row.root.transform,false);main.AddComponent<RectTransform>();UIFactory.AddHLG(main,spacing:4);UIFactory.AddLE(main,prefH:25);/* Feedback item 4: txtResult width hugs the score text (was 200 — the dead right half pushed the ID button visually next to "vs Player" instead of the score). */row.txtResult=UIFactory.CreateText("r",main.transform,"",19f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(132,25));/* July 22 item 6: tiny click-to-copy game-ID button. Sits OUTSIDE txtResult's rect so the score hover graph keeps its region. Ordered FIRST (before the score) in both ranked and casual history — next to the scoring column, not the "vs Player" text. Setting the sibling index here, at creation, is deliberate: doing it from BuildPage instead would silently no-op if tab construction ever became lazy or reordered (learning #91/#158). Later-created children append after it, so index 0 stays index 0. */row.btnId=UIFactory.CreateButton("id",main.transform,"ID",9f,C_DIM,C_BTN,()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(24,17));row.btnId.transform.SetSiblingIndex(0);row.btnId.SetActive(false);/* Sept 6 batch (Group 4 item c): "Session" opens the interactive set report. A fixed-width SLOT stays active on every row so the cells to its right never shift when a row has no button (an inactive HLG child takes no space) — only the button inside toggles. Sibling index 2 = right after the score cell. #265: the click reads the row's OWN binding, written by SetSessionButton in the same refresh that filled the row. */var sesSlot=new GameObject("ss");sesSlot.transform.SetParent(main.transform,false);sesSlot.AddComponent<RectTransform>();UIFactory.AddLE(sesSlot,minW:50,prefW:50,prefH:17);sesSlot.transform.SetSiblingIndex(2);row.btnSession=UIFactory.CreateButton("ses",sesSlot.transform,I18n.Tr("Session"),9f,C_DIM,C_BTN,()=>OpenSessionReport(row.sessionSel,row.sessionKey),sizeDelta:new Vector2(50,17));var sesRt=row.btnSession.GetComponent<RectTransform>();if(sesRt!=null){sesRt.anchorMin=Vector2.zero;sesRt.anchorMax=Vector2.one;sesRt.offsetMin=Vector2.zero;sesRt.offsetMax=Vector2.zero;}row.btnSession.SetActive(false);row.txtOpp=UIFactory.CreateText("o",main.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(296,25));/* Sept 6 (item i): 240 -> 296. The row HLG had ~66px of surplus in its flex spacer (the txtXP note below: ~966 usable, 900 preferred); this takes 56 of it and leaves ~10. NOT the 330 first proposed: that over-budgets the row by ~24px, and an over-budget HLG compresses every cell and paints overflow across neighbours (#199/#245). Text is fitted by PIXELS in ComposeOpponentCell (HIST_OPP_ROW_PX). *//* item 7c: opponent names are user-authored and routinely Cyrillic — 18pt in 25px is under the fallback line box. */UIFactory.FitOneLine(row.txtOpp);row.txtFps=UIFactory.CreateText("fp",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(120,25));var spFp=new GameObject("Sfp");spFp.transform.SetParent(main.transform,false);spFp.AddComponent<RectTransform>();UIFactory.AddLE(spFp,prefW:22,flexW:0);row.txtPing=UIFactory.CreateText("pg",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(150,25));/* July 22: FPS and Ping are SEPARATE hover targets, spaced apart */var sp=new GameObject("S");sp.transform.SetParent(main.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);/* Aug-3 item 14 (per-game gold vanished): cd73a96 made TMP Truncate the
            CreateText default; this cell was NEVER wide enough for "+943xp +10g"
            (~110-120px at 16pt bold) and only the old Overflow default was painting
            the trailing gold chip into the blank space beside it. Widened out of the
@@ -14352,7 +14423,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         private static void RefreshHistory(List<ApiClient.MatchHistoryEntry> ranked,List<ApiClient.MatchHistoryEntry> casual){/* Bug 263: while searching, the summary totals describe the UNFILTERED history — pages that don't exist under the filter (recon risk 1: the pager would advertise them and the prefetch-at-end trigger would loop). Use loaded counts only, and route the end-of-pages prefetch at the search cache instead. */bool hSearch=!string.IsNullOrEmpty(histSearch?.Trim());/* Review r1 find 5: the search stream is one chronological 400-row window split into two mode lists — an EMPTY category has no pager to reach older rows, so a mode whose matches sit beyond the window would falsely render as "none". Chain-fetch while either category is empty and rows remain (self-limiting: one in-flight fetch at a time; stops at loaded-all or first hit). */if(hSearch&&!ApiClient.MatchHistorySearchLoadedAll&&(ranked.Count==0||casual.Count==0))ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);CompetitiveUI.ClearCardHoverRegions();foreach(var r in rankedRows){r.root.SetActive(false);r.seriesGO.SetActive(false);}if(ranked.Count>0){var groups=GroupBySeries(ranked);int gpp=3,totalP=(groups.Count+gpp-1)/gpp;/* v1.33 lazy history (item 8): pager shows the FULL page count from the
  * server summary while only a window of matches is loaded; nearing the end
  * of the loaded window prefetches the next chunk. */int fullGroups=hSearch?groups.Count:Math.Max(groups.Count,ApiClient.HistoryTotalRankedGroups);int fullRankedP=Math.Max(totalP,(fullGroups+gpp-1)/gpp);rankedPage=Math.Max(0,Math.Min(rankedPage,totalP-1));if(rankedPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=rankedPage*gpp,end=Math.Min(start+gpp,groups.Count);int ri=0;for(int g=start;g<end&&ri<rankedRows.Count;g++){var grp=groups[g];if(grp.matches.Count==0)continue;var first=grp.matches[0];if(grp.series_id!=null&&ri<rankedRows.Count){var row=rankedRows[ri];string score=first.series_score??"?-?";bool complete=false,won=false;try{var p=score.Split('-');int mw=int.Parse(p[0]),tw=int.Parse(p[1]);complete=mw>=2||tw>=2;won=mw>tw;}catch{}UIFactory.SetTextRaw(row.txtSeriesHead,ComposeOpponentCell(row.txtSeriesHead,first,s=>complete?I18n.TrF("Series {0} {1}  vs {2}",won?"W":"L",score,s):I18n.TrF("Series {0}  vs {1}  (in progress)",score,s),HIST_OPP_SERIES_PX,HIST_OPP_BUDGET_SERIES));UIFactory.SetColor(row.txtSeriesHead,complete?(won?C_GREEN:C_RED):C_GOLD);/* The per-match row shows XP->gold (typically 4-5g/match); the series-win bonus (10-12g) was invisible because the history row never referenced series_gold_gained. Find the populated value across matches in this group (server sets it on the last-match-of-series row) and append to the elo line. */int grpSeriesGold=0;foreach(var mm in grp.matches)if(mm.series_gold_gained>grpSeriesGold)grpSeriesGold=mm.series_gold_gained;/* July 20 item 6: also show series gold when the elo delta is 0/absent — losers now
- * earn series gold (tier multipliers) and their rows previously hid it entirely. */if(complete&&(first.series_rating_change!=0f||grpSeriesGold>0)){float rc=first.series_rating_change;string goldStr=grpSeriesGold>0?$" <color=#FFD94D>+{grpSeriesGold}g</color>":"";string eloStr=rc!=0f?I18n.TrF("{0} elo",RatingDeltaText(rc)):"";UIFactory.SetText(row.txtSeriesElo,(eloStr+goldStr).TrimStart());UIFactory.SetColor(row.txtSeriesElo,rc>0?C_GREEN:rc<0?C_RED:C_GOLD);}else UIFactory.SetText(row.txtSeriesElo,"");row.seriesGO.SetActive(true);foreach(var m in grp.matches){if(ri>=rankedRows.Count)break;FillRow(rankedRows[ri],m,true);ri++;}}else{FillRow(rankedRows[ri],first,false);ri++;}}rPrev.SetActive(rankedPage>0);rNext.SetActive(rankedPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtRankedPage,fullRankedP>1?$"{rankedPage+1}/{fullRankedP}":"");}else{rPrev.SetActive(false);rNext.SetActive(false);UIFactory.SetText(txtRankedPage,"");}foreach(var r in casualRows)r.root.SetActive(false);if(casual.Count>0){int mpp=6,totalP=(casual.Count+mpp-1)/mpp;int fullCasual=hSearch?casual.Count:Math.Max(casual.Count,ApiClient.HistoryTotalCasual);int fullCasualP=Math.Max(totalP,(fullCasual+mpp-1)/mpp);casualPage=Math.Max(0,Math.Min(casualPage,totalP-1));if(casualPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=casualPage*mpp,end=Math.Min(start+mpp,casual.Count);for(int i=start;i<end;i++){int ri=i-start;if(ri<casualRows.Count)FillRow(casualRows[ri],casual[i],false);}cPrev.SetActive(casualPage>0);cNext.SetActive(casualPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtCasualPage,fullCasualP>1?$"{casualPage+1}/{fullCasualP}":"");}else{cPrev.SetActive(false);cNext.SetActive(false);UIFactory.SetText(txtCasualPage,"");}}
+ * earn series gold (tier multipliers) and their rows previously hid it entirely. */if(complete&&(first.series_rating_change!=0f||grpSeriesGold>0)){float rc=first.series_rating_change;string goldStr=grpSeriesGold>0?$" <color=#FFD94D>+{grpSeriesGold}g</color>":"";string eloStr=rc!=0f?I18n.TrF("{0} elo",RatingDeltaText(rc)):"";UIFactory.SetText(row.txtSeriesElo,(eloStr+goldStr).TrimStart());UIFactory.SetColor(row.txtSeriesElo,rc>0?C_GREEN:rc<0?C_RED:C_GOLD);}else UIFactory.SetText(row.txtSeriesElo,"");row.seriesGO.SetActive(true);int firstRi=ri;foreach(var m in grp.matches){if(ri>=rankedRows.Count)break;FillRow(rankedRows[ri],m,true);ri++;}/* Sept 6 item c: ONE "Session" per set, on the newest game (the row under the header); ranked sets are series -> ?series=. */if(ri>firstRi)SetSessionButton(rankedRows[firstRi],"series",grp.series_id);}else{FillRow(rankedRows[ri],first,false);/* Sept 6 item c: a ranked game with no series row is a one-game set. */SetSessionButton(rankedRows[ri],"match",first.match_id);ri++;}}rPrev.SetActive(rankedPage>0);rNext.SetActive(rankedPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtRankedPage,fullRankedP>1?$"{rankedPage+1}/{fullRankedP}":"");}else{rPrev.SetActive(false);rNext.SetActive(false);UIFactory.SetText(txtRankedPage,"");}foreach(var r in casualRows)r.root.SetActive(false);if(casual.Count>0){int mpp=6,totalP=(casual.Count+mpp-1)/mpp;int fullCasual=hSearch?casual.Count:Math.Max(casual.Count,ApiClient.HistoryTotalCasual);int fullCasualP=Math.Max(totalP,(fullCasual+mpp-1)/mpp);casualPage=Math.Max(0,Math.Min(casualPage,totalP-1));if(casualPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=casualPage*mpp,end=Math.Min(start+mpp,casual.Count);for(int i=start;i<end;i++){int ri=i-start;if(ri<casualRows.Count){FillRow(casualRows[ri],casual[i],false);/* Sept 6 item c: a casual set = consecutive rows sharing the reporter's opaque session uuid (server column, migration 298); the button sits on the NEWEST row of the run -> ?session=. A row without one (filed before the column existed) is a one-game set -> ?match=. */var cm=casual[i];bool hasSes=!string.IsNullOrEmpty(cm.session_uuid);bool newest=!hasSes||i==0||casual[i-1].session_uuid!=cm.session_uuid;if(newest)SetSessionButton(casualRows[ri],hasSes?"session":"match",hasSes?cm.session_uuid:cm.match_id);}}cPrev.SetActive(casualPage>0);cNext.SetActive(casualPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtCasualPage,fullCasualP>1?$"{casualPage+1}/{fullCasualP}":"");}else{cPrev.SetActive(false);cNext.SetActive(false);UIFactory.SetText(txtCasualPage,"");}}
 
         /// <summary>Half-point score format (item 4): each point is half a round, so
         /// "2-1 with 1-0 partial points" reads "2.5-1" instead of the old "2-1 1-0p".
@@ -14398,7 +14469,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         bool viewerReported=ViewerWasReporter(m);
         float dpsStepYou=DpsStepFor(m.player_damage_timeline,m.duration_seconds,viewerReported?DPS_STEP_LOCAL:DPS_STEP_PEER);
         float dpsStepOpp=DpsStepFor(m.opp_damage_timeline,m.duration_seconds,viewerReported?DPS_STEP_PEER:DPS_STEP_LOCAL);
-        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"),m.duration_seconds);if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)),m.duration_seconds);}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);/* Round-2 HIGH: the bodies are built FIRST because whether a build exists decides what the cell says. A row with no cards but a stored build used to render an empty cell and register no hover, so its build had no surface at all. */string myBuildBody=CardsPlusBuildBody(m.cards_display,m.player_end_stats);string oppBuildBody=CardsPlusBuildBody(m.opp_cards_display,m.opp_end_stats);UIFactory.SetTextRaw(row.txtCards,HistoryCardCellText(I18n.Tr("Cards:"),m.cards_display,myBuildBody));UIFactory.SetTextRaw(row.txtOppCards,HistoryCardCellText(I18n.Tr("Opp:")+"  ",m.opp_cards_display,oppBuildBody));if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());/* Aug 12 item 1: one hover, cards AND the end-of-game build. CardsPlusBuildBody returns NULL for a row with no stored build (every match before this shipped), and a null bodyOverride is exactly the pre-existing call — so old rows keep the identical tooltip and CompetitiveUI's memoised comma-split body. */RegisterHoverRectFor(row.txtCards,m.cards_display,false,null,myBuildBody);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true,null,oppBuildBody);row.root.SetActive(true);}
+        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"),m.duration_seconds);if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)),m.duration_seconds);}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));SetSessionButton(row,null,null);/* Sept 6 item c: pooled row — RefreshHistory re-arms the newest row of each set after this fill */UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);/* Round-2 HIGH: the bodies are built FIRST because whether a build exists decides what the cell says. A row with no cards but a stored build used to render an empty cell and register no hover, so its build had no surface at all. */string myBuildBody=CardsPlusBuildBody(m.cards_display,m.player_end_stats);string oppBuildBody=CardsPlusBuildBody(m.opp_cards_display,m.opp_end_stats);UIFactory.SetTextRaw(row.txtCards,HistoryCardCellText(I18n.Tr("Cards:"),m.cards_display,myBuildBody));UIFactory.SetTextRaw(row.txtOppCards,HistoryCardCellText(I18n.Tr("Opp:")+"  ",m.opp_cards_display,oppBuildBody));if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());/* Aug 12 item 1: one hover, cards AND the end-of-game build. CardsPlusBuildBody returns NULL for a row with no stored build (every match before this shipped), and a null bodyOverride is exactly the pre-existing call — so old rows keep the identical tooltip and CompetitiveUI's memoised comma-split body. */RegisterHoverRectFor(row.txtCards,m.cards_display,false,null,myBuildBody);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true,null,oppBuildBody);row.root.SetActive(true);}
 
         // Resolve a TMP text component's screen-space rect via its parent
         // chain. Handles both Screen Space - Overlay (corners are screen
@@ -14504,7 +14575,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// <summary>Lay a stored build-stat wire out as tooltip lines, packing
         /// as many stats per line as <paramref name="budgetChars"/> allows.
         /// Returns "" (never null) when there is no build to show.</summary>
-        private static string BuildStatsTipBlock(string wire, int budgetChars, string indent = "")
+        internal static string BuildStatsTipBlock(string wire, int budgetChars, string indent = "")
         {
             if (string.IsNullOrEmpty(wire)) return "";
             List<TabStatsOverlay.BuildStatLine> rows;
@@ -25488,6 +25559,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Game-ID copy is a tightly-sized control parented to line 1.
             // Header rows hide it; game rows place it after the rendered text.
             public GameObject btnId;
+            // Sept 6 item c: series-level "Session" report button — header rows only.
+            public GameObject btnSession;
             // Stacked cards columns — used for game rows. Hidden for series
             // header rows (which show the teams + player titles in txtLine2).
             public GameObject cardsRow;
@@ -25580,6 +25653,23 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 idRt.pivot = new Vector2(0f, 0.5f);
                 idRt.anchoredPosition = new Vector2(260f, 0f);
                 row.btnId.SetActive(false);
+                // Sept 6 batch (Group 4 item c): the series "Session" button, shown on
+                // HEADER rows (always visible, collapsed or not) and positioned after
+                // the rendered header text like [ID] is on game rows. Reads the row's
+                // own seriesKey at click time (#265).
+                row.btnSession = UIFactory.CreateButton("ses", line1Comp.transform, I18n.Tr("Session"), 12f, C_DIM,
+                    new Color(0.18f, 0.20f, 0.26f, 0.45f),
+                    () =>
+                    {
+                        if (row.isHeader && !string.IsNullOrEmpty(row.seriesKey))
+                            OpenSessionReport("series", row.seriesKey);
+                    },
+                    sizeDelta: new Vector2(66, 18));
+                var sesRt = row.btnSession.GetComponent<RectTransform>();
+                sesRt.anchorMin = sesRt.anchorMax = new Vector2(0f, 0.5f);
+                sesRt.pivot = new Vector2(0f, 0.5f);
+                sesRt.anchoredPosition = new Vector2(300f, 0f);
+                row.btnSession.SetActive(false);
             }
             // Line 2 holds the "Team A vs Team B" header text on series rows.
             // Hidden when the row renders a per-match cards block instead.
@@ -25664,6 +25754,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     // button owns copy input; the rest of the row remains inert.
                     if (!capturedRow.isHeader) return;
                     if (string.IsNullOrEmpty(capturedRow.seriesKey)) return;
+                    // Sept 6 item c: a press on the header's own Session button must not
+                    // ALSO toggle the series — two raw-poll handlers see one mouse-down.
+                    if (PointerOverActive(capturedRow.btnSession)) return;
                     bool cur;
                     _teamSeriesExpanded.TryGetValue(capturedRow.seriesKey, out cur);
                     _teamSeriesExpanded[capturedRow.seriesKey] = !cur;
@@ -25748,11 +25841,24 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static void PositionTeamHistIdButton(TeamHistRow row)
         {
             if (row?.btnId == null || row.txtLine1 == null || row.isHeader) return;
+            PositionAfterTeamHistLine1(row, row.btnId);
+        }
+
+        /// <summary>Sept 6 item c: the header's Session button sits after the
+        /// rendered header text, by the same measurement the [ID] button uses.</summary>
+        private static void PositionTeamHistSessionButton(TeamHistRow row)
+        {
+            if (row?.btnSession == null || row.txtLine1 == null || !row.isHeader || !row.btnSession.activeSelf) return;
+            PositionAfterTeamHistLine1(row, row.btnSession);
+        }
+
+        private static void PositionAfterTeamHistLine1(TeamHistRow row, GameObject btn)
+        {
             try
             {
                 var textComp = row.txtLine1 as Component;
                 var textRt = textComp?.GetComponent<RectTransform>();
-                var idRt = row.btnId.GetComponent<RectTransform>();
+                var idRt = btn.GetComponent<RectTransform>();
                 if (textComp == null || textRt == null || idRt == null) return;
 
                 float renderedW = 0f;
@@ -25774,7 +25880,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             yield return null;
             yield return new WaitForEndOfFrame();
             foreach (var row in teamHistRows)
-                if (row.root.activeSelf && !row.isHeader) PositionTeamHistIdButton(row);
+            {
+                if (!row.root.activeSelf) continue;
+                if (!row.isHeader) PositionTeamHistIdButton(row); else PositionTeamHistSessionButton(row);
+            }
             WriteTeamHistScrollY(y);
         }
 
@@ -26167,6 +26276,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (hdr.teleRow != null) hdr.teleRow.SetActive(false);
                 hdr.matchKey = null;
                 if (hdr.btnId != null) hdr.btnId.SetActive(false);
+                // Sept 6 item c: one "Session" per 2v2 series, on its header -> ?series=.
+                if (hdr.btnSession != null) hdr.btnSession.SetActive(!string.IsNullOrEmpty(s.series_id));
                 // Honest height: pad 8 + l1 26 + spacing 2 + l2 24 = 60.
                 SetTeamHistRowPrefH(hdr, 60, 0);
                 hdr.root.SetActive(true);
@@ -26206,6 +26317,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     row.isHeader = false;
                     row.seriesKey = s.series_id ?? "";
                     row.matchKey = m.match_id;
+                    if (row.btnSession != null) row.btnSession.SetActive(false);   // Sept 6 item c: header-only
                     string durChip = m.duration_seconds > 0 ?
                         $"  <color=#8FA3B8><size=85%>{m.duration_seconds / 60}:{m.duration_seconds % 60:00}</size></color>" : "";
                     UIFactory.SetTextRaw(row.txtLine1,

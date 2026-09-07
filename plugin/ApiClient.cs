@@ -432,6 +432,11 @@ namespace CompetitiveRounds
             public string cards_display; // Comma-separated card names for display
             public string opp_cards_display; // Opponent's cards
             public string series_id; // For grouping matches into BO3 series
+            // Sept 6 batch (Group 4 item c): the reporter-minted session id this game
+            // was filed under (an opaque UUID, never a room identifier); "" on rows
+            // without one. The Casual box groups consecutive games by it for the
+            // "Session" button.
+            public string session_uuid;
             public string series_score; // e.g. "2-0", "1-1"
             public float series_rating_change; // Elo change for completed series
             public int xp_gained; // XP earned for this match
@@ -6311,7 +6316,13 @@ namespace CompetitiveRounds
             // to p1SteamId. Null = not captured, which is a normal outcome and
             // simply omits the field. ADVISORY — rides outside the frozen
             // 7-field HMAC canonical below, which does not change for this.
-            string p1EndStats = null, string p2EndStats = null)
+            string p1EndStats = null, string p2EndStats = null,
+            // Sept 6 batch (Group 4 item c): reporter-minted opaque id for this room
+            // occupancy (GameStateWatcher.SessionUuid) so the server can group a
+            // casual sitting into one session report. Optional — omitted when null.
+            // ADVISORY: rides OUTSIDE the frozen 7-field HMAC canonical below, which
+            // does not change for this.
+            string sessionUuid = null)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             // §2c identity fence: the broadcast account never reports, even if
@@ -6344,6 +6355,8 @@ namespace CompetitiveRounds
             sb.Append($"\"started_at\":\"{startedAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture)}\",");
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
             sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\",");
+            // Sept 6 item c: optional session id (already a UUID string), outside the canonical.
+            if (!string.IsNullOrEmpty(sessionUuid)) sb.Append($"\"session_uuid\":\"{Escape(sessionUuid)}\",");
             // Reporter's combat input counts for inactive-player anti-cheat. Server-side advisory.
             sb.Append($"\"local_shots_fired\":{localShotsFired},");
             sb.Append($"\"local_blocks_raised\":{localBlocksRaised},");
@@ -9158,6 +9171,7 @@ namespace CompetitiveRounds
             entry.cards_display = ExtractCardNames(chunk);
             entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
             entry.series_id = ExtractJsonString(chunk, "series_id");
+            entry.session_uuid = ExtractJsonString(chunk, "session_uuid");   // Sept 6 item c: JSON null reads as ""
             entry.series_score = ExtractJsonString(chunk, "series_score");
             entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
             entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
@@ -11119,7 +11133,7 @@ namespace CompetitiveRounds
         /// FindMatchingBracket is only safe when string values can't contain
         /// brackets; these arrays are mostly USER-CONTROLLED display names
         /// ("[TAG] Bob", ">:[") — learning #61 family.</summary>
-        private static int FindMatchingBracketStringAware(string s, int openPos)
+        internal static int FindMatchingBracketStringAware(string s, int openPos)
         {
             if (openPos < 0 || openPos >= s.Length) return -1;
             int depth = 0; bool inStr = false;
@@ -11161,6 +11175,26 @@ namespace CompetitiveRounds
                 else if (c == '}') { depth--; if (depth == 0) return i; }
             }
             return -1;
+        }
+
+        /// <summary>Sept 6 batch (Group 4 item c): GET /api/v1/report — the session
+        /// report envelope for ONE set. `selector` is series / match / session and
+        /// `key` the UUID the history row carries. Strict Steam session endpoint
+        /// (no token -> the same early-out the other strict callers use, so the
+        /// view can say why); participant-only server side (a non-participant
+        /// gets the same 404 as a missing set). Read-only. Parsing lives in
+        /// SessionReportModel.Parse — the raw text is handed to the callback.</summary>
+        public static void FetchSessionReport(string selector, string key, Action<bool, string> callback)
+        {
+            if (callback == null) return;
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { callback(false, "no-identity"); return; }
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken)) { callback(false, "session_required"); return; }   // strict-session endpoint
+            if (selector != "series" && selector != "match" && selector != "session") { callback(false, "bad-selector"); return; }
+            Guid parsed;
+            if (!Guid.TryParse(key ?? "", out parsed)) { callback(false, "bad-key"); return; }
+            string url = $"{baseUrl}/api/v1/report?steam_id={Uri.EscapeDataString(sid)}&{selector}={parsed.ToString("D")}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, callback, detailedErrors: true, sessionAware: true));
         }
 
         private static List<OnlinePlayerEntry> ParsePresenceList(string json, string key)

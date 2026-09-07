@@ -179,6 +179,15 @@ class Match(Base):
     reported_by = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
     is_ranked = Column(Boolean, nullable=False, default=False)
     series_id = Column(UUID(as_uuid=True), ForeignKey("ranked_series.id"), nullable=True)
+    # Sept 6 batch (Group 4 item c, migration 298): reporter-minted opaque
+    # room-occupancy id — one UUID v4 per room the reporting seat sat in, the
+    # same value on every game of that sitting. Groups a casual sitting into
+    # one session report with NO room identifier leaving the server (#463).
+    # NULL on every pre-298 row and on rows filed by clients that predate the
+    # field; such games are served as one-game reports (#257). Outside the
+    # frozen 7-field HMAC canonical. DECLARED here because the report path
+    # assigns it on the ORM insert (#346: an undeclared column is a no-op).
+    session_uuid = Column(UUID(as_uuid=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
 
     # XP earned per player
