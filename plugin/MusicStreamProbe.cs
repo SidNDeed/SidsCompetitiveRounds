@@ -150,6 +150,12 @@ namespace CompetitiveRounds
         /// <summary>Tap delivery at the seek that sets up the natural end; -1
         /// while there is no such baseline.</summary>
         private static long _framesAtEndSeek = -1L;
+        /// <summary>Design v2 §2.3.6 `time_at_death`: the source's last
+        /// observed position while it was still playing after the end seek.
+        /// isPlaying flips first and `time` reads 0 once the source has
+        /// stopped, so the playhead has to be sampled BEFORE the death; -1
+        /// while nothing was sampled.</summary>
+        private static float _timeAtDeath = -1f;
         /// <summary>Whether ANY tap existed during this run. `-1` on the end
         /// line means no measurement was ever taken; a run whose tap reported a
         /// clean zero must not print the same marker.</summary>
@@ -366,6 +372,7 @@ namespace CompetitiveRounds
             _runFramesDelivered = 0L;
             _runSilentRunMax = 0;
             _framesAtEndSeek = -1L;
+            _timeAtDeath = -1f;
             _maskUntil = 0f;
             _mode = wanted;
             _key = key;
@@ -720,10 +727,12 @@ namespace CompetitiveRounds
                     // wall time says only that five seconds passed, which a
                     // source stopped by something else also satisfies.
                     _framesAtEndSeek = (object)_tap != null ? _tap.FramesDelivered : -1L;
+                    _timeAtDeath = -1f;
                     _stepAt = now; _stepDeadline = now + 7f;
                     _step = 5;
                     return;
                 case 5:
+                    if (_src.isPlaying) _timeAtDeath = _src.time;   // last position seen alive (§2.3.6)
                     if (!_src.isPlaying)
                     {
                         // r9 MEDIUM: the seek was to len-5, so a genuine
@@ -754,6 +763,14 @@ namespace CompetitiveRounds
                         Judge("natural_end", timed && played,
                               "isPlaying=0 after " + F1(elapsed) + " s (want 4.5-6.5 from len-5), "
                               + "delivered=" + (owed < 0f ? "unavailable" : F1(owed)) + " s (want >= 4), t=" + F1(_src.time));
+                        // §2.3.6: the last position seen alive must sit inside the
+                        // engine's 4 s natural window (MusicEngine.EOF_WINDOW_SEC),
+                        // or a streamed clip's real end is classified premature
+                        // there. The position is sampled once per tick, so the
+                        // gap includes up to one frame of playback.
+                        Judge("time_at_death", _timeAtDeath >= 0f && len - _timeAtDeath <= 4f,
+                              "t=" + (_timeAtDeath < 0f ? "unavailable" : F1(_timeAtDeath)) + " len=" + F1(len)
+                              + " gap=" + (_timeAtDeath < 0f ? "?" : F1(len - _timeAtDeath)) + " (want <= 4)");
                         _src.loop = true; _src.time = 0f;
                         MaskCallbacks(false);   // the natural end is an intended silence, not a gap
                         _src.Play();
@@ -952,7 +969,8 @@ namespace CompetitiveRounds
                 + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
                 + " silent_run_max=" + silentRunMax
                 + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs())
-                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail);
+                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail
+                + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath)));
             _cleanupKey = _key;
             _cleanupSampleAt = Time.realtimeSinceStartup + 2f;
             _cleanupGcAt = Time.realtimeSinceStartup + 5f;

@@ -64,6 +64,7 @@ namespace CompetitiveRounds
         // Opt-in, default off; the command names the track and the mode.
         internal static ConfigEntry<bool> MusicProbeEnabled;
         internal static ConfigEntry<string> MusicProbeRun;
+        internal static ConfigEntry<string> MusicTestScript;
         internal static ConfigEntry<bool> ShowIngameChat;
         // Bug 211/213 (Sid's chosen design): M cycles the in-game chat overlay
         // through Normal -> Pinned -> Muted. The on/off half of that state IS
@@ -940,6 +941,10 @@ namespace CompetitiveRounds
             MusicProbeRun = Config.Bind(
                 "Music", "StreamProbeRun", "",
                 "What StreamProbe measures: '<albumSku>:<trackIndex>' plays that track streamed for 120 s. Add ':stress' for 600 s plus busy threads (only inside a live offline Sandbox round) or ':churn' for ten open/close cycles. Whatever is set here runs once when the probe turns on, including at startup; set a different value to run again. Ignored unless StreamProbe is true."
+            );
+            MusicTestScript = Config.Bind(
+                "Music", "TestScript", "",
+                "Broadcast seat only (Sept 7 design v2 section 2.5): a ';'-separated music-engine exercise, run once per distinct value (including the value present at startup) and logged as [MUSIC-SELFTEST] lines. Named steps s1..s6 and s6neg, plus album:<sku>, play:<sku>/<idx>, preview:<sku>/<idx>, fail:<sku>/<idx>, seek:len-<n>, loop:on|off, shuffle:on|off, select:<sku>:<i,j,..>|all, stall, unstall, wait:<sec>, stop, reset. Ignored on every other seat; clear it when done."
             );
             MusicShuffle = Config.Bind(
                 "Music", "MusicShuffle", false,
@@ -2331,10 +2336,10 @@ namespace CompetitiveRounds
         /// admission wants on the preceding frames), any room, the director's
         /// acquisition, a local spectator session and an unsettled spectator
         /// join. It does NOT look at public WATCH grants or the Steam-lobby
-        /// latch; the engine's own click admission (BeginClickAdmission /
-        /// ClickDecodeOpportunity) does, and that is what gates the decode — a
-        /// `prepare` this filter lets through still decodes nothing in those
-        /// states (r5 LOW 1). r3 MEDIUM 1 context: an acquisition entering
+        /// latch. Sept 7 design v2 §7 Item 2 removed the click decode this
+        /// filter used to front (music is streamed; DevMusicClick refuses every
+        /// value), so a click it lets through changes nothing in those states
+        /// (r5 LOW 1 context). r3 MEDIUM 1 context: an acquisition entering
         /// Granting changes neither the room nor the client state.</summary>
         private static string MusicClickRefusal()
         {
@@ -2816,6 +2821,7 @@ namespace CompetitiveRounds
             // the player-seat branch was cut in review — see the class comment).
             try { OverlayIdleClose.Tick(); } catch { }
             try { MusicStreamProbe.Tick(); } catch { }
+            try { MusicEngine.TickTestScript(); } catch { }
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
