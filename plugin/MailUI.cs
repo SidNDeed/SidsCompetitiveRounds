@@ -1119,13 +1119,37 @@ namespace CompetitiveRounds
         /// an idempotency key; any difference is a new send.</summary>
         private static string Fingerprint(bool reply, string subj, string body)
         {
+            var to = new List<string>(cTo.Count); foreach (var p in cTo) to.Add(p.steamId);
+            var cc = new List<string>(cCc.Count); foreach (var p in cCc) cc.Add(p.steamId);
+            return FingerprintOf(reply, cReplyToId, cReplyAll, to, cc, subj, body);
+        }
+
+        /// <summary>The pure encoding behind <see cref="Fingerprint"/>, reachable
+        /// from the launch self-test. Every field is LENGTH-PREFIXED
+        /// ("&lt;len&gt;:&lt;field&gt;;") and each list is preceded by its count,
+        /// so the encoding is unambiguous: no character inside a field can move a
+        /// boundary. (Review r2 M7: the delimiter-joined form let subject "x|y"
+        /// with body "z" and subject "x" with body "y|z" share one key, so a lost
+        /// response followed by that edit could be reported as sent.)</summary>
+        internal static string FingerprintOf(bool reply, string replyTo, bool replyAll,
+                                             IList<string> to, IList<string> cc, string subj, string body)
+        {
             var sb = new StringBuilder(64 + (subj?.Length ?? 0) + (body?.Length ?? 0));
-            sb.Append(reply ? "R|" : "N|").Append(cReplyToId ?? "").Append('|').Append(cReplyAll ? '1' : '0').Append('|');
-            foreach (var p in cTo) sb.Append(p.steamId).Append(',');
-            sb.Append('|');
-            foreach (var p in cCc) sb.Append(p.steamId).Append(',');
-            sb.Append('|').Append(subj ?? "").Append('|').Append(body ?? "");
+            FpField(sb, reply ? "R" : "N");
+            FpField(sb, replyTo ?? "");
+            FpField(sb, replyAll ? "1" : "0");
+            FpField(sb, (to?.Count ?? 0).ToString(CultureInfo.InvariantCulture));
+            if (to != null) foreach (var s in to) FpField(sb, s ?? "");
+            FpField(sb, (cc?.Count ?? 0).ToString(CultureInfo.InvariantCulture));
+            if (cc != null) foreach (var s in cc) FpField(sb, s ?? "");
+            FpField(sb, subj ?? "");
+            FpField(sb, body ?? "");
             return sb.ToString();
+        }
+
+        private static void FpField(StringBuilder sb, string v)
+        {
+            sb.Append(v.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(v).Append(';');
         }
 
         private static void DiscardCurrent()

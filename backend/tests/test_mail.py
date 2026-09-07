@@ -142,6 +142,7 @@ class FakeDb:
         self.on_identity_lock = None        # hook(sid) run when delete-account's identity lock is granted
         self.fail_outbox = False            # make the pending_channel_posts insert fail (review r1 M3)
         self.fail_admin_actions = False     # make the admin_actions insert fail (review r1 M10)
+        self.commit_marks = []              # len(statements) at each commit: which statements were inside which transaction (review r2)
 
     # seeding -------------------------------------------------------------
     def add_player(self, sid, name=None, mod_seen=True, mail_from="everyone", deleted=False,
@@ -178,12 +179,41 @@ class FakeDb:
                                            "read_at": NOW if read else None, "deleted_at": None}
         return mid
 
+    def scrub(self, sid):
+        """delete_player_data's scrub for the tables the identity routes
+        write — the shape of a deletion that COMMITTED while a route waited
+        for the lock: the players row keeps its id but its steam_id becomes
+        the tombstone, and every raw copy in the audit and moderation
+        columns is rewritten to it (main.delete_player_data, table by name).
+        Returns the tombstone."""
+        p = self.player_by_sid(sid)
+        if p is None:
+            return None
+        tomb = f"deleted_{uuid.uuid4().hex[:8]}"
+        p.update({"steam_id": tomb, "display_name": "[Deleted User]", "discord_id": None, "deleted_at": NOW})
+        for a in self.admin_actions:
+            for k in ("admin", "target"):
+                if a[k] == sid:
+                    a[k] = tomb
+        for c in self.cases.values():
+            if c["resolved_by"] == sid:
+                c["resolved_by"] = tomb
+        for mu in self.mutes:
+            if mu["steam_id"] == sid:
+                mu["steam_id"], mu["revoked_at"] = tomb, mu["revoked_at"] or NOW
+            if mu.get("by") == sid:
+                mu["by"] = tomb
+        self.bulk_grants.pop(sid, None)
+        self.sessions = {k: v for k, v in self.sessions.items() if v["steam_id"] != sid}
+        return tomb
+
     # session protocol ----------------------------------------------------
     def begin_nested(self):
         return _Savepoint()
 
     async def commit(self):
         self.commits += 1
+        self.commit_marks.append(len(self.statements))
 
     async def rollback(self):
         pass
@@ -276,9 +306,9 @@ class FakeDb:
             if self.on_identity_lock is not None:
                 self.on_identity_lock(params["sid"])        # "a deletion committed while we waited for this lock"
             return _Res([(1,)])
-        if sql.lstrip().startswith("SELECT 1 FROM players WHERE steam_id = :sid AND deleted_at IS NULL"):
-            p = self.player_by_sid(params["sid"])
-            return _Res([(1,)] if p and p["deleted_at"] is None else [])
+        if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in sql:
+            p = self.players.get(params["pid"])             # the lattice re-read: by id, so a scrubbed row is FOUND, tombstone and all
+            return _Res([{k: p[k] for k in ("id", "steam_id", "deleted_at")}] if p else [])
         # gates
         if "SELECT reason FROM player_bans" in sql:
             r = self.bans.get(params["sid"])
@@ -359,7 +389,8 @@ class FakeDb:
         if "FROM mail_messages WHERE sender_id = :sid AND idempotency_key = :key" in sql:
             hit = [m for m in self.messages.values()
                    if m["sender_id"] == params["sid"] and m["idempotency_key"] == params["key"]]
-            return _Res([(hit[0]["id"],)] if hit else [])
+            return _Res([{"id": hit[0]["id"], "kind": hit[0]["kind"],
+                          "recipient_count": hit[0].get("recipient_count")}] if hit else [])
         if "AS per_minute" in sql:
             assert "kind = 'direct'" in sql, "rate window must ignore broadcasts"
             # review r1 M12: the waits are the time until the OLDEST send in
@@ -371,13 +402,24 @@ class FakeDb:
                     and m["kind"] == "direct" and m["created_at"] > NOW - timedelta(days=1)]
             minute = [m for m in mine if m["created_at"] > NOW - timedelta(minutes=1)]
 
-            def wait(rows, span):
+            # the rounding of each wait is READ OFF ITS OWN SQL expression
+            # (review r2 M12 pin): CEIL there rounds up here; a FLOOR there
+            # floors here, exactly as PostgreSQL would
+            def rounder(seg):
+                if "CEIL(EXTRACT" in seg:
+                    return math.ceil
+                assert "FLOOR(EXTRACT" in seg, "rate query lost its rounding"
+                return math.floor
+            round_minute = rounder(sql[sql.index("AS per_day,"):sql.index("AS minute_wait")])
+            round_day = rounder(sql[sql.index("AS minute_wait"):sql.index("AS day_wait")])
+
+            def wait(rows, span, rnd):
                 if not rows:
                     return None
-                return math.ceil((min(m["created_at"] for m in rows) + span - NOW).total_seconds())
+                return rnd((min(m["created_at"] for m in rows) + span - NOW).total_seconds())
             return _Res([{"per_minute": len(minute), "per_day": len(mine),
-                          "minute_wait": wait(minute, timedelta(minutes=1)),
-                          "day_wait": wait(mine, timedelta(days=1))}])
+                          "minute_wait": wait(minute, timedelta(minutes=1), round_minute),
+                          "day_wait": wait(mine, timedelta(days=1), round_day)}])
         # message insert + fan-out
         if "INSERT INTO mail_messages" in sql:
             kind = "system_broadcast" if "'system_broadcast'" in sql else "direct"
@@ -387,7 +429,11 @@ class FakeDb:
                                   "thread_id": params.get("tid", mid) if kind == "direct" else mid,
                                   "in_reply_to": params.get("irt"), "subject": params["subj"],
                                   "body": params["body"], "idempotency_key": params["key"],
-                                  "created_at": self.message_created_at, "deleted_by_sender_at": None}
+                                  "created_at": self.message_created_at, "deleted_by_sender_at": None,
+                                  "recipient_count": None}
+            return _Res()
+        if "UPDATE mail_messages SET recipient_count" in sql:
+            self.messages[params["mid"]]["recipient_count"] = int(params["n"])
             return _Res()
         if "INSERT INTO mail_recipients" in sql and "unnest(" in sql:
             for needle in FANOUT_PREDICATES:
@@ -444,9 +490,12 @@ class FakeDb:
             hit = [c for c in self.cases.values()
                    if (c["kind"], c["bucket_key"]) == (params["kind"], params["bucket"])]
             return _Res([(hit[0]["id"],)] if hit else [])
-        if sql.lstrip().startswith("SELECT p.steam_id FROM moderation_cases c JOIN players p"):
-            c = self.cases.get(params["id"])                          # the unlocked subject read (deleted rows included)
-            return _Res([(self.players[c["subject_player_id"]]["steam_id"],)] if c else [])
+        if sql.lstrip().startswith("SELECT p.id AS subject_id, p.steam_id AS subject_sid"):
+            c = self.cases.get(params["id"])                          # the unlocked subject pre-read (deleted rows included)
+            if c is None:
+                return _Res([])
+            p = self.players[c["subject_player_id"]]
+            return _Res([{"subject_id": p["id"], "subject_sid": p["steam_id"]}])
         if "FROM moderation_cases c JOIN players p" in sql and "FOR NO KEY UPDATE OF c" in sql:
             c = self.cases.get(params["id"])
             if c is None:
@@ -1445,14 +1494,14 @@ _LATTICE = [  # route, whose row the racing deletion removes, the refusal the re
     ("block_add", "actor", (401, "session_required")),
     ("block_add", "target", (404, "player_unknown")),
     ("block_remove", "actor", (401, "session_required")),
-    ("broadcast", "actor", (404, "admin_player_unknown")),
-    ("grant", "actor", (403, "admin_identity_not_live")),
+    ("broadcast", "actor", (404, "admin_player_unknown")),   # the one privileged route that needs the admin's row: it is the message's sender
     ("grant", "target", (404, "player_unknown")),
-    ("revoke", "actor", (403, "admin_identity_not_live")),
-    ("act_mute", "actor", (403, "not_authorised")),
     ("act_mute", "target", (400, "subject_deleted")),
-    ("act_dismiss", "actor", (403, "not_authorised")),
 ]
+# The actor rows of grant/revoke/act_* and the target rows of dismiss/revoke
+# are no refusals since review r2: the admin acts on admin_users membership,
+# and dismiss/revoke complete against a scrubbed subject — see
+# test_a_scrub_under_the_lock_is_written_as_the_tombstone.
 
 
 def _lattice_world(route):
@@ -1507,6 +1556,10 @@ def _lattice_coro(db, route, orig, case_id):
     if route == "act_dismiss":
         return main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-admin", "actor_name": "Mod",
                                                            "action": "dismiss", "reason": "b"}, "internal-key", db)
+    if route == "act_dismiss_hmac":
+        return main.admin_moderation_case_act(case_id, main._AdminModCaseActReq(
+            admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case_id),
+            action="dismiss", reason="b"), db)
     raise AssertionError(route)
 
 
@@ -1526,8 +1579,7 @@ def test_every_mutation_joins_the_identity_lattice(route, victim, refusal):
         _run(_lattice_coro(db, route, orig, case_id))
     sid = actor if victim == "actor" else target
     lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
-    reread_i = next(i for i, s in enumerate(db.statements)
-                    if s.lstrip().startswith("SELECT 1 FROM players WHERE steam_id = :sid AND deleted_at IS NULL"))
+    reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
     write_i = next(i for i, s in enumerate(db.statements) if _is_write(s))
     assert lock_i < reread_i < write_i and ("identity", sid) in db.locks and db.commits >= 1
     db, orig, case_id, actor, target = _lattice_world(route)         # the race
@@ -1545,11 +1597,15 @@ def test_every_mutation_joins_the_identity_lattice(route, victim, refusal):
 
 def test_dismiss_still_closes_a_case_whose_subject_was_deleted():
     """The lattice's one asymmetry: mute/ban have nothing to write for a
-    deleted subject (refused above); dismiss writes only the actor."""
+    deleted subject (refused above); dismiss locks the subject all the same
+    (its identity is the audit row's target) and closes the case with the
+    identity it re-read — here the tombstone of a subject deleted before
+    the click."""
     db, orig, case_id, actor, target = _lattice_world("act_dismiss")
-    db.player_by_sid(A_SID)["deleted_at"] = NOW
+    tomb = db.scrub(A_SID)
     assert _run(_lattice_coro(db, "act_dismiss", orig, case_id))["status"] == "ok"
-    assert db.cases[UUID(case_id)]["status"] == "dismissed" and ("identity", A_SID) not in db.locks
+    assert db.cases[UUID(case_id)]["status"] == "dismissed" and ("identity", tomb) in db.locks
+    assert db.admin_actions[-1]["target"] == tomb and A_SID not in json.dumps(db.admin_actions)
 
 
 def test_status_revision_advances_in_commit_order_not_created_at():
@@ -1561,6 +1617,9 @@ def test_status_revision_advances_in_commit_order_not_created_at():
     db.message_created_at = NOW
     first = _send(db, [B_SID], subject="newer timestamp, committed first")
     assert _status(db, "tokB") == {"unread": 1, "revision": "1", "mail_from": "everyone"}
+    fan_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_recipients" in s)
+    bump_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_inbox_rev" in s)
+    assert fan_i < bump_i < db.commit_marks[0]                       # the bump is INSIDE the sending transaction: after its fan-out, before its commit (review r2 pin)
     db.message_created_at = NOW - timedelta(hours=1)                 # the stalled send: older timestamp, later commit
     second = _send(db, [B_SID], subject="older timestamp, committed last")
     st = _status(db, "tokB")
@@ -1712,17 +1771,29 @@ def test_case_without_its_outbox_row_does_not_commit():
 
 
 def test_broadcast_replay_returns_the_full_original_response():
-    """M5: a same-key retry whose first answer was lost still learns the
-    recipient count."""
+    """M5, and review r2 LOW: a same-key retry whose first answer was lost
+    still learns the recipient count — the count PERSISTED on the row in
+    the sending transaction, replayed verbatim, so a recipient who deleted
+    their account in between cannot change the replayed answer."""
     db, ids = _world()
     db.add_player(ADMIN_SID)
     db.admins.add(ADMIN_SID)
     key = str(uuid.uuid4())
     with _admin_secret():
         first = _broadcast(db, key=key)
+        mid = UUID(first["id"])
+        assert db.messages[mid]["recipient_count"] == 4
+        set_i = next(i for i, s in enumerate(db.statements) if "UPDATE mail_messages SET recipient_count" in s)
+        assert set_i < db.commit_marks[-1]                             # persisted inside the sending transaction
+        db.recipients.pop((mid, ids[D_SID]))                           # D's account went: the envelope is gone
+        db.statements.clear()
         again = _broadcast(db, key=key)
     assert first["recipients"] == 4 and again == first and set(again) == {"id", "accepted", "recipients"}
+    assert not any("COUNT(*) FROM mail_recipients" in s for s in db.statements)   # replayed, not recounted
     assert len([m for m in db.messages.values() if m["kind"] == "system_broadcast"]) == 1
+    db.messages[mid]["recipient_count"] = None                         # control: a row written before the column falls back to its envelopes
+    with _admin_secret():
+        assert _broadcast(db, key=key)["recipients"] == 3
 
 
 def test_fake_db_reads_its_authorisation_off_the_production_sql():
@@ -1833,3 +1904,252 @@ def test_migration_300_matches_the_orm_and_the_readers():
     assert "INSERT INTO mail_inbox_rev" in main._MAIL_REV_BUMP_SQL
     assert "FROM mail_inbox_rev" in inspect.getsource(main.mail_status)
     assert "DELETE FROM mail_inbox_rev" in inspect.getsource(main.delete_player_data)
+    # review r2: the delivery trigger covers writers that predate this build
+    # (the deploy window); statement-level, set-wise and sorted like the api's
+    # own bump, installed after the backfill, rerun-safe, inside the one transaction
+    fn_ddl = "CREATE OR REPLACE FUNCTION mail_inbox_rev_bump()"
+    drop_ddl = "DROP TRIGGER IF EXISTS trg_mail_inbox_rev_bump ON mail_recipients;"
+    trig_ddl = "CREATE TRIGGER trg_mail_inbox_rev_bump"
+    assert sql.count(fn_ddl) == 1 and sql.count(drop_ddl) == 1 and sql.count(trig_ddl) == 1
+    fn = sql[sql.index(fn_ddl):sql.index(drop_ddl)]
+    for needle in ("INSERT INTO mail_inbox_rev (recipient_id, rev)", "FROM inserted", "WHERE delivery = 'delivered'",
+                   "GROUP BY recipient_id", "ORDER BY recipient_id", "ON CONFLICT (recipient_id) DO UPDATE",
+                   "SET rev = mail_inbox_rev.rev + EXCLUDED.rev", "RETURN NULL"):
+        assert needle in fn, needle
+    trig = sql[sql.index(trig_ddl):sql.index("COMMIT;")]
+    for needle in ("AFTER INSERT ON mail_recipients", "REFERENCING NEW TABLE AS inserted", "FOR EACH STATEMENT",
+                   "EXECUTE FUNCTION mail_inbox_rev_bump()"):
+        assert needle in trig, needle
+    assert sql.index("ON CONFLICT (recipient_id) DO NOTHING") < sql.index(fn_ddl) \
+        < sql.index(drop_ddl) < sql.index(trig_ddl) < sql.index("COMMIT;")
+    assert sql.index("BEGIN;") < sql.index("CREATE TABLE IF NOT EXISTS mail_inbox_rev")
+    # and the broadcast's persisted recipient count rides the same file
+    assert "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER" in sql
+    assert "recipient_count" in {c.name for c in models.MailMessage.__table__.columns}
+    assert "recipient_count" in inspect.getsource(main._mail_prior_send)
+    assert "UPDATE mail_messages SET recipient_count" in inspect.getsource(main.admin_mail_broadcast)
+
+
+# ── review r2 pins ────────────────────────────────────────────────────────
+
+_LATTICE_TOMBSTONED = [  # route, whose row the racing deletion SCRUBS: the route completes and writes the tombstone it re-read
+    ("grant", "actor"), ("revoke", "actor"), ("revoke", "target"),
+    ("act_mute", "actor"), ("act_dismiss", "actor"), ("act_dismiss", "target"),
+    ("act_dismiss_hmac", "actor"), ("act_dismiss_hmac", "target"),
+]
+
+
+@pytest.mark.parametrize("route,victim", _LATTICE_TOMBSTONED, ids=[f"{r}-{v}" for r, v in _LATTICE_TOMBSTONED])
+def test_a_scrub_under_the_lock_is_written_as_the_tombstone(route, victim):
+    """review r2 HIGH (the dismiss and revoke targets) and MEDIUM (the
+    actor's authority): every identity a route WRITES is the one it
+    re-read under the lock. The scrub fires when the victim's OWN lock is
+    granted — after the route's first read of that identity and before its
+    re-read, the deletion that committed while the route waited — so a route
+    locking only the other party would carry the raw id into its audit row
+    and this stays red."""
+    db, orig, case_id, actor, target = _lattice_world(route)
+    if route == "revoke":
+        db.bulk_grants[C_SID] = (40, NOW + timedelta(days=7))
+    sid = actor if victim == "actor" else target
+    tomb = {}
+
+    def scrub_under_lock(locked):
+        if locked == sid:
+            tomb["v"] = db.scrub(sid)
+    db.on_identity_lock = scrub_under_lock
+    with _admin_secret():
+        res = _run(_lattice_coro(db, route, orig, case_id))
+    assert res["status"] == "ok" and "v" in tomb and db.commits == 1
+    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+    reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
+    write_i = next(i for i, s in enumerate(db.statements) if _is_write(s))
+    assert any("players" in s for s in db.statements[:lock_i])       # the route's first read of the identity precedes the lock ...
+    assert lock_i < reread_i < write_i and ("identity", sid) in db.locks   # ... the re-read follows it, and every write follows the re-read
+    written = json.dumps([db.admin_actions,
+                          [c["resolved_by"] for c in db.cases.values()],
+                          [(m["steam_id"], m.get("by")) for m in db.mutes],
+                          sorted(db.bulk_grants)], default=str)
+    assert sid not in written and tomb["v"] in written
+    if route == "revoke" and victim == "target":
+        assert res["revoked"] is False and C_SID not in db.bulk_grants   # the grant went with the account; the revoke still lands and is audited
+    if route.startswith("act_"):
+        assert db.cases[UUID(case_id)]["status"] in ("dismissed", "resolved")
+
+
+def test_admin_without_a_players_row_acts_on_admin_users_authority():
+    """review r2 MEDIUM: admin_users membership IS the authority. An admin
+    who never ran the mod has no players row; grant, revoke and the case
+    actions lock that row when it exists and skip it when it does not, and
+    the audit actor is the admin's steam id. The broadcast is the one route
+    that needs the row — it is the message's sender — and says so."""
+    db, ids = _world()
+    db.admins.add(ADMIN_SID)
+    assert db.player_by_sid(ADMIN_SID) is None
+    with _admin_secret():
+        res = _run(main.admin_mail_bulk_grant(main._AdminMailBulkGrantReq(
+            admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "mail_bulk_grant", A_SID),
+            steam_id=A_SID, max_recipients=40, days=7), db))
+        assert res["status"] == "ok" and db.bulk_grants[A_SID][0] == 40
+        gone = _run(main.admin_mail_bulk_grant_revoke(A_SID, ADMIN_SID, _sign(ADMIN_SID, "mail_bulk_grant_revoke", A_SID), db))
+        assert gone["revoked"] is True and A_SID not in db.bulk_grants
+        case_id = _open_case(db, ids)
+        req = main._AdminModCaseActReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case_id),
+                                       action="dismiss")
+        assert _run(main.admin_moderation_case_act(case_id, req, db))["status"] == "ok"
+        case2 = _open_case(db, ids)
+        req = main._AdminModCaseActReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case2),
+                                       action="ban", reason="spam")
+        assert _run(main.admin_moderation_case_act(case2, req, db))["resolution"] == "ban"
+        exc = _raises(main.admin_mail_broadcast(_bcast_req(), db))
+    assert (exc.status_code, exc.detail) == (404, "admin_player_unknown")
+    assert db.cases[UUID(case_id)]["resolved_by"] == ADMIN_SID and db.cases[UUID(case2)]["resolved_by"] == ADMIN_SID
+    assert [a["action"] for a in db.admin_actions] == ["mail_bulk_grant", "mail_bulk_grant_revoke", "modcase_act", "modcase_act"]
+    assert {a["admin"] for a in db.admin_actions} == {ADMIN_SID}
+    assert [type(o).__name__ for o in db.added] == ["PlayerBan", "AdminAction"] and db.added[0].banned_by_steam_id == ADMIN_SID
+    assert ("identity", ADMIN_SID) in db.locks                        # the VALUE is still locked; there was simply no row to hold
+    for fn in (main._mail_lock_admin, main._mail_lock_identities):
+        assert "admin_identity_not_live" not in inspect.getsource(fn)
+    # a grantee, by contrast, must be live: a cap is live authority
+    with _admin_secret():
+        exc = _raises(main.admin_mail_bulk_grant(main._AdminMailBulkGrantReq(
+            admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "mail_bulk_grant", "76561198000000077"),
+            steam_id="76561198000000077", max_recipients=40, days=7), db))
+        assert (exc.status_code, exc.detail) == (404, "player_unknown")
+        exc = _raises(main.admin_mail_bulk_grant_revoke("76561198000000077", ADMIN_SID,
+                                                        _sign(ADMIN_SID, "mail_bulk_grant_revoke", "76561198000000077"), db))
+        assert (exc.status_code, exc.detail) == (404, "player_unknown")
+
+
+def _first_acquisitions(locks):
+    seen, out = set(), []
+    for lock in locks:
+        if lock not in seen:
+            seen.add(lock)
+            out.append(lock)
+    return out
+
+
+def test_every_ban_path_takes_the_identity_locks_before_the_ban_rate_lock():
+    """review r2 MEDIUM: one lock order on both ban paths — the identity
+    lattice (both ids, canonical order) first, the per-admin ban-rate lock
+    after — recorded as the fake grants them. Inverse orders on the two
+    paths would let two concurrent bans by one admin wait on each other."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    with _admin_secret():
+        res = _run(main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
+                                                    hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db))
+    assert res["status"] == "banned"
+    plain = _first_acquisitions(db.locks)
+    db2, ids2 = _world()
+    case_id = _open_case(db2, ids2)
+    db2.add_player(ADMIN_SID, discord_id="d-admin")
+    db2.admins.add(ADMIN_SID)
+    db2.locks.clear()
+    assert _act_internal(db2, case_id, "d-admin", "ban")["resolution"] == "ban"
+    case = _first_acquisitions(db2.locks)
+    expected = [("identity", s) for s in sorted((ADMIN_SID, A_SID))] + [("ban-rate", ADMIN_SID)]
+    assert plain == expected and case == expected
+    for locks in (db.locks, db2.locks):
+        rate_i = locks.index(("ban-rate", ADMIN_SID))
+        assert {v for k, v in locks if k == "identity"} == {v for k, v in locks[:rate_i] if k == "identity"}
+    # the ordinary route keeps the shared helpers, and the lattice call precedes the gate in its source too
+    src = inspect.getsource(main.admin_ban)
+    assert src.index("_mail_lock_identities(") < src.index("_ban_rate_gate_or_raise(") < src.index("_apply_ban_core(")
+    act = inspect.getsource(main._moderation_case_act)
+    assert act.index("_mail_lock_identities(") < act.index("_ban_rate_gate_or_raise(")
+
+
+def test_broadcast_replay_precedes_the_mutable_sender_gates():
+    """review r2 MEDIUM: a retry of a broadcast that already went out gets
+    the stored answer even after its sender was muted or banned; a NEW key
+    after the mute is refused (negative control)."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID)
+    db.admins.add(ADMIN_SID)
+    key = str(uuid.uuid4())
+    with _admin_secret():
+        first = _broadcast(db, key=key)
+        idem_i = next(i for i, s in enumerate(db.statements) if "idempotency_key = :key" in s)
+        gate_i = next(i for i, s in enumerate(db.statements) if "SELECT reason FROM player_bans" in s or "FROM chat_mutes" in s)
+        assert idem_i < gate_i                                       # at runtime the replay lookup ran before the first gate read
+        db.mutes.append({"steam_id": ADMIN_SID, "channel": None, "revoked_at": None, "expires_at": None})
+        assert _broadcast(db, key=key) == first                      # muted since: the stored 200, not a 403
+        db.bans[ADMIN_SID] = "spam"
+        assert _broadcast(db, key=key) == first                      # banned since: still the stored 200
+        exc = _raises(main.admin_mail_broadcast(_bcast_req(), db))
+    assert (exc.status_code, exc.detail) == (403, "banned")           # a NEW key meets the gates
+    assert len([m for m in db.messages.values() if m["kind"] == "system_broadcast"]) == 1
+    src = inspect.getsource(main.admin_mail_broadcast)
+    assert src.index("_mail_lock_admin(") < src.index("_mail_lock_sender(") < src.index("_mail_prior_send(") \
+        < src.index("_mail_sender_gates(") < src.index("_mail_text_or_raise(")
+
+
+def test_rate_wait_is_the_maximum_across_exhausted_windows_and_rounds_up():
+    """review r2 MEDIUM (M12): with BOTH windows closed the day's wait is
+    advertised, not the minute's; a fractional wait rounds UP (a wait of 30
+    for 30.5 s invites one refused retry). The fake rounds the way each SQL
+    expression says, so a CEIL-to-FLOOR edit turns this red."""
+    db, ids = _world()
+    for _ in range(90):
+        db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], created_at=NOW - timedelta(hours=2))
+    for _ in range(10):
+        db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], created_at=NOW - timedelta(seconds=30))
+    exc = _send_raises(db, to=[B_SID])                               # 100 today, 10 this minute: both closed
+    assert exc.detail == {"error": "rate_limited", "retry_after": 22 * 3600} and exc.headers["Retry-After"] == str(22 * 3600)
+    db, ids = _world()
+    for _ in range(10):
+        db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], created_at=NOW - timedelta(seconds=29.5))
+    exc = _send_raises(db, to=[B_SID])
+    assert exc.detail["retry_after"] == 31 and exc.headers["Retry-After"] == "31"
+    rate_sql = next(s for s in db.statements if "AS per_minute" in s)
+    assert rate_sql.count("CEIL(EXTRACT") == 2 and "FLOOR(" not in rate_sql
+    floored = db._dispatch(rate_sql.replace("CEIL(EXTRACT", "FLOOR(EXTRACT"), {"sid": ids[A_SID]}).first()
+    assert floored["minute_wait"] == 30                              # control: the fake follows the SQL's rounding
+    src = inspect.getsource(main._mail_rate_or_raise)
+    assert "max(waits)" in src and "elif per_day" not in src
+
+
+def test_client_plaintext_admission_covers_every_rfc1918_range():
+    """review r2: the C# admission expression, evaluated as written, admits
+    10/8, 172.16/12, 192.168/16 and loopback and nothing else; without its
+    172 clause the same evaluator refuses 172.16 (negative control)."""
+    src = _client_source("ApiClient.cs")
+    fn = src[src.index("private static bool CredentialedTransportAllowed"):]
+    fn = fn[:fn.index("private static bool _loggedTokenWithheld")]
+    expr = re.search(r"return\s+(\(b\[0\][^;]*);", fn).group(1)
+    py = " ".join(expr.replace("&&", " and ").replace("||", " or ").split())
+    assert re.fullmatch(r"[\sb\[\]0-9()=<>andor]+", py), py          # only the byte tests survive into eval
+
+    def admitted(text_expr, *octets):
+        return bool(eval(text_expr, {"__builtins__": {}}, {"b": octets}))   # noqa: S307 — the vetted C# expression
+    for ip in ((10, 0, 0, 1), (10, 255, 255, 255), (172, 16, 0, 1), (172, 31, 255, 255),
+               (192, 168, 72, 102), (192, 168, 0, 1), (127, 0, 0, 1)):
+        assert admitted(py, *ip), ip
+    for ip in ((172, 15, 255, 255), (172, 32, 0, 1), (8, 8, 8, 8), (100, 64, 0, 1), (169, 254, 1, 1),
+               (192, 169, 0, 1), (11, 0, 0, 1), (1, 1, 1, 1)):
+        assert not admitted(py, *ip), ip
+    without = py.replace("(b[0] == 172 and b[1] >= 16 and b[1] <= 31)", "False")
+    assert without != py and not admitted(without, 172, 16, 0, 1) and admitted(without, 10, 0, 0, 1)
+
+
+def test_client_selftest_count_and_fingerprint_structure():
+    """review r2 M7: the idempotency fingerprint length-prefixes every field
+    (the collision vector runs in the launch self-test), and the self-test's
+    expected count equals the cases wired, so the in-game summary cannot
+    read PASS with a case missing."""
+    mc = _client_source("MailClient.cs")
+    selftest = mc[mc.index("internal static int SelfTest("):]
+    selftest = selftest[:selftest.index("fail = failCount;")]
+    n = int(re.search(r"SELFTEST_CASES = (\d+);", mc).group(1))
+    assert selftest.count('Case("') == n
+    assert "MailUI.FingerprintOf(" in selftest and 'Case("fingerprint_fields_do_not_collide"' in selftest
+    ui = _client_source("MailUI.cs")
+    fp = ui[ui.index("internal static string FingerprintOf("):]
+    fp = fp[:fp.index("private static void DiscardCurrent")]
+    assert "Append(v.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(v).Append(';')" in fp
+    assert fp.count("FpField(sb, ") >= 8 and "'|'" not in fp and '"|"' not in fp
+    caller = ui[ui.index("private static string Fingerprint(bool reply, string subj, string body)"):ui.index("internal static string FingerprintOf(")]
+    assert "FingerprintOf(reply, cReplyToId, cReplyAll, to, cc, subj, body)" in caller

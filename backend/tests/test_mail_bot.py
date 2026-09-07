@@ -413,3 +413,29 @@ def test_click_without_an_api_session_answers_not_ready():
     inter = _Interaction(f"modcase:dismiss:{uuid.uuid4()}")
     _run(ns["on_interaction"](inter))
     assert inter.followup.sent == [("API session not ready.", {"ephemeral": True})]
+
+
+def test_truthy_error_answers_are_not_success():
+    """review r2: api_post answers a non-200 with {"error": <body>, "status":
+    <http code>} — a TRUTHY dict whose "status" is a number, not "ok" or
+    "acked". Neither the stamp nor the ack may take it for success: the row
+    stays pending, the send stays remembered, nothing is re-posted, and the
+    next tick that gets the real answer finishes the row."""
+    case_id = str(uuid.uuid4())
+    api = _Api([_case_post(case_id, 1)])
+    api.answers[f"/internal/moderation-cases/{case_id}/notified"] = [{"error": "case_not_found", "status": 404}, {"status": "ok"}]
+    api.answers["/internal/channel-posts/ack"] = [{"error": "boom", "status": 500}, {"status": "acked"}]
+    ch = _Channel(555)
+    out = []
+    ns = _bot_ns(api, _Bot({555: ch}), out=out)
+    _run(ns["poll_channel_posts"]())                                  # tick 0: the stamp answered an error dict
+    assert len(ch.sent) == 1 and not any(c[1] == "/internal/channel-posts/ack" for c in api.calls)
+    assert api.posts == [_case_post(case_id, 1)] and ns["_channel_post_sent"] == {1: ch.sent[0].id}
+    assert any("will retry" in line for line in out)
+    _run(ns["poll_channel_posts"]())                                  # tick 1: stamped; the ack answered an error dict
+    assert len(ch.sent) == 1 and api.posts == [_case_post(case_id, 1)] and ns["_channel_post_sent"] == {1: ch.sent[0].id}
+    assert sum(1 for c in api.calls if c[1] == "/internal/channel-posts/ack") == 1
+    assert any("row stays pending" in line for line in out)
+    _run(ns["poll_channel_posts"]())                                  # tick 2: acked, and still one post
+    assert api.posts == [] and ns["_channel_post_sent"] == {} and len(ch.sent) == 1
+    assert sum(1 for c in api.calls if c[1].endswith("/notified")) == 3

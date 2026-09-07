@@ -19180,9 +19180,13 @@ namespace CompetitiveRounds
                 if (!System.Net.IPAddress.TryParse(host, out ip)) return false;
                 if (ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
                 byte[] b = ip.GetAddressBytes();
-                return (b[0] == 192 && b[1] == 168)
-                    || b[0] == 10
-                    || b[0] == 127;
+                // Every RFC 1918 range plus loopback (review r2 added
+                // 172.16/12, which the first cut left out): a LAN in that
+                // block could not reach its own server over plaintext.
+                return (b[0] == 10)
+                    || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+                    || (b[0] == 192 && b[1] == 168)
+                    || (b[0] == 127);
             }
             catch { return false; }
         }

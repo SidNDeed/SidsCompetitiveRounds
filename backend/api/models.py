@@ -1265,6 +1265,10 @@ class MailMessage(Base):
     idempotency_key = Column(UUID(as_uuid=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     deleted_by_sender_at = Column(DateTime(timezone=True), nullable=True)
+    # A broadcast's delivered-envelope count, persisted in the sending
+    # transaction and replayed verbatim by a same-key retry (migration 300,
+    # review r2). NULL on direct messages.
+    recipient_count = Column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("sender_id", "idempotency_key", name="uq_mail_messages_sender_idem"),
@@ -1363,11 +1367,12 @@ class MailCensorHit(Base):
 
 class MailInboxRev(Base):
     """One row per recipient: the inbox delivery counter behind
-    /mail/status's `revision` (B-6; migration 300). `rev` is bumped by a
-    DB delta once per delivered envelope, in the sending transaction, so it
-    advances in commit order and never moves on a read or a delete. Personal
-    state: delete-account removes the row by name (the FK cascade is
-    decorative under anonymise-in-place)."""
+    /mail/status's `revision` (B-6; migration 300). `rev` is advanced by a
+    DB delta in the sending transaction — by migration 300's AFTER INSERT
+    trigger on mail_recipients for every writer, and by the api's own bump —
+    so it moves in commit order and never on a read or a delete. It is a
+    change signal, not a count. Personal state: delete-account removes the
+    row by name (the FK cascade is decorative under anonymise-in-place)."""
     __tablename__ = "mail_inbox_rev"
 
     recipient_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)

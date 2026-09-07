@@ -30710,6 +30710,16 @@ class _AdminBanReq(BaseModel):
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
+    # ONE lock order on every ban path (Sept 6 item b, review r2): the
+    # identity lattice first — both identities this transaction writes, in
+    # canonical order — THEN the per-admin ban-rate lock. The moderation-case
+    # ban (_moderation_case_act) takes them in exactly this order; a path
+    # taking them the other way round would let two concurrent bans by one
+    # admin wait on each other until PostgreSQL aborts one. Neither row has
+    # to exist here: a ban may pre-date the account, and the admin's
+    # authority is admin_users membership — the rows are locked when present.
+    await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
+                                optional=(req.admin_steam_id, req.target_steam_id))
     await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id)
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
                                    target_steam_id=req.target_steam_id, reason=req.reason)
@@ -47307,6 +47317,15 @@ _MAIL_BROADCAST_FANOUT_SQL = (
 # are visited in sorted order so two overlapping sends take their row locks
 # in the same order (no deadlock between them). /mail/status reads this
 # counter; the client toasts on a CHANGE of it.
+#
+# Migration 300 (review r2) also installs a statement-level AFTER INSERT
+# trigger on mail_recipients that runs this same sorted, set-wise delta for
+# EVERY writer — so envelopes inserted by the previous api build during the
+# deploy window (migration applied, api not yet rebuilt) still move the
+# counter. Under this build a send therefore advances it twice (trigger, then
+# this statement). That is deliberate: the value is a change signal, compared
+# by the client for inequality and never read as a count, and keeping this
+# statement keeps the bump an executed, test-pinned part of the send.
 _MAIL_REV_BUMP_SQL = (
     "INSERT INTO mail_inbox_rev (recipient_id, rev)"
     " SELECT r.recipient_id, 1"
@@ -47587,41 +47606,91 @@ async def _mail_lock_sender(db: AsyncSession, sender_id) -> None:
     ), {"sid": sender_id})
 
 
-async def _mail_lock_identities(db: AsyncSession, *steam_ids, missing: dict | None = None) -> None:
-    """Join delete-account's identity lattice (review r1 HIGH; #282): take the
-    SAME transaction-scoped advisory lock delete_player_data takes first
-    (`pg_advisory_xact_lock(hashtext(steam_id))`, also the lock _apply_ban_core
-    and the i18n grant routes take) on EVERY identity this transaction is
-    about to write, in canonical sorted order (#197), then re-read each one
-    live under the lock. A deletion that already holds the lock commits its
-    sweep before this returns and the re-read then refuses; one that arrives
-    later blocks behind this transaction and sweeps what it wrote. `missing`
-    maps a steam id to the (status, detail) to answer when it is not live;
-    the default is the caller's own 401, the one _mail_caller answers for a
-    deleted account."""
+# The identity re-read under the lattice lock, by the row's own id — the
+# stable handle. A deletion that committed while this transaction waited for
+# the lock has REWRITTEN steam_id, so a re-read by steam_id would simply miss
+# the row; by id it is found, tombstone and all, and that is what gets
+# written. FOR NO KEY UPDATE holds the row for the rest of the transaction:
+# delete-account's steam_id rewrite takes FOR UPDATE and waits behind it,
+# while the FK inserts that reference the row (envelopes, bans, blocks) take
+# KEY SHARE and are not blocked by it.
+_MAIL_IDENTITY_REREAD_SQL = (
+    "SELECT id, steam_id, deleted_at FROM players WHERE id = :pid FOR NO KEY UPDATE"
+)
+
+
+async def _mail_lock_identities(db: AsyncSession, *steam_ids, missing: dict | None = None,
+                                optional=(), handles: dict | None = None) -> dict:
+    """Join delete-account's identity lattice (review r1 HIGH, r2 HIGH; #282)
+    for EVERY identity this transaction is about to write: take the SAME
+    transaction-scoped advisory lock delete_player_data takes first
+    (`pg_advisory_xact_lock(hashtext(steam_id))`, also _apply_ban_core's and
+    the i18n grant routes') on each, in canonical sorted order (#197), then
+    re-read each row UNDER the lock by its id and hold it FOR NO KEY UPDATE.
+    The id comes from `handles` when the caller already holds it (its own
+    session row, a case's subject) and from an unlocked pre-read by steam_id
+    otherwise. A deletion that already held the lock committed its scrub
+    before this returns and the re-read finds the tombstone; one that arrives
+    later blocks behind this transaction and sweeps what it wrote.
+
+    Returns {steam id as given: row or None}, row = {id, steam_id (CURRENT),
+    deleted_at}. Callers write identities from THIS (_mail_identity_to_write),
+    never from their inputs. An identity that is not live — no row, or
+    deleted_at set — is refused with `missing`'s (status, detail) for it,
+    default the caller's own 401 (what _mail_caller answers for a deleted
+    account), unless it is in `optional`: an admin acts on admin_users
+    membership and needs no players row (locked when present, skipped when
+    absent), and a dismiss or a revoke completes against a subject deleted
+    meanwhile, writing the tombstone it re-read."""
     ids = sorted({str(s) for s in steam_ids if s})
+    handles = dict(handles or {})
+    for sid in ids:
+        if handles.get(sid) is None:
+            handles[sid] = (await db.execute(text(
+                "SELECT id FROM players WHERE steam_id = :sid"
+            ), {"sid": sid})).scalar()
     for sid in ids:
         await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": sid})
+    tolerated = {str(s) for s in optional}
+    out: dict = {}
     for sid in ids:
-        live = (await db.execute(text(
-            "SELECT 1 FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
-        ), {"sid": sid})).scalar()
-        if not live:
+        row = None
+        if handles.get(sid) is not None:
+            found = (await db.execute(text(_MAIL_IDENTITY_REREAD_SQL),
+                                      {"pid": handles[sid]})).mappings().first()
+            row = dict(found) if found is not None else None
+        out[sid] = row
+        live = row is not None and row.get("deleted_at") is None
+        if not live and sid not in tolerated:
             status, detail = (missing or {}).get(sid) or (401, "session_required")
             raise HTTPException(status_code=status, detail=detail)
+    return out
+
+
+def _mail_identity_to_write(rows: dict, steam_id: str) -> str:
+    """The identity a transaction WRITES for `steam_id` after the lattice
+    re-read: the row's current steam_id (the tombstone, if a deletion
+    committed first), or the id itself when there is no row at all (an admin
+    acting on admin_users membership)."""
+    row = (rows or {}).get(str(steam_id))
+    return str((row or {}).get("steam_id") or steam_id)
 
 
 async def _mail_lock_admin(db: AsyncSession, admin_steam_id: str, *others: str,
-                           missing: dict | None = None) -> None:
+                           missing: dict | None = None, optional=(), handles: dict | None = None) -> dict:
     """The admin routes' entry into the lattice: lock the admin and every
-    other identity written, re-read them live, and re-prove the admin grant
-    under the lock (_require_admin ran before the lock; the i18n grant
-    route re-proves the same way)."""
-    miss = {admin_steam_id: (403, "admin_identity_not_live")}
-    miss.update(missing or {})
-    await _mail_lock_identities(db, admin_steam_id, *others, missing=miss)
+    other identity written, re-read them, and re-prove the admin grant under
+    the lock (_require_admin ran before the lock; the i18n grant route
+    re-proves the same way). The admin's authority is admin_users membership
+    (review r2): the admin's players row is locked when it exists and skipped
+    when it does not; a route that needs that row for itself (a broadcast's
+    sender) checks the returned row. Returns the re-read rows."""
+    rows = await _mail_lock_identities(db, admin_steam_id, *others, missing=missing,
+                                       optional={str(admin_steam_id), *(str(s) for s in optional)},
+                                       handles=handles)
     if not await _is_admin(db, admin_steam_id):
         raise HTTPException(status_code=403, detail="Not an admin")
+    return rows
 
 
 async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, action: str,
@@ -47644,11 +47713,27 @@ async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID):
     gate, so a retry of an accepted send is never told 'muted' or
     'rate_limited' for a message that already went out."""
     prior = (await db.execute(text(
-        "SELECT id FROM mail_messages WHERE sender_id = :sid AND idempotency_key = :key"
-    ), {"sid": sender_id, "key": key})).scalar()
+        "SELECT id, kind, recipient_count FROM mail_messages"
+        " WHERE sender_id = :sid AND idempotency_key = :key"
+    ), {"sid": sender_id, "key": key})).mappings().first()
     if prior is None:
         return None
-    return {"id": str(prior), "accepted": True}
+    out = {"id": str(prior["id"]), "accepted": True}
+    if prior["kind"] == "system_broadcast":
+        # A broadcast's answer carries its recipient count: the count
+        # PERSISTED on the row in the sending transaction (migration 300,
+        # review r2), replayed verbatim — a recipient who deleted their
+        # account between the commit and the retry cannot change it. A row
+        # without one (written before the column existed) falls back to
+        # counting the envelopes it still has.
+        n = prior.get("recipient_count")
+        if n is None:
+            n = (await db.execute(text(
+                "SELECT COUNT(*) FROM mail_recipients"
+                " WHERE message_id = CAST(:mid AS uuid) AND delivery = 'delivered'"
+            ), {"mid": prior["id"]})).scalar() or 0
+        out["recipients"] = int(n)
+    return out
 
 
 async def _mail_sender_gates(db: AsyncSession, sender: dict) -> None:
@@ -47706,12 +47791,16 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     ), {"sid": sender_id})).mappings().first()
     per_minute = int((rate or {}).get("per_minute") or 0)
     per_day = int((rate or {}).get("per_day") or 0)
-    retry = None
+    # Every exhausted window contributes its wait and the LONGEST one is
+    # advertised (review r2): with both windows closed, the minute's wait
+    # alone would invite a retry the day window then refuses again.
+    waits = []
     if per_minute >= MAIL_RATE_PER_MINUTE:
-        retry = max(1, int((rate or {}).get("minute_wait") or 60))
-    elif per_day >= MAIL_RATE_PER_DAY:
-        retry = max(1, int((rate or {}).get("day_wait") or 86400))
-    if retry is not None:
+        waits.append(int((rate or {}).get("minute_wait") or 60))
+    if per_day >= MAIL_RATE_PER_DAY:
+        waits.append(int((rate or {}).get("day_wait") or 86400))
+    if waits:
+        retry = max(1, max(waits))
         raise HTTPException(status_code=429,
                             detail={"error": "rate_limited", "retry_after": retry},
                             headers={"Retry-After": str(retry)})
@@ -47928,7 +48017,7 @@ async def mail_send(req: _MailSendReq, request: Request, db: AsyncSession = Depe
     # Lock order everywhere in this block: identity (delete-account's lock)
     # -> per-sender mail lock -> ban-rate. The identity re-read under the
     # lock is what makes the sender row this transaction writes a LIVE one.
-    await _mail_lock_identities(db, me["steam_id"])
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await _mail_lock_sender(db, me["id"])
     prior = await _mail_prior_send(db, me["id"], key)
     if prior is not None:
@@ -47969,7 +48058,7 @@ async def mail_reply(message_id: str, req: _MailReplyReq, request: Request,
     me = await _mail_caller(request, db)
     mid = _mail_parse_uuid(message_id, "message_id")
     key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
-    await _mail_lock_identities(db, me["steam_id"])
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await _mail_lock_sender(db, me["id"])
     prior = await _mail_prior_send(db, me["id"], key)
     if prior is not None:
@@ -48112,13 +48201,11 @@ async def mail_block_add(req: _MailBlockReq, request: Request, db: AsyncSession 
         raise HTTPException(status_code=400, detail="steam_id_invalid")
     if sid == me["steam_id"]:
         raise HTTPException(status_code=400, detail="cannot_block_self")
-    # Both identities the row names, locked and re-read live (the lattice).
-    await _mail_lock_identities(db, me["steam_id"], sid, missing={sid: (404, "player_unknown")})
-    target = (await db.execute(text(
-        "SELECT id FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
-    ), {"sid": sid})).scalar()
-    if target is None:
-        raise HTTPException(status_code=404, detail="player_unknown")
+    # Both identities the row names, locked and re-read live (the lattice);
+    # the target's id is the re-read's.
+    rows = await _mail_lock_identities(db, me["steam_id"], sid, missing={sid: (404, "player_unknown")},
+                                       handles={me["steam_id"]: me["id"]})
+    target = rows[sid]["id"]
     count = (await db.execute(text(
         "SELECT COUNT(*) FROM mail_blocks WHERE blocker_id = :me"
     ), {"me": me["id"]})).scalar() or 0
@@ -48138,7 +48225,7 @@ async def mail_block_remove(steam_id: str, request: Request, db: AsyncSession = 
     sid = (steam_id or "").strip()
     if len(sid) != 17 or not sid.isdigit():
         raise HTTPException(status_code=400, detail="steam_id_invalid")
-    await _mail_lock_identities(db, me["steam_id"])
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await db.execute(text(
         "DELETE FROM mail_blocks"
         " WHERE blocker_id = :me"
@@ -48276,7 +48363,7 @@ async def mail_report(message_id: str, req: _MailReportReq, request: Request,
     # BEFORE the envelope read, so a deletion of this account either swept
     # first (and this refuses) or waits behind this transaction (and sweeps
     # the reporter_id it writes).
-    await _mail_lock_identities(db, me["steam_id"])
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     row = (await db.execute(text(
         "SELECT m.id, m.kind, m.subject, m.body, m.created_at, m.sender_id,"
         "       s.steam_id AS sender_steam_id, s.display_name AS sender_name"
@@ -48328,25 +48415,32 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
     action = (action or "").strip().lower()
     if action not in _MODCASE_ACTIONS:
         raise HTTPException(status_code=400, detail="action_invalid")
-    # The lattice (review r1): this transaction writes the ACTOR (resolved_by,
-    # the audit rows, muted_by/banned_by) and, for mute/ban, the SUBJECT
-    # (chat_mutes.steam_id / player_bans.steam_id). Learn the subject from an
-    # unlocked read, lock both identities in sorted order, then re-read the
-    # actor's authority and the case row UNDER the locks. A deleted actor is
-    # a 403 like any other missing grant; a deleted subject refuses mute/ban
-    # (nothing to write) and lets dismiss close the case.
+    # The lattice (review r1, r2): this transaction writes the ACTOR
+    # (resolved_by, the audit rows, muted_by/banned_by) and the SUBJECT (the
+    # audit rows' target on every action; chat_mutes.steam_id /
+    # player_bans.steam_id on mute/ban). Learn the subject's row id from an
+    # unlocked read, lock BOTH identities in sorted order — identity locks
+    # first, the ban-rate lock only afterwards, the same order admin_ban
+    # keeps — then re-read both rows, the actor's authority and the case row
+    # UNDER the locks, and write the identities the re-read returned. The
+    # actor's authority is the grant (_chat_moderator_scope), not a players
+    # row: an admin acting through the HMAC route need not have one. A
+    # subject deleted meanwhile refuses mute/ban (nothing to write) and lets
+    # dismiss close the case with the tombstone as its target.
     subject_pre = (await db.execute(text(
-        "SELECT p.steam_id FROM moderation_cases c JOIN players p ON p.id = c.subject_player_id"
+        "SELECT p.id AS subject_id, p.steam_id AS subject_sid"
+        "  FROM moderation_cases c JOIN players p ON p.id = c.subject_player_id"
         " WHERE c.id = :id"
-    ), {"id": cid})).scalar()
+    ), {"id": cid})).mappings().first()
     if subject_pre is None:
         raise HTTPException(status_code=404, detail="case_not_found")
-    missing = {actor_steam_id: (403, "not_authorised"),
-               subject_pre: (400, "subject_deleted")}
-    if action == "dismiss":
-        await _mail_lock_identities(db, actor_steam_id, missing=missing)
-    else:
-        await _mail_lock_identities(db, actor_steam_id, subject_pre, missing=missing)
+    subject_sid_pre = subject_pre["subject_sid"]
+    optional = {actor_steam_id} | ({subject_sid_pre} if action == "dismiss" else set())
+    rows = await _mail_lock_identities(
+        db, actor_steam_id, subject_sid_pre, missing={subject_sid_pre: (400, "subject_deleted")},
+        optional=optional, handles={subject_sid_pre: subject_pre["subject_id"]})
+    actor_w = _mail_identity_to_write(rows, actor_steam_id)
+    subject_w = _mail_identity_to_write(rows, subject_sid_pre)
     role, _langs = await _chat_moderator_scope(db, actor_steam_id)
     if role is None:
         raise HTTPException(status_code=403, detail="not_authorised")
@@ -48365,7 +48459,12 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
         return {"status": "already_resolved", "case_id": str(cid), "case_status": case["status"],
                 "resolution": case["resolution"], "subject_steam_id": case["subject_steam_id"],
                 "subject_name": case["subject_name"]}
-    subject_sid = case["subject_steam_id"]
+    # Every identity written below is the lattice re-read's (subject_w,
+    # actor_w) — live rows give the raw ids, a row scrubbed while this
+    # transaction waited gives its tombstone. The ban-rate gate alone keys on
+    # the actor's raw id: it is velocity accounting per admin, not a row
+    # carrying the actor's identity.
+    subject_sid = subject_w
     reason_txt = (reason or "").strip()[:256] or f"mail moderation case ({case['kind']})"
     if action == "mute":
         try:
@@ -48375,16 +48474,16 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
         if h <= 0 or h > 24 * 365:
             raise HTTPException(status_code=400, detail="hours_invalid")
         await _chat_mute_apply(db, target_steam_id=subject_sid, channel=None,
-                               by_steam_id=actor_steam_id, reason=reason_txt, minutes=h * 60)
+                               by_steam_id=actor_w, reason=reason_txt, minutes=h * 60)
         await _log_admin_action_strict(
-            db, admin_steam_id=actor_steam_id, action="chat_mute", target_steam_id=subject_sid,
+            db, admin_steam_id=actor_w, action="chat_mute", target_steam_id=subject_sid,
             details={"channel": "ALL", "duration_minutes": h * 60, "permanent": False,
-                     "reason": reason_txt, "moderator_steam_id": actor_steam_id,
+                     "reason": reason_txt, "moderator_steam_id": actor_w,
                      "moderator_role": role, "via": via, "case_id": str(cid)})
         resolution, new_status = f"mute:{h}h", "resolved"
     elif action == "ban":
         await _ban_rate_gate_or_raise(db, actor_steam_id, subject_sid)
-        res = await _apply_ban_core(db, admin_steam_id=actor_steam_id,
+        res = await _apply_ban_core(db, admin_steam_id=actor_w,
                                     target_steam_id=subject_sid, reason=reason_txt)
         resolution = "ban" if res.get("status") == "banned" else "ban:already_banned"
         new_status = "resolved"
@@ -48394,9 +48493,9 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
         "UPDATE moderation_cases"
         "   SET status = :st, resolved_at = NOW(), resolved_by = :by, resolution = :res"
         " WHERE id = :id"
-    ), {"st": new_status, "by": actor_steam_id[:32], "res": resolution, "id": cid})
+    ), {"st": new_status, "by": actor_w[:32], "res": resolution, "id": cid})
     await _log_admin_action_strict(
-        db, admin_steam_id=actor_steam_id, action="modcase_act", target_steam_id=subject_sid,
+        db, admin_steam_id=actor_w, action="modcase_act", target_steam_id=subject_sid,
         details={"case_id": str(cid), "kind": case["kind"], "action": action,
                  "hours": hours, "reason": reason_txt, "via": via,
                  "actor_name": (actor_name or "")[:64], "role": role})
@@ -48534,11 +48633,14 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     await _require_admin(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
         raise HTTPException(status_code=400, detail="actor_mismatch")
-    # Identity lock + live re-read + grant re-proof BEFORE the sender row is
-    # read (the lattice); the sender row this transaction writes is then a
-    # live one.
-    await _mail_lock_admin(db, req.admin_steam_id,
-                           missing={req.admin_steam_id: (404, "admin_player_unknown")})
+    # Identity lock + re-read + grant re-proof BEFORE the sender row is read
+    # (the lattice). A broadcast is a message and needs its sender row
+    # (mail_messages.sender_id) — the one privileged route where admin_users
+    # membership alone is not enough; the re-read decides, under the lock.
+    rows = await _mail_lock_admin(db, req.admin_steam_id)
+    me_row = rows.get(req.admin_steam_id)
+    if me_row is None or me_row.get("deleted_at") is not None:
+        raise HTTPException(status_code=404, detail="admin_player_unknown")
     sender = (await db.execute(text(
         "SELECT id, steam_id, display_name, mod_seen_at, mail_from"
         "  FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
@@ -48546,6 +48648,15 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     if sender is None:
         raise HTTPException(status_code=404, detail="admin_player_unknown")
     sender = dict(sender)
+    # Lock order and gate order as on every send: identity -> per-sender
+    # lock -> the idempotency replay -> ONLY THEN the mutable gates (review
+    # r2). A retry of a broadcast that already went out must get the stored
+    # answer even if the sender has been muted, banned or censored since:
+    # the message exists, and telling its sender otherwise is false.
+    await _mail_lock_sender(db, sender["id"])
+    prior = await _mail_prior_send(db, sender["id"], key)
+    if prior is not None:
+        return prior
     # The same sender gates as every other send (review r1): an account that
     # never ran the mod, an active ban or a GLOBAL mute refuses a broadcast
     # exactly as it refuses a direct message — a valid admin HMAC is proof of
@@ -48556,17 +48667,6 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     for s in (subject, body):
         if _chat_censor_hit(s) is not None:
             raise HTTPException(status_code=400, detail="censored")
-    await _mail_lock_sender(db, sender["id"])
-    prior = await _mail_prior_send(db, sender["id"], key)
-    if prior is not None:
-        # The replay returns the ORIGINAL response in full (review r1): the
-        # recipient count is re-derived from the envelopes the first send
-        # wrote, so a retry whose first answer was lost still learns it.
-        n_prior = (await db.execute(text(
-            "SELECT COUNT(*) FROM mail_recipients"
-            " WHERE message_id = CAST(:mid AS uuid) AND delivery = 'delivered'"
-        ), {"mid": UUID(prior["id"])})).scalar() or 0
-        return {**prior, "recipients": int(n_prior)}
     mid = uuid.uuid4()
     await db.execute(text(
         "INSERT INTO mail_messages"
@@ -48576,9 +48676,15 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     delivered = (await db.execute(text(_MAIL_BROADCAST_FANOUT_SQL), {
         "mid": mid, "sid": sender["id"], "days": MAIL_BROADCAST_SEEN_DAYS})).fetchall()
     n = len(delivered)
+    # The answer's recipient count is persisted on the row in this same
+    # transaction (migration 300) and replayed verbatim by _mail_prior_send.
+    await db.execute(text(
+        "UPDATE mail_messages SET recipient_count = CAST(:n AS integer) WHERE id = :mid"
+    ), {"n": n, "mid": mid})
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
     await _log_admin_action_strict(
-        db, admin_steam_id=req.admin_steam_id, action="mail_broadcast", target_steam_id=None,
+        db, admin_steam_id=_mail_identity_to_write(rows, req.admin_steam_id), action="mail_broadcast",
+        target_steam_id=None,
         details={"message_id": str(mid), "subject": subject[:MAIL_SUBJECT_MAX], "recipients": n,
                  "seen_days": MAIL_BROADCAST_SEEN_DAYS})
     await db.commit()
@@ -48600,11 +48706,14 @@ async def admin_mail_bulk_grant(req: _AdminMailBulkGrantReq, db: AsyncSession = 
     days = int(req.days or 0)
     if days < 1 or days > 365:
         raise HTTPException(status_code=400, detail="days_invalid")
-    # Two raw identities are written (the grantee on the row, the admin on
-    # granted_by and the audit row): both locked, both re-read live, the
-    # admin grant re-proven under the lock (the lattice; the i18n grant
-    # route's exact shape). An unknown or deleted grantee is a 404.
-    await _mail_lock_admin(db, req.admin_steam_id, sid, missing={sid: (404, "player_unknown")})
+    # Two identities are written (the grantee on the row, the admin on
+    # granted_by and the audit row): both locked, both re-read, the admin
+    # grant re-proven under the lock (the lattice; the i18n grant route's
+    # exact shape). The grantee must be live (an unknown or deleted grantee
+    # is a 404: a cap is live authority); the admin's identity is written as
+    # re-read — the admin's players row is not required (review r2).
+    rows = await _mail_lock_admin(db, req.admin_steam_id, sid, missing={sid: (404, "player_unknown")})
+    actor_w = _mail_identity_to_write(rows, req.admin_steam_id)
     expires = (await db.execute(text(
         "INSERT INTO mail_bulk_grants (steam_id, max_recipients, expires_at, granted_by)"
         " VALUES (:sid, :n, NOW() + make_interval(days => CAST(:d AS integer)), :adm)"
@@ -48612,9 +48721,9 @@ async def admin_mail_bulk_grant(req: _AdminMailBulkGrantReq, db: AsyncSession = 
         "   SET max_recipients = EXCLUDED.max_recipients, expires_at = EXCLUDED.expires_at,"
         "       granted_by = EXCLUDED.granted_by, granted_at = NOW()"
         " RETURNING expires_at"
-    ), {"sid": sid, "n": n, "d": days, "adm": req.admin_steam_id[:20]})).scalar()
+    ), {"sid": sid, "n": n, "d": days, "adm": actor_w[:20]})).scalar()
     await _log_admin_action_strict(
-        db, admin_steam_id=req.admin_steam_id, action="mail_bulk_grant", target_steam_id=sid,
+        db, admin_steam_id=actor_w, action="mail_bulk_grant", target_steam_id=sid,
         details={"max_recipients": n, "days": days})
     await db.commit()
     return {"status": "ok", "steam_id": sid, "max_recipients": n, "expires_at": _mail_iso(expires)}
@@ -48629,14 +48738,23 @@ async def admin_mail_bulk_grant_revoke(
 ):
     sid = (steam_id or "").strip()
     await _require_admin(db, admin_steam_id, "mail_bulk_grant_revoke", sid, hmac_signature)
-    # Only the admin's identity is written here (the audit actor); the grantee
-    # may already be deleted and a revoke must still land.
-    await _mail_lock_admin(db, admin_steam_id)
+    # Both identities the audit row carries are locked and re-read (review
+    # r2): the grantee is `optional` so a revoke completes against an account
+    # deleted while this transaction waited — the grant row went with that
+    # deletion, and the audit row is written with the tombstone the re-read
+    # returned, never with the id this request was addressed to. A grantee
+    # with no row at all (never a player, or scrubbed long ago) is a 404,
+    # the grant route's own answer: no grant can exist for it.
+    rows = await _mail_lock_admin(db, admin_steam_id, sid, optional={sid})
+    if rows.get(sid) is None:
+        raise HTTPException(status_code=404, detail="player_unknown")
+    actor_w = _mail_identity_to_write(rows, admin_steam_id)
+    target_w = _mail_identity_to_write(rows, sid)
     gone = (await db.execute(text(
         "DELETE FROM mail_bulk_grants WHERE steam_id = :sid RETURNING 1"
-    ), {"sid": sid})).first()
+    ), {"sid": target_w})).first()
     await _log_admin_action_strict(
-        db, admin_steam_id=admin_steam_id, action="mail_bulk_grant_revoke", target_steam_id=sid,
+        db, admin_steam_id=actor_w, action="mail_bulk_grant_revoke", target_steam_id=target_w,
         details={"revoked": gone is not None})
     await db.commit()
     return {"status": "ok", "steam_id": sid, "revoked": gone is not None}
