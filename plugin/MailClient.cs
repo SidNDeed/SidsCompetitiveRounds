@@ -830,7 +830,7 @@ namespace CompetitiveRounds
                 // 14-15: the idempotency fingerprint is unambiguous over its fields
                 // (review r2 M7): no delimiter or length-like text inside a field
                 // can move a boundary, and moving an id between to and cc changes it.
-                var one = new List<string> { "76561198000000001" };
+                var one = new List<string> { "76561190000000001" };
                 var none = new List<string>();
                 string fpA = MailUI.FingerprintOf(false, null, false, one, none, "x|y", "z");
                 string fpB = MailUI.FingerprintOf(false, null, false, one, none, "x", "y|z");
