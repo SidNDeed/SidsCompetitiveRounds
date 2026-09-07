@@ -398,7 +398,11 @@ namespace CompetitiveRounds
         private static void BuildHeader(Transform parent)
         {
             var hdr = Row(parent, "MailHdr", 32, 10);
-            UIFactory.CreateText("MailTitle", hdr.transform, "Mail", 22f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(110, 30));
+            var mailTitle = UIFactory.CreateText("MailTitle", hdr.transform, "Mail", 22f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(110, 30));
+            // Sept 7 item 1: the page lives inside the utility popup, whose header already
+            // carries TabLabel() ("Mail" / "Mail (N)"); the in-body title would repeat it,
+            // so it is built (the row keeps its layout) and hidden.
+            ((Component)mailTitle).gameObject.SetActive(false);
             navInbox = Btn(hdr.transform, "MailNavInbox", I18n.Tr("Inbox"), () => ShowView(View.Inbox), 150, 26);
             navSent = Btn(hdr.transform, "MailNavSent", I18n.Tr("Sent"), () => ShowView(View.Sent), 110, 26);
             navCompose = Btn(hdr.transform, "MailNavNew", I18n.Tr("New message"), () => OpenCompose(), 160, 26);
