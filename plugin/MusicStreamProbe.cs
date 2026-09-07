@@ -39,19 +39,32 @@ namespace CompetitiveRounds
     /// sits on the probe's own AudioSource, so they say whether Unity kept
     /// pulling audio out of it, and a dropout introduced downstream of the tap
     /// — mixer, output device, driver — leaves them clean. The run also
-    /// records managed/native/process memory before the request, after open,
-    /// during play and after cleanup, and a scripted control sequence (seek
-    /// running, pause + seek paused + resume, loop off → natural end, loop
-    /// wrap) each judged pass/fail. ":stress" = 600 s plus up to 7 busy threads
-    /// (ProcessorCount - 1, capped) for 60 s; ":churn" = ten open/close cycles
-    /// then the memory samples. The probe never touches MusicEngine state, and
-    /// stops if the normal engine starts sounding at any point in a run.
+    /// records managed/native/process memory before the request, after open
+    /// and during play, and a scripted control sequence (seek running, pause +
+    /// seek paused + resume, loop off → natural end, loop wrap) each judged
+    /// pass/fail. ":stress" = 600 s plus up to 7 busy threads (ProcessorCount
+    /// - 1, capped) for 60 s; ":churn" = ten bind/unbind cycles on the same
+    /// key. The probe never touches MusicEngine playback state (it reports its
+    /// opens to the engine's residency line), and stops if the normal engine
+    /// starts sounding at any point in a run.
+    ///
+    /// Opens (design v3 branch D, D11): a key is requested at most ONCE per
+    /// process and its request + clip are RETAINED until the process exits —
+    /// never disposed, never destroyed (a streamed clip reads its request's
+    /// buffer). A later run or churn cycle on the same key RE-SELECTS the
+    /// retained clip on a fresh source (`warm=1`, `reselect`), so request_ms
+    /// and getcontent_ms are then the first open's. Memory rows (D8):
+    /// d_native_per_open_mb on a first open (bound OggSize x 1.5 + 1 MB),
+    /// d_native_reopen_mb on a re-selection (0 +/- 0.5 MB — a second request
+    /// would show here as +MBs), both measured at the `opened` line and folded
+    /// into `end`, which is written at the stop and is the run's last row
+    /// (#564). No post-cleanup sample exists: nothing is cleaned up.
     ///
     /// Lifetime: the host GameObject is HideAndDontSave; if anything destroys it
     /// (its tap's OnDestroy flags it, and a Unity fake-null source is checked
-    /// too) every retained handle is released, or abandoned after four
-    /// attempts and logged (`[MUSIC-PROBE] handle abandoned`) — never treated
-    /// as idle.</summary>
+    /// too) the run ends: the source, tap and host object are released, or
+    /// abandoned after four attempts and logged (`[MUSIC-PROBE] handle
+    /// abandoned`) — never treated as idle. The retained pair stays.</summary>
     internal static class MusicStreamProbe
     {
         // ── gate ─────────────────────────────────────────────────────────
@@ -131,7 +144,7 @@ namespace CompetitiveRounds
         // value it saw. The difference is the r9 HIGH: adopting the launch
         // value as a baseline and then demanding a change meant a seat that
         // set both keys and restarted never ran anything.
-        private static string _lastRun, _key, _lastKeyOpened;
+        private static string _lastRun, _key;
         // Every run has a number, so a tap destroyed late cannot flag a run
         // that started after it (r9 PLAUSIBLE).
         private static int _gen;
@@ -166,14 +179,25 @@ namespace CompetitiveRounds
         /// when the bounded quiesce wait ran out. The fold that followed may
         /// have missed a run, so the bar cannot be shown to hold: a bar row.</summary>
         private static int _runTapQuiesceTimeouts;
-        // Bound on deferring the post-run collection while a room is live.
-        private static float _cleanupGcDeadline;
         // Bounded mask across a scripted transition, instead of masking whole
         // steps that are supposed to be audible (r9 MEDIUM).
         private static float _maskUntil;
         private static Mode _mode;
-        private static UnityWebRequest _req, _reqKeep;
-        private static AudioClip _clip;
+        /// <summary>D11: a key is opened at most ONCE per process; its request
+        /// and clip are retained here until the process exits — never
+        /// disposed, never destroyed (a streamed clip reads its request's
+        /// buffer). A later run or churn cycle on the key re-selects the
+        /// retained clip on a fresh source; request_ms/getcontent_ms are the
+        /// first open's. A request that never produced a clip is retained
+        /// clip-less and the key is refused from then on.</summary>
+        private sealed class RetainedOpen { public UnityWebRequest Req; public AudioClip Clip; public float RequestMs, GetContentMs; }
+        private static readonly Dictionary<string, RetainedOpen> _opened = new Dictionary<string, RetainedOpen>(StringComparer.Ordinal);
+        private static UnityWebRequest _req;   // this run's first-open request while in flight; retained from the stop or GetContent on
+        private static AudioClip _clip;        // the run's clip — the retained one
+        private static long _oggSize;          // catalog size of the run's file (the per-open bound)
+        private static long _natOpen0 = -1L;   // native counter just before this open (the request, or the bind on a re-selection)
+        private static string _nativeOpenRow;  // the run's first `opened` memory row, folded into the end record
+        private static bool _nativeOpenPass;
         private static GameObject _go;
         private static AudioSource _src;
         private static ProbeTap _tap;
@@ -183,8 +207,9 @@ namespace CompetitiveRounds
         private static long _playStartTicks;
         // §2.4 / §7 2-9 PASS bar (impl2 r1 M4): retained across the run for the
         // end line's verdict (BarVerdict) — every row of the bar is judged there
-        // except the post-cleanup memory row, which is judged where it is
-        // measured and folded into the end line by FinishEndRecord (impl2 r2 M4).
+        // except the memory row (D8: d_native_per_open_mb / d_native_reopen_mb),
+        // judged at the `opened` line where it is measured and folded into the
+        // end line by FinishEndRecord.
         private static float _firstSampleMs = -1f;   // -1 = no audible sample was ever observed
         private static float _deficitPeakMs;          // max of DeficitMs() sampled every playing tick
         private static bool _controlsDone;            // the scripted sequence reached its summary line
@@ -199,14 +224,13 @@ namespace CompetitiveRounds
         // resume / restart, and the natural end. A silent run that STARTS
         // inside one is "at a scripted seek" (§2.4); one outside fails the bar.
         private static readonly List<KeyValuePair<long, long>> _scriptedWindows = new List<KeyValuePair<long, long>>();
-        // impl2 r2 M4: the `end` record is the runner's stop signal, so it is
-        // written only when its bar is FINAL — after the post-cleanup native
-        // sample (or once that sample can no longer happen). Stop builds the
-        // record and every bar row it can judge; FinishEndRecord appends the
-        // native row and writes the line.
+        // impl2 r2 M4 / #564: the `end` record is the runner's stop signal, so
+        // it is written only when its bar is FINAL. Under D every row is final
+        // at the stop (the memory row was measured at the open): Stop builds
+        // the record and FinishEndRecord appends the memory row and writes the
+        // line at once — the last row of the run.
         private static string _endRecord;
         private static List<string> _endBar;   // null = churn (no bar)
-        private static bool _quitHooked;
         // Wall accrual after a Play/UnPause: the first accruing tick charges
         // the time since that call, not the whole frame (which began before
         // it) — with the deficit now judged per tick, a one-frame overcharge
@@ -219,8 +243,6 @@ namespace CompetitiveRounds
         private static int _wraps, _stalls;
         // memory
         private static long _mgd0, _nat0, _res0, _proc0;
-        private static float _cleanupSampleAt = -1f, _cleanupGcAt = -1f;
-        private static string _cleanupKey;
         // controls
         private static int _step;
         private static float _stepAt, _stepDeadline, _stepTarget;
@@ -245,15 +267,6 @@ namespace CompetitiveRounds
             {
                 if (Plugin.MusicProbeRun == null) return;
                 float now = Time.realtimeSinceStartup;
-                // A deferred end record must not die with the process: a quit
-                // inside the cleanup window writes it with the native row
-                // unmeasured — the marker prints on every seat (r3 F4); it is
-                // a bar row, so a FAIL, on the broadcast seat only.
-                if (!_quitHooked)
-                {
-                    _quitHooked = true;
-                    try { Application.quitting += () => { try { FinishEndRecord("unmeasured(quit inside the cleanup window)", false); } catch { } }; } catch { }
-                }
                 // Only while enabled: a seat with the probe off must not read
                 // the config file every two seconds forever.
                 if (SeatAllowed()) ReloadIfDue(now);
@@ -261,74 +274,14 @@ namespace CompetitiveRounds
                 if (dt > _frameMax) _frameMax = dt;
                 if ((_req != null || _openPending) && dt > _openFrameMax) _openFrameMax = dt;
                 if (_retry.Count > 0) RetryReleases();
-                if (_cleanupSampleAt > 0f && now >= _cleanupSampleAt) { _cleanupSampleAt = -1f; LogMemory("after_cleanup", _cleanupKey); }
                 if (_busy != null && now >= _busyUntil) StopBusy();
                 // r2 MEDIUM 3: a destroyed host (scene edge, or anything else)
-                // leaves _src as a Unity fake-null while the streamed request
-                // and clip are still retained — release, never idle.
-                if (HostDestroyed || (_src == null && (_reqKeep != null || (object)_clip != null)))
+                // leaves _src as a Unity fake-null while the run's clip is still
+                // bound — the run ends (its retained pair stays, D11), never idle.
+                if (HostDestroyed || (_src == null && (object)_clip != null))
                 {
                     HostDestroyed = false;
-                    if (_reqKeep != null || (object)_clip != null || (object)_src != null) { Stop("host destroyed"); return; }
-                }
-                if (_cleanupGcAt > 0f && now >= _cleanupGcAt)
-                {
-                    // r9 MEDIUM: NEVER inside a live match. Entering an online
-                    // room ends the run and schedules this, and a full blocking
-                    // collection five seconds later is a hitch in somebody's
-                    // game. Deferred while a room is live, and abandoned if the
-                    // room outlasts the window — a memory delta is worth
-                    // nothing next to a stutter in a ranked round.
-                    //
-                    // Stated as the contexts that are SAFE, not as the one that
-                    // is not: an unreadable context ("?" — the Photon read
-                    // threw) was neither "online-room" nor a proof of anything,
-                    // and it used to run the collection. The two offline
-                    // contexts are the operator's own seat, which is where this
-                    // probe runs.
-                    string ctxNow = SeatContext();
-                    if (ctxNow != "menu" && ctxNow != "sandbox" && ctxNow != "offline-idle")
-                    {
-                        if (now >= _cleanupGcDeadline)
-                        {
-                            _cleanupGcAt = -1f;
-                            Plugin.Log?.LogInfo("[MUSIC-PROBE] cleanup collection abandoned — context=" + ctxNow + " outlasted the window");
-                            FinishEndRecord("unmeasured(cleanup abandoned: " + ctxNow + " outlasted the window)", false);
-                        }
-                        else _cleanupGcAt = now + 5f;
-                    }
-                    else
-                    {
-                        // dV2 MEDIUM 4: a settle point for the cleanup sample — the
-                        // deferred native destroys have run by now and the managed
-                        // side is collected, so the delta is a leak reading, not
-                        // allocator noise.
-                        _cleanupGcAt = -1f;
-                        try { GC.Collect(); GC.WaitForPendingFinalizers(); } catch { }
-                        LogMemory("after_cleanup_gc", _cleanupKey);
-                        // §2.4 bar row "native delta after cleanup <= 1 MB where the
-                        // probe is the only activity (VM)", judged where it is
-                        // measured (impl2 r1 M4). The seat that can exclude other
-                        // activity is the broadcast identity; elsewhere the figure
-                        // is printed as measured-only, never as a pass.
-                        long natNow = NativeAlloc();
-                        bool natAvail = natNow >= 0 && _nat0 >= 0;
-                        long natDelta = natAvail ? natNow - _nat0 : 0L;
-                        bool natPass = natAvail && natDelta <= 1048576L;
-                        string natVerdict = !BroadcastMode.IsBroadcastIdentity ? "measured-only(not the broadcast seat: other activity is not excluded)"
-                            : !natAvail ? "FAIL(native allocation unavailable)"
-                            : natPass ? "pass" : "FAIL";
-                        Plugin.Log?.LogInfo("[MUSIC-PROBE] bar-memory key=" + _cleanupKey + " d_native_alloc_mb=" + (natAvail ? Dmb(natDelta) : "?") + " bound=+1.0 verdict=" + natVerdict);
-                        // impl2 r2 M4: the end record — the runner's stop signal
-                        // — is written only now, with this row folded into its
-                        // bar, so a `bar=pass` can never precede a native growth
-                        // measured after it. The row prints on every seat; it
-                        // counts against the bar on the broadcast seat only.
-                        FinishEndRecord(!natAvail ? "unavailable"
-                            : !BroadcastMode.IsBroadcastIdentity ? Dmb(natDelta) + "(measured-only)"
-                            : natPass ? Dmb(natDelta) + "(pass)"
-                            : Dmb(natDelta) + ">+1.0", natPass);
-                    }
+                    if ((object)_clip != null || (object)_src != null) { Stop("host destroyed"); return; }
                 }
                 if (_req == null && _src == null)
                 {
@@ -380,8 +333,8 @@ namespace CompetitiveRounds
             // the log said mode=Normal in a line nobody re-reads. The lever is a
             // diagnostic instruction; one that cannot be carried out is refused
             // out loud, and refused HERE, before the run takes any state — the
-            // generation bump and the pending-cleanup drop below both belong to
-            // a run that is actually going to happen.
+            // generation bump below belongs to a run that is actually going to
+            // happen.
             Mode wanted = Mode.Normal;
             if (parts.Length > 3)
             {
@@ -403,12 +356,11 @@ namespace CompetitiveRounds
             // ambiguous. Custom music sounding = refuse; vanilla = report.
             //
             // ASKED HERE, before anything moves. It used to sit below the
-            // generation bump and the pending-cleanup drop, so a command
-            // refused for context still ended the previous run's deferred
-            // cleanup and invalidated its outgoing tap's generation — the
-            // comment above the mode check claimed both mutations belonged to
-            // a run that was going to happen, and for this refusal they did
-            // not. It reads `wanted` rather than `_mode` for the same reason:
+            // generation bump, so a command refused for context still
+            // invalidated the previous run's outgoing tap's generation — the
+            // comment above the mode check claimed that mutation belonged to a
+            // run that was going to happen, and for this refusal it did not.
+            // It reads `wanted` rather than `_mode` for the same reason:
             // `_mode` is not this command's mode until the run is admitted.
             //
             // An UNREADABLE seat context is a refusal too. SeatContext returns
@@ -430,16 +382,6 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogWarning("[MUSIC-PROBE] refused key=" + key + " reason=" + refuse + " context=" + ctx + " vanilla_guards=" + vanilla);
                 return;
             }
-            // r9 MEDIUM: a deferred cleanup belongs to the run that
-            // scheduled it. Its memory baselines are about to be overwritten
-            // by this run, so comparing against them would report this run's
-            // allocations as the previous run's leak — and would force a
-            // blocking collection in the middle of this one. Dropped, said so.
-            if (_cleanupSampleAt > 0f || _cleanupGcAt > 0f)
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] pending cleanup for " + (_cleanupKey ?? "?")
-                                    + " dropped — a new run started inside its window");
-            _cleanupSampleAt = -1f; _cleanupGcAt = -1f;
-            FinishEndRecord("unmeasured(a new run started inside the cleanup window)", false);
             _gen++;
             _audioWallSeconds = 0f;
             _runMaxGapTicks = 0L;
@@ -462,7 +404,9 @@ namespace CompetitiveRounds
                 + " cores=" + Environment.ProcessorCount + " (bots/opponents are the operator's responsibility; the log cannot see them)");
             LogMemory("baseline", _key);
             _mgd0 = GC.GetTotalMemory(false); _nat0 = NativeAlloc(); _res0 = NativeReserved(); _proc0 = ProcessPrivate();
-            OpenRequest(album.Tracks[idx].OggFile, now);
+            _oggSize = album.Tracks[idx].OggSize;
+            _nativeOpenRow = null; _nativeOpenPass = false;
+            BeginOpen(album.Tracks[idx], now);
         }
 
         /// <summary>Photon's own room-entry edge.
@@ -547,22 +491,53 @@ namespace CompetitiveRounds
             catch { return "?"; }
         }
 
-        private static bool OpenRequest(string oggFile, float now)
+        /// <summary>D11: the open. A key already opened in this process is
+        /// RE-SELECTED — no request, no GetContent: its retained clip is bound
+        /// to a fresh source and the first open's request_ms/getcontent_ms
+        /// stand. A first open makes the ONE request the key will ever get
+        /// (reported to the engine's residency line) and PumpRequest completes
+        /// it. False = refused (nothing was started).</summary>
+        private static bool BeginOpen(MusicTrackDef track, float now)
         {
-            string path = MusicAssets.PathFor(oggFile);
+            _startRt = now;
+            _openFrameMax = 0f; _openPending = false;
+            _natOpen0 = NativeAlloc();
+            if (_opened.TryGetValue(_key, out var kept))
+            {
+                _warm = true;
+                _requestMs = kept.RequestMs; _getContentMs = kept.GetContentMs;
+                if ((object)kept.Clip == null || kept.Clip == null)
+                {
+                    Plugin.Log?.LogWarning("[MUSIC-PROBE] refused key=" + _key + " reason=retained-open-has-no-clip (opened once already; a key is never requested twice)");
+                    return false;
+                }
+                Plugin.Log?.LogInfo("[MUSIC-PROBE] reselect key=" + _key + " mode=" + _mode + " (retained pair; request_ms/getcontent_ms are the first open's)");
+                BindAndPlay(kept.Clip, now, null);
+                return true;
+            }
+            string path = MusicAssets.PathFor(track.OggFile);
             if (path == null) { Plugin.Log?.LogWarning("[MUSIC-PROBE] file not ready for " + _key + " (full tier not installed?)"); return false; }
             string url;
             try { url = new Uri(path).AbsoluteUri; }
             catch { url = "file:///" + path.Replace('\\', '/'); }
-            _warm = string.Equals(_lastKeyOpened, _key, StringComparison.Ordinal);
+            _warm = false;
+            MusicEngine.NoteProbeOpen(_key, track.OggSize);   // D11: probe_opens= on the residency line; seeds the engine's native baseline BEFORE this allocation
             _req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
             var dh = _req.downloadHandler as DownloadHandlerAudioClip;
             if (dh != null) dh.streamAudio = true;
-            _openFrameMax = 0f; _openPending = false;
             _req.SendWebRequest();
-            _startRt = now;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] request key=" + _key + " stream=1 mode=" + _mode + " warm=" + (_warm ? 1 : 0));
+            Plugin.Log?.LogInfo("[MUSIC-PROBE] request key=" + _key + " stream=1 mode=" + _mode + " warm=0");
             return true;
+        }
+
+        /// <summary>D11: the pair enters the retained store — once per key,
+        /// whatever GetContent returned, and clip-less for a request the run
+        /// ended before it completed (InProgress at teardown is the retain
+        /// class). Nothing ever leaves the store.</summary>
+        private static void RetainOpen(UnityWebRequest req, AudioClip clip)
+        {
+            if (_key == null || _opened.ContainsKey(_key)) return;
+            _opened[_key] = new RetainedOpen { Req = req, Clip = clip, RequestMs = _requestMs, GetContentMs = _getContentMs };
         }
 
         private static void PumpRequest(float now)
@@ -576,12 +551,12 @@ namespace CompetitiveRounds
             if (refuseOpen != null) { Stop(refuseOpen); return; }
             if (!_req.isDone)
             {
-                if (now - _startRt > 30f) { Plugin.Log?.LogWarning("[MUSIC-PROBE] request timeout"); Stop("timeout"); }
+                if (now - _startRt > 30f) { Plugin.Log?.LogWarning("[MUSIC-PROBE] request timeout (request retained, key refused from now on)"); Stop("timeout"); }
                 return;
             }
             if (!string.IsNullOrEmpty(_req.error))
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] request error: " + _req.error);
+                Plugin.Log?.LogWarning("[MUSIC-PROBE] request error: " + _req.error + " (request retained, key refused from now on)");
                 Stop("error");
                 return;
             }
@@ -592,12 +567,30 @@ namespace CompetitiveRounds
             // accumulating for two more frames before the record is written.
             var block = Stopwatch.StartNew();
             var sw = Stopwatch.StartNew();
-            _clip = DownloadHandlerAudioClip.GetContent(_req);
+            AudioClip clip = null;
+            try { clip = DownloadHandlerAudioClip.GetContent(_req); }
+            catch (Exception ex) { Plugin.Log?.LogWarning("[MUSIC-PROBE] GetContent threw: " + ex.Message); }
             sw.Stop();
             _getContentMs = (float)sw.Elapsed.TotalMilliseconds;
-            _reqKeep = _req; _req = null;
-            if (_clip == null) { Plugin.Log?.LogWarning("[MUSIC-PROBE] GetContent returned null"); Stop("null clip"); return; }
-            _lastKeyOpened = _key;
+            // D11: the pair is retained from here whatever GetContent returned.
+            var req = _req; _req = null;
+            RetainOpen(req, clip);
+            if (clip == null) { Plugin.Log?.LogWarning("[MUSIC-PROBE] GetContent returned no clip (request retained, key refused from now on)"); Stop("null clip"); return; }
+            BindAndPlay(clip, now, block);
+        }
+
+        /// <summary>The completion block's tail: host + source construction
+        /// and Play on the clip — a first open's, after GetContent, or a
+        /// re-selection's (then the block starts here). Refusal is asked AGAIN
+        /// immediately before the first audible sample: the streamed handle
+        /// open and the host construction are not free, so the answer from the
+        /// top of the tick is milliseconds old — and this is the one line
+        /// where being wrong is audible in somebody else's match. Nothing has
+        /// played yet, so Stop simply releases what was built.</summary>
+        private static void BindAndPlay(AudioClip clip, float now, Stopwatch block)
+        {
+            if (block == null) block = Stopwatch.StartNew();
+            _clip = clip;
             _go = new GameObject("SCR_MusicProbe") { hideFlags = HideFlags.HideAndDontSave };
             _src = _go.AddComponent<AudioSource>();
             _src.clip = _clip; _src.loop = true; _src.playOnAwake = false; _src.volume = 0.5f;
@@ -605,13 +598,6 @@ namespace CompetitiveRounds
             _tap.Reset();
             _tap.Gen = _gen;
             HostDestroyed = false;
-            // Asked AGAIN immediately before the first audible sample. The
-            // streamed handle open above (no decode — the bar bounds it at
-            // 20 ms) and the host construction are not free, so the answer
-            // from the top of this method is milliseconds old — and this is
-            // the one line where being wrong is audible in somebody else's
-            // match. Nothing has played yet, so Stop simply releases what was
-            // built.
             string refuseAtPlay = RefusalNow();
             if (refuseAtPlay != null) { Stop(refuseAtPlay); return; }
             _playStartTicks = Stopwatch.GetTimestamp();
@@ -649,11 +635,37 @@ namespace CompetitiveRounds
             if (_openPending && Time.frameCount >= _openLogFrame)
             {
                 _openPending = false;
+                // D8: the memory row, measured here (three frames after the
+                // completion block) against the counter sampled just before
+                // this open. A first open pays the request buffer plus FMOD's
+                // stream state: bound OggSize x 1.5 + 1 MB. A re-selection
+                // binds a retained clip and must cost nothing: 0 +/- 0.5 MB —
+                // a second request would show here as +MBs (D3). Judged where
+                // it is measured; a bar row on the broadcast seat only (impl2
+                // r1 M4: the seat that can exclude other activity).
+                long nat = NativeAlloc();
+                bool natAvail = nat >= 0 && _natOpen0 >= 0;
+                long d = natAvail ? nat - _natOpen0 : 0L;
+                double dMb = d / 1048576.0;
+                string rowName = _warm ? "d_native_reopen_mb" : "d_native_per_open_mb";
+                double boundMb = _warm ? 0.5 : _oggSize / 1048576.0 * 1.5 + 1.0;
+                bool pass = natAvail && (_warm ? Math.Abs(dMb) <= boundMb : dMb <= boundMb);
+                string boundText = _warm ? "+/-0.5" : F1((float)boundMb);
+                string verdict = !natAvail ? "unavailable" : !BroadcastMode.IsBroadcastIdentity ? "measured-only" : pass ? "pass" : "FAIL";
                 Plugin.Log?.LogInfo("[MUSIC-PROBE] opened key=" + _key + " warm=" + (_warm ? 1 : 0)
                     + " request_ms=" + F0(_requestMs) + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs)
                     + " open_frame_max_ms=" + F1(_openFrameMax)
                     + " loadState=" + _clip.loadState + " loadType=" + _clip.loadType
-                    + " length_s=" + F1(_clip.length) + " freq=" + _clip.frequency + " ch=" + _clip.channels);
+                    + " length_s=" + F1(_clip.length) + " freq=" + _clip.frequency + " ch=" + _clip.channels
+                    + " " + rowName + "=" + (natAvail ? Dmb(d) : "?") + " bound=" + boundText + " verdict=" + verdict);
+                // The end record carries the run's LAST opened row: the only
+                // one of a normal/stress run, the tenth re-selection's of a
+                // churn run (each cycle prints its own line above).
+                _nativeOpenRow = rowName + "=" + (!natAvail ? "unavailable"
+                    : !BroadcastMode.IsBroadcastIdentity ? Dmb(d) + "(measured-only)"
+                    : pass ? Dmb(d)
+                    : Dmb(d) + ">" + boundText);
+                _nativeOpenPass = pass;
                 LogMemory("after_open", _key);
             }
             // Context is re-checked every tick: an online room ends any run, and
@@ -940,11 +952,12 @@ namespace CompetitiveRounds
             _churnCycles++;
             Plugin.Log?.LogInfo("[MUSIC-PROBE] churn key=" + _key + " cycle=" + _churnCycles + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs) + " request_ms=" + F0(_requestMs));
             if (_churnCycles >= 10) { Stop("churn done"); return; }
-            // close this cycle's objects without ending the run, then reopen
+            // D11: this cycle's source, tap and host object go without ending
+            // the run; the retained pair is re-selected onto a fresh source.
             CloseObjects();
-            string oggFile = null;
-            try { var parts = _key.Split(':'); var album = MusicCatalog.Get(parts[0]); oggFile = album.Tracks[int.Parse(parts[1], CultureInfo.InvariantCulture)].OggFile; } catch { }
-            if (oggFile == null || !OpenRequest(oggFile, now)) { Stop("churn reopen failed"); return; }
+            MusicTrackDef track = null;
+            try { var parts = _key.Split(':'); var album = MusicCatalog.Get(parts[0]); track = album.Tracks[int.Parse(parts[1], CultureInfo.InvariantCulture)]; } catch { }
+            if (track == null || !BeginOpen(track, now)) { Stop("churn reselect failed"); return; }
             _churnPlayUntil = now + 1f;
         }
 
@@ -991,6 +1004,9 @@ namespace CompetitiveRounds
         }
 
         // ── teardown ─────────────────────────────────────────────────────
+        /// <summary>Per-run objects only — the source (stopped), the tap and
+        /// the host object (destroyed). The retained pair (request, clip) is
+        /// never passed here (D11): no dispose exists in this file.</summary>
         private static void Release(object h, string what)
         {
             try
@@ -998,7 +1014,6 @@ namespace CompetitiveRounds
                 if (h is AudioSource s) { s.Stop(); return; }
                 if (h is Component c) { UnityEngine.Object.Destroy(c); return; }
                 if (h is UnityEngine.Object o) { UnityEngine.Object.Destroy(o); return; }
-                if (h is UnityWebRequest r) { r.Dispose(); return; }
             }
             catch (Exception ex)
             {
@@ -1018,7 +1033,6 @@ namespace CompetitiveRounds
                 try
                 {
                     if (r.Handle is UnityEngine.Object o) { if (o != null) UnityEngine.Object.Destroy(o); }
-                    else if (r.Handle is UnityWebRequest q) q.Dispose();
                 }
                 catch (Exception ex)
                 {
@@ -1068,10 +1082,11 @@ namespace CompetitiveRounds
             }
             if ((object)_tap != null) Release(_tap, "tap");
             if ((object)_go != null) Release(_go, "host");
-            if ((object)_clip != null) Release(_clip, "clip");
-            if (_req != null) Release(_req, "request");
-            if (_reqKeep != null) Release(_reqKeep, "streamed request");
-            _src = null; _tap = null; _go = null; _clip = null; _req = null; _reqKeep = null;
+            // D11: the request and the clip are the retained pair — never
+            // released, never destroyed. A request still in flight at the stop
+            // (timeout, refusal) is retained too, clip-less.
+            if (_req != null) { RetainOpen(_req, null); _req = null; }
+            _src = null; _tap = null; _go = null; _clip = null;
             HostDestroyed = false;
         }
 
@@ -1121,10 +1136,6 @@ namespace CompetitiveRounds
             _openPending = false;
             CloseObjects();
             int silentRunMax = _runHadTap ? _runSilentRunMax : -1;
-            // A record still pending from an earlier stop (nothing should get
-            // here twice without a run start between, which flushes it) is
-            // written before it could be overwritten.
-            FinishEndRecord("unmeasured(superseded by a later stop)", false);
             // The bar is judged AFTER CloseObjects: the run totals (delivered
             // frames, gaps, every silent run's start) are folded there.
             // impl2 r2 M4: every silent run of >= 2 buffers must have STARTED
@@ -1134,15 +1145,11 @@ namespace CompetitiveRounds
             int silentRuns = _runSilentRunStarts.Count + _runSilentRunsUnstamped;
             int unscripted = _runSilentRunsUnstamped;
             for (int i = 0; i < _runSilentRunStarts.Count; i++) if (!SilentRunIsScripted(_runSilentRunStarts[i])) unscripted++;
-            // Every row but one is final here. The native-after-cleanup row is
-            // measured on a later tick, and the `end` record is the runner's
-            // stop signal — so the record is BUILT here and WRITTEN by
-            // FinishEndRecord after the post-cleanup sample, or at once with
-            // an unmeasured marker when the run is cut short (a new run, a
-            // quit, a cleanup abandoned to a live room, a later stop) — on
-            // every seat (impl2 r2 M4, r3 F4): its `bar=` is final, never a
-            // pass a later measurement would have to retract. `closing`
-            // marks the stop itself in the log.
+            // Every row is final here (D8, #564): the memory row was measured
+            // at this run's `opened` line, nothing is cleaned up later, so the
+            // `end` record — the runner's stop signal — is built and written
+            // now, as the run's last row, with a verdict no later measurement
+            // could retract.
             _endBar = BarVerdict(why, silentRunMax, unscripted);
             _endRecord = "[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
                 + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
@@ -1151,37 +1158,31 @@ namespace CompetitiveRounds
                 + " open_block_ms=" + F1(_openBlockMs) + " first_sample_ms=" + (_firstSampleMs < 0f ? "?" : F1(_firstSampleMs))
                 + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail + " controls_done=" + (_controlsDone ? 1 : 0)
                 + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath));
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] closing key=" + _key + " why=" + why + " — the end record follows the post-cleanup native sample, or is written at once with an unmeasured marker if the run is cut short");
-            _cleanupKey = _key;
-            _cleanupSampleAt = Time.realtimeSinceStartup + 2f;
-            _cleanupGcAt = Time.realtimeSinceStartup + 5f;
-            _cleanupGcDeadline = Time.realtimeSinceStartup + 120f;
+            FinishEndRecord(_nativeOpenRow ?? (_warm ? "d_native_reopen_mb" : "d_native_per_open_mb") + "=unmeasured(run ended before its open settled)", _nativeOpenRow != null && _nativeOpenPass);
         }
 
-        /// <summary>Writes the deferred `end` record with its FINAL bar (impl2
-        /// r2 M4). Once per run: after the post-cleanup native sample, or at
-        /// once with an unmeasured marker when the run is cut short — the
-        /// cleanup abandoned to a live room, a new run inside the window, a
-        /// quit, a later stop. `nativeRow` is the row's text and is printed
-        /// on EVERY seat as `native_after_cleanup=<row>` (r3 F4: a cancelled
-        /// cleanup used to pass a null row off the broadcast seat and print
-        /// an ordinary `bar=pass`); `nativePass` false adds the row to the
-        /// bar on the broadcast seat only, where it is a bar row (impl2 r1
-        /// M4: judged where it is measured). Churn runs carry no bar. A
-        /// no-op when nothing is pending.</summary>
-        private static void FinishEndRecord(string nativeRow, bool nativePass)
+        /// <summary>Writes the `end` record with its FINAL bar, at the stop
+        /// (D8, #564: the memory row was measured at the open, nothing is
+        /// pending, and this is the run's last row). `row` is the memory row —
+        /// `d_native_per_open_mb=<mb>` on a first open, `d_native_reopen_mb=
+        /// <mb>` on a re-selection, or an unmeasured marker — printed on EVERY
+        /// seat; `pass` false adds it to the bar on the broadcast seat only,
+        /// where it is a bar row (impl2 r1 M4: judged where it is measured;
+        /// elsewhere other activity is not excluded, so the figure prints as
+        /// measured-only). Churn runs carry no bar. A no-op when nothing is
+        /// pending.</summary>
+        private static void FinishEndRecord(string row, bool pass)
         {
             string rec = _endRecord;
             if (rec == null) return;
             _endRecord = null;
             var fails = _endBar;
             _endBar = null;
-            string row = "native_after_cleanup=" + (nativeRow ?? "unmeasured(no reason given)");
             string bar;
             if (fails == null) bar = "n/a(churn)";
             else
             {
-                if (!nativePass && BroadcastMode.IsBroadcastIdentity) fails.Add(row);
+                if (!pass && BroadcastMode.IsBroadcastIdentity) fails.Add(row);
                 bar = fails.Count == 0 ? "pass" : "FAIL[" + string.Join(",", fails.ToArray()) + "]";
             }
             Plugin.Log?.LogInfo(rec + " " + row + " bar=" + bar);
@@ -1259,9 +1260,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The §2.4 + §7 2-9 PASS bar (impl2 r1 M4), judged at the
-        /// stop for every row it can judge; the native-after-cleanup row is
-        /// measured later and appended by FinishEndRecord, which writes the
-        /// end line with the FINAL verdict (impl2 r2 M4). Every row is
+        /// stop for every row it can judge; the memory row (D8:
+        /// d_native_per_open_mb on a first open, d_native_reopen_mb on a
+        /// re-selection) was measured at the `opened` line and is appended by
+        /// FinishEndRecord, which writes the end line with the FINAL verdict
+        /// as the run's last row (#564). Every row is
         /// enforced: a run that did not reach its budget, a control sequence
         /// that did not complete, or a first sample never observed cannot
         /// pass; every silent run of >= 2 buffers must have started inside a

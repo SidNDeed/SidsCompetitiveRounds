@@ -2722,9 +2722,10 @@ namespace CompetitiveRounds
             // the player-seat branch was cut in review — see the class comment).
             try { OverlayIdleClose.Tick(); } catch { }
             try { MusicStreamProbe.Tick(); } catch { }
-            // impl2 r3 F1: a host-less music engine has no Update of its own;
-            // this persistent poll re-issues the host spawn until one adopts.
-            try { MusicEngine.RetryHostSpawn(); } catch { }
+            // D13: a host-less music engine has no Update of its own; this
+            // persistent poll respawns the host once the dying one is observed
+            // destroyed — stateless, uncapped, every frame.
+            try { MusicEngine.PollHost(); } catch { }
             try { MusicEngine.TickTestScript(); } catch { }
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
