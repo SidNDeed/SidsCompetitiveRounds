@@ -7926,6 +7926,154 @@ async def poll_new_bans():
             print(f"[BANS] post error: {ex}")
 
 
+# ── Mail moderation cases (Sept 6 item b, B-2) ───────────────────────────
+# The api enqueues each NEW moderation case (a mail report or an automatic
+# spam bucket) through the SAME pending_channel_posts outbox as every other
+# #scr-admin post, with "[MODCASE:<uuid>]" as the FIRST line of the content.
+# poll_channel_posts strips that line, posts the evidence with four buttons
+# whose custom_id carries the case id ONLY, and stamps notified_at. A click
+# is handled by the raw on_interaction listener (restart-safe: nothing but
+# the custom_id persists) and sent to the api's internal act route with the
+# clicker's Discord id — the SERVER resolves that id to a currently linked
+# account and re-checks that account's grant on every click; this bot holds
+# no authority and never decides the outcome, it renders the api's answer.
+
+MODCASE_MARKER = "[MODCASE:"
+# (custom_id key, button label, api action, hours)
+_MODCASE_BUTTONS = (
+    ("mute24", "Mute 24h", "mute", 24),
+    ("mute7d", "Mute 7d", "mute", 168),
+    ("ban", "Ban", "ban", None),
+    ("dismiss", "Dismiss", "dismiss", None),
+)
+
+
+def _modcase_uuid_ok(value):
+    """36-char lowercase hex uuid with hyphens at 8/13/18/23 — no regex
+    module needed at this point of the file."""
+    if not isinstance(value, str) or len(value) != 36:
+        return False
+    for i, ch in enumerate(value):
+        if i in (8, 13, 18, 23):
+            if ch != "-":
+                return False
+        elif ch not in "0123456789abcdef":
+            return False
+    return True
+
+
+def _modcase_parse(content):
+    """(case_id, body) when the post's FIRST line is the api's marker, else
+    (None, content) — an ordinary announcement passes through unchanged."""
+    if not isinstance(content, str) or not content.startswith(MODCASE_MARKER):
+        return None, content
+    nl = content.find("\n")
+    head = content if nl < 0 else content[:nl]
+    if not head.endswith("]"):
+        return None, content
+    cid = head[len(MODCASE_MARKER):-1].strip().lower()
+    if not _modcase_uuid_ok(cid):
+        return None, content
+    return cid, (content[nl + 1:] if nl >= 0 else "")
+
+
+def _modcase_custom_id(key, case_id):
+    return f"modcase:{key}:{case_id}"
+
+
+def _modcase_parse_custom_id(custom_id):
+    """custom_id -> {key, label, action, hours, case_id} or None."""
+    parts = (custom_id or "").split(":")
+    if len(parts) != 3 or parts[0] != "modcase" or not _modcase_uuid_ok(parts[2]):
+        return None
+    for key, label, action, hours in _MODCASE_BUTTONS:
+        if key == parts[1]:
+            return {"key": key, "label": label, "action": action, "hours": hours,
+                    "case_id": parts[2]}
+    return None
+
+
+def _modcase_view(case_id):
+    styles = {"mute24": discord.ButtonStyle.secondary, "mute7d": discord.ButtonStyle.primary,
+              "ban": discord.ButtonStyle.danger, "dismiss": discord.ButtonStyle.success}
+    view = discord.ui.View(timeout=None)
+    for key, label, _action, _hours in _MODCASE_BUTTONS:
+        view.add_item(discord.ui.Button(style=styles[key], label=label,
+                                        custom_id=_modcase_custom_id(key, case_id)))
+    return view
+
+
+def _modcase_render(status, body, spec, actor_name):
+    """Render the api's answer to a button click. 403 = the clicker is not
+    (or no longer) authorised — the server's word, not this bot's."""
+    body = body if isinstance(body, dict) else {}
+    detail = body.get("detail")
+    if isinstance(detail, dict):
+        detail = detail.get("error") or ""
+    detail = str(detail or "")[:180]
+    if status == 200 and body.get("status") == "ok":
+        return (f"\N{WHITE HEAVY CHECK MARK} **{spec['label']}** applied by {actor_name} "
+                f"to **{body.get('subject_name') or '?'}** (`{body.get('subject_steam_id') or '?'}`)"
+                f" — case `{spec['case_id'][:8]}` {body.get('resolution') or ''}".rstrip())
+    if status == 200 and body.get("status") == "already_resolved":
+        return (f"\N{INFORMATION SOURCE} This case was already **{body.get('case_status')}**"
+                f" ({body.get('resolution') or 'no detail'}).")
+    if status == 403:
+        return ("\N{CROSS MARK} You are no longer authorised for this action — it needs a "
+                "Discord account linked in-game (`/link`) that holds an admin or moderator grant.")
+    if status == 404:
+        return "\N{CROSS MARK} Case not found."
+    if status == 429:
+        return f"\N{HOURGLASS WITH FLOWING SAND} Refused by the rate gate. {detail}".rstrip()
+    return f"\N{CROSS MARK} Refused (HTTP {status}). {detail}".rstrip()
+
+
+async def _modcase_click(interaction, custom_id):
+    spec = _modcase_parse_custom_id(custom_id)
+    if spec is None:
+        await interaction.response.send_message("\N{WARNING SIGN} Unrecognized button.", ephemeral=True)
+        return
+    # The internal POST can take longer than Discord's 3-second window.
+    await interaction.response.defer(ephemeral=True)
+    if http_session is None or not API_SECRET_KEY:
+        await interaction.followup.send("API session not ready.", ephemeral=True)
+        return
+    actor_name = getattr(interaction.user, "display_name", "") or interaction.user.name
+    payload = {"actor_discord_id": str(interaction.user.id), "actor_name": actor_name,
+               "action": spec["action"], "reason": f"Discord button: {spec['label']}"}
+    if spec["hours"]:
+        payload["hours"] = spec["hours"]
+    status, body = 0, {}
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/moderation-cases/{spec['case_id']}/act",
+            json=payload,
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            status = resp.status
+            try:
+                body = await resp.json()
+            except Exception:
+                body = {}
+    except Exception as e:
+        await interaction.followup.send(f"Action failed: {e}", ephemeral=True)
+        return
+    rendered = _modcase_render(status, body, spec, actor_name)
+    if status == 200 and isinstance(body, dict) and body.get("status") in ("ok", "already_resolved"):
+        # Retire the buttons on the post and record the outcome on it, so the
+        # channel shows who handled the case; the ephemeral reply repeats it.
+        try:
+            msg = interaction.message
+            if msg is not None:
+                await msg.edit(content=((msg.content or "")[:1800] + "\n\n" + rendered)[:2000],
+                               view=None, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            print(f"[MODCASE] post edit failed for {spec['case_id']}: {e}")
+    await interaction.followup.send(rendered, ephemeral=True,
+                                    allowed_mentions=discord.AllowedMentions.none())
+
+
 @tasks.loop(seconds=30)
 async def poll_channel_posts():
     """Generic announce queue (v1.30): the API's pending_channel_posts table
@@ -7949,12 +8097,24 @@ async def poll_channel_posts():
             # Explicit allowed_mentions: server-queued posts (tournament
             # signup/leave/pushback etc.) carry <@id> mentions that MUST ping
             # the user — but never let queued content ping @everyone/roles.
-            await ch.send(
-                p["content"][:2000],
-                allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
-            )
+            # Sept 6 item b: a moderation case's post carries the api's
+            # [MODCASE:<uuid>] marker as its first line — strip it, attach the
+            # Mute/Ban/Dismiss buttons (custom_id = case id only, B-2) and
+            # stamp notified_at after the ack. Any other post is unchanged.
+            case_id, content = _modcase_parse(p["content"])
+            send_kw = {"allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False)}
+            if case_id:
+                send_kw["view"] = _modcase_view(case_id)
+            await ch.send(content[:2000], **send_kw)
             await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
             print(f"[CHANNEL-POST] posted {p['id']} to {p['channel_id']}")
+            if case_id:
+                # Bookkeeping only: the post is out either way; a failed stamp
+                # leaves notified_at NULL and is logged, never retried by
+                # re-posting.
+                stamped = await api_post(f"/internal/moderation-cases/{case_id}/notified")
+                if not stamped or stamped.get("status") != "ok":
+                    print(f"[MODCASE] notified stamp failed for {case_id}: {stamped}")
         except discord.Forbidden:
             print(f"[CHANNEL-POST] forbidden in channel {p['channel_id']} — leaving post {p['id']} queued")
             return
@@ -10266,6 +10426,11 @@ async def on_interaction(interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
             return
         cid = (interaction.data or {}).get("custom_id", "")
+        if cid.startswith("modcase:"):
+            # Mail moderation buttons (Sept 6 item b, B-2): routed to the api
+            # with the clicker's Discord id; the server decides.
+            await _modcase_click(interaction, cid)
+            return
         if cid.startswith("tdlc:"):
             parts = cid.split(":")
             if len(parts) != 4:
