@@ -160,7 +160,10 @@ namespace CompetitiveRounds
                     var cv = canvasGO.AddComponent(UIFactory.tCanvas);
                     var rm = UIFactory.tCanvas.GetProperty("renderMode", bf);
                     rm?.SetValue(cv, Enum.ToObject(rm.PropertyType, 0));                       // ScreenSpaceOverlay
-                    UIFactory.tCanvas.GetProperty("sortingOrder", bf)?.SetValue(cv, 30001);   // above F5's 30000, as IMGUI was
+                    // 30002: above F5's 30000 as IMGUI was, and above the TmpOverlayPanel
+                    // surfaces at 30001 (the hover profile card) -- the chat is never
+                    // covered by a card (design A-1; review a-M5).
+                    UIFactory.tCanvas.GetProperty("sortingOrder", bf)?.SetValue(cv, 30002);
                 }
                 if (UIFactory.tCanvasScaler != null)
                 {
@@ -279,10 +282,38 @@ namespace CompetitiveRounds
 
         /// <summary>Back off one UTF-16 unit when idx would land between the
         /// halves of a surrogate pair (an emoji at the cut).</summary>
+        /// <summary>Never split a surrogate pair, and (review f r2) never split an
+        /// emoji SEQUENCE: a cut is moved back past a ZWJ, a variation selector,
+        /// a keycap combiner, a skin-tone modifier pair and the second half of a
+        /// regional-indicator (flag) pair, so the fitted prefix ends on a whole
+        /// glyph cluster whether it renders as fallback glyphs or as one sprite.</summary>
         private static int SafeCut(string s, int idx)
         {
-            if (idx > 0 && idx < s.Length && char.IsHighSurrogate(s[idx - 1])) idx--;
+            for (int guard = 0; guard < 64 && idx > 0 && idx < s.Length; guard++)
+            {
+                if (char.IsLowSurrogate(s[idx])) { idx--; continue; }             // inside a pair
+                char c = s[idx], prev = s[idx - 1];
+                bool joinerAhead = c == (char)0x200D || c == (char)0xFE0F || c == (char)0xFE0E || c == (char)0x20E3;
+                bool joinerBehind = prev == (char)0x200D;
+                bool modifierAhead = c == (char)0xD83C && idx + 1 < s.Length && s[idx + 1] >= (char)0xDFFB && s[idx + 1] <= (char)0xDFFF;
+                bool flagSplit = IsRegionalIndicator(s, idx) && RegionalRunBefore(s, idx) % 2 == 1;
+                if (joinerAhead || joinerBehind || modifierAhead || flagSplit) { idx--; continue; }
+                break;
+            }
             return idx;
+        }
+
+        private static bool IsRegionalIndicator(string s, int i)
+        {
+            return i >= 0 && i + 1 < s.Length && s[i] == (char)0xD83C && s[i + 1] >= (char)0xDDE6 && s[i + 1] <= (char)0xDDFF;
+        }
+
+        /// <summary>How many regional-indicator pairs immediately precede `idx`.</summary>
+        private static int RegionalRunBefore(string s, int idx)
+        {
+            int run = 0;
+            for (int i = idx - 2; i >= 0 && IsRegionalIndicator(s, i); i -= 2) run++;
+            return run;
         }
 
         private static float Height(object tmp, string text)

@@ -1860,7 +1860,11 @@ namespace CompetitiveRounds
         public static void ClearCardHoverRegions()
         {
             _cardHoverRegions.Clear();
-            ProfileCard.ClearHoverTargets();   // Sept 6 item a: name-hover targets live and die with the card regions
+            // Sept 6 item a, review a-M2: the profile-card name targets are NOT cleared
+            // here. The FFA and 2v2 boards register their names and then call this to
+            // re-register the recent-row hovers, which erased the names a moment after
+            // registration. Name targets are cleared on tab switch (NativeUI.SwitchTab)
+            // and page teardown (ProfileCard.Teardown); refreshes re-register by component.
             _scoreGraphRegions.Clear();
             _fpsGraphRegions.Clear();
         }

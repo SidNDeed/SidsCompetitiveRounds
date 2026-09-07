@@ -127,8 +127,30 @@ namespace CompetitiveRounds
         internal static string Substitute(string text)
         {
             if (_state != State.Active || _matcher == null || string.IsNullOrEmpty(text)) return text;
-            try { return _matcher.Substitute(text, false); }
+            try { return _matcher.Substitute(NeutraliseSpriteTags(text), false); }
             catch (Exception ex) { LogOnce("subst", "[EMOJI] substitute failed: " + ex.Message + " (text left as-is)"); return text; }
+        }
+
+        /// <summary>Backstop (review E-M6). Once a label carries the sprite asset, a
+        /// literal `&lt;sprite ...&gt;` in its INPUT is a tag to TMP and can name any
+        /// atlas cell. Callers sanitise user text before substitution; this makes
+        /// the token inert regardless, by placing a zero-width space after its
+        /// '&lt;' so TMP no longer reads a tag name there. Case-insensitive, as TMP's
+        /// tag matching is.</summary>
+        internal static string NeutraliseSpriteTags(string text)
+        {
+            int i = text.IndexOf("<sprite", StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return text;
+            var sb = new StringBuilder(text.Length + 8);
+            int from = 0;
+            while (i >= 0)
+            {
+                sb.Append(text, from, i + 1 - from).Append((char)0x200B);
+                from = i + 1;
+                i = text.IndexOf("<sprite", from, StringComparison.OrdinalIgnoreCase);
+            }
+            sb.Append(text, from, text.Length - from);
+            return sb.ToString();
         }
 
         /// <summary>Give this TMP_Text (any subclass; passed as object because the
@@ -147,9 +169,16 @@ namespace CompetitiveRounds
                     if (ReferenceEquals(_attached[i].Component, tmp)) return;
                 var a = new Attachment { Component = tmp, Previous = Tmp.SpriteAssetProp.GetValue(tmp, null) };
                 _attached.Add(a);
-                if (_state == State.Active && _asset0 != null) Tmp.SpriteAssetProp.SetValue(tmp, _asset0, null);
+                if (_state == State.Active && _asset0 != null)
+                {
+                    // Review E-M5: a label that does not receive the asset would show
+                    // every substituted tag as literal text, so a failed assignment
+                    // takes the whole feature off rather than leaving one label wrong.
+                    try { Tmp.SpriteAssetProp.SetValue(tmp, _asset0, null); }
+                    catch (Exception ex) { Disable("spriteAsset assignment failed on attach: " + ex.Message); }
+                }
             }
-            catch (Exception ex) { LogOnce("attach", "[EMOJI] attach failed: " + ex.Message); }
+            catch (Exception ex) { Disable("attach failed: " + ex.Message); }
         }
 
         /// <summary>Restore the label's previous spriteAsset and forget it.</summary>
@@ -217,6 +246,7 @@ namespace CompetitiveRounds
             if (INDEX_SHA256.Length == 0)
             {
                 Plugin.Log?.LogInfo("[EMOJI] init " + BUILD_MARKER + ": no atlas pinned in this build - colour emoji off");
+                _state = State.Disabled;   // review E-L2: a terminal state, not Off (nothing to arm later)
                 return;
             }
             Sweep();
@@ -276,9 +306,17 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The decode admission (review E-M4): two consecutive admissible
+        /// frames, the same gate the music decoder uses, not the instantaneous
+        /// menu flag. Tick() is idempotent per frame, so the frame history exists
+        /// whether or not the music engine is driving it this session.</summary>
         private static bool SafeState()
         {
-            try { return MusicAdmission.AtAdmissibleMenu && !GameStateWatcher.IsTracking; }
+            try
+            {
+                MusicAdmission.Tick();
+                return MusicAdmission.ClickAdmissible(out _, out _) && !GameStateWatcher.IsTracking;
+            }
             catch { return false; }
         }
 
@@ -417,13 +455,22 @@ namespace CompetitiveRounds
                 for (int i = 0; i < index.Sequences.Count; i++) keys.Add(index.Sequences[i].Key);
                 _matcher = new EmojiMatcher(keys);
                 _asset0 = assets[0];
-                _state = State.Active;
-                _generation++;
+                // Review E-M5: every attached label receives the asset BEFORE the
+                // state turns Active (before Substitute starts emitting tags); one
+                // failed assignment aborts the build and takes the feature off, so no
+                // label ever shows a tag it cannot render.
                 Prune();
                 for (int i = 0; i < _attached.Count; i++)
                 {
-                    try { Tmp.SpriteAssetProp.SetValue(_attached[i].Component, _asset0, null); } catch { }
+                    try { Tmp.SpriteAssetProp.SetValue(_attached[i].Component, _asset0, null); }
+                    catch (Exception ex)
+                    {
+                        Disable("spriteAsset assignment failed during build: " + ex.Message);
+                        return;
+                    }
                 }
+                _state = State.Active;
+                _generation++;
                 try { NativeUI.MarkDirty(); } catch { }
                 total.Stop();
                 long mib = (long)index.Sheet * index.Sheet * 4L * index.Sheets.Count / (1024L * 1024L);
@@ -893,7 +940,7 @@ namespace CompetitiveRounds
                     if (p >= json.Length) { err = "sheets unterminated"; return false; }
                     if (json[p] == ']') break;
                     if (json[p] != '{') { err = "sheet entry is not an object"; return false; }
-                    int close = json.IndexOf('}', p);
+                    int close = ApiClient.FindMatchingBraceStringAware(json, p);   // string-aware (review E-L1)
                     if (close < 0) { err = "sheet object unterminated"; return false; }
                     string obj = json.Substring(p, close - p + 1);
                     var s = new SheetInfo();

@@ -385,7 +385,7 @@ def test_compose_with_cbdt_renderer_records_skips_with_reasons():
 def test_main_end_to_end_writes_pinned_index_zip_and_report(tmp_path, capsys):
     font = tmp_path / "NotoColorEmoji.ttf"
     font.write_bytes(_synthetic_font())
-    (tmp_path / "LICENSE").write_text("OFL 1.1 placeholder\n", encoding="utf-8")
+    (tmp_path / "LICENSE").write_text("SIL OPEN FONT LICENSE Version 1.1 - placeholder\n", encoding="utf-8")
     et = tmp_path / "emoji-test.txt"
     et.write_text(
         "1F600 ; fully-qualified # x\n"
@@ -411,7 +411,7 @@ def test_main_end_to_end_writes_pinned_index_zip_and_report(tmp_path, capsys):
         assert all(zi.date_time == (1980, 1, 1, 0, 0, 0) for zi in zf.infolist())
     report = (out / "emoji-atlas-report.txt").read_text(encoding="utf-8")
     assert "1F680  U+1F680 not in cmap" in report and "sha256 %s" % sha in report
-    assert (out / "LICENSE-NotoColorEmoji.txt").read_text(encoding="utf-8") == "OFL 1.1 placeholder\n"
+    assert (out / "LICENSE-NotoColorEmoji.txt").read_text(encoding="utf-8") == "SIL OPEN FONT LICENSE Version 1.1 - placeholder\n"
     # the sheet budget gate is real: the same list cannot fit one 16-px cell
     rc2 = ea.main(["--font", str(font), "--emoji-test", str(et), "--out", str(tmp_path / "out2"),
                    "--cell", "16", "--sheet", "16", "--max-sheets", "1"])
@@ -423,11 +423,17 @@ def test_find_licence_beside_font_or_explicit_else_refuses(tmp_path):
     font.write_bytes(b"x")
     with pytest.raises(SystemExit):
         ea.find_licence(str(font), None)
-    (tmp_path / "OFL.txt").write_text("ofl", encoding="utf-8")
-    assert ea.find_licence(str(font), None) == "ofl"
+    (tmp_path / "LICENSE").write_text("Apache License, Version 2.0 - the repository licence beside the font", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        ea.find_licence(str(font), None)          # a LICENSE file that is not the OFL is skipped (review E-M1)
+    (tmp_path / "OFL.txt").write_text("SIL Open Font License 1.1 - ofl", encoding="utf-8")
+    assert ea.find_licence(str(font), None) == "SIL Open Font License 1.1 - ofl"
     other = tmp_path / "other.txt"
     other.write_text("explicit", encoding="utf-8")
-    assert ea.find_licence(str(font), str(other)) == "explicit"
+    with pytest.raises(SystemExit, match="not the SIL Open Font License"):
+        ea.find_licence(str(font), str(other))    # an explicit path must BE the OFL too
+    other.write_text("SIL OPEN FONT LICENSE Version 1.1 - explicit", encoding="utf-8")
+    assert ea.find_licence(str(font), str(other)) == "SIL OPEN FONT LICENSE Version 1.1 - explicit"
 
 
 # ---------------------------------------------------------------------------

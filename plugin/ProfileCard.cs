@@ -142,7 +142,20 @@ namespace CompetitiveRounds
                 string me = MatchTracker.LocalSteamId;
                 if (!string.IsNullOrEmpty(me) && me == steamId) { Unregister(txt); return; }
                 Target t;
-                if (byTxt.TryGetValue(txt, out t)) { t.steamId = steamId; return; }
+                if (byTxt.TryGetValue(txt, out t))
+                {
+                    if (t.steamId != steamId)
+                    {
+                        // Review a-M4: a pooled row now names ANOTHER player. The dwell,
+                        // the armed request and an open (unpinned) card all belonged to
+                        // the previous id; none of them may carry over to the new one.
+                        string previous = t.steamId;
+                        t.steamId = steamId;
+                        if (ReferenceEquals(hover, t)) { hoverSince = Time.realtimeSinceStartup; hoverAsked = false; hoverRetries = 0; }
+                        if (openFor == previous && !pinned) HideCard();
+                    }
+                    return;
+                }
                 if (targets.Count >= MaxTargets) return;
                 var rt = comp.GetComponent<RectTransform>();
                 if (rt == null) return;
@@ -193,20 +206,27 @@ namespace CompetitiveRounds
             if (ReferenceEquals(hover, t)) hover = null;
         }
 
-        /// <summary>Forget every target (the page's hover regions were cleared:
-        /// tab switch, list refresh). A pinned card stays until its own
-        /// dismissal; an unpinned one hides on the next tick.</summary>
+        /// <summary>Forget every target (tab switch, page teardown). A pinned
+        /// card stays until its own dismissal; an unpinned one hides NOW (review
+        /// a-M3: with no target left there is nothing it belongs to, and the tick
+        /// would otherwise compare null with null and leave it floating). List
+        /// refreshes do NOT call this: a pooled row re-registers by component
+        /// (RegisterNameHover replaces the id), so the set stays bounded without
+        /// a clear that would erase the rows registered a moment earlier.</summary>
         internal static void ClearHoverTargets()
         {
             targets.Clear();
             byTxt.Clear();
             hover = null;
+            hoverAsked = false; hoverRetries = 0;
+            if (!pinned && openFor != null) HideCard();
         }
 
         // ── per-frame (NativeUI.Tick, while the page is open) ──
 
         internal static void Tick()
         {
+            MaybeRunParseSelfTest();
             if (!NativeUI.IsOpen) { if (pinned || openFor != null) CloseCard(); return; }
             bool blocked = ClickHandler.ModalBlockInput || MatchTracker.IsInMatch;
             float now = Time.realtimeSinceStartup;
@@ -215,7 +235,8 @@ namespace CompetitiveRounds
             {
                 if (blocked || panel == null || !panel.Visible) { CloseCard(); return; }
                 // Click-away: the click itself proceeds to whatever it hit.
-                if (Input.GetMouseButtonDown(0) && !cardRect.Contains(mp)) CloseCard();
+                if (Input.GetMouseButtonDown(0) && !cardRect.Contains(mp)) { CloseCard(); return; }
+                RenewIfStale(openFor, now);
                 return;
             }
             if (blocked) { HideCard(); hover = null; return; }
@@ -239,7 +260,22 @@ namespace CompetitiveRounds
             if (openFor != t.steamId || panel == null || !panel.Visible) Render(d, t.steamId);
             if (openFor != t.steamId) return;                  // render refused (no canvas)
             Position(LiveRectOf(t), mp);
+            RenewIfStale(t.steamId, now);
             if (Input.GetMouseButtonDown(0)) Pin();
+        }
+
+        // Review a-H2: a card that STAYS open (hovered or pinned) renews its data
+        // on this cadence, so a target who turns Appear Offline on, or comes
+        // online, is reflected within OpenRefreshSeconds instead of never. The
+        // first open still asks at once (RequestData's own 6 s floor applies).
+        internal const float OpenRefreshSeconds = 15f;
+
+        private static void RenewIfStale(string steamId, float now)
+        {
+            if (steamId == null) return;
+            CardData d;
+            if (!cache.TryGetValue(steamId, out d)) return;
+            if (now - d.fetchedAt >= OpenRefreshSeconds) RequestData(steamId, now);
         }
 
         /// <summary>NativeUI.Tick's Escape: a pinned card is the topmost surface
@@ -353,9 +389,11 @@ namespace CompetitiveRounds
                     }
                     d.fetchedAt = now;
                     cache[steamId] = d;
-                    // A refresh that lands while this target's card is open (and not
-                    // pinned) repaints it in place: the header is the fresh profile.
-                    if (openFor == steamId && !pinned && panel != null && panel.Visible) Render(d, steamId);
+                    // A refresh that lands while this target's card is open repaints it
+                    // in place, pinned or not (review a-H2: Appear Offline must reach a
+                    // card that stays open). Render keeps the pin's blocker state and
+                    // the card's position.
+                    if (openFor == steamId && panel != null && panel.Visible) Render(d, steamId);
                     return;
                 }
                 string err = resp ?? "";
@@ -374,67 +412,135 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>The two card members, each sliced ONCE with the string-aware
-        /// brace matcher and read only inside its own slice — a key search
-        /// never spans the whole response (A-4). `"member":null` (unknown
+        // ── parse self-test lever (review a-L3) ──
+        //
+        // [Debug] ProfileCardParseSelfTest = true runs Parse once at startup over
+        // display names built to look like card members and logs one [CARD] line
+        // per failed check plus a verdict. Nothing is shown, sent or persisted.
+        private static bool _selfTestDone;
+
+        private static void MaybeRunParseSelfTest()
+        {
+            if (_selfTestDone) return;
+            _selfTestDone = true;
+            try
+            {
+                var cf = Plugin.ConfigFileForLevers;
+                if (cf == null) return;
+                var lever = cf.Bind("Debug", "ProfileCardParseSelfTest", false,
+                    "Development only: once at startup, run the hover profile card's response parser over hostile display names and log a [CARD] verdict line. Nothing is shown, sent or persisted.");
+                if (!lever.Value) return;
+                RunParseSelfTest(s => Plugin.Log?.LogInfo(s), s => Plugin.Log?.LogWarning(s));
+            }
+            catch (Exception ex) { Plugin.Log?.LogWarning("[CARD] parse self-test could not run: " + ex.Message); }
+        }
+
+        /// <summary>True when every check passes. The vectors are the cases a
+        /// naive whole-text key search gets wrong: a display name that spells a
+        /// card member, a nested object that carries a top-level key's name before
+        /// the real one, escaped text, nulls, a null member, and a cut-off body.</summary>
+        internal static bool RunParseSelfTest(Action<string> info, Action<string> warn)
+        {
+            int failed = 0;
+            string bs = new string((char)92, 1);                       // one backslash
+            string hostile = bs + "\"modes" + bs + "\":{" + bs + "\"ranked_1v1" + bs + "\":{" + bs + "\"series_w" + bs + "\":99}}]";
+            string json = "{\"opponent_display_name\":\"x\",\"games_total\":1,"
+                + "\"profile\":{\"display_name\":\"" + hostile + "\",\"title\":\"" + bs + "u0041ce\",\"title_color\":\"\",\"tier\":\"Gold\",\"tier_color\":\"#fff\","
+                + "\"rating_1v1\":1500.7,\"rd_1v1\":60,\"level\":3,\"is_online\":null,\"last_seen_s\":null},"
+                + "\"modes\":{\"ranked_1v1\":{\"series_w\":1,\"series_l\":2,\"games_w\":3,\"games_l\":4,\"net_rating_1v1\":999},"
+                + "\"casual_1v1\":{\"w\":5,\"l\":6},\"ovt\":{\"as_solo\":{\"w\":7,\"l\":0},\"as_duo\":{\"w\":0,\"l\":8}},"
+                + "\"last_meeting\":{\"at\":\"2026-09-06T00:00:00Z\",\"mode\":\"ranked_1v1\",\"result\":\"W\"},"
+                + "\"streak\":{\"n\":2,\"holder\":\"viewer\"},\"net_rating_1v1\":-7}}";
+            var d = Parse(json);
+            Check(ref failed, warn, "parsed both members", d != null && d.hasProfile && d.hasModes);
+            Check(ref failed, warn, "hostile display name is data", d != null && d.displayName == "\"modes\":{\"ranked_1v1\":{\"series_w\":99}}]");
+            Check(ref failed, warn, "escaped title", d != null && d.title == "Ace");
+            Check(ref failed, warn, "numbers", d != null && d.rating == 1501 && d.rd == 60 && d.level == 3);
+            Check(ref failed, warn, "nulls stay null", d != null && d.isOnline == null && d.lastSeenS == null);
+            Check(ref failed, warn, "ranked block", d != null && d.seriesW == 1 && d.seriesL == 2 && d.gamesW == 3 && d.gamesL == 4);
+            Check(ref failed, warn, "nested key does not shadow the top-level one", d != null && d.netRating == -7);
+            Check(ref failed, warn, "casual + ovt", d != null && d.casual.w == 5 && d.casual.l == 6 && d.ovtSolo.w == 7 && d.ovtDuo.l == 8);
+            Check(ref failed, warn, "last meeting", d != null && d.lastMode == "ranked_1v1" && d.lastResult == "W");
+            Check(ref failed, warn, "streak", d != null && d.streakN == 2 && d.streakHolder == "viewer");
+            var np = Parse("{\"opponent_display_name\":\"modes\",\"profile\":null,\"modes\":{\"ranked_1v1\":{\"series_w\":0,\"series_l\":0,\"games_w\":0,\"games_l\":0},\"net_rating_1v1\":0}}");
+            Check(ref failed, warn, "null profile member", np != null && !np.hasProfile && np.hasModes);
+            Check(ref failed, warn, "no card members at all", Parse("{\"opponent_display_name\":\"profile\",\"games_total\":0}") == null);
+            Check(ref failed, warn, "cut-off body", Parse("{\"profile\":{\"display_name\":\"a") == null);
+            if (failed == 0) info("[CARD] parse self-test: 13 checks passed");
+            else warn("[CARD] parse self-test: " + failed + " check(s) FAILED");
+            return failed == 0;
+        }
+
+        private static void Check(ref int failed, Action<string> warn, string what, bool ok)
+        {
+            if (ok) return;
+            failed++;
+            warn("[CARD] parse self-test FAILED: " + what);
+        }
+
+        /// <summary>The two card members, each located by a string-aware,
+        /// depth-aware walk of the member that contains them (TopValue) and read
+        /// only inside their own slice — no text search anywhere in this parser
+        /// can be satisfied by a display name that contains a key name, a quote,
+        /// a brace or a bracket (A-4; review a-M1). `"member":null` (unknown
         /// opponent, or a card statement that failed server-side) yields no
         /// slice. Returns null when neither member is present.</summary>
         internal static CardData Parse(string json)
         {
             if (string.IsNullOrEmpty(json)) return null;
             var d = new CardData();
-            string prof = SliceObject(json, "profile");
+            string prof = TopObject(json, "profile");
             if (prof != null)
             {
                 d.hasProfile = true;
-                d.displayName = ApiClient.ExtractJsonStringPublic(prof, "display_name");
-                d.title = ApiClient.ExtractJsonStringPublic(prof, "title");
-                d.titleColor = ApiClient.ExtractJsonStringPublic(prof, "title_color");
-                d.tier = ApiClient.ExtractJsonStringPublic(prof, "tier");
-                d.tierColor = ApiClient.ExtractJsonStringPublic(prof, "tier_color");
-                d.rating = ApiClient.ExtractJsonIntPublic(prof, "rating_1v1");
-                d.rd = ApiClient.ExtractJsonIntPublic(prof, "rd_1v1");
-                d.level = ApiClient.ExtractJsonIntPublic(prof, "level");
-                d.isOnline = MemberIsNull(prof, "is_online") ? (bool?)null : ApiClient.ExtractJsonBoolPublic(prof, "is_online");
-                d.lastSeenS = MemberIsNull(prof, "last_seen_s") ? (int?)null : ApiClient.ExtractJsonIntPublic(prof, "last_seen_s");
+                d.displayName = TopString(prof, "display_name");
+                d.title = TopString(prof, "title");
+                d.titleColor = TopString(prof, "title_color");
+                d.tier = TopString(prof, "tier");
+                d.tierColor = TopString(prof, "tier_color");
+                d.rating = TopInt(prof, "rating_1v1", 1500);
+                d.rd = TopInt(prof, "rd_1v1", 350);
+                d.level = TopInt(prof, "level", 0);
+                d.isOnline = TopIsNull(prof, "is_online") ? (bool?)null : TopBool(prof, "is_online");
+                d.lastSeenS = TopIsNull(prof, "last_seen_s") ? (int?)null : TopInt(prof, "last_seen_s", 0);
             }
-            string modes = SliceObject(json, "modes");
+            string modes = TopObject(json, "modes");
             if (modes != null)
             {
                 d.hasModes = true;
-                string r = SliceObject(modes, "ranked_1v1");
+                string r = TopObject(modes, "ranked_1v1");
                 if (r != null)
                 {
-                    d.seriesW = ApiClient.ExtractJsonIntPublic(r, "series_w");
-                    d.seriesL = ApiClient.ExtractJsonIntPublic(r, "series_l");
-                    d.gamesW = ApiClient.ExtractJsonIntPublic(r, "games_w");
-                    d.gamesL = ApiClient.ExtractJsonIntPublic(r, "games_l");
+                    d.seriesW = TopInt(r, "series_w", 0);
+                    d.seriesL = TopInt(r, "series_l", 0);
+                    d.gamesW = TopInt(r, "games_w", 0);
+                    d.gamesL = TopInt(r, "games_l", 0);
                 }
-                ReadWL(SliceObject(modes, "casual_1v1"), d.casual, "w", "l");
-                ReadWL(SliceObject(modes, "team_2v2"), d.team, "w", "l");
-                ReadWL(SliceObject(modes, "ffa"), d.ffa, "above", "below");
-                string o = SliceObject(modes, "ovt");
+                ReadWL(TopObject(modes, "casual_1v1"), d.casual, "w", "l");
+                ReadWL(TopObject(modes, "team_2v2"), d.team, "w", "l");
+                ReadWL(TopObject(modes, "ffa"), d.ffa, "above", "below");
+                string o = TopObject(modes, "ovt");
                 if (o != null)
                 {
-                    ReadWL(SliceObject(o, "as_solo"), d.ovtSolo, "w", "l");
-                    ReadWL(SliceObject(o, "as_duo"), d.ovtDuo, "w", "l");
+                    ReadWL(TopObject(o, "as_solo"), d.ovtSolo, "w", "l");
+                    ReadWL(TopObject(o, "as_duo"), d.ovtDuo, "w", "l");
                 }
-                string lm = SliceObject(modes, "last_meeting");
+                string lm = TopObject(modes, "last_meeting");
                 if (lm != null)
                 {
-                    d.lastAt = ApiClient.ExtractJsonStringPublic(lm, "at");
-                    d.lastMode = ApiClient.ExtractJsonStringPublic(lm, "mode");
-                    d.lastResult = ApiClient.ExtractJsonStringPublic(lm, "result");
+                    d.lastAt = TopString(lm, "at");
+                    d.lastMode = TopString(lm, "mode");
+                    d.lastResult = TopString(lm, "result");
                     if (string.IsNullOrEmpty(d.lastMode)) d.lastMode = null;
                 }
-                string st = SliceObject(modes, "streak");
+                string st = TopObject(modes, "streak");
                 if (st != null)
                 {
-                    d.streakN = ApiClient.ExtractJsonIntPublic(st, "n");
-                    d.streakHolder = ApiClient.ExtractJsonStringPublic(st, "holder");
+                    d.streakN = TopInt(st, "n", 0);
+                    d.streakHolder = TopString(st, "holder");
                     if (string.IsNullOrEmpty(d.streakHolder) || d.streakN <= 0) d.streakHolder = null;
                 }
-                d.netRating = ApiClient.ExtractJsonIntPublic(modes, "net_rating_1v1");
+                d.netRating = TopInt(modes, "net_rating_1v1", 0);
             }
             return d.hasProfile || d.hasModes ? d : null;
         }
@@ -442,39 +548,139 @@ namespace CompetitiveRounds
         private static void ReadWL(string obj, WinLoss into, string wKey, string lKey)
         {
             if (obj == null) return;
-            into.w = Math.Max(0, ApiClient.ExtractJsonIntPublic(obj, wKey));
-            into.l = Math.Max(0, ApiClient.ExtractJsonIntPublic(obj, lKey));
+            into.w = Math.Max(0, TopInt(obj, wKey, 0));
+            into.l = Math.Max(0, TopInt(obj, lKey, 0));
         }
 
-        /// <summary>`"key":{...}` inside `json` → the object text, braces
-        /// included; null when the key is absent, its value is not an object
-        /// (null), or the braces do not close. The key pattern cannot match
-        /// inside a string value: a quote inside a JSON string arrives escaped,
-        /// so the `"` that must follow the key name is never there.</summary>
-        internal static string SliceObject(string json, string key)
+        // ── string-aware, depth-aware member access (review a-M1) ──
+        //
+        // Every reader below walks `obj` (one JSON object) character by character,
+        // skipping string literals (escape-aware) and tracking depth, and accepts a
+        // key only at depth 1 with a ':' after it. A display name of
+        // `"modes":{"ranked_1v1":...}` or of `}}]` is therefore inert: it is a
+        // string literal at depth 1 (or deeper), never a key.
+
+        /// <summary>The raw text of `"key": value` at the top level of `obj` —
+        /// `{...}`, `[...]`, `"..."`, a number, true/false or null, exactly as
+        /// sent; null when the key is absent or the text is malformed.</summary>
+        internal static string TopValue(string obj, string key)
         {
-            if (string.IsNullOrEmpty(json)) return null;
-            string k = "\"" + key + "\":";
-            int i = json.IndexOf(k, StringComparison.Ordinal);
-            if (i < 0) return null;
-            int p = i + k.Length;
-            while (p < json.Length && (json[p] == ' ' || json[p] == '\t' || json[p] == '\r' || json[p] == '\n')) p++;
-            if (p >= json.Length || json[p] != '{') return null;
-            int close = ApiClient.FindMatchingBraceStringAware(json, p);
-            if (close < 0) return null;
-            return json.Substring(p, close - p + 1);
+            if (string.IsNullOrEmpty(obj) || string.IsNullOrEmpty(key)) return null;
+            int n = obj.Length, depth = 0, i = 0;
+            while (i < n)
+            {
+                char c = obj[i];
+                if (c == '"')
+                {
+                    int s = i + 1, e = s;
+                    while (e < n && obj[e] != '"') { if (obj[e] == '\\') e++; e++; }
+                    if (e >= n) return null;
+                    bool named = depth == 1 && e - s == key.Length && string.CompareOrdinal(obj, s, key, 0, key.Length) == 0;
+                    i = e + 1;
+                    if (!named) continue;
+                    int p = i;
+                    while (p < n && char.IsWhiteSpace(obj[p])) p++;
+                    if (p >= n || obj[p] != ':') continue;          // a string VALUE equal to the key name
+                    p++;
+                    while (p < n && char.IsWhiteSpace(obj[p])) p++;
+                    if (p >= n) return null;
+                    int end = ValueEnd(obj, p);
+                    return end < 0 ? null : obj.Substring(p, end - p);
+                }
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') { depth--; if (depth <= 0) return null; }
+                i++;
+            }
+            return null;
         }
 
-        internal static bool MemberIsNull(string obj, string key)
+        /// <summary>Index just past the JSON value starting at `p`.</summary>
+        private static int ValueEnd(string obj, int p)
         {
-            if (string.IsNullOrEmpty(obj)) return true;
-            string k = "\"" + key + "\":";
-            int i = obj.IndexOf(k, StringComparison.Ordinal);
-            if (i < 0) return true;
-            int p = i + k.Length;
-            while (p < obj.Length && (obj[p] == ' ' || obj[p] == '\t')) p++;
-            return p + 4 <= obj.Length && string.CompareOrdinal(obj, p, "null", 0, 4) == 0;
+            int n = obj.Length;
+            char c = obj[p];
+            if (c == '{') { int close = ApiClient.FindMatchingBraceStringAware(obj, p); return close < 0 ? -1 : close + 1; }
+            if (c == '[') { int close = ApiClient.FindMatchingBracketStringAwarePublic(obj, p); return close < 0 ? -1 : close + 1; }
+            if (c == '"')
+            {
+                int e = p + 1;
+                while (e < n && obj[e] != '"') { if (obj[e] == '\\') e++; e++; }
+                return e >= n ? -1 : e + 1;
+            }
+            int q = p;
+            while (q < n && obj[q] != ',' && obj[q] != '}' && obj[q] != ']' && !char.IsWhiteSpace(obj[q])) q++;
+            return q > p ? q : -1;
         }
+
+        internal static string TopObject(string obj, string key)
+        {
+            string v = TopValue(obj, key);
+            return v != null && v.Length >= 2 && v[0] == '{' ? v : null;
+        }
+
+        internal static bool TopIsNull(string obj, string key)
+        {
+            string v = TopValue(obj, key);
+            return v == null || v == "null";
+        }
+
+        internal static bool TopBool(string obj, string key) => TopValue(obj, key) == "true";
+
+        internal static int TopInt(string obj, string key, int fallback)
+        {
+            string v = TopValue(obj, key);
+            if (string.IsNullOrEmpty(v) || v == "null" || v[0] == '"' || v[0] == '{' || v[0] == '[') return fallback;
+            double num;
+            if (!double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out num)) return fallback;
+            if (num > int.MaxValue || num < int.MinValue) return fallback;
+            return (int)Math.Round(num);
+        }
+
+        internal static string TopString(string obj, string key)
+        {
+            string v = TopValue(obj, key);
+            if (v == null || v.Length < 2 || v[0] != '"') return "";
+            return Unescape(v.Substring(1, v.Length - 2));
+        }
+
+        /// <summary>JSON string unescape: the standard escapes plus the 4-hex
+        /// form; surrogate halves come through as the two code units they are.</summary>
+        internal static string Unescape(string s)
+        {
+            if (s.IndexOf('\\') < 0) return s;
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c != '\\' || i + 1 >= s.Length) { sb.Append(c); continue; }
+                char e = s[++i];
+                switch (e)
+                {
+                    case 'n': sb.Append('\n'); break;
+                    case 'r': sb.Append('\r'); break;
+                    case 't': sb.Append('\t'); break;
+                    case 'b': sb.Append('\b'); break;
+                    case 'f': sb.Append('\f'); break;
+                    case 'u':
+                        if (i + 4 < s.Length)
+                        {
+                            int code;
+                            if (int.TryParse(s.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out code))
+                            { sb.Append((char)code); i += 4; break; }
+                        }
+                        sb.Append('?');
+                        break;
+                    default: sb.Append(e); break;   // \" \\ \/
+                }
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Kept for callers that slice by name: `"key":{...}` → the
+        /// object text, located the same way as every other member.</summary>
+        internal static string SliceObject(string json, string key) => TopObject(json, key);
+
+        internal static bool MemberIsNull(string obj, string key) => TopIsNull(obj, key);
 
         internal static bool IsSteamId64(string s)
         {
@@ -523,12 +729,14 @@ namespace CompetitiveRounds
                 var l2 = new StringBuilder(96);
                 string title = GameStateWatcher.StripRichText(d.title ?? "").Trim();
                 // The dynamic "Current Rank" title resolves to the tier text itself: show it once.
+                // Title and tier names are catalogue keys (the boards translate them the
+                // same way); I18n.Tr returns the text unchanged when no entry exists.
                 if (title.Length > 0 && !string.Equals(title, d.tier, StringComparison.Ordinal))
                     l2.Append("<color=").Append(HexOr(d.titleColor, "#FFFFFF")).Append(">[")
-                      .Append(TruncSafe(title, 22)).Append("]</color>  ");
+                      .Append(TruncSafe(I18n.Tr(title), 22)).Append("]</color>  ");
                 if (!string.IsNullOrEmpty(d.tier))
                     l2.Append("<color=").Append(HexOr(d.tierColor, "#FFFFFF")).Append(">")
-                      .Append(GameStateWatcher.StripRichText(d.tier)).Append("</color>  ");
+                      .Append(I18n.Tr(GameStateWatcher.StripRichText(d.tier))).Append("</color>  ");
                 l2.Append(d.rating).Append(" <size=80%><color=#9AA0A6>±").Append(d.rd).Append("</color></size>  ");
                 l2.Append("<color=#8FA3B8>").Append(I18n.TrF("Lv {0}", d.level)).Append("</color>");
                 UIFactory.SetTextRaw(txtLine2, l2.ToString());

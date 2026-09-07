@@ -718,6 +718,23 @@ async def _podium_maps_for(db: AsyncSession, skus) -> tuple[dict, dict, dict]:
     )
 
 
+def _podium_maps_cached(skus) -> tuple[dict, dict, dict]:
+    """READ-ONLY twin of _podium_maps_for for render sites that must not write.
+
+    The refreshing lookups above can grant or revoke the podium cosmetics
+    (_sync_podium_holders) when their 60 s cache has expired; a hover
+    profile card (Sept 6 item a) is a plain read and may not do that on
+    another player's behalf. This returns whatever the three caches hold
+    right now -- the boards refresh them -- and an empty map when a ladder's
+    cache is cold, in which case the title renders by its static name."""
+    s = {x for x in skus if x}
+    return (
+        dict(_podium_cache.get("map") or {}) if TITLE_PODIUM_SKU in s else {},
+        dict(_podium_2v2_cache.get("map") or {}) if TITLE_PODIUM_2V2_SKU in s else {},
+        dict(_podium_ffa_cache.get("map") or {}) if TITLE_PODIUM_FFA_SKU in s else {},
+    )
+
+
 async def bootstrap_mode_podium_titles(db: AsyncSession) -> None:
     """Grant the 2v2/FFA podium titles to whoever currently tops those boards.
 
@@ -7589,7 +7606,9 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
     rating = float(row["rating"]) if row["rating"] is not None else 1500.0
     rd = float(row["rd"]) if row["rd"] is not None else 350.0
     colors = await _rank_colors(db)
-    pmap, pmap2, pmapf = await _podium_maps_for(db, (row["title_sku"],))
+    # Review a-H1: the cached, non-refreshing maps -- this read must never grant
+    # or revoke a cosmetic (the refreshing lookup can, through the podium sync).
+    pmap, pmap2, pmapf = _podium_maps_cached((row["title_sku"],))
     pkey = str(target_id)
     title, title_color = _display_title_sync(
         colors, row["title_sku"], row["title"], row["title_color"], rating,
@@ -7633,6 +7652,14 @@ def _h2h_series_streak_and_net(rows) -> tuple[H2HStreak | None, int]:
         holder = winner
         n += 1
     return (H2HStreak(n=n, holder=holder) if n > 0 else None), int(round(net))
+
+
+def _uuid_bind(name: str):
+    """A typed UUID bind for a text() statement: the parameter is declared, not
+    inferred from whichever column it is first compared with (learnings #275/#448)."""
+    from sqlalchemy import bindparam
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+    return bindparam(name, type_=PG_UUID(as_uuid=True))
 
 
 async def _h2h_modes_block(db, viewer_id, target_id) -> H2HModesBlock:
@@ -7718,8 +7745,8 @@ async def _h2h_modes_block(db, viewer_id, target_id) -> H2HModesBlock:
             lm.ended_at AS last_at, lm.mode AS last_mode, lm.result AS last_result
           FROM (SELECT 1) AS one
           LEFT JOIN (SELECT mt.ended_at, mt.mode, mt.result FROM meetings mt
-                      ORDER BY mt.ended_at DESC LIMIT 1) AS lm ON TRUE
-    """), {"vid": viewer_id, "pid": target_id})).mappings().first()
+                      ORDER BY mt.ended_at DESC, mt.mode DESC, mt.result DESC LIMIT 1) AS lm ON TRUE
+    """).bindparams(_uuid_bind("vid"), _uuid_bind("pid")), {"vid": viewer_id, "pid": target_id})).mappings().first()
     series_rows = (await db.execute(text("""
         SELECT CASE WHEN rs.player1_id = :vid THEN rs.p1_series_wins ELSE rs.p2_series_wins END AS vw,
                CASE WHEN rs.player1_id = :vid THEN rs.p2_series_wins ELSE rs.p1_series_wins END AS pw,
@@ -7731,7 +7758,7 @@ async def _h2h_modes_block(db, viewer_id, target_id) -> H2HModesBlock:
              OR (rs.player1_id = :pid AND rs.player2_id = :vid))
            AND (rs.p1_series_wins >= 2 OR rs.p2_series_wins >= 2)
          ORDER BY rs.completed_at DESC NULLS LAST, rs.created_at DESC
-    """), {"vid": viewer_id, "pid": target_id})).mappings().all()
+    """).bindparams(_uuid_bind("vid"), _uuid_bind("pid")), {"vid": viewer_id, "pid": target_id})).mappings().all()
     streak, net = _h2h_series_streak_and_net(series_rows)
 
     def _c(key):

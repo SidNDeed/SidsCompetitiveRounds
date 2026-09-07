@@ -93,7 +93,7 @@ MODES_PREDICATES = (
     "LEFT(m.photon_room_id, 4) <> 'ovt_'",
     "LEFT(m.photon_room_id, 4) <> 'ffa_'",
     "CASE WHEN vpl < tpl THEN 'W' WHEN vpl > tpl THEN 'L' ELSE 'T' END",
-    "ORDER BY mt.ended_at DESC LIMIT 1",
+    "ORDER BY mt.ended_at DESC, mt.mode DESC, mt.result DESC LIMIT 1",   # deterministic tie-break (review a residual)
 )
 SERIES_LIST_PREDICATES = (
     "AS vchange",
@@ -124,10 +124,20 @@ class _Rows:
 
 
 class _Savepoint:
+    """Models PostgreSQL's transaction state (review a-L2): a failed statement
+    leaves the session ABORTED -- every later statement is refused -- until the
+    savepoint that encloses it exits on the exception, which rolls back to the
+    savepoint and clears the state. Without the savepoint the state sticks."""
+
+    def __init__(self, session):
+        self.session = session
+
     async def __aenter__(self):
         return None
 
-    async def __aexit__(self, *exc):
+    async def __aexit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            self.session.aborted = False
         return False
 
 
@@ -167,6 +177,7 @@ class FakeSession:
         self.ffa = list(ffa)
         self.ovt = list(ovt)
         self.fail_profile = fail_profile
+        self.aborted = False          # set by a failed statement, cleared by a savepoint exit
         self.statements = []
         # Every begin_nested, tagged with the statement that ran just before
         # it. The session gate (_seat_attestation_verdict) opens its own
@@ -177,7 +188,7 @@ class FakeSession:
 
     def begin_nested(self):
         self.savepoint_after.append(self.statements[-1] if self.statements else "")
-        return _Savepoint()
+        return _Savepoint(self)
 
     @property
     def card_savepoints(self):
@@ -228,6 +239,8 @@ class FakeSession:
         sql = str(statement)
         self.statements.append(sql)
         params = params or {}
+        if self.aborted:
+            raise RuntimeError("current transaction is aborted, commands ignored until end of transaction block")
         if "FROM steam_sessions" in sql:
             return _Rows([self.session_row] if self.session_row else [])
         if "rank_role_colors" in sql:
@@ -238,6 +251,7 @@ class FakeSession:
             low = sql.lower()
             assert "gold" not in low and "discord" not in low, "the card must not carry gold or Discord identity"
             if self.fail_profile:
+                self.aborted = True
                 raise RuntimeError("profile statement refused by the fake")
             p = next((x for x in self.players if x["id"] == params["pid"]), None)
             if p is None:
@@ -697,6 +711,7 @@ def test_a_failed_card_statement_leaves_the_flat_line_intact():
     assert (r.opponent_display_name, r.games_won, r.games_lost, r.series_won) == ("Opp Name", 1, 1, 1)
     assert r.profile is None and r.modes is None
     assert s.card_savepoints == 1, "the card blocks run inside their own savepoint, after the flat facts"
+    assert not s.aborted, "the savepoint exit rolled the failed statement back; the transaction is usable again"
     assert (ME_SID, OPP_SID) not in main._h2h_modes_cache
     # negative control: the same fixture without the fault carries both blocks
     ok = FakeSession(session_row=_good_session(), players=_players(),
@@ -736,3 +751,59 @@ def test_fake_session_refuses_a_card_statement_that_lost_a_predicate():
     real = FakeSession(session_row=_good_session(), players=_players())
     _call(real)
     assert _count(real.statements, "WITH team_games AS (") == 1
+
+
+def test_the_fake_models_an_aborted_transaction_until_a_savepoint_exits():
+    """Control for the assertion above (#391): the aborted state is real and
+    sticky. Without a savepoint the refused statement leaves the session
+    refusing everything; the same failure inside begin_nested() is rolled back."""
+    s = FakeSession(session_row=_good_session(), players=_players(), fail_profile=True)
+
+    async def bare():
+        with pytest.raises(RuntimeError, match="refused by the fake"):
+            await main._h2h_profile_block(s, OPP)
+        assert s.aborted
+        with pytest.raises(RuntimeError, match="transaction is aborted"):
+            await s.execute("SELECT 1 FROM rank_role_colors")
+
+    asyncio.run(bare())
+    s2 = FakeSession(session_row=_good_session(), players=_players(), fail_profile=True)
+
+    async def guarded():
+        try:
+            async with s2.begin_nested():
+                await main._h2h_profile_block(s2, OPP)
+        except RuntimeError:
+            pass
+        assert not s2.aborted
+        await s2.execute("SELECT 1 FROM rank_role_colors")   # usable again
+
+    asyncio.run(guarded())
+
+
+def test_a_the_profile_card_reads_the_podium_maps_without_refreshing_or_granting():
+    """Review a-H1: the card is a read; the refreshing podium lookup can sync
+    (grant/revoke) the podium cosmetics and must not run on a hover."""
+    src = inspect.getsource(main._h2h_profile_block)
+    assert "_podium_maps_cached(" in src
+    for forbidden in ("_podium_maps_for(", "_podium_map(", "_podium_map_2v2(", "_podium_map_ffa(", "_sync_podium"):
+        assert forbidden not in src, forbidden
+    cached = inspect.getsource(main._podium_maps_cached)
+    body = cached.split('"""')[-1]                    # the code after the docstring
+    assert not inspect.iscoroutinefunction(main._podium_maps_cached)
+    assert "await" not in body and "_sync_podium" not in body and "_podium_map" + "(" not in body
+    saved = (dict(main._podium_cache), dict(main._podium_2v2_cache), dict(main._podium_ffa_cache))
+    try:
+        for c in (main._podium_cache, main._podium_2v2_cache, main._podium_ffa_cache):
+            c.clear()
+        assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})   # cold: nothing, no refresh
+        main._podium_cache["map"] = {"abc": 1}
+        main._podium_ffa_cache["map"] = {"fff": 3}
+        m, m2, mf = main._podium_maps_cached((main.TITLE_PODIUM_SKU, main.TITLE_PODIUM_2V2_SKU))
+        assert (m, m2, mf) == ({"abc": 1}, {}, {})                                  # only the asked-for ladders
+        m["zzz"] = 2
+        assert "zzz" not in main._podium_cache["map"], "a copy, never the cache itself"
+        assert main._podium_maps_cached((None, "")) == ({}, {}, {})
+    finally:
+        for c, v in zip((main._podium_cache, main._podium_2v2_cache, main._podium_ffa_cache), saved):
+            c.clear(); c.update(v)

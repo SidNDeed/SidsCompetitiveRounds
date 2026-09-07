@@ -891,18 +891,33 @@ def write_report(out_dir: str, report_lines: Sequence[str]) -> None:
         fh.write("\n".join(report_lines) + "\n")
 
 
+LICENCE_MARKER = "SIL OPEN FONT LICENSE"
+
+
+def check_licence_text(text: str, source: str) -> str:
+    """The file must BE the OFL (review E-M1): a repository's Apache LICENSE
+    beside the font, or any other file whose name starts with LICENSE, is not
+    the font's licence and must not ship as one."""
+    if LICENCE_MARKER not in text.upper():
+        raise SystemExit("%s is not the SIL Open Font License text (missing '%s'): pass --licence "
+                         "<path to Noto's OFL 1.1 LICENSE file>" % (source, LICENCE_MARKER))
+    return text
+
+
 def find_licence(font_path: str, explicit: Optional[str]) -> str:
     if explicit:
         with open(explicit, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
+            return check_licence_text(fh.read(), explicit)
     d = os.path.dirname(os.path.abspath(font_path))
     for name in sorted(os.listdir(d)):
         up = name.upper()
         if up.startswith("LICENSE") or up.startswith("LICENCE") or up.startswith("OFL"):
             with open(os.path.join(d, name), "r", encoding="utf-8", errors="replace") as fh:
-                return fh.read()
-    raise SystemExit("no licence text: pass --licence <path to Noto's OFL 1.1 LICENSE file> "
-                     "(the atlas must ship with it)")
+                text = fh.read()
+            if LICENCE_MARKER in text.upper():
+                return text
+    raise SystemExit("no OFL licence text beside the font: pass --licence <path to Noto's OFL 1.1 "
+                     "LICENSE file> (the atlas must ship with it)")
 
 
 # ---------------------------------------------------------------------------
@@ -1112,6 +1127,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if n_sheets == 0:
         print("ERROR: nothing rendered - wrong font or list?", file=sys.stderr)
         return 1
+    if n_sheets > args.max_sheets:
+        # Review E-M3: refuse BEFORE anything is written -- an over-budget atlas
+        # must not exist on disk to be published by mistake.
+        print("ERROR: %d sheets exceed the runtime budget of %d - nothing written" % (n_sheets, args.max_sheets),
+              file=sys.stderr)
+        return 1
     index, index_bytes, zip_path = write_atlas(args.out, build, licence, make_zip=not args.no_zip)
     index_sha = sha256_bytes(index_bytes)
     lines = [
@@ -1137,9 +1158,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     lines += ["", "skipped:"] + ["  %s  %s" % (k, why) for k, why in build.skipped]
     write_report(args.out, lines)
     print("\n".join(lines[:summary_len]))
-    if n_sheets > args.max_sheets:
-        print("ERROR: %d sheets exceed the runtime budget of %d" % (n_sheets, args.max_sheets), file=sys.stderr)
-        return 1
     return 0
 
 

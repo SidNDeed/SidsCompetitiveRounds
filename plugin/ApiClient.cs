@@ -7448,10 +7448,15 @@ namespace CompetitiveRounds
                         // rating (FFA game rows do; rating_history rows do not), that value
                         // is the first drawn point, held at the row's own timestamp before
                         // the jump -- the same rule the bot's _rating_axis_points applies.
-                        if (obj.IndexOf("\"rating_before\":", StringComparison.Ordinal) >= 0)
+                        // Presence, not positivity (review f r2): a present 0 is a real
+                        // value; only an absent key or an explicit null means "unknown".
+                        int rb = obj.IndexOf("\"rating_before\":", StringComparison.Ordinal);
+                        if (rb >= 0)
                         {
-                            float before = ExtractJsonFloat(obj, "rating_before");
-                            if (before > 0f) { ratings.Add(before); times.Add(t); }
+                            int v = rb + "\"rating_before\":".Length;
+                            while (v < obj.Length && (obj[v] == ' ' || obj[v] == '\t')) v++;
+                            bool isNull = v < obj.Length && obj[v] == 'n';
+                            if (!isNull) { ratings.Add(ExtractJsonFloat(obj, "rating_before")); times.Add(t); }
                         }
                         first = false;
                     }
