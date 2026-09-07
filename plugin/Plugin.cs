@@ -123,6 +123,7 @@ namespace CompetitiveRounds
         // Gravity SDF font renders them cleanly regardless of OS locale.
         internal static ConfigEntry<string> TournamentDateFormat;
         internal static ConfigEntry<string> UiDateFormat;       // MDY | DMY | YMD (Sid Aug-3 item 9)
+        internal static ConfigEntry<string> RatingGraphAxisMode; // updates | calendar | since_first (Sept 6 item f) — RatingGraphAxis.cs
         internal static ConfigEntry<bool> UiHeavyFont;          // bug #159: thicker SCR menu text
         internal static ConfigEntry<float> UiFontWeight;        // how much thicker (SDF weight delta)
         internal static ConfigEntry<string> ChatDisplayChannel; // all | global | es | ru | uk | sv (item 5)
@@ -856,6 +857,17 @@ namespace CompetitiveRounds
                 "UI", "DateOrder",
                 "MDY",
                 "Order for dates shown in the mod: MDY (8/23/2026, US default), DMY (23/8/2026), or YMD (2026-08-23). Short dates follow the same order."
+            );
+            // Sept 6 (item f): x axis of the rating graphs (leaderboard profile
+            // graph and the Compare tab's Elo charts). "updates" = one point per
+            // rating update (what the graphs always drew), "calendar" = real
+            // dates, "since_first" = days since each player's first plotted
+            // update so every line starts at x = 0. Written by the buttons on the
+            // graphs themselves; RatingGraphAxis.cs sanitises the value.
+            RatingGraphAxisMode = Config.Bind(
+                "UI", "RatingGraphAxis",
+                "updates",
+                "X axis for the rating graphs: updates (one point per rating update), calendar (dates), or since_first (days since each player's first plotted update)."
             );
             // Bug #159: Sid asked for the game's own font at the Russian
             // fallback face's weight. Defaults ON at his request ("it looks

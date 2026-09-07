@@ -5708,6 +5708,14 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Sept 6 (item f): the four axis-flavoured Elo metrics collapsed
+                // into one per ladder; a directive still naming an old entry lands
+                // on its ladder's graph instead of silently no-op'ing.
+                switch (label)
+                {
+                    case "Elo over games": case "Elo over time": label = "Elo"; break;
+                    case "FFA Elo over games": case "FFA Elo over time": label = "FFA Elo"; break;
+                }
                 for (int i = 0; i < COMPARE_METRICS.Length; i++)
                     if (COMPARE_METRICS[i] == label)
                     {
@@ -15177,74 +15185,72 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
  * header on their last mod-only API call). Helps testers tell at a
  * glance who's on a build that has a given fix. *//* July 22 item 8: opt-in Discord display name, right above the Mod line. Server already nulls discord_display_name for non-opted-in third-party views; the show_discord check is the client-side second layer. */if(ps.show_discord&&!string.IsNullOrEmpty(ps.discord_display_name)){detail+="\n"+I18n.Tr("<color=#888>Discord:</color>")+$" <color=#8899FF>@{Trunc(ps.discord_display_name,24)}</color>";}if(!string.IsNullOrEmpty(ps.mod_version)){string mvCol=ps.mod_version==Plugin.ModVersion?"#88FF88":"#FFD94D";detail+="\n"+I18n.Tr("<color=#888>Mod:</color>")+$" <color={mvCol}>v{ps.mod_version}</color>\n";}else{detail+="\n"+I18n.Tr("<color=#888>Mod: <i>not detected</i></color>")+"\n";}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n"+I18n.Tr("<color=#99AAEE>Top Cards:</color>")+"\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {CardTextLocalizer.PrettyName(ps.top_card_names[ci],ps.top_card_names[ci])}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n"+I18n.Tr("<color=#FFD94D>Tournaments:</color>")+" ";detail+=I18n.TrF("<color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <color=#888>(played {3})</color>",_tHist.winner_count,_tHist.runner_up_count,_tHist.third_place_count,_tHist.participant_count)+"\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=DateFmt.FullShortYear(TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()));}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}/* Composition (item 10 + July 12 item 5): main text = stats + Series-vs-You
  * (so the pager GameObject right after it lands directly under the series
- * list); achievements render in their own element BELOW the pager. */string _histPart;string _seriesPart=BuildViewHistoryText(out _histPart);UIFactory.SetTextRaw(txtLBDetail,detail+_seriesPart);UIFactory.SetTextRaw(txtLBDetailB,_histPart);UIFactory.SetTextRaw(txtLBAch,GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Stop Avoiding in Ranked":"Avoid in Ranked Matchmaking");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}
+ * list); achievements render in their own element BELOW the pager. */string _histPart;string _seriesPart=BuildViewHistoryText(out _histPart);UIFactory.SetTextRaw(txtLBDetail,detail+_seriesPart);UIFactory.SetTextRaw(txtLBDetailB,_histPart);UIFactory.SetTextRaw(txtLBAch,GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.rating_history_times,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Stop Avoiding in Ranked":"Avoid in Ranked Matchmaking");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}
 /* Admin-only Steam ID (Sid item 10) - IsAdmin resolves async, so gate here
- * in the refresh (late-resolution pattern), not at build time. */if(txtLBSteamId!=null){var _sidGO=((Component)txtLBSteamId).gameObject;bool showSid=ApiClient.IsAdmin&&!string.IsNullOrEmpty(selectedSteamId);if(_sidGO.activeSelf!=showSid)_sidGO.SetActive(showSid);if(showSid)UIFactory.SetTextRaw(txtLBSteamId,I18n.Tr("<color=#888>Steam ID:</color>")+$" <color=#9AD0FF>{selectedSteamId}</color> "+I18n.Tr("<color=#666>(click to copy)</color>"));}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBAch,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);if(txtLBSteamId!=null)((Component)txtLBSteamId).gameObject.SetActive(false);if(h2hPager!=null)h2hPager.SetActive(false);}}
+ * in the refresh (late-resolution pattern), not at build time. */if(txtLBSteamId!=null){var _sidGO=((Component)txtLBSteamId).gameObject;bool showSid=ApiClient.IsAdmin&&!string.IsNullOrEmpty(selectedSteamId);if(_sidGO.activeSelf!=showSid)_sidGO.SetActive(showSid);if(showSid)UIFactory.SetTextRaw(txtLBSteamId,I18n.Tr("<color=#888>Steam ID:</color>")+$" <color=#9AD0FF>{selectedSteamId}</color> "+I18n.Tr("<color=#666>(click to copy)</color>"));}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBAch,"");BuildFormGraph(null,null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);if(txtLBSteamId!=null)((Component)txtLBSteamId).gameObject.SetActive(false);if(h2hPager!=null)h2hPager.SetActive(false);}}
 
-        private static void BuildFormGraph(List<float> ratingHistory, List<string> form)
+        private static void BuildFormGraph(List<float> ratingHistory, List<float> ratingTimes, List<string> form)
         {
             if(lbGraphPanel==null)return;
             for(int c=lbGraphPanel.transform.childCount-1;c>=0;c--)
                 UnityEngine.Object.Destroy(lbGraphPanel.transform.GetChild(c).gameObject);
 
-            // Determine data source: prefer rating_history (Elo over time), fall back to form (running score)
-            bool useElo = ratingHistory != null && ratingHistory.Count >= 2;
+            // Determine data source: prefer rating_history (Elo), fall back to form
+            // (running score). Sept 6 (item f): the Elo polyline comes from the
+            // shared axis rule (RatingGraphAxis.Build — updates / calendar / since
+            // first, step plots on the time axes, the same 100-point density cap
+            // this graph has always applied). A time axis without usable
+            // timestamps falls back to the updates axis, not to the form graph:
+            // the ratings are still there to draw.
+            const int MAX_DRAW_POINTS = 100;
+            string axisMode = RatingGraphAxis.Current;
+            float[] gx, gy;
+            bool useElo = RatingGraphAxis.Build(ratingHistory, ratingTimes, axisMode, MAX_DRAW_POINTS, out gx, out gy);
+            if (!useElo && axisMode != RatingGraphAxis.Updates)
+            {
+                axisMode = RatingGraphAxis.Updates;
+                useElo = RatingGraphAxis.Build(ratingHistory, ratingTimes, axisMode, MAX_DRAW_POINTS, out gx, out gy);
+            }
             bool useForm = !useElo && form != null && form.Count >= 2;
             if(!useElo && !useForm){lbGraphPanel.SetActive(false);return;}
             lbGraphPanel.SetActive(true);
 
-            // Build data points array
-            float[] pts;
+            // gx/gy is the polyline (x monotonic, y the value); on a stepped
+            // polyline every ODD vertex is the hold before a jump, not an update.
+            bool stepped = useElo && RatingGraphAxis.IsStep(axisMode);
             string graphLabel;
             if(useElo)
             {
-                // Server returns ASC (oldest→newest) as of v1.26.8. Bucket-average
-                // to ~100 points when the history is long so a heavy player's
-                // 300-series timeline doesn't draw as illegible dot-spam.
-                var raw = ratingHistory.ToArray();
-                const int MAX_DRAW_POINTS = 100;
-                if (raw.Length > MAX_DRAW_POINTS)
-                {
-                    int bucketCount = MAX_DRAW_POINTS;
-                    pts = new float[bucketCount];
-                    for (int b = 0; b < bucketCount; b++)
-                    {
-                        int s = (int)((long)b * raw.Length / bucketCount);
-                        int e = (int)((long)(b + 1) * raw.Length / bucketCount);
-                        if (e <= s) e = s + 1;
-                        if (e > raw.Length) e = raw.Length;
-                        float sum = 0f; int cnt = 0;
-                        for (int i = s; i < e; i++) { sum += raw[i]; cnt++; }
-                        pts[b] = cnt > 0 ? sum / cnt : raw[s];
-                    }
-                    graphLabel = I18n.TrF("Rating History  ({0} Elo, {1} games)", raw[raw.Length - 1].ToString("F0", _INV), raw.Length);
-                }
-                else
-                {
-                    pts = raw;
-                    graphLabel = I18n.TrF("Rating History  ({0} Elo)", pts[pts.Length-1].ToString("F0", _INV));
-                }
+                // The server sends the NEWEST 500 updates oldest→newest (Sept 6;
+                // ASC since v1.26.8). One rating_history row is one completed
+                // ranked series, so the count says "rating updates" — the old label
+                // called them games, which they never were.
+                graphLabel = I18n.TrF("Rating History  ({0} Elo, {1} rating updates)",
+                    ratingHistory[ratingHistory.Count - 1].ToString("F0", _INV), ratingHistory.Count);
             }
             else
             {
                 // Form -> running score line (reversed: oldest left)
                 var fList = new List<string>(form);
                 fList.Reverse();
-                pts = new float[fList.Count];
+                gx = new float[fList.Count]; gy = new float[fList.Count];
                 int sc = 0;
                 int fW=0,fL=0;
-                for(int i=0;i<fList.Count;i++){sc+=fList[i]=="W"?1:-1;pts[i]=sc;if(fList[i]=="W")fW++;else fL++;}
+                for(int i=0;i<fList.Count;i++){sc+=fList[i]=="W"?1:-1;gx[i]=i;gy[i]=sc;if(fList[i]=="W")fW++;else fL++;}
                 string sumCol=fW>fL?"#00FF00":fW<fL?"#FF6666":"#AAAAAA";
                 graphLabel=I18n.TrF("Ranked Form  <color={0}>{1}W-{2}L</color>",sumCol,fW,fL);
             }
 
+            float[] pts = gy;
             int n = pts.Length;
+            float xMin = gx[0], xRange = Mathf.Max(gx[n-1] - xMin, 1e-3f);
             // July 21 item 6: keep in sync with the lbGraphPanel LayoutElement
             // (prefH/minH at build time) — a mismatch clips or letterboxes.
             float graphH = 110f;
             // padR reserves the right gutter for the fixed rating-line labels;
-            // the data line ends just short of them.
-            float padL = 6f, padR = 44f, padT = 18f, padB = 6f;
+            // the data line ends just short of them. Sept 6 (item f): the Elo
+            // graph's padB is the band that holds the axis caption and buttons.
+            float padL = 6f, padR = 44f, padT = 18f, padB = useElo ? 20f : 6f;
             // The old hardcoded 310px was the panel width of an ancient layout —
             // after the round-5/6/7 leaderboard reworks the panel is ~506px, so
             // the line visibly stopped ~3/5 of the way across. Read the LIVE
@@ -15274,6 +15280,35 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             try{var lGO=(lbl as Component)?.gameObject;if(lGO!=null){var lrt=lGO.GetComponent<RectTransform>();lrt.anchorMin=new Vector2(0,1);lrt.anchorMax=new Vector2(1,1);lrt.pivot=new Vector2(0,1);lrt.anchoredPosition=new Vector2(padL,-1f);lrt.sizeDelta=new Vector2(300,14);
             // Remove LayoutElement so it doesn't affect VLG
             var le=lGO.GetComponent(UIFactory.tLE);if(le!=null)UnityEngine.Object.Destroy(le as UnityEngine.Object);}}catch{}
+
+            // Sept 6 (item f): axis buttons (bottom-right, Elo only) and the caption
+            // naming the active axis (bottom-left). Both sit in the padB band under
+            // the plot (widened to 20px for the Elo graph), LEFT of the right gutter
+            // that holds the reference-line labels, so nothing overlaps. A button
+            // persists the mode and marks the tab dirty; RefreshCurrentTab then
+            // redraws this graph through RefreshLeaderboard.
+            if (useElo)
+            {
+                const float abw = 56f, abh = 14f, abGap = 2f;
+                for (int bi = 0; bi < RatingGraphAxis.Modes.Length; bi++)
+                {
+                    string m = RatingGraphAxis.Modes[bi];
+                    bool active = m == axisMode;
+                    var tb = UIFactory.CreateButton($"GAx{bi}", lbGraphPanel.transform, RatingGraphAxis.Label(m), 9f,
+                        active ? C_WHITE : C_LABEL, active ? C_TABACT : C_TAB,
+                        () => { RatingGraphAxis.Set(m); dirty = true; }, sizeDelta: new Vector2(abw, abh));
+                    var tle = tb.GetComponent(UIFactory.tLE); if (tle != null) UnityEngine.Object.Destroy(tle as UnityEngine.Object);
+                    var trt = tb.GetComponent<RectTransform>();
+                    trt.anchorMin = trt.anchorMax = new Vector2(1f, 0f); trt.pivot = new Vector2(1f, 0f);
+                    trt.anchoredPosition = new Vector2(-padR - 2f - (RatingGraphAxis.Modes.Length - 1 - bi) * (abw + abGap), 2f);
+                    trt.sizeDelta = new Vector2(abw, abh);
+                    try { UIFactory.FitOneLine(UIFactory.GetButtonText(tb)); } catch { }
+                }
+                var cap = UIFactory.CreateText("GAxCap", lbGraphPanel.transform, $"<color=#777>{RatingGraphAxis.Caption(axisMode)}</color>",
+                    9f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(230, 12));
+                UIFactory.FitOneLine(cap);
+                try{var cGO=(cap as Component)?.gameObject;if(cGO!=null){var crt=cGO.GetComponent<RectTransform>();crt.anchorMin=Vector2.zero;crt.anchorMax=Vector2.zero;crt.pivot=Vector2.zero;crt.anchoredPosition=new Vector2(padL+2f,2f);crt.sizeDelta=new Vector2(230,12);var cle=cGO.GetComponent(UIFactory.tLE);if(cle!=null)UnityEngine.Object.Destroy(cle as UnityEngine.Object);}}catch{}
+            }
 
             // Find Y range
             float minV=pts[0],maxV=pts[0];
@@ -15380,14 +15415,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
             for(int i=0;i<n-1;i++)
             {
-                float x1 = padL + (n>1 ? (float)i/(n-1)*plotW : 0);
+                float x1 = padL + (gx[i]-xMin)/xRange*plotW;
                 float y1 = padB + (pts[i]-minV)/range*plotH;
-                float x2 = padL + (float)(i+1)/(n-1)*plotW;
+                float x2 = padL + (gx[i+1]-xMin)/xRange*plotW;
                 float y2 = padB + (pts[i+1]-minV)/range*plotH;
 
                 // Line segment as a rotated thin rect
                 float dx=x2-x1, dy=y2-y1;
                 float len=Mathf.Sqrt(dx*dx+dy*dy);
+                if(len<0.25f)continue;   // a step's zero-length leg (two updates at one instant) has nothing to draw
                 float angle=Mathf.Atan2(dy,dx)*Mathf.Rad2Deg;
 
                 var seg=new GameObject($"L{i}");seg.transform.SetParent(lbGraphPanel.transform,false);
@@ -15401,11 +15437,14 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(simg,lineCol);
             }
 
-            // Draw dots at each data point
-            float dotSize = n > 15 ? 3f : 4f;
+            // Draw dots at each data point (on a stepped polyline every odd vertex
+            // is the hold before a jump, not an update — no dot there)
+            int updateCount = stepped ? (n+1)/2 : n;
+            float dotSize = updateCount > 15 ? 3f : 4f;
             for(int i=0;i<n;i++)
             {
-                float x = padL + (n>1 ? (float)i/(n-1)*plotW : 0);
+                if(stepped && (i&1)==1)continue;
+                float x = padL + (gx[i]-xMin)/xRange*plotW;
                 float y = padB + (pts[i]-minV)/range*plotH;
                 var dot=new GameObject($"D{i}");dot.transform.SetParent(lbGraphPanel.transform,false);
                 var drt=dot.AddComponent<RectTransform>();
@@ -15426,7 +15465,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         // Aug 6 item 2 — left-column controls whose visibility flips per sub-tab.
         private static object compareSearchCap, txtCompareHeader;
         private static GameObject compareClrSearchBtn;
-        // Metric index into COMPARE_METRICS. 0 = Elo-over-games graph; the rest are
+        // Metric index into COMPARE_METRICS. 0 = the Elo graph; the rest are
         // table metrics rendered into the text/cards scroll panel.
         private static int compareMetric = 0;
         /* Aug 6 item 2 — Compare sub-tabs. 0 = Players (everything that existed
@@ -15453,9 +15492,16 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
         }
         private static readonly string[] COMPARE_METRICS = {
-            // Aug 7 item 1: the two FFA Elo series sit immediately after their 1v1
-            // twins so the four graph metrics read as one group in the dropdown.
-            "Elo over games", "Elo over time", "FFA Elo over games", "FFA Elo over time",
+            // Aug 7 item 1: the FFA Elo series sits right after its 1v1 twin so the
+            // graph metrics read as one group in the dropdown. Sept 6 (item f): the
+            // four axis-flavoured entries ("over games" / "over time", per ladder)
+            // collapsed into one per ladder — the axis is chosen on the graph itself
+            // (RatingGraphAxis: updates / calendar / since first, remembered in the
+            // config), and "over games" named a count the rows never were. The
+            // rename retires the old translation keys; IdleShowcase's CURATED_METRICS
+            // byte-matches this array and moved with it; DevSetCompareMetricByName
+            // still accepts the four old names as aliases.
+            "Elo", "FFA Elo",
             "Top Cards", "Worst Cards", "Hit / Block %",
             "Avg Cards / Game", "Avg FPS", "Peak Elo", "Total XP",
             "Achievements", "Achievement Grid", "Region Time",
@@ -15506,10 +15552,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         {
             switch (m)
             {
-                case "Elo over games": return I18n.Tr("Elo over games");
-                case "Elo over time": return I18n.Tr("Elo over time");
-                case "FFA Elo over games": return I18n.Tr("FFA Elo over games");
-                case "FFA Elo over time": return I18n.Tr("FFA Elo over time");
+                case "Elo": return I18n.Tr("Elo");
+                case "FFA Elo": return I18n.Tr("FFA Elo");
                 case "Top Cards": return I18n.Tr("Most Used Cards");
                 case "Worst Cards": return I18n.Tr("Worst Cards");
                 case "Hit / Block %": return I18n.Tr("Hit / Block %");
@@ -16217,7 +16261,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     dirty = true;
                 }, sizeDelta: new Vector2(30, 30));
             UIFactory.AddLE(cmpPrev, prefW: 30, prefH: 30, flexW: 0, flexH: 0);
-            compareMetricBtn = UIFactory.CreateButton("CmpMet", metricRow.transform, "Showing: Elo over games",
+            compareMetricBtn = UIFactory.CreateButton("CmpMet", metricRow.transform, "Showing: Elo",
                 15f, C_WHITE, C_TAB, OpenMetricPicker, sizeDelta: new Vector2(320, 30));
             UIFactory.AddLE(compareMetricBtn, prefH: 30, flexW: 1, flexH: 0);
             var cmpNext = UIFactory.CreateButton("CmpMetN", metricRow.transform, ">",
@@ -16363,7 +16407,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (compareMetricBtnTxt != null)
                 /* item 11: composed BEFORE SetText, so the finished string could
                  * never match a catalogue key (only the build-time literal
-                 * "Showing: Elo over games" was ever harvested). Translate the parts,
+                 * "Showing: Elo" was ever harvested). Translate the parts,
                  * then compose, then SetTextRaw so the chokepoint does not re-Tr it. */
                 UIFactory.SetTextRaw(compareMetricBtnTxt,
                     I18n.TrF("Showing: {0}", TrMetric(metricName)) + "   <color=#888>" + I18n.Tr("(click to change)") + "</color>");
@@ -16419,7 +16463,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             for (int i = n; i < comparePickerRows.Count; i++) comparePickerRows[i].SetActive(false);
 
             // Route each metric to the renderer that fits its data:
-            //   "Elo over games"      → line graph        (compareGraphPanel)
+            //   "Elo" / "FFA Elo"     → line graph        (compareGraphPanel; axis from RatingGraphAxis)
             //   "Top/Worst Cards"     → multi-column grid  (compareCardsScroll)
             //   everything else       → bar/grouped/stacked chart (compareGraphPanel)
             bool isCards = metricName == "Top Cards" || metricName == "Worst Cards";
@@ -16432,10 +16476,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (compareGraphPanel != null) compareGraphPanel.SetActive(!useScroll);
             if (compareCardsScroll != null) compareCardsScroll.SetActive(useScroll);
 
-            if (metricName == "Elo over games") BuildCompareGraph();
-            else if (metricName == "Elo over time") BuildCompareGraph(timeAxis: true);
-            else if (metricName == "FFA Elo over games") BuildCompareGraph(ffa: true);
-            else if (metricName == "FFA Elo over time") BuildCompareGraph(timeAxis: true, ffa: true);
+            if (metricName == "Elo") BuildCompareGraph();
+            else if (metricName == "FFA Elo") BuildCompareGraph(ffa: true);
             else if (isCards) BuildCompareCardGrid(metricName);
             else if (metricName == "Player Nemesis") BuildComparePlayerNemesisPanel();
             else BuildCompareBarChart(metricName);
@@ -16561,53 +16603,63 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// <summary>The Elo line graph. `ffa` (Aug 7 item 1) selects the FFA
         /// rating series instead of the 1v1 one — same axes, colours and sizing,
         /// because the two are the same shape of data and a second copy of this
-        /// method would drift (#279). The FFA series is parsed by ApiClient into
-        /// a parallel pair with the SAME 1500-baseline prepend as the 1v1 one, so
-        /// every length assumption below still holds.</summary>
-        private static void BuildCompareGraph(bool timeAxis = false, bool ffa = false)
+        /// method would drift (#279). Sept 6 (item f): the x axis is the shared
+        /// RatingGraphAxis mode (updates / calendar / since first, remembered in
+        /// the config and switched by the buttons drawn under the plot). It used
+        /// to be a pair of dropdown metrics ("over games" / "over time"); the
+        /// index axis is now named for what a row is — one rating update per
+        /// completed ranked series, not a game. Both series are parsed by
+        /// ApiClient into parallel (rating, time) lists with NO synthetic
+        /// baseline point (the prepended 1500 is gone, design F-L).</summary>
+        private static void BuildCompareGraph(bool ffa = false)
         {
             if (compareGraphPanel == null) return;
             for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
                 UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
             CompetitiveUI.ClearCardHoverRegions();   // Records hovers die with the panel (Aug 17)
 
-            // Gather each selected player's Elo series from cache. timeAxis
-            // (v1.29 "Elo over time") plots x by SNAPSHOT DATE instead of game
-            // index, so gaps in play show as flat stretches, and players who
-            // started months apart line up on a real calendar.
+            string axisMode = RatingGraphAxis.Current;
+            // Density cap per player. The updates axis stays uncapped — exactly
+            // what this chart always drew. A step doubles the vertices, so the
+            // time axes are decimated to 250 rows (= 499 segments, the same
+            // GameObject budget the raw 500-row line used to cost).
+            int maxPoints = RatingGraphAxis.IsStep(axisMode) ? 250 : 0;
+
+            // Gather each selected player's Elo polyline from cache.
             var names = new List<string>();
             var cols = new List<Color>();
-            var seriesList = new List<float[]>();
-            var timesList = new List<float[]>();
+            var xsList = new List<float[]>();
+            var ysList = new List<float[]>();
             for (int i = 0; i < compareSelected.Count; i++)
             {
                 string sid = compareSelected[i];
                 if (!compareStatsCache.TryGetValue(sid, out var ps) || ps == null) continue;
                 var hist = ffa ? ps.ffa_rating_history : ps.rating_history;
                 var histTimes = ffa ? ps.ffa_rating_history_times : ps.rating_history_times;
-                // <2 snapshots is SKIPPED, not drawn: a single point is a dot with
-                // no line, which reads as a rendering failure rather than as "this
-                // player has one rated game". Same rule the 1v1 series has always
-                // had — and it is the common case for FFA, which is newer.
-                if (hist == null || hist.Count < 2) continue;
-                float[] times = null;
-                if (timeAxis)
-                {
-                    if (histTimes == null || histTimes.Count != hist.Count)
-                        continue; // no usable timestamps for this player
-                    times = histTimes.ToArray();
-                }
+                // <2 updates is SKIPPED, not drawn: a single point is a dot with no
+                // line, which reads as a rendering failure rather than as "this
+                // player has one rated series". Same rule the 1v1 series has always
+                // had — and the common case for FFA, which is newer. A time axis
+                // with no usable timestamps skips the player the same way.
+                float[] xs, ys;
+                if (!RatingGraphAxis.Build(hist, histTimes, axisMode, maxPoints, out xs, out ys)) continue;
                 names.Add(Trunc(ps.display_name ?? "?", 14));
                 cols.Add(COMPARE_COLORS[i % COMPARE_COLORS.Length]);
-                seriesList.Add(hist.ToArray());
-                timesList.Add(times);
+                xsList.Add(xs);
+                ysList.Add(ys);
             }
 
             CompareChartSize(out float W, out float H);
-            float padL = 56f, padR = 16f, padT = 30f, padB = 26f;
+            // padB grew from 26 (Sept 6): the band under the plot holds the tick
+            // labels (upper row) and the axis caption + axis buttons (lower row).
+            float padL = 56f, padR = 16f, padT = 30f, padB = 42f;
             float plotW = W - padL - padR, plotH = H - padT - padB;
 
-            if (seriesList.Count == 0)
+            // Drawn in the empty state too, so the axis can be switched before a
+            // second drawable player is selected.
+            DrawCompareAxisControls(axisMode, W, padL, padR);
+
+            if (xsList.Count == 0)
             {
                 /* Name the LADDER in the empty state: with four Elo metrics in the
                  * dropdown, "no ranked history" on the FFA chart reads as a bug to
@@ -16624,14 +16676,20 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 return;
             }
 
-            // Global Y range + max length (X = game index, shared across players).
-            float minV = float.MaxValue, maxV = float.MinValue; int maxLen = 0;
-            foreach (var s in seriesList)
+            // Global Y range + X domain, shared across players. Each polyline's x
+            // is monotonic, so its ends bound it. The index and since-first axes
+            // start at 0 for everyone; calendar starts at the earliest update drawn.
+            float minV = float.MaxValue, maxV = float.MinValue;
+            float xMin = float.MaxValue, xMax = float.MinValue;
+            for (int si = 0; si < ysList.Count; si++)
             {
-                if (s.Length > maxLen) maxLen = s.Length;
-                foreach (var v in s) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
+                foreach (var v in ysList[si]) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
+                var sx = xsList[si];
+                if (sx[0] < xMin) xMin = sx[0];
+                if (sx[sx.Length - 1] > xMax) xMax = sx[sx.Length - 1];
             }
-            if (maxLen < 2) maxLen = 2;
+            if (axisMode != RatingGraphAxis.Calendar) xMin = 0f;
+            float xRange = Mathf.Max(xMax - xMin, axisMode == RatingGraphAxis.Updates ? 1f : 0.5f);
             // Round the Y range to clean Elo numbers (e.g. 1400, 1500, … 1900) instead of
             // padded fractions like 1437→1913 with a label at 2185. Snap min DOWN and max
             // UP to a nice step, then label every step.
@@ -16653,47 +16711,40 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 MakeGraphLabel($"CmpYLbl{gi}", $"<color=#999>{FullNum(val)}</color>",
                     new Vector2(0, 0), new Vector2(padL - 4f, yy - 6f), new Vector2(50, 12), UIFactory.AlignMidRight);
             }
-            // X axis: game index (default) or calendar time (timeAxis).
-            float tMin = 0f, tRange = 1f;
-            if (timeAxis)
+            // X axis ticks: 4 divisions. Calendar labels them as dates (days since
+            // 2020-01-01 base), since-first as whole days (the caption carries the
+            // unit); the updates axis keeps no tick labels, as before — the caption
+            // names it.
+            if (axisMode != RatingGraphAxis.Updates)
             {
-                tMin = float.MaxValue; float tMax = float.MinValue;
-                foreach (var ts in timesList)
-                    foreach (var t in ts) { if (t < tMin) tMin = t; if (t > tMax) tMax = t; }
-                tRange = Mathf.Max(0.5f, tMax - tMin);
-                // Date gridlines: 4 divisions labeled M/d (days since 2020-01-01 base).
                 var epoch = new DateTime(2020, 1, 1);
                 for (int d = 0; d <= 4; d++)
                 {
-                    float tv = tMin + tRange * d / 4f;
-                    float xx = padL + (tv - tMin) / tRange * plotW;
+                    float tv = xMin + xRange * d / 4f;
+                    float xx = padL + (tv - xMin) / xRange * plotW;
                     DrawBar($"CmpXGrid{d}", xx, padB, 1f, plotH, new Color(1f, 1f, 1f, 0.07f));
-                    string dl = DateFmt.Short(epoch.AddDays(tv));
-                    MakeGraphLabel($"CmpXDate{d}", $"<color=#999>{dl}</color>",
+                    string dl = axisMode == RatingGraphAxis.Calendar
+                        ? DateFmt.Short(epoch.AddDays(tv))
+                        : Mathf.RoundToInt(tv).ToString(_INV);
+                    MakeGraphLabel($"CmpXTick{d}", $"<color=#999>{dl}</color>",
                         new Vector2(0, 0), new Vector2(xx - 24f, padB - 16f), new Vector2(48, 12), UIFactory.AlignMidCenter);
                 }
             }
-            else
-            {
-                MakeGraphLabel("CmpXLbl", $"<color=#888>{I18n.Tr("games ->")}</color>", new Vector2(1, 0), new Vector2(-padR, padB - 14f), new Vector2(90, 12), UIFactory.AlignMidRight);
-            }
 
-            // Draw each player's line + legend chip (full names — there's room now).
-            for (int si = 0; si < seriesList.Count; si++)
+            // Draw each player's polyline + legend chip (full names — there's room now).
+            for (int si = 0; si < xsList.Count; si++)
             {
-                var pts = seriesList[si];
-                var ts = timesList[si];
+                var sx = xsList[si];
+                var sy = ysList[si];
                 Color col = cols[si];
-                for (int j = 0; j < pts.Length - 1; j++)
+                for (int j = 0; j < sx.Length - 1; j++)
                 {
-                    float x1 = timeAxis
-                        ? padL + (ts[j] - tMin) / tRange * plotW
-                        : padL + (float)j / (maxLen - 1) * plotW;
-                    float y1 = padB + (pts[j] - minV) / range * plotH;
-                    float x2 = timeAxis
-                        ? padL + (ts[j + 1] - tMin) / tRange * plotW
-                        : padL + (float)(j + 1) / (maxLen - 1) * plotW;
-                    float y2 = padB + (pts[j + 1] - minV) / range * plotH;
+                    float x1 = padL + (sx[j] - xMin) / xRange * plotW;
+                    float y1 = padB + (sy[j] - minV) / range * plotH;
+                    float x2 = padL + (sx[j + 1] - xMin) / xRange * plotW;
+                    float y2 = padB + (sy[j + 1] - minV) / range * plotH;
+                    // A step's zero-length leg (two updates at one instant) has nothing to draw.
+                    if (Mathf.Abs(x2 - x1) < 0.25f && Mathf.Abs(y2 - y1) < 0.25f) continue;
                     DrawGraphSegment($"CmpL{si}_{j}", x1, y1, x2, y2, col, 2f);
                 }
                 // Legend: a SOLID colored line swatch (matches the player's graph line)
@@ -16709,6 +16760,32 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 MakeGraphLabel($"CmpLeg{si}", $"<b>{names[si]}</b>",
                     new Vector2(0, 1), new Vector2(lx + 30f, ly), new Vector2(colW - 30f, 16), UIFactory.AlignMidLeft, 13f);
             }
+        }
+
+        /// <summary>Sept 6 (item f): the three axis buttons (bottom-right, under the
+        /// plot) and the caption naming the active axis (bottom-left) of the Compare
+        /// Elo chart. A button persists the mode and marks the tab dirty; the
+        /// refresh re-dispatches into BuildCompareGraph, which reads the mode.</summary>
+        private static void DrawCompareAxisControls(string axisMode, float W, float padL, float padR)
+        {
+            const float bw = 78f, bh = 18f, gap = 4f;
+            for (int bi = 0; bi < RatingGraphAxis.Modes.Length; bi++)
+            {
+                string m = RatingGraphAxis.Modes[bi];
+                bool active = m == axisMode;
+                var tb = UIFactory.CreateButton($"CmpAx{bi}", compareGraphPanel.transform, RatingGraphAxis.Label(m), 11f,
+                    active ? C_WHITE : C_LABEL, active ? C_TABACT : C_TAB,
+                    () => { RatingGraphAxis.Set(m); dirty = true; }, sizeDelta: new Vector2(bw, bh));
+                var tle = tb.GetComponent(UIFactory.tLE); if (tle != null) UnityEngine.Object.Destroy(tle as UnityEngine.Object);
+                var trt = tb.GetComponent<RectTransform>();
+                trt.anchorMin = trt.anchorMax = Vector2.zero; trt.pivot = Vector2.zero;
+                trt.anchoredPosition = new Vector2(W - padR - (RatingGraphAxis.Modes.Length - bi) * (bw + gap), 3f);
+                trt.sizeDelta = new Vector2(bw, bh);
+                try { UIFactory.FitOneLine(UIFactory.GetButtonText(tb)); } catch { }
+            }
+            MakeGraphLabel("CmpXLbl", $"<color=#888>{RatingGraphAxis.Caption(axisMode)}</color>",
+                new Vector2(0, 0), new Vector2(padL, 5f),
+                new Vector2(Mathf.Max(80f, W - padL - padR - RatingGraphAxis.Modes.Length * (bw + gap) - 8f), 14), UIFactory.AlignMidLeft);
         }
 
         // Helper: a rotated 1px-tall rect acting as a line segment in compareGraphPanel.

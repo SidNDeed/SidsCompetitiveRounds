@@ -36,7 +36,7 @@ namespace CompetitiveRounds
         // Sources and Build Types are single-fetch pie boards and safe.
         private static readonly string[] CURATED_METRICS =
         {
-            "Elo over games", "Hit / Block %", "Top Cards", "Peak Elo",
+            "Elo", "Hit / Block %", "Top Cards", "Peak Elo",
             "Top Streaks", "5-0s Given / Taken", "Avg Game Length",
             "Gold Sources", "Build Types",
         };
@@ -51,7 +51,7 @@ namespace CompetitiveRounds
         private static readonly View[] SCRIPT =
         {
             new View(0, 0, 18f),          // Home
-            new View(1, 0, 26f),          // Compare: Elo over games (+ setup)
+            new View(1, 0, 26f),          // Compare: Elo (+ setup; axis = the configured RatingGraphAxis mode)
             new View(1, 1, 20f),          // Hit / Block %
             new View(1, 2, 20f),          // Top Cards
             new View(1, 3, 15f),          // Peak Elo

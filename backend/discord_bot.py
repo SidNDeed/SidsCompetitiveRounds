@@ -4944,34 +4944,51 @@ _COMPARE_COLORS = ["#5865F2", "#ED4245", "#57F287", "#FEE75C"]  # blurple/red/gr
 _mpl_render_lock = threading.Lock()
 
 
-def _render_rating_history_png(series):
+def _render_rating_history_png(series, axis="calendar", x_label=None):
     """Render the overlay rating-history line chart to a PNG BytesIO.
-    series = [{"name": str, "points": [(datetime, rating), ...]}], each list
-    oldest-first. Runs inside asyncio.to_thread — matplotlib is CPU-bound and
-    must never block the event loop (heartbeat/WS would starve)."""
+    series = [{"name": str, "points": [(x, rating), ...]}], each list
+    oldest-first and already transformed by _rating_axis_points for `axis`
+    (x is a datetime on the calendar axis, a number otherwise). Runs inside
+    asyncio.to_thread — matplotlib is CPU-bound and must never block the
+    event loop (heartbeat/WS would starve)."""
     with _mpl_render_lock:
-        return _render_rating_history_png_locked(series)
+        return _render_rating_history_png_locked(series, axis, x_label)
 
 
-def _render_rating_history_png_locked(series):
+def _render_rating_history_png_locked(series, axis="calendar", x_label=None):
     bg = "#2b2d31"  # Discord embed grey — the chart reads as part of the embed
     fig, ax = plt.subplots(figsize=(10, 5.5), dpi=110)
     try:
         fig.patch.set_facecolor(bg)
         ax.set_facecolor(bg)
+        # The points already carry the step duplication (_rating_axis_points),
+        # so a plain line draws the step. Markers only on the updates axis: on
+        # a step polyline every update is two vertices at the same x, and a
+        # marker per vertex would draw doubled dots.
         for i, sr in enumerate(series):
             xs = [p[0] for p in sr["points"]]
             ys = [p[1] for p in sr["points"]]
             ax.plot(xs, ys, color=_COMPARE_COLORS[i % len(_COMPARE_COLORS)],
-                    linewidth=2.2, marker="o", markersize=2.5, label=str(sr["name"])[:24])
+                    linewidth=2.2, marker="o" if axis == "updates" else None,
+                    markersize=2.5, label=str(sr["name"])[:24])
         ax.set_title("Ranked Rating History", color="#ffffff", fontsize=14, pad=12)
         ax.tick_params(colors="#b5bac1", labelsize=9)
         for spine in ax.spines.values():
             spine.set_color("#4a4d55")
         ax.grid(True, color="#4a4d55", linewidth=0.6, alpha=0.5)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-        fig.autofmt_xdate()
-        ax.legend(facecolor="#232428", edgecolor="#4a4d55", labelcolor="#dbdee1", fontsize=9)
+        if axis == "calendar":
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+            fig.autofmt_xdate()
+        elif axis == "updates":
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        # Axis title + legend title both name the active axis (Sept 6 item f).
+        ax.set_xlabel(x_label or _GRAPH_AXIS_LABELS.get(axis, ""), color="#b5bac1", fontsize=9)
+        legend = ax.legend(facecolor="#232428", edgecolor="#4a4d55", labelcolor="#dbdee1", fontsize=9,
+                           title=f"x axis: {str(axis).replace('_', ' ')}", title_fontsize=8)
+        try:
+            legend.get_title().set_color("#b5bac1")
+        except Exception:
+            pass
         fig.tight_layout()
         buf = io.BytesIO()
         fig.savefig(buf, format="png", facecolor=bg)
@@ -4981,13 +4998,19 @@ def _render_rating_history_png_locked(series):
         plt.close(fig)
 
 
+# Sept 6 (item f): the server serves the NEWEST `limit` rating updates (the
+# window used to be the oldest 500). Named once so the embed footer that
+# describes the window cannot drift from the request that fetches it.
+RATING_HISTORY_FETCH = 500
+
+
 async def _fetch_rating_history(steam_id):
     """History points for one player, newest endpoint first: the lean
     /rating-history endpoint (v1.32 server contract), falling back to the
     heavy /players/{steam} recent_rating_history when it isn't there yet.
     Returns (history_list, stats_or_none) — stats is reused for rating/peak."""
     hist = None
-    lean = await api_get(f"/players/{steam_id}/rating-history?limit=500")
+    lean = await api_get(f"/players/{steam_id}/rating-history?limit={RATING_HISTORY_FETCH}")
     if isinstance(lean, dict):
         hist = lean.get("history")
     stats = await api_get(f"/players/{steam_id}")
@@ -4997,23 +5020,104 @@ async def _fetch_rating_history(steam_id):
 
 
 def _history_to_points(hist):
-    """[{rating, rd, date}] -> sorted [(datetime, rating)], with the client's
-    synthetic 1500 baseline prepended one day before the first snapshot
-    (ApiClient.cs:3187 convention) so lines start from the shared origin."""
+    """[{rating, rd, date | period_end[, rating_before]}] -> sorted
+    [(datetime, rating, rating_before_or_None)], oldest first.
+
+    Sept 6 (item f, design F-L): NO synthetic 1500 baseline any more — the
+    first drawn point is the first fetched row (its pre-update rating when a
+    server ever exposes one, else its rating). rating_history rows carry no
+    pre-update value today, so the third element is None; _rating_axis_points
+    handles both. `period_end` is the column's own name (Sept 6 server),
+    `date` the v1.26.8 alias older servers still emit."""
     pts = []
-    for h in hist:
+    for h in hist or []:
         if not isinstance(h, dict):
             continue
         try:
-            d = datetime.fromisoformat(str(h.get("date")).replace("Z", "+00:00"))
+            raw = h.get("period_end") or h.get("date")
+            d = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             r = float(h.get("rating"))
         except Exception:
             continue
-        pts.append((d, r))
+        before = h.get("rating_before")
+        try:
+            before = float(before) if before is not None else None
+        except Exception:
+            before = None
+        pts.append((d, r, before))
     pts.sort(key=lambda x: x[0])
-    if pts and pts[0][1] != 1500.0:
-        pts.insert(0, (pts[0][0] - timedelta(days=1), 1500.0))
     return pts
+
+
+_GraphAxis = Literal["calendar", "updates", "since_first"]
+
+# Axis captions for the elo chart. F-1 terminology: one rating_history row is
+# one completed ranked series, so the index axis is "rating updates" — never a
+# game count (the server keeps no game ordinal for it).
+_GRAPH_AXIS_LABELS = {
+    "calendar": "Date (step plot: a flat run is a gap in play, not a slope)",
+    "updates": "Rating updates (one per completed ranked series)",
+    "since_first": "Days since each player's first plotted rating update (step plot)",
+}
+
+
+def _rating_axis_points(series, axis):
+    """PURE axis transform for the /graph elo overlay (Sept 6 item f).
+
+    series: one list per player of (period_end, rating[, rating_before])
+    tuples, any order; axis: one of _GraphAxis. Returns (per_player_xy,
+    x_label): per_player_xy[i] is the polyline for series[i] as (x, y)
+    pairs, oldest first.
+
+    - F-1 axes: "calendar" x = period_end (datetime); "updates" x = 1-based
+      count of the rating update within the fetched window; "since_first"
+      x = fractional days since THAT player's first fetched row, so every
+      line starts at x = 0.
+    - F-2 step plots: on the two time axes the previous rating is repeated
+      at each new timestamp before the jump, so a gap in play draws as a
+      flat run, never as a slope invented between two updates. "updates"
+      stays a plain line through the points.
+    - F-L baseline: the first drawn point is the first row's pre-update
+      rating when the row carries one (held at that row's x, then the jump
+      to its rating; on the "updates" axis it sits at x = 0), else that
+      row's rating. Nothing else is prepended — no 1500.
+
+    Empty input yields an empty polyline; a single row yields one point."""
+    if axis not in _GRAPH_AXIS_LABELS:
+        raise ValueError(f"unknown graph axis: {axis!r}")
+    step = axis != "updates"
+    out = []
+    for pts in series or []:
+        rows = []
+        for p in pts or []:
+            if not p or len(p) < 2 or p[0] is None or p[1] is None:
+                continue
+            before = p[2] if len(p) > 2 else None
+            rows.append((p[0], float(p[1]), float(before) if before is not None else None))
+        rows.sort(key=lambda r: r[0])
+        xy = []
+        if not rows:
+            out.append(xy)
+            continue
+        t0 = rows[0][0]
+        prev = rows[0][2]            # the value held BEFORE the first update, when known
+        count = 0
+        if axis == "updates" and prev is not None:
+            xy.append((0, prev))
+        for t, r, _before in rows:
+            if axis == "calendar":
+                x = t
+            elif axis == "since_first":
+                x = (t - t0).total_seconds() / 86400.0
+            else:
+                count += 1
+                x = count
+            if step and prev is not None:
+                xy.append((x, prev))
+            xy.append((x, r))
+            prev = r
+        out.append(xy)
+    return out, _GRAPH_AXIS_LABELS[axis]
 
 
 # Wider palette for pie slices / >4-color needs (first 4 = _COMPARE_COLORS so
@@ -5453,14 +5557,20 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
                     description="Chart a Compare-tab metric for 2-4 players (elo history, hit/block %, top cards, ...)")
 @app_commands.describe(player1="First player", player2="Second player",
                        metric="Which Compare-tab metric to chart (default: elo history)",
-                       player3="Optional third player", player4="Optional fourth player")
+                       player3="Optional third player", player4="Optional fourth player",
+                       axis="Elo chart x axis: calendar (default), updates (one per completed ranked series), since_first (days since each player's first plotted update)")
 async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
                     metric: _GraphMetric = "elo",
-                    player3: discord.Member = None, player4: discord.Member = None):
+                    player3: discord.Member = None, player4: discord.Member = None,
+                    axis: _GraphAxis = "calendar"):
     """All the in-game Compare-tab graphs as PNGs: 'elo' = the rating-history
     overlay line chart (the old /compare); everything else maps to a
     /players/{steam} stats field (see _GRAPH_BAR_METRICS) plus the two
-    specials — 'top-cards' (per-player hbar) and 'region' (per-player pie)."""
+    specials — 'top-cards' (per-player hbar) and 'region' (per-player pie).
+
+    `axis` (Sept 6 item f) only affects 'elo'. It is the LAST parameter on
+    purpose: the prefix form `!graph @a @b elo @c @d` binds positionally, so
+    a new option anywhere earlier would swallow the third player."""
     if not _MPL_AVAILABLE:
         await ctx.send("❌ Chart rendering isn't available on this bot build — redeploy with matplotlib installed.")
         return
@@ -5491,26 +5601,33 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
             hist, stats = await _fetch_rating_history(sid)
             players.append({
                 "name": (stats or {}).get("display_name") or nm,
-                "points": _history_to_points(hist),
+                "rows": _history_to_points(hist),
                 "rating": (stats or {}).get("rating"),
                 "peak": (stats or {}).get("peak_rating"),
             })
-        drawable = [p for p in players if len(p["points"]) >= 2]
+        # Fewer than two rating updates is a dot, not a line: skipped, and said
+        # so in the embed field — the same rule the in-game graphs apply. (Until
+        # Sept 6 a synthetic 1500 point made a one-update player drawable;
+        # design F-L removed the invented baseline.)
+        drawable = [p for p in players if len(p["rows"]) >= 2]
         if not drawable:
-            await ctx.send("❌ None of those players have ranked rating history to plot yet.")
+            await ctx.send("❌ None of those players have two or more ranked rating updates to plot yet.")
             return
-        buf = await asyncio.to_thread(_render_rating_history_png, drawable)
+        per_player_xy, x_label = _rating_axis_points([p["rows"] for p in drawable], axis)
+        series = [{"name": p["name"], "points": pts} for p, pts in zip(drawable, per_player_xy)]
+        buf = await asyncio.to_thread(_render_rating_history_png, series, axis, x_label)
         file = discord.File(buf, filename="graph.png")
         embed = discord.Embed(title="Ranked Rating History", color=0x5865F2)
         for p in players:
             if p["rating"] is not None:
                 val = f"**{p['rating']:.0f}** Elo · Peak **{(p['peak'] or p['rating']):.0f}**"
-                if len(p["points"]) < 2:
-                    val += " · (no history — not plotted)"
+                if len(p["rows"]) < 2:
+                    val += " · (fewer than two rating updates — not plotted)"
             else:
                 val = "(no data)"
             embed.add_field(name=str(p["name"])[:256], value=val, inline=True)
         embed.set_image(url="attachment://graph.png")
+        embed.set_footer(text=(f"x axis: {x_label} • newest {RATING_HISTORY_FETCH} rating updates per player")[:2048])
         await ctx.send(embed=embed, file=file)
         return
 

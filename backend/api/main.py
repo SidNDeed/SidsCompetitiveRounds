@@ -7693,51 +7693,19 @@ async def get_player_stats(
 
     # Rating history — was capped at last 20 in v1.26.7 and earlier, which
     # made the leaderboard graph appear to "lose" older points for active
-    # players. v1.26.8 bumps to 500 (covers ~6 months of heavy play) and
-    # switches to ASC ordering so the client can plot left-to-right
-    # chronologically. Client buckets to ~100 points when this is large.
-    history_result = await db.execute(
-        select(RatingHistory)
-        .where(RatingHistory.player_id == player.id)
-        .order_by(RatingHistory.period_end.asc())
-        .limit(500)
-    )
-    history = [
-        {"rating": round(h.rating), "rd": round(h.rating_deviation), "date": h.period_end.isoformat()}
-        for h in history_result.scalars().all()
-    ]
+    # players. v1.26.8 bumped the cap to 500 and switched to ASC ordering so
+    # the client can plot left-to-right chronologically. Sept 6 (item f): the
+    # window is the NEWEST 500 rows, not the oldest — a player past 500 rating
+    # updates saw a graph frozen in the past. One implementation, shared with
+    # the lean /rating-history feed: _rating_history_window.
+    history = await _rating_history_window(db, player.id)
 
     # Aug 7 — the same series for FFA. There is no rating_history table for FFA
     # ratings, but every rated FFA game already snapshots rating_after on the
-    # per-player row, so the game rows ARE the history. Same 500 cap and same
-    # ASC ordering as the 1v1 list above so both feed one client graph.
-    # Filters: ranked only (a casual game leaves rating_after NULL), roster
-    # ghosts excluded (they held a slot but did not play — #227), invalidated
-    # matches excluded (every other FFA aggregate in this file does), and
-    # rating_after NOT NULL so a null can never land in the plotted series.
-    #
-    # Each entry carries the timestamp under BOTH keys on purpose. The frozen
-    # contract names the field 'recorded_at'; the 1v1 client parser this one is
-    # copied from reads 'date'. Emitting both means neither end can be wrong,
-    # and the split-on-"rating" parser is unaffected by the extra key.
-    ffa_history_rows = (await db.execute(text("""
-        SELECT fmp.rating_after, fm.created_at
-          FROM ffa_match_players fmp
-          JOIN ffa_matches fm ON fm.id = fmp.match_id
-         WHERE fmp.player_id = :pid
-           AND fm.is_ranked IS TRUE
-           AND fm.invalidated_at IS NULL
-           AND NOT fmp.absent
-           AND fmp.rating_after IS NOT NULL
-         ORDER BY fm.created_at ASC
-         LIMIT 500
-    """), {"pid": player.id})).mappings().all()
-    ffa_history = [
-        {"rating": round(float(r["rating_after"]), 1),
-         "recorded_at": r["created_at"].isoformat(),
-         "date": r["created_at"].isoformat()}
-        for r in ffa_history_rows
-    ]
+    # per-player row, so the game rows ARE the history. Same window and same
+    # ASC ordering as the 1v1 list above so both feed one client graph — see
+    # _ffa_rating_history_window for the row filters and the key aliases.
+    ffa_history = await _ffa_rating_history_window(db, player.id)
 
     # Top cards by pick count, with pass-rate from card_offers (additive — old
     # matches without offer rows just yield times_offered=0, pass_rate=0).
@@ -8880,6 +8848,88 @@ async def get_player_stats(
     )
 
 
+# Sept 6 (item f) — the rating-history window shared by the full stats payload
+# and the lean /rating-history feed. Both used to take the OLDEST 500 rows in
+# ascending order, so a player past 500 rating updates saw a graph frozen in
+# the past while every new series landed outside the window. The window is
+# taken from the newest end (ORDER BY period_end DESC LIMIT n) and only then
+# re-ordered ascending for the plotters. One implementation on purpose: the
+# Discord bot reads the lean feed and the client reads the stats payload, and
+# two copies of the query would drift (#279).
+RATING_HISTORY_WINDOW = 500
+
+
+async def _rating_history_window(db: AsyncSession, player_id, limit: int = RATING_HISTORY_WINDOW) -> list[dict]:
+    """The newest `limit` rating_history rows for one player, oldest-first.
+
+    Row shape is additive over the v1.26.8 contract: `rating`, `rd` and `date`
+    are unchanged; `period_end` is the same timestamp under the column's own
+    name, which is what the axis code on both clients reads first. The table
+    carries no pre-update rating (rating / rd / volatility / period_end only),
+    so a plotter's first drawn point is the first row's rating — no baseline
+    is invented server-side either."""
+    newest = (
+        select(RatingHistory.rating, RatingHistory.rating_deviation, RatingHistory.period_end)
+        .where(RatingHistory.player_id == player_id)
+        .order_by(RatingHistory.period_end.desc())
+        .limit(limit)
+        .subquery("newest")
+    )
+    rows = (await db.execute(
+        select(newest.c.rating, newest.c.rating_deviation, newest.c.period_end)
+        .order_by(newest.c.period_end.asc())
+    )).all()
+    return [
+        {
+            "rating": round(r.rating),
+            "rd": round(r.rating_deviation),
+            "date": r.period_end.isoformat(),
+            "period_end": r.period_end.isoformat(),
+        }
+        for r in rows
+    ]
+
+
+async def _ffa_rating_history_window(db: AsyncSession, player_id, limit: int = RATING_HISTORY_WINDOW) -> list[dict]:
+    """The newest `limit` rated FFA game rows for one player, oldest-first —
+    the FFA counterpart of _rating_history_window (there is no rating_history
+    table for FFA; the per-player game row snapshots rating_after).
+
+    Filters: ranked only (a casual game leaves rating_after NULL), roster
+    ghosts excluded (they held a slot but did not play — #227), invalidated
+    matches excluded (every other FFA aggregate in this file does), and
+    rating_after NOT NULL so a null can never land in the plotted series.
+
+    Each entry carries the timestamp under THREE keys on purpose. The frozen
+    contract names the field 'recorded_at'; the 1v1 parser the client shares
+    reads 'date'; 'period_end' is the Sept 6 name both clients try first.
+    The split-on-"rating" client parser is unaffected by the extra keys."""
+    rows = (await db.execute(text("""
+        WITH newest AS (
+            SELECT fmp.rating_after, fm.created_at
+              FROM ffa_match_players fmp
+              JOIN ffa_matches fm ON fm.id = fmp.match_id
+             WHERE fmp.player_id = :pid
+               AND fm.is_ranked IS TRUE
+               AND fm.invalidated_at IS NULL
+               AND NOT fmp.absent
+               AND fmp.rating_after IS NOT NULL
+             ORDER BY fm.created_at DESC
+             LIMIT CAST(:lim AS INTEGER)
+        )
+        SELECT rating_after, created_at FROM newest ORDER BY created_at ASC
+    """), {"pid": player_id, "lim": int(limit)})).mappings().all()
+    return [
+        {
+            "rating": round(float(r["rating_after"]), 1),
+            "recorded_at": r["created_at"].isoformat(),
+            "date": r["created_at"].isoformat(),
+            "period_end": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+
 @app.get("/api/v1/players/{steam_id}/rating-history", tags=["Players"])
 async def get_player_rating_history(
     steam_id: str,
@@ -8890,23 +8940,15 @@ async def get_player_rating_history(
     shape from the full /players/{steam_id} response, standalone. The full
     stats endpoint runs ~15 queries (streak walks, card aggregates, ...);
     the Discord bot's compare graphs only need this slice. Public read, same
-    trust level as the stats endpoint."""
+    trust level as the stats endpoint. Sept 6 (item f): the newest `limit`
+    rows, ascending, with `period_end` on every row — _rating_history_window."""
     row = (await db.execute(
         select(Player.id, Player.display_name).where(Player.steam_id == steam_id)
     )).first()
     if row is None:
         raise HTTPException(status_code=404, detail="Player not found")
     pid, display_name = row
-    history_result = await db.execute(
-        select(RatingHistory)
-        .where(RatingHistory.player_id == pid)
-        .order_by(RatingHistory.period_end.asc())
-        .limit(limit)
-    )
-    history = [
-        {"rating": round(h.rating), "rd": round(h.rating_deviation), "date": h.period_end.isoformat()}
-        for h in history_result.scalars().all()
-    ]
+    history = await _rating_history_window(db, pid, limit)
     return {"steam_id": steam_id, "display_name": display_name, "history": history}
 
 
