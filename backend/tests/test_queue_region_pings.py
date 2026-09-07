@@ -5,7 +5,9 @@ polling, as the X-Region-Pings header; ONE validator admits both. The map is
 stored on the queue row off-ORM (migration 301) by the join's single INSERT ...
 ON CONFLICT and by the poll's heartbeat UPDATE (only with a valid header); the
 poll that carries a valid header also overlays it onto its own row snapshot, so
-issuance in that same request judges the refreshed map (impl review r1 M1). At
+issuance in that same request judges the refreshed map (impl review r1 M1); the
+stamp the row takes and the stamp the chooser judges are ONE Python value,
+bound typed — never transaction-start time (impl review r2 M1). At
 room issuance both seats' maps are re-read under the ordered locks and
 `_pick_region_by_pings` (rung 0) may replace the ladder's answer — only by a
 region that costs NEITHER seat more than 20 ms over its own baseline.
@@ -328,6 +330,14 @@ def _projection(sql):
     return [c.strip().split(".")[-1] for c in m.group(1).split(",")]
 
 
+# The header heartbeat's typed binds (#275/#448); the issuance fake refuses a
+# statement that lost one, the way the join fake refuses a lost JOIN_PREDICATE.
+POLL_HEADER_PREDICATES = (
+    "region_pings = CAST(:region_pings AS JSONB)",
+    "region_pings_at = CAST(:region_pings_at AS TIMESTAMPTZ)",
+)
+
+
 class FakeIssuanceSession:
     """Enough of a session for queue_poll / queue_ready to reach room issuance.
 
@@ -362,11 +372,20 @@ class FakeIssuanceSession:
         if sql.startswith("UPDATE ranked_queue SET last_polled = NOW()"):
             self.heartbeats.append((sql, params))
             # a valid header's statement lands on the ROW (what a later re-read
-            # returns); the snapshot the handler took earlier is untouched
+            # returns) with the stamp it BOUND — the fake has no clock of its
+            # own, so a stamp derived from NOW() could never reach the row
+            # (impl review r2 M1); the snapshot the handler took earlier is
+            # untouched. A statement that lost a typed bind, or a naive stamp,
+            # is refused.
             if "region_pings" in params:
+                for p in POLL_HEADER_PREDICATES:
+                    assert p in sql, f"header heartbeat lost predicate: {p}"
+                stamp = params["region_pings_at"]
+                assert isinstance(stamp, datetime) and stamp.tzinfo is not None, \
+                    "header heartbeat bound a naive stamp"
                 row = self.rows[params["pid"]]
                 row["region_pings"] = params["region_pings"]
-                row["region_pings_at"] = datetime.now(timezone.utc) - timedelta(seconds=params["region_pings_age"])
+                row["region_pings_at"] = stamp
             return _Result([])
         if sql.startswith("SELECT") and "FROM players" in sql:
             pid = self.by_steam[self.me_steam]
@@ -518,12 +537,19 @@ def test_every_authoritative_re_read_names_both_columns():
 def test_queue_poll_writes_a_valid_header_through_the_heartbeat(issuance):
     at = _now() - timedelta(seconds=20)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, at, at), ME_STEAM)
+    before = _now()
     _poll(session, {"x-region-pings": "us=42,eu=31;age=12"})
+    after = _now()
     assert len(session.heartbeats) == 1
     sql, params = session.heartbeats[0]
     assert "region_pings = CAST(:region_pings AS JSONB)" in sql
-    assert "region_pings_at = NOW() - make_interval(secs => :region_pings_age)" in sql
-    assert params == {"pid": ME, "region_pings": '{"eu":31,"us":42}', "region_pings_age": 12}
+    assert "region_pings_at = CAST(:region_pings_at AS TIMESTAMPTZ)" in sql
+    assert "NOW() - make_interval" not in sql, "the stamp is bound, never transaction-start arithmetic (r2 M1)"
+    assert set(params) == {"pid", "region_pings", "region_pings_at"}
+    assert params["pid"] == ME and params["region_pings"] == '{"eu":31,"us":42}'
+    stamp = params["region_pings_at"]
+    assert stamp.tzinfo is not None
+    assert before - timedelta(seconds=12) <= stamp <= after - timedelta(seconds=12)
 
 
 @pytest.mark.parametrize("headers", [{}, {"x-region-pings": "us=42;age=-1"}, {"x-region-pings": "garbage"}])
@@ -569,9 +595,9 @@ def test_a_valid_header_replaces_the_stored_map_issuance_sees_in_the_same_poll(i
 
 
 def test_the_header_stamp_is_what_the_issuance_window_judges(issuance):
-    """The stamp half: the UPDATE dates the row now() - age, so a valid header
-    whose age is past the window leaves A stale although the STORED stamp was
-    fresh — issuance agrees with what the row now holds, not with the snapshot."""
+    """The stamp half: the UPDATE binds the row's stamp as now - age, so a valid
+    header whose age is past the window leaves A stale although the STORED stamp
+    was fresh — issuance agrees with what the row now holds, not with the snapshot."""
     fresh = _now() - timedelta(seconds=10)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
     age = main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 1
@@ -592,13 +618,68 @@ def test_control_a_stale_snapshot_stays_stale_without_a_valid_header(issuance, h
     assert not any("region_pings" in p for _, p in session.heartbeats)
 
 
+def test_the_persisted_stamp_is_the_stamp_issuance_judges(issuance, monkeypatch):
+    """Impl review r2 M1: NOW() is transaction-start time, taken before the
+    ordered lock wait, while `now` is read after it — a row dated NOW() - age
+    and a snapshot dated now - age differed by the lock wait, so at age 179 a
+    2 s wait persisted a map the window already refuses while the overlay still
+    read fresh. The stamp is one Python value, bound into the UPDATE (what the
+    row holds) and handed to the chooser (what issuance judges)."""
+    seen = {}
+    real = main._pick_room_region
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(main, "_pick_room_region", spy)
+    fresh = _now() - timedelta(seconds=10)
+    session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
+    age = main.REGION_PINGS_ISSUANCE_MAX_AGE_S - 1
+    before = _now()
+    resp = _poll(session, {"x-region-pings": f"us=100,eu=30;age={age}"})
+    after = _now()
+    assert resp.status == "ready_join" and resp.photon_region == "eu"
+    (_, params), = session.heartbeats
+    stamp = params["region_pings_at"]
+    assert before - timedelta(seconds=age) <= stamp <= after - timedelta(seconds=age)
+    assert session.rows[ME]["region_pings_at"] == stamp, "the row holds the bound stamp"
+    assert seen["p1_pings_at"] == stamp, "the chooser judged the bound stamp"
+    assert seen["p2_pings_at"] == fresh, "the opponent's stamp comes from its own row"
+
+
+def test_the_issuance_fake_refuses_a_header_heartbeat_that_lost_a_typed_bind(issuance):
+    fresh = _now() - timedelta(seconds=10)
+    recorder = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
+    _poll(recorder, {"x-region-pings": "us=42;age=1"})
+    real, params = recorder.heartbeats[0]
+    mutations = (
+        real.replace("CAST(:region_pings AS JSONB)", ":region_pings"),
+        real.replace("CAST(:region_pings_at AS TIMESTAMPTZ)", ":region_pings_at"),
+        real.replace("CAST(:region_pings_at AS TIMESTAMPTZ)", "NOW() - make_interval(secs => :region_pings_age)"),
+    )
+    session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, fresh, fresh), ME_STEAM)
+    # positive control: the unmutated statement passes and lands its stamp on the row
+    _run(session.execute(text(real), params))
+    assert session.rows[ME]["region_pings_at"] == params["region_pings_at"]
+    for mutated in mutations:
+        assert mutated != real
+        with pytest.raises(AssertionError, match="lost predicate"):
+            _run(session.execute(text(mutated), params))
+    naive = dict(params, region_pings_at=params["region_pings_at"].replace(tzinfo=None))
+    with pytest.raises(AssertionError, match="naive stamp"):
+        _run(session.execute(text(real), naive))
+
+
 def test_the_overlay_sits_between_the_header_heartbeat_and_the_chooser():
     src = inspect.getsource(main.queue_poll)
-    heartbeat = src.index("make_interval(secs => :region_pings_age)")
-    overlay = src.index('entry["region_pings_at"] = now - timedelta(seconds=_hdr_age)')
+    stamp = src.index("_hdr_stamp = now - timedelta(seconds=_hdr_age)")
+    heartbeat = src.index("CAST(:region_pings_at AS TIMESTAMPTZ)")
+    overlay = src.index('entry["region_pings_at"] = _hdr_stamp')
     chooser = src.index("chosen_region = _pick_room_region(")
-    assert heartbeat < overlay < chooser
+    assert stamp < heartbeat < overlay < chooser
     assert src.count('entry["region_pings"] = _hdr_pings') == 1
+    assert src.count("_hdr_stamp") == 3, "one stamp: computed, bound, overlaid"
 
 
 def test_queue_poll_parses_the_header_after_the_session_gate_and_before_any_statement():
@@ -607,7 +688,8 @@ def test_queue_poll_parses_the_header_after_the_session_gate_and_before_any_stat
     parse = src.index('_region_pings_from_header(request.headers.get("x-region-pings"))')
     first_stmt = src.index("await db.execute(")
     assert gate < parse < first_stmt
-    assert src.count("make_interval(secs => :region_pings_age)") == 1
+    assert src.count("CAST(:region_pings_at AS TIMESTAMPTZ)") == 1
+    assert "make_interval(secs => :region_pings_age)" not in src, "the poll's stamp is bound, not NOW()-derived (r2 M1)"
 
 
 def test_join_request_schema_accepts_the_fields_loosely():

@@ -14580,26 +14580,33 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
     # binds, #275/#448); the fragment is chosen in code, never by a NULL test
     # on a bound parameter (#448). A poll never NULLs the columns.
     if _hdr_pings is not None:
+        # Impl review r1 M1 (7/3-1): issuance in THIS request must see what the
+        # statement writes. `entry` is the snapshot taken under the locks
+        # BEFORE the heartbeat, so the chooser below would otherwise judge the
+        # map and stamp this poll replaces. Overlay the validated map and its
+        # stamp onto that snapshot rather than re-selecting: no extra
+        # statement, the lock set and order untouched. The opponent's map is
+        # read below, after this UPDATE, from its own row.
+        # Impl review r2 M1: the row and the snapshot take ONE stamp, computed
+        # here and bound typed. NOW() is the transaction's start time, taken
+        # at the discovery read before the ordered lock wait, while `now` was
+        # read after it; dating the row `NOW() - age` and the snapshot
+        # `now - age` left the lock wait between them, so near the window's
+        # edge the row could already be past it while the snapshot still read
+        # fresh. The chooser judges the window on its own clock a few ms
+        # after `now`; both clocks are aware UTC.
+        _hdr_stamp = now - timedelta(seconds=_hdr_age)
         await db.execute(
             text("""UPDATE ranked_queue
                        SET last_polled = NOW(),
                            region_pings = CAST(:region_pings AS JSONB),
-                           region_pings_at = NOW() - make_interval(secs => :region_pings_age)
+                           region_pings_at = CAST(:region_pings_at AS TIMESTAMPTZ)
                      WHERE player_id = :pid"""),
-            {"pid": my_pid, "region_pings": _hdr_pings, "region_pings_age": _hdr_age},
+            {"pid": my_pid, "region_pings": _hdr_pings, "region_pings_at": _hdr_stamp},
         )
-        # Impl review r1 M1 (7/3-1): issuance in THIS request must see what the
-        # statement just wrote. `entry` is the snapshot taken under the locks
-        # BEFORE the heartbeat, so the chooser below would otherwise judge the
-        # map and stamp this poll has just replaced. Overlay the validated map
-        # and its stamp onto that snapshot — the values the UPDATE bound, the
-        # stamp dated `now - age` as the statement dates the row (the chooser
-        # judges the window on its own clock a few ms later) — rather than
-        # re-selecting: no extra statement, the lock set and order untouched.
-        # The opponent's map is read below, after this UPDATE, from its own row.
         entry = dict(entry)
         entry["region_pings"] = _hdr_pings
-        entry["region_pings_at"] = now - timedelta(seconds=_hdr_age)
+        entry["region_pings_at"] = _hdr_stamp
     else:
         await db.execute(
             text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),

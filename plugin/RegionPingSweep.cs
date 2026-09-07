@@ -39,13 +39,16 @@ namespace CompetitiveRounds
     ///    is older than 5 min (serves the NEXT join — a join never waits on
     ///    pings). Never started while PUN's RegionHandler is pinging, and a
     ///    running sweep yields to it (the worker waits in 50 ms steps behind
-    ///    a flag the main thread mirrors every frame) — PUN's sample has
+    ///    a flag the main thread mirrors every frame; a round PUN interrupts
+    ///    is discarded and run again after the wait) — PUN's sample has
     ///    priority; ours never touches RegionHandler state. Aborted when a
     ///    room join begins or a live room appears.
     ///
     /// Publication is main-thread only: LastMap / LastCompletedAt / Revision.
     /// One log line per completion:
-    /// <c>[REGION-PINGS] n=&lt;targets&gt; ok=&lt;k&gt; ms=&lt;elapsed&gt; aborted=&lt;b&gt; map={us:42,...}</c>.</summary>
+    /// <c>[REGION-PINGS] n=&lt;targets&gt; ok=&lt;k&gt; ms=&lt;elapsed&gt; aborted=&lt;b&gt; map={us:42,...}</c>,
+    /// carrying <c>deadline=true</c>, <c>err=</c>, <c>errs=</c>, <c>rev=</c> and
+    /// <c>yielded_ms=</c> (time waited for PUN's pinging) only when they apply.</summary>
     internal static class RegionPingSweep
     {
         // ── published results (main thread only) ──
@@ -405,18 +408,20 @@ namespace CompetitiveRounds
                 Revision++;
                 sb.Append(" rev=").Append(Revision);
             }
-            Plugin.Log?.LogInfo(sb.ToString());
             int yielded = s.YieldedMs;
-            if (yielded > 0) Plugin.Log?.LogInfo($"[REGION-PINGS] yielded to PUN pinging for {yielded} ms");
+            if (yielded > 0) sb.Append(" yielded_ms=").Append(yielded);
+            Plugin.Log?.LogInfo(sb.ToString());
         }
 
         // ── the sweep thread ──
 
         /// <summary>Resolves every host (cached), then runs all targets'
         /// attempts concurrently, yielding to PUN's own region ping before each
-        /// target (impl r1 M3). Writes only into the sweep's own boxes; every
-        /// box is marked Done in <c>finally</c>, so an exception can never
-        /// strand the main-thread poll.</summary>
+        /// resolve and each send, and at every step of a round's reply window —
+        /// a round PUN interrupts is discarded and run again (impl r1/r2 M3).
+        /// Writes only into the sweep's own boxes; every box is marked Done in
+        /// <c>finally</c>, so an exception can never strand the main-thread
+        /// poll.</summary>
         static void Worker(Sweep s)
         {
             var sw = Stopwatch.StartNew();
@@ -445,9 +450,18 @@ namespace CompetitiveRounds
                 var pings = new RegionPing[n];
                 var startedAt = new long[n];
                 var settled = new bool[n];
-                for (int round = 0; round < ATTEMPTS && !s.Abort; round++)
+                var successesAtStart = new int[n];   // the boxes as a round begins; restored when PUN interrupts it
+                var minMsAtStart = new int[n];
+                int round = 0;
+                while (round < ATTEMPTS && !s.Abort)
                 {
                     int pending = 0;
+                    bool interrupted = false;
+                    for (int i = 0; i < n; i++)
+                    {
+                        successesAtStart[i] = boxes[i].Successes;
+                        minMsAtStart[i] = boxes[i].MinMs;
+                    }
                     for (int i = 0; i < n; i++)
                     {
                         if (punPinging)
@@ -485,6 +499,15 @@ namespace CompetitiveRounds
                     while (pending > 0 && !s.Abort && sw.ElapsedMilliseconds < windowEnd)
                     {
                         Thread.Sleep(POLL_MS);
+                        if (punPinging)
+                        {
+                            // M3 (impl r2): PUN's own ping began while this round's
+                            // replies were still due — its sample and ours would share
+                            // the wire. Stop reading replies; the round is discarded
+                            // and run again after the yield below.
+                            interrupted = true;
+                            break;
+                        }
                         for (int i = 0; i < n; i++)
                         {
                             var p = pings[i];
@@ -505,7 +528,23 @@ namespace CompetitiveRounds
                         }
                     }
                     DisposeRound(pings);
-                    if (round < ATTEMPTS - 1 && !s.Abort) Thread.Sleep(BETWEEN_ROUNDS_MS);
+                    if (interrupted)
+                    {
+                        // Discard the round's samples: the boxes go back to what they
+                        // held as the round began (replies read before the flag was
+                        // seen included), then wait PUN out and run the same round
+                        // again. Abort (the 8 s deadline, a room join) ends the wait
+                        // and the loop at its guard.
+                        for (int i = 0; i < n; i++)
+                        {
+                            boxes[i].Successes = successesAtStart[i];
+                            boxes[i].MinMs = minMsAtStart[i];
+                        }
+                        YieldToPun(s);
+                        continue;
+                    }
+                    round++;
+                    if (round < ATTEMPTS && !s.Abort) Thread.Sleep(BETWEEN_ROUNDS_MS);
                 }
             }
             catch (Exception ex)
