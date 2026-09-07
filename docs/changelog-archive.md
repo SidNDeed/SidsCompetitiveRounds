@@ -2,6 +2,23 @@
 
 Prior sessions' "Completed This Session" entries. Newest dated heading on top. See `docs/CHANGELOG.md` for the version-oriented record; this file is organized by when the work was done, not by what version carried it.
 
+## Archived 2026-09-07 (from TODO.md — Sept 6 triage batch close-out, completed-this-session list)
+
+### ✅ Completed This Session (2026-09-07) — Sept 6 triage batch close-out
+
+- Item c (session report) r2: migration 299 tie rule, byte bound enforced at
+  the serialisation boundary, measured card heights, pins (`6484aa8`).
+- Item b (in-game mail): r1 repairs finished by a second agent and merged
+  (`80b48b4`); Codex r2 NO-GO -> all repaired (`5ed82d0`); Codex r3
+  GO-WITH-CHANGES -> two MEDIUMs repaired (`31fcf30`: migration 300 table
+  lock, deletion-ledger refusal in the identity lattice), ladder CLOSED.
+- i18n: extractor scope +8 files, 2671 keys, generated key file, new scope
+  gate (`4664c8a`, `52bb6df`). Route manifest rebaselined three times.
+- Seat cycle + drop published from `8728bca`; log clean, mail self-test PASS.
+- Learnings #550-#557. Bug comment on 346. `deploy-notes.md` written.
+- Templates fixed at the source of a 2-hour hang: `codex exec` now `< /dev/null`
+  in the global CLAUDE.md and `scripts/lore/core.md`.
+
 ## Archived 2026-07-29 (from TODO.md — previous session status, superseded)
 
 ## 🟢 v1.34.4 — SHIPPED 2026-07-26 ✅ (GitHub release + cosmetics.zip; backend + bot live; migration 150 applied; **HTTPS now live**)
