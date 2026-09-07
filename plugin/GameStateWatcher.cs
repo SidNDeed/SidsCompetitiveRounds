@@ -304,6 +304,16 @@ namespace CompetitiveRounds
         // Room info
         private static string photonRoomId = "";
         private static string photonRegion = "";
+        // Sept 6 batch (Group 4 item c): reporter-minted opaque id for THIS room
+        // occupancy. Minted at the room-join edge (the poll below AND the reliable
+        // Photon OnJoinedRoom callback — whichever lands later wins, both precede
+        // any game), cleared by OnLeftRoom / OnDisconnected. Rides the 1v1 match
+        // report as the OPTIONAL `session_uuid` field, outside the frozen 7-field
+        // HMAC canonical; the server groups a casual sitting by it (migration 298).
+        // Never derived from the room name, never published anywhere else.
+        public static string SessionUuid { get; private set; }
+        internal static void MintSessionUuid() { SessionUuid = Guid.NewGuid().ToString("D"); }
+        internal static void ClearSessionUuid() { SessionUuid = null; }
         // The Photon master publishes one token per game. Both clients then
         // build the same durable report ID even when their local clocks cross
         // a second boundary at match start.
@@ -3175,6 +3185,7 @@ namespace CompetitiveRounds
                 photonRoomId = PhotonNetwork.CurrentRoom?.Name ?? "";
                 photonRegion = PhotonNetwork.CloudRegion ?? "";
                 roomJoinTime = DateTime.UtcNow;
+                MintSessionUuid();   // Sept 6 item c: one opaque id per room occupancy
                 // Spectate attest edge state is ROOM-scoped (design-review
                 // find 14: joining room B <60s after leaving room A while
                 // both battles were live produced no false->true edge, so B's
@@ -5992,7 +6003,9 @@ namespace CompetitiveRounds
                     // Positional by SLOT, not viewer-relative. Either may be
                     // null ("not recorded"), which ApiClient omits entirely.
                     p1EndStats: EndStatsFor(p1SteamId),
-                    p2EndStats: EndStatsFor(p2SteamId)
+                    p2EndStats: EndStatsFor(p2SteamId),
+                    // Sept 6 item c: opaque room-occupancy id, outside the HMAC canonical.
+                    sessionUuid: SessionUuid
                 );
             }
 

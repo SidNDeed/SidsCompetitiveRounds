@@ -4101,6 +4101,7 @@ namespace CompetitiveRounds
             // statement, so an in-flight response can never bind to the next
             // room. Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
+            try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
             // OnLeftRoom must still close the room/game telemetry — first
             // statement, before any early return below. Idempotent: with no
@@ -4137,6 +4138,9 @@ namespace CompetitiveRounds
             // Bug 235 diagnostics bind to the reliable Photon room edge so a
             // fast leave+rejoin cannot merge two sittings' counters/budgets.
             try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }
+            // Sept 6 item c: the reliable join edge mints the session id too (the
+            // poll can miss a leave+join inside one tick); no game precedes either.
+            try { GameStateWatcher.MintSessionUuid(); } catch { }
             // The music probe's private source must not survive a room entry.
             // Its own tick asks the same question, but a join can land after
             // that tick has already read "menu", so the reliable Photon edge is
@@ -4723,6 +4727,7 @@ namespace CompetitiveRounds
             // Release B §1: the head-to-head line dies with the room — first
             // statement (same reason as OnDisconnected). Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
+            try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
             // A teardown window is bound to the room it was opened in. Without
             // this a seat that leaves between the round call-in and the call-in
             // of new players carries the open window across the room boundary

@@ -287,7 +287,9 @@ namespace CompetitiveRounds
             // backdrop-less, so a click outside their box would otherwise reach
             // the very rows they exist to guard.
             || SpectatorHud.MenuOpen
-            || confirmOpen;
+            || confirmOpen
+            // Sept 6 item c: the full-screen IMGUI session report over the F5 page.
+            || SessionReportView.Active;
 
         // AnyModalOwnsInput — the above PLUS every modal that raises its own
         // uGUI backdrop. A backdrop absorbs EventSystem clicks; NOTHING absorbs
@@ -367,6 +369,7 @@ namespace CompetitiveRounds
             DrawCardHoverTooltip();
             DrawScoreHoverGraph();
             DrawFpsHoverGraph();
+            SessionReportView.Draw();   // Sept 6 item c: above the F5 hover popups, below the search overlays
             DrawCompareSearch();
             DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
             DrawLeaderboardSearch();
@@ -1970,7 +1973,7 @@ namespace CompetitiveRounds
         }
 
         // Rotated-texture line segment — IMGUI has no native line primitive.
-        private static void GuiLine(Vector2 a, Vector2 b, Color color, float width)
+        internal static void GuiLine(Vector2 a, Vector2 b, Color color, float width)
         {
             var prev = GUI.color;
             GUI.color = color;
