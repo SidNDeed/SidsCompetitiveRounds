@@ -105,6 +105,9 @@ def _window(eng, limit=None):
 
 def test_1v1_window_is_the_newest_500_in_ascending_order():
     hist, statements = _window(_history_engine(600))
+    # the window and the plot order break period_end ties on created_at then id
+    assert "created_at DESC" in statements[0] and "id DESC" in statements[0]
+    assert "created_at ASC" in statements[0] and "id ASC" in statements[0]
     assert len(hist) == WINDOW
     assert [h["rating"] for h in hist] == [1000 + i for i in range(100, 600)]
     dates = [h["period_end"] for h in hist]
@@ -120,7 +123,7 @@ def test_1v1_window_is_the_newest_500_in_ascending_order():
     sql = statements[0]
     assert "ORDER BY rating_history.period_end DESC" in sql
     assert " LIMIT " in sql
-    assert sql.rstrip().endswith("ORDER BY newest.period_end ASC")
+    assert sql.rstrip().endswith("ORDER BY newest.period_end ASC, newest.created_at ASC, newest.id ASC")
 
 
 def test_1v1_window_short_history_returns_every_row():
@@ -167,20 +170,26 @@ def _ffa_engine(n_ranked: int):
             "is_ranked BOOLEAN NOT NULL, invalidated_at TEXT)"))
         conn.execute(text(
             "CREATE TABLE ffa_match_players (match_id TEXT NOT NULL, player_id TEXT NOT NULL, "
-            "rating_after REAL, absent BOOLEAN NOT NULL DEFAULT 0)"))
+            "rating_after REAL, rating_before REAL, absent BOOLEAN NOT NULL DEFAULT 0)"))
 
-        def game(i, *, ranked=True, invalidated=None, absent=False, rating=None, player=PLAYER):
+        def game(i, *, ranked=True, invalidated=None, absent=False, rating=None, player=PLAYER,
+                 before="auto"):
+            # rating_before mirrors the settlement: the pre-update value, 5 below the
+            # result here so a test can tell the two apart; None = a NULL column.
+            if before == "auto":
+                before = None if rating is None else rating - 5.0
             mid = str(uuid.uuid4())
             conn.execute(text("INSERT INTO ffa_matches VALUES (:id, :c, :r, :inv)"),
                          {"id": mid, "c": (BASE + timedelta(hours=i)).isoformat(),
                           "r": ranked, "inv": invalidated})
-            conn.execute(text("INSERT INTO ffa_match_players VALUES (:m, :p, :ra, :ab)"),
-                         {"m": mid, "p": str(player), "ra": rating, "ab": absent})
+            conn.execute(text("INSERT INTO ffa_match_players VALUES (:m, :p, :ra, :rb, :ab)"),
+                         {"m": mid, "p": str(player), "ra": rating, "rb": before, "ab": absent})
 
         order = list(range(n_ranked))
         random.Random(7).shuffle(order)
         for i in order:
-            game(i, rating=1500.0 + i)
+            # one in-window row with a NULL rating_before: the key must simply be absent
+            game(i, rating=1500.0 + i, before=None if i == 350 else "auto")
         # Every excluded class sits at the NEWEST end, where a leaky filter would
         # surface it inside the window.
         game(n_ranked + 1, ranked=False, rating=None)                    # casual: rating_after NULL
@@ -204,19 +213,27 @@ def test_ffa_window_is_the_newest_500_rated_games_ascending_with_every_filter_ke
     assert [h["rating"] for h in hist] == [1500.0 + i for i in range(100, 600)]
     stamps = [h["period_end"] for h in hist]
     assert stamps == sorted(stamps)
-    assert all(set(h) == {"rating", "recorded_at", "date", "period_end"} for h in hist)
+    # review f-M1: the FFA row snapshots the pre-update rating, so it rides along;
+    # a NULL column leaves the key out rather than sending null
+    assert all(set(h) == {"rating", "rating_before", "recorded_at", "date", "period_end"}
+               for h in hist if h["rating"] != 1850.0)
+    assert all(h["rating_before"] == h["rating"] - 5.0 for h in hist if "rating_before" in h)
+    null_row = [h for h in hist if h["rating"] == 1850.0]
+    assert len(null_row) == 1 and "rating_before" not in null_row[0]
+    assert hist[0]["rating_before"] == 1595.0          # the window's first drawn point (F-L)
     assert all(h["recorded_at"] == h["date"] == h["period_end"] for h in hist)
     assert all(h["rating"] < 9000 for h in hist)      # none of the excluded classes leaked
     sql = statements[0]
     for predicate in ("fm.is_ranked IS TRUE", "fm.invalidated_at IS NULL",
-                      "NOT fmp.absent", "fmp.rating_after IS NOT NULL",
-                      "ORDER BY fm.created_at DESC", "ORDER BY created_at ASC"):
+                      "NOT fmp.absent", "fmp.rating_after IS NOT NULL", "fmp.rating_before",
+                      "ORDER BY fm.created_at DESC, fm.id DESC", "ORDER BY created_at ASC, match_id ASC"):
         assert predicate in sql, f"FFA window lost: {predicate}"
 
 
 def test_ffa_window_short_history_returns_every_rated_row():
     hist, _ = _ffa_window(_ffa_engine(3))
     assert [h["rating"] for h in hist] == [1500.0, 1501.0, 1502.0]
+    assert [h["rating_before"] for h in hist] == [1495.0, 1496.0, 1497.0]
 
 
 # ── the handlers are pinned to the helpers (no second copy of the query) ─────

@@ -9164,16 +9164,20 @@ async def _rating_history_window(db: AsyncSession, player_id, limit: int = RATIN
     carries no pre-update rating (rating / rd / volatility / period_end only),
     so a plotter's first drawn point is the first row's rating — no baseline
     is invented server-side either."""
+    # created_at / id break period_end ties deterministically (review f residual):
+    # two rows written in one period must land on the same side of the window
+    # boundary on every read, and plot in the same order.
     newest = (
-        select(RatingHistory.rating, RatingHistory.rating_deviation, RatingHistory.period_end)
+        select(RatingHistory.rating, RatingHistory.rating_deviation, RatingHistory.period_end,
+               RatingHistory.created_at, RatingHistory.id)
         .where(RatingHistory.player_id == player_id)
-        .order_by(RatingHistory.period_end.desc())
+        .order_by(RatingHistory.period_end.desc(), RatingHistory.created_at.desc(), RatingHistory.id.desc())
         .limit(limit)
         .subquery("newest")
     )
     rows = (await db.execute(
         select(newest.c.rating, newest.c.rating_deviation, newest.c.period_end)
-        .order_by(newest.c.period_end.asc())
+        .order_by(newest.c.period_end.asc(), newest.c.created_at.asc(), newest.c.id.asc())
     )).all()
     return [
         {
@@ -9199,10 +9203,17 @@ async def _ffa_rating_history_window(db: AsyncSession, player_id, limit: int = R
     Each entry carries the timestamp under THREE keys on purpose. The frozen
     contract names the field 'recorded_at'; the 1v1 parser the client shares
     reads 'date'; 'period_end' is the Sept 6 name both clients try first.
-    The split-on-"rating" client parser is unaffected by the extra keys."""
+
+    Unlike rating_history, the FFA row DOES snapshot the pre-update rating
+    (fmp.rating_before, written by the settlement beside rating_after), so
+    it rides along as `rating_before` when present (review f-M1): the plotters'
+    first drawn point is then the value the player really held before the
+    window's first game, not that game's result. The key is omitted when the
+    column is NULL rather than sent as null. fm.id breaks created_at ties so
+    the window boundary and the plot order are the same on every read."""
     rows = (await db.execute(text("""
         WITH newest AS (
-            SELECT fmp.rating_after, fm.created_at
+            SELECT fmp.rating_after, fmp.rating_before, fm.created_at, fm.id AS match_id
               FROM ffa_match_players fmp
               JOIN ffa_matches fm ON fm.id = fmp.match_id
              WHERE fmp.player_id = :pid
@@ -9210,20 +9221,23 @@ async def _ffa_rating_history_window(db: AsyncSession, player_id, limit: int = R
                AND fm.invalidated_at IS NULL
                AND NOT fmp.absent
                AND fmp.rating_after IS NOT NULL
-             ORDER BY fm.created_at DESC
+             ORDER BY fm.created_at DESC, fm.id DESC
              LIMIT CAST(:lim AS INTEGER)
         )
-        SELECT rating_after, created_at FROM newest ORDER BY created_at ASC
+        SELECT rating_after, rating_before, created_at FROM newest ORDER BY created_at ASC, match_id ASC
     """), {"pid": player_id, "lim": int(limit)})).mappings().all()
-    return [
-        {
+    out = []
+    for r in rows:
+        entry = {
             "rating": round(float(r["rating_after"]), 1),
             "recorded_at": r["created_at"].isoformat(),
             "date": r["created_at"].isoformat(),
             "period_end": r["created_at"].isoformat(),
         }
-        for r in rows
-    ]
+        if r["rating_before"] is not None:
+            entry["rating_before"] = round(float(r["rating_before"]), 1)
+        out.append(entry)
+    return out
 
 
 @app.get("/api/v1/players/{steam_id}/rating-history", tags=["Players"])

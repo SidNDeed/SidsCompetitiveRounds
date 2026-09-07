@@ -209,6 +209,7 @@ namespace CompetitiveRounds
                 var tmp = UIFactory.CreateText("L" + i, go.transform, "", FontSize, Color.white,
                                                UIFactory.AlignTopLeft, new Vector2(PanelW, 20f), true, false);
                 UIFactory.SetWordWrap(tmp, true);
+                try { EmojiSprites.Attach(tmp); } catch { }   // 333 step 2: colour emoji sprites on this label (no-op until the atlas is live)
                 var rt = ((Component)tmp).GetComponent<RectTransform>();
                 rt.anchorMin = rt.anchorMax = Vector2.zero;
                 rt.pivot = Vector2.zero;
@@ -232,7 +233,10 @@ namespace CompetitiveRounds
             // translation-pack update re-measures instead of reusing the
             // previous language's cut.
             string suffix = " ... " + I18n.Tr("[see F5]");
-            string cacheKey = suffix + "\u0001" + line;
+            // 333 step 2: the fitted string also embeds the emoji substitution, so the
+            // atlas generation is part of the key -- an atlas arriving mid-session
+            // re-measures instead of reusing a monochrome cut.
+            string cacheKey = suffix + "\u0001" + EmojiSprites.Generation + "\u0001" + line;
             Fit cached;
             if (fitCache.TryGetValue(cacheKey, out cached)) return cached;
             if (fitCache.Count > 256) fitCache.Clear();
@@ -265,6 +269,10 @@ namespace CompetitiveRounds
                 // rather than append a false indicator to an uncut line.
             }
             if (fit.H <= 0f) fit.H = singleLineH;
+            // 333 step 2: substitute AFTER the cut, so minCut (LastIndexOf('>')) never
+            // lands inside a sprite tag and the cut never splits one; sprites keep the
+            // font's line metrics, so the measured height stands.
+            try { fit.Disp = EmojiSprites.Substitute(fit.Disp); } catch { }
             fitCache[cacheKey] = fit;
             return fit;
         }

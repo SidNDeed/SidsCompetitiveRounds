@@ -101,21 +101,34 @@ namespace CompetitiveRounds
             if (maxPoints >= 2 && n > maxPoints)
             {
                 r = new float[maxPoints];
-                if (timeAxis) t = new float[maxPoints];
-                for (int b = 0; b < maxPoints; b++)
+                if (timeAxis)
                 {
-                    int s = (int)((long)b * n / maxPoints);
-                    int e = (int)((long)(b + 1) * n / maxPoints);
-                    if (e <= s) e = s + 1;
-                    if (e > n) e = n;
-                    if (timeAxis)
+                    // Decimate, keeping the FIRST fetched row verbatim (review f-M2): it
+                    // is the baseline the design names and the since-first day zero.
+                    // The remaining rows fall into maxPoints-1 buckets and each bucket
+                    // keeps its newest row -- a value the player really held (the last
+                    // bucket ends at the newest row, so the current rating survives too).
+                    t = new float[maxPoints];
+                    r[0] = ratings[0]; t[0] = times[0];
+                    int rest = n - 1, buckets = maxPoints - 1;
+                    for (int b = 0; b < buckets; b++)
                     {
-                        // Decimate: the bucket's newest row, a value the player really held.
-                        r[b] = ratings[e - 1];
-                        t[b] = times[e - 1];
+                        int s = 1 + (int)((long)b * rest / buckets);
+                        int e = 1 + (int)((long)(b + 1) * rest / buckets);
+                        if (e <= s) e = s + 1;
+                        if (e > n) e = n;
+                        r[b + 1] = ratings[e - 1];
+                        t[b + 1] = times[e - 1];
                     }
-                    else
+                }
+                else
+                {
+                    for (int b = 0; b < maxPoints; b++)
                     {
+                        int s = (int)((long)b * n / maxPoints);
+                        int e = (int)((long)(b + 1) * n / maxPoints);
+                        if (e <= s) e = s + 1;
+                        if (e > n) e = n;
                         // Average: the profile graph's long-standing density rule.
                         float sr = 0f; int cnt = 0;
                         for (int i = s; i < e; i++) { sr += ratings[i]; cnt++; }

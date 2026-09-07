@@ -176,3 +176,26 @@ def test_graph_command_axis_option_defaults_to_calendar_and_is_last():
     # F-L: no invented baseline VALUE anywhere on the elo path.
     for fn in (callback, bot._history_to_points, bot._rating_axis_points):
         assert 1500 not in _numeric_constants(inspect.getsource(fn)), fn.__name__
+
+
+# ── Discord schema limits (review f-H1) ───────────────────────────────────────
+
+def test_every_slash_command_and_option_description_fits_discord_limits():
+    """Discord caps a command or option description at 100 characters. One
+    over-long description fails the WHOLE tree sync, so every slash command
+    silently keeps its previous schema -- the new option never appears. Walk
+    the real tree the bot would sync, options included."""
+    limit = 100
+    options = 0
+    for cmd in bot.bot.tree.walk_commands():
+        assert 1 <= len(cmd.description) <= limit, (cmd.qualified_name, len(cmd.description))
+        for p in getattr(cmd, "parameters", []):
+            options += 1
+            assert 1 <= len(p.description) <= limit, (cmd.qualified_name, p.name, len(p.description))
+    assert options >= 10, options                     # the walk reached real options
+    graph = bot.bot.tree.get_command("graph")
+    assert graph is not None and "axis" in {p.name for p in graph.parameters}
+    # negative control: the wording the review caught is what this test rejects
+    long_desc = ("Elo chart x axis: calendar (default), updates (one per completed ranked "
+                 "series), since_first (days since each player's first plotted update)")
+    assert len(long_desc) > limit

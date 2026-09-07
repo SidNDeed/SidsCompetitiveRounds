@@ -5558,7 +5558,9 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
 @app_commands.describe(player1="First player", player2="Second player",
                        metric="Which Compare-tab metric to chart (default: elo history)",
                        player3="Optional third player", player4="Optional fourth player",
-                       axis="Elo chart x axis: calendar (default), updates (one per completed ranked series), since_first (days since each player's first plotted update)")
+                       # Discord caps an option description at 100 characters (review f-H1):
+                       # the longer wording would fail the whole tree sync and drop the option.
+                       axis="Elo chart x axis: calendar (default), updates (per ranked series), since_first (days since first)")
 async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
                     metric: _GraphMetric = "elo",
                     player3: discord.Member = None, player4: discord.Member = None,

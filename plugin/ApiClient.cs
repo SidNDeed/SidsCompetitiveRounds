@@ -7385,62 +7385,66 @@ namespace CompetitiveRounds
         {
             try
             {
-                int rhStart = response.IndexOf($"\"{jsonKey}\"");
-                if (rhStart >= 0)
+                // Review f-M3: the array is located by a string-aware KEY match (a display
+                // name that contains the key text, or a bracket inside a string value,
+                // must not derail it) and its row OBJECTS are walked with the brace
+                // matcher -- never by splitting the whole array on the text "rating".
+                int arrStart = FindJsonArrayStartStringAware(response, jsonKey);
+                if (arrStart < 0) return;
+                int arrEnd = FindMatchingBracketStringAware(response, arrStart);
+                if (arrEnd <= arrStart) return;
+                string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
+                var epoch = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                float lastT = 0f;
+                bool first = true;
+                int pos = 1;
+                while (pos < arr.Length)
                 {
-                    int arrStart = response.IndexOf("[", rhStart);
-                    int arrEnd = FindMatchingBracket(response, arrStart);
-                    if (arrStart >= 0 && arrEnd >= 0)
+                    int objStart = arr.IndexOf('{', pos);
+                    if (objStart < 0) break;
+                    int objEnd = FindMatchingBraceStringAware(arr, objStart);
+                    if (objEnd <= objStart) break;
+                    string obj = arr.Substring(objStart, objEnd - objStart + 1);
+                    pos = objEnd + 1;
+                    if (obj.IndexOf("\"rating\":", StringComparison.Ordinal) < 0) continue;
+                    float val = ExtractJsonFloat(obj, "rating");
+                    // Snapshot date → fractional days since 2020-01-01 (the calendar /
+                    // since-first x axes). Missing/bad date → nudge past the previous
+                    // point so the lists stay parallel.
+                    float t = lastT + 0.01f;
+                    try
                     {
-                        string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
-                        if (arr != "[]")
+                        // Sept 6 servers name the timestamp "period_end" on both series
+                        // (the column's own name). Older rows key it "date" (1v1) or
+                        // "recorded_at" + "date" (FFA); newest name first, then the
+                        // aliases, so a server that drops an alias still plots.
+                        string ds = ExtractJsonString(obj, "period_end");
+                        if (string.IsNullOrEmpty(ds)) ds = ExtractJsonString(obj, "recorded_at");
+                        if (string.IsNullOrEmpty(ds)) ds = ExtractJsonString(obj, "date");
+                        if (!string.IsNullOrEmpty(ds))
                         {
-                            var epoch = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-                            float lastT = 0f;
-                            var parts = arr.Split(new[] { "\"rating\"" }, StringSplitOptions.None);
-                            for (int i = 1; i < parts.Length; i++)
-                            {
-                                // extract number after ":"
-                                int colonIdx = parts[i].IndexOf(':');
-                                if (colonIdx >= 0)
-                                {
-                                    int vStart = colonIdx + 1;
-                                    while (vStart < parts[i].Length && parts[i][vStart] == ' ') vStart++;
-                                    int vEnd = vStart;
-                                    while (vEnd < parts[i].Length && (char.IsDigit(parts[i][vEnd]) || parts[i][vEnd] == '.' || parts[i][vEnd] == '-')) vEnd++;
-                                    if (vEnd > vStart)
-                                    {
-                                        float val = float.Parse(parts[i].Substring(vStart, vEnd - vStart), System.Globalization.CultureInfo.InvariantCulture);
-                                        ratings.Add(val);
-                                        // Snapshot date → fractional days since 2020-01-01 (the
-                                        // calendar / since-first x axes). Missing/bad date → nudge
-                                        // past the previous point so the lists stay parallel.
-                                        float t = lastT + 0.01f;
-                                        try
-                                        {
-                                            // Sept 6 servers name the timestamp "period_end" on
-                                            // both series (the column's own name). Older rows key
-                                            // it "date" (1v1) or "recorded_at" + "date" (FFA); try
-                                            // the newest name first, then the aliases, so a server
-                                            // that drops an alias still plots.
-                                            string ds = ExtractJsonString(parts[i], "period_end");
-                                            if (string.IsNullOrEmpty(ds)) ds = ExtractJsonString(parts[i], "recorded_at");
-                                            if (string.IsNullOrEmpty(ds)) ds = ExtractJsonString(parts[i], "date");
-                                            if (!string.IsNullOrEmpty(ds))
-                                            {
-                                                var dt = DateTime.Parse(ds, System.Globalization.CultureInfo.InvariantCulture,
-                                                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
-                                                t = (float)(dt - epoch).TotalDays;
-                                            }
-                                        }
-                                        catch { }
-                                        lastT = t;
-                                        times.Add(t);
-                                    }
-                                }
-                            }
+                            var dt = DateTime.Parse(ds, System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+                            t = (float)(dt - epoch).TotalDays;
                         }
                     }
+                    catch { }
+                    if (first)
+                    {
+                        // Design F-L: when the first fetched row carries the pre-update
+                        // rating (FFA game rows do; rating_history rows do not), that value
+                        // is the first drawn point, held at the row's own timestamp before
+                        // the jump -- the same rule the bot's _rating_axis_points applies.
+                        if (obj.IndexOf("\"rating_before\":", StringComparison.Ordinal) >= 0)
+                        {
+                            float before = ExtractJsonFloat(obj, "rating_before");
+                            if (before > 0f) { ratings.Add(before); times.Add(t); }
+                        }
+                        first = false;
+                    }
+                    lastT = t;
+                    ratings.Add(val);
+                    times.Add(t);
                 }
             }
             catch { }
