@@ -2263,8 +2263,9 @@ namespace CompetitiveRounds
             // lag-332 W6-A verification: "16:click:prepare:<process nonce>[:<tag>]"
             // runs ONE Music-tab preparation click (r4 cut: transport actions are
             // not lever-driven) through the same callback path a real click uses —
-            // the engine's menu-admission snapshot still gates any decode. Tab 16
-            // only; the nonce is logged once at startup; a value present at
+            // the engine's menu-admission snapshot still gates any decode. Music
+            // popup only (Sept 7 item 1; "16", the former tab number, stays the
+            // directive's selector); the nonce is logged once at startup; a value present at
             // startup is the baseline and never replays.
             // Broadcast seat only, like every lever here: synthetic mouse input
             // cannot reach the overlay (#420), so this is how the seat proves
@@ -2272,7 +2273,7 @@ namespace CompetitiveRounds
             string musicClick = null;
             if (idx == 16 && parts.Length > 2 && string.Equals(parts[1].Trim(), "click", StringComparison.OrdinalIgnoreCase))
             {
-                // r5 LOW 11: a Music click replays only on the Music tab (16) — the
+                // r5 LOW 11: a Music click replays only while the Music popup is open — the
                 // Shop's real Preview callback is the only other decode path.
                 // r6 LOW 9: exact token, and a pre-start value never replays.
                 if (string.Equals(raw, _testLeverBaseline, StringComparison.Ordinal))
@@ -2314,9 +2315,9 @@ namespace CompetitiveRounds
                 }
                 Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' not applied: {refuse}");
                 bool onMusicTab = false;
-                try { onMusicTab = NativeUI.IsOpen && NativeUI.CurrentTab == 16; } catch { }
-                if (onMusicTab) return;   // page already there; nothing else to do
-                // fall through: open the Music tab so a re-issued directive can run
+                try { onMusicTab = NativeUI.IsOpen && NativeUI.UtilityPopupIs(NativeUI.UtilKind.Music); } catch { }
+                if (onMusicTab) return;   // popup already open; nothing else to do
+                // fall through: open the Music popup so a re-issued directive can run
             }
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
@@ -2327,7 +2328,7 @@ namespace CompetitiveRounds
         /// its OWN checks pass. Read at the instant of the call — there is no
         /// armed state to bind, so no transition can slip between the check and
         /// the click. This is a coarse operator-facing filter, not the admission:
-        /// it looks at the page (open on the Music tab, which the engine's
+        /// it looks at the page (open with the Music popup up, which the engine's
         /// admission wants on the preceding frames), any room, the director's
         /// acquisition, a local spectator session and an unsettled spectator
         /// join. It does NOT look at public WATCH grants or the Steam-lobby
@@ -2340,8 +2341,8 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 16)
-                    return "the page is not open on the Music tab (opening it now - re-issue the directive with the same nonce and a different 5th-field tag once it is)";
+                if (!NativeUI.IsOpen || !NativeUI.UtilityPopupIs(NativeUI.UtilKind.Music))
+                    return "the Music popup is not open (opening it now - re-issue the directive with the same nonce and a different 5th-field tag once it is)";
                 if (PhotonNetwork.InRoom) return "the seat is inside a room";
                 if (BroadcastMode.AcquisitionBusy) return "a spectator acquisition is in progress";
                 if (SpectatorSession.IsLocalSpectator) return "the seat is a spectator";

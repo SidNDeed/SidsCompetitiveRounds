@@ -303,12 +303,19 @@ namespace CompetitiveRounds
         // hotkey surfaces gated by this property, so including it would make
         // DrawChatInput's guard close the popup that DrawQuickChat is drawing.
         // Each consumer ORs it in explicitly where it means "a modal is up".
-        private static bool AnyModalOwnsInput =>
+        //
+        // Sept 7 item 1: the utility popup (Mail / Music, its own uGUI backdrop)
+        // joins here — ONE term that covers ModalBlockInput and the three hotkey
+        // guards. OtherModalOwnsInput is the same set WITHOUT the popup's own
+        // term: NativeUI.OpenUtilityPopup refuses while it is true, so a modal
+        // raised elsewhere never sits under a popup.
+        internal static bool OtherModalOwnsInput =>
                BackdroplessModalOpen
             || NativeUI.InfoPopupOpen || NativeUI.TournBetsPopupOpen
             || NativeUI.RecentTournPopupOpen
             || NativeUI.PickerOpen || NativeUI.LangPromptOpen
             || !Plugin.DataConsentAsked;
+        private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
         /// <summary>Called from OnGUI. FPS + notifications + match status. The server-down
         /// banner moved to the F5 menu (NativeUI.RefreshServerBanner) — it was constantly
@@ -414,6 +421,10 @@ namespace CompetitiveRounds
             // ClickHandler polling Input.GetMouseButtonDown itself (#141/#200).
             // Adding them to anyModal instead would double-blocker them.
             ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen || danceWheelOpen;
+            // Sept 7 item 1 (contract 7 / 1-1a): a backdropless modal is topmost
+            // by definition, so while one is up every popup's bypass handlers
+            // are inert as well. Single writer, beside ModalBlockInput's.
+            ClickHandler.BypassSuspended = BackdroplessModalOpen;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -4200,6 +4211,29 @@ namespace CompetitiveRounds
             confirmMessage = message ?? "Are you sure?";
             confirmOnYes = onYes;
             confirmOpen = true;
+        }
+
+        /// <summary>Sept 7 item 1 — read-only views for MailUI and NativeUI's
+        /// utility popup: the composer yields under a confirm (contract 7 /
+        /// 1-1b); the popup's backdrop self-vetoes while a prompt is up.</summary>
+        public static bool ConfirmOpen => confirmOpen;
+        public static bool PromptOpen => confirmOpen || playerSearchOpen;
+        /// <summary>MailUI.OnPopupClosed: the resets DrawConfirm / DrawPlayerSearch
+        /// perform when the page is not open, callable. The callback reference
+        /// is nulled with the flag, so a cancelled prompt cannot fire later.</summary>
+        public static void CancelPrompts()
+        {
+            confirmOpen = false; confirmOnYes = null;
+            playerSearchOpen = false; playerSearchOnPick = null;
+        }
+        /// <summary>NativeUI.Tick, Escape with a utility popup open: a confirm
+        /// answers No, the recipient picker cancels; true when one was consumed.
+        /// Runs in Update, before the IMGUI draw would see the same press.</summary>
+        public static bool ConsumePromptEscape()
+        {
+            if (confirmOpen) { confirmOpen = false; confirmOnYes = null; return true; }
+            if (playerSearchOpen) { playerSearchOpen = false; playerSearchOnPick = null; return true; }
+            return false;
         }
 
         private static void DrawConfirm()
