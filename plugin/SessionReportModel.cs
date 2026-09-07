@@ -38,7 +38,11 @@ namespace CompetitiveRounds
     {
         /// <summary>Rolling-window length for DPS / hit % / block %.</summary>
         internal const float WINDOW_S = 15f;
-        internal const int PAGE_COUNT = 4;
+        /// <summary>Pages with a fixed layout (timeline, rates, totals). The
+        /// builds follow as one page per screenful — their count depends on
+        /// the body height, so the VIEW owns it (SessionReportView.PageCount)
+        /// and nothing is ever dropped for not fitting (review r1).</summary>
+        internal const int FIXED_PAGES = 3;
         private const int NAME_CAP = 18;
         private static readonly CultureInfo INV = CultureInfo.InvariantCulture;
 
@@ -50,7 +54,10 @@ namespace CompetitiveRounds
             public int Team;
         }
 
-        internal sealed class Pick { public string Id = "", Card = ""; }
+        /// <summary>One pick. `Rolled` (FFA only): the rolling card cap pushed
+        /// this card OUT of the build later in the game — it was picked, it is
+        /// not part of the end build.</summary>
+        internal sealed class Pick { public string Id = "", Card = ""; public bool Rolled; }
 
         internal sealed class Death { public float T; public string Id = ""; }
 
@@ -66,6 +73,9 @@ namespace CompetitiveRounds
                 = new Dictionary<string, Dictionary<string, List<Vector2>>>();
             public readonly HashSet<string> Available = new HashSet<string>();
             public readonly List<Pick> Picks = new List<Pick>();
+            /// <summary>The server kept only the newest picks of this game (its
+            /// per-report card budget); the oldest are not in Picks/EndBuild.</summary>
+            public bool PicksCapped;
             public readonly List<Death> Deaths = new List<Death>();
             public readonly Dictionary<string, List<string>> EndBuild = new Dictionary<string, List<string>>();
             public readonly Dictionary<string, string> EndStats = new Dictionary<string, string>();
@@ -82,6 +92,9 @@ namespace CompetitiveRounds
             public int V;
             public string Kind = "";
             public bool Truncated;
+            /// <summary>Games of the set the envelope does not carry (beyond the
+            /// server's cap, or a different roster under the same uuid).</summary>
+            public int GamesOmitted;
             public readonly List<Player> Players = new List<Player>();
             public readonly List<Game> Games = new List<Game>();
             public readonly Dictionary<string, RatingEntry> Rating = new Dictionary<string, RatingEntry>();
@@ -108,6 +121,7 @@ namespace CompetitiveRounds
                     case "v": env.V = (int)Num(kv.Value, 0f); break;
                     case "kind": env.Kind = Str(kv.Value); break;
                     case "truncated": env.Truncated = kv.Value == "true"; break;
+                    case "games_omitted": env.GamesOmitted = Math.Max(0, (int)Num(kv.Value, 0f)); break;
                     case "players":
                         foreach (string p in Elements(kv.Value))
                         {
@@ -185,10 +199,12 @@ namespace CompetitiveRounds
                             {
                                 if (e.Key == "id") pk.Id = Str(e.Value);
                                 else if (e.Key == "card") pk.Card = Str(e.Value);
+                                else if (e.Key == "rolled") pk.Rolled = e.Value == "true";
                             }
                             if (pk.Id.Length > 0 && pk.Card.Length > 0) g.Picks.Add(pk);
                         }
                         break;
+                    case "picks_capped": g.PicksCapped = kv.Value == "true"; break;
                     case "deaths":
                         foreach (string d in Elements(kv.Value))
                         {
@@ -456,10 +472,22 @@ namespace CompetitiveRounds
             public readonly List<string> TotalsHeader = new List<string>();
             public readonly List<List<string>> TotalsRows = new List<List<string>>();
             public readonly List<string> SummaryLines = new List<string>();
-            // page 4
+            // page 4, 4b, 4c ... (one page per screenful, paged by the view)
             public readonly List<BuildBlock> Builds = new List<BuildBlock>();
             public string BuildsMissing;
-            public readonly string[] PageTitles = new string[PAGE_COUNT];
+            public readonly string[] PageTitles = new string[FIXED_PAGES];
+            public string BuildsTitle = "";
+
+            /// <summary>Footer title for page `pg` given the view's current
+            /// number of build pages: "Builds" alone when one page holds them
+            /// all, "Builds 2/3" on a continuation page.</summary>
+            public string PageTitle(int pg, int buildPages)
+            {
+                if (pg < FIXED_PAGES) return pg >= 0 ? PageTitles[pg] : "";
+                int sub = pg - FIXED_PAGES;
+                if (buildPages <= 1) return BuildsTitle;
+                return I18n.TrF("{0} {1}/{2}", BuildsTitle, sub + 1, buildPages);
+            }
         }
 
         private static readonly string[] PALETTE =
@@ -472,7 +500,7 @@ namespace CompetitiveRounds
             m.PageTitles[0] = I18n.Tr("Timeline");
             m.PageTitles[1] = I18n.Tr("Rates");
             m.PageTitles[2] = I18n.Tr("Totals");
-            m.PageTitles[3] = I18n.Tr("Builds");
+            m.BuildsTitle = I18n.Tr("Builds");
 
             // Roster, colours, legend.
             var idx = new Dictionary<string, int>();
@@ -515,10 +543,17 @@ namespace CompetitiveRounds
                     sp.LabelShort = sa.ToString(INV) + "-" + sb.ToString(INV);
                     sp.LabelLong = ScoreLine(m, 0, sa, 1, sb);
                 }
+                else if (m.Kind == "team" || m.Kind == "ovt")
+                {
+                    // Two sides: the recorded side scores, winner's score in colour.
+                    sp.LabelShort = TeamScoreLabel(m, g, gi, false);
+                    sp.LabelLong = TeamScoreLabel(m, g, gi, true);
+                }
                 else
                 {
-                    sp.LabelShort = "G" + gi.ToString(INV);
-                    sp.LabelLong = I18n.TrF("Game {0}", gi);
+                    // N players (FFA): the recorded points, best first.
+                    sp.LabelShort = FfaScoreLabel(m, g, gi, false);
+                    sp.LabelLong = FfaScoreLabel(m, g, gi, true);
                 }
                 // Picks carry no timestamp in any mode: ticks on the divider, in
                 // pick order, coloured by picker.
@@ -546,7 +581,10 @@ namespace CompetitiveRounds
                 m.Header = m.Legend;
             string kindLabel = KindLabel(m.Kind);
             m.Sub = I18n.TrF("{0} - {1} games - {2} played", kindLabel, env.Games.Count, Clock(m.TotalS));
-            if (env.Truncated) m.Note = I18n.TrF("showing the newest {0} games of this sitting", env.Games.Count);
+            if (env.GamesOmitted > 0)
+                m.Note = I18n.TrF("showing the newest {0} games of this sitting ({1} not shown)", env.Games.Count, env.GamesOmitted);
+            else if (env.Truncated)
+                m.Note = I18n.TrF("showing the newest {0} games of this sitting", env.Games.Count);
             if (env.V != 1) m.Note = I18n.TrF("report version {0} - some panels may be missing", env.V);
 
             // Page 1 — cumulative damage and the score race, per game segment.
@@ -641,20 +679,30 @@ namespace CompetitiveRounds
                     {
                         try { body = NativeUI.BuildStatsTipBlock(stats, 34) ?? ""; } catch { body = ""; }
                     }
-                    if (!hasCards && body.Length == 0) continue;
+                    // Picks the FFA rolling cap pushed out are NOT the build (the
+                    // server keeps them out of end_build and flags the pick).
+                    var rolled = new List<string>();
+                    foreach (var pk in g.Picks)
+                        if (pk.Rolled && pk.Id == pid) rolled.Add(Safe(pk.Card));
+                    if (!hasCards && body.Length == 0 && rolled.Count == 0) continue;
                     var cb = new StringBuilder();
                     if (hasCards)
                     {
+                        // The server kept only the newest picks: say so ahead of them.
+                        if (g.PicksCapped) cb.Append("... ");
                         for (int ci = 0; ci < cards.Count; ci++)
                         {
                             if (ci > 0) cb.Append(", ");
                             cb.Append(Safe(cards[ci]));
                         }
                     }
+                    else cb.Append(I18n.Tr("no cards recorded"));
+                    if (rolled.Count > 0)
+                        cb.Append("\n<color=#8FA3B8>").Append(I18n.TrF("rolled out: {0}", string.Join(", ", rolled.ToArray()))).Append("</color>");
                     m.Builds.Add(new BuildBlock
                     {
                         Title = I18n.TrF("Game {0}", gi + 1) + " - " + Coloured(m, pi, Safe(m.Players[pi].Name)),
-                        Cards = hasCards ? cb.ToString() : I18n.Tr("no cards recorded"),
+                        Cards = cb.ToString(),
                         Stats = body,
                     });
                 }
@@ -868,6 +916,57 @@ namespace CompetitiveRounds
             if (sa > sb) na = Coloured(m, ia, na);
             else if (sb > sa) nb = Coloured(m, ib, nb);
             return na + " " + sa.ToString(INV) + "-" + sb.ToString(INV) + " " + nb;
+        }
+
+        /// <summary>Divider label for a two-SIDED game (2v2, 1v2): the recorded
+        /// side scores — every player of a side carries the side's rounds — with
+        /// the winning side's score in that side's first player's colour. Short
+        /// form for a narrow segment, long form names the sides.</summary>
+        private static string TeamScoreLabel(Model m, Game g, int gi, bool longForm)
+        {
+            int p1 = -1, p2 = -1;
+            for (int i = 0; i < m.Players.Count; i++)
+            {
+                if (m.Players[i].Team == 1 && p1 < 0) p1 = i;
+                else if (m.Players[i].Team == 2 && p2 < 0) p2 = i;
+            }
+            if (p1 < 0 || p2 < 0)
+                return longForm ? I18n.TrF("Game {0}", gi) : I18n.TrF("G{0}", gi);
+            int s1 = Get(g.Scores, m.Players[p1].Id), s2 = Get(g.Scores, m.Players[p2].Id);
+            string a = s1.ToString(INV), b = s2.ToString(INV);
+            if (s1 > s2) a = Coloured(m, p1, a);
+            else if (s2 > s1) b = Coloured(m, p2, b);
+            if (!longForm) return I18n.TrF("G{0} {1}-{2}", gi, a, b);
+            return m.Kind == "ovt"
+                ? I18n.TrF("Game {0}: solo {1}-{2} duo", gi, a, b)
+                : I18n.TrF("Game {0}: team 1 {1}-{2} team 2", gi, a, b);
+        }
+
+        /// <summary>Divider label for an N-player game (FFA): the recorded points,
+        /// best first, names in colour; at most four names, the rest counted.</summary>
+        private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)
+        {
+            var order = new List<int>();
+            for (int i = 0; i < m.Players.Count; i++) order.Add(i);
+            order.Sort((x, y) =>
+            {
+                int c = Get(g.Scores, m.Players[y].Id).CompareTo(Get(g.Scores, m.Players[x].Id));
+                return c != 0 ? c : x.CompareTo(y);
+            });
+            if (order.Count == 0) return longForm ? I18n.TrF("Game {0}", gi) : I18n.TrF("G{0}", gi);
+            if (!longForm)
+                return I18n.TrF("G{0} {1}", gi, Coloured(m, order[0], Get(g.Scores, m.Players[order[0]].Id).ToString(INV)));
+            var sb = new StringBuilder();
+            int shown = Math.Min(4, order.Count);
+            for (int k = 0; k < shown; k++)
+            {
+                if (k > 0) sb.Append(", ");
+                int pi = order[k];
+                sb.Append(Coloured(m, pi, Safe(m.Players[pi].Name))).Append(' ')
+                  .Append(Get(g.Scores, m.Players[pi].Id).ToString(INV));
+            }
+            if (order.Count > shown) sb.Append(", ").Append(I18n.TrF("+{0} more", order.Count - shown));
+            return I18n.TrF("Game {0}: {1}", gi, sb.ToString());
         }
 
         internal static string Coloured(Model m, int pi, string text)

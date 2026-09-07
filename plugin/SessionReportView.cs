@@ -6,8 +6,12 @@ using UnityEngine;
 namespace CompetitiveRounds
 {
     /// <summary>Sept 6 batch (Group 4 item c) — the F5-owned INTERACTIVE session
-    /// report: a four-page IMGUI pager (prev / next / Esc, no auto-advance, no
+    /// report: an IMGUI pager (prev / next / Esc, no auto-advance, no
     /// stream-mode requirement) drawn full-screen over the open F5 overlay.
+    /// Three fixed pages (timeline, rates, totals) and then the builds, one
+    /// page per screenful — the build rows are PAGED, never discarded, so the
+    /// page count is dynamic (<see cref="PageCount"/>) and every key and footer
+    /// path reads it (review r1).
     /// It draws a <see cref="SessionReportModel.Model"/> and nothing else — all
     /// parsing, sanitizing and maths live in the model.
     ///
@@ -41,9 +45,21 @@ namespace CompetitiveRounds
 
         private static int gen;
         private static bool loading;
+        /// <summary>A short diagnostic CODE, never prose: one of the ERR_*
+        /// constants, ApiClient's own codes (no-identity, session_required,
+        /// no-consent, ...) or the HTTP failure text. ErrorMessage translates
+        /// the code; the raw tail goes to the log, not the label.</summary>
         private static string errorText;
+        private const string ERR_LOCAL = "local";     // the request could not be started
+        private const string ERR_PARSE = "parse";     // the body was not an envelope
+        private const string ERR_MODEL = "model";     // the model builder threw
         private static SessionReportModel.Model model;
         private static int page;
+        /// <summary>Build pages measured by the last DrawBuilds pass (the body
+        /// height decides how many rows fit); 1 until a pass has run.</summary>
+        private static int buildPages = 1;
+
+        private static int PageCount() => SessionReportModel.FIXED_PAGES + Mathf.Max(1, buildPages);
 
         private static bool stylesReady;
         private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny;
@@ -67,6 +83,7 @@ namespace CompetitiveRounds
             errorText = null;
             model = null;
             page = 0;
+            buildPages = 1;
             try
             {
                 ApiClient.FetchSessionReport(selector, key, (ok, body) => OnFetched(g, ok, body));
@@ -74,7 +91,7 @@ namespace CompetitiveRounds
             catch (Exception ex)
             {
                 loading = false;
-                errorText = "local: " + ex.Message;
+                errorText = ERR_LOCAL;
                 Plugin.Log.LogWarning($"[SESSION-REPORT] fetch: {ex.Message}");
             }
         }
@@ -85,18 +102,27 @@ namespace CompetitiveRounds
             loading = false;
             if (!ok)
             {
+                // The label shows a translated line for the CODE; the server's
+                // actual text (status line + body head) is for the log only.
                 errorText = body ?? "";
+                string tail = errorText.Length > 160 ? errorText.Substring(0, 160) : errorText;
+                Plugin.Log.LogWarning($"[SESSION-REPORT] fetch failed: {tail}");
                 return;
             }
             try
             {
                 var env = SessionReportModel.Parse(body);
-                if (env == null) { errorText = "parse"; return; }
+                if (env == null)
+                {
+                    errorText = ERR_PARSE;
+                    Plugin.Log.LogWarning($"[SESSION-REPORT] parse: body was not an envelope ({(body ?? "").Length} chars)");
+                    return;
+                }
                 model = SessionReportModel.Build(env);
             }
             catch (Exception ex)
             {
-                errorText = "model: " + ex.Message;
+                errorText = ERR_MODEL;
                 Plugin.Log.LogWarning($"[SESSION-REPORT] build: {ex.Message}");
             }
         }
@@ -112,6 +138,7 @@ namespace CompetitiveRounds
             errorText = null;
             model = null;
             page = 0;
+            buildPages = 1;
         }
 
         // ── drawing ──────────────────────────────────────────────────────────
@@ -142,6 +169,12 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(content.x + content.width * 0.6f, content.y + 22f, content.width * 0.4f, 22f), model != null ? model.Note : "", stSmallR);
 
                 var body = new Rect(content.x, content.y + 90f, content.width, content.height - 90f - 50f);
+                // The build page count follows the body height: measure it every
+                // frame (a few dozen blocks) so the footer and the keys are exact
+                // before the builds are ever visited, and a resize can never leave
+                // the current page past the end.
+                if (model != null) MeasureBuildPages(body, model);
+                page = Mathf.Clamp(page, 0, PageCount() - 1);
                 if (loading) GUI.Label(body, I18n.Tr("Loading..."), stCenter);
                 else if (model == null) GUI.Label(body, ErrorMessage(errorText), stCenter);
                 else DrawPage(body, model, page);
@@ -171,24 +204,50 @@ namespace CompetitiveRounds
                     page = Mathf.Max(0, page - 1); ev.Use(); break;
                 case KeyCode.RightArrow:
                 case KeyCode.PageDown:
-                    page = Mathf.Min(SessionReportModel.PAGE_COUNT - 1, page + 1); ev.Use(); break;
+                    page = Mathf.Min(PageCount() - 1, page + 1); ev.Use(); break;
                 case KeyCode.Home: page = 0; ev.Use(); break;
-                case KeyCode.End: page = SessionReportModel.PAGE_COUNT - 1; ev.Use(); break;
+                case KeyCode.End: page = PageCount() - 1; ev.Use(); break;
                 case KeyCode.Escape: Close(); ev.Use(); break;
             }
         }
 
+        /// <summary>The visible line for a diagnostic code. Every branch is a
+        /// catalogue string; the only server-authored characters that can reach
+        /// the label are the three digits of an HTTP status.</summary>
         private static string ErrorMessage(string raw)
         {
             string e = raw ?? "";
+            if (e == ERR_LOCAL)
+                return I18n.Tr("The report request could not be started");
+            if (e == ERR_PARSE || e == ERR_MODEL)
+                return I18n.Tr("The report could not be read");
+            if (e == "no-identity")
+                return I18n.Tr("Steam identity is not available yet");
+            if (e == "no-consent")
+                return I18n.Tr("Data sharing is disabled in your settings");
             if (e.Contains("401") || e.Contains("session_required"))
                 return I18n.Tr("Steam sign-in is required to view session reports");
             if (e.Contains("404") || e.Contains("not_found"))
                 return I18n.Tr("This report is not available");
-            if (e == "no-consent")
-                return I18n.Tr("Data sharing is disabled in your settings");
-            string tail = SessionReportModel.Safe(e.Length > 90 ? e.Substring(0, 90) : e);
-            return I18n.Tr("Could not load this report") + (tail == "?" ? "" : "\n<size=13><color=#888>" + tail + "</color></size>");
+            string status = HttpStatusOf(e);
+            return status.Length > 0
+                ? I18n.TrF("Could not load this report (error {0})", status)
+                : I18n.Tr("Could not load this report");
+        }
+
+        /// <summary>The first three-digit run in an ApiClient failure text
+        /// ("HTTP 503 ...", "Error: 500"), or "" — digits only, locale-neutral.</summary>
+        private static string HttpStatusOf(string e)
+        {
+            for (int i = 0; i + 3 <= e.Length; i++)
+            {
+                if (!char.IsDigit(e[i]) || !char.IsDigit(e[i + 1]) || !char.IsDigit(e[i + 2])) continue;
+                if (i > 0 && char.IsDigit(e[i - 1])) continue;
+                if (i + 3 < e.Length && char.IsDigit(e[i + 3])) continue;
+                if (e[i] < '1' || e[i] > '5') continue;
+                return e.Substring(i, 3);
+            }
+            return "";
         }
 
         private static void DrawFooter(Rect r)
@@ -198,12 +257,13 @@ namespace CompetitiveRounds
             bool wasEnabled = GUI.enabled;
             GUI.enabled = model != null && page > 0;
             if (GUI.Button(new Rect(r.x + 8f, y, bw, bh), I18n.Tr("< Prev"), stBtn)) page = Mathf.Max(0, page - 1);
-            GUI.enabled = model != null && page < SessionReportModel.PAGE_COUNT - 1;
+            int pages = PageCount();
+            GUI.enabled = model != null && page < pages - 1;
             if (GUI.Button(new Rect(r.x + 16f + bw, y, bw, bh), I18n.Tr("Next >"), stBtn))
-                page = Mathf.Min(SessionReportModel.PAGE_COUNT - 1, page + 1);
+                page = Mathf.Min(pages - 1, page + 1);
             GUI.enabled = wasEnabled;
             string pageLabel = model != null
-                ? I18n.TrF("Page {0}/{1}", page + 1, SessionReportModel.PAGE_COUNT) + "  -  " + model.PageTitles[page]
+                ? I18n.TrF("Page {0}/{1}", page + 1, pages) + "  -  " + model.PageTitle(page, buildPages)
                 : "";
             GUI.Label(new Rect(r.x + 24f + 2f * bw, y, r.width - 48f - 3f * bw, bh), pageLabel, stBody);
             if (GUI.Button(new Rect(r.xMax - bw - 8f, y, bw, bh), I18n.Tr("Close"), stBtn)) Close();
@@ -233,7 +293,7 @@ namespace CompetitiveRounds
                     break;
                 }
                 case 2: DrawTotals(body, m); break;
-                default: DrawBuilds(body, m); break;
+                default: DrawBuilds(body, m, pg - SessionReportModel.FIXED_PAGES); break;
             }
         }
 
@@ -357,25 +417,59 @@ namespace CompetitiveRounds
 
         // ── builds page ──────────────────────────────────────────────────────
 
-        private static void DrawBuilds(Rect body, SessionReportModel.Model m)
+        /// <summary>First block index of every builds page, as measured against
+        /// the current body: rows of blocks are laid out top to bottom, a row
+        /// that does not fit starts the next page, and a row taller than the
+        /// body still gets a page of its own — so every block is reachable and
+        /// nothing is discarded. Sets buildPages, which the pager reads.</summary>
+        private static readonly List<int> buildStarts = new List<int>();
+
+        private static void MeasureBuildPages(Rect body, SessionReportModel.Model m)
         {
-            Fill(body, PANEL);
-            if (m.BuildsMissing != null)
-            {
-                GUI.Label(body, "<color=#8FA3B8>" + m.BuildsMissing + "</color>", stCenter);
-                return;
-            }
+            buildStarts.Clear();
+            buildStarts.Add(0);
+            if (m.BuildsMissing != null || m.Builds.Count == 0) { buildPages = 1; return; }
             int cols = Mathf.Clamp(m.Players.Count, 1, 4);
-            float colW = (body.width - 16f) / cols;
-            float y = body.y + 8f;
-            int shown = 0;
+            float usable = body.height - 16f;
+            float used = 0f;
             for (int i = 0; i < m.Builds.Count; i += cols)
             {
                 float rowH = 0f;
                 for (int c = 0; c < cols && i + c < m.Builds.Count; c++)
                     rowH = Mathf.Max(rowH, BlockHeight(m.Builds[i + c]));
-                if (y + rowH > body.yMax - 8f) break;
-                for (int c = 0; c < cols && i + c < m.Builds.Count; c++)
+                if (used > 0f && used + rowH > usable)
+                {
+                    buildStarts.Add(i);
+                    used = 0f;
+                }
+                used += rowH;
+            }
+            buildPages = buildStarts.Count;
+        }
+
+        /// <summary>Builds page `sub` (0 = the first), the blocks between two
+        /// measured page breaks.</summary>
+        private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)
+        {
+            Fill(body, PANEL);
+            if (m.BuildsMissing != null || m.Builds.Count == 0)
+            {
+                GUI.Label(body, "<color=#8FA3B8>" + (m.BuildsMissing ?? "") + "</color>", stCenter);
+                return;
+            }
+            if (buildStarts.Count == 0) MeasureBuildPages(body, m);
+            int cols = Mathf.Clamp(m.Players.Count, 1, 4);
+            float colW = (body.width - 16f) / cols;
+            sub = Mathf.Clamp(sub, 0, buildPages - 1);
+            int first = buildStarts[sub], end = sub + 1 < buildStarts.Count ? buildStarts[sub + 1] : m.Builds.Count;
+
+            float y = body.y + 8f;
+            for (int i = first; i < end; i += cols)
+            {
+                float rowH = 0f;
+                for (int c = 0; c < cols && i + c < end; c++)
+                    rowH = Mathf.Max(rowH, BlockHeight(m.Builds[i + c]));
+                for (int c = 0; c < cols && i + c < end; c++)
                 {
                     var b = m.Builds[i + c];
                     var r = new Rect(body.x + 8f + c * colW, y, colW - 8f, rowH - 6f);
@@ -384,13 +478,9 @@ namespace CompetitiveRounds
                     GUI.Label(new Rect(r.x + 6f, r.y + 24f, r.width - 12f, 40f), b.Cards, stSmall);
                     if (b.Stats.Length > 0)
                         GUI.Label(new Rect(r.x + 6f, r.y + 66f, r.width - 12f, r.height - 70f), b.Stats, stTiny);
-                    shown++;
                 }
                 y += rowH;
             }
-            if (shown < m.Builds.Count)
-                GUI.Label(new Rect(body.x + 8f, body.yMax - 24f, body.width - 16f, 22f),
-                    "<color=#8FA3B8>" + I18n.TrF("showing {0} of {1}", shown, m.Builds.Count) + "</color>", stSmall);
         }
 
         private static float BlockHeight(SessionReportModel.BuildBlock b)

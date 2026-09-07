@@ -225,6 +225,15 @@ def _prune_skip(table: str, exc: BaseException) -> None:
 # .env is opaque to tooling, and a live pin could silently defeat a code
 # change (learning #190's persisted-default class).
 GLICKO2_TAU = 0.6
+# Sept 6 batch (Group 4 item c, migration 299): the series-completion writer
+# stamps its two rating_history snapshots with the series they belong to, so
+# the session report joins the snapshot by IDENTITY instead of a time window.
+# Typed binds (#275/#448); the column is raw-SQL-only, see RatingHistory.
+_RATING_HISTORY_LINK_SQL = """
+    UPDATE rating_history
+       SET series_id = CAST(:sid AS uuid)
+     WHERE id = ANY(CAST(:ids AS uuid[]))
+"""
 GLICKO2_DEFAULT_RATING = float(os.getenv("GLICKO2_DEFAULT_RATING", "1500"))
 GLICKO2_DEFAULT_RD = float(os.getenv("GLICKO2_DEFAULT_RD", "350"))
 GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06"))
@@ -7129,17 +7138,36 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 g2.updated_at = now
 
                 # Save rating history snapshots (powers the Elo-over-time graph)
+                snapshot_ids = []
                 for pid, r, rd, vol in [
                     (p1.id, new_r1, new_rd1, new_vol1),
                     (p2.id, new_r2, new_rd2, new_vol2),
                 ]:
+                    snapshot_id = uuid.uuid4()
+                    snapshot_ids.append(str(snapshot_id))
                     db.add(RatingHistory(
+                        id=snapshot_id,
                         player_id=pid,
                         rating=r,
                         rating_deviation=rd,
                         volatility=vol,
                         period_end=now,
                     ))
+                # Sept 6 batch (Group 4 item c, migration 299): link the two
+                # snapshots to THIS series by identity, so the session report
+                # joins rating_history.series_id instead of guessing from a
+                # time window. Raw SQL under a SAVEPOINT on purpose: the column
+                # is deliberately NOT declared on the model (see RatingHistory),
+                # so a box whose schema predates 299 skips the link here and
+                # keeps the rating update — an ORM column would have failed the
+                # whole Glicko commit in the deploy window (#477/#235).
+                await db.flush()
+                try:
+                    async with db.begin_nested():
+                        await db.execute(text(_RATING_HISTORY_LINK_SQL),
+                                         {"sid": str(series.id), "ids": snapshot_ids})
+                except Exception as _lx:
+                    print(f"[REPORT] rating_history series link skipped: {_lx}")
 
                 # Auto-grant rating achievements (Master / Grand Master) when
                 # either player crosses a threshold on this Glicko update.
@@ -46067,7 +46095,14 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 # It replaces nothing: the history endpoints keep their rows and the broadcast
 # renderer keeps its own feeds. The rules that shaped it (design v2 §c):
 #   - strict Steam session (fail-closed, checked before any other statement)
-#     and PARTICIPANT-ONLY: a caller whose steam id is not in the set's roster
+#     and PARTICIPANT-ONLY, per GAME: the caller's player id is resolved first
+#     and every games statement requires it in the row (an FFA row counts only
+#     when the caller's ffa_match_players row is NOT absent — a frozen-roster
+#     ghost did not play that game, #227). The rows that come back must then
+#     share ONE roster — the set row's for a series, the newest game's
+#     otherwise — and a row with a different roster is dropped, so a
+#     client-chosen session uuid can only ever group games the caller played
+#     with the same people. A caller with no row, or not in the roster,
 #     receives the same 404 as a set that does not exist, so the endpoint
 #     confirms nothing about ids it will not serve;
 #   - exactly one selector, each a UUID: `series` resolves a ranked_series,
@@ -46083,13 +46118,20 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 #   - stored sample series carry no timestamps of their own (fixed-cadence,
 #     decimated cumulative counters — #318), so sample i of n is stamped
 #     t = (i + 1) * duration_s / n: spread over the game it was recorded in.
-#     Point events keep their real seconds. Per-game `available` lists the
-#     streams that exist so a missing panel renders "not recorded"; per-game
-#     `totals` carries each player's stored counters (shots, hits, blocks,
-#     blocks_ok, keys, active_s, damage, deaths, kills) SPARSELY — an absent
-#     key is "not recorded", never zero (#257);
+#     Point events keep their real seconds; the FFA half-point event list has
+#     none either and is index-stamped the same way. Per-game `available`
+#     lists the streams that exist so a missing panel renders "not recorded";
+#     per-game `totals` carries each player's stored counters (shots, hits,
+#     blocks, blocks_ok, keys, active_s, damage, deaths, kills) SPARSELY — an
+#     absent key is "not recorded", never zero (#257);
+#   - the rating snapshot is joined by IDENTITY (rating_history.series_id,
+#     migration 299, linked by the series-completion writer), never by a time
+#     window — two series completing seconds apart stay distinct;
 #   - set_summary is computed ONCE per set from the set's own row(s), never
-#     summed over match rows (C-7).
+#     summed over match rows (C-7);
+#   - the envelope is BOUNDED (_REPORT_MAX_BYTES, asserted by
+#     test_session_report.py against worst-case fixtures): sample pairs,
+#     picks, deaths and names are budgeted per report, see the constants.
 # Read-only: no writes, no session-state mutation. Primary-only until the
 # edge's replica read list names it (deploy note, not code).
 # ══════════════════════════════════════════════════════════════════════════
@@ -46097,10 +46139,50 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
 _REPORT_PALETTE = ("#99B3E6", "#E69988", "#8FD18F", "#E6C866",
                    "#C48CFF", "#66D9E6", "#FFB347", "#F28CC8")
 # Games per envelope. A sitting can run longer; the NEWEST games are kept and
-# the envelope says so (`truncated`), because a 3-hour x-axis is unreadable
-# anyway and 24 games of 128-sample streams is already ~100 KB of JSON.
+# the envelope says so (`truncated` + `games_omitted`), because a 3-hour
+# x-axis is unreadable anyway and the byte budget below is sized for 24.
 _REPORT_MAX_GAMES = 24
 _REPORT_NOT_FOUND = "not_found"
+
+# ── the byte budget ───────────────────────────────────────────────────────
+# Documented bound: one envelope serialises to AT MOST _REPORT_MAX_BYTES
+# (compact JSON, the shape FastAPI emits). A typical BO3 is ~40 KB; the bound
+# is for the worst reachable shapes, which the test suite builds and measures:
+#   sample pairs  <= _REPORT_SAMPLE_PAIRS_BUDGET (12,288 x <= 17 B = ~209 KB).
+#       Per stream per game the cap is
+#       clamp(budget // (games x players x 8), _REPORT_SAMPLES_MIN, _REPORT_SAMPLES_MAX):
+#       1 game 1v1 -> 128 samples; 24 games 1v1 -> 32; 24 games 2v2 -> 16
+#       (16 x 24 x 4 x 7 streams = 10,752 pairs); FFA is one game of <= 10
+#       players x 9 streams x 128 = 11,520 pairs. A stream longer than its
+#       cap is DECIMATED (evenly spaced indices, first and last kept — #318),
+#       never head- or tail-truncated.
+#   picks         <= _REPORT_CARD_BUDGET entries (~100 B each = ~100 KB) plus
+#       their end_build names (~44 KB): per player per game the newest
+#       clamp(budget // (games x players), _REPORT_CARDS_MIN, _REPORT_CARDS_MAX)
+#       picks are kept and the game says `picks_capped`; names are cut at
+#       _REPORT_CARD_NAME_MAX.
+#   deaths        <= _REPORT_DEATHS_MAX per game (24 x 48 x ~36 B = ~41 KB).
+#   end_stats     <= 300 chars each (_END_STATS_MAX_LEN), totals ~170 B each,
+#       display names cut at _REPORT_NAME_MAX.
+# Worst cases measured from the test worlds (compact JSON, 2026-09-06):
+# 24-game 1v1 387,940 B (~379 KB), 24-game 2v2 221,508 B (~216 KB), 10-player
+# FFA 215,425 B (~210 KB), an ordinary BO3 5,621 B — all under the 512 KB bound
+# with headroom. Change a constant here and the test's literal bound is what
+# tells you the truth.
+_REPORT_MAX_BYTES = 512 * 1024
+_REPORT_SAMPLE_PAIRS_BUDGET = 12288
+_REPORT_SAMPLES_MAX = 128
+_REPORT_SAMPLES_MIN = 16
+_REPORT_CARD_BUDGET = 1024
+_REPORT_CARDS_MAX = 32
+_REPORT_CARDS_MIN = 8
+_REPORT_CARD_NAME_MAX = 40
+_REPORT_DEATHS_MAX = 48
+_REPORT_NAME_MAX = 32
+# The divisor in the sample cap: the largest stream count a 2-to-4 player
+# mode carries (1v1: 8 incl. score). FFA carries 9 but is always ONE game,
+# which the budget arithmetic above absorbs (11,520 < 12,288).
+_REPORT_STREAMS_PER_PLAYER = 8
 
 # (stream name, slot column, pair index) — the pair index selects one side of
 # a "left:right" cumulative pair series; None means a plain integer series.
@@ -46109,8 +46191,19 @@ _REPORT_SLOT_STREAMS = (
     ("shots", "hit", 0), ("hits", "hit", 1),
     ("blocks", "block", 0), ("blocks_ok", "block", 1),
     ("fps", "fps", None), ("ping", "ping", None),
+    ("kills", "killtl", None),          # FFA only (ffa_match_players.kill_timeline)
 )
 
+# The caller's player row, resolved BEFORE any games statement so every loader
+# can require it in the row (participant-only, per game).
+_REPORT_CALLER_SQL = """
+    SELECT p.id
+      FROM players p
+     WHERE p.steam_id = :sid
+     LIMIT 1
+"""
+# `total_rows` is the participant-filtered size of the whole set (the window
+# runs before LIMIT), so `games_omitted` is exact whatever the LIMIT hides.
 _REPORT_1V1_SQL = """
     SELECT m.id, m.is_ranked, m.series_id, m.session_uuid,
            m.started_at, m.ended_at, m.created_at,
@@ -46127,9 +46220,11 @@ _REPORT_1V1_SQL = """
            m.p1_bullets_fired, m.p1_bullets_hit, m.p1_blocks_activated, m.p1_blocks_successful,
            m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
            m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
-           m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths
+           m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           COUNT(*) OVER () AS total_rows
       FROM matches m
      WHERE {where} AND m.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)
      ORDER BY COALESCE(m.started_at, m.ended_at, m.created_at) DESC, m.created_at DESC
      LIMIT :lim
 """
@@ -46157,9 +46252,11 @@ _REPORT_TEAM_SQL = """
            COALESCE(tm.duration_seconds, 0) AS duration_s,
            tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id,
            tm.t1_rounds_won, tm.t2_rounds_won, tm.t1_points_total, tm.t2_points_total,
-           tm.t1a_end_stats, tm.t1b_end_stats, tm.t2a_end_stats, tm.t2b_end_stats
+           tm.t1a_end_stats, tm.t1b_end_stats, tm.t2a_end_stats, tm.t2b_end_stats,
+           COUNT(*) OVER () AS total_rows
       FROM team_matches tm
      WHERE {where} AND tm.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)
      ORDER BY COALESCE(tm.started_at, tm.ended_at) DESC
      LIMIT :lim
 """
@@ -46189,9 +46286,11 @@ _REPORT_OVT_SQL = """
            om.solo_id, om.duo_a_id, om.duo_b_id,
            om.solo_rounds_won, om.duo_rounds_won, om.solo_points_total, om.duo_points_total,
            om.solo_damage_timeline, om.duo_a_damage_timeline, om.duo_b_damage_timeline,
-           om.solo_end_stats, om.duo_a_end_stats, om.duo_b_end_stats
+           om.solo_end_stats, om.duo_a_end_stats, om.duo_b_end_stats,
+           COUNT(*) OVER () AS total_rows
       FROM ovt_matches om
      WHERE {where} AND om.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)
      ORDER BY COALESCE(om.started_at, om.ended_at) DESC
      LIMIT :lim
 """
@@ -46199,21 +46298,29 @@ _REPORT_OVT_WHERE = {
     "series": "om.series_id = CAST(:key AS uuid)",
     "match": "om.id = CAST(:key AS uuid)",
 }
+# The FFA match row counts for the caller only when the caller PLAYED it: an
+# `absent` roster row is a frozen-roster ghost (left in an earlier game of the
+# sitting, #227) — the same predicate the profile card uses.
 _REPORT_FFA_SQL = """
-    SELECT fm.id, fm.started_at, fm.ended_at,
+    SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
            COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s
       FROM ffa_matches fm
      WHERE fm.id = CAST(:key AS uuid) AND fm.invalidated_at IS NULL
+       AND EXISTS (SELECT 1 FROM ffa_match_players fpx
+                    WHERE fpx.match_id = fm.id
+                      AND fpx.player_id = CAST(:cpid AS uuid)
+                      AND NOT fpx.absent)
 """
 _REPORT_FFA_PLAYERS_SQL = """
     SELECT fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
            fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained,
            fp.fps_timeline, fp.ping_timeline, fp.hit_timeline, fp.block_timeline,
+           fp.damage_dealt_timeline, fp.kill_timeline, fp.damage_dealt,
            fp.end_stats, fp.color_hex,
            fp.bullets_fired, fp.bullets_hit, fp.blocks_activated, fp.blocks_successful,
            fp.keys_pressed, fp.active_seconds, fp.kills
       FROM ffa_match_players fp
-     WHERE fp.match_id = CAST(:key AS uuid)
+     WHERE fp.match_id = CAST(:key AS uuid) AND NOT fp.absent
      ORDER BY fp.placement ASC, fp.slot ASC
 """
 _REPORT_ROSTER_SQL = """
@@ -46228,21 +46335,25 @@ _REPORT_GOLD_SQL = """
        AND gt.reference_id = ANY(CAST(:refs AS text[]))
      GROUP BY gt.player_id
 """
+# Identity join (migration 299): the snapshot the series-completion writer
+# linked to THIS series. No time window — a snapshot written for a series
+# completing seconds later carries that series' id, not this one's.
 _REPORT_RATING_SQL = """
     SELECT rh.player_id, rh.rating, rh.period_end
       FROM rating_history rh
-     WHERE rh.player_id = ANY(CAST(:pids AS uuid[]))
-       AND rh.period_end >= CAST(:t0 AS timestamptz) - make_interval(secs => 60)
-       AND rh.period_end <= CAST(:t0 AS timestamptz) + make_interval(mins => 10)
+     WHERE rh.series_id = CAST(:key AS uuid)
+       AND rh.player_id = ANY(CAST(:pids AS uuid[]))
      ORDER BY rh.period_end ASC
 """
 # Card tables share the (match_id, player_id, card_name, pick_order) core;
-# the 1v2 table has no round_number. Table names come from THIS tuple only.
+# the 1v2 table has no round_number and only the FFA table records `rolled`
+# (its rolling 5-card cap pushes older picks OUT of the build, migration 156).
+# Table names come from THIS tuple only: (table, has round_number, has rolled).
 _REPORT_CARD_TABLES = {
-    "1v1": ("match_cards", True),
-    "team": ("team_match_cards", True),
-    "ovt": ("ovt_match_cards", False),
-    "ffa": ("ffa_match_cards", True),
+    "1v1": ("match_cards", True, False),
+    "team": ("team_match_cards", True, False),
+    "ovt": ("ovt_match_cards", False, False),
+    "ffa": ("ffa_match_cards", True, True),
 }
 
 
@@ -46261,12 +46372,40 @@ def _report_iso(dt):
         return None
 
 
-def _report_samples(csv, duration_s, part=None):
+def _report_sample_cap(games, players):
+    """Samples allowed per stream per game so the whole envelope stays inside
+    _REPORT_SAMPLE_PAIRS_BUDGET (see the budget comment above)."""
+    denom = max(1, int(games)) * max(1, int(players)) * _REPORT_STREAMS_PER_PLAYER
+    return max(_REPORT_SAMPLES_MIN, min(_REPORT_SAMPLES_MAX, _REPORT_SAMPLE_PAIRS_BUDGET // denom))
+
+
+def _report_card_cap(games, players):
+    """Picks kept per player per game (the NEWEST ones) so `picks` stays inside
+    _REPORT_CARD_BUDGET entries per envelope."""
+    denom = max(1, int(games)) * max(1, int(players))
+    return max(_REPORT_CARDS_MIN, min(_REPORT_CARDS_MAX, _REPORT_CARD_BUDGET // denom))
+
+
+def _report_decimate(pairs, cap):
+    """At most `cap` of the [t, v] pairs, evenly spaced, FIRST and LAST always
+    kept (#318: decimate interior samples; never cut the head or the tail of a
+    cumulative series — the tail carries the totals)."""
+    n = len(pairs)
+    if cap < 2 or n <= cap:
+        return pairs
+    last = n - 1
+    idx = sorted({round(k * last / (cap - 1)) for k in range(cap)})
+    return [pairs[i] for i in idx]
+
+
+def _report_samples(csv, duration_s, part=None, cap=_REPORT_SAMPLES_MAX):
     """Delimited cumulative sample series -> [[t, v], ...], or None when the
     column is empty or the game has no duration to spread the samples over.
     Sample i of n is stamped (i + 1) * duration_s / n (#318: after decimation
-    only the SPAN is known, not the stride). `part` picks one side of a
-    "left:right" pair series; malformed tokens are skipped, not zero-filled."""
+    only the SPAN is known, not the stride) BEFORE the envelope's own
+    decimation to `cap` samples, so every kept sample keeps its true position.
+    `part` picks one side of a "left:right" pair series; malformed tokens are
+    skipped, not zero-filled."""
     if not csv or not isinstance(csv, str):
         return None
     toks = [t for t in csv.split(",") if t != ""]
@@ -46290,13 +46429,16 @@ def _report_samples(csv, duration_s, part=None):
         except (TypeError, ValueError):
             continue
         out.append([round((i + 1) * dur / n, 1), v])
-    return out or None
+    return _report_decimate(out, cap) or None
 
 
-def _report_points(point_times, point_timeline, sid_a, sid_b):
+def _report_points(point_times, point_timeline, sid_a, sid_b, cap=_REPORT_SAMPLES_MAX):
     """1v1 point events ("12,47" + "1:0,1:1") -> the two sides' cumulative
     score streams plus the deaths they imply: in 1v1 a point ends when the
-    other fighter dies, so the side that did NOT score died at that second."""
+    other fighter dies, so the side that did NOT score died at that second.
+    Score streams are decimated to `cap` pairs; deaths keep the first
+    _REPORT_DEATHS_MAX (a game with more points than that is not a game the
+    marks could show anyway)."""
     if not point_times or not point_timeline:
         return None, None, []
     times = str(point_times).split(",")
@@ -46313,20 +46455,69 @@ def _report_points(point_times, point_timeline, sid_a, sid_b):
             continue
         score_a.append([t, a])
         score_b.append([t, b])
-        if a > prev_a:
+        if a > prev_a and len(deaths) < _REPORT_DEATHS_MAX:
             deaths.append({"t": t, "id": sid_b})
-        if b > prev_b:
+        if b > prev_b and len(deaths) < _REPORT_DEATHS_MAX:
             deaths.append({"t": t, "id": sid_a})
         prev_a, prev_b = a, b
     if not score_a:
         return None, None, []
-    return score_a, score_b, deaths
+    return _report_decimate(score_a, cap), _report_decimate(score_b, cap), deaths
+
+
+def _report_ffa_scores(timeline, slots, duration_s, cap=_REPORT_SAMPLES_MAX):
+    """FFA score progression: the match row's half-point event list
+    ("slot[R][G]" per token — R = the half point converted a full point, which
+    clears everyone's live halves; migration 156, same grammar as the FFA
+    recent panel's hover graph) -> {slot: [[t, score], ...]} with score in
+    full points plus 0.5 per live half point. The list carries no times, so
+    event i of n is stamped (i + 1) * duration_s / n like the sample series."""
+    if not timeline or not isinstance(timeline, str) or not slots:
+        return {}
+    toks = [t.strip() for t in timeline.split(",") if t.strip()]
+    try:
+        dur = float(duration_s or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if not toks or dur <= 0:
+        return {}
+    known = set()
+    for s in slots:
+        try:
+            known.add(int(s))
+        except (TypeError, ValueError):
+            continue
+    full = {s: 0 for s in known}
+    halves = {s: 0 for s in known}
+    out = {s: [] for s in known}
+    n = len(toks)
+    for i, tok in enumerate(toks):
+        digits = ""
+        for ch in tok:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            continue
+        slot = int(digits)
+        if slot not in known:
+            continue
+        halves[slot] += 1
+        if "R" in tok[len(digits):]:
+            full[slot] += 1
+            for s in halves:
+                halves[s] = 0
+        t = round((i + 1) * dur / n, 1)
+        for s in known:
+            out[s].append([t, full[s] + 0.5 * halves[s]])
+    return {s: _report_decimate(v, cap) for s, v in out.items() if v}
 
 
 def _report_slot(pid, rounds, points, fps=None, ping=None, hit=None, block=None,
-                 dmg=None, end_stats=None, totals=None):
+                 dmg=None, end_stats=None, totals=None, killtl=None):
     return {"pid": str(pid) if pid is not None else None, "rounds": rounds, "points": points,
-            "fps": fps, "ping": ping, "hit": hit, "block": block, "dmg": dmg,
+            "fps": fps, "ping": ping, "hit": hit, "block": block, "dmg": dmg, "killtl": killtl,
             "end_stats": end_stats, "totals": totals or {}}
 
 
@@ -46354,9 +46545,12 @@ def _report_totals(shots=None, hits=None, blocks=None, blocks_ok=None, keys=None
     return out
 
 
-def _report_game_json(game, sid_of, cards_by_match):
+def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_MAX,
+                      card_cap=_REPORT_CARDS_MAX):
     """One game of the envelope, every field keyed by steam id string. Only
-    the listed keys are ever copied out of `game` — nothing is passed through."""
+    the listed keys are ever copied out of `game` — nothing is passed through.
+    `sample_cap` / `card_cap` are the per-report budgets (_report_sample_cap,
+    _report_card_cap) that make the envelope's size bound true."""
     duration_s = int(game.get("duration_s") or 0)
     slots = game["slots"]
     scores, points, timelines, end_build, end_stats, totals = {}, {}, {}, {}, {}, {}
@@ -46371,7 +46565,7 @@ def _report_game_json(game, sid_of, cards_by_match):
             totals[sid] = dict(s["totals"])
         tl = {}
         for key, col, part in _REPORT_SLOT_STREAMS:
-            series = _report_samples(s.get(col), duration_s, part)
+            series = _report_samples(s.get(col), duration_s, part, sample_cap)
             if series:
                 tl[key] = series
                 available.add(key)
@@ -46385,21 +46579,52 @@ def _report_game_json(game, sid_of, cards_by_match):
         sid_a, sid_b = sid_of.get(slots[0]["pid"]), sid_of.get(slots[1]["pid"])
         if sid_a and sid_b:
             sa, sb, deaths = _report_points(game.get("point_times"), game.get("point_timeline"),
-                                            sid_a, sid_b)
+                                            sid_a, sid_b, sample_cap)
             if sa:
                 timelines.setdefault(sid_a, {})["score"] = sa
                 timelines.setdefault(sid_b, {})["score"] = sb
                 available.add("score")
-    picks = []
-    for pid, card, _pick_order, _round_number in cards_by_match.get(str(game["id"]), []):
+    if game.get("ffa_timeline"):
+        # FFA: the match row's half-point event list, one score stream per
+        # PLAYING slot (absent rows never reach `slots`).
+        by_slot = {}
+        for s in slots:
+            if s.get("slot") is not None and sid_of.get(s["pid"]) is not None:
+                by_slot[int(s["slot"])] = sid_of[s["pid"]]
+        for slot, series in _report_ffa_scores(game["ffa_timeline"], list(by_slot.keys()),
+                                               duration_s, sample_cap).items():
+            if series:
+                timelines.setdefault(by_slot[slot], {})["score"] = series
+                available.add("score")
+    # Picks in pick order, the NEWEST `card_cap` per player (the oldest are
+    # dropped and the game says `picks_capped`). A card the FFA rolling cap
+    # pushed out is a pick that happened (kept, flagged `rolled`) but is NOT
+    # part of the end build.
+    raw = []
+    for pid, card, _pick_order, _round_number, rolled in cards_by_match.get(str(game["id"]), []):
         sid = sid_of.get(str(pid))
         if sid is None or not card:
             continue
+        raw.append((sid, str(card)[:_REPORT_CARD_NAME_MAX], bool(rolled)))
+    counts = {}
+    for sid, _card, _rolled in raw:
+        counts[sid] = counts.get(sid, 0) + 1
+    skip = {sid: max(0, n - card_cap) for sid, n in counts.items()}
+    picks_capped = any(v > 0 for v in skip.values())
+    picks, seen = [], {}
+    for sid, card, rolled in raw:
+        seen[sid] = seen.get(sid, 0) + 1
+        if seen[sid] <= skip[sid]:
+            continue
         # No pick timestamp is recorded in any mode: t is null and the client
         # draws the tick on the game divider, in pick order.
-        picks.append({"t": None, "id": sid, "card": str(card)})
-        end_build.setdefault(sid, []).append(str(card))
-    return {
+        entry = {"t": None, "id": sid, "card": card}
+        if rolled:
+            entry["rolled"] = True
+        else:
+            end_build.setdefault(sid, []).append(card)
+        picks.append(entry)
+    out = {
         "match_id": str(game["id"]),
         "started_at": _report_iso(game.get("started_at")),
         "duration_s": duration_s,
@@ -46413,6 +46638,15 @@ def _report_game_json(game, sid_of, cards_by_match):
         "end_stats": end_stats,
         "totals": totals,
     }
+    if picks_capped:
+        out["picks_capped"] = True
+    return out
+
+
+def _report_roster_key(slots):
+    """The roster of one game as a frozenset of player-id strings — the unit of
+    the consistency rule (every game in an envelope carries the same one)."""
+    return frozenset(str(s["pid"]) for s in slots if s.get("pid") is not None)
 
 
 async def _report_rows(db, sql, params):
@@ -46420,15 +46654,22 @@ async def _report_rows(db, sql, params):
 
 
 def _report_take(rows):
-    """Newest-first rows (LIMIT max+1) -> (oldest-first games, truncated)."""
-    truncated = len(rows) > _REPORT_MAX_GAMES
-    return list(reversed(rows[:_REPORT_MAX_GAMES])), truncated
+    """Newest-first rows (LIMIT max+1) -> (oldest-first rows, total_rows): the
+    participant-filtered size of the whole set from the statement's window
+    count, or the row count when a statement carries none."""
+    total = len(rows)
+    if rows and rows[0].get("total_rows") is not None:
+        try:
+            total = max(total, int(rows[0]["total_rows"]))
+        except (TypeError, ValueError):
+            pass
+    return list(reversed(rows[:_REPORT_MAX_GAMES])), total
 
 
-async def _report_load_1v1(db, selector, key):
+async def _report_load_1v1(db, selector, key, cpid):
     rows = await _report_rows(db, _REPORT_1V1_SQL.format(where=_REPORT_1V1_WHERE[selector]),
-                              {"key": key, "lim": _REPORT_MAX_GAMES + 1})
-    rows, truncated = _report_take(rows)
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
     games = []
     for r in rows:
         games.append({
@@ -46452,13 +46693,13 @@ async def _report_load_1v1(db, selector, key):
                                             r["p2_damage_dealt"], r["p2_deaths"])),
             ],
         })
-    return games, truncated
+    return games, total
 
 
-async def _report_load_team(db, selector, key):
+async def _report_load_team(db, selector, key, cpid):
     rows = await _report_rows(db, _REPORT_TEAM_SQL.format(where=_REPORT_TEAM_WHERE[selector]),
-                              {"key": key, "lim": _REPORT_MAX_GAMES + 1})
-    rows, truncated = _report_take(rows)
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
     games = []
     if rows:
         tele = await _report_rows(db, _REPORT_TEAM_TELE_SQL,
@@ -46485,13 +46726,13 @@ async def _report_load_team(db, selector, key):
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
                       "series_id": r["series_id"], "slots": slots})
-    return games, truncated
+    return games, total
 
 
-async def _report_load_ovt(db, selector, key):
+async def _report_load_ovt(db, selector, key, cpid):
     rows = await _report_rows(db, _REPORT_OVT_SQL.format(where=_REPORT_OVT_WHERE[selector]),
-                              {"key": key, "lim": _REPORT_MAX_GAMES + 1})
-    rows, truncated = _report_take(rows)
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
     games = []
     for r in rows:
         slots = []
@@ -46508,11 +46749,14 @@ async def _report_load_ovt(db, selector, key):
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
                       "series_id": r["series_id"], "slots": slots})
-    return games, truncated
+    return games, total
 
 
-async def _report_load_ffa(db, key):
-    rows = await _report_rows(db, _REPORT_FFA_SQL, {"key": key})
+async def _report_load_ffa(db, key, cpid):
+    """One FFA game — the match row (only when the caller PLAYED it) and its
+    PLAYING roster rows: `absent` rows are frozen-roster ghosts and are not
+    participants, not slots, not telemetry (#227)."""
+    rows = await _report_rows(db, _REPORT_FFA_SQL, {"key": key, "cpid": cpid})
     if not rows:
         return [], []
     r = rows[0]
@@ -46521,11 +46765,13 @@ async def _report_load_ffa(db, key):
     for fp in fps:
         s = _report_slot(fp["player_id"], fp["rounds_won"], fp["points_total"],
                          fp["fps_timeline"], fp["ping_timeline"], fp["hit_timeline"],
-                         fp["block_timeline"], None, fp["end_stats"],
+                         fp["block_timeline"], fp["damage_dealt_timeline"], fp["end_stats"],
                          _report_totals(fp["bullets_fired"], fp["bullets_hit"],
                                         fp["blocks_activated"], fp["blocks_successful"],
                                         fp["keys_pressed"], fp["active_seconds"],
-                                        kills=fp["kills"]))
+                                        damage=fp["damage_dealt"], kills=fp["kills"]),
+                         killtl=fp["kill_timeline"])
+        s["slot"] = fp["slot"]
         s["placement"] = fp["placement"]
         s["rating_before"] = fp["rating_before"]
         s["rating_after"] = fp["rating_after"]
@@ -46534,27 +46780,37 @@ async def _report_load_ffa(db, key):
         s["color_hex"] = fp["color_hex"]
         slots.append(s)
     game = {"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-            "slots": slots}
+            "ffa_timeline": r["timeline"], "slots": slots}
     return [game], slots
 
 
+def _report_consistent(games, anchor):
+    """Oldest-first games -> those whose roster equals `anchor` (a frozenset of
+    player ids), plus the count dropped. The envelope shows ONE roster."""
+    kept = [g for g in games if _report_roster_key(g["slots"]) == anchor]
+    return kept, len(games) - len(kept)
+
+
 async def _report_load_cards(db, mode, mids):
-    """{match_id str: [(player_id, card_name, pick_order, round_number), ...]}
-    in pick order (round first where the table records one)."""
+    """{match_id str: [(player_id, card_name, pick_order, round_number, rolled), ...]}
+    in pick order (round first where the table records one). `rolled` is
+    False for every table but FFA's, which is the only one that records it."""
     if not mids:
         return {}
-    table, with_round = _REPORT_CARD_TABLES[mode]
+    table, with_round, with_rolled = _REPORT_CARD_TABLES[mode]
     round_col = "c.round_number" if with_round else "NULL AS round_number"
+    rolled_col = "c.rolled" if with_rolled else "FALSE AS rolled"
     order = "c.round_number NULLS FIRST, c.pick_order" if with_round else "c.pick_order"
     rows = await _report_rows(db, f"""
-        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}
+        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}, {rolled_col}
           FROM {table} c
          WHERE c.match_id = ANY(CAST(:mids AS uuid[]))
          ORDER BY c.match_id, {order}""", {"mids": [str(m) for m in mids]})
     out = {}
     for r in rows:
         out.setdefault(str(r["match_id"]), []).append(
-            (r["player_id"], r["card_name"], r["pick_order"], r["round_number"]))
+            (r["player_id"], r["card_name"], r["pick_order"], r["round_number"],
+             bool(r.get("rolled") or False)))
     return out
 
 
@@ -46578,7 +46834,8 @@ async def _report_roster(db, pids_in_order, team_of=None, color_of=None):
         if r is None:
             continue
         color = (color_of or {}).get(p) or _REPORT_PALETTE[i % len(_REPORT_PALETTE)]
-        roster.append({"pid": p, "id": str(r["steam_id"]), "name": r["display_name"] or "",
+        roster.append({"pid": p, "id": str(r["steam_id"]),
+                       "name": (r["display_name"] or "")[:_REPORT_NAME_MAX],
                        "color": color, "team": (team_of or {}).get(p)})
     return roster
 
@@ -46593,15 +46850,23 @@ async def _report_gold(db, reasons, refs):
     return {str(r["player_id"]): int(r["amount"] or 0) for r in rows}
 
 
-async def _report_rating_after(db, pids, completed_at):
-    """{player_id str: rating} from the rating_history snapshot the series
-    completion wrote (the FIRST snapshot in a bounded window around
-    completed_at: the row is written in the same request, so anything later
-    belongs to a later series). Empty when the set never completed."""
-    if completed_at is None or not pids:
+async def _report_rating_after(db, pids, series_id):
+    """{player_id str: rating} from the rating_history snapshots the series
+    completion writer LINKED to this series (rating_history.series_id,
+    migration 299) — an identity, never a time window. Empty when the set has
+    no linked snapshot (pre-299 rows the backfill could not attribute), which
+    the client renders as the delta alone. Savepointed (#235): on a box whose
+    schema predates 299 this one panel reads "not recorded" instead of the
+    whole report failing."""
+    if series_id is None or not pids:
         return {}
-    rows = await _report_rows(db, _REPORT_RATING_SQL,
-                              {"pids": [str(p) for p in pids], "t0": completed_at})
+    try:
+        async with db.begin_nested():
+            rows = await _report_rows(db, _REPORT_RATING_SQL,
+                                      {"pids": [str(p) for p in pids], "key": str(series_id)})
+    except Exception as ex:
+        print(f"[REPORT] rating snapshot lookup skipped: {ex}")
+        return {}
     out = {}
     for r in rows:
         k = str(r["player_id"])
@@ -46632,7 +46897,7 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
                   str(set_row["player2_id"]): set_row["p2_rating_change"]}
         after = {}
         if set_row["status"] == "completed":
-            after = await _report_rating_after(db, list(deltas.keys()), set_row["completed_at"])
+            after = await _report_rating_after(db, list(deltas.keys()), set_row["id"])
         for pid, d in deltas.items():
             sid = sid_of.get(pid)
             if sid is None or d is None:
@@ -46696,7 +46961,14 @@ async def get_set_report(request: Request, steam_id: str = "",
     above. Errors: 401 "session_required" (fail-closed session check, first
     statement); 400 "bad_request" for zero or several selectors or a selector
     that is not a UUID; 404 "not_found" for an unknown, invalidated or empty
-    set AND for a caller who is not in its roster (one detail for both)."""
+    set AND for a caller who has no player row or is not in the roster of
+    the games (one detail for all of them).
+
+    Participation is decided PER GAME in SQL (the caller's player id must be
+    in the row), then the games are reduced to ONE roster: the set row's for
+    a series, the newest game's otherwise. `games_omitted` counts every game
+    of the set the envelope does not carry — dropped for a different roster
+    or beyond _REPORT_MAX_GAMES — and `truncated` is its boolean."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     chosen = [(name, val) for name, val in
@@ -46708,7 +46980,12 @@ async def get_set_report(request: Request, steam_id: str = "",
     if key is None:
         raise HTTPException(status_code=400, detail="bad_request")
 
-    kind, mode, games, truncated = None, None, [], False
+    caller = await _report_rows(db, _REPORT_CALLER_SQL, {"sid": str(steam_id)})
+    if not caller or caller[0]["id"] is None:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    cpid = str(caller[0]["id"])
+
+    kind, mode, games, total = None, None, [], 0
     set_row, roster_pids, team_of, color_of = None, [], {}, {}
 
     if selector == "series":
@@ -46718,7 +46995,7 @@ async def get_set_report(request: Request, steam_id: str = "",
             if set_row["invalidated_at"] is not None:
                 raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
             kind, mode = "ranked", "1v1"
-            games, truncated = await _report_load_1v1(db, "series", key)
+            games, total = await _report_load_1v1(db, "series", key, cpid)
             roster_pids = [set_row["player1_id"], set_row["player2_id"]]
         else:
             ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
@@ -46727,7 +47004,7 @@ async def get_set_report(request: Request, steam_id: str = "",
                 if set_row["invalidated_at"] is not None:
                     raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
                 kind, mode = "team", "team"
-                games, truncated = await _report_load_team(db, "series", key)
+                games, total = await _report_load_team(db, "series", key, cpid)
                 roster_pids = [set_row["t1a_id"], set_row["t1b_id"], set_row["t2a_id"], set_row["t2b_id"]]
                 team_of = {str(set_row["t1a_id"]): 1, str(set_row["t1b_id"]): 1,
                            str(set_row["t2a_id"]): 2, str(set_row["t2b_id"]): 2}
@@ -46739,43 +47016,54 @@ async def get_set_report(request: Request, steam_id: str = "",
                 if set_row["invalidated_at"] is not None:
                     raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
                 kind, mode = "ovt", "ovt"
-                games, truncated = await _report_load_ovt(db, "series", key)
+                games, total = await _report_load_ovt(db, "series", key, cpid)
                 roster_pids = [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]]
                 team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
                            str(set_row["duo_b_id"]): 2}
     elif selector == "session":
         kind, mode = "casual", "1v1"
-        games, truncated = await _report_load_1v1(db, "session", key)
+        games, total = await _report_load_1v1(db, "session", key, cpid)
         if games and all(g["is_ranked"] for g in games):
             kind = "ranked"
-        for g in games:
-            roster_pids.extend(s["pid"] for s in g["slots"])
     else:  # match
-        games, truncated = await _report_load_1v1(db, "match", key)
+        games, total = await _report_load_1v1(db, "match", key, cpid)
         if games:
             mode = "1v1"
             kind = "ranked" if games[0]["is_ranked"] else "casual"
-            roster_pids = [s["pid"] for s in games[0]["slots"]]
         else:
-            games, truncated = await _report_load_team(db, "match", key)
+            games, total = await _report_load_team(db, "match", key, cpid)
             if games:
                 kind, mode = "team", "team"
-                roster_pids = [s["pid"] for s in games[0]["slots"]]
                 team_of = {s["pid"]: s["team"] for s in games[0]["slots"]}
             else:
-                games, truncated = await _report_load_ovt(db, "match", key)
+                games, total = await _report_load_ovt(db, "match", key, cpid)
                 if games:
                     kind, mode = "ovt", "ovt"
-                    roster_pids = [s["pid"] for s in games[0]["slots"]]
                     team_of = {s["pid"]: s["team"] for s in games[0]["slots"]}
                 else:
-                    games, ffa_slots = await _report_load_ffa(db, key)
+                    games, ffa_slots = await _report_load_ffa(db, key, cpid)
                     if games:
                         kind, mode = "ffa", "ffa"
-                        roster_pids = [s["pid"] for s in ffa_slots]
+                        total = 1
                         color_of = {s["pid"]: s["color_hex"] for s in ffa_slots if s.get("color_hex")}
     if not games:
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+
+    # ONE roster per envelope: the set row's when there is one, else the
+    # newest game the caller played. Games with any other roster are dropped
+    # and counted in `games_omitted` — a session uuid groups only the caller's
+    # own games with the same people.
+    if set_row is not None:
+        anchor = frozenset(str(p) for p in roster_pids if p is not None)
+    else:
+        anchor = _report_roster_key(games[-1]["slots"])
+        roster_pids = [s["pid"] for s in games[-1]["slots"]]
+    if cpid not in anchor:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    games, _dropped = _report_consistent(games, anchor)
+    if not games:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    games_omitted = max(0, int(total) - len(games))
 
     roster = await _report_roster(db, roster_pids, team_of, color_of)
     # PARTICIPANT-ONLY, and indistinguishable from "no such set" on purpose.
@@ -46783,8 +47071,10 @@ async def get_set_report(request: Request, steam_id: str = "",
         raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
     sid_of = {r["pid"]: r["id"] for r in roster}
 
+    sample_cap = _report_sample_cap(len(games), len(roster))
+    card_cap = _report_card_cap(len(games), len(roster))
     cards = await _report_load_cards(db, mode, [g["id"] for g in games])
-    games_json = [_report_game_json(g, sid_of, cards) for g in games]
+    games_json = [_report_game_json(g, sid_of, cards, sample_cap, card_cap) for g in games]
     set_summary = await _report_set_summary(db, kind, selector, key, set_row, games, roster)
     return {
         "v": 1,
@@ -46793,7 +47083,8 @@ async def get_set_report(request: Request, steam_id: str = "",
                     for r in roster],
         "games": games_json,
         "set_summary": set_summary,
-        "truncated": truncated,
+        "truncated": games_omitted > 0,
+        "games_omitted": games_omitted,
     }
 
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──

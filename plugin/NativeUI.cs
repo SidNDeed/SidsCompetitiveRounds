@@ -1948,7 +1948,7 @@ namespace CompetitiveRounds
 
         private static void BuildPage(Transform canvasParent)
         {
-            try{rankedRows.Clear();casualRows.Clear();lbRows.Clear();cardRows.Clear();sessionOppTexts.Clear();ovtSoloLbRows.Clear();ovtDuoLbRows.Clear();ovtRecentRows.Clear();ovtRecentHoverBodies.Clear();ffaLbRows.Clear();ffaRecentRows.Clear();ffaRecentCasRows.Clear();
+            try{rankedRows.Clear();casualRows.Clear();lbRows.Clear();cardRows.Clear();sessionOppTexts.Clear();ovtSoloLbRows.Clear();ovtDuoLbRows.Clear();ovtRecentRows.Clear();ovtRecentHoverBodies.Clear();ovtRecentSessionKeys.Clear();ovtRecentSessionBtns.Clear();ffaLbRows.Clear();ffaRecentRows.Clear();ffaRecentCasRows.Clear();
             /* Bugs #147/#149/#150: EVERY pool below holds rows parented to the
              * OLD pageGO and is re-Add()ed by a Build*Tab under the new one.
              * Miss one and a SECOND BuildPage — which the language switch and
@@ -5071,6 +5071,15 @@ namespace CompetitiveRounds
          * series, body grouped by game then player, is the version that cannot
          * lie; DrawWideTooltip bounds the height. */
         private static readonly List<string> ovtRecentHoverBodies = new List<string>();
+        /* Sept 6 item c (review r1): the 1v2 history surface gets the same
+         * "Session" control as the other lists. One button per SERIES row, a
+         * child of the row's text element (anchored to its top-right, outside
+         * the container's layout group), and the series id it opens lives in a
+         * parallel list read at CLICK time (#265) — never captured from the
+         * cache the refresh may reorder. Both lists are index-aligned with
+         * ovtRecentRows and cleared with it on rebuild. */
+        private static readonly List<string> ovtRecentSessionKeys = new List<string>();
+        private static readonly List<GameObject> ovtRecentSessionBtns = new List<GameObject>();
         private static RectTransform ovtRecentViewport, ovtTabOuterViewport;
         private sealed class OneVTwoHoverDrawer : MonoBehaviour
         {
@@ -5502,23 +5511,52 @@ namespace CompetitiveRounds
             var list=ApiClient.CachedOvtRecent??new List<ApiClient.OvtRecentSeries>();
             while(ovtRecentRows.Count<Math.Min(list.Count,10))
             {
-                var t=UIFactory.CreateText($"O1RR{ovtRecentRows.Count}",ovtRecentContainer.transform,"",18f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(896,27));
+                int idx=ovtRecentRows.Count;
+                var t=UIFactory.CreateText($"O1RR{idx}",ovtRecentContainer.transform,"",18f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(896,27));
                 UIFactory.SetWordWrap(t,false);
+                // Sept 6 item c (review r1): the row's "Session" control. A child
+                // of the text element (the container's VLG lays out only direct
+                // children, so the row height arithmetic is untouched), pinned to
+                // the row's top-right over the header line's tail. The click reads
+                // the index-aligned key list at click time (#265); the shared
+                // opener resolves ?series= for the 1v2 series server-side.
+                GameObject sesBtn=null;
+                var tComp=t as Component;
+                if(tComp!=null)
+                {
+                    sesBtn=UIFactory.CreateButton($"O1RS{idx}",tComp.transform,I18n.Tr("Session"),12f,C_DIM,C_BTN,
+                        ()=>{if(idx<ovtRecentSessionKeys.Count)OpenSessionReport("series",ovtRecentSessionKeys[idx]);},sizeDelta:new Vector2(66,21));
+                    var brt=sesBtn.GetComponent<RectTransform>();
+                    if(brt!=null){brt.anchorMin=brt.anchorMax=new Vector2(1f,1f);brt.pivot=new Vector2(1f,1f);brt.anchoredPosition=new Vector2(-6f,-3f);brt.sizeDelta=new Vector2(66,21);}
+                    sesBtn.SetActive(false);
+                }
                 ovtRecentRows.Add(t);
+                ovtRecentSessionBtns.Add(sesBtn);
             }
             float recTotalH=0f;
             // Kept index-aligned with the row pool BEFORE the loop, so the
             // hover scan can index it with a row index unconditionally — a
             // `continue` inside the loop must not be able to leave it short.
             while(ovtRecentHoverBodies.Count<ovtRecentRows.Count)ovtRecentHoverBodies.Add(null);
+            while(ovtRecentSessionKeys.Count<ovtRecentRows.Count)ovtRecentSessionKeys.Add(null);
+            while(ovtRecentSessionBtns.Count<ovtRecentRows.Count)ovtRecentSessionBtns.Add(null);
+            string meSteam=MatchTracker.LocalSteamId;
             for(int i=0;i<ovtRecentRows.Count;i++)
             {
-                var comp=ovtRecentRows[i] as Component;if(comp==null){ovtRecentHoverBodies[i]=null;continue;}
-                if(i>=list.Count){comp.gameObject.SetActive(false);ovtRecentHoverBodies[i]=null;continue;}
+                var comp=ovtRecentRows[i] as Component;if(comp==null){ovtRecentHoverBodies[i]=null;ovtRecentSessionKeys[i]=null;continue;}
+                if(i>=list.Count){comp.gameObject.SetActive(false);ovtRecentHoverBodies[i]=null;ovtRecentSessionKeys[i]=null;if(ovtRecentSessionBtns[i]!=null)ovtRecentSessionBtns[i].SetActive(false);continue;}
                 int lines;
                 string hoverBody;
                 UIFactory.SetTextRaw(ovtRecentRows[i],BuildOvtRecentRowText(list[i],out lines,out hoverBody));
                 ovtRecentHoverBodies[i]=hoverBody;
+                // Armed only for a seat of THIS series (solo, duo A or duo B): the
+                // server answers a non-participant with not_found anyway, so a
+                // bystander gets no dead control.
+                var s=list[i];
+                bool mine=!string.IsNullOrEmpty(meSteam)&&meSteam!="unknown"&&!string.IsNullOrEmpty(s.series_id)
+                          &&(meSteam==s.solo_steam||meSteam==s.duo_a_steam||meSteam==s.duo_b_steam);
+                ovtRecentSessionKeys[i]=mine?s.series_id:null;
+                if(ovtRecentSessionBtns[i]!=null&&ovtRecentSessionBtns[i].activeSelf!=mine)ovtRecentSessionBtns[i].SetActive(mine);
                 int h=lines*24+10;
                 UIFactory.SetPrefH(comp.gameObject,h);
                 var rt=comp.GetComponent<RectTransform>();

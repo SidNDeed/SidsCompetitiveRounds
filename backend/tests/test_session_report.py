@@ -8,12 +8,22 @@ predicate (the "lost predicate" pattern of test_queue_pair_writers). The
 fixture match rows deliberately carry the three room-shaped columns a
 careless serialiser would drag along, so the no-room-id pin can actually
 fail; the pin's own checker is exercised against a leaky blob first.
+
+Review r1 added the fixtures the first suite lacked, each with a negative
+control (#391): a session uuid shared by two pairs and by two rosters of the
+caller, an FFA frozen-roster ghost (`absent`), stored FFA damage / kill /
+score telemetry, a rolled-out FFA pick, the rating snapshot joined by series
+identity rather than a time window, the byte bound against worst-case
+shapes, and the C# surfaces the plugin must carry (1v2 Session control,
+continuation paging, translated dividers and diagnostics).
 """
 import asyncio
 import inspect
 import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -21,18 +31,27 @@ from pydantic import ValidationError
 
 import main
 from schemas import MatchHistoryEntry, MatchReport
+from _cs_structure import method_spans, strip_comments_only
+
+PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
+SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
 CALLER = "76561198000000001"      # player A, in every set below
 OPP = "76561198000000002"         # player B
-OTHER = "76561198000000003"       # never a participant
-PID_A, PID_B, PID_C = (str(uuid.uuid4()) for _ in range(3))
+OTHER = "76561198000000003"       # C: a 2v2 team-mate of A, never in a 1v1 with A
+XSTEAM = "76561198000000004"      # X and Y: another pair whose reporter reused A's session uuid
+YSTEAM = "76561198000000005"
+GHOST = "76561198000000006"       # G: an FFA frozen-roster ghost (absent row)
+NOBODY = "76561198000000099"      # a valid session but no player row at all
+PID_A, PID_B, PID_C, PID_X, PID_Y, PID_G = (str(uuid.uuid4()) for _ in range(6))
 SERIES = str(uuid.uuid4())
+SERIES_LATER = str(uuid.uuid4())  # a second ranked series of A, completed 30 s after SERIES
 SESSION = str(uuid.uuid4())
 SESSION_2 = str(uuid.uuid4())
-M1, M2, M3, C1, C2, C3, N1 = (str(uuid.uuid4()) for _ in range(7))
+M1, M2, M3, C1, C2, C3, CX, X1, N1 = (str(uuid.uuid4()) for _ in range(9))
 TEAM_SERIES, TM1, FFA1 = (str(uuid.uuid4()) for _ in range(3))
 ROOM_SECRET = "ranked_SECRETROOM77"
 T0 = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
@@ -81,6 +100,9 @@ PLAYERS = [
     {"id": PID_A, "steam_id": CALLER, "display_name": "Spirit"},
     {"id": PID_B, "steam_id": OPP, "display_name": "Dopex"},
     {"id": PID_C, "steam_id": OTHER, "display_name": "Bystander"},
+    {"id": PID_X, "steam_id": XSTEAM, "display_name": "Xavier"},
+    {"id": PID_Y, "steam_id": YSTEAM, "display_name": "Yara"},
+    {"id": PID_G, "steam_id": GHOST, "display_name": "Ghost"},
 ]
 SERIES_ROW = {
     "id": SERIES, "player1_id": PID_B, "player2_id": PID_A,   # series order differs from match order
@@ -92,15 +114,27 @@ MATCHES = [
     match_row(M1, PID_A, PID_B, minute=0, series_id=SERIES),
     match_row(M2, PID_B, PID_A, minute=5, series_id=SERIES),
     match_row(M3, PID_A, PID_B, minute=10, series_id=SERIES),
+    # A's casual sitting with B, then — under the SAME reporter-minted uuid —
+    # one game A played against C (a different roster) and one game the X/Y
+    # pair filed with A's uuid (a client-chosen label, not a fact about A).
+    match_row(CX, PID_A, PID_C, minute=55, ranked=False, session_uuid=SESSION),
     match_row(C1, PID_A, PID_B, minute=60, ranked=False, session_uuid=SESSION),
     match_row(C2, PID_A, PID_B, minute=65, ranked=False, session_uuid=SESSION),
+    match_row(X1, PID_X, PID_Y, minute=70, ranked=False, session_uuid=SESSION),
     match_row(C3, PID_A, PID_B, minute=90, ranked=False, session_uuid=SESSION_2),
     match_row(N1, PID_A, PID_B, minute=120, ranked=False, telemetry=False),
 ]
 CARDS = [
-    {"match_id": M1, "player_id": PID_A, "card_name": "BombsAway", "pick_order": 1, "round_number": 0},
-    {"match_id": M1, "player_id": PID_B, "card_name": "Leach", "pick_order": 1, "round_number": 0},
-    {"match_id": M1, "player_id": PID_A, "card_name": "Barrage", "pick_order": 2, "round_number": 1},
+    {"match_id": M1, "player_id": PID_A, "card_name": "BombsAway", "pick_order": 1, "round_number": 0, "rolled": False},
+    {"match_id": M1, "player_id": PID_B, "card_name": "Leach", "pick_order": 1, "round_number": 0, "rolled": False},
+    {"match_id": M1, "player_id": PID_A, "card_name": "Barrage", "pick_order": 2, "round_number": 1, "rolled": False},
+]
+FFA_CARDS = [
+    # A's sixth pick rolled "Alpha" out of the five-card build (migration 156).
+    {"match_id": FFA1, "player_id": PID_A, "card_name": "Alpha", "pick_order": 1, "round_number": 0, "rolled": True},
+    {"match_id": FFA1, "player_id": PID_A, "card_name": "Beta", "pick_order": 2, "round_number": 1, "rolled": False},
+    {"match_id": FFA1, "player_id": PID_A, "card_name": "Gamma", "pick_order": 3, "round_number": 2, "rolled": False},
+    {"match_id": FFA1, "player_id": PID_G, "card_name": "GhostCard", "pick_order": 1, "round_number": 0, "rolled": False},
 ]
 GOLD = [
     {"player_id": PID_A, "amount": 12, "reason": "series_win", "reference_id": SERIES},
@@ -111,13 +145,22 @@ GOLD = [
     {"player_id": PID_A, "amount": 3, "reason": "xp", "reference_id": C1},
     {"player_id": PID_A, "amount": 4, "reason": "xp", "reference_id": C2},
     {"player_id": PID_A, "amount": 9, "reason": "xp", "reference_id": C3},
+    {"player_id": PID_A, "amount": 8, "reason": "xp", "reference_id": CX},
     {"player_id": PID_B, "amount": 2, "reason": "level_reward", "reference_id": C1},
 ]
+# Snapshots: the two the completion of SERIES linked (migration 299), a
+# decoy A snapshot the 097/104 backfills could not attribute (series_id NULL)
+# that sits EARLIER in the old 60-second window, and A's next series 30 s
+# later. Identity picks 1512.5; the old window rule picked 1499.0.
 RATING_HISTORY = [
-    {"player_id": PID_A, "rating": 1512.5, "period_end": SERIES_ROW["completed_at"] + timedelta(milliseconds=40)},
-    {"player_id": PID_B, "rating": 1487.5, "period_end": SERIES_ROW["completed_at"] + timedelta(milliseconds=40)},
-    # a LATER series' snapshot: must never be picked for this one
-    {"player_id": PID_A, "rating": 1600.0, "period_end": SERIES_ROW["completed_at"] + timedelta(hours=2)},
+    {"player_id": PID_A, "rating": 1499.0, "series_id": None,
+     "period_end": SERIES_ROW["completed_at"] - timedelta(seconds=20)},
+    {"player_id": PID_A, "rating": 1512.5, "series_id": SERIES,
+     "period_end": SERIES_ROW["completed_at"] + timedelta(milliseconds=40)},
+    {"player_id": PID_B, "rating": 1487.5, "series_id": SERIES,
+     "period_end": SERIES_ROW["completed_at"] + timedelta(milliseconds=40)},
+    {"player_id": PID_A, "rating": 1600.0, "series_id": SERIES_LATER,
+     "period_end": SERIES_ROW["completed_at"] + timedelta(seconds=30)},
 ]
 TEAM_SERIES_ROW = {
     "id": TEAM_SERIES, "t1a_id": PID_A, "t1b_id": PID_C, "t2a_id": PID_B, "t2b_id": None,
@@ -139,21 +182,38 @@ TEAM_TELE = [
      "bullets_fired": 10, "bullets_hit": 6, "blocks_activated": None, "blocks_successful": None,
      "keys_pressed": 80, "active_seconds": 200.0},
 ]
+# FFA: six half-point events, "slot[R][G]" (migration 156). A is slot 0, B slot
+# 1; G (slot 2) is a frozen-roster ghost who did NOT play this game.
+FFA_TIMELINE = "0,0R,1,1R,0,0RG"
 FFA_MATCH = {"id": FFA1, "started_at": T0, "ended_at": T0 + timedelta(seconds=400),
-             "duration_s": 400, "invalidated_at": None, **_room_cols()}
+             "duration_s": 400, "invalidated_at": None, "timeline": FFA_TIMELINE, **_room_cols()}
+
+
+def ffa_player(pid, slot, placement, **over):
+    row = {"player_id": pid, "slot": slot, "placement": placement, "rounds_won": 0, "points_total": 0,
+           "rating_before": None, "rating_after": None, "rating_change": None, "gold_gained": None,
+           "fps_timeline": None, "ping_timeline": None, "hit_timeline": None, "block_timeline": None,
+           "damage_dealt_timeline": None, "kill_timeline": None, "damage_dealt": None,
+           "end_stats": None, "color_hex": None, "absent": False,
+           "bullets_fired": None, "bullets_hit": None, "blocks_activated": None,
+           "blocks_successful": None, "keys_pressed": None, "active_seconds": None, "kills": 0}
+    row.update(over)
+    return row
+
+
 FFA_PLAYERS = [
-    {"player_id": PID_A, "slot": 0, "placement": 1, "rounds_won": 5, "points_total": 5,
-     "rating_before": 1500.0, "rating_after": 1520.0, "rating_change": 20.0, "gold_gained": 30,
-     "fps_timeline": "60,60", "ping_timeline": "30,31", "hit_timeline": "4:1,8:3",
-     "block_timeline": "1:1,2:2", "end_stats": END_STATS, "color_hex": "#FF8800",
-     "bullets_fired": 8, "bullets_hit": 3, "blocks_activated": 2, "blocks_successful": 2,
-     "keys_pressed": 50, "active_seconds": 300.0, "kills": 4},
-    {"player_id": PID_B, "slot": 1, "placement": 2, "rounds_won": 3, "points_total": 3,
-     "rating_before": 1500.0, "rating_after": 1490.0, "rating_change": -10.0, "gold_gained": 10,
-     "fps_timeline": None, "ping_timeline": None, "hit_timeline": None,
-     "block_timeline": None, "end_stats": None, "color_hex": None,
-     "bullets_fired": None, "bullets_hit": None, "blocks_activated": None,
-     "blocks_successful": None, "keys_pressed": None, "active_seconds": None, "kills": 1},
+    ffa_player(PID_A, 0, 1, rounds_won=5, points_total=5, rating_before=1500.0, rating_after=1520.0,
+               rating_change=20.0, gold_gained=30, fps_timeline="60,60", ping_timeline="30,31",
+               hit_timeline="4:1,8:3", block_timeline="1:1,2:2", damage_dealt_timeline="0,400,900",
+               kill_timeline="0,2,4", damage_dealt=900, end_stats=END_STATS, color_hex="#FF8800",
+               bullets_fired=8, bullets_hit=3, blocks_activated=2, blocks_successful=2,
+               keys_pressed=50, active_seconds=300.0, kills=4),
+    ffa_player(PID_B, 1, 2, rounds_won=3, points_total=3, rating_before=1500.0, rating_after=1490.0,
+               rating_change=-10.0, gold_gained=10, kills=1),
+    # The ghost: holds slot 2 in the frozen roster, absent from THIS game, and
+    # carries the all-zero tallies plus a rating stamp the writer never applies.
+    ffa_player(PID_G, 2, 3, absent=True, rating_before=1500.0, rating_after=1500.0,
+               rating_change=0.0, gold_gained=0, fps_timeline="1,1", kills=0),
 ]
 
 
@@ -171,76 +231,148 @@ class _Res:
         return self._rows[0] if self._rows else None
 
 
+class _NoopSavepoint:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class FakeDb:
     """Scripted read-only session. Each branch asserts the predicates the
-    envelope's guarantees rest on, so a statement that lost one refuses."""
+    envelope's guarantees rest on, so a statement that lost one refuses.
+    Every table can be overridden per test (the size-bound tests build their
+    own worst-case worlds); `fail_rating` makes the rating statement raise,
+    the pre-299 schema shape."""
 
-    def __init__(self):
+    def __init__(self, *, matches=None, players=None, cards=None, ffa_cards=None, gold=None,
+                 rating_history=None, team_matches=None, team_tele=None, ffa_match=None,
+                 ffa_players=None, series_row=None, team_series_row=None, fail_rating=False):
         self.statements = []
+        self.matches = MATCHES if matches is None else matches
+        self.players = PLAYERS if players is None else players
+        self.cards = CARDS if cards is None else cards
+        self.ffa_cards = FFA_CARDS if ffa_cards is None else ffa_cards
+        self.gold = GOLD if gold is None else gold
+        self.rating_history = RATING_HISTORY if rating_history is None else rating_history
+        self.team_matches = TEAM_MATCHES if team_matches is None else team_matches
+        self.team_tele = TEAM_TELE if team_tele is None else team_tele
+        self.ffa_match = FFA_MATCH if ffa_match is None else ffa_match
+        self.ffa_players = FFA_PLAYERS if ffa_players is None else ffa_players
+        self.series_row = SERIES_ROW if series_row is None else series_row
+        self.team_series_row = TEAM_SERIES_ROW if team_series_row is None else team_series_row
+        self.fail_rating = fail_rating
 
     def count(self, needle):
         return sum(1 for s, _ in self.statements if needle in s)
+
+    def begin_nested(self):
+        return _NoopSavepoint()
+
+    @staticmethod
+    def _with_total(rows):
+        out = []
+        for r in rows:
+            r = dict(r)
+            r["total_rows"] = len(rows)
+            out.append(r)
+        return out
 
     async def execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
         params = params or {}
         self.statements.append((sql, params))
+        if "FROM players p WHERE p.steam_id = :sid" in sql:
+            return _Res([{"id": p["id"]} for p in self.players if p["steam_id"] == params["sid"]])
         if "FROM matches m" in sql:
             assert "m.invalidated_at IS NULL" in sql, "1v1 statement lost the invalidation predicate"
-            key = params["key"]
+            assert "CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)" in sql, \
+                "1v1 statement lost the participant predicate"
+            assert "COUNT(*) OVER () AS total_rows" in sql, "1v1 statement lost its set count"
+            key, cpid = params["key"], params["cpid"]
             if "m.series_id = CAST(:key AS uuid)" in sql:
-                rows = [m for m in MATCHES if str(m["series_id"]) == key]
+                rows = [m for m in self.matches if str(m["series_id"]) == key]
             elif "m.session_uuid = CAST(:key AS uuid)" in sql:
-                rows = [m for m in MATCHES if str(m["session_uuid"]) == key]
+                rows = [m for m in self.matches if str(m["session_uuid"]) == key]
             elif "m.id = CAST(:key AS uuid)" in sql:
-                rows = [m for m in MATCHES if str(m["id"]) == key]
+                rows = [m for m in self.matches if str(m["id"]) == key]
             else:
                 raise AssertionError("1v1 statement lost its selector predicate")
+            rows = [m for m in rows if m["invalidated_at"] is None
+                    and cpid in (str(m["player1_id"]), str(m["player2_id"]))]
             rows.sort(key=lambda m: m["started_at"], reverse=True)
-            return _Res(rows[: int(params["lim"])])
+            return _Res(self._with_total(rows)[: int(params["lim"])])
         if "FROM ranked_series rs" in sql:
-            return _Res([r for r in [SERIES_ROW] if str(r["id"]) == params["key"]])
+            return _Res([r for r in [self.series_row] if str(r["id"]) == params["key"]])
         if "FROM team_series ts" in sql:
-            return _Res([r for r in [TEAM_SERIES_ROW] if str(r["id"]) == params["key"]])
+            return _Res([r for r in [self.team_series_row] if str(r["id"]) == params["key"]])
         if "FROM ovt_series os" in sql:
             return _Res([])
         if "FROM team_matches tm" in sql:
             assert "tm.invalidated_at IS NULL" in sql
-            key = params["key"]
+            assert "CAST(:cpid AS uuid) IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)" in sql, \
+                "2v2 statement lost the participant predicate"
+            assert "COUNT(*) OVER () AS total_rows" in sql
+            key, cpid = params["key"], params["cpid"]
             if "tm.series_id = CAST(:key AS uuid)" in sql:
-                return _Res([m for m in TEAM_MATCHES if str(m["series_id"]) == key])
-            return _Res([m for m in TEAM_MATCHES if str(m["id"]) == key])
+                rows = [m for m in self.team_matches if str(m["series_id"]) == key]
+            else:
+                rows = [m for m in self.team_matches if str(m["id"]) == key]
+            rows = [m for m in rows if cpid in {str(m[k]) for k in ("t1a_id", "t1b_id", "t2a_id", "t2b_id")
+                                                if m[k] is not None}]
+            rows.sort(key=lambda m: m["started_at"], reverse=True)
+            return _Res(self._with_total(rows)[: int(params["lim"])])
         if "FROM team_match_telemetry tt" in sql:
             mids = set(params["mids"])
-            return _Res([t for t in TEAM_TELE if str(t["match_id"]) in mids])
+            return _Res([t for t in self.team_tele if str(t["match_id"]) in mids])
         if "FROM ovt_matches om" in sql:
+            assert "CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)" in sql, \
+                "1v2 statement lost the participant predicate"
             return _Res([])
         if "FROM ffa_matches fm" in sql:
             assert "fm.invalidated_at IS NULL" in sql
-            return _Res([FFA_MATCH] if str(FFA_MATCH["id"]) == params["key"] else [])
+            assert ("EXISTS (SELECT 1 FROM ffa_match_players fpx WHERE fpx.match_id = fm.id "
+                    "AND fpx.player_id = CAST(:cpid AS uuid) AND NOT fpx.absent)") in sql, \
+                "FFA statement lost the played-this-game participant predicate"
+            if str(self.ffa_match["id"]) != params["key"]:
+                return _Res([])
+            played = any(str(p["player_id"]) == params["cpid"] and not p["absent"]
+                         for p in self.ffa_players)
+            return _Res([self.ffa_match] if played else [])
         if "FROM ffa_match_players fp" in sql:
-            return _Res(FFA_PLAYERS if params["key"] == FFA1 else [])
+            assert "AND NOT fp.absent" in sql, "FFA roster statement lost the absent filter"
+            return _Res([p for p in self.ffa_players if not p["absent"]] if params["key"] == FFA1 else [])
         if "FROM players p" in sql:
             pids = set(params["pids"])
-            return _Res([p for p in PLAYERS if str(p["id"]) in pids])
+            return _Res([p for p in self.players if str(p["id"]) in pids])
         if " c WHERE c.match_id = ANY(CAST(:mids AS uuid[]))" in sql:
             table = sql.split("FROM ")[1].split(" ")[0]
             assert table in ("match_cards", "team_match_cards", "ovt_match_cards", "ffa_match_cards"), table
+            if table == "ffa_match_cards":
+                assert "c.rolled" in sql, "FFA card statement lost the rolled column"
+            else:
+                assert "FALSE AS rolled" in sql and "c.rolled" not in sql, \
+                    "only the FFA card table records `rolled`"
             mids = set(params["mids"])
-            rows = [c for c in CARDS if str(c["match_id"]) in mids] if table == "match_cards" else []
-            return _Res(rows)
+            source = {"match_cards": self.cards, "ffa_match_cards": self.ffa_cards}.get(table, [])
+            return _Res([c for c in source if str(c["match_id"]) in mids])
         if "FROM gold_transactions gt" in sql:
             reasons, refs = set(params["reasons"]), set(params["refs"])
             agg = {}
-            for g in GOLD:
+            for g in self.gold:
                 if g["reason"] in reasons and str(g["reference_id"]) in refs:
                     agg[g["player_id"]] = agg.get(g["player_id"], 0) + g["amount"]
             return _Res([{"player_id": p, "amount": a} for p, a in agg.items()])
         if "FROM rating_history rh" in sql:
-            assert "make_interval" in sql and "CAST(:t0 AS timestamptz)" in sql, "rating window lost its typed binds"
-            pids, t0 = set(params["pids"]), params["t0"]
-            lo, hi = t0 - timedelta(seconds=60), t0 + timedelta(minutes=10)
-            rows = [r for r in RATING_HISTORY if str(r["player_id"]) in pids and lo <= r["period_end"] <= hi]
+            if self.fail_rating:
+                raise RuntimeError('column rh.series_id does not exist')
+            assert "rh.series_id = CAST(:key AS uuid)" in sql, "rating statement lost its identity join"
+            assert "make_interval" not in sql and "period_end >=" not in sql, \
+                "rating statement is a time window again"
+            pids, key = set(params["pids"]), params["key"]
+            rows = [r for r in self.rating_history
+                    if str(r["player_id"]) in pids and str(r["series_id"]) == key]
             rows.sort(key=lambda r: r["period_end"])
             return _Res(rows)
         raise AssertionError(f"unexpected statement: {sql[:90]}")
@@ -256,10 +388,10 @@ def _call(db, steam_id, **sel):
 
 @pytest.fixture
 def session_ok(monkeypatch):
-    """Strict session check passes for CALLER and OTHER (both have valid
-    sessions in this world); nobody else."""
+    """Strict session check passes for every fixture identity (they all hold
+    valid sessions in this world); nobody else."""
     async def _ok(request, steam_id, db):
-        return steam_id in (CALLER, OTHER)
+        return steam_id in (CALLER, OPP, OTHER, XSTEAM, YSTEAM, GHOST, NOBODY)
     monkeypatch.setattr(main, "_strict_steam_session_ok", _ok)
 
 
@@ -268,6 +400,11 @@ def _no_room_leak(payload) -> bool:
     if ROOM_SECRET in blob:
         return False
     return not any(k in blob for k in ROOM_KEYS)
+
+
+def _wire_bytes(payload) -> int:
+    """The size FastAPI's JSONResponse puts on the wire: compact separators."""
+    return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8"))
 
 
 # ── the pins ─────────────────────────────────────────────────────────────────
@@ -306,15 +443,37 @@ def test_participant_gate_is_a_404_indistinguishable_from_missing(session_ok):
         _call(FakeDb(), OTHER, series=SERIES)
     with pytest.raises(HTTPException) as missing:
         _call(FakeDb(), CALLER, series=str(uuid.uuid4()))
-    assert bystander.value.status_code == missing.value.status_code == 404
-    assert bystander.value.detail == missing.value.detail == "not_found"
+    db = FakeDb()
+    with pytest.raises(HTTPException) as no_row:
+        _call(db, NOBODY, series=SERIES)
+    assert bystander.value.status_code == missing.value.status_code == no_row.value.status_code == 404
+    assert bystander.value.detail == missing.value.detail == no_row.value.detail == "not_found"
+    # a caller with no player row is decided by the FIRST statement: nothing
+    # about the set is read for an identity that cannot be a participant
+    assert len(db.statements) == 1 and "p.steam_id = :sid" in db.statements[0][0]
+
+
+def test_caller_is_resolved_first_and_required_in_every_games_statement(session_ok):
+    db = FakeDb()
+    _call(db, CALLER, series=SERIES)
+    assert "p.steam_id = :sid" in db.statements[0][0] and db.statements[0][1] == {"sid": CALLER}
+    games_stmt, params = next((s, p) for s, p in db.statements if "FROM matches m" in s)
+    assert params["cpid"] == PID_A, "the games statement binds the CALLER's player id"
+    assert "CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)" in games_stmt
+    # every loader carries the predicate (the FakeDb refuses one that lost it)
+    for src_name, needle in (("_REPORT_1V1_SQL", "CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)"),
+                             ("_REPORT_TEAM_SQL", "CAST(:cpid AS uuid) IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)"),
+                             ("_REPORT_OVT_SQL", "CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)"),
+                             ("_REPORT_FFA_SQL", "AND NOT fpx.absent")):
+        assert needle in " ".join(getattr(main, src_name).split()), src_name
 
 
 def test_ranked_series_envelope(session_ok):
     db = FakeDb()
     resp = _call(db, CALLER, series=SERIES)
     assert _no_room_leak(resp), "a room-shaped value or key reached the envelope"
-    assert resp["v"] == 1 and resp["kind"] == "ranked" and resp["truncated"] is False
+    assert resp["v"] == 1 and resp["kind"] == "ranked"
+    assert resp["truncated"] is False and resp["games_omitted"] == 0
     ids = [p["id"] for p in resp["players"]]
     assert ids == [OPP, CALLER], "roster follows the series row order, keyed by steam id"
     names = {p["id"]: p["name"] for p in resp["players"]}
@@ -334,7 +493,8 @@ def test_ranked_series_envelope(session_ok):
     assert g1["deaths"] == [{"t": 12.0, "id": OPP}, {"t": 47.0, "id": CALLER}, {"t": 89.0, "id": OPP}]
     assert g1["picks"] == [{"t": None, "id": CALLER, "card": "BombsAway"},
                            {"t": None, "id": OPP, "card": "Leach"},
-                           {"t": None, "id": CALLER, "card": "Barrage"}]
+                           {"t": None, "id": CALLER, "card": "Barrage"}], "pick order, no rolled key in 1v1"
+    assert "picks_capped" not in g1
     assert g1["end_build"] == {CALLER: ["BombsAway", "Barrage"], OPP: ["Leach"]}
     assert g1["end_stats"] == {CALLER: END_STATS, OPP: END_STATS}
     assert g1["totals"] == {
@@ -344,7 +504,7 @@ def test_ranked_series_envelope(session_ok):
               "damage": 120, "deaths": 2, "active_s": 90.0}}
     # game 2 was reported with the players swapped: still keyed by steam id
     assert resp["games"][1]["scores"] == {OPP: 2, CALLER: 1}
-    # set_summary ONCE per set, from the series row + the completion snapshot
+    # set_summary ONCE per set, from the series row + the linked snapshot
     ss = resp["set_summary"]
     assert ss["rating"] == {CALLER: {"before": 1500.0, "after": 1512.5, "delta": 12.5},
                             OPP: {"before": 1500.0, "after": 1487.5, "delta": -12.5}}
@@ -354,19 +514,54 @@ def test_ranked_series_envelope(session_ok):
     assert db.count("FROM matches m") == 1, "one games statement per set, not one per game"
 
 
-def test_session_selector_groups_by_uuid_only(session_ok):
+def test_session_uuid_groups_only_the_callers_games_with_one_roster(session_ok):
+    """The uuid is a client-chosen label. Under SESSION the fixture holds A vs
+    B twice, A vs C once and X vs Y once: A's report is A-vs-B only (the
+    roster of A's newest game), the A-vs-C game is counted as omitted, and
+    the X/Y game is not in the set at all."""
     db = FakeDb()
     resp = _call(db, CALLER, session=SESSION)
     assert _no_room_leak(resp)
     assert resp["kind"] == "casual"
-    assert [g["match_id"] for g in resp["games"]] == [C1, C2], "every game with that uuid and nothing else"
+    assert [g["match_id"] for g in resp["games"]] == [C1, C2]
+    assert [p["id"] for p in resp["players"]] == [CALLER, OPP]
+    assert resp["games_omitted"] == 1 and resp["truncated"] is True, "the A-vs-C game is omitted, and said so"
     stmt, params = next((s, p) for s, p in db.statements if "FROM matches m" in s)
     assert "m.session_uuid = CAST(:key AS uuid)" in stmt and params["key"] == SESSION
-    # no rating on a casual sitting; gold is the per-game ledger fetched ONCE
+    assert params["cpid"] == PID_A
+    blob = json.dumps(resp)
+    assert XSTEAM not in blob and YSTEAM not in blob and "Xavier" not in blob and X1 not in blob
+    assert OTHER not in blob and "Bystander" not in blob and CX not in blob
+    # no rating on a casual sitting; gold is the per-game ledger fetched ONCE,
+    # for the games SHOWN only (CX's 8 gold is not in this envelope)
     assert resp["set_summary"]["rating"] == {}
     assert resp["set_summary"]["gold"] == {CALLER: 7, OPP: 2}
     assert db.count("FROM gold_transactions gt") == 1
     assert db.count("FROM rating_history rh") == 0
+
+
+def test_the_same_uuid_gives_the_other_pair_only_their_own_game(session_ok):
+    resp = _call(FakeDb(), XSTEAM, session=SESSION)
+    assert [g["match_id"] for g in resp["games"]] == [X1]
+    assert {p["id"] for p in resp["players"]} == {XSTEAM, YSTEAM}
+    assert resp["games_omitted"] == 0 and resp["truncated"] is False
+    blob = json.dumps(resp)
+    for absent in (CALLER, OPP, OTHER, "Spirit", "Dopex", "Bystander", C1, C2, CX):
+        assert absent not in blob
+    # C played exactly one game under the uuid: a one-game report, nothing of A-vs-B
+    resp_c = _call(FakeDb(), OTHER, session=SESSION)
+    assert [g["match_id"] for g in resp_c["games"]] == [CX]
+    assert {p["id"] for p in resp_c["players"]} == {CALLER, OTHER}
+    assert OPP not in json.dumps(resp_c)
+
+
+def test_control_roster_rule_is_what_drops_the_foreign_roster(session_ok, monkeypatch):
+    """Negative control (#391): with the consistency rule disabled, the
+    A-vs-C game rides along under the uuid — so the assertion above is
+    load-bearing, not decoration."""
+    monkeypatch.setattr(main, "_report_consistent", lambda games, anchor: (games, 0))
+    resp = _call(FakeDb(), CALLER, session=SESSION)
+    assert CX in [g["match_id"] for g in resp["games"]]
 
 
 def test_match_selector_single_game(session_ok):
@@ -376,6 +571,10 @@ def test_match_selector_single_game(session_ok):
     assert resp["set_summary"]["gold"] == {CALLER: 5}
     resp2 = _call(FakeDb(), CALLER, match=C3)
     assert resp2["kind"] == "casual" and resp2["set_summary"]["gold"] == {CALLER: 9}
+    # X asking for A's game by id: not a participant, same 404 as a missing id
+    with pytest.raises(HTTPException) as ei:
+        _call(FakeDb(), XSTEAM, match=M1)
+    assert ei.value.status_code == 404 and ei.value.detail == "not_found"
 
 
 def test_match_without_telemetry_reports_nothing_recorded(session_ok):
@@ -390,7 +589,8 @@ def test_match_without_telemetry_reports_nothing_recorded(session_ok):
 
 
 def test_team_series_path(session_ok):
-    resp = _call(FakeDb(), CALLER, series=TEAM_SERIES)
+    db = FakeDb()
+    resp = _call(db, CALLER, series=TEAM_SERIES)
     assert _no_room_leak(resp)
     assert resp["kind"] == "team"
     teams = {p["id"]: p["team"] for p in resp["players"]}
@@ -406,27 +606,82 @@ def test_team_series_path(session_ok):
     assert ss["rating"] == {CALLER: {"before": None, "after": None, "delta": 7.0},
                             OTHER: {"before": None, "after": None, "delta": 7.0},
                             OPP: {"before": None, "after": None, "delta": -7.0}}
+    params = next(p for s, p in db.statements if "FROM team_matches tm" in s)
+    assert params["cpid"] == PID_A
+    # X is not on either team: the 2v2 loader's predicate returns nothing -> 404
+    with pytest.raises(HTTPException) as ei:
+        _call(FakeDb(), XSTEAM, series=TEAM_SERIES)
+    assert ei.value.status_code == 404
 
 
-def test_ffa_match_path(session_ok):
-    resp = _call(FakeDb(), CALLER, match=FFA1)
+def test_ffa_match_path_excludes_the_absent_ghost(session_ok):
+    """HIGH 2: an `absent` roster row is not a participant. The ghost is not a
+    player of the envelope, not a slot, not telemetry — and the ghost's own
+    verified session cannot open the game it did not play."""
+    db = FakeDb()
+    resp = _call(db, CALLER, match=FFA1)
     assert _no_room_leak(resp)
     assert resp["kind"] == "ffa"
+    assert [p["id"] for p in resp["players"]] == [CALLER, OPP]
+    blob = json.dumps(resp)
+    assert GHOST not in blob and "Ghost" not in blob, "the ghost is nowhere in the envelope"
     colors = {p["id"]: p["color"] for p in resp["players"]}
     assert colors[CALLER] == "#FF8800" and colors[OPP].startswith("#")
     g = resp["games"][0]
     assert g["scores"] == {CALLER: 5, OPP: 3}
-    assert g["available"] == ["blocks", "blocks_ok", "fps", "hits", "ping", "shots"]
+    assert set(g["timelines"].keys()) == {CALLER, OPP}
+    assert set(g["end_build"].keys()) == {CALLER, OPP}
     assert resp["set_summary"]["rating"] == {CALLER: {"before": 1500.0, "after": 1520.0, "delta": 20.0},
                                              OPP: {"before": 1500.0, "after": 1490.0, "delta": -10.0}}
     assert resp["set_summary"]["gold"] == {CALLER: 30, OPP: 10}
+    stmt = next(s for s, _ in db.statements if "FROM ffa_match_players fp WHERE" in s)
+    assert "AND NOT fp.absent" in stmt
+    # the ghost's verified session + the game id: same 404 as a stranger
+    for who in (GHOST, OTHER):
+        with pytest.raises(HTTPException) as ei:
+            _call(FakeDb(), who, match=FFA1)
+        assert ei.value.status_code == 404 and ei.value.detail == "not_found", who
+
+
+def test_control_absent_flag_is_what_excludes_the_ghost(session_ok):
+    """Negative control (#391): the identical roster row with absent=false IS
+    a participant — the predicate decides, not the tallies."""
+    played = [dict(p, absent=False) for p in FFA_PLAYERS]
+    resp = _call(FakeDb(ffa_players=played), GHOST, match=FFA1)
+    assert resp["kind"] == "ffa" and GHOST in {p["id"] for p in resp["players"]}
+
+
+def test_ffa_envelope_carries_stored_damage_kills_and_score(session_ok):
+    """MEDIUM: the FFA row's stored telemetry reaches the same envelope shape
+    1v1 uses — `available` names it, the DPS source stream exists, totals
+    carry damage, and the match row's half-point list becomes each player's
+    score race (half points as .5, index-stamped over the duration)."""
+    resp = _call(FakeDb(), CALLER, match=FFA1)
+    g = resp["games"][0]
+    assert g["available"] == ["blocks", "blocks_ok", "damage", "fps", "hits", "kills", "ping", "score", "shots"]
+    tl = g["timelines"][CALLER]
+    assert tl["damage"] == [[133.3, 0], [266.7, 400], [400.0, 900]]
+    assert tl["kills"] == [[133.3, 0], [266.7, 2], [400.0, 4]]
+    assert tl["score"] == [[66.7, 0.5], [133.3, 1.0], [200.0, 1.0], [266.7, 1.0], [333.3, 1.5], [400.0, 2.0]]
+    assert g["timelines"][OPP]["score"] == [[66.7, 0.0], [133.3, 0.0], [200.0, 0.5], [266.7, 1.0], [333.3, 1.0], [400.0, 1.0]]
+    assert g["timelines"][OPP].keys() == {"score"}, "B recorded nothing else — no fake streams"
     assert g["totals"] == {CALLER: {"shots": 8, "hits": 3, "blocks": 2, "blocks_ok": 2, "keys": 50,
-                                    "kills": 4, "active_s": 300.0},
+                                    "damage": 900, "kills": 4, "active_s": 300.0},
                            OPP: {"kills": 1}}
-    # participant gate holds on the FFA path too: a bystander gets the same 404
-    with pytest.raises(HTTPException) as ei:
-        _call(FakeDb(), OTHER, match=FFA1)
-    assert ei.value.status_code == 404 and ei.value.detail == "not_found"
+
+
+def test_ffa_rolled_pick_is_a_pick_but_not_part_of_the_end_build(session_ok):
+    resp = _call(FakeDb(), CALLER, match=FFA1)
+    g = resp["games"][0]
+    assert g["picks"] == [{"t": None, "id": CALLER, "card": "Alpha", "rolled": True},
+                          {"t": None, "id": CALLER, "card": "Beta"},
+                          {"t": None, "id": CALLER, "card": "Gamma"}], "the ghost's pick is not here either"
+    assert g["end_build"] == {CALLER: ["Beta", "Gamma"], OPP: []}
+    # negative control: the same card with rolled=false is in the build
+    unrolled = [dict(c, rolled=False) for c in FFA_CARDS]
+    resp2 = _call(FakeDb(ffa_cards=unrolled), CALLER, match=FFA1)
+    assert resp2["games"][0]["end_build"][CALLER] == ["Alpha", "Beta", "Gamma"]
+    assert all("rolled" not in p for p in resp2["games"][0]["picks"])
 
 
 def test_team_single_match_path(session_ok):
@@ -443,6 +698,79 @@ def test_team_single_match_path(session_ok):
     assert set(params["reasons"]) == {"team_xp", "level_reward"} and params["refs"] == [TM1]
 
 
+# ── the rating snapshot: identity, not a window ──────────────────────────────
+
+def test_rating_snapshot_is_joined_by_series_identity(session_ok):
+    """MEDIUM: the fixture holds an EARLIER unlinked snapshot (1499, inside the
+    old 60 s window) and a LATER one linked to A's next series (1600, 30 s
+    after). Only the snapshot linked to THIS series is the answer."""
+    db = FakeDb()
+    resp = _call(db, CALLER, series=SERIES)
+    assert resp["set_summary"]["rating"][CALLER] == {"before": 1500.0, "after": 1512.5, "delta": 12.5}
+    stmt, params = next((s, p) for s, p in db.statements if "FROM rating_history rh" in s)
+    assert "rh.series_id = CAST(:key AS uuid)" in stmt and params["key"] == SERIES
+    assert set(params["pids"]) == {PID_A, PID_B}
+    assert "make_interval" not in stmt and "completed_at" not in stmt and "t0" not in params
+    # negative control (#391): the OLD rule — earliest snapshot within
+    # [completed_at - 60 s, completed_at + 10 min] — lands on the decoy, so
+    # the fixture can tell the two mechanisms apart
+    t0 = SERIES_ROW["completed_at"]
+    window = sorted((r for r in RATING_HISTORY if r["player_id"] == PID_A
+                     and t0 - timedelta(seconds=60) <= r["period_end"] <= t0 + timedelta(minutes=10)),
+                    key=lambda r: r["period_end"])
+    assert window[0]["rating"] == 1499.0
+
+
+def test_rating_lookup_degrades_to_delta_only_when_the_column_is_missing(session_ok):
+    """#235: the identity join runs under a savepoint, so a box whose schema
+    predates migration 299 answers the report with before/after null and the
+    authoritative delta, instead of a 500."""
+    resp = _call(FakeDb(fail_rating=True), CALLER, series=SERIES)
+    assert resp["set_summary"]["rating"] == {CALLER: {"before": None, "after": None, "delta": 12.5},
+                                             OPP: {"before": None, "after": None, "delta": -12.5}}
+    assert resp["set_summary"]["gold"] == {CALLER: 12, OPP: 4}, "the rest of the summary is intact"
+    src = inspect.getsource(main._report_rating_after)
+    assert "begin_nested" in src
+
+
+def test_series_completion_links_its_snapshots_to_the_series():
+    """The writer half of the identity: the Glicko update stamps the two
+    snapshots it just added with the series id, by raw SQL under a savepoint
+    (the column is deliberately not on the model — a pre-299 box keeps the
+    rating update and skips the link)."""
+    submit = inspect.getsource(main.submit_match)
+    assert submit.count("_RATING_HISTORY_LINK_SQL") == 1
+    link = " ".join(main._RATING_HISTORY_LINK_SQL.split())
+    assert link == ("UPDATE rating_history SET series_id = CAST(:sid AS uuid) "
+                    "WHERE id = ANY(CAST(:ids AS uuid[]))"), "typed binds (#275/#448), ids only"
+    # the link sits in a savepoint AFTER the snapshots exist, keyed on the ids
+    # the writer chose itself
+    i_add = submit.index("db.add(RatingHistory(")
+    i_link = submit.index("_RATING_HISTORY_LINK_SQL")
+    assert i_add < i_link
+    between = submit[i_add:i_link]
+    assert "id=snapshot_id" in between and "await db.flush()" in between and "begin_nested()" in between
+    assert '{"sid": str(series.id), "ids": snapshot_ids}' in submit
+    from models import RatingHistory
+    assert "series_id" not in RatingHistory.__table__.columns, \
+        "NOT declared on purpose: an ORM column would ride every INSERT before 299 lands (#477)"
+
+
+def test_migration_299_shape():
+    path = SQL_DIR / "299_rating_history_series_id.sql"
+    sql = path.read_text(encoding="utf-8")
+    body = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+    assert body.strip().startswith("BEGIN;") and body.strip().endswith("COMMIT;")
+    assert "ALTER TABLE rating_history ADD COLUMN IF NOT EXISTS series_id UUID;" in body
+    assert "CREATE INDEX IF NOT EXISTS idx_rating_history_series" in body
+    assert "WHERE rh.series_id IS NULL" in body, "the backfill touches unlinked rows only (#168)"
+    assert "LATERAL" not in body.upper()
+    assert body.count("rs.status = 'completed'") == 2 and body.count("rs.invalidated_at IS NULL") == 2
+    assert "UNION ALL" in body, "one row per (series, player): an equality join, not an OR"
+    assert "ROW_NUMBER() OVER (PARTITION BY rh.id ORDER BY s.completed_at DESC)" in body
+    assert "s.completed_at <= rh.period_end" in body and "interval '10 minutes'" in body
+
+
 def test_no_room_column_in_any_report_statement():
     """Static half of the pin: none of the envelope's statements or serialisers
     name a room column, so the runtime pin above is not the only guard."""
@@ -450,12 +778,172 @@ def test_no_room_column_in_any_report_statement():
     sources += [inspect.getsource(main.get_set_report), inspect.getsource(main._report_game_json),
                 inspect.getsource(main._report_totals), inspect.getsource(main._report_slot),
                 inspect.getsource(main._report_load_1v1), inspect.getsource(main._report_load_team),
-                inspect.getsource(main._report_load_ovt), inspect.getsource(main._report_load_ffa)]
-    assert len(sources) >= 12
+                inspect.getsource(main._report_load_ovt), inspect.getsource(main._report_load_ffa),
+                inspect.getsource(main._report_ffa_scores), inspect.getsource(main._report_consistent),
+                inspect.getsource(main._report_roster)]
+    assert len(sources) >= 14
     for src in sources:
         low = src.lower()
         for bad in ("photon_room", "room_id", "room_name", "select *", "select m.*"):
             assert bad not in low, bad
+
+
+# ── the byte bound ───────────────────────────────────────────────────────────
+
+def _big_stream(n, scale):
+    return ",".join(str(i * scale) for i in range(n))
+
+
+def _big_pairs(n, scale):
+    return ",".join(f"{i * scale}:{i * scale // 2}" for i in range(n))
+
+
+BIG_SESSION = str(uuid.uuid4())
+BIG_END_STATS = "1|" + "|".join(["1234567.123"] * 21)
+LONG_NAME = "N" * 40
+
+
+def _worst_1v1_world(n_games=30):
+    """30 casual games under one uuid (the envelope keeps 24), every stream
+    300 samples of six-digit values, 200 point events, 400 cards each with
+    40-character names, maximal end stats and long display names."""
+    matches, cards = [], []
+    for i in range(n_games):
+        mid = str(uuid.uuid4())
+        row = match_row(mid, PID_A, PID_B, minute=i * 3, ranked=False, session_uuid=BIG_SESSION, dur=3600)
+        for side in ("p1", "p2"):
+            row[f"{side}_fps_timeline"] = _big_stream(300, 333)
+            row[f"{side}_ping_timeline"] = _big_stream(300, 333)
+            row[f"{side}_damage_timeline"] = _big_stream(300, 3333)
+            row[f"{side}_hit_timeline"] = _big_pairs(300, 3333)
+            row[f"{side}_block_timeline"] = _big_pairs(300, 3333)
+            row[f"{side}_end_stats"] = BIG_END_STATS
+        row["point_times"] = ",".join(str(t * 18) for t in range(1, 201))
+        row["point_timeline"] = ",".join(f"{(t + 1) // 2}:{t // 2}" for t in range(1, 201))
+        matches.append(row)
+        for k in range(400):
+            for pid in (PID_A, PID_B):
+                cards.append({"match_id": mid, "player_id": pid, "card_name": f"Card{k:03d}" + "x" * 60,
+                              "pick_order": k + 1, "round_number": k, "rolled": False})
+    players = [{"id": PID_A, "steam_id": CALLER, "display_name": LONG_NAME},
+               {"id": PID_B, "steam_id": OPP, "display_name": LONG_NAME}]
+    return FakeDb(matches=matches, cards=cards, players=players, gold=[])
+
+
+def _worst_team_world():
+    """24 2v2 games of one series, four players, every telemetry row 300
+    samples, 400 cards each."""
+    series = str(uuid.uuid4())
+    team_row = dict(TEAM_SERIES_ROW, id=series, t1a_id=PID_A, t1b_id=PID_C, t2a_id=PID_B, t2b_id=PID_X)
+    matches, tele = [], []
+    for i in range(24):
+        mid = str(uuid.uuid4())
+        matches.append({"id": mid, "series_id": series, "started_at": T0 + timedelta(minutes=i * 5),
+                        "ended_at": T0 + timedelta(minutes=i * 5, seconds=3600), "duration_s": 3600,
+                        "invalidated_at": None, "t1a_id": PID_A, "t1b_id": PID_C, "t2a_id": PID_B, "t2b_id": PID_X,
+                        "t1_rounds_won": 3, "t2_rounds_won": 2, "t1_points_total": 9, "t2_points_total": 8,
+                        "t1a_end_stats": BIG_END_STATS, "t1b_end_stats": BIG_END_STATS,
+                        "t2a_end_stats": BIG_END_STATS, "t2b_end_stats": BIG_END_STATS, **_room_cols()})
+        for pid in (PID_A, PID_B, PID_C, PID_X):
+            tele.append({"match_id": mid, "player_id": pid, "fps_timeline": _big_stream(300, 333),
+                         "ping_timeline": _big_stream(300, 333), "hit_timeline": _big_pairs(300, 3333),
+                         "block_timeline": _big_pairs(300, 3333), "damage_dealt_timeline": _big_stream(300, 3333),
+                         "bullets_fired": 999999, "bullets_hit": 999999, "blocks_activated": 999999,
+                         "blocks_successful": 999999, "keys_pressed": 9999999, "active_seconds": 3599.9})
+    players = [{"id": p, "steam_id": s, "display_name": LONG_NAME}
+               for p, s in ((PID_A, CALLER), (PID_B, OPP), (PID_C, OTHER), (PID_X, XSTEAM))]
+    return FakeDb(team_series_row=team_row, team_matches=matches, team_tele=tele, players=players, gold=[]), series
+
+
+def _worst_ffa_world():
+    """One FFA game with the ten-player maximum, nine streams of 300 samples
+    each, a 400-token half-point list and 400 cards per player."""
+    pids = [PID_A] + [str(uuid.uuid4()) for _ in range(9)]
+    steams = [CALLER] + [f"7656119800000010{i}" for i in range(9)]
+    fps = []
+    for slot, pid in enumerate(pids):
+        fps.append(ffa_player(pid, slot, slot + 1, rounds_won=5 - min(slot, 5), points_total=5,
+                              rating_before=1500.0, rating_after=1520.0, rating_change=20.0, gold_gained=30,
+                              fps_timeline=_big_stream(300, 333), ping_timeline=_big_stream(300, 333),
+                              hit_timeline=_big_pairs(300, 3333), block_timeline=_big_pairs(300, 3333),
+                              damage_dealt_timeline=_big_stream(300, 3333), kill_timeline=_big_stream(300, 33),
+                              damage_dealt=999999, end_stats=BIG_END_STATS, color_hex="#FF8800",
+                              bullets_fired=999999, bullets_hit=999999, blocks_activated=999999,
+                              blocks_successful=999999, keys_pressed=9999999, active_seconds=3599.9, kills=999))
+    timeline = ",".join(f"{i % 10}{'R' if i % 3 == 0 else ''}" for i in range(400))
+    ffa_match = dict(FFA_MATCH, duration_s=3600, timeline=timeline)
+    cards = [{"match_id": FFA1, "player_id": pid, "card_name": f"Card{k:03d}" + "x" * 60,
+              "pick_order": k + 1, "round_number": k, "rolled": k % 2 == 0}
+             for pid in pids for k in range(400)]
+    players = [{"id": p, "steam_id": s, "display_name": LONG_NAME} for p, s in zip(pids, steams)]
+    return FakeDb(ffa_match=ffa_match, ffa_players=fps, ffa_cards=cards, players=players, gold=[])
+
+
+def _pairs(resp):
+    return sum(len(v) for g in resp["games"] for tls in g["timelines"].values() for v in tls.values())
+
+
+def _picks(resp):
+    return sum(len(g["picks"]) for g in resp["games"])
+
+
+def test_envelope_stays_under_the_documented_bound_for_worst_case_shapes(session_ok):
+    """MEDIUM (size): the bound is a literal here on purpose — widening a cap
+    in main.py must fail THIS line, not move it (#391)."""
+    assert main._REPORT_MAX_BYTES == 512 * 1024
+    assert main._REPORT_MAX_GAMES == 24
+    assert main._REPORT_SAMPLE_PAIRS_BUDGET == 12288 and main._REPORT_SAMPLES_MAX == 128 and main._REPORT_SAMPLES_MIN == 16
+    assert main._REPORT_CARD_BUDGET == 1024 and main._REPORT_CARDS_MAX == 32 and main._REPORT_CARDS_MIN == 8
+    assert main._REPORT_DEATHS_MAX == 48 and main._REPORT_CARD_NAME_MAX == 40 and main._REPORT_NAME_MAX == 32
+
+    # 1v1: 30 games in the sitting, 24 shown, 6 omitted and said so
+    resp = _call(_worst_1v1_world(), CALLER, session=BIG_SESSION)
+    assert len(resp["games"]) == 24 and resp["games_omitted"] == 6 and resp["truncated"] is True
+    size_1v1 = _wire_bytes(resp)
+    assert size_1v1 <= main._REPORT_MAX_BYTES, size_1v1
+    assert _pairs(resp) <= main._REPORT_SAMPLE_PAIRS_BUDGET
+    assert _picks(resp) <= main._REPORT_CARD_BUDGET
+    for g in resp["games"]:
+        assert g["picks_capped"] is True
+        assert len(g["deaths"]) <= main._REPORT_DEATHS_MAX
+        for tls in g["timelines"].values():
+            for name, v in tls.items():
+                assert len(v) <= 32, (name, len(v))          # 12288 // (24 x 2 x 8)
+                assert v[-1][0] == 3600.0, "decimation keeps the last sample (#318)"
+        for cards in g["end_build"].values():
+            assert len(cards) <= main._REPORT_CARDS_MAX and all(len(c) <= 40 for c in cards)
+    assert all(len(p["name"]) <= main._REPORT_NAME_MAX for p in resp["players"])
+    # the oldest picks are the ones dropped: the newest card is still there
+    assert resp["games"][0]["end_build"][CALLER][-1].startswith("Card399")
+
+    # 2v2: 24 games, four players — the per-stream cap floors at 16
+    db, series = _worst_team_world()
+    resp_t = _call(db, CALLER, series=series)
+    assert len(resp_t["games"]) == 24
+    size_team = _wire_bytes(resp_t)
+    assert size_team <= main._REPORT_MAX_BYTES, size_team
+    assert _pairs(resp_t) <= main._REPORT_SAMPLE_PAIRS_BUDGET and _picks(resp_t) <= main._REPORT_CARD_BUDGET
+
+    # FFA: ten players, one game — every stream keeps its full 128
+    resp_f = _call(_worst_ffa_world(), CALLER, match=FFA1)
+    assert len(resp_f["players"]) == 10
+    size_ffa = _wire_bytes(resp_f)
+    assert size_ffa <= main._REPORT_MAX_BYTES, size_ffa
+    assert _pairs(resp_f) <= main._REPORT_SAMPLE_PAIRS_BUDGET and _picks(resp_f) <= main._REPORT_CARD_BUDGET
+    assert max(len(v) for tls in resp_f["games"][0]["timelines"].values() for v in tls.values()) == 128
+
+
+def test_control_without_the_caps_the_same_world_breaks_the_bound(session_ok, monkeypatch):
+    """Negative control (#391): lift the budgets and the identical fixture
+    serialises far past the bound — the caps are what hold it."""
+    monkeypatch.setattr(main, "_REPORT_SAMPLES_MIN", 10 ** 6)
+    monkeypatch.setattr(main, "_REPORT_SAMPLES_MAX", 10 ** 6)
+    monkeypatch.setattr(main, "_REPORT_CARDS_MIN", 10 ** 6)
+    monkeypatch.setattr(main, "_REPORT_CARDS_MAX", 10 ** 6)
+    monkeypatch.setattr(main, "_REPORT_DEATHS_MAX", 10 ** 6)
+    resp = _call(_worst_1v1_world(), CALLER, session=BIG_SESSION)
+    assert _wire_bytes(resp) > 2 * main._REPORT_MAX_BYTES
+    assert _pairs(resp) > main._REPORT_SAMPLE_PAIRS_BUDGET and _picks(resp) > main._REPORT_CARD_BUDGET
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -470,12 +958,41 @@ def test_samples_are_index_stamped_over_the_duration():
     assert main._report_samples("1,2,3", 0) is None, "no duration -> no timeline, never a fake grid"
 
 
+def test_decimation_keeps_first_and_last_and_the_true_positions():
+    pairs = [[float(i + 1), i * 10] for i in range(300)]
+    out = main._report_decimate(pairs, 32)
+    assert len(out) == 32 and out[0] == [1.0, 0] and out[-1] == [300.0, 2990]
+    assert all(out[i][0] < out[i + 1][0] for i in range(len(out) - 1))
+    assert main._report_decimate(pairs[:5], 32) == pairs[:5], "short series untouched"
+    assert main._report_samples(_big_stream(300, 1), 3000, cap=32)[-1] == [3000.0, 299]
+    # the caps derive from the report's shape
+    assert main._report_sample_cap(1, 2) == 128 and main._report_sample_cap(6, 2) == 128
+    assert main._report_sample_cap(12, 2) == 64 and main._report_sample_cap(24, 2) == 32
+    assert main._report_sample_cap(24, 4) == 16 and main._report_sample_cap(1, 10) == 128
+    assert main._report_card_cap(1, 2) == 32 and main._report_card_cap(24, 2) == 21
+    assert main._report_card_cap(24, 4) == 10 and main._report_card_cap(1, 10) == 32
+
+
 def test_points_become_scores_and_deaths():
     sa, sb, deaths = main._report_points("12,47,89", "1:0,1:1,2:1", "A", "B")
     assert sa == [[12.0, 1], [47.0, 1], [89.0, 2]] and sb == [[12.0, 0], [47.0, 1], [89.0, 1]]
     assert deaths == [{"t": 12.0, "id": "B"}, {"t": 47.0, "id": "A"}, {"t": 89.0, "id": "B"}]
     assert main._report_points(None, "1:0", "A", "B") == (None, None, [])
     assert main._report_points("12", None, "A", "B") == (None, None, [])
+    times = ",".join(str(t) for t in range(1, 101))
+    totals = ",".join(f"{t}:0" for t in range(1, 101))
+    sa, _sb, deaths = main._report_points(times, totals, "A", "B")
+    assert len(deaths) == main._REPORT_DEATHS_MAX and len(sa) == 100
+
+
+def test_ffa_half_point_grammar():
+    out = main._report_ffa_scores("0,0R,1,1R,0,0RG", [0, 1], 400)
+    assert out[0] == [[66.7, 0.5], [133.3, 1.0], [200.0, 1.0], [266.7, 1.0], [333.3, 1.5], [400.0, 2.0]]
+    assert out[1] == [[66.7, 0.0], [133.3, 0.0], [200.0, 0.5], [266.7, 1.0], [333.3, 1.0], [400.0, 1.0]]
+    assert main._report_ffa_scores("0,0R", [0, 1], 0) == {}, "no duration -> no timeline"
+    assert main._report_ffa_scores("", [0], 100) == {}
+    assert main._report_ffa_scores("7,7R", [0, 1], 100) == {}, "events of an unknown slot are ignored"
+    assert main._report_ffa_scores("x,0R", [0], 100)[0] == [[100.0, 1.0]]
 
 
 def test_parse_uuid():
@@ -521,3 +1038,81 @@ def test_insert_history_and_canonical_pins():
     assert 'session_uuid=str(row["session_uuid"]) if row["session_uuid"] else None' in history
     from models import Match
     assert "session_uuid" in Match.__table__.columns, "declared on the model (#346)"
+
+
+# ── the plugin's half (source pins, structure read on a mask) ────────────────
+
+def _cs_body(path, signature):
+    spans = list(method_spans(path, signature))
+    assert spans, f"signature not found: {signature}"
+    open_brace, end = spans[0]
+    return strip_comments_only(path.read_text(encoding="utf-8")[open_brace:end])
+
+
+def test_cs_pin_helper_ignores_prose():
+    """Negative control for the pins below: a needle that lives only in a
+    comment does not satisfy them."""
+    body = _cs_body(PLUGIN / "SessionReportView.cs", "private static string ErrorMessage(string raw)")
+    assert "ErrorMessage" not in body or "I18n.Tr(" in body
+    assert "//" not in body.replace("://", "")
+
+
+def test_the_1v2_history_rows_carry_a_session_control():
+    """MEDIUM: the Recent 1v2 Games rows open the series report through the
+    shared opener, the binding is read from an index-aligned list at click
+    time (#265), that list is cleared with the row pools on rebuild, and the
+    control is armed only for a seat of the series."""
+    src = PLUGIN / "NativeUI.cs"
+    refresh = _cs_body(src, "private static void RefreshOvtRecent()")
+    assert 'OpenSessionReport("series"' in refresh
+    assert "ovtRecentSessionKeys" in refresh and "ovtRecentSessionBtns" in refresh
+    assert "MatchTracker.LocalSteamId" in refresh
+    assert "solo_steam" in refresh and "duo_a_steam" in refresh and "duo_b_steam" in refresh
+    assert 'I18n.Tr("Session")' in refresh
+    build = _cs_body(src, "private static void BuildPage(Transform canvasParent)")
+    assert "ovtRecentSessionKeys.Clear()" in build and "ovtRecentSessionBtns.Clear()" in build
+    assert "ovtRecentRows.Clear()" in build
+
+
+def test_the_builds_page_continues_instead_of_discarding_rows():
+    """MEDIUM: page 4 paginates its build rows (4, 4b, 4c ...) inside the
+    view's existing pager — the page count is dynamic and every key/footer
+    path reads it; nothing is silently dropped."""
+    src = PLUGIN / "SessionReportView.cs"
+    whole = strip_comments_only(src.read_text(encoding="utf-8"))
+    assert "SessionReportModel.PAGE_COUNT" not in whole, "the fixed page count is gone"
+    assert "PageCount()" in _cs_body(src, "private static void HandleKey(Event ev)")
+    assert "PageCount()" in _cs_body(src, "private static void DrawFooter(Rect r)")
+    builds = _cs_body(src, "private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)")
+    assert "buildPages" in builds and "sub" in builds
+    assert "showing {0} of {1}" not in builds, "the discard notice is gone with the discard"
+    model = PLUGIN / "SessionReportModel.cs"
+    assert "FIXED_PAGES = 3" in strip_comments_only(model.read_text(encoding="utf-8"))
+
+
+def test_dividers_and_diagnostics_are_translated():
+    """LOWs: multiplayer dividers carry the recorded score through the
+    catalogue; the view's visible diagnostics are short codes routed through
+    I18n and the raw tail goes to the log."""
+    model = PLUGIN / "SessionReportModel.cs"
+    build = _cs_body(model, "internal static Model Build(Envelope env)")
+    assert '"G" + gi.ToString(INV)' not in build, "the bare untranslated G<n> is gone"
+    assert "TeamScoreLabel(" in build and "FfaScoreLabel(" in build
+    team = _cs_body(model, "private static string TeamScoreLabel(Model m, Game g, int gi, bool longForm)")
+    assert "I18n.TrF(" in team
+    ffa = _cs_body(model, "private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)")
+    assert "I18n.TrF(" in ffa
+    # rolled picks: parsed, and kept out of the build list
+    parse = _cs_body(model, "private static Game ParseGame(string obj)")
+    assert '"rolled"' in parse and "pk.Rolled" in parse
+    assert "Rolled" in build and "GamesOmitted" in build
+    view = PLUGIN / "SessionReportView.cs"
+    whole = strip_comments_only(view.read_text(encoding="utf-8"))
+    for gone in ('"local: "', '"model: "', 'errorText = "parse"'):
+        assert gone not in whole, gone
+    err = _cs_body(view, "private static string ErrorMessage(string raw)")
+    assert "ERR_LOCAL" in err and "ERR_PARSE" in err and "ERR_MODEL" in err
+    assert "Substring(0, 90)" not in err, "no raw error tail on the label"
+    assert err.count("I18n.Tr") >= 6
+    fetched = _cs_body(view, "private static void OnFetched(int g, bool ok, string body)")
+    assert "Plugin.Log.LogWarning" in fetched and "ERR_" in fetched
