@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "9707809a3ecbbdacd778d9ca225d36202784067e"
+          "941f940f7672d2bb761cbef8267a5ab2ba625276"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -2693,7 +2693,7 @@
           ],
           "main",
           "admin_mail_broadcast",
-          "8381e36ed7b2061109953ddbf9fce430e0aea4dd"
+          "606aa1dc876ead629ab8dadb84b1747858f2b0d3"
         ],
         [
           "/api/v1/admin/mail/bulk-grants",
@@ -2702,7 +2702,7 @@
           ],
           "main",
           "admin_mail_bulk_grant",
-          "0cf7821816d9eb24a091cece6637398e96de63fe"
+          "9f70276b0e398e6edb680e7a3d8c1f91c61dd451"
         ],
         [
           "/api/v1/admin/mail/bulk-grants/{steam_id}",
@@ -2711,7 +2711,7 @@
           ],
           "main",
           "admin_mail_bulk_grant_revoke",
-          "ddffeffb5264e6073fe070054389fc55931dbaab"
+          "7db231e50428dd50b75fa86304f5772b2f5ba69c"
         ],
         [
           "/api/v1/admin/moderation-cases",
@@ -2729,7 +2729,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "af40540b793fb5008d81c61fa26d1b84ef5d2eb3"
+          "d21aa95617ec146a0a60d605717afa4a7d6ea29c"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2747,7 +2747,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "b26ca489cb3b8e4ca5d8f8fbdb8db099958da351"
+          "4d6f1d2fd9d8964219c2365f65ea8794204ef39a"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",
@@ -2765,7 +2765,7 @@
           ],
           "main",
           "mail_send",
-          "83d107d7b0be123c16c183c9cdd15011f07f37bc"
+          "83130bf1a76ff7999062336606b9c14904c8d995"
         ],
         [
           "/api/v1/mail/blocks",
@@ -2774,7 +2774,7 @@
           ],
           "main",
           "mail_block_add",
-          "8e0f120acea72996b5a30852ff917b18f036545d"
+          "89a97f9d8448e689f726ce50aa70ea24fe3e2e85"
         ],
         [
           "/api/v1/mail/blocks",
@@ -2792,7 +2792,7 @@
           ],
           "main",
           "mail_block_remove",
-          "881eba12b5edf40d09c648f0b94343d5a0888cd6"
+          "22e5b17836332e5e2803ba0f85f05cd67885f39b"
         ],
         [
           "/api/v1/mail/inbox",
@@ -2873,7 +2873,7 @@
           ],
           "main",
           "mail_reply",
-          "ca0359b75eb1c5ee970ee10f607bfc1efc4bed27"
+          "310b6df224efd9b6078f8b53c3fe478291424ee3"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -2882,7 +2882,7 @@
           ],
           "main",
           "mail_report",
-          "345ee5b3c7d3f188d963c381e9070d8308e58ace"
+          "5949e7c51b9ac14e1e76d19e83817cf70459eac7"
         ],
         [
           "/api/v1/report",
