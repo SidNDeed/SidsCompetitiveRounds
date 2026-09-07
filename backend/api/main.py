@@ -58,14 +58,6 @@ from schemas import (
     MatchResponse,
     PlayerStatsResponse,
     H2HSummaryResponse,
-    H2HProfileBlock,
-    H2HModesBlock,
-    H2HRanked1v1,
-    H2HWinLoss,
-    H2HFfa,
-    H2HOvt,
-    H2HLastMeeting,
-    H2HStreak,
     QueueJoinRequest,
     QueueDeclineRequest,
     QueuePollResponse,
@@ -105,6 +97,22 @@ from schemas import (
     SpectateLeaseBody,
     SpectateValidateBody,
     AllowSpectatorsBody,
+)
+# Sept 6 Group 4 item a — the mini-profile card's models, imported in their
+# OWN statement on purpose: backend/tests/test_route_manifest_net_seat.py
+# fingerprints a binding by the text of the statement that binds it, so a name
+# added to the shared block above re-fingerprints every route that reaches any
+# schema name (45 handlers to re-review for an import line). Kept apart, the
+# only route whose fingerprint moves is the one that reaches these: h2h_summary.
+from schemas import (
+    H2HProfileBlock,
+    H2HModesBlock,
+    H2HRanked1v1,
+    H2HWinLoss,
+    H2HFfa,
+    H2HOvt,
+    H2HLastMeeting,
+    H2HStreak,
 )
 
 # ── Config from environment ────────────────────────────────────
