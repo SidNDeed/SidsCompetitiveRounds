@@ -7,9 +7,11 @@ using UnityEngine;
 
 namespace CompetitiveRounds
 {
-    /// <summary>Sept 6 (Sid, Group 4 item b) — in-game mail UI: the F5 Mail tab
-    /// (inbox / sent / reader / composer), the Settings row ("Who can mail me" +
-    /// the blocked-sender list), the status-driven toast and the tab-label count.
+    /// <summary>Sept 6 (Sid, Group 4 item b) — in-game mail UI: the F5 Mail body
+    /// (inbox / sent / reader / composer; Sept 7 item 1: a popup opened from the
+    /// header icon, formerly a tab), the Settings row ("Who can mail me" + the
+    /// blocked-sender list), the status-driven toast and the unread count that
+    /// feeds the icon badge.
     ///
     /// <para>Mechanics, each the codebase's existing precedent:
     /// uGUI through UIFactory (reflection, #15); text ENTRY is IMGUI drawn over
@@ -129,9 +131,20 @@ namespace CompetitiveRounds
         // Hooks called from NativeUI / CompetitiveUI / MailClient
         // ═════════════════════════════════════════════════════════════════════
 
-        /// <summary>NativeUI.BuildPage: the Mail tab panel (tabPanels[TAB_MAIL]).</summary>
+        /// <summary>NativeUI.BuildUtilityPopup: the Mail body of the utility
+        /// popup (Sept 7 item 1); built once per page build, shown per open.</summary>
         public static GameObject BuildTab(Transform parent)
         {
+            // Height budget (impl r1 repair iii). The popup box is sized from
+            // the live canvas, h = min(900, canvas.h - 60); a 32:9 window
+            // (1920x540 canvas units) gives 480 -> Body 436 (44 px popup
+            // header) -> 430 for this root (Body padB 6) -> 410 inside its own
+            // padding -> 372 for the active view after the 32 px header row and
+            // its 6 px spacing. Each view keeps ONE flexible child (flexH 1,
+            // minH <= 120, no prefH) and fixed siblings whose heights plus
+            // spacing MUST stay <= 252 (= 372 - 120): reader 180, composer 190,
+            // list 0 today. Break the rule and the lower controls render past
+            // the box, where a click lands on the backdrop and closes it.
             panelRoot = new GameObject("Mail");
             panelRoot.transform.SetParent(parent, false);
             panelRoot.AddComponent<RectTransform>();
@@ -182,6 +195,9 @@ namespace CompetitiveRounds
                     case View.Reader: PaintReader(); break;
                     case View.Compose: PaintComposer(); break;
                 }
+                // Bug 230: a paint can spawn fresh buttons, and the popup this
+                // body lives in asserts ModalBlockInput — mark them (idempotent).
+                NativeUI.MarkPopupChildrenInteractive(panelRoot);
             }
             catch (Exception ex)
             {
@@ -193,25 +209,67 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>NativeUI.SwitchTab: entering the Mail tab polls status and
-        /// refreshes the open list; leaving it drops any text focus (B-4).</summary>
-        public static void OnTabSwitched(int idx)
+        /// <summary>Generation of the popup instance (Sept 7 item 1, contract
+        /// 7 / 1-3 and impl r1 repair iv): ++ on every open and close. Every
+        /// MUTATING request the popup issues — block, delete, report, send /
+        /// reply, mark-read — captures it at issue. A completion whose
+        /// generation has moved applies its DATA effects only (cached rows,
+        /// the unread count, listVersion / blocksVersion, the send hold,
+        /// in-flight claims the close path does not reset) and none of its
+        /// VIEW effects: no toast, no MarkDirty, no ShowView, no focus drop,
+        /// no composer / report state — those belong to the instance that
+        /// issued the call. Deferred data reaches a successor on its next
+        /// repaint (any MarkDirty, or the status poll's Refresh while the
+        /// popup is open). NOT fenced by it: the read fetches (list page,
+        /// message body) — they resolve a loading state a successor shows
+        /// too, because the view survives a close, and each carries its own
+        /// supersession fence (listGen / readerGen / statusGen) — and the
+        /// Settings row's own requests (mail-from, blocked-list fetch,
+        /// unblock): their completions belong to that row, and the page-wide
+        /// dirty mark they set changes nothing visible in the popup, whose
+        /// paints are version-keyed.</summary>
+        private static int popupGen;
+
+        /// <summary>NativeUI.OpenUtilityPopup(Mail): status poll + list refresh
+        /// on entry (the former tab-entry work).</summary>
+        public static void OnPopupOpened()
         {
-            if (idx == NativeUI.TAB_MAIL)
-            {
-                try { MailClient.PollNow(); } catch { }
-                if (view == View.Inbox || view == View.Sent) RefreshList(reset: true);
-                NativeUI.MarkDirty();
-            }
-            else
-            {
-                dropFocusPending = true;
-                reportOpen = false;
-            }
+            popupGen++;
+            try { MailClient.PollNow(); } catch { }
+            if (view == View.Inbox || view == View.Sent) RefreshList(reset: true);
+            NativeUI.MarkDirty();
         }
 
-        /// <summary>NativeUI.UpdateTabBarVisual: "Mail" or "Mail (3)" — text is
-        /// the only badge precedent in this UI.</summary>
+        /// <summary>NativeUI.CloseUtilityPopup (icon, Escape, backdrop, page
+        /// close, host recovery): text focus dropped, report modal closed, the
+        /// in-flight flags (reportSending, cSending) reset here — a completion
+        /// that lands later sees popupGen moved and leaves them, and every
+        /// other view effect, alone (see popupGen) — and both CompetitiveUI
+        /// prompts cancelled, so a pending confirm's Yes can never issue a
+        /// request after the close. The draft survives — the discard confirm
+        /// stays the only path that clears it.</summary>
+        public static void OnPopupClosed()
+        {
+            popupGen++;
+            dropFocusPending = true;
+            reportOpen = false;
+            reportSending = false;
+            cSending = false;
+            try { CompetitiveUI.CancelPrompts(); } catch { }
+        }
+
+        /// <summary>NativeUI.Tick, Escape with the mail popup open: the report
+        /// modal is the topmost mail surface — one press closes it alone.</summary>
+        public static bool ConsumeEscape()
+        {
+            if (!reportOpen) return false;
+            reportOpen = false;
+            dropFocusPending = true;
+            return true;
+        }
+
+        /// <summary>The popup's title: "Mail" or "Mail (3)" (the icon badge
+        /// carries the count itself).</summary>
         public static string TabLabel()
             => Unread > 0 ? I18n.TrF("Mail ({0})", Unread) : I18n.Tr("Mail");
 
@@ -240,11 +298,12 @@ namespace CompetitiveRounds
                 }
                 if (!NativeUI.IsOpen) { reportOpen = false; return; }
                 if (reportOpen) { DrawReportModal(); return; }
-                if (NativeUI.CurrentTab != NativeUI.TAB_MAIL || view != View.Compose) return;
+                if (!NativeUI.UtilityPopupIs(NativeUI.UtilKind.Mail) || view != View.Compose) return;
                 if (composeRoot == null || !composeRoot.activeInHierarchy) return;
-                // A picker/prompt over the composer owns the keyboard; do not
-                // paint (or steal focus back) underneath it.
-                if (CompetitiveUI.ArtistPromptOpen) return;
+                // A picker/prompt or a confirm over the composer owns the keyboard;
+                // do not paint (or steal focus back) underneath it — this draw
+                // runs AFTER DrawConfirm in CompetitiveUI.DrawUI (contract 7 / 1-1b).
+                if (CompetitiveUI.ArtistPromptOpen || CompetitiveUI.ConfirmOpen) return;
                 DrawComposerFields();
             }
             catch (Exception ex)
@@ -270,6 +329,8 @@ namespace CompetitiveRounds
         {
             if (st == null) return;
             if (st.unread != Unread) { Unread = Math.Max(0, st.unread); NativeUI.MarkDirty(); }
+            try { NativeUI.RefreshUtilityStrip(); } catch { }                       // Sept 7 item 1: the icon badge
+            if (NativeUI.UtilityPopupIs(NativeUI.UtilKind.Mail)) Refresh();
             if (!baselineLoaded) LoadBaseline();
             string rev = st.revision ?? "";
             if (rev == (lastRevision ?? "")) return;
@@ -395,7 +456,11 @@ namespace CompetitiveRounds
             try
             {
                 host = UIFactory.CreatePanel("MailBodyHost", parent, C_FIELD);
-                UIFactory.AddLE(host, prefH: 300, minH: 300, flexW: 1, flexH: 0);
+                // Repair iii: the reader's ONE flexible child (its siblings are
+                // fixed rows) — no prefH, minH 120, flexH 1 — so the body takes
+                // whatever the box leaves and the view never outgrows the popup
+                // on a wide (32:9) canvas. See the budget note in BuildTab.
+                UIFactory.AddLE(host, minH: 120, flexW: 1, flexH: 1);
                 host.SetActive(false);                       // configure before the component's OnEnable runs
                 var vp = new GameObject("Viewport");
                 vp.transform.SetParent(host.transform, false);
@@ -455,7 +520,7 @@ namespace CompetitiveRounds
             }
             // Fallback: scroll view + wrapping label (richText off so tags stay literal).
             var fb = UIFactory.CreatePanel("MailBodyHostFb", parent, C_FIELD);
-            UIFactory.AddLE(fb, prefH: 300, minH: 300, flexW: 1, flexH: 0);
+            UIFactory.AddLE(fb, minH: 120, flexW: 1, flexH: 1);   // same shape as the field host above (repair iii)
             var sv = UIFactory.CreateScrollView("MailBodySV", fb.transform, spacing: 0);
             var lbl = UIFactory.CreateText("MailBodyLbl", sv.content.transform, "", 14f, C_WHITE, UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 40), richText: false);
             UIFactory.SetWordWrap(lbl, true);
@@ -497,7 +562,13 @@ namespace CompetitiveRounds
             UIFactory.FitOneLine(txtReplySubject);
             txtSubjectCount = UIFactory.CreateText("MailCpSubjN", subjRow.transform, "", 12f, C_DIM, UIFactory.AlignMidRight, sizeDelta: new Vector2(90, 28));
 
-            bodyAnchor = Anchor(composeRoot.transform, "MailCpBodyAnchor", 250);
+            // Repair iii: the composer's ONE flexible child (no prefH, minH 120,
+            // flexH 1; every sibling row is fixed — budget note in BuildTab).
+            // The IMGUI TextArea is drawn into this anchor's LIVE screen rect
+            // each frame (DrawComposerFields -> ScreenRect -> GetWorldCorners),
+            // so it follows the anchor wherever the layout puts it.
+            bodyAnchor = UIFactory.CreatePanel("MailCpBodyAnchor", composeRoot.transform, C_FIELD);
+            UIFactory.AddLE(bodyAnchor, minH: 120, flexW: 1, flexH: 1);
             var countRow = Row(composeRoot.transform, "MailCpCount", 20, 6);
             txtBodyCount = UIFactory.CreateText("MailCpBodyN", countRow.transform, "", 12f, C_DIM, UIFactory.AlignMidRight, sizeDelta: new Vector2(200, 20));
             UIFactory.SetFlexW(((Component)txtBodyCount).gameObject, 1);
@@ -901,18 +972,23 @@ namespace CompetitiveRounds
                     // still reads unread (DeleteCurrent marks it read when IT
                     // takes the decrement).
                     if (!fromSent && s.IsUnread && readClaims.Add(s.id))
+                    {
+                        int rg = popupGen;                        // repair iv: a mutation — fenced at issue
                         MailClient.MarkRead(s.id, (ok2, r2) =>
                         {
-                            readClaims.Remove(s.id);
+                            readClaims.Remove(s.id);              // in-flight claim: the close path does not reset it
                             if (!ok2) return;
+                            // Data effects, whichever popup instance is up now.
                             bool dec = s.IsUnread;
                             s.readAt = "read";
                             int at = IndexOfId(inboxItems, s.id);
                             if (at >= 0) inboxItems[at].readAt = "read";
                             if (dec && Unread > 0) Unread--;
                             listVersion++;
-                            NativeUI.MarkDirty();
+                            // The repaint (row style, "Inbox (n)") only for the issuing instance.
+                            if (rg == popupGen) NativeUI.MarkDirty();
                         });
+                    }
                 }
                 readerVersion++;
                 NativeUI.MarkDirty();
@@ -940,17 +1016,28 @@ namespace CompetitiveRounds
             if (m == null || m.sender == null || string.IsNullOrEmpty(m.sender.steamId)) return;
             string sid = m.sender.steamId, name = m.sender.name;
             CompetitiveUI.OpenConfirm(I18n.TrF("Block {0}? Their mail will no longer reach you. You can unblock them in Settings.", San(name)), () =>
+            {
+                int g = popupGen;                              // repair iv: fenced at issue (the confirm's Yes)
                 MailClient.AddBlock(sid, (ok, r) =>
                 {
                     if (ok)
                     {
-                        CompetitiveUI.ShowNotification(I18n.TrF("Blocked {0}.", San(name)), C_TOAST, 4f);
+                        // Data effects, whichever popup instance is up now: the
+                        // Settings row's cache is stale, and an EXPANDED list
+                        // refetches at once (a null cache paints it empty). That
+                        // fetch's completion is the Settings row's own — its dirty
+                        // mark and any error toast are the row's, exactly as when
+                        // the list is toggled there.
                         blocks = null; blocksVersion++;
                         if (blocksExpanded) FetchBlocks();
                     }
+                    // View effects — the toast and the repaint — only for the instance that issued the block.
+                    if (g != popupGen) return;
+                    if (ok) CompetitiveUI.ShowNotification(I18n.TrF("Blocked {0}.", San(name)), C_TOAST, 4f);
                     else CompetitiveUI.ShowNotification(MailClient.ErrorDetail(r), Color.yellow, 5f);
                     NativeUI.MarkDirty();
-                }));
+                });
+            });
         }
 
         private static void DeleteCurrent()
@@ -960,9 +1047,13 @@ namespace CompetitiveRounds
             string id = m.id;
             var summary = (readerSummary != null && !readerFromSent) ? readerSummary : null;
             CompetitiveUI.OpenConfirm(I18n.Tr("Delete this message?"), () =>
+            {
+                int delGen = popupGen;                         // contract 7 / 1-3, repair iv: fenced at issue (the confirm's Yes)
                 MailClient.Delete(id, (ok, r) =>
                 {
-                    if (!ok) { CompetitiveUI.ShowNotification(MailClient.ErrorDetail(r), Color.yellow, 5f); return; }
+                    bool live = delGen == popupGen;
+                    if (!ok) { if (live) CompetitiveUI.ShowNotification(MailClient.ErrorDetail(r), Color.yellow, 5f); return; }
+                    // Data effects apply whatever the popup did since.
                     RemoveId(inboxItems, id); RemoveId(sentItems, id);
                     // Judged NOW, not at click time: a MarkRead that landed in
                     // between has already taken this row's decrement (review r1 L4).
@@ -972,9 +1063,14 @@ namespace CompetitiveRounds
                         if (Unread > 0) Unread--;
                     }
                     listVersion++;
+                    // View effects — leaving the reader, the error toast above,
+                    // the repaint — belong to the instance that issued the
+                    // delete; a successor picks the list change up on its next repaint.
+                    if (!live) return;
                     if (view == View.Reader && current != null && current.id == id) ShowView(readerFromSent ? View.Sent : View.Inbox);
                     NativeUI.MarkDirty();
-                }));
+                });
+            });
         }
 
         private static void OpenReport(MailClient.Message m)
@@ -994,8 +1090,14 @@ namespace CompetitiveRounds
             string detail = CleanSubject(reportText ?? "").Trim();
             if (detail.Length > REPORT_DETAIL_MAX) detail = detail.Substring(0, REPORT_DETAIL_MAX);
             string reason = REPORT_CODES[Mathf.Clamp(reportReason, 0, REPORT_CODES.Length - 1)] + (detail.Length > 0 ? ": " + detail : "");
+            int reportGen = popupGen;                          // contract 7 / 1-3, repair iv: fenced at issue
             MailClient.Report(reportId, reason, (ok, r) =>
             {
+                // A report has no data effect. Everything here is a view effect
+                // — the modal's flags, the focus drop, the toast — and belongs
+                // to the instance that issued it; after a close, OnPopupClosed
+                // has already reset the flags.
+                if (reportGen != popupGen) return;
                 reportSending = false; reportOpen = false; dropFocusPending = true;
                 if (ok) CompetitiveUI.ShowNotification(I18n.Tr("Reported - thank you. A moderator will review it."), C_TOAST, 5f);
                 else CompetitiveUI.ShowNotification(MailClient.ErrorDetail(r), Color.yellow, 5f);
@@ -1078,8 +1180,29 @@ namespace CompetitiveRounds
             cSending = true;
             SetComposeStatus(I18n.Tr("Sending..."), false);
             dropFocusPending = true;
+            int sendGen = popupGen;                            // contract 7 / 1-3, repair iv: fenced at issue
             Action<bool, string, string> cb = (ok, id, err) =>
             {
+                // Data effects, whichever popup instance is up now: the Sent
+                // list is stale after a success; a 429 carries the real wait
+                // (review r1 M14) and that hold is the server's Retry-After for
+                // this client, so a successor's Send honours it too (on the
+                // unscaled clock).
+                if (ok) sentLoaded = false;
+                else
+                {
+                    int wait = MailClient.RetryAfterSeconds(err);
+                    if (wait > 0) sendHoldUntil = Time.realtimeSinceStartup + wait;
+                }
+                if (sendGen != popupGen)
+                {
+                    // The popup closed (and maybe reopened) since this send left:
+                    // no view effect — the successor's flags (OnPopupClosed reset
+                    // cSending), focus, draft and status line are its own. An
+                    // unchanged re-send reuses the same idempotency key, so the
+                    // server answers it with the original id.
+                    return;
+                }
                 cSending = false;
                 dropFocusPending = true;                        // B-4: focus cleared on completion AND error
                 if (ok)
@@ -1087,18 +1210,14 @@ namespace CompetitiveRounds
                     // The client never learns about suppression (design B-7): "Sent" is all it can truthfully say.
                     CompetitiveUI.ShowNotification(I18n.Tr("Sent."), new Color(0.6f, 1f, 0.6f), 3f);
                     ResetComposer();
-                    sentLoaded = false;
                     ShowView(View.Sent);
                 }
                 else
                 {
-                    // A 429 carries the real wait (review r1 M14): hold the Send
-                    // button for it on the unscaled clock. Otherwise the server's
-                    // refusal, localised (censor hit, recipient cap, formatting);
-                    // the key stays bound to this exact payload for an unchanged
-                    // retry and is re-minted by any edit.
-                    int wait = MailClient.RetryAfterSeconds(err);
-                    if (wait > 0) sendHoldUntil = Time.realtimeSinceStartup + wait;
+                    // The server's refusal, localised (censor hit, recipient cap,
+                    // formatting, or the 429's wait); the key stays bound to this
+                    // exact payload for an unchanged retry and is re-minted by
+                    // any edit.
                     SetComposeStatus(MailClient.ErrorDetail(err), true);
                 }
             };

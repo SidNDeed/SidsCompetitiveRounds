@@ -888,6 +888,12 @@ namespace CompetitiveRounds
         // info-popup's click-anywhere-to-close backdrop) so they keep working
         // while ModalBlockInput suppresses every handler BEHIND the modal.
         public bool bypassModalBlock;
+        // Sept 7 item 1 (contract 7 / 1-1a): while a BACKDROPLESS modal (confirm,
+        // player search, mail report modal, session report, ...) is up, every
+        // bypass handler in every popup is inert as well — such a modal is
+        // topmost by definition. Written ONLY by CompetitiveUI, beside
+        // ModalBlockInput's single writer.
+        public static bool BypassSuspended;
         private bool ContainsScreenPoint(RectTransform target, Vector3 point)
         {
             if (target == null) return false;
@@ -937,7 +943,7 @@ namespace CompetitiveRounds
         private void Update()
         {
             if(rt==null||onClick==null||!gameObject.activeInHierarchy)return;
-            if(ModalBlockInput&&!bypassModalBlock)return;
+            if(ModalBlockInput&&(!bypassModalBlock||BypassSuspended))return;
             if(!Input.GetMouseButtonDown(0))return;
             if(!cameraResolved)ResolveCamera();
             Vector3 mp=Input.mousePosition;
@@ -1424,7 +1430,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
+        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
         public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;PageGeneration++;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -1574,6 +1580,13 @@ namespace CompetitiveRounds
             // the report, the next closes the page. Consumed here in Update so no
             // OnGUI consumer sees the same press (the view itself is IMGUI).
             if(SessionReportView.Active&&Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;SessionReportView.Close();return;}
+            // Sept 7 item 1: a utility popup owns Escape — topmost surface first,
+            // one per press: the mail report modal, then a confirm / recipient
+            // picker, then the popup itself; the page closes on the NEXT press.
+            // (Guard first: a flag with no visible popup would hold every
+            // ClickHandler blocked, so it expires instead — #276/#430.)
+            if(utilKind!=UtilKind.None&&(utilPopupGO==null||!utilPopupGO.activeSelf)){Plugin.Log.LogWarning("[UTIL-POPUP] flag set with no visible popup - closing");CloseUtilityPopup();}
+            if(UtilityPopupOpen&&Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;bool took=false;try{took=MailUI.ConsumeEscape();}catch{}if(!took){try{took=CompetitiveUI.ConsumePromptEscape();}catch{}}if(!took)CloseUtilityPopup();return;}
             if(Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;/* Sept 6 item a: a PINNED profile card is the topmost surface — Escape unpins it and the page stays. */if(ProfileCard.ConsumeEscape())return;Close();return;}
             try{ProfileCard.Tick();}catch(Exception ex){VanillaFixSupport.DiagLimited("ProfileCard","tick failed: "+ex.Message,5);}/* Sept 6 item a: name-hover dwell, open, follow, pin */
             // r8 find 1: a bet-row refresh deferred by the mid-click guard
@@ -2016,9 +2029,10 @@ namespace CompetitiveRounds
             var titleTxt=UIFactory.CreateText("Title",titleRow.transform,"SID'S COMPETITIVE ROUNDS",24f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(0,30));
             UIFactory.FitOneLine(titleTxt);
             var titleTxtGO=(titleTxt as Component)?.gameObject;if(titleTxtGO!=null){if(UIFactory.tLE!=null){var tle=titleTxtGO.GetComponent(UIFactory.tLE);if(tle!=null)UnityEngine.Object.Destroy(tle as UnityEngine.Object);}UIFactory.AddLE(titleTxtGO,flexW:1,prefH:42);}
-            /* Balancer = name box (280) minus BackBtn (85), so the flexW title
-             * keeps its optical center despite the asymmetric chrome. */
-            var tBal=new GameObject("TBal");tBal.transform.SetParent(titleRow.transform,false);tBal.AddComponent<RectTransform>();UIFactory.AddLE(tBal,prefW:195,flexW:0);
+            /* Utility strip = name box (280) minus BackBtn (85), so the flexW title
+             * keeps its optical center despite the asymmetric chrome. Sept 7 item 1:
+             * it holds the Music and Mail icons (with the unread badge). */
+            BuildUtilityStrip(titleRow.transform);
             UIFactory.CreateButton("BackBtn",titleRow.transform,"< BACK",16f,C_LABEL,C_BTN,()=>Close(),sizeDelta:new Vector2(85,34));
             // Server-status indicator row, just below the title. Hidden when the API looks fine.
             // Replaces the old in-game IMGUI banner, which was firing during quiet periods even
@@ -2054,7 +2068,7 @@ namespace CompetitiveRounds
             tIndRow.SetActive(false);
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
-            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);tabPanels[16]=BuildMusicTab(content.transform);tabPanels[TAB_MAIL]=MailUI.BuildTab(content.transform);
+            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);BuildUtilityPopup(pageGO.transform);/* Sept 7 item 1: Music (16) and Mail (17) are popup bodies, not tabs — their slots stay null and SwitchTab null-skips them */
             // (The [ID] button's position is set in CreateHistoryRow itself, so
             // it cannot desync from tab-build ordering.)
 
@@ -2306,11 +2320,11 @@ namespace CompetitiveRounds
         // I18n.Tr calls run at ACCESS time — after I18nCatalogues.Install() — and
         // re-evaluate after a language switch (which rebuilds the page).
         private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info"),I18n.Tr("Music"),I18n.Tr("Mail")};
-        private const int NUM_TABS=18;   // Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music (own top-level group); Sept 6: 17 = Mail (own top-level group)
+        private const int NUM_TABS=18;   // Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music; Sept 6: 17 = Mail; Sept 7: 16 and 17 became header-icon popups (indices kept, panels null)
         private const int TAB_HOME=13;
         private const int TAB_BANNED=14;
         private const int TAB_INFO=15;   // Aug 23 (Sid): the explainer library — Settings group sub-tab
-        internal const int TAB_MAIL=17;  // Sept 6 (Sid): in-game mail — its own group; the page lives in MailUI.cs
+        internal const int TAB_MAIL=17;  // Sept 6 (Sid): in-game mail (MailUI.cs). Sept 7 item 1: a header-icon popup with no tab slot — the index is kept so every other tab keeps its meaning
         // Top bar order per Sid's spec (July 12 round 2): Multiplayer right after
         // Tournaments; Settings last; Admin gated. Sub-tabs: Compare under
         // Leaderboard, Artist under Shop, 2v2/1v2/FFA under Multiplayer. First
@@ -2318,12 +2332,11 @@ namespace CompetitiveRounds
         // the landing tab when the menu is first built; Card Stats + Achievements
         // moved under My Stats as sub-tabs (Sid's item 4).
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
-        private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Music"),I18n.Tr("Mail"),I18n.Tr("Admin"),I18n.Tr("Settings")};
-        // Music sits right after Shop (buy there, listen here) rather than
-        // appended at the end — Sid's July 12 bar order keeps Settings LAST.
-        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{16},new[]{TAB_MAIL},new[]{6,14},new[]{5,15}};
-        private const int GROUP_MAIL=7;    // GROUP_LABELS index of the Mail slot (Sept 6) — its label carries the unread count as text
-        private const int GROUP_ADMIN=8;   // GROUP_LABELS index of the admin-gated slot (8 since Mail took slot 7)
+        private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Admin"),I18n.Tr("Settings")};
+        // Sept 7 item 1: Music (16) and Mail (17) left the bar — both open as
+        // popups from the header icons (BuildUtilityStrip / OpenUtilityPopup).
+        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{6,14},new[]{5,15}};
+        private const int GROUP_ADMIN=6;   // GROUP_LABELS index of the admin-gated slot (6 since the Music and Mail slots left the bar, Sept 7)
         private static int GroupOf(int tabIdx){for(int g=0;g<GROUP_MEMBERS.Length;g++)for(int m=0;m<GROUP_MEMBERS[g].Length;m++)if(GROUP_MEMBERS[g][m]==tabIdx)return g;return 0;}
         /* Aug 7 item 7: the Banned sub-tab is ADMIN-only (its only fetch is the
          * admin-HMAC banned list). Gating here also keeps the sub-tab bar
@@ -2408,12 +2421,10 @@ namespace CompetitiveRounds
                     groupButtons[g].SetActive(CanModerateChat);
                     UIFactory.SetText(groupTexts[g],ApiClient.IsAdmin?"Admin":"Moderation");
                 }
-                // Sept 6 mail: "Mail (3)" — the unread count rides the label as text,
-                // the only badge precedent in this UI; repainted on every dirty cycle.
-                if(g==GROUP_MAIL&&groupTexts[g]!=null)UIFactory.SetTextRaw(groupTexts[g],MailUI.TabLabel());
                 UIFactory.SetImageColor(groupButtons[g],g==ag?C_TABACT:C_TAB);
                 if(groupTexts[g]!=null){UIFactory.SetColor(groupTexts[g],g==ag?C_WHITE:C_LABEL);UIFactory.SetBold(groupTexts[g],g==ag);}
             }
+            RefreshUtilityStrip();/* Sept 7 item 1: the unread badge repaints on every dirty cycle, where the "Mail (n)" label used to */
             var members=GROUP_MEMBERS[ag];
             int visCount=0;for(int m=0;m<members.Length;m++)if(TabVisible(members[m]))visCount++;
             bool showSub=visCount>1;
@@ -5735,6 +5746,10 @@ namespace CompetitiveRounds
             {
                 if (!isOpen) Toggle();
                 if (!isOpen || pageGO == null) return;
+                // Sept 7 item 1: 16 (Music) and 17 (Mail) are header-icon popups,
+                // not tabs — the lever keeps its tab-number grammar and opens the
+                // matching popup (SwitchTab would show no panel for either).
+                if (idx == 16 || idx == TAB_MAIL) { OpenUtilityPopup(idx == 16 ? UtilKind.Music : UtilKind.Mail); return; }
                 if (idx >= 0 && idx < NUM_TABS && idx != currentTab) SwitchTab(idx);
                 if (idx == TAB_INFO && !string.IsNullOrEmpty(infoArticleKey))
                 {
@@ -6036,7 +6051,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}MailUI.OnTabSwitched(idx);/* Sept 6 mail: status poll + list refresh on entry; text focus dropped on exit (design B-4) */if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
+        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
 tournaments"): the My Match panel — Ready Up / Play Now / FORFEIT — is gated by the
 sub-tab kind fence, so a participant whose live match sits under the OTHER kind's
 sub-tab opened the tab and saw nothing concedable. On tab entry only (manual sub-tab
@@ -6045,7 +6060,7 @@ another kind does, land on that kind. Mirrors the sub-tab buttons' own switch
 statements; the branch's force fetch below is shared. Entries older than 45s are
 ignored (review MEDIUM: a failed refresh retains the previous list indefinitely,
 and switching on a stale snapshot lands on a completed match's kind — the 20s
-poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}if(idx==16){/* Music tab open = a previews-tier trigger (design §3); idempotent no-op once ready/in-flight/gave-up. Shop fetch refreshes entitlements (ApplyShopSnapshot rides it). */try{MusicAssets.EnsureTier(MusicTier.Previews,"music-tab");}catch(Exception ex){Plugin.Log.LogWarning($"[MUSIC-UI] EnsureTier: {ex.Message}");}var _muid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_muid)&&_muid!="unknown")ApiClient.FetchShopItems(_muid);}dirty=true;}
+poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -7243,6 +7258,329 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // the backdrop's own handler carries bypassModalBlock so closing works.
         private static GameObject infoPopupGO;
         public static bool InfoPopupOpen => infoPopupGO != null;
+
+        // ── Utility popup (Sept 7 item 1, design v2 section 7) ─────────────
+        // Mail and Music open as popups over the page from the two header
+        // icons (BuildUtilityStrip) instead of holding tab slots. The popup is
+        // built ONCE per page build as the LAST child of pageGO, so it draws
+        // above the page in the same canvas and dies with the page at every
+        // pageBuilt=false site — no persistent-canvas teardown class (#369).
+        // Input: UtilityPopupOpen is OR'd into CompetitiveUI.AnyModalOwnsInput
+        // (#200), so every ClickHandler outside the popup is blocked while it
+        // is up (the icons included — one popup at a time) and the hotkey
+        // guards stay closed; the popup's own handlers carry bypassModalBlock
+        // via MarkPopupChildrenInteractive (bug 230), re-run after row rebuilds.
+        internal enum UtilKind { None, Mail, Music }
+        private static UtilKind utilKind = UtilKind.None;
+        private static GameObject utilStripGO, utilMailIconGO, utilMusicIconGO, utilBadgeGO;
+        private static object utilBadgeTxt, utilTitleTxt;
+        private static GameObject utilPopupGO, utilBoxGO, utilBodyGO, mailBodyGO, musicBodyGO;
+        private static RectTransform utilBoxRT;
+        private static Sprite utilBadgeSprite;
+        public static bool UtilityPopupOpen => utilKind != UtilKind.None;
+        internal static bool UtilityPopupIs(UtilKind kind) => utilKind == kind;
+        /// <summary>A surface the popup's own content opened and that must
+        /// answer a click before the backdrop may dismiss (report modal,
+        /// confirm, recipient picker).</summary>
+        private static bool UtilityChildSurfaceOpen
+        {
+            get { try { return MailUI.ModalOpen || CompetitiveUI.PromptOpen; } catch { return false; } }
+        }
+
+        /// <summary>BuildPage: the two 40 px icon buttons in the title row's
+        /// 195 px balancer slot, plus the unread badge on the mail icon.</summary>
+        private static void BuildUtilityStrip(Transform titleRow)
+        {
+            utilStripGO = new GameObject("UtilStrip");
+            utilStripGO.transform.SetParent(titleRow, false);
+            utilStripGO.AddComponent<RectTransform>();
+            UIFactory.AddLE(utilStripGO, prefW: 195, flexW: 0);
+            // Anchored, not laid out: TitleRow's HLG controls child heights and
+            // would force a laid-out icon to the 30 px row. Anchored children
+            // keep 40x40, overhanging the row by 5 px top and bottom (nothing
+            // masks the header). CreateIconButton: sprite + preserveAspect, no
+            // hover tint; the pressed feedback is the popup opening.
+            utilMusicIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMusic", "ic_music.png", 40f, () => OpenUtilityPopup(UtilKind.Music));
+            utilMailIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMail", "ic_mail.png", 40f, () => OpenUtilityPopup(UtilKind.Mail));
+            // Right inset 14 keeps the badge's overhang short of the BACK button.
+            PlaceUtilIcon(utilMailIconGO, -14f);
+            PlaceUtilIcon(utilMusicIconGO, -14f - 40f - 12f);
+            var tint = new Color(0.85f, 0.87f, 0.92f, 1f);
+            UIFactory.SetImageColor(utilMusicIconGO, tint);
+            UIFactory.SetImageColor(utilMailIconGO, tint);
+            if (utilMailIconGO != null)
+            {
+                utilBadgeGO = new GameObject("UtilBadge");
+                utilBadgeGO.transform.SetParent(utilMailIconGO.transform, false);
+                var brt = utilBadgeGO.AddComponent<RectTransform>();
+                brt.anchorMin = brt.anchorMax = new Vector2(1f, 1f);
+                brt.pivot = new Vector2(0.5f, 0.5f);
+                brt.anchoredPosition = new Vector2(6f, 6f);
+                brt.sizeDelta = new Vector2(26f, 26f);
+                if (UIFactory.tImage != null)
+                {
+                    var bimg = utilBadgeGO.AddComponent(UIFactory.tImage);
+                    try
+                    {
+                        var bf = BindingFlags.Public | BindingFlags.Instance;
+                        UIFactory.tImage.GetProperty("sprite", bf)?.SetValue(bimg, GetUtilBadgeSprite());
+                        UIFactory.tImage.GetProperty("preserveAspect", bf)?.SetValue(bimg, true);
+                        UIFactory.tImage.GetProperty("raycastTarget", bf)?.SetValue(bimg, false);
+                        UIFactory.tImage.GetProperty("color", bf)?.SetValue(bimg, new Color(0.898f, 0.224f, 0.208f, 1f));   // #E53935
+                    }
+                    catch { }
+                }
+                utilBadgeTxt = UIFactory.CreateText("UtilBadgeTxt", utilBadgeGO.transform, "", 15f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(26, 26));
+                var tgo = (utilBadgeTxt as Component)?.gameObject;
+                if (tgo != null) { var trt = tgo.GetComponent<RectTransform>(); trt.anchorMin = Vector2.zero; trt.anchorMax = Vector2.one; trt.offsetMin = Vector2.zero; trt.offsetMax = Vector2.zero; }
+                UIFactory.SetBold(utilBadgeTxt, true);
+                UIFactory.FitOneLine(utilBadgeTxt);
+                utilBadgeGO.SetActive(false);
+            }
+            RefreshUtilityStrip();
+        }
+
+        private static void PlaceUtilIcon(GameObject go, float right)
+        {
+            if (go == null) return;
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = new Vector2(1f, 0.5f);
+            rt.pivot = new Vector2(1f, 0.5f);
+            rt.anchoredPosition = new Vector2(right, 0f);
+            rt.sizeDelta = new Vector2(40f, 40f);
+        }
+
+        /// <summary>64x64 antialiased disc (4x4 supersampled coverage), cached
+        /// like the FFA dot sprite; tinted by the badge Image's color.</summary>
+        private static Sprite GetUtilBadgeSprite()
+        {
+            if (utilBadgeSprite != null) return utilBadgeSprite;
+            const int size = 64, ss = 4;
+            var tex = new Texture2D(size, size, TextureFormat.ARGB32, false);
+            tex.name = "CR_UtilBadgeDisc";
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            tex.filterMode = FilterMode.Bilinear;
+            tex.wrapMode = TextureWrapMode.Clamp;
+            var px = new Color[size * size];
+            float c = size * 0.5f, r = c - 1.5f, r2 = r * r;
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                {
+                    int inside = 0;
+                    for (int sy = 0; sy < ss; sy++)
+                        for (int sx = 0; sx < ss; sx++)
+                        {
+                            float dx = x + (sx + 0.5f) / ss - c, dy = y + (sy + 0.5f) / ss - c;
+                            if (dx * dx + dy * dy <= r2) inside++;
+                        }
+                    px[y * size + x] = new Color(1f, 1f, 1f, inside / (float)(ss * ss));
+                }
+            tex.SetPixels(px);
+            tex.Apply(false, true);
+            var spr = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), size);
+            spr.name = tex.name;
+            spr.hideFlags = HideFlags.HideAndDontSave;
+            utilBadgeSprite = spr;
+            return spr;
+        }
+
+        /// <summary>Badge (count; hidden at 0; "99+" past 99) and, while the
+        /// mail popup is open, its "Mail (n)" title. Called from
+        /// UpdateTabBarVisual (every dirty cycle), MailUI.OnStatus and
+        /// CloseUtilityPopup. The count is as fresh as MailClient's last poll
+        /// (design 1.4: frozen during a tracked match; PollNow on open re-arms
+        /// the poll for the first eligible wake).</summary>
+        internal static void RefreshUtilityStrip()
+        {
+            try
+            {
+                int n = 0;
+                try { n = MailUI.Unread; } catch { }
+                if (utilBadgeGO != null)
+                {
+                    bool show = n > 0;
+                    if (utilBadgeGO.activeSelf != show) utilBadgeGO.SetActive(show);
+                    if (show && utilBadgeTxt != null) UIFactory.SetTextRaw(utilBadgeTxt, n > 99 ? "99+" : n.ToString());
+                }
+                if (utilKind == UtilKind.Mail && utilTitleTxt != null) UIFactory.SetTextRaw(utilTitleTxt, MailUI.TabLabel());
+            }
+            catch { }
+        }
+
+        /// <summary>BuildPage: backdrop + box (header row 44 px: title and
+        /// CLOSE; the Body anchored below it holds both bodies). Built exactly
+        /// once per page build — the music row pools are filled by
+        /// BuildMusicTab and refilled by index, never rebuilt per open.
+        /// Inactive until OpenUtilityPopup.</summary>
+        private static void BuildUtilityPopup(Transform pageParent)
+        {
+            utilKind = UtilKind.None;
+            utilPopupGO = new GameObject("UtilPopup");
+            utilPopupGO.transform.SetParent(pageParent, false);
+            var rt = utilPopupGO.AddComponent<RectTransform>();
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+            // CreatePanel: full-rect, raycastTarget on — absorbs EventSystem
+            // clicks to the page beneath; the raw-poll half is ModalBlockInput.
+            var bd = UIFactory.CreatePanel("BD", utilPopupGO.transform, new Color(0f, 0f, 0f, 0.6f));
+            utilBoxGO = UIFactory.CreatePanel("Box", utilPopupGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.97f));
+            utilBoxRT = utilBoxGO.GetComponent<RectTransform>();
+            utilBoxRT.anchorMin = utilBoxRT.anchorMax = new Vector2(0.5f, 0.5f);
+            utilBoxRT.pivot = new Vector2(0.5f, 0.5f);
+            utilBoxRT.sizeDelta = new Vector2(1500f, 900f);   // re-sized from the live canvas at every open (SizeUtilityBox)
+            var hdr = new GameObject("Hdr");
+            hdr.transform.SetParent(utilBoxGO.transform, false);
+            var hrt = hdr.AddComponent<RectTransform>();
+            hrt.anchorMin = new Vector2(0f, 1f); hrt.anchorMax = new Vector2(1f, 1f); hrt.pivot = new Vector2(0.5f, 1f);
+            hrt.anchoredPosition = Vector2.zero; hrt.sizeDelta = new Vector2(0f, 44f);
+            UIFactory.AddHLG(hdr, spacing: 8, padL: 20, padR: 12, padT: 6, padB: 6, forceExpandH: true);
+            utilTitleTxt = UIFactory.CreateText("UtilTitle", hdr.transform, "", 22f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(0, 32));
+            var tgo = (utilTitleTxt as Component)?.gameObject;
+            if (tgo != null) UIFactory.AddLE(tgo, flexW: 1, prefH: 32, minH: 32);
+            UIFactory.FitOneLine(utilTitleTxt);
+            UIFactory.CreateButton("UtilClose", hdr.transform, I18n.Tr("Close"), 15f, C_WHITE, C_BTN, () => CloseUtilityPopup(), sizeDelta: new Vector2(110, 30));
+            utilBodyGO = new GameObject("Body");
+            utilBodyGO.transform.SetParent(utilBoxGO.transform, false);
+            var brt = utilBodyGO.AddComponent<RectTransform>();
+            brt.anchorMin = Vector2.zero; brt.anchorMax = Vector2.one;
+            brt.offsetMin = Vector2.zero; brt.offsetMax = new Vector2(0f, -44f);
+            // The bodies carry flexH:1 and were written for the page's VLG
+            // Content; the Body gives them the same parent shape.
+            UIFactory.AddVLG(utilBodyGO, spacing: 0, padB: 6);
+            mailBodyGO = MailUI.BuildTab(utilBodyGO.transform);
+            musicBodyGO = BuildMusicTab(utilBodyGO.transform);
+            if (mailBodyGO != null) mailBodyGO.SetActive(false);
+            if (musicBodyGO != null) musicBodyGO.SetActive(false);
+            // Backdrop handler (tournament-bets shape): a raw poll with no
+            // occlusion test fires for EVERY click (#141), so it vetoes itself
+            // for a click inside the box (a composer field, Play, a row) and
+            // while a child surface is up; bypassModalBlock so it runs under
+            // the popup's own ModalBlockInput (#200).
+            var bdClick = bd.AddComponent<ClickHandler>();
+            bdClick.bypassModalBlock = true;
+            bdClick.onClick = () =>
+            {
+                try
+                {
+                    if (PointerInsideRect(utilBoxRT)) return;
+                    if (UtilityChildSurfaceOpen) return;
+                }
+                catch { }
+                if (ClickGuard.Claim(bd)) CloseUtilityPopup();
+            };
+            MarkPopupChildrenInteractive(utilPopupGO);
+            utilPopupGO.SetActive(false);
+        }
+
+        /// <summary>Contract 7 / 1-5: sized from the live canvas at every open
+        /// (ScaleWithScreenSize 1920x1080, match-width — a 32:9 window leaves
+        /// far fewer vertical units than 1080).</summary>
+        private static void SizeUtilityBox()
+        {
+            float w = 1500f, h = 900f;
+            try
+            {
+                var canvasRT = overlayCanvasGO != null ? overlayCanvasGO.GetComponent<RectTransform>() : null;
+                if (canvasRT != null && canvasRT.rect.height > 200f)
+                {
+                    w = Mathf.Min(1500f, canvasRT.rect.width - 80f);
+                    h = Mathf.Min(900f, canvasRT.rect.height - 60f);
+                }
+            }
+            catch { }
+            if (utilBoxRT != null) utilBoxRT.sizeDelta = new Vector2(w, h);
+        }
+
+        /// <summary>Opens the Mail or Music popup. Refused (false, logged)
+        /// while the page is not open or while ANOTHER surface owns input (a
+        /// confirm, picker, language prompt or consent modal opened elsewhere
+        /// must never sit under a popup — CancelPrompts at close could cancel
+        /// it). Another kind open -> closed first, hooks and all. Does not bump
+        /// PageGeneration and does not write currentTab (SwitchTab stays its
+        /// only writer): the underlying tab stays current and its fetch fences
+        /// stay valid.</summary>
+        internal static bool OpenUtilityPopup(UtilKind kind)
+        {
+            try
+            {
+                if (kind == UtilKind.None) { CloseUtilityPopup(); return true; }
+                if (!isOpen || !pageBuilt || utilPopupGO == null) { Plugin.Log.LogInfo($"[UTIL-POPUP] {kind} refused: page not open"); return false; }
+                if (CompetitiveUI.OtherModalOwnsInput) { Plugin.Log.LogInfo($"[UTIL-POPUP] {kind} refused: another modal owns input"); return false; }
+                if (utilKind == kind) return true;
+                if (utilKind != UtilKind.None) CloseUtilityPopup();
+                utilKind = kind;
+                SizeUtilityBox();
+                if (mailBodyGO != null) mailBodyGO.SetActive(kind == UtilKind.Mail);
+                if (musicBodyGO != null) musicBodyGO.SetActive(kind == UtilKind.Music);
+                if (utilTitleTxt != null) UIFactory.SetTextRaw(utilTitleTxt, kind == UtilKind.Mail ? MailUI.TabLabel() : I18n.Tr("Music"));
+                utilPopupGO.transform.SetAsLastSibling();
+                utilPopupGO.SetActive(true);
+                if (kind == UtilKind.Mail)
+                {
+                    try { MailUI.OnPopupOpened(); } catch (Exception ex) { Plugin.Log.LogWarning($"[UTIL-POPUP] mail open hook: {ex.Message}"); }
+                }
+                else
+                {
+                    // The former Music-tab entry work (SwitchTab's tab-16 branch,
+                    // contract 7 / 1-2): a previews-tier trigger (design §3;
+                    // idempotent once ready / in flight / gave up) and a shop
+                    // fetch that refreshes entitlements (ApplyShopSnapshot rides it).
+                    try { MusicAssets.EnsureTier(MusicTier.Previews, "music-popup"); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] EnsureTier: {ex.Message}"); }
+                    var _muid = MatchTracker.LocalSteamId;
+                    if (!string.IsNullOrEmpty(_muid) && _muid != "unknown") ApiClient.FetchShopItems(_muid);
+                    try { RefreshMusicTab(); } catch (Exception ex) { Plugin.Log.LogWarning($"[UTIL-POPUP] music refresh: {ex.Message}"); }
+                }
+                MarkPopupChildrenInteractive(utilPopupGO);
+                RefreshUtilityStrip();
+                dirty = true;
+                Plugin.Log.LogInfo($"[UTIL-POPUP] opened {kind}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[UTIL-POPUP] open {kind}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>Hooks first (Mail: MailUI.OnPopupClosed — focus, report
+        /// modal, in-flight flags and both prompts; Music: nothing — the Music
+        /// body has no preview control, contract 7 / 1-4, so a shop preview
+        /// keeps playing), then the body and popup go inactive. No-op when
+        /// nothing is open; safe after the page host is destroyed.</summary>
+        internal static void CloseUtilityPopup()
+        {
+            if (utilKind == UtilKind.None) return;
+            var was = utilKind;
+            if (was == UtilKind.Mail)
+            {
+                try { MailUI.OnPopupClosed(); } catch (Exception ex) { Plugin.Log.LogWarning($"[UTIL-POPUP] mail close hook: {ex.Message}"); }
+            }
+            try { if (mailBodyGO != null) mailBodyGO.SetActive(false); } catch { }
+            try { if (musicBodyGO != null) musicBodyGO.SetActive(false); } catch { }
+            try { if (utilPopupGO != null) utilPopupGO.SetActive(false); } catch { }
+            utilKind = UtilKind.None;
+            RefreshUtilityStrip();
+            dirty = true;
+            Plugin.Log.LogInfo($"[UTIL-POPUP] closed {was}");
+        }
+
+        /// <summary>RefreshCurrentTab's tail: the dirty repaint of whichever
+        /// body is showing. A music refill can leave fresh handlers unmarked,
+        /// so the walk-and-mark re-runs after it (bug 230; idempotent) — the
+        /// mail body marks itself at the end of MailUI.Refresh.</summary>
+        private static void RefreshUtilityPopup()
+        {
+            if (utilKind == UtilKind.Mail)
+            {
+                try { MailUI.Refresh(); } catch (Exception ex) { Plugin.Log.LogWarning($"[UTIL-POPUP] mail refresh: {ex.Message}"); }
+            }
+            else if (utilKind == UtilKind.Music)
+            {
+                try { RefreshMusicTab(); } catch (Exception ex) { Plugin.Log.LogWarning($"[UTIL-POPUP] music refresh: {ex.Message}"); }
+                MarkPopupChildrenInteractive(musicBodyGO);
+            }
+        }
 
         // ── Tournament Bets popup ─────────────────────────────────────────
         // A REAL popup, not an inline expander (owner, Aug 13 second pass):
@@ -8791,7 +9129,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==8){ApiClient.FetchTeamLeaderboard(200,ApiClient.CachedTeamLeaderboardSort??"rating");/* 342 review M2 + r5 L1: manual refresh on the 2v2 board (tab 8) */}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;case 16:RefreshMusicTab();break;case TAB_MAIL:MailUI.Refresh();break;}}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;}if(utilKind!=UtilKind.None)RefreshUtilityPopup();/* Sept 7 item 1: a dirty repaint reaches the open popup, not only the tab beneath */}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -12109,15 +12447,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static void MaybeRefreshMusicTab()
         {
             bool shopPreviewLive = currentTab == 4 && !string.IsNullOrEmpty(shopSelectedSku) && MusicCatalog.Get(shopSelectedSku) != null;
-            if (currentTab != 16 && !shopPreviewLive) return;
-            // Batch-2 §2: ratings refresh while the Music tab is open — the
+            if (utilKind != UtilKind.Music && !shopPreviewLive) return;   // Sept 7 item 1: the Music popup, not a tab
+            // Batch-2 §2: ratings refresh while the Music popup is open — the
             // store owns the throttle (60s) and flips NativeUI.MarkDirty when
             // a fetch lands, so no sig component is needed here.
-            if (currentTab == 16) { try { MusicRatings.FetchIfStale(); } catch { } }
+            if (utilKind == UtilKind.Music) { try { MusicRatings.FetchIfStale(); } catch { } }
             // Seek-line micro-ticker: the position moves continuously, but a
             // full tab repaint for it would be #162-class waste — update just
             // the slider + time labels at 4 Hz, with no dirty flip.
-            if (currentTab == 16 && Time.unscaledTime >= musicSeekPollAt)
+            if (utilKind == UtilKind.Music && Time.unscaledTime >= musicSeekPollAt)
             {
                 musicSeekPollAt = Time.unscaledTime + 0.25f;
                 try { UpdateMusicSeekRow(); } catch { }
