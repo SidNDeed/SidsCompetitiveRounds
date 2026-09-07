@@ -16,6 +16,18 @@
   report, a send) still updates your inbox data, but its toast belongs to the
   popup that issued it and is not shown to a later one.
 
+**Music plays on the first click (bug 346)**
+
+- There is no prepare step any more: a track opens as a streamed clip in a few
+  milliseconds and is decoded on the audio thread while it plays. Tracks opened
+  during a session stay loaded (about 4 MB each) until the game closes, so
+  switching back to a track is instant and nothing is torn down under a playing
+  clip. A track whose file fails to open after the read is marked "Unavailable
+  until the game restarts"; a failure before the read is retried on the next
+  click. A delivery watchdog stops a track that has gone silent and moves on.
+  Testing levers: `[Music] TestScript` (the self-test runner, including the
+  `openall` memory gate) and the `compressed_mb` / `native_delta_mb` fields on
+  the `[MUSIC-RESIDENCY]` log line.
 **Ranked 1v1: the room region is picked from both players' pings**
 
 - After the mod connects to Photon (and again every five minutes in the menu,
