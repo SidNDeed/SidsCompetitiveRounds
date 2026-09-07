@@ -11135,7 +11135,9 @@ namespace CompetitiveRounds
 
         // Curly twin of the above (learning #156: any slice over a region that
         // can carry user-authored strings must be string-aware).
-        private static int FindMatchingBraceStringAware(string s, int openPos)
+        // internal since Sept 6 item a: ProfileCard slices the H2H response's
+        // nested `profile` / `modes` members with it (design v2 A-4).
+        internal static int FindMatchingBraceStringAware(string s, int openPos)
         {
             if (openPos < 0 || openPos >= s.Length) return -1;
             int depth = 0; bool inStr = false;

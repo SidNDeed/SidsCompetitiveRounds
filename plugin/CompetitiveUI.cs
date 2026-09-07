@@ -1854,6 +1854,7 @@ namespace CompetitiveRounds
         public static void ClearCardHoverRegions()
         {
             _cardHoverRegions.Clear();
+            ProfileCard.ClearHoverTargets();   // Sept 6 item a: name-hover targets live and die with the card regions
             _scoreGraphRegions.Clear();
             _fpsGraphRegions.Clear();
         }
