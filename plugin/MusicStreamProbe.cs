@@ -49,7 +49,9 @@ namespace CompetitiveRounds
     ///
     /// Lifetime: the host GameObject is HideAndDontSave; if anything destroys it
     /// (its tap's OnDestroy flags it, and a Unity fake-null source is checked
-    /// too) every retained handle is released — never treated as idle.</summary>
+    /// too) every retained handle is released, or abandoned after four
+    /// attempts and logged (`[MUSIC-PROBE] handle abandoned`) — never treated
+    /// as idle.</summary>
     internal static class MusicStreamProbe
     {
         // ── gate ─────────────────────────────────────────────────────────
@@ -177,15 +179,30 @@ namespace CompetitiveRounds
         private static long _playStartTicks;
         // §2.4 / §7 2-9 PASS bar (impl2 r1 M4): retained across the run for the
         // end line's verdict (BarVerdict) — every row of the bar is judged there
-        // or, for the post-cleanup memory row, where it is measured.
+        // except the post-cleanup memory row, which is judged where it is
+        // measured and folded into the end line by FinishEndRecord (impl2 r2 M4).
         private static float _firstSampleMs = -1f;   // -1 = no audible sample was ever observed
         private static float _deficitPeakMs;          // max of DeficitMs() sampled every playing tick
         private static bool _controlsDone;            // the scripted sequence reached its summary line
-        private static long _runSilentRunMaxStart;    // Stopwatch stamp of the first buffer of the run's longest silent run
+        // impl2 r2 M4: the start stamp of EVERY silent run of >= 2 buffers in
+        // the run (folded from each tap's ring by CloseObjects), plus the
+        // count the ring could not stamp. Each is judged against the scripted
+        // windows in Stop — the longest run alone let a later, unscripted run
+        // of equal length hide behind a scripted one's stamp.
+        private static readonly List<long> _runSilentRunStarts = new List<long>();
+        private static int _runSilentRunsUnstamped;
         // Scripted windows [from, to] in Stopwatch ticks: Play, each seek /
         // resume / restart, and the natural end. A silent run that STARTS
         // inside one is "at a scripted seek" (§2.4); one outside fails the bar.
         private static readonly List<KeyValuePair<long, long>> _scriptedWindows = new List<KeyValuePair<long, long>>();
+        // impl2 r2 M4: the `end` record is the runner's stop signal, so it is
+        // written only when its bar is FINAL — after the post-cleanup native
+        // sample (or once that sample can no longer happen). Stop builds the
+        // record and every bar row it can judge; FinishEndRecord appends the
+        // native row and writes the line.
+        private static string _endRecord;
+        private static List<string> _endBar;   // null = churn (no bar)
+        private static bool _quitHooked;
         // Wall accrual after a Play/UnPause: the first accruing tick charges
         // the time since that call, not the whole frame (which began before
         // it) — with the deficit now judged per tick, a one-frame overcharge
@@ -211,8 +228,11 @@ namespace CompetitiveRounds
         private static Thread[] _busy;
         private static volatile bool _busyRun;
         private static float _busyUntil, _busyStartAt;
-        // release retry (r2 PLAUSIBLE: a throwing release must not lose the handle)
-        private static readonly List<KeyValuePair<object, int>> _retry = new List<KeyValuePair<object, int>>();
+        // release retry (r2 PLAUSIBLE: a throwing release must not lose the
+        // handle): the initial attempt plus three on later ticks, then the
+        // handle is abandoned and said so (impl2 r2 LOW).
+        private struct RetryHandle { public object Handle; public int Attempts; public string What; }
+        private static readonly List<RetryHandle> _retry = new List<RetryHandle>();
         internal static volatile bool HostDestroyed;
 
         internal static void Tick()
@@ -221,6 +241,14 @@ namespace CompetitiveRounds
             {
                 if (Plugin.MusicProbeRun == null) return;
                 float now = Time.realtimeSinceStartup;
+                // A deferred end record must not die with the process: a quit
+                // inside the cleanup window writes it with the native row
+                // unmeasured (a bar row on the broadcast seat, so a FAIL there).
+                if (!_quitHooked)
+                {
+                    _quitHooked = true;
+                    try { Application.quitting += () => FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(quit inside the cleanup window)" : null); } catch { }
+                }
                 // Only while enabled: a seat with the probe off must not read
                 // the config file every two seconds forever.
                 if (SeatAllowed()) ReloadIfDue(now);
@@ -260,6 +288,7 @@ namespace CompetitiveRounds
                         {
                             _cleanupGcAt = -1f;
                             Plugin.Log?.LogInfo("[MUSIC-PROBE] cleanup collection abandoned — context=" + ctxNow + " outlasted the window");
+                            FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(cleanup abandoned: " + ctxNow + " outlasted the window)" : null);
                         }
                         else _cleanupGcAt = now + 5f;
                     }
@@ -284,6 +313,14 @@ namespace CompetitiveRounds
                             : !natAvail ? "FAIL(native allocation unavailable)"
                             : natDelta <= 1048576L ? "pass" : "FAIL";
                         Plugin.Log?.LogInfo("[MUSIC-PROBE] bar-memory key=" + _cleanupKey + " d_native_alloc_mb=" + (natAvail ? Dmb(natDelta) : "?") + " bound=+1.0 verdict=" + natVerdict);
+                        // impl2 r2 M4: the end record — the runner's stop signal
+                        // — is written only now, with this row folded into its
+                        // bar, so a `bar=pass` can never precede a native growth
+                        // measured after it.
+                        FinishEndRecord(!BroadcastMode.IsBroadcastIdentity ? null
+                            : !natAvail ? "native_after_cleanup=unavailable"
+                            : natDelta <= 1048576L ? null
+                            : "native_after_cleanup=" + Dmb(natDelta) + ">+1.0");
                     }
                 }
                 if (_req == null && _src == null)
@@ -395,6 +432,7 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogInfo("[MUSIC-PROBE] pending cleanup for " + (_cleanupKey ?? "?")
                                     + " dropped — a new run started inside its window");
             _cleanupSampleAt = -1f; _cleanupGcAt = -1f;
+            FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(a new run started inside the cleanup window)" : null);
             _gen++;
             _audioWallSeconds = 0f;
             _runMaxGapTicks = 0L;
@@ -410,7 +448,7 @@ namespace CompetitiveRounds
             // request so a failed open reports zeros, not the previous run.
             _stallMax = 0f; _stalls = 0; _wraps = 0; _driftPeak = 0f; _lastDrift = 0f; _frameMax = 0f;
             _controlsPass = 0; _controlsFail = 0; _churnCycles = 0; _getContentMs = 0f; _requestMs = 0f; _openBlockMs = 0f;
-            _firstSampleMs = -1f; _deficitPeakMs = 0f; _controlsDone = false; _runSilentRunMaxStart = 0L; _scriptedWindows.Clear();
+            _firstSampleMs = -1f; _deficitPeakMs = 0f; _controlsDone = false; _runSilentRunStarts.Clear(); _runSilentRunsUnstamped = 0; _scriptedWindows.Clear();
             _wallFromTicks = 0L; _wallAccruing = false;
             Plugin.Log?.LogInfo("[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
                 + " cores=" + Environment.ProcessorCount + " (bots/opponents are the operator's responsibility; the log cannot see them)");
@@ -559,12 +597,13 @@ namespace CompetitiveRounds
             _tap.Reset();
             _tap.Gen = _gen;
             HostDestroyed = false;
-            // Asked AGAIN immediately before the first audible sample.
-            // GetContent decodes a whole track and the host construction above
-            // is not free, so the answer from the top of this method is several
-            // milliseconds old — and this is the one line where being wrong is
-            // audible in somebody else's match. Nothing has played yet, so Stop
-            // simply releases what was built.
+            // Asked AGAIN immediately before the first audible sample. The
+            // streamed handle open above (no decode — the bar bounds it at
+            // 20 ms) and the host construction are not free, so the answer
+            // from the top of this method is milliseconds old — and this is
+            // the one line where being wrong is audible in somebody else's
+            // match. Nothing has played yet, so Stop simply releases what was
+            // built.
             string refuseAtPlay = RefusalNow();
             if (refuseAtPlay != null) { Stop(refuseAtPlay); return; }
             _playStartTicks = Stopwatch.GetTimestamp();
@@ -955,9 +994,10 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                // Keep the handle for a bounded retry rather than dropping it.
+                // Keep the handle for a bounded retry rather than dropping it:
+                // three more attempts on later ticks, then abandoned and logged.
                 Plugin.Log?.LogWarning("[MUSIC-PROBE] release failed (" + what + "): " + ex.Message);
-                _retry.Add(new KeyValuePair<object, int>(h, 1));
+                _retry.Add(new RetryHandle { Handle = h, Attempts = 1, What = what });
             }
         }
 
@@ -965,17 +1005,18 @@ namespace CompetitiveRounds
         {
             for (int i = _retry.Count - 1; i >= 0; i--)
             {
-                var kv = _retry[i];
+                var r = _retry[i];
                 _retry.RemoveAt(i);
                 try
                 {
-                    if (kv.Key is UnityEngine.Object o) { if (o != null) UnityEngine.Object.Destroy(o); }
-                    else if (kv.Key is UnityWebRequest r) r.Dispose();
+                    if (r.Handle is UnityEngine.Object o) { if (o != null) UnityEngine.Object.Destroy(o); }
+                    else if (r.Handle is UnityWebRequest q) q.Dispose();
                 }
                 catch (Exception ex)
                 {
-                    if (kv.Value < 3) _retry.Add(new KeyValuePair<object, int>(kv.Key, kv.Value + 1));
-                    else Plugin.Log?.LogWarning("[MUSIC-PROBE] release abandoned after 3 attempts: " + ex.Message);
+                    r.Attempts++;
+                    if (r.Attempts < 4) _retry.Add(r);
+                    else Plugin.Log?.LogWarning("[MUSIC-PROBE] handle abandoned after 4 attempts (" + r.What + "): " + ex.Message + " — this handle is NOT released");
                 }
             }
         }
@@ -987,7 +1028,16 @@ namespace CompetitiveRounds
             if ((object)_tap != null)
             {
                 if (_tap.MaxGapTicks > _runMaxGapTicks) _runMaxGapTicks = _tap.MaxGapTicks;
-                if (_tap.SilentRunMax > _runSilentRunMax) { _runSilentRunMax = _tap.SilentRunMax; _runSilentRunMaxStart = _tap.SilentRunMaxStartTicks; }
+                if (_tap.SilentRunMax > _runSilentRunMax) _runSilentRunMax = _tap.SilentRunMax;
+                // impl2 r2 M4: every silent run of >= 2 buffers is judged, not
+                // just the longest — the tap's start stamps join the run's
+                // list here (classification against the scripted windows is
+                // the main thread's, in Stop). Runs past the ring were counted
+                // but not stamped; they cannot be shown scripted, so they fail.
+                int runs = _tap.SilentRunCount;
+                int stamped = Math.Min(runs, ProbeTap.SilentRunRing);
+                for (int i = 0; i < stamped; i++) _runSilentRunStarts.Add(_tap.SilentRunStartTicks[i]);
+                _runSilentRunsUnstamped += runs - stamped;
                 _runHadTap = true;
                 _runFramesDelivered += _tap.FramesDelivered;
             }
@@ -1023,21 +1073,63 @@ namespace CompetitiveRounds
             if (_busy != null) StopBusy();
             _openPending = false;
             CloseObjects();
+            // A record still pending from an earlier stop (nothing should get
+            // here twice without a run start between, which flushes it) is
+            // written before it could be overwritten.
+            FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(superseded by a later stop)" : null);
             // The bar is judged AFTER CloseObjects: the run totals (delivered
-            // frames, gaps, the silent-run start) are folded there.
-            string bar = BarVerdict(why, silentRunMax);
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
+            // frames, gaps, every silent run's start) are folded there.
+            // impl2 r2 M4: every silent run of >= 2 buffers must have STARTED
+            // inside a scripted window — judged here, on the main thread, with
+            // every window of the run known; a run the tap counted but could
+            // not stamp cannot be shown scripted and counts against the bar.
+            int silentRuns = _runSilentRunStarts.Count + _runSilentRunsUnstamped;
+            int unscripted = _runSilentRunsUnstamped;
+            for (int i = 0; i < _runSilentRunStarts.Count; i++) if (!SilentRunIsScripted(_runSilentRunStarts[i])) unscripted++;
+            // Every row but one is final here. The native-after-cleanup row is
+            // measured on a later tick, and the `end` record is the runner's
+            // stop signal — so the record is BUILT here and WRITTEN by
+            // FinishEndRecord once that row is judged (impl2 r2 M4): its
+            // `bar=` is final, never a pass a later measurement would have to
+            // retract. `closing` marks the stop itself in the log.
+            _endBar = BarVerdict(why, silentRunMax, unscripted);
+            _endRecord = "[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
                 + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
-                + " silent_run_max=" + silentRunMax + " silent_run_scripted=" + (silentRunMax <= 0 ? "n/a" : (SilentRunIsScripted(_runSilentRunMaxStart) ? "1" : "0"))
+                + " silent_run_max=" + silentRunMax + " silent_runs=" + silentRuns + " silent_runs_unscripted=" + unscripted
                 + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs()) + " audio_deficit_peak_ms=" + F0(_deficitPeakMs)
                 + " open_block_ms=" + F1(_openBlockMs) + " first_sample_ms=" + (_firstSampleMs < 0f ? "?" : F1(_firstSampleMs))
                 + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail + " controls_done=" + (_controlsDone ? 1 : 0)
-                + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath))
-                + " bar=" + bar);
+                + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath));
+            Plugin.Log?.LogInfo("[MUSIC-PROBE] closing key=" + _key + " why=" + why + " — the end record follows the post-cleanup native sample");
             _cleanupKey = _key;
             _cleanupSampleAt = Time.realtimeSinceStartup + 2f;
             _cleanupGcAt = Time.realtimeSinceStartup + 5f;
             _cleanupGcDeadline = Time.realtimeSinceStartup + 120f;
+        }
+
+        /// <summary>Writes the deferred `end` record with its FINAL bar (impl2
+        /// r2 M4). Once per run: after the post-cleanup native sample was
+        /// judged (`nativeFail` null for pass, or for a seat where the row is
+        /// measured-only), or when that sample can no longer happen — the
+        /// cleanup abandoned to a live room, a new run inside the window, a
+        /// quit — with the row's failure text on the broadcast seat, where it
+        /// is a bar row. Churn runs carry no bar. A no-op when nothing is
+        /// pending.</summary>
+        private static void FinishEndRecord(string nativeFail)
+        {
+            string rec = _endRecord;
+            if (rec == null) return;
+            _endRecord = null;
+            var fails = _endBar;
+            _endBar = null;
+            string bar;
+            if (fails == null) bar = "n/a(churn)";
+            else
+            {
+                if (nativeFail != null) fails.Add(nativeFail);
+                bar = fails.Count == 0 ? "pass" : "FAIL[" + string.Join(",", fails.ToArray()) + "]";
+            }
+            Plugin.Log?.LogInfo(rec + " bar=" + bar);
         }
 
         /// <summary>The longest interval between two consecutive audio
@@ -1111,21 +1203,25 @@ namespace CompetitiveRounds
             return false;
         }
 
-        /// <summary>The §2.4 + §7 2-9 PASS bar, judged on the end line (impl2 r1
-        /// M4). Every row is enforced: a run that did not reach its budget, a
-        /// control sequence that did not complete, or a first sample never
-        /// observed cannot pass. The native-after-cleanup row is judged where
-        /// it is measured (the post-GC sample); the time_at_death bound is a
-        /// control (§2.3.6) and rides the controls row. Churn runs have no bar.</summary>
-        private static string BarVerdict(string why, int silentRunMax)
+        /// <summary>The §2.4 + §7 2-9 PASS bar (impl2 r1 M4), judged at the
+        /// stop for every row it can judge; the native-after-cleanup row is
+        /// measured later and appended by FinishEndRecord, which writes the
+        /// end line with the FINAL verdict (impl2 r2 M4). Every row is
+        /// enforced: a run that did not reach its budget, a control sequence
+        /// that did not complete, or a first sample never observed cannot
+        /// pass; every silent run of >= 2 buffers must have started inside a
+        /// scripted window (`unscripted` counts those that did not); the
+        /// time_at_death bound is a control (§2.3.6) and rides the controls
+        /// row. Churn runs have no bar (null).</summary>
+        private static List<string> BarVerdict(string why, int silentRunMax, int unscripted)
         {
-            if (_mode == Mode.Churn) return "n/a(churn)";
+            if (_mode == Mode.Churn) return null;
             var fail = new List<string>();
             if (why != "budget") fail.Add("ended=" + why);
             if (_stalls != 0) fail.Add("stalls=" + _stalls);
             if (_driftPeak * 1000f > 60f) fail.Add("drift_peak=" + F0(_driftPeak * 1000f) + ">60");
             if (silentRunMax < 0 || silentRunMax > 2) fail.Add("silent_run_max=" + silentRunMax + (silentRunMax < 0 ? "(no tap)" : ">2"));
-            else if (silentRunMax > 0 && !SilentRunIsScripted(_runSilentRunMaxStart)) fail.Add("silent_run_unscripted");
+            if (unscripted > 0) fail.Add("silent_runs_unscripted=" + unscripted);
             if (MaxGapMs() > 100f) fail.Add("audio_gap_max=" + F1(MaxGapMs()) + ">100");
             if (DeficitMs() > 100f) fail.Add("audio_deficit_end=" + F0(DeficitMs()) + ">100");
             if (_deficitPeakMs > 100f) fail.Add("audio_deficit_peak=" + F0(_deficitPeakMs) + ">100");
@@ -1134,7 +1230,7 @@ namespace CompetitiveRounds
             if (_openBlockMs > 20f) fail.Add("open_block=" + F1(_openBlockMs) + ">20");
             if (_firstSampleMs < 0f) fail.Add("first_sample=none");
             else if (_firstSampleMs > 50f) fail.Add("first_sample=" + F1(_firstSampleMs) + ">50");
-            return fail.Count == 0 ? "pass" : "FAIL[" + string.Join(",", fail.ToArray()) + "]";
+            return fail;
         }
 
         private static string F0(float v) { return v.ToString("F0", CultureInfo.InvariantCulture); }
@@ -1163,17 +1259,25 @@ namespace CompetitiveRounds
             /// shows up in: it supplies no zero-filled buffer, so silent_run
             /// stays at zero however starved the path is (review r9).</summary>
             public long LastCallbackTicks, MaxGapTicks, FramesDelivered;
-            /// <summary>Stopwatch stamp of the first buffer of the longest
-            /// silent run — where the bar decides whether that run sat at a
-            /// scripted transition (impl2 r1 M4).</summary>
-            public long SilentRunMaxStartTicks;
+            /// <summary>impl2 r2 M4: the Stopwatch stamp of the FIRST buffer of
+            /// EVERY silent run that reached two buffers, in a ring allocated
+            /// once with the tap — the audio thread only stores a stamp and
+            /// bumps the count, never allocates or classifies; CloseObjects
+            /// folds the ring into the run and Stop judges each stamp against
+            /// the scripted windows. SilentRunCount keeps counting past the
+            /// ring; the unstamped remainder cannot be shown scripted and
+            /// fails the bar. The longest run's stamp alone let a later run of
+            /// equal length hide behind it (the `>`-only maximum).</summary>
+            public const int SilentRunRing = 64;
+            public readonly long[] SilentRunStartTicks = new long[SilentRunRing];
+            public volatile int SilentRunCount;
             private long _silentRunStartTicks;
             public void Reset()
             {
                 Buffers = 0; SilentRun = 0; SilentRunMax = 0;
                 FirstSampleTicks = 0; FirstSampleLogged = false;
                 LastCallbackTicks = 0; MaxGapTicks = 0; FramesDelivered = 0;
-                SilentRunMaxStartTicks = 0; _silentRunStartTicks = 0;
+                SilentRunCount = 0; _silentRunStartTicks = 0;
                 CallbacksPaused = false; SilenceExpected = false;
             }
             /// <summary>The scripted PAUSE, where Unity stops calling the
@@ -1222,7 +1326,14 @@ namespace CompetitiveRounds
                 {
                     if (SilentRun == 0) _silentRunStartTicks = stamp;
                     SilentRun++;
-                    if (SilentRun > SilentRunMax) { SilentRunMax = SilentRun; SilentRunMaxStartTicks = _silentRunStartTicks; }
+                    if (SilentRun > SilentRunMax) SilentRunMax = SilentRun;
+                    // The run became a run (two buffers): stamp its start once.
+                    if (SilentRun == 2)
+                    {
+                        int n = SilentRunCount;
+                        if (n < SilentRunRing) SilentRunStartTicks[n] = _silentRunStartTicks;
+                        SilentRunCount = n + 1;
+                    }
                 }
                 else { SilentRun = 0; if (FirstSampleTicks == 0) FirstSampleTicks = Stopwatch.GetTimestamp(); }
             }

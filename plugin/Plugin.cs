@@ -2146,7 +2146,10 @@ namespace CompetitiveRounds
         private static string _lastTestOpenTab;
         private static float _testOpenTabAt = -1f;
         private static float _testOpenTabCfgReloadAt = -1f;
-        // Per-process nonce for the click directive (impl-review r1 HIGH 1).
+        // TestQuit lever state (Sept 6, TickTestQuit): the directive's value at
+        // its first read is the BASELINE — a value already present at launch
+        // never fires; only a later, different, non-empty value quits, and at
+        // most once per process (_testQuitFired). Live state, not a leftover.
         private static string _testQuitBaseline;
         private static bool _testQuitFired;
         // The "16:click:prepare:<nonce>" directive (lag-332 W6-A, with its

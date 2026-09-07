@@ -110,20 +110,26 @@ namespace CompetitiveRounds
             public int RequestedFrame;
         }
 
-        /// <summary>§7 2-4: an evicted entry travels as one pair. Step 1 at
-        /// eviction: a POSITIVE detach from every source on every host this
-        /// engine created (Stop returned without throwing, and no source is
-        /// still bound to the clip and playing), then Destroy(clip). Step 2 in
-        /// the sweep, only after step 1 succeeded AND on a later frame than
-        /// the Destroy: Dispose the request. A step 1 that cannot confirm the
-        /// detach (a Stop that threw, a source still playing the clip, a
-        /// Destroy that threw) is retried at most twice a second for
-        /// RELEASE_DETACH_WINDOW_SEC and then HELD: the pair stays queued for
-        /// the session, never destroyed and never disposed (impl2 r1 H1 — a
-        /// retained buffer is the safe failure direction, a buffer freed under
-        /// a live voice is not, #276). A step 2 that throws retries at most
-        /// twice a second and is never held: its clip is already gone, so
-        /// nothing reads the buffer.</summary>
+        /// <summary>§7 2-4 as rebuilt by impl2 r2 (DETACH-OR-RETIRE): an
+        /// evicted entry travels as one pair. Step 1 — the clip may be
+        /// Destroyed only when EVERY listed host (rule a) is either observed
+        /// destroyed or has both sources cleanly detached from the clip
+        /// (rule b: Stop returned, `clip = null` returned, a same-frame
+        /// read-back of null). A source that fails that in ANY way — an
+        /// exception anywhere, a read-back still bound — is never retried: its
+        /// whole host is retired (Destroy of the GameObject, so the
+        /// AudioSources and their native voices die with it at end of frame,
+        /// #278) and the pair waits for that host to be observed destroyed on
+        /// a later frame (rule c). Step 1 is re-evaluated by every sweep —
+        /// that is an observation of the host list, not a retry of a detach.
+        /// Step 2, in the sweep on a later frame than the Destroy: Dispose the
+        /// request. A pair still at step 1 RELEASE_DETACH_WINDOW_SEC after
+        /// eviction, or whose clip Destroy threw, is HELD for the session:
+        /// never destroyed, never disposed, one `[MUSIC-RELEASE] held:` line,
+        /// still counted by the ledger (rule d — a retained buffer is the safe
+        /// failure direction, a buffer freed under a live voice is not, #276).
+        /// A step 2 that throws retries at most twice a second and is never
+        /// held: its clip is already gone, so nothing reads the buffer.</summary>
         private struct PendingReleaseEntry
         {
             public string Key;
@@ -131,11 +137,9 @@ namespace CompetitiveRounds
             public UnityWebRequest Req;
             public bool Destroyed;            // step 1 done (vacuous when Clip is null)
             public int DestroyedFrame;        // frame of the Destroy call; step 2 waits past it
-            public int DestroyAttempts;
             public int DisposeAttempts;
             public float QueuedRt;            // realtimeSinceStartup at eviction: the detach window and the self-test's pair age count from here
-            public bool Held;                 // step 1 never confirmed inside the window: retained for the session, still counted by the ledger
-            public string LastWhy;            // the latest step-1 refusal, printed on the held line
+            public bool Held;                 // step 1 never completed inside the window, or the clip Destroy threw: retained for the session, still counted by the ledger
         }
 
         private sealed class PreviewSnapshot
@@ -280,13 +284,28 @@ namespace CompetitiveRounds
         private static readonly System.Random Rng = new System.Random();
 
         private static MusicEngineHost _host;
-        /// <summary>impl2 r1 H2: every host this engine created whose OnDestroy
-        /// has not yet reached OnHostDestroyed. OnHostAwake retires every other
-        /// listed host before adopting the new one, and the release pair's
-        /// step-1 detach checks the sources of ALL listed hosts, so a clip is
-        /// not destroyed while a source on an older host may still be playing
-        /// it (a source that is bound but stopped holds no voice).</summary>
-        private static readonly List<MusicEngineHost> Hosts = new List<MusicEngineHost>();
+        /// <summary>impl2 r2 rule (a): every host this engine ever created,
+        /// listed until its GameObject is OBSERVED destroyed (Unity's
+        /// overloaded null) on a later frame — PruneObservedNullHosts is the
+        /// ONLY remover. Not the component's OnDestroy (after a
+        /// component-only Destroy the GameObject and its two AudioSources
+        /// outlive it), not a failed silence, not a respawn. The release
+        /// pair's step 1 walks this list (rule c) and RetireOtherHosts retires
+        /// every entry still listed at a new host's adoption (rule f).</summary>
+        private sealed class HostEntry
+        {
+            public MusicEngineHost Host;      // the component; its Main/Preview fields stay readable after Unity destroys it
+            public GameObject Go;             // the object whose observed destruction removes the entry
+            public bool Retired;              // Destroy(Go) was issued (or threw): issued once, logged once (rules b/f)
+            public int RetiredFrame;
+            public string RetiredWhy;
+        }
+        private static readonly List<HostEntry> Hosts = new List<HostEntry>();
+        /// <summary>Rule (e): set by RetireHost when the retired entry was the
+        /// adopted host; drained by TickPlayback on a LATER frame, after that
+        /// host's OnDestroy has (or has not) respawned a fresh one.</summary>
+        private static string _hostRetiredPending;
+        private static int _hostRetiredFrame;
         private static bool _initialized;
         private static bool _patchDead;      // suppression prefixes failed to attach (#83) — engine may never own
         private static bool _quitting;
@@ -1721,6 +1740,39 @@ namespace CompetitiveRounds
         {
             var s = S;
             var h = _host;
+            // impl2 r2 rule (e): the adopted host was retired on an EARLIER
+            // frame (a source of it failed rule b). Its OnDestroy respawned a
+            // fresh host at that frame's end, and the rehydration cleared
+            // currentStarted, so EnsureMainPlaying below restarts the current
+            // from resumePositionSec — charged here as the classifier's ONE
+            // counted resume (a stalled death, §7 2-7): a second death of this
+            // track is the durable fault it would be anywhere else. No fresh
+            // host (the Destroy threw, the respawn failed) is a durable fault
+            // outright — nothing can own playback.
+            if (_hostRetiredPending != null && Time.frameCount > _hostRetiredFrame)
+            {
+                string why = _hostRetiredPending;
+                _hostRetiredPending = null;
+                if ((object)h == null || HostIsRetired(h))
+                {
+                    if (!s.faultDurable) EnterDurableFaultNoThrow("host-retired without a respawn: " + why);
+                    return;
+                }
+                if (s.mode == MusicMode.Custom && s.current.HasValue)
+                {
+                    if (!s.currentPrematureRetried)
+                    {
+                        s.currentPrematureRetried = true;
+                        _prematureResumeCount++;
+                        Plugin.Log?.LogWarning($"[MUSIC] main source host-retired at {s.resumePositionSec:F1}s ({why}) — attempting one resume on the respawned host");
+                    }
+                    else
+                    {
+                        EnterDurableFaultNoThrow("host-retired after the one resume: " + why);
+                        return;
+                    }
+                }
+            }
             if (h == null) return;
 
             // [R1/R2] The silence bound is armed ONLY while Custom actually
@@ -2823,9 +2875,10 @@ namespace CompetitiveRounds
             return c;
         }
 
-        /// <summary>impl2 r1 H1: pairs whose step 1 was never confirmed inside
-        /// the detach window — retained for the session, still counted by
-        /// LiveObjectCount, shown on every [MUSIC-RESIDENCY] line.</summary>
+        /// <summary>impl2 r2 rule (d): pairs held for the session — a retired
+        /// host not observed destroyed inside the detach window, or a clip
+        /// Destroy that threw — still counted by LiveObjectCount, shown on
+        /// every [MUSIC-RESIDENCY] line.</summary>
         private static int HeldPairCount()
         {
             int c = 0;
@@ -2934,25 +2987,24 @@ namespace CompetitiveRounds
             EnsureClipLoading("p:" + t, path);
         }
 
-        /// <summary>§7 2-4, the sweep half of the paired release. Step-1
-        /// retries (a detach not confirmed, a Destroy that threw) and every
-        /// RETRY of step 2 run at most twice a second — a persistently faulting
-        /// object must not cost every frame (the r7 LOW 13 rule carried over).
-        /// The NOMINAL path is two frames: Destroy in the evicting frame and
-        /// the pair's FIRST step-2 attempt on the next sweep, unthrottled — the
-        /// 2 Hz cadence gates retries only (§7 2-8: S4's 1.0 s bound). Step 2
-        /// never runs in the frame that issued the Destroy: Unity's end-of-frame
-        /// destroy of the clip precedes the release of the handler buffer it
-        /// streamed from. A pair whose step 1 is still unconfirmed
-        /// RELEASE_DETACH_WINDOW_SEC after eviction is HELD (impl2 r1 H1): one
-        /// `[MUSIC-RELEASE] held:` line, then never touched again — clip and
-        /// request stay alive for the session and the ledger keeps counting
-        /// them (LiveObjectCount, HeldPairCount).</summary>
+        /// <summary>§7 2-4, the sweep half of the paired release, rebuilt for
+        /// impl2 r2 (DETACH-OR-RETIRE). Every sweep first observes the host
+        /// list (rule a), then re-evaluates step 1 of every pair still at it —
+        /// an observation of retired hosts, not a retry of a detach — and
+        /// holds a pair whose window expired (rule d). Step 2 (the request
+        /// Dispose) never runs in the frame that issued the Destroy: Unity's
+        /// end-of-frame destroy of the clip precedes the release of the
+        /// handler buffer it streamed from. The NOMINAL path is two frames:
+        /// Destroy in the evicting frame and the pair's FIRST step-2 attempt
+        /// on the next sweep, unthrottled (§7 2-8: S4's 1.0 s bound); only a
+        /// step 2 that threw retries, at most twice a second — a persistently
+        /// faulting object must not cost every frame (the r7 LOW 13 rule).</summary>
         private const float RELEASE_DETACH_WINDOW_SEC = 5f;
         private static float _releaseRetryRt = -1f;
         private static void SweepPendingRelease()
         {
             AuditLedger();
+            PruneObservedNullHosts();
             if (PendingRelease.Count == 0) return;
             float now = Time.realtimeSinceStartup;
             bool retry = now - _releaseRetryRt >= 0.5f;
@@ -2964,16 +3016,8 @@ namespace CompetitiveRounds
                 if (p.Held) continue;
                 if (!p.Destroyed)
                 {
-                    if (now - p.QueuedRt > RELEASE_DETACH_WINDOW_SEC)
-                    {
-                        p.Held = true;
-                        PendingRelease[i] = p;
-                        Plugin.Log?.LogWarning($"[MUSIC-RELEASE] held: key={p.Key} {p.LastWhy ?? "detach unconfirmed"} — {p.DestroyAttempts} attempts over {now - p.QueuedRt:F1}s; clip and request retained for the session (live={LiveObjectCount()} held={HeldPairCount()})");
-                        continue;
-                    }
-                    if (!retry) continue;
-                    p.DestroyAttempts++;
-                    TryDestroyPairClip(ref p);
+                    if (!TryReleaseStep1(ref p) && !p.Held && now - p.QueuedRt > RELEASE_DETACH_WINDOW_SEC)
+                        HoldPair(ref p, "a retired host was not observed destroyed within " + RELEASE_DETACH_WINDOW_SEC.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " s (" + RetiredHostsSummary() + ")");
                     PendingRelease[i] = p;
                     continue;   // step 2 waits for a later frame than the Destroy
                 }
@@ -3218,78 +3262,99 @@ namespace CompetitiveRounds
             return p.HasValue && key == "p:" + p.Value;
         }
 
-        /// <summary>§7 2-4 step 1, as repaired by impl2 r1 H1/H2: the clip is
-        /// Destroyed only after a POSITIVE detach from every source on every
-        /// host this engine created (DetachClipFromAllHosts: Stop returned
-        /// without throwing AND no source is still bound to the clip and
-        /// playing). Any refusal — a Stop that threw, a source still playing
-        /// the clip, a Destroy that threw — leaves the pair at step 1 with the
-        /// reason in LastWhy; the sweep retries at <= 2 Hz inside the detach
-        /// window and holds the pair after it. Returns true when the Destroy
-        /// call returned (the object dies at end of frame). A pair with no clip
-        /// (an entry that never opened) passes step 1 vacuously.</summary>
-        private static bool TryDestroyPairClip(ref PendingReleaseEntry p)
+        /// <summary>§7 2-4 step 1 under impl2 r2 rules (b)/(c): Destroy(clip)
+        /// only when every listed host is observed destroyed or cleanly
+        /// detached from the clip on both sources. A host already retired
+        /// counts only once observed destroyed, on a later frame — until then
+        /// the pair waits. A source that fails the clean detach retires its
+        /// host right here (never retried). Returns true when the Destroy
+        /// call returned (the object dies at end of frame). A pair with no
+        /// clip (an entry that never opened) passes vacuously; a Destroy that
+        /// throws holds the pair (rule d).</summary>
+        private static bool TryReleaseStep1(ref PendingReleaseEntry p)
         {
             if (p.Clip == null) { p.Destroyed = true; p.DestroyedFrame = Time.frameCount; return true; }
-            string why;
-            if (!DetachClipFromAllHosts(p.Clip, out why))
+            PruneObservedNullHosts();
+            bool clear = true;
+            for (int i = 0; i < Hosts.Count; i++)
             {
-                p.LastWhy = why;
-                LogOnce("detachclip:" + p.Key, $"[MUSIC] clip detach unconfirmed for {p.Key} (pair kept at step 1, retried at <= 2 Hz for {RELEASE_DETACH_WINDOW_SEC:F0} s, then held): {why}", true);
-                return false;
+                var e = Hosts[i];
+                if (e.Retired) { clear = false; continue; }
+                string why = null;
+                AudioSource main = null, preview = null;
+                bool readOk = true;
+                // Reference check, not Unity's overload: after a component-only
+                // Destroy the component reads as null while its fields still
+                // name two live AudioSources — exactly the sources rule (c)
+                // must account for.
+                try { var h = e.Host; if ((object)h != null) { main = h.Main; preview = h.Preview; } }
+                catch (Exception ex) { why = "host read threw: " + ex.Message; readOk = false; }
+                if (!readOk || !DetachSourceClean(main, p.Clip, "Main", ref why) || !DetachSourceClean(preview, p.Clip, "Preview", ref why))
+                {
+                    RetireHost(e, why);
+                    clear = false;
+                }
             }
+            if (!clear) return false;
             try
             {
                 UnityEngine.Object.Destroy(p.Clip);
                 p.Destroyed = true;
                 p.DestroyedFrame = Time.frameCount;
-                p.LastWhy = null;
                 return true;
             }
             catch (Exception ex)
             {
-                p.LastWhy = "destroy threw: " + ex.Message;
-                LogOnce("destroyclip:" + p.Key, $"[MUSIC] clip destroy failed for {p.Key} (pair kept at step 1, retried at <= 2 Hz for {RELEASE_DETACH_WINDOW_SEC:F0} s, then held): {ex.Message}", true);
+                HoldPair(ref p, "clip destroy threw: " + ex.Message);
                 return false;
             }
         }
 
-        /// <summary>impl2 r1 H1/H2: Stop and unbind every source on every
-        /// listed host that references the clip, then CONFIRM it — a source
-        /// that still holds the clip and reports isPlaying may have a native
-        /// voice reading the request buffer, so the caller must not Destroy.
-        /// A source Unity reports destroyed holds no voice and counts as
-        /// detached. A host Unity reports destroyed is dropped from the list
-        /// here (its OnDestroy never reached OnHostDestroyed).</summary>
-        private static bool DetachClipFromAllHosts(AudioClip clip, out string why)
-        {
-            why = null;
-            bool ok = true;
-            for (int i = Hosts.Count - 1; i >= 0; i--)
-            {
-                var h = Hosts[i];
-                if (h == null) { Hosts.RemoveAt(i); continue; }
-                if (!DetachSourceFromClip(h.Main, clip, "Main", i, ref why)) ok = false;
-                if (!DetachSourceFromClip(h.Preview, clip, "Preview", i, ref why)) ok = false;
-            }
-            return ok;
-        }
-
-        private static bool DetachSourceFromClip(AudioSource src, AudioClip clip, string name, int hostIdx, ref string why)
+        /// <summary>Rule (b), one source. True when the source is not bound
+        /// to the clip (a source Unity reports destroyed holds no voice), or
+        /// when Stop() returned, `clip = null` returned and the same-frame
+        /// read-back is null. Anything else — an exception anywhere, a
+        /// read-back still bound — is false and the caller retires the host;
+        /// nothing here is retried.</summary>
+        private static bool DetachSourceClean(AudioSource src, AudioClip clip, string name, ref string why)
         {
             try
             {
-                if (src == null || src.clip != clip) return true;
+                if (src == null) return true;
+                if (src.clip != clip) return true;
                 src.Stop();
-                try { src.clip = null; } catch { }
-                if (src.clip == clip && src.isPlaying) { why = $"{name} of host#{hostIdx} still playing the clip after Stop"; return false; }
-                return true;
+                src.clip = null;
+                if (src.clip == null) return true;
+                why = name + " still bound after clip = null";
+                return false;
             }
             catch (Exception ex)
             {
-                why = $"{name} of host#{hostIdx} threw during detach: {ex.Message}";
+                why = name + " threw during detach: " + ex.Message;
                 return false;
             }
+        }
+
+        /// <summary>Rule (d): the pair is retained for the session — never
+        /// destroyed, never disposed, still counted by LiveObjectCount and
+        /// HeldPairCount — and logged exactly once, here.</summary>
+        private static void HoldPair(ref PendingReleaseEntry p, string why)
+        {
+            p.Held = true;
+            Plugin.Log?.LogWarning($"[MUSIC-RELEASE] held: key={p.Key} {why} — {Time.realtimeSinceStartup - p.QueuedRt:F1}s after eviction; clip and request retained for the session (live={LiveObjectCount()} held={HeldPairCount() + 1})");
+        }
+
+        private static string RetiredHostsSummary()
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < Hosts.Count; i++)
+            {
+                var e = Hosts[i];
+                if (!e.Retired) continue;
+                if (sb.Length > 0) sb.Append("; ");
+                sb.Append("host#").Append(i).Append(" retired at frame ").Append(e.RetiredFrame).Append(": ").Append(e.RetiredWhy ?? "?");
+            }
+            return sb.Length == 0 ? "no retired host listed" : sb.ToString();
         }
 
         /// <summary>The ONLY release primitive: every clip and every request
@@ -3299,8 +3364,8 @@ namespace CompetitiveRounds
         private static void QueueRelease(string key, AudioClip clip, UnityWebRequest req)
         {
             if (clip == null && req == null) return;
-            var p = new PendingReleaseEntry { Key = key, Clip = clip, Req = req, DestroyAttempts = 1, QueuedRt = Time.realtimeSinceStartup };
-            TryDestroyPairClip(ref p);
+            var p = new PendingReleaseEntry { Key = key, Clip = clip, Req = req, QueuedRt = Time.realtimeSinceStartup };
+            TryReleaseStep1(ref p);
             PendingRelease.Add(p);
             ClipStateGeneration++;
         }
@@ -3942,19 +4007,20 @@ namespace CompetitiveRounds
 
         internal static void OnHostAwake(MusicEngineHost host)
         {
-            // impl2 r1 H2 — the single-host invariant, enforced at every
-            // adoption. SpawnHost never looks for a live host and this method
-            // used to adopt unconditionally, so a second Awake — a respawn
-            // raised by a component-only Destroy that left the old GameObject
-            // and its two AudioSources alive, or any clone / second
-            // AddComponent of MusicEngineHost — left an older source pair
-            // playing beside the adopted host's, and an eviction detached only
-            // the adopted host's sources while the older Main stayed bound to
-            // the clip being destroyed. Every other listed host is stopped,
-            // unbound and destroyed BEFORE this one is adopted.
-            RetireOtherHosts(host);
-            Hosts.Add(host);
+            // impl2 r2 rules (a)/(f): the new host is listed and adopted
+            // FIRST, then every other listed entry is retired — the host whose
+            // OnDestroy raised this respawn (its GameObject may be dying, or
+            // may have survived a component-only Destroy with both
+            // AudioSources alive), a clone, a second AddComponent — by rule
+            // (b)'s Destroy of the whole GameObject, whether or not a source
+            // on it can be seen. Adopting first means _host never names a
+            // retired entry past this method; an entry leaves the list only
+            // when observed destroyed (PruneObservedNullHosts).
+            var entry = new HostEntry { Host = host };
+            try { entry.Go = host.gameObject; } catch { }
+            Hosts.Add(entry);
             _host = host;
+            RetireOtherHosts(host);
             var s = S;
             RouteSources();
             if (!s.everHosted) { s.everHosted = true; return; }
@@ -3981,69 +4047,126 @@ namespace CompetitiveRounds
 
         internal static void OnHostDestroyed(MusicEngineHost dying)
         {
-            // impl2 r1 H2: this is the COMPONENT's OnDestroy. After a
-            // component-only Destroy its GameObject and the two AudioSources on
-            // it outlive the callback, and during a GameObject destroy they may
-            // still be alive while it runs — either way the dying host's
-            // sources are stopped and unbound here (a source Unity already
-            // reports destroyed is skipped) before anything else runs — the
-            // respawn's own Reconcile evicts entries — and the host leaves the
-            // list as confirmed destroyed.
-            string why;
-            if (!SilenceHostSources(dying, out why) && !_quitting) Plugin.Log?.LogWarning($"[MUSIC] dying host: {why}");
-            for (int i = Hosts.Count - 1; i >= 0; i--) if (ReferenceEquals(Hosts[i], dying)) Hosts.RemoveAt(i);
+            // impl2 r2 rule (f): this is the COMPONENT's OnDestroy. The dying
+            // host is silenced if it can be — after a component-only Destroy
+            // its GameObject and both AudioSources outlive this callback, and
+            // during a GameObject destroy they may still be alive while it
+            // runs — and its list entry is left UNTOUCHED (rule a): it leaves
+            // only once the GameObject is observed destroyed, and until then
+            // the respawned host's Awake retires it (rule b's Destroy of the
+            // GameObject) whether or not the silence here succeeded. That is
+            // what closes the surviving-source hole (impl2 r2 H2): a failed
+            // silence no longer drops the entry the retire needs.
+            string why = SilenceSources(dying);
+            if (why != null && !_quitting) Plugin.Log?.LogWarning($"[MUSIC] dying host: {why} (entry stays listed until observed destroyed; the respawned host retires it)");
             if (!ReferenceEquals(_host, dying)) return;   // a retired duplicate: no respawn
             _host = null;
             if (_quitting) return;
-            SpawnHost();
+            _dyingHost = dying;   // RetireOtherHosts tells this routine retire from an unexpected one
+            try { SpawnHost(); }
+            finally { _dyingHost = null; }
             // [I1] failed respawn: nothing ticks again, so a held suppression
             // would silence vanilla forever — durable fault releases it all.
             if (_host == null) EnterDurableFaultNoThrow("host-respawn-failed");
         }
+        private static MusicEngineHost _dyingHost;
 
-        /// <summary>impl2 r1 H2: every listed host other than `keep` is
-        /// stopped, unbound and its GameObject destroyed; its OnDestroy then
-        /// removes it from the list without a respawn. Logged per host — a
-        /// duplicate is a defect signal, not a routine.</summary>
-        private static void RetireOtherHosts(MusicEngineHost keep)
+        /// <summary>Rule (a): the ONLY remover of a host entry. An entry
+        /// leaves when its captured GameObject reads as Unity-null — for a
+        /// retired entry only on a frame after its Destroy was issued (Destroy
+        /// is deferred to end of frame, #278, so the observation is
+        /// necessarily later; the guard makes the rule literal). A GameObject
+        /// that was never captured cannot be observed destroyed, so its entry
+        /// stays.</summary>
+        private static void PruneObservedNullHosts()
         {
+            int f = Time.frameCount;
             for (int i = Hosts.Count - 1; i >= 0; i--)
             {
-                var h = Hosts[i];
-                if (ReferenceEquals(h, keep)) continue;
-                if (h == null) { Hosts.RemoveAt(i); continue; }
-                string why;
-                bool silenced = SilenceHostSources(h, out why);
-                try { UnityEngine.Object.Destroy(h.gameObject); }
-                catch (Exception ex) { why = (why == null ? "" : why + "; ") + "destroy threw: " + ex.Message; silenced = false; }
-                Plugin.Log?.LogWarning($"[MUSIC] duplicate host retired before adoption (listed={Hosts.Count}, silenced={silenced}{(why != null ? ", " + why : "")})");
+                var e = Hosts[i];
+                if ((object)e.Go == null || e.Go != null) continue;
+                if (e.Retired && f <= e.RetiredFrame) continue;
+                Hosts.RemoveAt(i);
             }
         }
 
-        /// <summary>Stop and unbind both sources of a host; never throws.
-        /// False (with a reason) when a source could not be positively
-        /// unbound — the same predicate the release pair's step 1 uses.</summary>
-        private static bool SilenceHostSources(MusicEngineHost h, out string why)
+        /// <summary>Rule (f): at a new host's adoption, every listed entry
+        /// other than the adopted host and not yet observed destroyed is
+        /// retired — live GameObject or not, and without needing to see a
+        /// surviving source. The host whose OnDestroy raised this respawn is
+        /// the routine case (its GameObject is usually dying with it, and the
+        /// second Destroy is a no-op; after a component-only Destroy it is
+        /// the Destroy that matters); any other entry is a defect signal. An
+        /// entry already retired (a host this engine retired itself, now
+        /// dying) is skipped: its Destroy was issued once and logged once.</summary>
+        private static void RetireOtherHosts(MusicEngineHost keep)
         {
-            why = null;
-            AudioSource m = null, p = null;
-            try { m = h.Main; p = h.Preview; } catch (Exception ex) { why = "source read threw: " + ex.Message; return false; }
-            bool ok = UnbindSource(m, "Main", ref why);
-            if (!UnbindSource(p, "Preview", ref why)) ok = false;
-            return ok;
+            PruneObservedNullHosts();
+            for (int i = Hosts.Count - 1; i >= 0; i--)
+            {
+                var e = Hosts[i];
+                if (ReferenceEquals(e.Host, keep) || e.Retired) continue;
+                RetireHost(e, ReferenceEquals(e.Host, _dyingHost)
+                    ? "the host whose OnDestroy raised this respawn (its GameObject is destroyed in case it outlived the component)"
+                    : "listed host not observed destroyed at a new host's adoption");
+            }
         }
 
-        private static bool UnbindSource(AudioSource src, string name, ref string why)
+        /// <summary>Rule (b)'s retire: the whole GameObject is Destroyed, so
+        /// its AudioSources and their native voices go with it at end of
+        /// frame (#278) — the one action that needs nothing from a source
+        /// that just threw. Issued once per entry and logged once (rule f); a
+        /// best-effort silence first, so a voice stops now rather than at end
+        /// of frame. A Destroy that throws leaves the entry retired and never
+        /// observed destroyed — every pair waiting on it holds at the window
+        /// (rule d). Retiring the adopted host is noted for TickPlayback
+        /// (rule e): its OnDestroy respawns as it always did.</summary>
+        private static void RetireHost(HostEntry e, string why)
+        {
+            if (e.Retired) return;
+            e.Retired = true;
+            e.RetiredFrame = Time.frameCount;
+            e.RetiredWhy = why;
+            string silence = SilenceSources(e.Host);
+            bool adopted = ReferenceEquals(e.Host, _host);
+            bool routine = ReferenceEquals(e.Host, _dyingHost) && silence == null;
+            try { UnityEngine.Object.Destroy(e.Go); }
+            catch (Exception ex) { e.RetiredWhy = why = why + "; host destroy threw: " + ex.Message; routine = false; }
+            string line = $"[MUSIC] host retired ({why}){(silence != null ? "; silence: " + silence : "")} — adopted={adopted}, listed={Hosts.Count}; the GameObject dies at end of frame and its entry leaves once observed destroyed";
+            if (routine) Plugin.Log?.LogInfo(line); else Plugin.Log?.LogWarning(line);
+            if (adopted) { _hostRetiredPending = why; _hostRetiredFrame = Time.frameCount; }
+        }
+
+        private static bool HostIsRetired(MusicEngineHost h)
+        {
+            for (int i = 0; i < Hosts.Count; i++) if (ReferenceEquals(Hosts[i].Host, h)) return Hosts[i].Retired;
+            return false;
+        }
+
+        /// <summary>Best-effort Stop + unbind of both sources of a host;
+        /// never throws, never retried. The return is a reason for the log
+        /// (null when everything returned) — the guarantee is the
+        /// GameObject's Destroy in RetireHost, not this.</summary>
+        private static string SilenceSources(MusicEngineHost h)
+        {
+            string why = null;
+            AudioSource m = null, p = null;
+            try { if ((object)h != null) { m = h.Main; p = h.Preview; } }
+            catch (Exception ex) { return "source read threw: " + ex.Message; }
+            SilenceSource(m, "Main", ref why);
+            SilenceSource(p, "Preview", ref why);
+            return why;
+        }
+
+        private static void SilenceSource(AudioSource src, string name, ref string why)
         {
             try
             {
-                if (src == null) return true;
+                if (src == null) return;
                 src.Stop();
-                try { src.clip = null; } catch { }
-                if (src.clip != null && src.isPlaying) { why = name + " still playing after Stop"; return false; }
-                return true;
+                src.clip = null;
             }
-            catch (Exception ex) { why = name + " threw during unbind: " + ex.Message; return false; }
+            catch (Exception ex) { why = (why == null ? "" : why + "; ") + name + " threw during silence: " + ex.Message; }
         }
 
         // ── misc ─────────────────────────────────────────────────────────
