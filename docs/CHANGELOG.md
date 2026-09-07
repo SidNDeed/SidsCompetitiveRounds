@@ -16,22 +16,6 @@
   report, a send) still updates your inbox data, but its toast belongs to the
   popup that issued it and is not shown to a later one.
 
-**Music plays on the first click (bug 346)**
-
-- Custom music no longer goes through a "prepare two tracks" step. A track is
-  opened as a stream and starts on the click that chose it; play, pause, skip,
-  previous, shuffle and loop act at once, and the Prepare button and its "not
-  prepared" toast are gone (the row shows a short loading status only while a
-  file is still being fetched). The engine also watches that audio is actually
-  being delivered: a track that stops producing sound while the game says it is
-  playing is restarted once and, if it stalls again, retired with a logged cause
-  (`delivery-stalled`) instead of playing silence until the end of the file.
-  Clips and the files behind them are released in the safe order, and a release
-  that cannot be proven safe is kept in memory and logged (`[MUSIC-RELEASE]
-  held`) rather than freed under a playing voice. Developer levers: `[Music]
-  TestScript` runs the self-test script (S1–S6) and the stream probe now judges
-  every row of its pass bar on the `end` line.
-
 **Ranked 1v1: the room region is picked from both players' pings**
 
 - After the mod connects to Photon (and again every five minutes in the menu,

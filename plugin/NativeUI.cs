@@ -11874,8 +11874,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             hdr.AddComponent<RectTransform>();
             UIFactory.AddHLG(hdr, spacing: 14, forceExpandH: true);
             UIFactory.AddLE(hdr, prefH: 32, flexH: 0);
-            UIFactory.CreateText("MusTitle", hdr.transform, "Music", 22f, C_GOLD,
+            var musTitle = UIFactory.CreateText("MusTitle", hdr.transform, "Music", 22f, C_GOLD,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 30));
+            // Sept 7 item 1: the page lives inside the utility popup, whose own header
+            // already says "Music" — the in-body title would print it twice, so it is
+            // built (the row keeps its layout) and hidden.
+            ((Component)musTitle).gameObject.SetActive(false);
 
             // Albums/tracks scroll — the transport dock sits BELOW it, outside
             // the scroll, so the controls never leave the screen. #63 rules
