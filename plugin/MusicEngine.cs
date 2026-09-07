@@ -4722,6 +4722,11 @@ namespace CompetitiveRounds
         // Playing) within TS_VANILLA_AUDIBLE_SEC of that edge and still at 60 s,
         // and the tombstoned key is never re-opened for 60 s (impl2 r1 M2:
         // "Loading + suppress=false" alone is also what a failing re-entry shows).
+        // Final-cycle finding (2026-09-07): the selection reduction is inert on
+        // the broadcast queue (it plays whole albums), so the end adopted track 2
+        // instead of Loading. Every other track of the album is tombstoned too,
+        // which makes the premise (no playable successor) hold on both queue
+        // shapes; the oracle still watches track 1 only.
         private static void TsRunS2(float rt)
         {
             string k0 = TsKey(0), k1 = TsKey(1);
@@ -4732,6 +4737,8 @@ namespace CompetitiveRounds
                         string err = TsSetup(new[] { 0, 1 }, 2);
                         if (err != null) { TsEnd(false, err); return; }
                         TsFailKey(k1);
+                        var albumDef = TsAlbumDef();
+                        for (int i = 2; albumDef != null && i < albumDef.Tracks.Length; i++) TsFailKey(TsKey(i));   // no playable successor on any queue shape
                         _tsI1 = TsOpens(k1);
                         PlayTrack(_tsAlbum, 0); _tsT1 = rt; _tsPhase = 1; return;
                     }
