@@ -3033,11 +3033,14 @@ namespace CompetitiveRounds
             return (now - _nativeBaseline) / 1048576.0;
         }
 
-        private static string NativeDeltaMbText()
+        private static string NativeDeltaMbText() => NativeDeltaMbText(NativeDeltaMb());
+
+        /// <summary>Formats ONE already-taken sample, so a judged value and
+        /// its printed text never come from two reads of the counter (impl r3).</summary>
+        private static string NativeDeltaMbText(double d)
         {
             if (_nativeBaselineUnmeasured) return "unmeasured";
             if (_nativeBaseline < 0L) return "?";
-            double d = NativeDeltaMb();
             return double.IsNaN(d) ? "unmeasured" : d.ToString("+0.0;-0.0;0.0", System.Globalization.CultureInfo.InvariantCulture);
         }
 
@@ -5124,8 +5127,8 @@ namespace CompetitiveRounds
                     {
                         if (rt - _tsT2 < TS_LEDGER_SETTLE_SEC) return;
                         int keys = _tsOpenAll.Count, entries = EntryCount(), rooted = RootedFailed.Count;
-                        double delta = NativeDeltaMb();
-                        string deltaText = NativeDeltaMbText();
+                        double delta = NativeDeltaMb();               // ONE sample: judged and printed from the same read (impl r3)
+                        string deltaText = NativeDeltaMbText(delta);
                         string compressed = (_tsL0 / 1048576.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
                         bool fresh = _tsOpenAllFresh;
                         bool countOk = entries + rooted == keys;

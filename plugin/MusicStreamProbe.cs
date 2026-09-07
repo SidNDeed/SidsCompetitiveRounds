@@ -404,8 +404,11 @@ namespace CompetitiveRounds
             _wallFromTicks = 0L; _wallAccruing = false;
             MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
                 + " cores=" + Environment.ProcessorCount + " (bots/opponents are the operator's responsibility; the log cannot see them)");
-            LogMemory("baseline", _key);
+            // R17 (impl r3): the baselines are sampled ONCE, here, and the
+            // baseline row prints these stored values; a -1 stays -1 for the
+            // run (every later native delta prints `unmeasured`).
             _mgd0 = GC.GetTotalMemory(false); _nat0 = NativeAlloc(); _res0 = NativeReserved(); _proc0 = ProcessPrivate();
+            LogMemory("baseline", _key);
             _oggSize = album.Tracks[idx].OggSize;
             _nativeOpenRow = null; _nativeOpenPass = false;
             BeginOpen(album.Tracks[idx], now);
@@ -1029,9 +1032,10 @@ namespace CompetitiveRounds
         /// native field as `unmeasured`, never a delta against -1.</summary>
         private static void LogMemory(string phase, string key)
         {
-            long mgd = GC.GetTotalMemory(false), nat = NativeAlloc(), res = NativeReserved(), proc = ProcessPrivate();
+            bool baseline = phase == "baseline";   // the stored samples, never a second read
+            long mgd = baseline ? _mgd0 : GC.GetTotalMemory(false), nat = baseline ? _nat0 : NativeAlloc(), res = baseline ? _res0 : NativeReserved(), proc = baseline ? _proc0 : ProcessPrivate();
             MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] mem key=" + key + " phase=" + phase
-                + " managed_mb=" + Mb(mgd) + " native_alloc_mb=" + Mb(nat) + " native_reserved_mb=" + Mb(res) + " process_private_mb=" + (proc > 0 ? Mb(proc) : "?")
+                + " managed_mb=" + Mb(mgd) + " native_alloc_mb=" + (nat < 0 ? "unmeasured" : Mb(nat)) + " native_reserved_mb=" + Mb(res) + " process_private_mb=" + (proc > 0 ? Mb(proc) : "?")
                 + (phase == "baseline" ? "" : " d_managed_mb=" + Dmb(mgd - _mgd0) + " d_native_alloc_mb=" + DmbOr(nat, _nat0) + " d_native_reserved_mb=" + DmbOr(res, _res0) + " d_process_mb=" + (proc > 0 && _proc0 > 0 ? Dmb(proc - _proc0) : "?")));
         }
 
