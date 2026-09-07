@@ -138,6 +138,65 @@
 - A config-driven quit lever (`[Broadcast] TestQuit`, broadcast identity only)
   for the seat's maintenance workflow.
 
+**Hover profile card**
+
+- Hover a player's name on the F5 page — the 1v1 ranked and casual history
+  rows, the four leaderboards, the 1v2 solo and duo boards and the
+  leaderboard's selected-player panel — and after a short pause a mini-profile
+  card opens: name and title, tier, 1v1 rating and level, online status (hidden
+  for players who appear offline) and your head-to-head in every mode: ranked
+  series and games, casual, 2v2 on opposite teams, FFA placings, 1v2 as solo
+  and as duo, plus your last meeting, the current ranked-series streak and your
+  net rating change against them. Click the name to pin the card; Escape, a
+  click elsewhere or any popup closes it. An open card refreshes every 15
+  seconds. Labels that carry several names (Online now, Recent Ranked Series,
+  the 2v2/FFA/1v2 recents, Session opponents) and names that already have a
+  hover (tournament brackets, Records, 2v2 telemetry cells) open no card in
+  this release.
+- Server: the in-room head-to-head read gains the card's two members
+  additively; per-mode aggregates are cached for 60 seconds, the profile is
+  read fresh so Appear Offline applies at once, and the card reads the podium
+  titles from the boards' cache without refreshing it.
+
+**In-game mail**
+
+- A new Mail tab: write to other players (up to 8 recipients, a 120-character
+  subject and a 2,000-character plain-text body), read, reply, select and copy,
+  report, block and delete messages, with a toast and a tone when new mail
+  arrives. Settings gains "Who can mail me" (everyone by default, or only
+  players you have played) and a blocked-sender list. Admins may address any
+  number of recipients, or every recently active player at once.
+- Server: send, reply, inbox, blocks and the "who may mail me" setting, with
+  per-sender rate limits, plain-text enforcement (no code or markup) and
+  idempotent retries. Reports and automatic spam detection open moderation
+  cases in the admin channel that already logs suspicious game behaviour, with
+  one-click mute, ban or dismiss; each click is re-checked against the
+  clicker's current grant. A retention sweep removes old mail. Migration 297.
+
+**Rating graph axes**
+
+- Rating graphs now compare players over time on a common footing. In-game,
+  the leaderboard profile graph and the Compare tab's Elo charts gain an axis
+  toggle — Updates (one point per completed ranked series, the default),
+  Calendar, or Since first (days since each player's first plotted update, so
+  every line starts together) — remembered between sessions. The two time axes
+  are step plots: a player idle for weeks shows a flat run, never a slope. The
+  graphs start at the first recorded update instead of an assumed 1500 and
+  always show a player's most recent 500 rating updates (long histories used to
+  stop at the oldest 500; FFA histories now use the same window). The Compare
+  metrics "Elo over games/over time" are now simply "Elo" and "FFA Elo". The
+  Discord `/graph` command gains the same `axis` option.
+
+**Colour emoji in chat (bug 333, step 2)**
+
+- Emoji in the in-game chat and the F5 chat pane render in colour. The mod
+  fetches a small emoji sprite sheet (Noto Color Emoji, SIL Open Font License
+  1.1; the licence text ships with it) once, the first time it is idle at the
+  main menu, and keeps the previous monochrome glyphs while the sheet is
+  absent, on low-memory seats, or when decoding would take too long. Skin-tone
+  variants show the neutral emoji. Other text and other mods are unchanged.
+  `[Chat] ColourEmoji` turns it off.
+
 ## Unreleased — 2026-09-04 (version to be named at the bump)
 
 **In-game library: Spirit's charts**

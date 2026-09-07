@@ -133,24 +133,47 @@ namespace CompetitiveRounds
 
         /// <summary>Backstop (review E-M6). Once a label carries the sprite asset, a
         /// literal `&lt;sprite ...&gt;` in its INPUT is a tag to TMP and can name any
-        /// atlas cell. Callers sanitise user text before substitution; this makes
-        /// the token inert regardless, by placing a zero-width space after its
-        /// '&lt;' so TMP no longer reads a tag name there. Case-insensitive, as TMP's
-        /// tag matching is.</summary>
+        /// sprite asset or cell. Callers sanitise user text before substitution;
+        /// this makes every such token inert regardless, by placing a zero-width
+        /// space after its '&lt;' so TMP no longer reads a tag name there.
+        /// Case-insensitive, as TMP's tag matching is. The matcher's OWN tags
+        /// (`&lt;sprite name="e_HEX[-HEX]"&gt;`, optionally ` tint=1`) pass untouched,
+        /// so Substitute is idempotent (round 2): output fed back in is unchanged.</summary>
         internal static string NeutraliseSpriteTags(string text)
         {
             int i = text.IndexOf("<sprite", StringComparison.OrdinalIgnoreCase);
             if (i < 0) return text;
-            var sb = new StringBuilder(text.Length + 8);
+            StringBuilder sb = null;
             int from = 0;
             while (i >= 0)
             {
-                sb.Append(text, from, i + 1 - from).Append((char)0x200B);
-                from = i + 1;
-                i = text.IndexOf("<sprite", from, StringComparison.OrdinalIgnoreCase);
+                if (!IsOwnTag(text, i))
+                {
+                    if (sb == null) sb = new StringBuilder(text.Length + 8);
+                    sb.Append(text, from, i + 1 - from).Append((char)0x200B);
+                    from = i + 1;
+                }
+                i = text.IndexOf("<sprite", i + 1, StringComparison.OrdinalIgnoreCase);
             }
+            if (sb == null) return text;
             sb.Append(text, from, text.Length - from);
             return sb.ToString();
+        }
+
+        /// <summary>True when the text at `at` is exactly one of this class's generated
+        /// tags: `&lt;sprite name="` + SPRITE_NAME_PREFIX + [0-9A-F-]+ + `"` + optional
+        /// ` tint=1` + `&gt;` — the shape EmojiMatcher.Tag emits and nothing else.</summary>
+        internal static bool IsOwnTag(string text, int at)
+        {
+            string head = "<sprite name=\"" + SPRITE_NAME_PREFIX;
+            if (string.CompareOrdinal(text, at, head, 0, head.Length) != 0) return false;
+            int p = at + head.Length, keyStart = p;
+            while (p < text.Length && ((text[p] >= '0' && text[p] <= '9') || (text[p] >= 'A' && text[p] <= 'F') || text[p] == '-')) p++;
+            if (p == keyStart || p >= text.Length || text[p] != '"') return false;
+            p++;
+            const string tint = " tint=1";
+            if (string.CompareOrdinal(text, p, tint, 0, tint.Length) == 0) p += tint.Length;
+            return p < text.Length && text[p] == '>';
         }
 
         /// <summary>Give this TMP_Text (any subclass; passed as object because the
@@ -345,6 +368,12 @@ namespace CompetitiveRounds
             DestroyRuntimeObjects();
             _matcher = null;
             _asset0 = null;
+            // Round 2 (E-M5): text substituted while the atlas was active still carries
+            // sprite tags. A new generation invalidates every fitted-line cache keyed
+            // on it (Substitute is identity now, so the refit is plain text), and the
+            // page redraw re-sets the labels that hold the old strings.
+            _generation++;
+            try { NativeUI.MarkDirty(); } catch { }
             Plugin.Log?.LogWarning("[EMOJI] colour emoji off this session: " + reason);
         }
 
@@ -356,7 +385,10 @@ namespace CompetitiveRounds
                 if (uo == null) return;                         // destroyed (Unity's overloaded ==)
                 if (Tmp.SpriteAssetProp == null) return;
                 object cur = Tmp.SpriteAssetProp.GetValue(a.Component, null);
-                if (_asset0 != null && !ReferenceEquals(cur, _asset0)) return;   // someone else set it since
+                // Only an asset THIS class assigned is ours to take back: with no asset
+                // ever assigned there is nothing to restore, and a label some other
+                // system changed since keeps that newer value (round 2).
+                if (_asset0 == null || !ReferenceEquals(cur, _asset0)) return;
                 Tmp.SpriteAssetProp.SetValue(a.Component, a.Previous, null);
             }
             catch { }
@@ -414,11 +446,11 @@ namespace CompetitiveRounds
                     if (png.LongLength != s.Bytes || !string.Equals(Sha256Hex(png), s.Sha256, StringComparison.OrdinalIgnoreCase))
                     { Disable(s.File + " does not match the index (size/sha256)"); return; }
                     var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    _runtimeObjects.Add(tex);           // registered BEFORE any setter can throw (round 2): Disable always finds it
                     tex.name = "CR_EmojiSheet" + i;
                     tex.hideFlags = HideFlags.HideAndDontSave;
                     tex.wrapMode = TextureWrapMode.Clamp;
                     tex.filterMode = FilterMode.Bilinear;
-                    _runtimeObjects.Add(tex);
                     textures.Add(tex);
                     var sw = Stopwatch.StartNew();
                     bool ok = ImageConversion.LoadImage(tex, png, false);
@@ -517,10 +549,10 @@ namespace CompetitiveRounds
             Tmp.VersionField.SetValue(asset, "1.1.0");
             Tmp.SpriteSheetField.SetValue(asset, tex);
             var mat = new Material(shader);
+            _runtimeObjects.Add(mat);                   // registered before its setters (round 2)
             mat.name = "CR_EmojiSprite_" + sheetIndex;
             mat.hideFlags = HideFlags.HideAndDontSave;
             mat.mainTexture = tex;
-            _runtimeObjects.Add(mat);
             Tmp.MaterialField.SetValue(asset, mat);
             Tmp.HashCodeField.SetValue(asset, EmojiMatcher.SimpleHash(so.name));
             var glyphs = Tmp.GlyphTableProp.GetValue(asset, null) as IList;

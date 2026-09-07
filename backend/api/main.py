@@ -726,13 +726,27 @@ def _podium_maps_cached(skus) -> tuple[dict, dict, dict]:
     profile card (Sept 6 item a) is a plain read and may not do that on
     another player's behalf. This returns whatever the three caches hold
     right now -- the boards refresh them -- and an empty map when a ladder's
-    cache is cold, in which case the title renders by its static name."""
+    cache is cold or older than _PODIUM_CACHED_MAX_AGE_S (round 2: a map the
+    boards have not refreshed for that long may name an ex-holder), in which
+    case the title renders by its static name."""
     s = {x for x in skus if x}
+    now = time.monotonic()
+
+    def usable(cache: dict) -> bool:
+        at = cache.get("at")
+        return isinstance(at, (int, float)) and at > 0 and (now - at) <= _PODIUM_CACHED_MAX_AGE_S
+
     return (
-        dict(_podium_cache.get("map") or {}) if TITLE_PODIUM_SKU in s else {},
-        dict(_podium_2v2_cache.get("map") or {}) if TITLE_PODIUM_2V2_SKU in s else {},
-        dict(_podium_ffa_cache.get("map") or {}) if TITLE_PODIUM_FFA_SKU in s else {},
+        dict(_podium_cache.get("map") or {}) if TITLE_PODIUM_SKU in s and usable(_podium_cache) else {},
+        dict(_podium_2v2_cache.get("map") or {}) if TITLE_PODIUM_2V2_SKU in s and usable(_podium_2v2_cache) else {},
+        dict(_podium_ffa_cache.get("map") or {}) if TITLE_PODIUM_FFA_SKU in s and usable(_podium_ffa_cache) else {},
     )
+
+
+# How old a podium map a read-only render (the hover card) may still serve:
+# ten refresh periods of the boards' 60 s cache. Beyond it the card shows the
+# title's static name rather than a possibly superseded podium placing.
+_PODIUM_CACHED_MAX_AGE_S = 600.0
 
 
 async def bootstrap_mode_podium_titles(db: AsyncSession) -> None:

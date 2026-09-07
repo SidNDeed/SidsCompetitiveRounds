@@ -289,7 +289,7 @@ namespace CompetitiveRounds
         /// glyph cluster whether it renders as fallback glyphs or as one sprite.</summary>
         private static int SafeCut(string s, int idx)
         {
-            for (int guard = 0; guard < 64 && idx > 0 && idx < s.Length; guard++)
+            while (idx > 0 && idx < s.Length)          // every continuing branch decrements idx: terminates at 0
             {
                 if (char.IsLowSurrogate(s[idx])) { idx--; continue; }             // inside a pair
                 char c = s[idx], prev = s[idx - 1];

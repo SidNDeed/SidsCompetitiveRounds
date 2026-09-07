@@ -97,6 +97,7 @@ namespace CompetitiveRounds
             public string streakHolder;                    // "viewer" | "target" | null
             public int netRating;
             public float fetchedAt;
+            public float renewAskedAt;     // last renewal REQUEST (review a round 2): a failing refresh keeps the 15 s cadence, not the 6 s floor
         }
         private static readonly Dictionary<string, CardData> cache = new Dictionary<string, CardData>();
         private static readonly HashSet<string> inFlight = new HashSet<string>();
@@ -203,7 +204,11 @@ namespace CompetitiveRounds
             if (txt == null || !byTxt.TryGetValue(txt, out t)) return;
             byTxt.Remove(txt);
             targets.Remove(t);
-            if (ReferenceEquals(hover, t)) hover = null;
+            if (ReferenceEquals(hover, t)) { hover = null; hoverAsked = false; hoverRetries = 0; }
+            // Review a-M4 (round 2): the row this card belonged to now names nobody
+            // (the viewer, or no valid id); an unpinned card for it hides with the
+            // target instead of floating beside the replacement row.
+            if (openFor == t.steamId && !pinned) HideCard();
         }
 
         /// <summary>Forget every target (tab switch, page teardown). A pinned
@@ -275,7 +280,22 @@ namespace CompetitiveRounds
             if (steamId == null) return;
             CardData d;
             if (!cache.TryGetValue(steamId, out d)) return;
-            if (now - d.fetchedAt >= OpenRefreshSeconds) RequestData(steamId, now);
+            if (now - d.fetchedAt < OpenRefreshSeconds) return;
+            if (now - d.renewAskedAt < OpenRefreshSeconds) return;   // a failed renewal waits a full period, not the floor
+            d.renewAskedAt = now;
+            RequestData(steamId, now);
+        }
+
+        /// <summary>After a re-render changed the card's height, keep its origin and
+        /// re-apply the size so the panel and the click-away bounds agree (review a
+        /// round 2): a pinned card is not repositioned by the tick.</summary>
+        private static void Resize()
+        {
+            if (panel == null) return;
+            float sh = Screen.height;
+            float y = Mathf.Clamp(cardRect.y, 4f, Mathf.Max(4f, sh - cardH - 4f));
+            cardRect = new Rect(cardRect.x, y, CardW, cardH);
+            panel.SetRect(cardRect.x, cardRect.y, CardW, cardH);
         }
 
         /// <summary>NativeUI.Tick's Escape: a pinned card is the topmost surface
@@ -393,7 +413,7 @@ namespace CompetitiveRounds
                     // in place, pinned or not (review a-H2: Appear Offline must reach a
                     // card that stays open). Render keeps the pin's blocker state and
                     // the card's position.
-                    if (openFor == steamId && panel != null && panel.Visible) Render(d, steamId);
+                    if (openFor == steamId && panel != null && panel.Visible) { Render(d, steamId); Resize(); }
                     return;
                 }
                 string err = resp ?? "";

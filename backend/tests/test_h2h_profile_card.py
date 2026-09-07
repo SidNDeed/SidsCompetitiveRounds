@@ -28,6 +28,7 @@ is frozen the way test_h2h_summary.py freezes it.
 import asyncio
 import inspect
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -797,13 +798,20 @@ def test_a_the_profile_card_reads_the_podium_maps_without_refreshing_or_granting
         for c in (main._podium_cache, main._podium_2v2_cache, main._podium_ffa_cache):
             c.clear()
         assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})   # cold: nothing, no refresh
-        main._podium_cache["map"] = {"abc": 1}
-        main._podium_ffa_cache["map"] = {"fff": 3}
+        main._podium_cache.update({"map": {"abc": 1}, "at": time.monotonic()})
+        main._podium_ffa_cache.update({"map": {"fff": 3}, "at": time.monotonic()})
         m, m2, mf = main._podium_maps_cached((main.TITLE_PODIUM_SKU, main.TITLE_PODIUM_2V2_SKU))
         assert (m, m2, mf) == ({"abc": 1}, {}, {})                                  # only the asked-for ladders
         m["zzz"] = 2
         assert "zzz" not in main._podium_cache["map"], "a copy, never the cache itself"
         assert main._podium_maps_cached((None, "")) == ({}, {}, {})
+        # round 2: a map the boards have not refreshed for longer than the bound is not served
+        main._podium_cache["at"] = time.monotonic() - main._PODIUM_CACHED_MAX_AGE_S - 1
+        assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})
+        main._podium_cache["at"] = time.monotonic() - main._PODIUM_CACHED_MAX_AGE_S + 5   # inside the bound: served
+        assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,))[0] == {"abc": 1}
+        main._podium_cache["map"] = {}                                              # a refresh that emptied the map
+        assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})
     finally:
         for c, v in zip((main._podium_cache, main._podium_2v2_cache, main._podium_ffa_cache), saved):
             c.clear(); c.update(v)

@@ -892,16 +892,33 @@ def write_report(out_dir: str, report_lines: Sequence[str]) -> None:
 
 
 LICENCE_MARKER = "SIL OPEN FONT LICENSE"
+# The OFL 1.1's own section headings and defined terms: a file that carries the
+# title but not the terms (a notice, a truncated copy) is not the licence.
+LICENCE_TERMS = ("PERMISSION & CONDITIONS", "RESERVED FONT NAME", "TERMINATION", "DISCLAIMER")
+LICENCE_MIN_CHARS = 3000                 # the OFL 1.1 text is about 4,400 characters
 
 
 def check_licence_text(text: str, source: str) -> str:
-    """The file must BE the OFL (review E-M1): a repository's Apache LICENSE
-    beside the font, or any other file whose name starts with LICENSE, is not
-    the font's licence and must not ship as one."""
-    if LICENCE_MARKER not in text.upper():
-        raise SystemExit("%s is not the SIL Open Font License text (missing '%s'): pass --licence "
-                         "<path to Noto's OFL 1.1 LICENSE file>" % (source, LICENCE_MARKER))
+    """The file must BE the OFL (review E-M1, round 2): the title, every section
+    heading of the 1.1 text, and its length. A repository's Apache LICENSE
+    beside the font, a notice that merely names the OFL, or a truncated copy
+    must not ship as the font's licence."""
+    up = text.upper()
+    missing = [m for m in (LICENCE_MARKER,) + LICENCE_TERMS if m not in up]
+    if missing or len(text) < LICENCE_MIN_CHARS:
+        why = ("missing %s" % ", ".join("'%s'" % m for m in missing)) if missing else (
+            "only %d characters, the licence text is longer" % len(text))
+        raise SystemExit("%s is not the complete SIL Open Font License text (%s): pass --licence "
+                         "<path to Noto's OFL 1.1 LICENSE file>" % (source, why))
     return text
+
+
+def is_licence_text(text: str) -> bool:
+    try:
+        check_licence_text(text, "candidate")
+        return True
+    except SystemExit:
+        return False
 
 
 def find_licence(font_path: str, explicit: Optional[str]) -> str:
@@ -914,7 +931,7 @@ def find_licence(font_path: str, explicit: Optional[str]) -> str:
         if up.startswith("LICENSE") or up.startswith("LICENCE") or up.startswith("OFL"):
             with open(os.path.join(d, name), "r", encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
-            if LICENCE_MARKER in text.upper():
+            if is_licence_text(text):
                 return text
     raise SystemExit("no OFL licence text beside the font: pass --licence <path to Noto's OFL 1.1 "
                      "LICENSE file> (the atlas must ship with it)")
