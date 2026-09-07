@@ -158,6 +158,17 @@ class RatingHistory(Base):
     volatility = Column(Double, nullable=False)
     period_end = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    # NOT DECLARED HERE ON PURPOSE: rating_history.series_id (migration 299,
+    # Sept 6 item c). It exists in the DB and is written ONLY by the raw,
+    # savepointed UPDATE in the series-completion path (_RATING_HISTORY_LINK_SQL)
+    # and read ONLY by the session report's identity join (_REPORT_RATING_SQL).
+    # Declaring it would put the column on every INSERT this model emits, and
+    # the pinned-SHA deploy cannot run a migration before the api it ships with
+    # (#477): a rating_history INSERT failing on a missing column would take
+    # the whole Glicko commit down with it. Left unmapped, a pre-299 box skips
+    # the link and keeps the rating update. The same trap note as
+    # RankedSeries.last_activity_at applies: `row.series_id = x` on an
+    # instance is a silent no-op (#346) — never assign it through the ORM.
 
     player = relationship("Player", back_populates="rating_history")
 
