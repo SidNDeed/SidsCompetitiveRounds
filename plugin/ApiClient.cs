@@ -188,13 +188,14 @@ namespace CompetitiveRounds
             public List<int> top_card_picks;
             public List<float> top_card_win_rates;
             public List<string> recent_form; // "W","L","W"... last 20
-            public List<float> rating_history; // oldest→newest
+            public List<float> rating_history; // oldest→newest (the server's NEWEST 500 updates, Sept 6)
             // Parallel to rating_history: days since 2020-01-01 per snapshot
-            // (v1.29, "Elo over time" compare graph). Same length as
-            // rating_history, including the prepended 1500 baseline point.
+            // (v1.29 compare graph; Sept 6 the calendar / since-first axes of
+            // every rating graph, RatingGraphAxis.cs). Same length as
+            // rating_history — there is no synthetic baseline point any more.
             public List<float> rating_history_times;
-            // Aug 7: the same pair for the FFA rating series ("FFA Elo over
-            // games" / "over time"). [NonSerialized] is load-bearing — unlike the
+            // Aug 7: the same pair for the FFA rating series (Compare tab "FFA
+            // Elo"). [NonSerialized] is load-bearing — unlike the
             // 1v1 pair (C# `rating_history` vs JSON `recent_rating_history`) the
             // field name and the JSON key are IDENTICAL here, so JsonUtility
             // would try to fill a List<float> from an array of OBJECTS before the
@@ -7355,7 +7356,7 @@ namespace CompetitiveRounds
             data.ffa_rating_history = new List<float>();
             data.ffa_rating_history_times = new List<float>();
             ParseRatingSeries(response, "ffa_rating_history", data.ffa_rating_history, data.ffa_rating_history_times);
-            Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} 1v1 + {data.ffa_rating_history.Count} FFA rating history points for {data.display_name} (oldest→newest, 1500 baseline prepended)");
+            Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} 1v1 + {data.ffa_rating_history.Count} FFA rating history points for {data.display_name} (oldest→newest, server's newest-500 window, no baseline point)");
 
             /* Aug 6 item 1: re-read the three nullable career records. JsonUtility
              * has already written 0 for a JSON null, which would render as a real
@@ -7368,11 +7369,13 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Parse one `[{"rating":…, <timestamp>:…}, …]` rating series into
-        /// a parallel (rating, days-since-2020-01-01) pair, then prepend the 1500
-        /// baseline point. ONE implementation for the 1v1 and FFA series on
-        /// purpose: the compare graph indexes the two output lists in lockstep, so
-        /// two hand-copied parsers drifting apart would render an off-by-one lie
-        /// rather than an obviously missing point.</summary>
+        /// a parallel (rating, days-since-2020-01-01) pair. ONE implementation for
+        /// the 1v1 and FFA series on purpose: the graphs index the two output lists
+        /// in lockstep, so two hand-copied parsers drifting apart would render an
+        /// off-by-one lie rather than an obviously missing point. Sept 6 (item f):
+        /// no synthetic 1500 baseline is prepended any more — the first point is
+        /// the first row the server sent (its newest 500 updates) and the graphs
+        /// draw from there (RatingGraphAxis.Build).</summary>
         private static void ParseRatingSeries(string response, string jsonKey,
                                               List<float> ratings, List<float> times)
         {
@@ -7406,16 +7409,18 @@ namespace CompetitiveRounds
                                         float val = float.Parse(parts[i].Substring(vStart, vEnd - vStart), System.Globalization.CultureInfo.InvariantCulture);
                                         ratings.Add(val);
                                         // Snapshot date → fractional days since 2020-01-01 (the
-                                        // "Elo over time" x-axis). Missing/bad date → nudge past
-                                        // the previous point so the lists stay parallel.
+                                        // calendar / since-first x axes). Missing/bad date → nudge
+                                        // past the previous point so the lists stay parallel.
                                         float t = lastT + 0.01f;
                                         try
                                         {
-                                            // The 1v1 entries key the timestamp "date"; the FFA
-                                            // ones carry BOTH "recorded_at" (the contract name)
-                                            // and "date". Try the contract name first so a future
-                                            // server that drops the "date" alias still plots.
-                                            string ds = ExtractJsonString(parts[i], "recorded_at");
+                                            // Sept 6 servers name the timestamp "period_end" on
+                                            // both series (the column's own name). Older rows key
+                                            // it "date" (1v1) or "recorded_at" + "date" (FFA); try
+                                            // the newest name first, then the aliases, so a server
+                                            // that drops an alias still plots.
+                                            string ds = ExtractJsonString(parts[i], "period_end");
+                                            if (string.IsNullOrEmpty(ds)) ds = ExtractJsonString(parts[i], "recorded_at");
                                             if (string.IsNullOrEmpty(ds)) ds = ExtractJsonString(parts[i], "date");
                                             if (!string.IsNullOrEmpty(ds))
                                             {
@@ -7435,26 +7440,19 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
-            // Server returns ASC (oldest → newest) since v1.26.8. Do NOT reverse —
-            // the old reverse call was a v1.26.7-era hack that made the graph plot
+            // Server returns ASC (oldest → newest) since v1.26.8 — and, since Sept 6,
+            // the NEWEST 500 updates rather than the oldest. Do NOT reverse — the old
+            // reverse call was a v1.26.7-era hack that made the graph plot
             // right-to-left after the server switched ordering, AND made the "current
             // Elo" label read the OLDEST rating instead of the newest.
             //
-            // Prepend 1500 as a synthetic first point so the graph starts at every
-            // player's initial rating instead of wherever their first recorded series
-            // happened to land. This matches user expectation ("shouldn't it start at
-            // 1500 for everyone?") and turns the first slope into a meaningful "your
-            // first series gain/loss from baseline" visualization. 1500 is the default
-            // for the FFA ladder too (glicko_ratings_ffa.rating DEFAULT 1500), so the
-            // same baseline is correct for both series.
-            if (ratings.Count > 0 && ratings[0] != 1500f)
-            {
-                ratings.Insert(0, 1500f);
-                // Keep the time axis parallel: baseline sits one day before the
-                // first real snapshot.
-                if (times.Count > 0)
-                    times.Insert(0, times[0] - 1f);
-            }
+            // No synthetic first point. Until Sept 6 a 1500 baseline was prepended one
+            // day before the first snapshot so every line "started at 1500". With the
+            // newest-500 window the first fetched row is not a player's first series,
+            // and even when it was, the slope from 1500 to it was movement no rating
+            // update ever produced (design F-L). The graphs start at the first row's
+            // rating; a one-row player has no line to draw and falls back exactly as
+            // a player with no history does.
         }
 
         /// <summary>Read an `int | None` JSON field: the integer when present,
