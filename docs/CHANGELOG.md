@@ -1,5 +1,51 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — 2026-09-07 (Sept 7 polish batch; version to be named at the bump)
+
+**Mail and Music are icons now, not tabs**
+
+- The Mail and Music pages left the tab strip. Two icons sit at the top right,
+  above the tabs; the mail icon carries a red badge with your unread count. Each
+  opens as a popup over a dimmed backdrop instead of taking over the page: Escape
+  or a click on the backdrop closes it, the page underneath is untouched, and a
+  half-written message survives closing and reopening. Confirmations and the
+  report form still sit on top of the popup and take Escape first. The box sizes
+  itself to the screen (down to a 32:9 monitor) and every mail view fits inside
+  it — the message body and the composer's text area shrink before anything else
+  does. A mail action that finishes after its popup closed (a delete, a block, a
+  report, a send) still updates your inbox data, but its toast belongs to the
+  popup that issued it and is not shown to a later one.
+
+**Music plays on the first click (bug 346)**
+
+- Custom music no longer goes through a "prepare two tracks" step. A track is
+  opened as a stream and starts on the click that chose it; play, pause, skip,
+  previous, shuffle and loop act at once, and the Prepare button and its "not
+  prepared" toast are gone (the row shows a short loading status only while a
+  file is still being fetched). The engine also watches that audio is actually
+  being delivered: a track that stops producing sound while the game says it is
+  playing is restarted once and, if it stalls again, retired with a logged cause
+  (`delivery-stalled`) instead of playing silence until the end of the file.
+  Clips and the files behind them are released in the safe order, and a release
+  that cannot be proven safe is kept in memory and logged (`[MUSIC-RELEASE]
+  held`) rather than freed under a playing voice. Developer levers: `[Music]
+  TestScript` runs the self-test script (S1–S6) and the stream probe now judges
+  every row of its pass bar on the `end` line.
+
+**Ranked 1v1: the room region is picked from both players' pings**
+
+- After the mod connects to Photon (and again every five minutes in the menu,
+  every 90 seconds while a search is running) it pings each region on a
+  background thread and sends the results along with the queue join and its
+  polls. When both players' maps are fresh
+  (under three minutes old) and overlap, the room goes to the region that is best
+  for the pair under one rule: neither player is moved more than 20 ms beyond
+  their own best region. When a map is missing or stale the previous ladder
+  decides, as before. 2v2 and FFA rooms are unchanged for now. Log lines:
+  `[REGION-PINGS] sweep started …` and the completion line with per-region ms;
+  the server records `[QUEUE-REGION]` with the rung that decided. Needs
+  migration 301 (two nullable columns on the queue row) before the api.
+
 ## Unreleased — 2026-09-06 (Sept 6 triage batch; version to be named at the bump)
 
 **Matched but never connected (bugs 335, 336, 340)**
