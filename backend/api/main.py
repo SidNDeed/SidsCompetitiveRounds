@@ -47641,7 +47641,10 @@ async def _mail_lock_identities(db: AsyncSession, *steam_ids, missing: dict | No
     account), unless it is in `optional`: an admin acts on admin_users
     membership and needs no players row (locked when present, skipped when
     absent), and a dismiss or a revoke completes against a subject deleted
-    meanwhile, writing the tombstone it re-read."""
+    meanwhile, writing the tombstone it re-read. `optional` tolerates an id
+    that never had a row: one with no row that the deletion ledger knows is
+    refused (403 account_deleted unless `missing` names it), so a route never
+    writes the raw id a scrub removed (review r3)."""
     ids = sorted({str(s) for s in steam_ids if s})
     handles = dict(handles or {})
     for sid in ids:
@@ -47664,6 +47667,18 @@ async def _mail_lock_identities(db: AsyncSession, *steam_ids, missing: dict | No
         if not live and sid not in tolerated:
             status, detail = (missing or {}).get(sid) or (401, "session_required")
             raise HTTPException(status_code=status, detail=detail)
+        # review r3 MEDIUM 2: `optional` tolerates an identity that never had
+        # a row, not one whose row was scrubbed. A scrub rewrites steam_id to
+        # the tombstone, so a lookup by the raw id finds nothing and the
+        # fallback in _mail_identity_to_write would write the raw id the scrub
+        # removed. The deletion ledger (deleted_steam_ids, written by
+        # delete_player_data in the same transaction as the scrub, under this
+        # advisory lock) is read here, AFTER the lock: a deletion that
+        # committed before the lookup is refused, one that committed while
+        # this transaction waited was re-read above as the tombstone.
+        if row is None and sid in tolerated and await _is_steam_id_purged(db, sid):
+            status, detail = (missing or {}).get(sid) or (403, "account_deleted")
+            raise HTTPException(status_code=status, detail=detail)
     return out
 
 
@@ -47671,7 +47686,8 @@ def _mail_identity_to_write(rows: dict, steam_id: str) -> str:
     """The identity a transaction WRITES for `steam_id` after the lattice
     re-read: the row's current steam_id (the tombstone, if a deletion
     committed first), or the id itself when there is no row at all (an admin
-    acting on admin_users membership)."""
+    acting on admin_users membership; the lattice has already refused an
+    absent id the deletion ledger knows, review r3)."""
     row = (rows or {}).get(str(steam_id))
     return str((row or {}).get("steam_id") or steam_id)
 
@@ -48743,8 +48759,10 @@ async def admin_mail_bulk_grant_revoke(
     # deleted while this transaction waited — the grant row went with that
     # deletion, and the audit row is written with the tombstone the re-read
     # returned, never with the id this request was addressed to. A grantee
-    # with no row at all (never a player, or scrubbed long ago) is a 404,
-    # the grant route's own answer: no grant can exist for it.
+    # with no row at all that was never a player is a 404, the grant
+    # route's own answer: no grant can exist for it. One with no row that
+    # the deletion ledger knows (scrubbed before this lookup) is refused by
+    # the lattice itself, 403 account_deleted, before any audit row (review r3).
     rows = await _mail_lock_admin(db, admin_steam_id, sid, optional={sid})
     if rows.get(sid) is None:
         raise HTTPException(status_code=404, detail="player_unknown")

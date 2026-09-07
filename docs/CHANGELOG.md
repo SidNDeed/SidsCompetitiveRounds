@@ -171,7 +171,9 @@
   idempotent retries. Reports and automatic spam detection open moderation
   cases in the admin channel that already logs suspicious game behaviour, with
   one-click mute, ban or dismiss; each click is re-checked against the
-  clicker's current grant. A retention sweep removes old mail. Migrations 297 and 300.
+  clicker's current grant. A retention sweep removes old mail. Admin actions
+  refuse a deleted account as actor or target instead of recording its former
+  id. Migrations 297 and 300.
 
 **Session reports**
 

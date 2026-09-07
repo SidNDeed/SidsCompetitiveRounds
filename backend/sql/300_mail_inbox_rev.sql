@@ -28,7 +28,10 @@
 --    no toast. A statement-level AFTER INSERT trigger on mail_recipients
 --    advances the counter for EVERY writer, old or new, inside the inserting
 --    transaction — the same set-wise, sorted, row-locked delta the api runs
---    itself (two overlapping sends take their rows in one order). The api
+--    itself (two overlapping sends take their rows in one order). The
+--    table lock at the top of this file (review r3) closes the gap between
+--    the backfill's snapshot and the trigger's installation: a delivery
+--    is counted by exactly one of the two, never by neither. The api
 --    keeps its own bump as well, so under the new build a send advances the
 --    counter twice. That is fine and intended: the value is a CHANGE signal
 --    — the client compares it for inequality and never reads it as a count
@@ -46,6 +49,15 @@
 -- DROP TRIGGER IF EXISTS, so a second application is a no-op.
 
 BEGIN;
+
+-- Review r3: taken FIRST so the backfill below and the trigger installed
+-- after it see one consistent set of deliveries. SHARE ROW EXCLUSIVE
+-- conflicts with the ROW EXCLUSIVE lock every INSERT takes, so a send
+-- that started before this point commits before the backfill counts
+-- (counted there) and one that starts after it waits for COMMIT (counted
+-- by the trigger); nothing lands in the gap between the two. Readers are
+-- not blocked. Released at COMMIT, so a rerun holds it for one no-op pass.
+LOCK TABLE mail_recipients IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE TABLE IF NOT EXISTS mail_inbox_rev (
     recipient_id UUID        PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,

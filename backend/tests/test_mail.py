@@ -143,6 +143,7 @@ class FakeDb:
         self.fail_outbox = False            # make the pending_channel_posts insert fail (review r1 M3)
         self.fail_admin_actions = False     # make the admin_actions insert fail (review r1 M10)
         self.commit_marks = []              # len(statements) at each commit: which statements were inside which transaction (review r2)
+        self.purged_hashes = set()          # deleted_steam_ids: the deletion ledger delete_player_data writes with the scrub (review r3)
 
     # seeding -------------------------------------------------------------
     def add_player(self, sid, name=None, mod_seen=True, mail_from="everyone", deleted=False,
@@ -205,6 +206,7 @@ class FakeDb:
                 mu["by"] = tomb
         self.bulk_grants.pop(sid, None)
         self.sessions = {k: v for k, v in self.sessions.items() if v["steam_id"] != sid}
+        self.purged_hashes.add(main._hash_steam_id(sid))   # the ledger row, same transaction as the scrub
         return tomb
 
     # session protocol ----------------------------------------------------
@@ -294,6 +296,11 @@ class FakeDb:
         if "UPDATE players SET mail_from" in sql:
             self.players[params["me"]]["mail_from"] = params["v"]
             return _Res()
+        # the deletion ledger (review r3)
+        if "FROM deleted_steam_ids" in sql:
+            if "= ANY(" in sql:
+                return _Res([(h,) for h in params["hashes"] if h in self.purged_hashes])
+            return _Res([(1,)] if params["h"] in self.purged_hashes else [])
         # locks
         if "pg_advisory_xact_lock(hashtext('mail:'" in sql:
             self.locks.append(("mail", params["sid"]))
@@ -1923,6 +1930,11 @@ def test_migration_300_matches_the_orm_and_the_readers():
     assert sql.index("ON CONFLICT (recipient_id) DO NOTHING") < sql.index(fn_ddl) \
         < sql.index(drop_ddl) < sql.index(trig_ddl) < sql.index("COMMIT;")
     assert sql.index("BEGIN;") < sql.index("CREATE TABLE IF NOT EXISTS mail_inbox_rev")
+    # review r3: the backfill is serialised against live writers — the table
+    # lock is taken first, before the backfill it protects, inside the transaction
+    lock = "LOCK TABLE mail_recipients IN SHARE ROW EXCLUSIVE MODE;"
+    assert sql.count(lock) == 1
+    assert sql.index("BEGIN;") < sql.index(lock) < sql.index("INSERT INTO mail_inbox_rev (recipient_id, rev)")
     # and the broadcast's persisted recipient count rides the same file
     assert "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER" in sql
     assert "recipient_count" in {c.name for c in models.MailMessage.__table__.columns}
@@ -2019,6 +2031,94 @@ def test_admin_without_a_players_row_acts_on_admin_users_authority():
         exc = _raises(main.admin_mail_bulk_grant_revoke("76561198000000077", ADMIN_SID,
                                                         _sign(ADMIN_SID, "mail_bulk_grant_revoke", "76561198000000077"), db))
         assert (exc.status_code, exc.detail) == (404, "player_unknown")
+
+
+class _match_secret:
+    """MATCH_HMAC_SECRET salts the deletion ledger's hashes (main._hash_steam_id)
+    and gates its readers — _is_steam_id_purged answers False without it."""
+    def __enter__(self):
+        self._old = main.MATCH_HMAC_SECRET
+        main.MATCH_HMAC_SECRET = "test-match-secret"
+        return self
+
+    def __exit__(self, *exc):
+        main.MATCH_HMAC_SECRET = self._old
+        return False
+
+
+def test_a_deleted_admin_is_refused_while_a_never_created_one_acts():
+    """review r3 MEDIUM: `optional` tolerates an identity that never had a
+    players row, not one whose row was scrubbed. A deleted admin still listed
+    in admin_users has no row under the raw id (the scrub rewrote it to the
+    tombstone) and IS in the deletion ledger: every admin route refuses
+    (403 account_deleted) under the identity lock, writes no audit row, and
+    the raw id appears nowhere. Negative control: the same admin with the
+    ledger entry gone is indistinguishable from never-created, and acts."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID)
+    db.admins.add(ADMIN_SID)
+    with _admin_secret(), _match_secret():
+        db.scrub(ADMIN_SID)
+        assert db.player_by_sid(ADMIN_SID) is None and main._hash_steam_id(ADMIN_SID) in db.purged_hashes
+        case_id = _open_case(db, ids)
+        db.statements.clear()
+        grant = main._AdminMailBulkGrantReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "mail_bulk_grant", A_SID),
+                                            steam_id=A_SID, max_recipients=40, days=7)
+        act = main._AdminModCaseActReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case_id),
+                                       action="dismiss")
+        for coro in (main.admin_mail_bulk_grant(grant, db),
+                     main.admin_mail_bulk_grant_revoke(A_SID, ADMIN_SID, _sign(ADMIN_SID, "mail_bulk_grant_revoke", A_SID), db),
+                     main.admin_moderation_case_act(case_id, act, db),
+                     main.admin_mail_broadcast(_bcast_req(), db)):
+            exc = _raises(coro)
+            assert (exc.status_code, exc.detail) == (403, "account_deleted")
+        lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+        ledger_i = next(i for i, s in enumerate(db.statements) if "FROM deleted_steam_ids" in s)
+        assert lock_i < ledger_i                                          # read under the lock, after it
+        assert not db.admin_actions and A_SID not in db.bulk_grants
+        assert db.cases[UUID(case_id)]["status"] not in ("dismissed", "resolved")
+        assert ADMIN_SID not in json.dumps(db.admin_actions) and ADMIN_SID not in json.dumps(list(db.cases.values()), default=str)
+        # negative control (#391): no ledger entry = never-created = admin_users authority suffices
+        db.purged_hashes.clear()
+        assert _run(main.admin_mail_bulk_grant(grant, db))["status"] == "ok" and db.bulk_grants[A_SID][0] == 40
+        assert db.admin_actions[-1]["admin"] == ADMIN_SID
+
+
+def test_a_revoke_target_deleted_before_the_lookup_is_refused_without_an_audit_row():
+    """review r3, the class behind MEDIUM 2 (#432): the same rule for a
+    tolerated TARGET. A grantee scrubbed BEFORE the route looked it up has no
+    row under the raw id; the revoke refuses on the ledger instead of
+    landing with the raw id in the audit row's target column. (Scrubbed
+    while the route WAITED, it lands with the tombstone — the r2 pin.)"""
+    db, ids = _world()
+    db.add_player(ADMIN_SID)
+    db.admins.add(ADMIN_SID)
+    with _admin_secret(), _match_secret():
+        res = _run(main.admin_mail_bulk_grant(main._AdminMailBulkGrantReq(
+            admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "mail_bulk_grant", C_SID),
+            steam_id=C_SID, max_recipients=40, days=7), db))
+        assert res["status"] == "ok" and len(db.admin_actions) == 1
+        db.scrub(C_SID)
+        exc = _raises(main.admin_mail_bulk_grant_revoke(C_SID, ADMIN_SID, _sign(ADMIN_SID, "mail_bulk_grant_revoke", C_SID), db))
+    assert (exc.status_code, exc.detail) == (403, "account_deleted")
+    assert len(db.admin_actions) == 1 and C_SID not in json.dumps(db.admin_actions)
+
+
+def test_broadcast_bump_is_inside_the_sending_transaction():
+    """review r3 pin audit: the direct-send pin leaves a broadcast whose
+    revision bump moved after commit green, so the broadcast's own bump is
+    pinned the same way — after its fan-out, before its commit, no commit
+    between the two."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID)
+    db.admins.add(ADMIN_SID)
+    with _admin_secret():
+        first = _broadcast(db)
+    fan_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_recipients" in s)
+    bump_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_inbox_rev" in s)
+    mark = next(m for m in db.commit_marks if m > bump_i)
+    assert fan_i < bump_i < mark and not any(fan_i < m <= bump_i for m in db.commit_marks)
+    assert first["recipients"] == 4 and sum(db.inbox_rev.values()) == first["recipients"]
 
 
 def _first_acquisitions(locks):
