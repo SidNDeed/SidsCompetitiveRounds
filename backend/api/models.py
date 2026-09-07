@@ -60,6 +60,12 @@ class Player(Base):
     # excluded from the Home tab's online / recently-online lists. The
     # anonymous online COUNT still includes them (it carries no identity).
     appear_offline = Column(Boolean, nullable=False, default=False)
+    # Who may mail this player (migration 297, Sept 6 item b): 'everyone'
+    # (default), 'played' (the pair shares a recorded participant set -- B-13)
+    # or 'nobody'. Read by the mail fan-out's delivery CASE in SQL, written by
+    # PUT /api/v1/mail/settings in SQL; declared so the ORM and the schema
+    # agree (an undeclared column is a silent no-op on assignment, #346).
+    mail_from = Column(Text, nullable=False, default="everyone")
     # Lifetime gun accuracy + block success counters (migration 038).
     # Accumulated from each submitted non-invalidated match's local_* fields on the reporter.
     bullets_fired = Column(BigInteger, nullable=False, default=0)
@@ -1214,3 +1220,122 @@ class SpectateLease(Base):
     # SPECTATE_PROTOCOL) at heartbeat/validate.
     protocol = Column(Integer, nullable=False, default=1)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ── In-game mail (migration 297, Sept 6 item b) ─────────────────────────────
+# The routes write these tables with text() SQL; every column is still
+# declared here so the ORM and the schema agree (learning #346). Shape
+# decisions are recorded on the migration and in group4-design-v2.md §b.
+
+class MailMessage(Base):
+    """One sent message. thread_id is the ROOT message's own id (a new thread
+    points at itself), in_reply_to the parent (self-FK, SET NULL on purge).
+    UNIQUE (sender_id, idempotency_key): a retried send finds its original row
+    (B-11). kind 'system_broadcast' is admin-only, audited, and bypasses
+    preferences and blocks (B-12); everything else is 'direct'."""
+    __tablename__ = "mail_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    kind = Column(Text, nullable=False, default="direct")
+    thread_id = Column(UUID(as_uuid=True), nullable=False)
+    in_reply_to = Column(UUID(as_uuid=True), ForeignKey("mail_messages.id", ondelete="SET NULL"), nullable=True)
+    subject = Column(String(120), nullable=False)
+    body = Column(String(2000), nullable=False)
+    idempotency_key = Column(UUID(as_uuid=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    deleted_by_sender_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("sender_id", "idempotency_key", name="uq_mail_messages_sender_idem"),
+        CheckConstraint("kind IN ('direct', 'system_broadcast')", name="ck_mail_messages_kind"),
+    )
+
+
+class MailRecipient(Base):
+    """The immutable ADDRESS ENVELOPE (B-7/B-9): who was addressed, as to or
+    cc, and whether their copy was delivered or silently SUPPRESSED (the
+    recipient blocks the sender, mail_from = 'nobody', or 'played' with no
+    shared participant set). Every read path filters delivery = 'delivered';
+    suppression is never exposed to the sender. Replies derive their
+    recipients from this envelope, so it is never edited after the send."""
+    __tablename__ = "mail_recipients"
+
+    message_id = Column(UUID(as_uuid=True), ForeignKey("mail_messages.id", ondelete="CASCADE"), primary_key=True)
+    recipient_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), primary_key=True)
+    kind = Column(Text, nullable=False)
+    delivery = Column(Text, nullable=False)
+    read_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('to', 'cc')", name="ck_mail_recipients_kind"),
+        CheckConstraint("delivery IN ('delivered', 'suppressed')", name="ck_mail_recipients_delivery"),
+    )
+
+
+class MailBlock(Base):
+    """Mail-only block list (B-1). player_blocks is MATCHMAKING state (team
+    formation deletes its rows) and is never read or written by mail. The
+    CASCADE is decorative under anonymise-in-place (#437): delete_player_data
+    removes both directions by name."""
+    __tablename__ = "mail_blocks"
+
+    blocker_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    blocked_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class ModerationCase(Base):
+    """One lifecycle for mail reports and automatic spam buckets (B-10).
+    UNIQUE (kind, bucket_key): a repeated report is a no-op and a spam burst
+    is ONE row per sender per UTC day (evidence bumped). evidence is a JSONB
+    SNAPSHOT so a later delete cannot empty the record. resolved_by is the
+    acting moderator's steam id (the admin_actions.admin_steam_id convention,
+    no FK -- an audit row must not be constrained by the current roster).
+    Discord delivery rides pending_channel_posts; the bot stamps notified_at
+    after its post lands. FlaggedMatch, AdminAction, BugReport unchanged."""
+    __tablename__ = "moderation_cases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kind = Column(Text, nullable=False)
+    subject_player_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    reporter_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
+    message_id = Column(UUID(as_uuid=True), ForeignKey("mail_messages.id", ondelete="SET NULL"), nullable=True)
+    evidence = Column(JSONB, nullable=False)
+    bucket_key = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="open")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by = Column(String(32), nullable=True)
+    resolution = Column(Text, nullable=True)
+    notified_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("kind", "bucket_key", name="uq_moderation_cases_kind_bucket"),
+        CheckConstraint("status IN ('open', 'resolved', 'dismissed')", name="ck_moderation_cases_status"),
+    )
+
+
+class MailBulkGrant(Base):
+    """Organiser grant raising the per-message recipient cap without admin
+    status (B-14). Admin-managed; expires_at is checked at send time; the
+    grant is live authority and dies with the account on deletion."""
+    __tablename__ = "mail_bulk_grants"
+
+    steam_id = Column(String(20), primary_key=True)
+    max_recipients = Column(Integer, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    granted_by = Column(String(20), nullable=True)
+    granted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class MailCensorHit(Base):
+    """One row per censor refusal on the mail send path -- the ledger behind
+    B-14's third spam trigger (>= 3 hits in a day). Pruned after two days by
+    the janitor's mail retention arm."""
+    __tablename__ = "mail_censor_hits"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
