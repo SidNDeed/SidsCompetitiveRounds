@@ -4374,6 +4374,7 @@ namespace CompetitiveRounds
         private static readonly List<string> _tsSteps = new List<string>();
         private static int _tsIdx = -1, _tsNo, _tsPass, _tsFail, _tsPhase;
         private static float _tsT0, _tsT1, _tsT2, _tsF0, _tsF1;
+        private static bool _tsS5Left;          // S5 release half: the runner's own Sandbox exit was issued
         private static int _tsI0, _tsI1, _tsI2;
         private static long _tsL0;
         private static string _tsAlbum, _tsName, _tsArg;
@@ -5169,7 +5170,19 @@ namespace CompetitiveRounds
 
         // S5 (§2.5): inside the Sandbox with BroadcastCustomMusic on — engine-owned
         // playback, vanilla in-game music not playing, tap delivering; then the
-        // release edge once the Sandbox ends (the operator/runner leaves it).
+        // Round->Menu edge once the Sandbox ends. S5 can only run with the
+        // broadcast predicate on, and that predicate COVERS the menu (MenuCovered
+        // returns true before the menu-mode setting is read), so the edge keeps
+        // engine ownership on every seat that can run S5: the release half's
+        // oracle is the suppression invariant at that edge — vanilla's menu
+        // music call observed (ctx=Menu), engine still owning and audible,
+        // vanilla's menu music not playing, no fault — not a hand-back to
+        // vanilla (design v3 section 11 S5 corrections). The runner arms at 6 s and the
+        // TestMapSkinSandbox lever enters past 8 s, so the entry waits up to 60 s
+        // for GM_Test instead of failing on its first tick; the exit is the
+        // operator's within 5 s, otherwise the runner leaves through vanilla's
+        // own NetworkRestart (the ESC-menu path) so the edge is exercised
+        // unattended (design v3 section 11 S5 corrections).
         private static void TsRunS5(float rt)
         {
             var tap = TsTap();
@@ -5177,7 +5190,11 @@ namespace CompetitiveRounds
             {
                 case 0:
                     if (!BroadcastPredicate()) { TsEnd(false, "BroadcastCustomMusic is off on this seat (BroadcastPredicate false)"); return; }
-                    if (!TsSandboxLive()) { TsEnd(false, "not inside the Sandbox (GM_Test not live)"); return; }
+                    if (!TsSandboxLive())
+                    {
+                        if (rt - _tsT0 > 60f) TsEnd(false, "not inside the Sandbox within 60 s (GM_Test not live)");
+                        return;
+                    }
                     if (tap == null) { TsEnd(false, "no delivery tap on the host"); return; }
                     _tsL0 = tap.FramesDelivered; _tsT1 = rt; _tsPhase = 1; return;
                 case 1:
@@ -5187,18 +5204,36 @@ namespace CompetitiveRounds
                         bool vanillaSilent = van == "NotPlaying";
                         TsLog(vanillaSilent, "s5", $"engine-owned playback in the Sandbox: vanilla-ingame={van} (want NotPlaying) tapCallbacks={tap.Callbacks} frames={tap.FramesDelivered - _tsL0}; {TsState()}");
                         if (!vanillaSilent) { TsAdvance(); return; }
-                        _tsName = "s5-release"; _tsNo++; _tsT2 = rt; _tsPhase = 2; return;
+                        _tsName = "s5-release"; _tsNo++; _tsT2 = rt; _tsS5Left = false; _tsPhase = 2; return;
                     }
                     if (rt - _tsT1 > 30f) TsEnd(false, "no engine-owned playback within 30 s: " + TsState());
                     return;
                 case 2:
                     if (!TsSandboxLive()) { _tsT1 = rt; _tsPhase = 3; return; }
-                    if (rt - _tsT2 > 90f) TsEnd(false, "Sandbox exit not observed within 90 s — the release edge was not exercised (leave the Sandbox while this step waits)");
+                    if (!_tsS5Left && rt - _tsT2 > 5f)
+                    {
+                        _tsS5Left = true;
+                        SafeLog(LogLevel.Info, "[MUSIC-SELFTEST] s5-release: runner leaving the Sandbox (NetworkRestart)");
+                        try { NetworkConnectionHandler.instance.NetworkRestart(); }
+                        catch (Exception e) { TsEnd(false, "NetworkRestart threw " + e.GetType().Name + ": " + TsState()); return; }
+                    }
+                    if (rt - _tsT2 > 90f) TsEnd(false, "Sandbox exit not observed within 90 s — the release edge was not exercised: " + TsState());
                     return;
                 case 3:
-                    if (!IsEngineOwned(S.mode) && !S.suppress) { TsEnd(true, $"released {rt - _tsT1:F1}s after the Sandbox ended: vanilla-menu={TsVanilla(true)}; {TsState()}"); return; }
-                    if (rt - _tsT1 > 3f) TsEnd(false, "still owned 3 s after the Sandbox ended: " + TsState());
+                    if (S.faultDurable || S.mode == MusicMode.Fault) { TsEnd(false, "fault after the Sandbox ended: " + TsState()); return; }
+                    if (S.ctx == Ctx.Menu) { _tsT2 = rt; _tsPhase = 4; return; }
+                    if (rt - _tsT1 > 30f) TsEnd(false, "vanilla's menu music call not observed within 30 s of the Sandbox end (ctx=" + S.ctx + "): " + TsState());
                     return;
+                case 4:
+                    {
+                        if (S.faultDurable || S.mode == MusicMode.Fault) { TsEnd(false, "fault at the menu edge: " + TsState()); return; }
+                        string van = TsVanilla(true);
+                        bool live = BroadcastMusicLive;
+                        bool ok = S.mode == MusicMode.Custom && S.suppress && live && van != "Playing";
+                        if (ok) { TsEnd(true, $"ownership retained across the Sandbox exit ({rt - _tsT1:F1}s after GM_Test ended, {rt - _tsT2:F1}s after ctx=Menu): vanilla-menu={van} (want not Playing) live={live}; {TsState()}"); return; }
+                        if (rt - _tsT2 > 5f) TsEnd(false, $"menu edge broke the invariant 5 s after ctx=Menu: vanilla-menu={van} live={live}; {TsState()}");
+                        return;
+                    }
             }
         }
 
