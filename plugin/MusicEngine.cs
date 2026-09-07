@@ -4530,6 +4530,7 @@ namespace CompetitiveRounds
                 }
                 if (LoopEnabled != _tsSnapLoop) LoopEnabled = _tsSnapLoop;
                 if (ShuffleEnabled != _tsSnapShuffle) ShuffleEnabled = _tsSnapShuffle;
+                TsClearRetryableTombstones();
                 SafeLog(LogLevel.Info, $"[MUSIC-SELFTEST] restored: deselected={S.deselected.Count} loop={LoopEnabled} shuffle={ShuffleEnabled}");
             }
             catch (Exception ex) { SafeLog(LogLevel.Warning, "[MUSIC-SELFTEST] restore failed: " + ex.Message); }
@@ -4561,16 +4562,22 @@ namespace CompetitiveRounds
             var tap = TsTap(); if (tap != null) tap.Frozen = false;
             if (S.previewTrack.HasValue || S.previewPending.HasValue) StopPreviewAndRestoreInternal("self-test");
             LoopEnabled = false; ShuffleEnabled = false;
+            TsClearRetryableTombstones();   // every album: S2 tombstones the whole catalog
             var drop = new List<string>();
-            foreach (var k in Tombstones) if (k.StartsWith(_tsAlbum + "/", StringComparison.Ordinal) || k.StartsWith("p:" + _tsAlbum + "/", StringComparison.Ordinal)) drop.Add(k);
-            foreach (var k in drop) Tombstones.Remove(k);
-            drop.Clear();
             // D10: a pre-open failure's hollow marker leaves Clips so the key can
             // be requested again; an entry holding objects is never disposed.
             foreach (var kv in Clips) if (kv.Value.Failed && kv.Value.Req == null && kv.Value.Clip == null && !kv.Value.GetContentInvoked) drop.Add(kv.Key);
             foreach (var k in drop) Clips.Remove(k);
             for (int i = 0; i < a.Tracks.Length; i++) SetSelected(_tsAlbum, i, tracks == null || Array.IndexOf(tracks, i) >= 0);
             return null;
+        }
+
+        /// <summary>Drops every RETRYABLE tombstone (the `Tombstones` set; sticky
+        /// ones live in StickyTombstones and stay, D10). Test runner only.</summary>
+        private static void TsClearRetryableTombstones()
+        {
+            var drop = new List<string>(Tombstones);
+            foreach (var k in drop) Tombstones.Remove(k);
         }
 
         private static bool TsParseTrack(string arg, out string sku, out int idx)
@@ -4723,10 +4730,11 @@ namespace CompetitiveRounds
         // and the tombstoned key is never re-opened for 60 s (impl2 r1 M2:
         // "Loading + suppress=false" alone is also what a failing re-entry shows).
         // Final-cycle finding (2026-09-07): the selection reduction is inert on
-        // the broadcast queue (it plays whole albums), so the end adopted track 2
-        // instead of Loading. Every other track of the album is tombstoned too,
-        // which makes the premise (no playable successor) hold on both queue
-        // shapes; the oracle still watches track 1 only.
+        // the broadcast queue (it plays every owned album, album-major), so the
+        // end adopted the next playable track instead of Loading. Every other
+        // custom track in the catalog is tombstoned too, which makes the premise
+        // (no playable successor) hold on both queue shapes; the oracle still
+        // watches track 1 only.
         private static void TsRunS2(float rt)
         {
             string k0 = TsKey(0), k1 = TsKey(1);
@@ -4737,8 +4745,20 @@ namespace CompetitiveRounds
                         string err = TsSetup(new[] { 0, 1 }, 2);
                         if (err != null) { TsEnd(false, err); return; }
                         TsFailKey(k1);
-                        var albumDef = TsAlbumDef();
-                        for (int i = 2; albumDef != null && i < albumDef.Tracks.Length; i++) TsFailKey(TsKey(i));   // no playable successor on any queue shape
+                        // No playable successor on any queue shape: the broadcast
+                        // queue spans every owned album, so every custom track in the
+                        // catalog except k0 is tombstoned (retryable; TsSetup and the
+                        // restore path clear them).
+                        foreach (var alb in MusicCatalog.Albums)
+                        {
+                            if (alb == null || alb.Tracks == null || IsVanillaSku(alb.Sku)) continue;
+                            for (int i = 0; i < alb.Tracks.Length; i++)
+                            {
+                                string kk = alb.Sku + "/" + i;
+                                if (kk == k0 || kk == k1) continue;
+                                TsFailKey(kk);
+                            }
+                        }
                         _tsI1 = TsOpens(k1);
                         PlayTrack(_tsAlbum, 0); _tsT1 = rt; _tsPhase = 1; return;
                     }
