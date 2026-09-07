@@ -39,17 +39,32 @@ namespace CompetitiveRounds
     /// sits on the probe's own AudioSource, so they say whether Unity kept
     /// pulling audio out of it, and a dropout introduced downstream of the tap
     /// — mixer, output device, driver — leaves them clean. The run also
-    /// records managed/native/process memory before the request, after open,
-    /// during play and after cleanup, and a scripted control sequence (seek
-    /// running, pause + seek paused + resume, loop off → natural end, loop
-    /// wrap) each judged pass/fail. ":stress" = 600 s plus up to 7 busy threads
-    /// (ProcessorCount - 1, capped) for 60 s; ":churn" = ten open/close cycles
-    /// then the memory samples. The probe never touches MusicEngine state, and
-    /// stops if the normal engine starts sounding at any point in a run.
+    /// records managed/native/process memory before the request, after open
+    /// and during play, and a scripted control sequence (seek running, pause +
+    /// seek paused + resume, loop off → natural end, loop wrap) each judged
+    /// pass/fail. ":stress" = 600 s plus up to 7 busy threads (ProcessorCount
+    /// - 1, capped) for 60 s; ":churn" = ten bind/unbind cycles on the same
+    /// key. The probe never touches MusicEngine playback state (it reports its
+    /// opens to the engine's residency line), and stops if the normal engine
+    /// starts sounding at any point in a run.
+    ///
+    /// Opens (design v3 branch D, D11): a key is requested at most ONCE per
+    /// process and its request + clip are RETAINED until the process exits —
+    /// never disposed, never destroyed (a streamed clip reads its request's
+    /// buffer). A later run or churn cycle on the same key RE-SELECTS the
+    /// retained clip on a fresh source (`warm=1`, `reselect`), so request_ms
+    /// and getcontent_ms are then the first open's. Memory rows (D8):
+    /// d_native_per_open_mb on a first open (bound OggSize x 1.5 + 1 MB),
+    /// d_native_reopen_mb on a re-selection (0 +/- 0.5 MB — a second request
+    /// would show here as +MBs), both measured at the `opened` line and folded
+    /// into `end`, which is written at the stop and is the run's last row
+    /// (#564). No post-cleanup sample exists: nothing is cleaned up.
     ///
     /// Lifetime: the host GameObject is HideAndDontSave; if anything destroys it
     /// (its tap's OnDestroy flags it, and a Unity fake-null source is checked
-    /// too) every retained handle is released — never treated as idle.</summary>
+    /// too) the run ends: the source, tap and host object are released, or
+    /// abandoned after four attempts and logged (`[MUSIC-PROBE] handle
+    /// abandoned`) — never treated as idle. The retained pair stays.</summary>
     internal static class MusicStreamProbe
     {
         // ── gate ─────────────────────────────────────────────────────────
@@ -129,7 +144,7 @@ namespace CompetitiveRounds
         // value it saw. The difference is the r9 HIGH: adopting the launch
         // value as a baseline and then demanding a change meant a seat that
         // set both keys and restarted never ran anything.
-        private static string _lastRun, _key, _lastKeyOpened;
+        private static string _lastRun, _key;
         // Every run has a number, so a tap destroyed late cannot flag a run
         // that started after it (r9 PLAUSIBLE).
         private static int _gen;
@@ -150,18 +165,39 @@ namespace CompetitiveRounds
         /// <summary>Tap delivery at the seek that sets up the natural end; -1
         /// while there is no such baseline.</summary>
         private static long _framesAtEndSeek = -1L;
+        /// <summary>Design v2 §2.3.6 `time_at_death`: the source's last
+        /// observed position while it was still playing after the end seek.
+        /// isPlaying flips first and `time` reads 0 once the source has
+        /// stopped, so the playhead has to be sampled BEFORE the death; -1
+        /// while nothing was sampled.</summary>
+        private static float _timeAtDeath = -1f;
         /// <summary>Whether ANY tap existed during this run. `-1` on the end
         /// line means no measurement was ever taken; a run whose tap reported a
         /// clean zero must not print the same marker.</summary>
         private static bool _runHadTap;
-        // Bound on deferring the post-run collection while a room is live.
-        private static float _cleanupGcDeadline;
+        /// <summary>r3 M4 (F3): cycles whose tap was still inside a callback
+        /// when the bounded quiesce wait ran out. The fold that followed may
+        /// have missed a run, so the bar cannot be shown to hold: a bar row.</summary>
+        private static int _runTapQuiesceTimeouts;
         // Bounded mask across a scripted transition, instead of masking whole
         // steps that are supposed to be audible (r9 MEDIUM).
         private static float _maskUntil;
         private static Mode _mode;
-        private static UnityWebRequest _req, _reqKeep;
-        private static AudioClip _clip;
+        /// <summary>D11: a key is opened at most ONCE per process; its request
+        /// and clip are retained here until the process exits — never
+        /// disposed, never destroyed (a streamed clip reads its request's
+        /// buffer). A later run or churn cycle on the key re-selects the
+        /// retained clip on a fresh source; request_ms/getcontent_ms are the
+        /// first open's. A request that never produced a clip is retained
+        /// clip-less and the key is refused from then on.</summary>
+        private sealed class RetainedOpen { public UnityWebRequest Req; public AudioClip Clip; public float RequestMs, GetContentMs; }
+        private static readonly Dictionary<string, RetainedOpen> _opened = new Dictionary<string, RetainedOpen>(StringComparer.Ordinal);
+        private static UnityWebRequest _req;   // this run's first-open request while in flight; retained from the stop or GetContent on
+        private static AudioClip _clip;        // the run's clip — the retained one
+        private static long _oggSize;          // catalog size of the run's file (the per-open bound)
+        private static long _natOpen0 = -1L;   // native counter just before this open (the request, or the bind on a re-selection)
+        private static string _nativeOpenRow;  // the run's first `opened` memory row, folded into the end record
+        private static bool _nativeOpenPass;
         private static GameObject _go;
         private static AudioSource _src;
         private static ProbeTap _tap;
@@ -169,14 +205,44 @@ namespace CompetitiveRounds
         private static int _openLogFrame = -1;
         private static bool _openPending, _warm;
         private static long _playStartTicks;
+        // §2.4 / §7 2-9 PASS bar (impl2 r1 M4): retained across the run for the
+        // end line's verdict (BarVerdict) — every row of the bar is judged there
+        // except the memory row (D8: d_native_per_open_mb / d_native_reopen_mb),
+        // judged at the `opened` line where it is measured and folded into the
+        // end line by FinishEndRecord.
+        private static float _firstSampleMs = -1f;   // -1 = no audible sample was ever observed
+        private static float _deficitPeakMs;          // max of DeficitMs() sampled every playing tick
+        private static bool _controlsDone;            // the scripted sequence reached its summary line
+        // impl2 r2 M4: the start stamp of EVERY silent run of >= 2 buffers in
+        // the run (folded from each tap's ring by CloseObjects), plus the
+        // count the ring could not stamp. Each is judged against the scripted
+        // windows in Stop — the longest run alone let a later, unscripted run
+        // of equal length hide behind a scripted one's stamp.
+        private static readonly List<long> _runSilentRunStarts = new List<long>();
+        private static int _runSilentRunsUnstamped;
+        // Scripted windows [from, to] in Stopwatch ticks: Play, each seek /
+        // resume / restart, and the natural end. A silent run that STARTS
+        // inside one is "at a scripted seek" (§2.4); one outside fails the bar.
+        private static readonly List<KeyValuePair<long, long>> _scriptedWindows = new List<KeyValuePair<long, long>>();
+        // impl2 r2 M4 / #564: the `end` record is the runner's stop signal, so
+        // it is written only when its bar is FINAL. Under D every row is final
+        // at the stop (the memory row was measured at the open): Stop builds
+        // the record and FinishEndRecord appends the memory row and writes the
+        // line at once — the last row of the run.
+        private static string _endRecord;
+        private static List<string> _endBar;   // null = churn (no bar)
+        // Wall accrual after a Play/UnPause: the first accruing tick charges
+        // the time since that call, not the whole frame (which began before
+        // it) — with the deficit now judged per tick, a one-frame overcharge
+        // at every start would read as starvation.
+        private static long _wallFromTicks;
+        private static bool _wallAccruing;
         // drift reference (reset after every control action)
         private static double _dspRef;
         private static float _timeRef, _lastTime, _lastDrift, _stallMax, _driftPeak;
         private static int _wraps, _stalls;
         // memory
         private static long _mgd0, _nat0, _res0, _proc0;
-        private static float _cleanupSampleAt = -1f, _cleanupGcAt = -1f;
-        private static string _cleanupKey;
         // controls
         private static int _step;
         private static float _stepAt, _stepDeadline, _stepTarget;
@@ -188,8 +254,11 @@ namespace CompetitiveRounds
         private static Thread[] _busy;
         private static volatile bool _busyRun;
         private static float _busyUntil, _busyStartAt;
-        // release retry (r2 PLAUSIBLE: a throwing release must not lose the handle)
-        private static readonly List<KeyValuePair<object, int>> _retry = new List<KeyValuePair<object, int>>();
+        // release retry (r2 PLAUSIBLE: a throwing release must not lose the
+        // handle): the initial attempt plus three on later ticks, then the
+        // handle is abandoned and said so (impl2 r2 LOW).
+        private struct RetryHandle { public object Handle; public int Attempts; public string What; }
+        private static readonly List<RetryHandle> _retry = new List<RetryHandle>();
         internal static volatile bool HostDestroyed;
 
         internal static void Tick()
@@ -205,51 +274,14 @@ namespace CompetitiveRounds
                 if (dt > _frameMax) _frameMax = dt;
                 if ((_req != null || _openPending) && dt > _openFrameMax) _openFrameMax = dt;
                 if (_retry.Count > 0) RetryReleases();
-                if (_cleanupSampleAt > 0f && now >= _cleanupSampleAt) { _cleanupSampleAt = -1f; LogMemory("after_cleanup", _cleanupKey); }
                 if (_busy != null && now >= _busyUntil) StopBusy();
                 // r2 MEDIUM 3: a destroyed host (scene edge, or anything else)
-                // leaves _src as a Unity fake-null while the streamed request
-                // and clip are still retained — release, never idle.
-                if (HostDestroyed || (_src == null && (_reqKeep != null || (object)_clip != null)))
+                // leaves _src as a Unity fake-null while the run's clip is still
+                // bound — the run ends (its retained pair stays, D11), never idle.
+                if (HostDestroyed || (_src == null && (object)_clip != null))
                 {
                     HostDestroyed = false;
-                    if (_reqKeep != null || (object)_clip != null || (object)_src != null) { Stop("host destroyed"); return; }
-                }
-                if (_cleanupGcAt > 0f && now >= _cleanupGcAt)
-                {
-                    // r9 MEDIUM: NEVER inside a live match. Entering an online
-                    // room ends the run and schedules this, and a full blocking
-                    // collection five seconds later is a hitch in somebody's
-                    // game. Deferred while a room is live, and abandoned if the
-                    // room outlasts the window — a memory delta is worth
-                    // nothing next to a stutter in a ranked round.
-                    //
-                    // Stated as the contexts that are SAFE, not as the one that
-                    // is not: an unreadable context ("?" — the Photon read
-                    // threw) was neither "online-room" nor a proof of anything,
-                    // and it used to run the collection. The two offline
-                    // contexts are the operator's own seat, which is where this
-                    // probe runs.
-                    string ctxNow = SeatContext();
-                    if (ctxNow != "menu" && ctxNow != "sandbox" && ctxNow != "offline-idle")
-                    {
-                        if (now >= _cleanupGcDeadline)
-                        {
-                            _cleanupGcAt = -1f;
-                            Plugin.Log?.LogInfo("[MUSIC-PROBE] cleanup collection abandoned — context=" + ctxNow + " outlasted the window");
-                        }
-                        else _cleanupGcAt = now + 5f;
-                    }
-                    else
-                    {
-                        // dV2 MEDIUM 4: a settle point for the cleanup sample — the
-                        // deferred native destroys have run by now and the managed
-                        // side is collected, so the delta is a leak reading, not
-                        // allocator noise.
-                        _cleanupGcAt = -1f;
-                        try { GC.Collect(); GC.WaitForPendingFinalizers(); } catch { }
-                        LogMemory("after_cleanup_gc", _cleanupKey);
-                    }
+                    if ((object)_clip != null || (object)_src != null) { Stop("host destroyed"); return; }
                 }
                 if (_req == null && _src == null)
                 {
@@ -273,16 +305,18 @@ namespace CompetitiveRounds
                     Start(raw, now);
                     return;
                 }
-                // The key going false mid-run must END the run, not strand it:
-                // returning early here would leave the request, clip, source and
-                // host object retained with nothing left to release them.
+                // The key going false mid-run must END the run (Stop: the
+                // source stops, the tap and the host object are destroyed, the
+                // end record is written) rather than strand it mid-flight. The
+                // request and the clip are retained either way (D11): a
+                // disabled run keeps them on the key's record, by design.
                 if (!SeatAllowed()) { Stop("probe key turned off"); return; }
                 if (_req != null) { PumpRequest(now); return; }
                 if (_src != null) PumpPlayback(now);
             }
             catch (Exception ex)
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] tick threw: " + ex.Message);
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] tick threw: " + ex.Message);   // R4: a throwing logger must not skip the Stop
                 Stop("exception");
             }
         }
@@ -290,23 +324,23 @@ namespace CompetitiveRounds
         private static void Start(string raw, float now)
         {
             string[] parts = raw.Split(':');
-            if (parts.Length < 2) { Plugin.Log?.LogWarning("[MUSIC-PROBE] bad lever '" + raw + "' (want sku:idx[:stress|:churn])"); return; }
+            if (parts.Length < 2) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] bad lever '" + raw + "' (want sku:idx[:stress|:churn])"); return; }
             var album = MusicCatalog.Get(parts[0]);
             int idx;
             if (album == null || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out idx)
                 || idx < 0 || idx >= album.Tracks.Length)
-            { Plugin.Log?.LogWarning("[MUSIC-PROBE] unknown album/track '" + raw + "'"); return; }
+            { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] unknown album/track '" + raw + "'"); return; }
             // A misspelled suffix used to run the DEFAULT mode silently, so an
             // operator asked for a stress run, got a two-minute normal one, and
             // the log said mode=Normal in a line nobody re-reads. The lever is a
             // diagnostic instruction; one that cannot be carried out is refused
             // out loud, and refused HERE, before the run takes any state — the
-            // generation bump and the pending-cleanup drop below both belong to
-            // a run that is actually going to happen.
+            // generation bump below belongs to a run that is actually going to
+            // happen.
             Mode wanted = Mode.Normal;
             if (parts.Length > 3)
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] too many fields in '" + raw + "' (want sku:idx[:stress|:churn])");
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] too many fields in '" + raw + "' (want sku:idx[:stress|:churn])");
                 return;
             }
             if (parts.Length > 2)
@@ -315,7 +349,7 @@ namespace CompetitiveRounds
                 else if (string.Equals(parts[2], "churn", StringComparison.OrdinalIgnoreCase)) wanted = Mode.Churn;
                 else
                 {
-                    Plugin.Log?.LogWarning("[MUSIC-PROBE] unknown mode '" + parts[2] + "' in '" + raw + "' (want stress or churn)");
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] unknown mode '" + parts[2] + "' in '" + raw + "' (want stress or churn)");
                     return;
                 }
             }
@@ -324,12 +358,11 @@ namespace CompetitiveRounds
             // ambiguous. Custom music sounding = refuse; vanilla = report.
             //
             // ASKED HERE, before anything moves. It used to sit below the
-            // generation bump and the pending-cleanup drop, so a command
-            // refused for context still ended the previous run's deferred
-            // cleanup and invalidated its outgoing tap's generation — the
-            // comment above the mode check claimed both mutations belonged to
-            // a run that was going to happen, and for this refusal they did
-            // not. It reads `wanted` rather than `_mode` for the same reason:
+            // generation bump, so a command refused for context still
+            // invalidated the previous run's outgoing tap's generation — the
+            // comment above the mode check claimed that mutation belonged to a
+            // run that was going to happen, and for this refusal it did not.
+            // It reads `wanted` rather than `_mode` for the same reason:
             // `_mode` is not this command's mode until the run is admitted.
             //
             // An UNREADABLE seat context is a refusal too. SeatContext returns
@@ -348,37 +381,37 @@ namespace CompetitiveRounds
                 : null;
             if (refuse != null)
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] refused key=" + key + " reason=" + refuse + " context=" + ctx + " vanilla_guards=" + vanilla);
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] refused key=" + key + " reason=" + refuse + " context=" + ctx + " vanilla_guards=" + vanilla);
                 return;
             }
-            // r9 MEDIUM: a deferred cleanup belongs to the run that
-            // scheduled it. Its memory baselines are about to be overwritten
-            // by this run, so comparing against them would report this run's
-            // allocations as the previous run's leak — and would force a
-            // blocking collection in the middle of this one. Dropped, said so.
-            if (_cleanupSampleAt > 0f || _cleanupGcAt > 0f)
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] pending cleanup for " + (_cleanupKey ?? "?")
-                                    + " dropped — a new run started inside its window");
-            _cleanupSampleAt = -1f; _cleanupGcAt = -1f;
             _gen++;
             _audioWallSeconds = 0f;
             _runMaxGapTicks = 0L;
             _runFramesDelivered = 0L;
             _runSilentRunMax = 0;
             _framesAtEndSeek = -1L;
+            _timeAtDeath = -1f;
             _maskUntil = 0f;
             _mode = wanted;
             _key = key;
             _runHadTap = false;
+            _runTapQuiesceTimeouts = 0;
             // r2 LOW 3: every counter belongs to THIS run, reset before the
             // request so a failed open reports zeros, not the previous run.
             _stallMax = 0f; _stalls = 0; _wraps = 0; _driftPeak = 0f; _lastDrift = 0f; _frameMax = 0f;
             _controlsPass = 0; _controlsFail = 0; _churnCycles = 0; _getContentMs = 0f; _requestMs = 0f; _openBlockMs = 0f;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
+            _firstSampleMs = -1f; _deficitPeakMs = 0f; _controlsDone = false; _runSilentRunStarts.Clear(); _runSilentRunsUnstamped = 0; _scriptedWindows.Clear();
+            _wallFromTicks = 0L; _wallAccruing = false;
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] begin key=" + _key + " mode=" + _mode + " context=" + ctx + " vanilla_guards=" + vanilla
                 + " cores=" + Environment.ProcessorCount + " (bots/opponents are the operator's responsibility; the log cannot see them)");
-            LogMemory("baseline", _key);
+            // R17 (impl r3): the baselines are sampled ONCE, here, and the
+            // baseline row prints these stored values; a -1 stays -1 for the
+            // run (every later native delta prints `unmeasured`).
             _mgd0 = GC.GetTotalMemory(false); _nat0 = NativeAlloc(); _res0 = NativeReserved(); _proc0 = ProcessPrivate();
-            OpenRequest(album.Tracks[idx].OggFile, now);
+            LogMemory("baseline", _key);
+            _oggSize = album.Tracks[idx].OggSize;
+            _nativeOpenRow = null; _nativeOpenPass = false;
+            BeginOpen(album.Tracks[idx], now);
         }
 
         /// <summary>Photon's own room-entry edge.
@@ -463,22 +496,76 @@ namespace CompetitiveRounds
             catch { return "?"; }
         }
 
-        private static bool OpenRequest(string oggFile, float now)
+        /// <summary>D11: the open. A key already opened in this process is
+        /// RE-SELECTED — no request, no GetContent: its retained clip is bound
+        /// to a fresh source and the first open's request_ms/getcontent_ms
+        /// stand. A first open makes the ONE request the key will ever get
+        /// (reported to the engine's residency line) and PumpRequest completes
+        /// it. False = refused (nothing was started).</summary>
+        private static bool BeginOpen(MusicTrackDef track, float now)
         {
-            string path = MusicAssets.PathFor(oggFile);
-            if (path == null) { Plugin.Log?.LogWarning("[MUSIC-PROBE] file not ready for " + _key + " (full tier not installed?)"); return false; }
+            _startRt = now;
+            _openFrameMax = 0f; _openPending = false;
+            _natOpen0 = NativeAlloc();
+            if (_opened.TryGetValue(_key, out var kept))
+            {
+                _warm = true;
+                _requestMs = kept.RequestMs; _getContentMs = kept.GetContentMs;
+                if ((object)kept.Clip == null || kept.Clip == null)
+                {
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] refused key=" + _key + " reason=retained-open-has-no-clip (opened once already; a key is never requested twice)");
+                    return false;
+                }
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] reselect key=" + _key + " mode=" + _mode + " (retained pair; request_ms/getcontent_ms are the first open's)");
+                BindAndPlay(kept.Clip, now, null);
+                return true;
+            }
+            string path = MusicAssets.PathFor(track.OggFile);
+            if (path == null) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] file not ready for " + _key + " (full tier not installed?)"); return false; }
             string url;
             try { url = new Uri(path).AbsoluteUri; }
             catch { url = "file:///" + path.Replace('\\', '/'); }
-            _warm = string.Equals(_lastKeyOpened, _key, StringComparison.Ordinal);
-            _req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
-            var dh = _req.downloadHandler as DownloadHandlerAudioClip;
-            if (dh != null) dh.streamAudio = true;
-            _openFrameMax = 0f; _openPending = false;
-            _req.SendWebRequest();
-            _startRt = now;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] request key=" + _key + " stream=1 mode=" + _mode + " warm=" + (_warm ? 1 : 0));
+            _warm = false;
+            // R8: the key's record exists BEFORE any allocation (state:
+            // attempting — no request, no clip). An allocation that throws
+            // leaves it clip-less, i.e. refused (D-m), so a later command for
+            // the same key never allocates again; probe_opens counts records.
+            var rec = new RetainedOpen();
+            _opened[_key] = rec;
+            long bytes = 0L;
+            string failed = null;
+            try
+            {
+                _req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.OGGVORBIS);
+                var dh = _req.downloadHandler as DownloadHandlerAudioClip;
+                if (dh != null) dh.streamAudio = true;
+                _req.SendWebRequest();
+                bytes = track.OggSize;
+            }
+            catch (Exception ex) { failed = ex.Message; }
+            MusicEngine.NoteProbeOpen(_key, bytes);   // D11: probe_opens= on the residency line — the record, whatever the allocation did (R11: no engine baseline seeding)
+            if (failed != null)
+            {
+                rec.Req = _req; _req = null;   // a request that exists is retained on the record (D-m); nothing is disposed
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] request failed key=" + _key + ": " + failed + " (record kept clip-less; key refused from now on)");
+                return false;
+            }
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] request key=" + _key + " stream=1 mode=" + _mode + " warm=0");
             return true;
+        }
+
+        /// <summary>D11/R8: the pair fills the key's record — the record was
+        /// written at BeginOpen, before the allocation — once per key,
+        /// whatever GetContent returned, and clip-less for a request the run
+        /// ended before it completed (InProgress at teardown is the retain
+        /// class). A record that already holds a request or a clip is never
+        /// overwritten; nothing ever leaves the store.</summary>
+        private static void RetainOpen(UnityWebRequest req, AudioClip clip)
+        {
+            if (_key == null) return;
+            if (!_opened.TryGetValue(_key, out var rec)) { rec = new RetainedOpen(); _opened[_key] = rec; }
+            if (rec.Req != null || (object)rec.Clip != null) return;
+            rec.Req = req; rec.Clip = clip; rec.RequestMs = _requestMs; rec.GetContentMs = _getContentMs;
         }
 
         private static void PumpRequest(float now)
@@ -492,12 +579,12 @@ namespace CompetitiveRounds
             if (refuseOpen != null) { Stop(refuseOpen); return; }
             if (!_req.isDone)
             {
-                if (now - _startRt > 30f) { Plugin.Log?.LogWarning("[MUSIC-PROBE] request timeout"); Stop("timeout"); }
+                if (now - _startRt > 30f) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] request timeout (request retained, key refused from now on)"); Stop("timeout"); }   // R4 class: no logger ahead of a Stop may skip it
                 return;
             }
             if (!string.IsNullOrEmpty(_req.error))
             {
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] request error: " + _req.error);
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] request error: " + _req.error + " (request retained, key refused from now on)");
                 Stop("error");
                 return;
             }
@@ -508,12 +595,30 @@ namespace CompetitiveRounds
             // accumulating for two more frames before the record is written.
             var block = Stopwatch.StartNew();
             var sw = Stopwatch.StartNew();
-            _clip = DownloadHandlerAudioClip.GetContent(_req);
+            AudioClip clip = null;
+            try { clip = DownloadHandlerAudioClip.GetContent(_req); }
+            catch (Exception ex) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] GetContent threw: " + ex.Message); }   // R4 class: the record below must be filled whatever the logger does
             sw.Stop();
             _getContentMs = (float)sw.Elapsed.TotalMilliseconds;
-            _reqKeep = _req; _req = null;
-            if (_clip == null) { Plugin.Log?.LogWarning("[MUSIC-PROBE] GetContent returned null"); Stop("null clip"); return; }
-            _lastKeyOpened = _key;
+            // D11: the pair is retained from here whatever GetContent returned.
+            var req = _req; _req = null;
+            RetainOpen(req, clip);
+            if (clip == null) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] GetContent returned no clip (request retained, key refused from now on)"); Stop("null clip"); return; }
+            BindAndPlay(clip, now, block);
+        }
+
+        /// <summary>The completion block's tail: host + source construction
+        /// and Play on the clip — a first open's, after GetContent, or a
+        /// re-selection's (then the block starts here). Refusal is asked AGAIN
+        /// immediately before the first audible sample: the streamed handle
+        /// open and the host construction are not free, so the answer from the
+        /// top of the tick is milliseconds old — and this is the one line
+        /// where being wrong is audible in somebody else's match. Nothing has
+        /// played yet, so Stop simply releases what was built.</summary>
+        private static void BindAndPlay(AudioClip clip, float now, Stopwatch block)
+        {
+            if (block == null) block = Stopwatch.StartNew();
+            _clip = clip;
             _go = new GameObject("SCR_MusicProbe") { hideFlags = HideFlags.HideAndDontSave };
             _src = _go.AddComponent<AudioSource>();
             _src.clip = _clip; _src.loop = true; _src.playOnAwake = false; _src.volume = 0.5f;
@@ -521,15 +626,11 @@ namespace CompetitiveRounds
             _tap.Reset();
             _tap.Gen = _gen;
             HostDestroyed = false;
-            // Asked AGAIN immediately before the first audible sample.
-            // GetContent decodes a whole track and the host construction above
-            // is not free, so the answer from the top of this method is several
-            // milliseconds old — and this is the one line where being wrong is
-            // audible in somebody else's match. Nothing has played yet, so Stop
-            // simply releases what was built.
             string refuseAtPlay = RefusalNow();
             if (refuseAtPlay != null) { Stop(refuseAtPlay); return; }
             _playStartTicks = Stopwatch.GetTimestamp();
+            NoteScriptedWindow(0f);   // the buffers before the first sample are scripted silence
+            _wallFromTicks = _playStartTicks;
             _src.Play();
             block.Stop();
             _openBlockMs = (float)block.Elapsed.TotalMilliseconds;
@@ -562,11 +663,40 @@ namespace CompetitiveRounds
             if (_openPending && Time.frameCount >= _openLogFrame)
             {
                 _openPending = false;
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] opened key=" + _key + " warm=" + (_warm ? 1 : 0)
+                // D8: the memory row, measured here (three frames after the
+                // completion block) against the counter sampled just before
+                // this open. A first open pays the request buffer plus FMOD's
+                // stream state: bound OggSize x 1.5 + 1 MB. A re-selection
+                // binds a retained clip and must cost nothing: 0 +/- 0.5 MB —
+                // a second request would show here as +MBs (D3). Judged where
+                // it is measured; a bar row on the broadcast seat only (impl2
+                // r1 M4: the seat that can exclude other activity). R17: the
+                // row's baseline was sampled just before this open and is not
+                // resampled; a counter unreadable on either side prints the
+                // row as unmeasured, which is a failed bar row, never a pass.
+                long nat = NativeAlloc();
+                bool natAvail = nat >= 0 && _natOpen0 >= 0;
+                long d = natAvail ? nat - _natOpen0 : 0L;
+                double dMb = d / 1048576.0;
+                string rowName = _warm ? "d_native_reopen_mb" : "d_native_per_open_mb";
+                double boundMb = _warm ? 0.5 : _oggSize / 1048576.0 * 1.5 + 1.0;
+                bool pass = natAvail && (_warm ? Math.Abs(dMb) <= boundMb : dMb <= boundMb);
+                string boundText = _warm ? "+/-0.5" : F1((float)boundMb);
+                string verdict = !natAvail ? "unmeasured" : !BroadcastMode.IsBroadcastIdentity ? "measured-only" : pass ? "pass" : "FAIL";
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] opened key=" + _key + " warm=" + (_warm ? 1 : 0)
                     + " request_ms=" + F0(_requestMs) + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs)
                     + " open_frame_max_ms=" + F1(_openFrameMax)
                     + " loadState=" + _clip.loadState + " loadType=" + _clip.loadType
-                    + " length_s=" + F1(_clip.length) + " freq=" + _clip.frequency + " ch=" + _clip.channels);
+                    + " length_s=" + F1(_clip.length) + " freq=" + _clip.frequency + " ch=" + _clip.channels
+                    + " " + rowName + "=" + (natAvail ? Dmb(d) : "unmeasured") + " bound=" + boundText + " verdict=" + verdict);
+                // The end record carries the run's LAST opened row: the only
+                // one of a normal/stress run, the tenth re-selection's of a
+                // churn run (each cycle prints its own line above).
+                _nativeOpenRow = rowName + "=" + (!natAvail ? "unmeasured"
+                    : !BroadcastMode.IsBroadcastIdentity ? Dmb(d) + "(measured-only)"
+                    : pass ? Dmb(d)
+                    : Dmb(d) + ">" + boundText);
+                _nativeOpenPass = pass;
                 LogMemory("after_open", _key);
             }
             // Context is re-checked every tick: an online room ends any run, and
@@ -591,7 +721,21 @@ namespace CompetitiveRounds
             // compared against. Gating it on the content mask would excuse the
             // very interval the split above exists to measure.
             if (_tap != null && !_tap.CallbacksPaused && _src.isPlaying)
-                _audioWallSeconds += Time.unscaledDeltaTime;
+            {
+                if (_wallAccruing) _audioWallSeconds += Time.unscaledDeltaTime;
+                else
+                {
+                    float since = (float)((Stopwatch.GetTimestamp() - _wallFromTicks) / (double)Stopwatch.Frequency);
+                    _audioWallSeconds += Mathf.Clamp(since, 0f, Time.unscaledDeltaTime);
+                    _wallAccruing = true;
+                }
+            }
+            else _wallAccruing = false;
+            // impl2 r1 M4 (§7 2-9): the peak deficit is retained per tick, not
+            // only at the 5 s records — a transient starvation between two
+            // records is exactly what the row exists to catch. Read from the
+            // same expression as the end line's figure.
+            { float d = DeficitMs(); if (d > _deficitPeakMs) _deficitPeakMs = d; }
             float t = _src.time;
             float len = _clip.length;
             // Wrap-aware: a drop of more than half the clip is a loop wrap.
@@ -621,7 +765,8 @@ namespace CompetitiveRounds
             {
                 _tap.FirstSampleLogged = true;
                 double ms = (_tap.FirstSampleTicks - _playStartTicks) * 1000.0 / Stopwatch.Frequency;
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] started key=" + _key + " first_sample_ms=" + F1((float)ms));
+                _firstSampleMs = (float)ms;
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] started key=" + _key + " first_sample_ms=" + F1((float)ms));
             }
             if (_mode == Mode.Stress && _busy == null && _busyStartAt > 0f && now >= _busyStartAt) StartBusy(now);
             if (_mode == Mode.Churn) { PumpChurn(now); return; }
@@ -652,11 +797,11 @@ namespace CompetitiveRounds
             if (now >= _nextLog || now >= _endAt)
             {
                 _nextLog = now + 5f;
-                Plugin.Log?.LogInfo("[MUSIC-PROBE] play key=" + _key + " t=" + F1(t) + " wraps=" + _wraps
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] play key=" + _key + " t=" + F1(t) + " wraps=" + _wraps
                     + " drift_ms=" + F0(drift * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
                     + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f)
                     + " silent_run=" + _tap.SilentRun + " silent_run_max=" + _tap.SilentRunMax + " buffers=" + _tap.Buffers
-                    + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs())
+                    + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs()) + " audio_deficit_peak_ms=" + F0(_deficitPeakMs)
                     + " frame_max_ms=" + F1(_frameMax) + " fps=" + (Time.smoothDeltaTime > 0f ? F0(1f / Time.smoothDeltaTime) : "?")
                     + " busy=" + (_busy != null ? 1 : 0) + " playing=" + (_src.isPlaying ? 1 : 0) + " step=" + _step + " context=" + SeatContext());
                 _frameMax = 0f;
@@ -676,8 +821,9 @@ namespace CompetitiveRounds
             {
                 case 0:
                     if (now < _stepAt) return;
-                    if (len < 20f) { Plugin.Log?.LogInfo("[MUSIC-PROBE] controls key=" + _key + " skipped (track shorter than 20 s)"); _step = 7; return; }
+                    if (len < 20f) { MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] controls key=" + _key + " skipped (track shorter than 20 s)"); _step = 7; return; }
                     _stepTarget = len - 8f;
+                    NoteScriptedWindow(0f);
                     _src.time = _stepTarget;
                     _maskUntil = now + 0.5f;
                     _stepAt = now; _stepDeadline = now + 9f;
@@ -695,9 +841,11 @@ namespace CompetitiveRounds
                     return;
                 case 3:
                     if (now - _stepAt < 3f) return;
-                    Judge("pause_holds", Mathf.Abs(_src.time - _stepTarget) < 0.05f && !_src.isPlaying, "t=" + F1(_src.time) + " held=" + F1(_stepTarget) + " playing=" + (_src.isPlaying ? 1 : 0));
+                    Judge("pause_holds", Mathf.Abs(_src.time - _stepTarget) < 0.05f && !_src.isPlaying, "t=" + F1(_src.time) + " retained=" + F1(_stepTarget) + " playing=" + (_src.isPlaying ? 1 : 0));
                     _src.time = 10f;
+                    NoteScriptedWindow(0f);
                     MaskCallbacks(false);
+                    _wallFromTicks = Stopwatch.GetTimestamp();
                     _src.UnPause();
                     // The drift reference is from before the pause and the
                     // seek, so it is meaningless now. Step 4 is AUDIBLE and its
@@ -713,6 +861,7 @@ namespace CompetitiveRounds
                     if (now - _stepAt < 1f) return;
                     Judge("seek_paused_resume", _src.isPlaying && Mathf.Abs(_src.time - (10f + (now - _stepAt))) < 0.5f, "t=" + F1(_src.time) + " want~" + F1(10f + (now - _stepAt)));
                     _src.loop = false;
+                    NoteScriptedWindow(0f);
                     _src.time = len - 5f;
                     _maskUntil = now + 0.5f;
                     ResetDriftRef();
@@ -720,12 +869,17 @@ namespace CompetitiveRounds
                     // wall time says only that five seconds passed, which a
                     // source stopped by something else also satisfies.
                     _framesAtEndSeek = (object)_tap != null ? _tap.FramesDelivered : -1L;
+                    _timeAtDeath = -1f;
                     _stepAt = now; _stepDeadline = now + 7f;
                     _step = 5;
                     return;
                 case 5:
+                    if (_src.isPlaying) _timeAtDeath = _src.time;   // last position seen alive (§2.3.6)
                     if (!_src.isPlaying)
                     {
+                        // The natural end is scripted silence too: the buffers
+                        // up to half a second before the observed stop.
+                        NoteScriptedWindow(0.5f);
                         // r9 MEDIUM: the seek was to len-5, so a genuine
                         // natural end arrives about five seconds later. An
                         // immediate !isPlaying is a source that stopped for
@@ -754,8 +908,18 @@ namespace CompetitiveRounds
                         Judge("natural_end", timed && played,
                               "isPlaying=0 after " + F1(elapsed) + " s (want 4.5-6.5 from len-5), "
                               + "delivered=" + (owed < 0f ? "unavailable" : F1(owed)) + " s (want >= 4), t=" + F1(_src.time));
+                        // §2.3.6: the last position seen alive must sit inside the
+                        // engine's 4 s natural window (MusicEngine.EOF_WINDOW_SEC),
+                        // or a streamed clip's real end is classified premature
+                        // there. The position is sampled once per tick, so the
+                        // gap includes up to one frame of playback.
+                        Judge("time_at_death", _timeAtDeath >= 0f && len - _timeAtDeath <= 4f,
+                              "t=" + (_timeAtDeath < 0f ? "unavailable" : F1(_timeAtDeath)) + " len=" + F1(len)
+                              + " gap=" + (_timeAtDeath < 0f ? "?" : F1(len - _timeAtDeath)) + " (want <= 4)");
                         _src.loop = true; _src.time = 0f;
+                        NoteScriptedWindow(0f);
                         MaskCallbacks(false);   // the natural end is an intended silence, not a gap
+                        _wallFromTicks = Stopwatch.GetTimestamp();
                         _src.Play();
                         _maskUntil = now + 0.5f;
                         ResetDriftRef();
@@ -769,7 +933,8 @@ namespace CompetitiveRounds
                     }
                     return;
                 case 6:
-                    Plugin.Log?.LogInfo("[MUSIC-PROBE] controls key=" + _key + " pass=" + _controlsPass + " fail=" + _controlsFail);
+                    _controlsDone = true;
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] controls key=" + _key + " pass=" + _controlsPass + " fail=" + _controlsFail);
                     _step = 7;
                     return;
                 default:
@@ -809,20 +974,21 @@ namespace CompetitiveRounds
         private static void Judge(string name, bool ok, string detail)
         {
             if (ok) _controlsPass++; else _controlsFail++;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] control key=" + _key + " " + name + "=" + (ok ? "pass" : "FAIL") + " " + detail);
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] control key=" + _key + " " + name + "=" + (ok ? "pass" : "FAIL") + " " + detail);
         }
 
         private static void PumpChurn(float now)
         {
             if (now < _churnPlayUntil) return;
             _churnCycles++;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] churn key=" + _key + " cycle=" + _churnCycles + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs) + " request_ms=" + F0(_requestMs));
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] churn key=" + _key + " cycle=" + _churnCycles + " getcontent_ms=" + F1(_getContentMs) + " open_block_ms=" + F1(_openBlockMs) + " request_ms=" + F0(_requestMs));
             if (_churnCycles >= 10) { Stop("churn done"); return; }
-            // close this cycle's objects without ending the run, then reopen
+            // D11: this cycle's source, tap and host object go without ending
+            // the run; the retained pair is re-selected onto a fresh source.
             CloseObjects();
-            string oggFile = null;
-            try { var parts = _key.Split(':'); var album = MusicCatalog.Get(parts[0]); oggFile = album.Tracks[int.Parse(parts[1], CultureInfo.InvariantCulture)].OggFile; } catch { }
-            if (oggFile == null || !OpenRequest(oggFile, now)) { Stop("churn reopen failed"); return; }
+            MusicTrackDef track = null;
+            try { var parts = _key.Split(':'); var album = MusicCatalog.Get(parts[0]); track = album.Tracks[int.Parse(parts[1], CultureInfo.InvariantCulture)]; } catch { }
+            if (track == null || !BeginOpen(track, now)) { Stop("churn reselect failed"); return; }
             _churnPlayUntil = now + 1f;
         }
 
@@ -839,7 +1005,7 @@ namespace CompetitiveRounds
             }
             _busyUntil = now + 60f;
             _busyStartAt = -1f;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] busy key=" + _key + " threads=" + n + " for 60 s");
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] busy key=" + _key + " threads=" + n + " for 60 s");
         }
 
         private static void BusyLoop()
@@ -852,7 +1018,7 @@ namespace CompetitiveRounds
         {
             _busyRun = false;
             _busy = null;
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] busy key=" + _key + " released");
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] busy key=" + _key + " released");   // R4: teardown logging is swallow-all
         }
 
         // ── memory ───────────────────────────────────────────────────────
@@ -860,15 +1026,23 @@ namespace CompetitiveRounds
         private static long NativeReserved() { try { return Profiler.GetTotalReservedMemoryLong(); } catch { return -1; } }
         private static long ProcessPrivate() { try { return Process.GetCurrentProcess().PrivateMemorySize64; } catch { return -1; } }
 
+        /// <summary>R17: the run's native baselines (_nat0/_res0) are sampled
+        /// once at Start, before the run's first allocation, and never
+        /// resampled; a counter that read -1 on either side prints that
+        /// native field as `unmeasured`, never a delta against -1.</summary>
         private static void LogMemory(string phase, string key)
         {
-            long mgd = GC.GetTotalMemory(false), nat = NativeAlloc(), res = NativeReserved(), proc = ProcessPrivate();
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] mem key=" + key + " phase=" + phase
-                + " managed_mb=" + Mb(mgd) + " native_alloc_mb=" + Mb(nat) + " native_reserved_mb=" + Mb(res) + " process_private_mb=" + (proc > 0 ? Mb(proc) : "?")
-                + (phase == "baseline" ? "" : " d_managed_mb=" + Dmb(mgd - _mgd0) + " d_native_alloc_mb=" + Dmb(nat - _nat0) + " d_native_reserved_mb=" + Dmb(res - _res0) + " d_process_mb=" + (proc > 0 && _proc0 > 0 ? Dmb(proc - _proc0) : "?")));
+            bool baseline = phase == "baseline";   // the stored samples, never a second read
+            long mgd = baseline ? _mgd0 : GC.GetTotalMemory(false), nat = baseline ? _nat0 : NativeAlloc(), res = baseline ? _res0 : NativeReserved(), proc = baseline ? _proc0 : ProcessPrivate();
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, "[MUSIC-PROBE] mem key=" + key + " phase=" + phase
+                + " managed_mb=" + Mb(mgd) + " native_alloc_mb=" + (nat < 0 ? "unmeasured" : Mb(nat)) + " native_reserved_mb=" + Mb(res) + " process_private_mb=" + (proc > 0 ? Mb(proc) : "?")
+                + (phase == "baseline" ? "" : " d_managed_mb=" + Dmb(mgd - _mgd0) + " d_native_alloc_mb=" + DmbOr(nat, _nat0) + " d_native_reserved_mb=" + DmbOr(res, _res0) + " d_process_mb=" + (proc > 0 && _proc0 > 0 ? Dmb(proc - _proc0) : "?")));
         }
 
         // ── teardown ─────────────────────────────────────────────────────
+        /// <summary>Per-run objects only — the source (stopped), the tap and
+        /// the host object (destroyed). The retained pair (request, clip) is
+        /// never passed here (D11): no dispose exists in this file.</summary>
         private static void Release(object h, string what)
         {
             try
@@ -876,13 +1050,15 @@ namespace CompetitiveRounds
                 if (h is AudioSource s) { s.Stop(); return; }
                 if (h is Component c) { UnityEngine.Object.Destroy(c); return; }
                 if (h is UnityEngine.Object o) { UnityEngine.Object.Destroy(o); return; }
-                if (h is UnityWebRequest r) { r.Dispose(); return; }
             }
             catch (Exception ex)
             {
-                // Keep the handle for a bounded retry rather than dropping it.
-                Plugin.Log?.LogWarning("[MUSIC-PROBE] release failed (" + what + "): " + ex.Message);
-                _retry.Add(new KeyValuePair<object, int>(h, 1));
+                // Keep the handle for a bounded retry rather than dropping it:
+                // three more attempts on later ticks, then abandoned and logged.
+                // R4: the handle is kept BEFORE any logging, and the logger is
+                // swallow-all — a throw in either cannot abort the teardown.
+                _retry.Add(new RetryHandle { Handle = h, Attempts = 1, What = what });
+                MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] release failed (" + what + "): " + ex.Message);
             }
         }
 
@@ -890,40 +1066,91 @@ namespace CompetitiveRounds
         {
             for (int i = _retry.Count - 1; i >= 0; i--)
             {
-                var kv = _retry[i];
+                var r = _retry[i];
                 _retry.RemoveAt(i);
                 try
                 {
-                    if (kv.Key is UnityEngine.Object o) { if (o != null) UnityEngine.Object.Destroy(o); }
-                    else if (kv.Key is UnityWebRequest r) r.Dispose();
+                    if (r.Handle is UnityEngine.Object o) { if (o != null) UnityEngine.Object.Destroy(o); }
                 }
                 catch (Exception ex)
                 {
-                    if (kv.Value < 3) _retry.Add(new KeyValuePair<object, int>(kv.Key, kv.Value + 1));
-                    else Plugin.Log?.LogWarning("[MUSIC-PROBE] release abandoned after 3 attempts: " + ex.Message);
+                    r.Attempts++;
+                    if (r.Attempts < 4) _retry.Add(r);
+                    else MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] handle abandoned after 4 attempts (" + r.What + "): " + ex.Message + " — this handle is NOT released");
                 }
             }
         }
 
         private static void CloseObjects()
         {
-            // Fold BEFORE the release, or a churn cycle's gaps and delivered
-            // frames leave with the tap that recorded them.
+            // r3 M4 (F3): STOP FIRST, QUIESCE, THEN FOLD. The fold used to
+            // read the silent-run count and ring while the source still
+            // played, so the audio thread could deliver the qualifying second
+            // zero buffer of an unscripted run after the read and before
+            // Stop — a run missing from the snapshot, and a `bar=pass` over
+            // it. Now the source is stopped, the tap is disarmed with a full
+            // fence and the main thread waits (bounded) for any callback
+            // already inside the tap to leave; only then are the counters
+            // and the ring folded, so every run the tap ever stamped is in
+            // them. A Stop that throws keeps its handle for the retry as
+            // before; the disarm alone ends the recording either way.
+            if ((object)_src != null) Release(_src, "source");
             if ((object)_tap != null)
             {
+                if (!QuiesceTap(_tap))
+                {
+                    _runTapQuiesceTimeouts++;
+                    MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Warning, "[MUSIC-PROBE] tap still inside a callback " + TAP_QUIESCE_MS + " ms after the disarm — the fold below may miss a run; counted against the bar");
+                }
+                // Fold BEFORE the release, or a churn cycle's gaps and delivered
+                // frames leave with the tap that recorded them.
                 if (_tap.MaxGapTicks > _runMaxGapTicks) _runMaxGapTicks = _tap.MaxGapTicks;
                 if (_tap.SilentRunMax > _runSilentRunMax) _runSilentRunMax = _tap.SilentRunMax;
+                // impl2 r2 M4: every silent run of >= 2 buffers is judged, not
+                // just the longest — the tap's start stamps join the run's
+                // list here (classification against the scripted windows is
+                // the main thread's, in Stop). Runs past the ring were counted
+                // but not stamped; they cannot be shown scripted, so they fail.
+                int runs = _tap.SilentRunCount;
+                int stamped = Math.Min(runs, ProbeTap.SilentRunRing);
+                for (int i = 0; i < stamped; i++) _runSilentRunStarts.Add(_tap.SilentRunStartTicks[i]);
+                _runSilentRunsUnstamped += runs - stamped;
                 _runHadTap = true;
                 _runFramesDelivered += _tap.FramesDelivered;
             }
-            if ((object)_src != null) Release(_src, "source");
             if ((object)_tap != null) Release(_tap, "tap");
             if ((object)_go != null) Release(_go, "host");
-            if ((object)_clip != null) Release(_clip, "clip");
-            if (_req != null) Release(_req, "request");
-            if (_reqKeep != null) Release(_reqKeep, "streamed request");
-            _src = null; _tap = null; _go = null; _clip = null; _req = null; _reqKeep = null;
+            // D11: the request and the clip are the retained pair — never
+            // released, never destroyed. A request still in flight at the stop
+            // (timeout, refusal) is retained too, clip-less.
+            if (_req != null) { RetainOpen(_req, null); _req = null; }
+            _src = null; _tap = null; _go = null; _clip = null;
             HostDestroyed = false;
+        }
+
+        private const int TAP_QUIESCE_MS = 20;
+
+        /// <summary>r3 M4 (F3): disarms the tap and confirms, on the main
+        /// thread, that no callback is still writing. Dekker-shaped with the
+        /// tap's OnAudioFilterRead: the audio side marks InCallback with a
+        /// full fence BEFORE it reads Armed; this side writes Armed and
+        /// fences BEFORE it reads InCallback — so a callback that saw Armed
+        /// set is seen here as in flight and waited out, and one that starts
+        /// after the fence sees Armed clear and writes nothing but the mark.
+        /// The wait is bounded (a callback's work is a zero scan over one
+        /// buffer, microseconds); false past the bound is a bar failure, not
+        /// a hang. No allocation on either side.</summary>
+        private static bool QuiesceTap(ProbeTap tap)
+        {
+            tap.Armed = false;
+            Thread.MemoryBarrier();
+            long deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * TAP_QUIESCE_MS / 1000L;
+            while (Volatile.Read(ref tap.InCallback) != 0)
+            {
+                if (Stopwatch.GetTimestamp() > deadline) return false;
+                Thread.Yield();
+            }
+            return true;
         }
 
         private static void Stop(string why)
@@ -931,10 +1158,11 @@ namespace CompetitiveRounds
             // RELEASE FIRST. The record below builds a string, formats six
             // numbers and calls into the logger; a throw anywhere in it used to
             // strand the tap, the host object and up to seven spinning
-            // background threads, because every release sat underneath it. The
-            // one value that does not survive the release is read into a local
-            // first; the starvation numbers are run-scoped and CloseObjects
-            // folds the outgoing tap into them, so they are complete after it.
+            // background threads, because every release sat underneath it.
+            // Every tap number is run-scoped and CloseObjects folds the
+            // outgoing tap into the run totals AFTER stopping the source and
+            // quiescing the tap (r3 M4), so they are complete — and final —
+            // only after it; nothing is read off the tap before that.
             // Run-scoped, like the gap and the deficit: in churn mode the tap
             // is rebuilt every cycle, and the last cycle's number is not the
             // run's. -1 stays the "no tap ever existed" marker — and it is
@@ -942,21 +1170,60 @@ namespace CompetitiveRounds
             // is zero. A churn cycle whose tap reported a clean zero used to
             // come out as -1, i.e. as no measurement at all, which is the
             // opposite reading of the best possible result.
-            int silentRunMax = (object)_tap != null
-                ? Math.Max(_runSilentRunMax, _tap.SilentRunMax)
-                : (_runHadTap ? _runSilentRunMax : -1);
             if (_busy != null) StopBusy();
             _openPending = false;
             CloseObjects();
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
+            int silentRunMax = _runHadTap ? _runSilentRunMax : -1;
+            // The bar is judged AFTER CloseObjects: the run totals (delivered
+            // frames, gaps, every silent run's start) are folded there.
+            // impl2 r2 M4: every silent run of >= 2 buffers must have STARTED
+            // inside a scripted window — judged here, on the main thread, with
+            // every window of the run known; a run the tap counted but could
+            // not stamp cannot be shown scripted and counts against the bar.
+            int silentRuns = _runSilentRunStarts.Count + _runSilentRunsUnstamped;
+            int unscripted = _runSilentRunsUnstamped;
+            for (int i = 0; i < _runSilentRunStarts.Count; i++) if (!SilentRunIsScripted(_runSilentRunStarts[i])) unscripted++;
+            // Every row is final here (D8, #564): the memory row was measured
+            // at this run's `opened` line, nothing is cleaned up later, so the
+            // `end` record — the runner's stop signal — is built and written
+            // now, as the run's last row, with a verdict no later measurement
+            // could retract.
+            _endBar = BarVerdict(why, silentRunMax, unscripted);
+            _endRecord = "[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
                 + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
-                + " silent_run_max=" + silentRunMax
-                + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs())
-                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail);
-            _cleanupKey = _key;
-            _cleanupSampleAt = Time.realtimeSinceStartup + 2f;
-            _cleanupGcAt = Time.realtimeSinceStartup + 5f;
-            _cleanupGcDeadline = Time.realtimeSinceStartup + 120f;
+                + " silent_run_max=" + silentRunMax + " silent_runs=" + silentRuns + " silent_runs_unscripted=" + unscripted + " tap_quiesce_timeouts=" + _runTapQuiesceTimeouts
+                + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs()) + " audio_deficit_peak_ms=" + F0(_deficitPeakMs)
+                + " open_block_ms=" + F1(_openBlockMs) + " first_sample_ms=" + (_firstSampleMs < 0f ? "?" : F1(_firstSampleMs))
+                + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail + " controls_done=" + (_controlsDone ? 1 : 0)
+                + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath));
+            FinishEndRecord(_nativeOpenRow ?? (_warm ? "d_native_reopen_mb" : "d_native_per_open_mb") + "=unmeasured(run ended before its open settled)", _nativeOpenRow != null && _nativeOpenPass);
+        }
+
+        /// <summary>Writes the `end` record with its FINAL bar, at the stop
+        /// (D8, #564: the memory row was measured at the open, nothing is
+        /// pending, and this is the run's last row). `row` is the memory row —
+        /// `d_native_per_open_mb=<mb>` on a first open, `d_native_reopen_mb=
+        /// <mb>` on a re-selection, or an unmeasured marker — printed on EVERY
+        /// seat; `pass` false adds it to the bar on the broadcast seat only,
+        /// where it is a bar row (impl2 r1 M4: judged where it is measured;
+        /// elsewhere other activity is not excluded, so the figure prints as
+        /// measured-only). Churn runs carry no bar. A no-op when nothing is
+        /// pending.</summary>
+        private static void FinishEndRecord(string row, bool pass)
+        {
+            string rec = _endRecord;
+            if (rec == null) return;
+            _endRecord = null;
+            var fails = _endBar;
+            _endBar = null;
+            string bar;
+            if (fails == null) bar = "n/a(churn)";
+            else
+            {
+                if (!pass && BroadcastMode.IsBroadcastIdentity) fails.Add(row);
+                bar = fails.Count == 0 ? "pass" : "FAIL[" + string.Join(",", fails.ToArray()) + "]";
+            }
+            MusicEngine.SafeLog(BepInEx.Logging.LogLevel.Info, rec + " " + row + " bar=" + bar);   // R4
         }
 
         /// <summary>The longest interval between two consecutive audio
@@ -1011,16 +1278,72 @@ namespace CompetitiveRounds
             return (float)(delivered / (double)rate);
         }
 
+        /// <summary>A scripted window opens now: [now - backSec, now + 1 s].
+        /// Every Play / seek / resume / restart calls this before the action;
+        /// the natural end calls it with half a second of look-back, because
+        /// its silent buffers precede the observed stop.</summary>
+        private static void NoteScriptedWindow(float backSec)
+        {
+            long now = Stopwatch.GetTimestamp();
+            long back = (long)(backSec * Stopwatch.Frequency);
+            _scriptedWindows.Add(new KeyValuePair<long, long>(now - back, now + Stopwatch.Frequency));
+        }
+
+        private static bool SilentRunIsScripted(long startTicks)
+        {
+            if (startTicks == 0L) return false;
+            for (int i = 0; i < _scriptedWindows.Count; i++)
+                if (startTicks >= _scriptedWindows[i].Key && startTicks <= _scriptedWindows[i].Value) return true;
+            return false;
+        }
+
+        /// <summary>The §2.4 + §7 2-9 PASS bar (impl2 r1 M4), judged at the
+        /// stop for every row it can judge; the memory row (D8:
+        /// d_native_per_open_mb on a first open, d_native_reopen_mb on a
+        /// re-selection) was measured at the `opened` line and is appended by
+        /// FinishEndRecord, which writes the end line with the FINAL verdict
+        /// as the run's last row (#564). Every row is
+        /// enforced: a run that did not reach its budget, a control sequence
+        /// that did not complete, or a first sample never observed cannot
+        /// pass; every silent run of >= 2 buffers must have started inside a
+        /// scripted window (`unscripted` counts those that did not); the
+        /// time_at_death bound is a control (§2.3.6) and rides the controls
+        /// row. Churn runs have no bar (null).</summary>
+        private static List<string> BarVerdict(string why, int silentRunMax, int unscripted)
+        {
+            if (_mode == Mode.Churn) return null;
+            var fail = new List<string>();
+            if (why != "budget") fail.Add("ended=" + why);
+            if (_stalls != 0) fail.Add("stalls=" + _stalls);
+            if (_driftPeak * 1000f > 60f) fail.Add("drift_peak=" + F0(_driftPeak * 1000f) + ">60");
+            if (silentRunMax < 0 || silentRunMax > 2) fail.Add("silent_run_max=" + silentRunMax + (silentRunMax < 0 ? "(no tap)" : ">2"));
+            if (unscripted > 0) fail.Add("silent_runs_unscripted=" + unscripted);
+            if (_runTapQuiesceTimeouts > 0) fail.Add("tap_quiesce_timeouts=" + _runTapQuiesceTimeouts);
+            if (MaxGapMs() > 100f) fail.Add("audio_gap_max=" + F1(MaxGapMs()) + ">100");
+            if (DeficitMs() > 100f) fail.Add("audio_deficit_end=" + F0(DeficitMs()) + ">100");
+            if (_deficitPeakMs > 100f) fail.Add("audio_deficit_peak=" + F0(_deficitPeakMs) + ">100");
+            if (!_controlsDone) fail.Add("controls=incomplete");
+            else if (_controlsFail != 0) fail.Add("controls_fail=" + _controlsFail);
+            if (_openBlockMs > 20f) fail.Add("open_block=" + F1(_openBlockMs) + ">20");
+            if (_firstSampleMs < 0f) fail.Add("first_sample=none");
+            else if (_firstSampleMs > 50f) fail.Add("first_sample=" + F1(_firstSampleMs) + ">50");
+            return fail;
+        }
+
         private static string F0(float v) { return v.ToString("F0", CultureInfo.InvariantCulture); }
         private static string F1(float v) { return v.ToString("F1", CultureInfo.InvariantCulture); }
-        private static string Mb(long b) { return b < 0 ? "?" : (b / 1048576.0).ToString("F1", CultureInfo.InvariantCulture); }
+        private static string Mb(long b) { return b < 0 ? "unmeasured" : (b / 1048576.0).ToString("F1", CultureInfo.InvariantCulture); }
         private static string Dmb(long b) { return (b / 1048576.0).ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture); }
+        private static string DmbOr(long now, long baseline) { return now < 0 || baseline < 0 ? "unmeasured" : Dmb(now - baseline); }   // R17
 
         /// <summary>Audio-thread tap on the probe source's output: counts
         /// buffers, the current and longest run of all-zero buffers, and the
         /// Stopwatch tick of the first non-zero sample. Written on the audio
-        /// thread, read on the main thread (diagnostic: torn reads tolerated).
-        /// OnDestroy flags the host so the owner releases what it still holds.</summary>
+        /// thread; the mid-run polls on the main thread are diagnostic (torn
+        /// reads tolerated), the fold at the stop is complete — it runs after
+        /// QuiesceTap has disarmed the tap and seen no callback in flight
+        /// (r3 M4). OnDestroy flags the host so the owner releases what it
+        /// still holds.</summary>
         private sealed class ProbeTap : MonoBehaviour
         {
             public volatile int Buffers, SilentRun, SilentRunMax;
@@ -1037,12 +1360,37 @@ namespace CompetitiveRounds
             /// shows up in: it supplies no zero-filled buffer, so silent_run
             /// stays at zero however starved the path is (review r9).</summary>
             public long LastCallbackTicks, MaxGapTicks, FramesDelivered;
+            /// <summary>impl2 r2 M4: the Stopwatch stamp of the FIRST buffer of
+            /// EVERY silent run that reached two buffers, in a ring allocated
+            /// once with the tap — the audio thread only stores a stamp and
+            /// bumps the count, never allocates or classifies; CloseObjects
+            /// folds the ring into the run and Stop judges each stamp against
+            /// the scripted windows. SilentRunCount keeps counting past the
+            /// ring; the unstamped remainder cannot be shown scripted and
+            /// fails the bar. The longest run's stamp alone let a later run of
+            /// equal length hide behind it (the `>`-only maximum).</summary>
+            public const int SilentRunRing = 64;
+            public readonly long[] SilentRunStartTicks = new long[SilentRunRing];
+            public volatile int SilentRunCount;
+            private long _silentRunStartTicks;
+            /// <summary>r3 M4 (F3): the tap records only while ARMED. Reset
+            /// arms it last (the volatile write publishes the cleared fields
+            /// with it); QuiesceTap clears it, fences, and waits for
+            /// InCallback — set with a full fence at the top of every
+            /// callback, before Armed is read, and cleared at its exit — to
+            /// read zero, so the fold that follows sees every write the tap
+            /// ever made and no callback writes after it. InCallback is
+            /// deliberately not reset: a callback may be inside the mark.</summary>
+            public volatile bool Armed;
+            public int InCallback;
             public void Reset()
             {
                 Buffers = 0; SilentRun = 0; SilentRunMax = 0;
                 FirstSampleTicks = 0; FirstSampleLogged = false;
                 LastCallbackTicks = 0; MaxGapTicks = 0; FramesDelivered = 0;
+                SilentRunCount = 0; _silentRunStartTicks = 0;
                 CallbacksPaused = false; SilenceExpected = false;
+                Armed = true;
             }
             /// <summary>The scripted PAUSE, where Unity stops calling the
             /// filter at all. Nothing is measured across it: no delivery, no
@@ -1070,6 +1418,18 @@ namespace CompetitiveRounds
             public volatile bool SilenceExpected;
             private void OnAudioFilterRead(float[] data, int channels)
             {
+                // r3 M4 (F3): mark in-flight (full fence) BEFORE reading Armed
+                // — see QuiesceTap; the disarmed path writes nothing else.
+                Interlocked.Exchange(ref InCallback, 1);
+                try
+                {
+                    if (!Armed) return;
+                    Record(data, channels);
+                }
+                finally { Interlocked.Exchange(ref InCallback, 0); }
+            }
+            private void Record(float[] data, int channels)
+            {
                 if (CallbacksPaused) { SilentRun = 0; LastCallbackTicks = 0; return; }
                 long stamp = Stopwatch.GetTimestamp();
                 long prev = LastCallbackTicks;
@@ -1086,7 +1446,19 @@ namespace CompetitiveRounds
                 if (SilenceExpected) { SilentRun = 0; return; }
                 bool silent = true;
                 for (int i = 0; i < data.Length; i++) { if (data[i] != 0f) { silent = false; break; } }
-                if (silent) { SilentRun++; if (SilentRun > SilentRunMax) SilentRunMax = SilentRun; }
+                if (silent)
+                {
+                    if (SilentRun == 0) _silentRunStartTicks = stamp;
+                    SilentRun++;
+                    if (SilentRun > SilentRunMax) SilentRunMax = SilentRun;
+                    // The run became a run (two buffers): stamp its start once.
+                    if (SilentRun == 2)
+                    {
+                        int n = SilentRunCount;
+                        if (n < SilentRunRing) SilentRunStartTicks[n] = _silentRunStartTicks;
+                        SilentRunCount = n + 1;
+                    }
+                }
                 else { SilentRun = 0; if (FirstSampleTicks == 0) FirstSampleTicks = Stopwatch.GetTimestamp(); }
             }
             private void OnDestroy() { if (Gen == _gen) HostDestroyed = true; }

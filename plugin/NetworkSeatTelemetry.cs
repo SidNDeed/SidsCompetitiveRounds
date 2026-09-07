@@ -74,11 +74,13 @@ namespace CompetitiveRounds
         private static readonly long[] _hist = new long[HistEdgesMs.Length + 1];
 
         // Per-frame component ledger (r2 MEDIUM 8): named durations measured
-        // INSIDE the frame (music decode, our network callbacks). A component
-        // that owns ≥60% of the frame's wall gap is a cause tag; context flags
-        // (gc/load/f5/spec) are prefixed "ctx:" because they are observations,
-        // not measured owners.
-        private static double _compDecodeMs, _compNetCbMs;
+        // INSIDE the frame (the music engine's streamed clip open, our network
+        // callbacks). A component that owns ≥60% of the frame's wall gap is a
+        // cause tag; context flags (gc/load/f5/spec) are prefixed "ctx:"
+        // because they are observations, not measured owners. The former
+        // "decode" slot is gone with the decode (Sept 7 design v2 §2.3.1): a
+        // streamed open is a 2-5 ms handle and is tagged under its own name.
+        private static double _compMusicOpenMs, _compNetCbMs;
 
         // Window ring (bundle-only): 64 most recent 1 s windows.
         private const int WINDOW_RING = 64;
@@ -220,7 +222,7 @@ namespace CompetitiveRounds
             _ringCount = 0; _ringHead = 0; _windowSeq = 0;
             Array.Clear(_hist, 0, _hist.Length);
             _tickTicks = 0; _tickCalls = 0;
-            _compDecodeMs = 0; _compNetCbMs = 0;
+            _compMusicOpenMs = 0; _compNetCbMs = 0;
             if (!keepFrozen) { _frozenReportFields = null; }
             ResetWindowAccumulators();
             _wOpenActor = 0; _wOpenId = null;   // r6 M3: the next game's first window samples its key when TickFrame opens it
@@ -332,9 +334,11 @@ namespace CompetitiveRounds
             catch { return 0; }
         }
 
-        /// <summary>A measured component of this frame (music decode ms, …).
-        /// Called from inside the frame; consumed at the next TickFrame.</summary>
-        internal static void NoteDecodeMs(double ms) { _compDecodeMs += ms; }
+        /// <summary>A measured component of this frame: the music engine's
+        /// streamed clip open (GetContent on a streamAudio handler — a handle,
+        /// not a decode). Called from inside the frame; consumed at the next
+        /// TickFrame; tagged "mopen" when it owns the frame.</summary>
+        internal static void NoteMusicOpenMs(double ms) { _compMusicOpenMs += ms; }
 
         /// <summary>battle = the FIGHTER'S vanilla battleOngoing; a spectator
         /// seat uses the observer's validated battle gate instead. Spectator
@@ -386,7 +390,7 @@ namespace CompetitiveRounds
                     WorstFrameMs = frameMs;
                     WorstFrameTags = _wWorstTags.Length > 0 ? _wWorstTags : BuildTags(frameMs);
                 }
-                _compDecodeMs = 0;
+                _compMusicOpenMs = 0;
                 if (_windowStartRt < 0f)
                 {
                     // r6 M3: the game's first window opens under the key sampled now.
@@ -419,7 +423,7 @@ namespace CompetitiveRounds
         {
             var sb = new StringBuilder(40);
             double threshold = _lastFrameWall > 0 ? _lastFrameWall * 0.6 : frameMs * 0.6;
-            if (_compDecodeMs >= threshold && _compDecodeMs > 0) sb.Append("decode");
+            if (_compMusicOpenMs >= threshold && _compMusicOpenMs > 0) sb.Append("mopen");
             if (_compNetCbMs >= threshold && _compNetCbMs > 0) { if (sb.Length > 0) sb.Append('|'); sb.Append("netcb"); }
             if (sb.Length == 0) sb.Append("unattributed");
             sb.Append(_tBattle ? "|ctx:battle" : _tPick ? "|ctx:pick" : "|ctx:between");

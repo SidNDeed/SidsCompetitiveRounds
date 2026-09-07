@@ -64,6 +64,7 @@ namespace CompetitiveRounds
         // Opt-in, default off; the command names the track and the mode.
         internal static ConfigEntry<bool> MusicProbeEnabled;
         internal static ConfigEntry<string> MusicProbeRun;
+        internal static ConfigEntry<string> MusicTestScript;
         internal static ConfigEntry<bool> ShowIngameChat;
         // Bug 211/213 (Sid's chosen design): M cycles the in-game chat overlay
         // through Normal -> Pinned -> Muted. The on/off half of that state IS
@@ -940,6 +941,10 @@ namespace CompetitiveRounds
             MusicProbeRun = Config.Bind(
                 "Music", "StreamProbeRun", "",
                 "What StreamProbe measures: '<albumSku>:<trackIndex>' plays that track streamed for 120 s. Add ':stress' for 600 s plus busy threads (only inside a live offline Sandbox round) or ':churn' for ten open/close cycles. Whatever is set here runs once when the probe turns on, including at startup; set a different value to run again. Ignored unless StreamProbe is true."
+            );
+            MusicTestScript = Config.Bind(
+                "Music", "TestScript", "",
+                "A ';'-separated music-engine exercise (Sept 7 design v2 section 2.5), run once per distinct value (including the value present at startup) and logged as [MUSIC-SELFTEST] lines. Named steps s1..s6, s4neg, s6neg and openall, plus album:<sku>, play:<sku>/<idx>, preview:<sku>/<idx>, fail:<sku>/<idx>, seek:len-<n>, loop:on|off, shuffle:on|off, select:<sku>:<i,j,..>|all, stall, unstall, wait:<sec>, stop, reset. Broadcast seat only, except a script of nothing but openall (the design v3 D12 gate), which runs on any seat; clear it when done."
             );
             MusicShuffle = Config.Bind(
                 "Music", "MusicShuffle", false,
@@ -2141,32 +2146,16 @@ namespace CompetitiveRounds
         private static string _lastTestOpenTab;
         private static float _testOpenTabAt = -1f;
         private static float _testOpenTabCfgReloadAt = -1f;
-        // Per-process nonce for the click directive (impl-review r1 HIGH 1).
-        private static readonly string _testLeverNonce = Guid.NewGuid().ToString("N").Substring(0, 6);
-        private static bool _testLeverNonceLogged;
-        // r6 LOW 9: the cfg value present when this process first looked is the
-        // STARTUP BASELINE — a click directive equal to it is inert whatever nonce
-        // it carries (a 6-hex nonce collides 1 in 16.7M; the baseline closes even that).
-        private static string _testLeverBaseline;
+        // TestQuit lever state (Sept 6, TickTestQuit): the directive's value at
+        // its first read is the BASELINE — a value already present at launch
+        // never fires; only a later, different, non-empty value quits, and at
+        // most once per process (_testQuitFired). Live state, not a leftover.
         private static string _testQuitBaseline;
         private static bool _testQuitFired;
-        // Sept 4: a Music click replayed in the SAME tick as the page open is
-        // refused by the engine ("no decode (entry: menu not open)" — its
-        // admission wants the page open on the preceding frames). The first
-        // design ARMED the click here and replayed it on a later tick; three
-        // review rounds then bound the replay to the page, the Room object, the
-        // page generation and the Photon client state, and each round found the
-        // next unbound transition inside the previous repair (a spectator
-        // acquisition entering Granting changes none of them). r3 cut: there is
-        // no armed state any more. A click directive runs in the tick that
-        // reads it or not at all, with the lever's own refusal checks read at the
-        // instant of the call (MusicClickRefusal — a coarse operator filter; the
-        // engine's click admission is the decode gate), and it requires the page to be
-        // ALREADY open on the Music tab from an earlier lever open — the
-        // operator issues the open, then the click again with a different
-        // 5th-field tag (the process nonce stays; the tag only makes the cfg
-        // value distinct so the lever re-applies). r4 cut: only 'prepare' is
-        // a lever action — see NativeUI.DevMusicClick.
+        // The "16:click:prepare:<nonce>" directive (lag-332 W6-A, with its
+        // per-process nonce and startup baseline) was removed with the click
+        // decode it drove (Sept 7 design v2 §7 Item 2): a streamed engine has
+        // no preparation click, and the engine exercise is [Music] TestScript.
 
         /// <summary>Sept 6: the seat's own way to close the game. The elevated
         /// ROUNDS on the broadcast VM stopped honouring WM_CLOSE from a
@@ -2217,7 +2206,6 @@ namespace CompetitiveRounds
         private void TickTestOpenTab()
         {
             if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;
-            if (!_testLeverNonceLogged) { _testLeverNonceLogged = true; Plugin.Log.LogInfo($"[UI] TestOpenTab click nonce for this process: {_testLeverNonce}"); }
             // Re-read the cfg file every 2s so the lever can be driven without
             // a relaunch (Config.Bind values never track disk edits, #190).
             if (Time.realtimeSinceStartup - _testOpenTabCfgReloadAt > 2f)
@@ -2227,7 +2215,6 @@ namespace CompetitiveRounds
             }
             TickTestQuit();
             string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
-            if (_testLeverBaseline == null) _testLeverBaseline = raw;
             if (raw == _lastTestOpenTab) return;
             if (Time.realtimeSinceStartup < 6f) return;   // let the menu and the overlay's page build settle
             if (_testOpenTabAt < 0f) { _testOpenTabAt = Time.realtimeSinceStartup; return; }
@@ -2260,96 +2247,14 @@ namespace CompetitiveRounds
                     int.TryParse(parts[1].Trim().Substring(3), out shopCat);
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
-            // lag-332 W6-A verification: "16:click:prepare:<process nonce>[:<tag>]"
-            // runs ONE Music-tab preparation click (r4 cut: transport actions are
-            // not lever-driven) through the same callback path a real click uses —
-            // the engine's menu-admission snapshot still gates any decode. Music
-            // popup only (Sept 7 item 1; "16", the former tab number, stays the
-            // directive's selector); the nonce is logged once at startup; a value present at
-            // startup is the baseline and never replays.
-            // Broadcast seat only, like every lever here: synthetic mouse input
-            // cannot reach the overlay (#420), so this is how the seat proves
-            // the click-decode rule with nobody at it.
-            string musicClick = null;
-            if (idx == 16 && parts.Length > 2 && string.Equals(parts[1].Trim(), "click", StringComparison.OrdinalIgnoreCase))
-            {
-                // r5 LOW 11: a Music click replays only while the Music popup is open — the
-                // Shop's real Preview callback is the only other decode path.
-                // r6 LOW 9: exact token, and a pre-start value never replays.
-                if (string.Equals(raw, _testLeverBaseline, StringComparison.Ordinal))
-                {
-                    Plugin.Log.LogInfo("[UI] TestOpenTab click directive ignored: present at startup (baseline)");
-                    parts = new string[] { parts[0] };
-                }
-                // impl-review r1 HIGH 1: a PERSISTED click directive fired at the
-                // bot's relaunch and decoded a track with nobody at the seat —
-                // the exact "config value consumed after startup" hazard the
-                // design forbids. A click replay now requires THIS process's
-                // nonce as the 4th field ("16:click:prepare:<nonce>"), logged
-                // once at startup; a value written before launch cannot carry
-                // it (1-in-16.7M collision aside), and the startup baseline
-                // above makes any pre-start directive inert regardless.
-                string nonce = parts.Length > 3 ? parts[3].Trim() : "";
-                if (string.Equals(nonce, _testLeverNonce, StringComparison.Ordinal))
-                    musicClick = parts[2].Trim().ToLowerInvariant();
-                else
-                    Plugin.Log.LogInfo($"[UI] TestOpenTab click directive ignored: nonce mismatch (this process: {_testLeverNonce})");
-            }
-            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"} shopCat {shopCat} musicClick {musicClick ?? "-"}");
+            // A "16:click:..." value (the retired preparation-click directive)
+            // now opens tab 16 like any other "16" value: "click" is not a
+            // scroll float, so the scroll stays -1.
+            Plugin.Log.LogInfo($"[UI] TestOpenTab -> tab {idx} scroll {scroll} article {infoKey ?? "-"} metric {compareMetric ?? "-"} shopCat {shopCat}");
             NativeUI.ReleaseShowcaseOwnership();   // r1 LOW 9: the lever takes the page over from the showcase
-            if (!string.IsNullOrEmpty(musicClick))
-            {
-                // Synchronous, never armed (see the comment above TickTestOpenTab).
-                string refuse = MusicClickRefusal();
-                if (refuse == null)
-                {
-                    try
-                    {
-                        bool ran = NativeUI.DevMusicClick(musicClick);
-                        Plugin.Log.LogInfo(ran
-                            ? $"[UI] TestOpenTab: music click '{musicClick}' applied"
-                            : $"[UI] TestOpenTab: music click '{musicClick}' not applied: not a lever action");
-                    }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestOpenTab music click '{musicClick}' failed: {ex.Message}"); }
-                    return;
-                }
-                Plugin.Log.LogInfo($"[UI] TestOpenTab: music click '{musicClick}' not applied: {refuse}");
-                bool onMusicTab = false;
-                try { onMusicTab = NativeUI.IsOpen && NativeUI.UtilityPopupIs(NativeUI.UtilKind.Music); } catch { }
-                if (onMusicTab) return;   // popup already open; nothing else to do
-                // fall through: open the Music popup so a re-issued directive can run
-            }
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
-        }
-
-        /// <summary>Why the lever refuses a Music click RIGHT NOW, or null when
-        /// its OWN checks pass. Read at the instant of the call — there is no
-        /// armed state to bind, so no transition can slip between the check and
-        /// the click. This is a coarse operator-facing filter, not the admission:
-        /// it looks at the page (open with the Music popup up, which the engine's
-        /// admission wants on the preceding frames), any room, the director's
-        /// acquisition, a local spectator session and an unsettled spectator
-        /// join. It does NOT look at public WATCH grants or the Steam-lobby
-        /// latch; the engine's own click admission (BeginClickAdmission /
-        /// ClickDecodeOpportunity) does, and that is what gates the decode — a
-        /// `prepare` this filter lets through still decodes nothing in those
-        /// states (r5 LOW 1). r3 MEDIUM 1 context: an acquisition entering
-        /// Granting changes neither the room nor the client state.</summary>
-        private static string MusicClickRefusal()
-        {
-            try
-            {
-                if (!NativeUI.IsOpen || !NativeUI.UtilityPopupIs(NativeUI.UtilKind.Music))
-                    return "the Music popup is not open (opening it now - re-issue the directive with the same nonce and a different 5th-field tag once it is)";
-                if (PhotonNetwork.InRoom) return "the seat is inside a room";
-                if (BroadcastMode.AcquisitionBusy) return "a spectator acquisition is in progress";
-                if (SpectatorSession.IsLocalSpectator) return "the seat is a spectator";
-                if (SpectatorJoiner.JoinOpUnsettled) return "a join operation is unsettled";
-                return null;
-            }
-            catch (Exception ex) { return "state read failed: " + ex.Message; }
         }
 
         // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──
@@ -2818,6 +2723,11 @@ namespace CompetitiveRounds
             try { OverlayIdleClose.Tick(); } catch { }
             try { MusicStreamProbe.Tick(); } catch { }
             try { RegionPingSweep.Tick(); } catch { }   // Sept 7 item 3: 250 ms self-throttled main-thread poll
+            // D13: a host-less music engine has no Update of its own; this
+            // persistent poll respawns the host once the dying one is observed
+            // destroyed — stateless, uncapped, every frame.
+            try { MusicEngine.PollHost(); } catch { }
+            try { MusicEngine.TickTestScript(); } catch { }
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }

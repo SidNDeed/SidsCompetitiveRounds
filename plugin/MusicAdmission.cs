@@ -8,23 +8,19 @@ using UnityEngine;
 namespace CompetitiveRounds
 {
     /// <summary>
-    /// W6-A (lag-332 design v6 §2.1): the MENU ADMISSION snapshot behind the
-    /// pure synchronous-click decode rule.
-    ///
-    /// A buffered OGG's decode (DownloadHandlerAudioClip.GetContent) is a
-    /// 320-700 ms main-thread stall per track (measured, evidence-seed
-    /// addendum 3). Five design-review rounds killed every automatic
-    /// admission latch: Steam-invite acceptance, queue enrollment and the
-    /// public WATCH flow all begin their join several ticks before ANY
+    /// The MENU ADMISSION snapshot (lag-332 design v6 §2.1), kept after Sept 7
+    /// design v2 §7 Item 2 removed the click decode it was built for: music is
+    /// streamed now (DownloadHandlerAudioClip.streamAudio = true), so no click
+    /// decodes anything and this class no longer gates the music engine's
+    /// file opens. Two readers remain: ClickAdmissible (EmojiSprites' safe
+    /// state for its own sprite decode) and AtAdmissibleMenu (MusicEngine's
+    /// Previous and uncached-preview branches). The snapshot is still the
+    /// right shape for them because Steam-invite acceptance, queue enrollment
+    /// and the public WATCH flow begin their join several ticks before ANY
     /// engine-visible state changes (Photon stays ConnectedToMasterServer,
-    /// the menu stays open, nothing is loading), so a decode "at the menu"
-    /// can land inside a join transition. The surviving rule: a decode may
-    /// happen ONLY inside an explicit menu click callback — a Music-tab
-    /// control, or the Shop's music Preview button (v6.1 note 1) — and only
-    /// when this snapshot has been identical and admissible on two DISTINCT
-    /// earlier frames as well as at the click itself. Nothing automatic ever
-    /// decodes; a request that completes later stays undecoded until the
-    /// next click.
+    /// the menu stays open, nothing is loading); a reader wants the snapshot
+    /// identical and admissible on two DISTINCT earlier frames as well as at
+    /// the moment it asks.
     /// </summary>
     internal static class MusicAdmission
     {
@@ -62,16 +58,11 @@ namespace CompetitiveRounds
         }
 
         // Two prior observations on distinct frames + the current one. The
-        // click rule compares all three (design v6 §2.1: "identical complete
+        // ClickAdmissible compares all three (design v6 §2.1: "identical complete
         // snapshot on two DISTINCT prior frames", frame count is metadata and
         // never part of equality).
         private static Snapshot _prev1, _prev2, _current;
         private static bool _havePrev1, _havePrev2;
-
-        /// <summary>True only for the duration of the single GetContent call
-        /// site's click callback — the call-stack guard the design requires.
-        /// MusicEngine's decode wrapper refuses to run when this is false.</summary>
-        internal static bool InClickDecode;
 
         /// <summary>Steam invite acceptance calls SteamMatchmaking.JoinLobby
         /// immediately and only closes the menu in the asynchronous
@@ -106,7 +97,7 @@ namespace CompetitiveRounds
         /// impl-review r1 HIGH 2: comparing against _prev1/_prev2 alone let a
         /// UI callback that runs BEFORE the host's Update skip the observation
         /// of frame N-1 (held in _current), so an unsafe N-1 was invisible.
-        /// Returns the current snapshot for the decode log.</summary>
+        /// Returns the current snapshot for the caller's log.</summary>
         internal static bool ClickAdmissible(out Snapshot now, out string why)
         {
             now = default;

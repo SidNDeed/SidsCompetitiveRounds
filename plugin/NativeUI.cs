@@ -5693,31 +5693,6 @@ namespace CompetitiveRounds
 
         private static GameObject shopScrollGO;
 
-        /// <summary>Broadcast-seat verification lever (Aug 23): open the overlay
-        /// on a tab and optionally scroll the Shop list, so a seat with nobody at
-        /// it can screenshot every tab. Gated by the caller on the broadcast
-        /// identity; no state beyond what a click would set.</summary>
-        /// <summary>lag-332 W6-A test lever (broadcast seat only, via
-        /// [Broadcast] TestOpenTab "16:click:prepare:&lt;process nonce&gt;[:&lt;tag&gt;]" —
-        /// the nonce is logged once at startup and a value present at startup is
-        /// inert): runs the Music-tab preparation click through MusicUiCall in
-        /// the tick the lever is read — the identical path a real click takes,
-        /// so the engine's admission snapshot and click-decode rule apply. r4
-        /// cut: transport actions are not lever-driven.</summary>
-        internal static bool DevMusicClick(string what)
-        {
-            if (!BroadcastMode.IsBroadcastIdentity) return false;
-            // r4 cut: only the PREPARATION click is lever-driven. It has no
-            // transport action of its own — MusicUiCall's admission token is the
-            // engine's click-decode gate, which refuses to decode in every
-            // joining / acquiring / spectating state. The transport actions
-            // (play-pause, skip, prev, stop, use-vanilla) mutate playback
-            // outside that gate and are not exposed to the lever.
-            if (what == "prepare") { MusicUiCall("prepare", () => { }); return true; }
-            Plugin.Log.LogInfo($"[MUSIC-UI] DevMusicClick: '{what}' is not a lever action (only 'prepare' is)");
-            return false;
-        }
-
         // Deferred Info-article body scroll for the lever (see DevOpenTab).
         private static float pendingInfoScroll = -1f;
         private static int pendingInfoScrollFrame;
@@ -5740,6 +5715,10 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>Broadcast-seat verification lever (Aug 23): open the overlay
+        /// on a tab and optionally scroll the Shop list, so a seat with nobody at
+        /// it can screenshot every tab. Gated by the caller on the broadcast
+        /// identity; no state beyond what a click would set.</summary>
         internal static void DevOpenTab(int idx, float shopScroll, string infoArticleKey = null)
         {
             try
@@ -10433,10 +10412,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                                 dirty = true;
                                 return;
                             }
-                            // Key-bound (r2 MEDIUM 10 / r3 MEDIUM 1): this click may decode ONLY its own preview.
-                            var token = MusicEngine.BeginClickAdmission("shop-preview", "p:" + trCap.albumSku + "/" + trCap.trackIdx);   // entry admission (r2 MEDIUM 11)
+                            // Streamed music (Sept 7 design v2 §2.3): the click queues the
+                            // request; the engine's tick opens the file. Nothing decodes here.
                             MusicEngine.TogglePreview(trCap.albumSku, trCap.trackIdx);
-                            MusicEngine.ClickDecodeOpportunity(token);
                             dirty = true;   // repaint Preview <-> Stop
                         }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[SHOP-MUSIC] preview: {ex.Message}"); }
@@ -11735,8 +11713,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object txtMusicMode, txtMusicNow, txtMusicDlStatus;
         private static GameObject musicStatusRow, musicRetryBtn;
         private static GameObject musicPlayBtn, musicLoopBtn, musicShuffleBtn;
-        private static GameObject musicPrepareBtn;       // v6 §2.1 explicit decode affordance
-        private static object musicPrepareBtnTxt;
+        private static GameObject musicStatusLineGo;     // the engine's status line (Downloading n% / Failed / Not installed) in the slot the Prepare button held until Sept 7 design v2 §7 Item 2
+        private static object musicStatusLineTxt;
         private static object musicSeekElapsed, musicSeekTotal;
         private static UIFactory.SliderHandle musicSeekSlider, musicVolSlider;
         private static float musicSeekPollAt;
@@ -11774,12 +11752,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
          * (#158 — CreateButton already guarded the click). */
         private static void MusicUiCall(string what, Action a)
         {
-            // lag-332 v6 §2.1 + impl-review r2 MEDIUM 10/11: the admission decision
-            // is taken at ENTRY (before the action mutates selection/playback),
-            // and only PREPARATION actions may decode (the engine's allowlist).
-            var token = MusicEngine.BeginClickAdmission(what);   // r3 MEDIUM 1: action-bound, one-shot
+            // Sept 7 design v2 §7 Item 2: no click admission and no decode after
+            // the action. Music is streamed, so a control only mutates
+            // selection/playback; the engine's tick opens what it then needs.
             try { a(); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] {what}: {ex.Message}"); }
-            try { MusicEngine.ClickDecodeOpportunity(token); } catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] decode after {what}: {ex.Message}"); }
             dirty = true;
         }
 
@@ -11956,16 +11932,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var musVanBtn = UIFactory.CreateButton("MusVan", rowC.transform, "Use vanilla music", 13f, C_WHITE,
                 new Color(0.3f, 0.3f, 0.5f, 0.9f), () => MusicUiCall("use-vanilla", MusicEngine.UseVanilla), sizeDelta: new Vector2(170, 26));
             UIFactory.AddLE(musVanBtn, prefW: 170, prefH: 26, flexW: 0, flexH: 0);
-            // lag-332 v6 §2.1: the Prepare affordance. Decoding a downloaded
-            // track is a 320-700 ms main-thread stall and happens ONLY inside an
-            // explicit menu click (a Music-tab control, or the Shop's music
-            // Preview — v6.1 note 1); this button is the explicit one.
-            // Hidden when every desired track is resident (RefreshMusicTab).
-            musicPrepareBtn = UIFactory.CreateButton("MusPrep", rowC.transform, "Prepare music", 13f, C_WHITE,
-                new Color(0.55f, 0.4f, 0.2f, 0.95f), () => MusicUiCall("prepare", () => { }), sizeDelta: new Vector2(230, 26));
-            UIFactory.AddLE(musicPrepareBtn, prefW: 230, prefH: 26, flexW: 0, flexH: 0);
-            musicPrepareBtnTxt = UIFactory.GetButtonText(musicPrepareBtn);
-            musicPrepareBtn.SetActive(false);
+            // Sept 7 design v2 §7 Item 2: the Prepare button is gone (music is
+            // streamed; no click opens anything). Its slot carries the engine's
+            // status line instead — loading progress, files not installed, or
+            // failed tracks — hidden while it has nothing to say (RefreshMusicTab).
+            // CreateText sizes its own LayoutElement.
+            musicStatusLineTxt = UIFactory.CreateText("MusStatus", rowC.transform, "", 13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(230, 26));
+            musicStatusLineGo = (musicStatusLineTxt as Component)?.gameObject;
+            if (musicStatusLineGo != null) musicStatusLineGo.SetActive(false);
             var csp1 = new GameObject("S"); csp1.transform.SetParent(rowC.transform, false); csp1.AddComponent<RectTransform>(); UIFactory.AddLE(csp1, flexW: 1);
             // Centered cluster: shuffle | stop | prev | play-pause | next | loop.
             // Shuffle/loop tint (green = on) painted in RefreshMusicTab.
@@ -12041,7 +12015,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     try
                     {
                         if (string.IsNullOrEmpty(h.albumSku)) return;
-                        // r3 MEDIUM 1: selection toggles never decode (v6.1 note 12 amended) — Prepare/Play do.
+                        // r3 MEDIUM 1 / Sept 7 design v2: a selection toggle only moves the desired set —
+                        // the engine's residency reconcile REQUESTS the desired keys (a file read) and
+                        // PollClipLoads opens them one per frame; no click opens or decodes anything.
                         MusicEngine.SetAlbumSelected(h.albumSku, !MusicEngine.IsAlbumEnabled(h.albumSku));
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] album toggle: {ex.Message}"); }
@@ -12067,7 +12043,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     try
                     {
                         if (string.IsNullOrEmpty(t.albumSku) || t.menuOnly) return;
-                        // r3 MEDIUM 1: selection toggles never decode (v6.1 note 12 amended) — Prepare/Play do.
+                        // r3 MEDIUM 1 / Sept 7 design v2: a selection toggle only moves the desired set —
+                        // the engine's residency reconcile REQUESTS the desired keys (a file read) and
+                        // PollClipLoads opens them one per frame; no click opens or decodes anything.
                         MusicEngine.SetSelected(t.albumSku, t.trackIdx, !MusicEngine.IsSelected(t.albumSku, t.trackIdx));
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] select: {ex.Message}"); }
@@ -12134,10 +12112,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     try
                     {
                         if (string.IsNullOrEmpty(t.albumSku) || t.menuOnly) return;
-                        // Key-bound (r2 MEDIUM 10 / r3 MEDIUM 1): Play prepares exactly the track it plays.
-                        var token = MusicEngine.BeginClickAdmission("play-track", t.albumSku + "/" + t.trackIdx);   // entry admission (r2 MEDIUM 11)
+                        // Streamed music (Sept 7 design v2 §2.3): the engine's tick opens
+                        // the file; nothing decodes in this click.
                         MusicEngine.PlayTrack(t.albumSku, t.trackIdx);
-                        MusicEngine.ClickDecodeOpportunity(token);
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[MUSIC-UI] play: {ex.Message}"); }
                     dirty = true;
@@ -12285,20 +12262,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             try { loop = MusicEngine.LoopEnabled; shuf = MusicEngine.ShuffleEnabled; } catch { }
             if (musicLoopBtn != null) UIFactory.SetImageColor(musicLoopBtn, loop ? MUS_ICON_ON : MUS_ICON_OFF);
             if (musicShuffleBtn != null) UIFactory.SetImageColor(musicShuffleBtn, shuf ? MUS_ICON_ON : MUS_ICON_OFF);
-            // v6 §2.1 Prepare affordance: shown while a desired track is
-            // downloading or downloaded-undecoded; clickable only when a
-            // decode is actually possible on the next click.
-            if (musicPrepareBtn != null)
+            // Sept 7 design v2 §7 Item 2: the engine's status line (loading
+            // progress / files not installed / failed tracks) in the slot the
+            // Prepare button used to occupy; hidden when it has nothing to say.
+            if (musicStatusLineGo != null)
             {
-                string prep = null; bool prepClickable = false;
-                try { prep = MusicEngine.PrepareStateLine(out prepClickable); } catch { }
-                musicPrepareBtn.SetActive(!string.IsNullOrEmpty(prep));
-                if (!string.IsNullOrEmpty(prep))
-                {
-                    if (musicPrepareBtnTxt != null) UIFactory.SetTextRaw(musicPrepareBtnTxt, prep);
-                    UIFactory.SetImageColor(musicPrepareBtn, prepClickable ? new Color(0.55f, 0.4f, 0.2f, 0.95f) : new Color(0.3f, 0.3f, 0.3f, 0.9f));
-                    SetButtonInteractable(musicPrepareBtn, prepClickable);   // r6 LOW 4: the tint is not a promise — the button really disables
-                }
+                string st = null;
+                try { st = MusicEngine.MusicStatusLine(); } catch { }
+                musicStatusLineGo.SetActive(!string.IsNullOrEmpty(st));
+                if (!string.IsNullOrEmpty(st) && musicStatusLineTxt != null) UIFactory.SetTextRaw(musicStatusLineTxt, st);
             }
             // Volume: the persisted config value IS the state (the contract's
             // SetVolumePercent writes it); silent so the repaint can't re-seek
@@ -12469,7 +12441,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             string sig;
             try
             {
-                sig = $"{MusicEngine.Mode}|{MusicEngine.IsPlayingNow}|{MusicEngine.NowPlayingLine()}|{MusicAssets.TierStatusLine()}|{MusicAssets.RetryAvailable}|{(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100)}|{MusicEngine.LoopEnabled}|{MusicEngine.ShuffleEnabled}|{MusicEngine.ClipStateGeneration}";   // r5 LOW 9: Prepare affordance follows clip state
+                sig = $"{MusicEngine.Mode}|{MusicEngine.IsPlayingNow}|{MusicEngine.NowPlayingLine()}|{MusicAssets.TierStatusLine()}|{MusicAssets.RetryAvailable}|{(Plugin.MusicVolume != null ? Plugin.MusicVolume.Value : 100)}|{MusicEngine.LoopEnabled}|{MusicEngine.ShuffleEnabled}|{MusicEngine.ClipStateGeneration}";   // r5 LOW 9 / Sept 7 v2: the status line (Downloading n% / Failed / Not installed) follows clip state
             }
             catch { return; }
             if (sig != musicTabSig) { musicTabSig = sig; dirty = true; }
