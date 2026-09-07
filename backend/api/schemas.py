@@ -497,6 +497,84 @@ class PlayerStatsResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Mini-profile card (Sept 6 Group 4 item a) — the two ADDITIVE members on
+# H2HSummaryResponse (design v2 A-4). Every flat field on that model stays
+# exactly as it is; an old client never reads these. Nested member names are
+# chosen so that none equals a flat key the in-room line reads with a
+# whole-response key search (opponent_display_name, games_total, games_won,
+# games_lost, series_total, played_today, last_played_at,
+# last_played_days_ago) — test_h2h_profile_card.py pins the disjointness.
+class H2HProfileBlock(BaseModel):
+    """The card's header: ONE player, read fresh on every request (A-2).
+
+    Field matrix (A-5): display_name, title (+colour), tier (+colour), the
+    1v1 rating and RD, and level are ALWAYS present — each is already public
+    on the boards. is_online and last_seen_s are NULL when the player has
+    appear_offline set. Gold and Discord identity are not carried at all."""
+    display_name: str | None = None
+    title: str | None = None
+    title_color: str | None = None
+    tier: str = ""
+    tier_color: str = ""
+    rating_1v1: int = 1500
+    rd_1v1: int = 350
+    level: int = 0
+    is_online: bool | None = None
+    last_seen_s: int | None = None
+
+
+class H2HWinLoss(BaseModel):
+    w: int = 0
+    l: int = 0
+
+
+class H2HRanked1v1(BaseModel):
+    """_viewer_h2h_counts's answer: decided series only, a tie for neither."""
+    series_w: int = 0
+    series_l: int = 0
+    games_w: int = 0
+    games_l: int = 0
+
+
+class H2HFfa(BaseModel):
+    """Games both played, by who placed higher; a shared (dense-tied)
+    placement counts for neither."""
+    above: int = 0
+    below: int = 0
+
+
+class H2HOvt(BaseModel):
+    """Split by the VIEWER's role: as_solo — the target was in the duo;
+    as_duo — the target was the solo."""
+    as_solo: H2HWinLoss = Field(default_factory=H2HWinLoss)
+    as_duo: H2HWinLoss = Field(default_factory=H2HWinLoss)
+
+
+class H2HLastMeeting(BaseModel):
+    at: datetime
+    mode: str      # ranked_1v1 | casual_1v1 | team_2v2 | ffa | ovt
+    result: str    # W | L | T, oriented to the viewer
+
+
+class H2HStreak(BaseModel):
+    n: int
+    holder: str    # viewer | target
+
+
+class H2HModesBlock(BaseModel):
+    """Every mode's head-to-head, oriented to the VIEWER — the viewer's own
+    history, never hidden. Immutable, so the server caches it 60 s per
+    (viewer, target) pair (A-2)."""
+    ranked_1v1: H2HRanked1v1 = Field(default_factory=H2HRanked1v1)
+    casual_1v1: H2HWinLoss = Field(default_factory=H2HWinLoss)
+    team_2v2: H2HWinLoss = Field(default_factory=H2HWinLoss)
+    ffa: H2HFfa = Field(default_factory=H2HFfa)
+    ovt: H2HOvt = Field(default_factory=H2HOvt)
+    last_meeting: H2HLastMeeting | None = None
+    streak: H2HStreak | None = None
+    net_rating_1v1: int = 0
+
+
 class H2HSummaryResponse(BaseModel):
     """GET /api/v1/h2h/{steam_id}/{opponent_steam_id} — aggregates only, for
     the client's in-room "vs NAME · last played · H2H · ranked series" line.
@@ -527,6 +605,13 @@ class H2HSummaryResponse(BaseModel):
     last_played_at: datetime | None = None
     last_played_days_ago: int | None = None
     played_today: bool = False
+    # Sept 6 Group 4 item a — ADDITIVE (design v2 A-4): the mini-profile
+    # card's two optional members, declared LAST so the flat fields keep
+    # their place at the head of the JSON. Both null for an unknown
+    # opponent; both null when a card statement failed (the flat line
+    # survives — main._h2h_card_blocks).
+    profile: H2HProfileBlock | None = None
+    modes: H2HModesBlock | None = None
 
 
 class LeaderboardEntry(BaseModel):

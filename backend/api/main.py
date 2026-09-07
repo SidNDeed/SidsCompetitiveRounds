@@ -58,6 +58,14 @@ from schemas import (
     MatchResponse,
     PlayerStatsResponse,
     H2HSummaryResponse,
+    H2HProfileBlock,
+    H2HModesBlock,
+    H2HRanked1v1,
+    H2HWinLoss,
+    H2HFfa,
+    H2HOvt,
+    H2HLastMeeting,
+    H2HStreak,
     QueueJoinRequest,
     QueueDeclineRequest,
     QueuePollResponse,
@@ -7499,6 +7507,269 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ── Mini-profile card (Sept 6 Group 4 item a) ─────────────────────────────
+# The card's two members ride the strict-session H2H read below as ADDITIVE
+# optional members (design v2 A-4). Split cache (A-2): `modes` is immutable
+# history, cached 60 s per (viewer, target) and capped at 2,000 entries;
+# `profile` is one indexed row read fresh on every request so a privacy
+# toggle (appear_offline) applies immediately. The route stays PRIMARY-ONLY
+# (A-3): nothing about its gate, debounce or routing changes.
+_H2H_MODES_TTL_SECONDS = 60.0
+_H2H_MODES_MAX_KEYS = 2000
+_h2h_modes_cache: dict[tuple[str, str], tuple[float, H2HModesBlock]] = {}
+_h2h_card_last_warn = 0.0
+
+
+def _h2h_cache_clock() -> float:
+    """Monotonic seconds behind the modes cache — one seam, so the card's
+    tests drive the TTL with a fake clock instead of sleeping."""
+    return time.monotonic()
+
+
+async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
+    """The card's header for ONE player, read fresh on every request.
+
+    Field matrix (design v2 A-5, pinned by test_h2h_profile_card.py):
+    display_name, title (+colour), tier (+colour), the 1v1 rating and RD,
+    and level are ALWAYS present — every one is already public on the
+    boards. is_online and last_seen_s are NULL when the player has
+    appear_offline set; otherwise is_online is the boards' shared marker
+    (_ONLINE_MARKER_SQL — the same rule, replica replay gate included) and
+    last_seen_s is the whole seconds since the later of last_seen and the
+    presence heartbeat. Gold and Discord identity are NOT in the response.
+    Title and tier strings come from the canonical utilities the boards use
+    (_display_title_sync with the podium maps, _rank_info), never a
+    re-derivation (A-L)."""
+    row = (await db.execute(text(f"""
+        SELECT p.steam_id, p.display_name, p.total_xp,
+               si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,
+               gr.rating AS rating, gr.rating_deviation AS rd,
+               CASE WHEN p.appear_offline THEN NULL ELSE {_ONLINE_MARKER_SQL} END AS is_online,
+               CASE WHEN p.appear_offline THEN NULL
+                    ELSE CAST(GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW()
+                         - GREATEST(p.last_seen, COALESCE(p.presence_seen_at, p.last_seen)))))) AS BIGINT)
+               END AS last_seen_s
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE p.id = :pid
+    """), {"pid": target_id})).mappings().first()
+    if row is None:
+        return None
+    rating = float(row["rating"]) if row["rating"] is not None else 1500.0
+    rd = float(row["rd"]) if row["rd"] is not None else 350.0
+    colors = await _rank_colors(db)
+    pmap, pmap2, pmapf = await _podium_maps_for(db, (row["title_sku"],))
+    pkey = str(target_id)
+    title, title_color = _display_title_sync(
+        colors, row["title_sku"], row["title"], row["title_color"], rating,
+        podium_pos=pmap.get(pkey), podium_pos_2v2=pmap2.get(pkey), podium_pos_ffa=pmapf.get(pkey))
+    tier, tier_color = await _rank_info(db, rating)
+    return H2HProfileBlock(
+        display_name=_clean_display_name(row["display_name"], row["steam_id"]),
+        title=title,
+        title_color=title_color,
+        tier=tier,
+        tier_color=tier_color,
+        rating_1v1=int(round(rating)),
+        rd_1v1=int(round(rd)),
+        level=level_from_xp(int(row["total_xp"] or 0))[0],
+        is_online=None if row["is_online"] is None else bool(row["is_online"]),
+        last_seen_s=None if row["last_seen_s"] is None else int(row["last_seen_s"]),
+    )
+
+
+def _h2h_series_streak_and_net(rows) -> tuple[H2HStreak | None, int]:
+    """Streak and net rating from the pair's decided ranked series, NEWEST
+    FIRST, each row oriented to the viewer (vw, pw, vchange). The streak is
+    the run of consecutive series won by one side, counted from the latest;
+    a level row ends the run (2-2 is decided under the helper's rule and is
+    nobody's win), and no decided series means no streak. net is the
+    viewer's summed rating change over the SAME rows — a NULL change (a
+    series older than the column) counts as 0."""
+    net = 0.0
+    n = 0
+    holder = None
+    run_open = True
+    for r in rows:
+        net += float(r["vchange"] or 0.0)
+        vw, pw = int(r["vw"] or 0), int(r["pw"] or 0)
+        winner = "viewer" if vw > pw else ("target" if vw < pw else None)
+        if not run_open:
+            continue
+        if winner is None or (holder is not None and winner != holder):
+            run_open = False
+            continue
+        holder = winner
+        n += 1
+    return (H2HStreak(n=n, holder=holder) if n > 0 else None), int(round(net))
+
+
+async def _h2h_modes_block(db, viewer_id, target_id) -> H2HModesBlock:
+    """Every mode's head-to-head for one pair, oriented to the VIEWER.
+
+    ranked_1v1 and casual_1v1 are _viewer_h2h_counts's answer — the helper
+    is CALLED (A-L), so its rules hold without repetition: decided series
+    only, a completed tie for neither, misroutes and invalidated rows
+    excluded. The other modes are one statement, one CTE each. team_2v2:
+    2v2 games where the pair stood on OPPOSITE teams (the four slot
+    columns; the same team is not a meeting). ffa: games both played, by
+    who placed higher — a shared placement for neither, roster ghosts
+    excluded with the FFA history's `absent` rule. ovt: split by the
+    viewer's role (as_solo — the target was in the duo; as_duo — the target
+    was the solo). last_meeting is the newest counted game across every
+    mode with its mode and the viewer's result; its 1v1 leg repeats the
+    helper's pair / invalidation / room-prefix predicates only because the
+    helper returns counters and no timestamp (the card's test pins them).
+    streak and net_rating_1v1 come from the pair's decided ranked series,
+    newest first, under the helper's own predicates, so the three ranked
+    figures describe one set of rows."""
+    (ranked_w, ranked_l, casual_w, casual_l,
+     series_w, series_l) = await _viewer_h2h_counts(db, viewer_id, target_id)
+    facts = (await db.execute(text("""
+        WITH team_games AS (
+            SELECT tm.ended_at, tm.winner_team,
+                   CASE WHEN (tm.t1a_id = :vid OR tm.t1b_id = :vid) THEN 1 ELSE 2 END AS vteam
+              FROM team_matches tm
+             WHERE tm.invalidated_at IS NULL
+               AND (((tm.t1a_id = :vid OR tm.t1b_id = :vid) AND (tm.t2a_id = :pid OR tm.t2b_id = :pid))
+                 OR ((tm.t2a_id = :vid OR tm.t2b_id = :vid) AND (tm.t1a_id = :pid OR tm.t1b_id = :pid)))
+        ), ffa_games AS (
+            SELECT fm.ended_at, mv.placement AS vpl, mt.placement AS tpl
+              FROM ffa_matches fm
+              JOIN ffa_match_players mv ON mv.match_id = fm.id AND mv.player_id = :vid AND NOT mv.absent
+              JOIN ffa_match_players mt ON mt.match_id = fm.id AND mt.player_id = :pid AND NOT mt.absent
+             WHERE fm.invalidated_at IS NULL
+        ), ovt_games AS (
+            SELECT om.ended_at, om.winner_side,
+                   CASE WHEN om.solo_id = :vid THEN 1 ELSE 2 END AS vside
+              FROM ovt_matches om
+             WHERE om.invalidated_at IS NULL
+               AND ((om.solo_id = :vid AND (om.duo_a_id = :pid OR om.duo_b_id = :pid))
+                 OR (om.solo_id = :pid AND (om.duo_a_id = :vid OR om.duo_b_id = :vid)))
+        ), pair_1v1 AS (
+            SELECT m.ended_at, m.is_ranked, m.winner_id
+              FROM matches m
+             WHERE ((m.player1_id = :vid AND m.player2_id = :pid)
+                 OR (m.player1_id = :pid AND m.player2_id = :vid))
+               AND m.invalidated_at IS NULL
+               AND m.winner_id IS NOT NULL
+               AND (m.photon_room_id IS NULL OR (
+                       LEFT(m.photon_room_id, 5) <> 'team_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ovt_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ffa_'))
+        ), meetings AS (
+            SELECT ended_at,
+                   CASE WHEN is_ranked THEN 'ranked_1v1' ELSE 'casual_1v1' END AS mode,
+                   CASE WHEN winner_id = :vid THEN 'W' ELSE 'L' END AS result
+              FROM pair_1v1
+            UNION ALL
+            SELECT ended_at, 'team_2v2',
+                   CASE WHEN winner_team = vteam THEN 'W' ELSE 'L' END
+              FROM team_games
+            UNION ALL
+            SELECT ended_at, 'ffa',
+                   CASE WHEN vpl < tpl THEN 'W' WHEN vpl > tpl THEN 'L' ELSE 'T' END
+              FROM ffa_games
+            UNION ALL
+            SELECT ended_at, 'ovt',
+                   CASE WHEN winner_side = vside THEN 'W' ELSE 'L' END
+              FROM ovt_games
+        )
+        SELECT
+            (SELECT COUNT(*) FROM team_games tg WHERE tg.winner_team = tg.vteam) AS team_w,
+            (SELECT COUNT(*) FROM team_games tg WHERE tg.winner_team <> tg.vteam) AS team_l,
+            (SELECT COUNT(*) FROM ffa_games fg WHERE fg.vpl < fg.tpl) AS ffa_above,
+            (SELECT COUNT(*) FROM ffa_games fg WHERE fg.vpl > fg.tpl) AS ffa_below,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 1 AND og.winner_side = 1) AS ovt_solo_w,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 1 AND og.winner_side = 2) AS ovt_solo_l,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 2 AND og.winner_side = 2) AS ovt_duo_w,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 2 AND og.winner_side = 1) AS ovt_duo_l,
+            lm.ended_at AS last_at, lm.mode AS last_mode, lm.result AS last_result
+          FROM (SELECT 1) AS one
+          LEFT JOIN (SELECT mt.ended_at, mt.mode, mt.result FROM meetings mt
+                      ORDER BY mt.ended_at DESC LIMIT 1) AS lm ON TRUE
+    """), {"vid": viewer_id, "pid": target_id})).mappings().first()
+    series_rows = (await db.execute(text("""
+        SELECT CASE WHEN rs.player1_id = :vid THEN rs.p1_series_wins ELSE rs.p2_series_wins END AS vw,
+               CASE WHEN rs.player1_id = :vid THEN rs.p2_series_wins ELSE rs.p1_series_wins END AS pw,
+               CASE WHEN rs.player1_id = :vid THEN rs.p1_rating_change ELSE rs.p2_rating_change END AS vchange
+          FROM ranked_series rs
+         WHERE rs.status = 'completed'
+           AND rs.invalidated_at IS NULL
+           AND ((rs.player1_id = :vid AND rs.player2_id = :pid)
+             OR (rs.player1_id = :pid AND rs.player2_id = :vid))
+           AND (rs.p1_series_wins >= 2 OR rs.p2_series_wins >= 2)
+         ORDER BY rs.completed_at DESC NULLS LAST, rs.created_at DESC
+    """), {"vid": viewer_id, "pid": target_id})).mappings().all()
+    streak, net = _h2h_series_streak_and_net(series_rows)
+
+    def _c(key):
+        return int(facts[key] or 0) if facts else 0
+
+    last = None
+    if facts and facts["last_at"] is not None:
+        last = H2HLastMeeting(at=facts["last_at"], mode=str(facts["last_mode"]),
+                              result=str(facts["last_result"]))
+    return H2HModesBlock(
+        ranked_1v1=H2HRanked1v1(series_w=series_w, series_l=series_l, games_w=ranked_w, games_l=ranked_l),
+        casual_1v1=H2HWinLoss(w=casual_w, l=casual_l),
+        team_2v2=H2HWinLoss(w=_c("team_w"), l=_c("team_l")),
+        ffa=H2HFfa(above=_c("ffa_above"), below=_c("ffa_below")),
+        ovt=H2HOvt(as_solo=H2HWinLoss(w=_c("ovt_solo_w"), l=_c("ovt_solo_l")),
+                   as_duo=H2HWinLoss(w=_c("ovt_duo_w"), l=_c("ovt_duo_l"))),
+        last_meeting=last,
+        streak=streak,
+        net_rating_1v1=net,
+    )
+
+
+async def _h2h_modes_cached(db, viewer_steam_id, target_steam_id, viewer_id, target_id) -> H2HModesBlock:
+    """60 s per-pair cache over _h2h_modes_block, capped at
+    _H2H_MODES_MAX_KEYS: past the cap, expired keys are dropped first, then
+    the oldest until the cap holds (the debounce table's shape). Keyed by
+    the steam-id pair the request names, oriented — (A, B) and (B, A) are
+    two entries, because each is oriented to its own viewer."""
+    now = _h2h_cache_clock()
+    key = (viewer_steam_id, target_steam_id)
+    hit = _h2h_modes_cache.get(key)
+    if hit is not None and (now - hit[0]) < _H2H_MODES_TTL_SECONDS:
+        return hit[1]
+    block = await _h2h_modes_block(db, viewer_id, target_id)
+    _h2h_modes_cache[key] = (now, block)
+    if len(_h2h_modes_cache) > _H2H_MODES_MAX_KEYS:
+        cut = now - _H2H_MODES_TTL_SECONDS
+        for k in [k for k, v in _h2h_modes_cache.items() if v[0] <= cut]:
+            _h2h_modes_cache.pop(k, None)
+        over = len(_h2h_modes_cache) - _H2H_MODES_MAX_KEYS
+        if over > 0:
+            for k in sorted(_h2h_modes_cache, key=lambda k: _h2h_modes_cache[k][0])[:over]:
+                _h2h_modes_cache.pop(k, None)
+    return block
+
+
+async def _h2h_card_blocks(db, viewer_steam_id, target_steam_id, viewer_id, target_id):
+    """(profile, modes) for the response, inside a savepoint. The card is
+    cosmetic and the flat line it rides on is a shipped feature, so a failed
+    card statement (a column the standby has not replayed yet, say) yields
+    (None, None) and one warning a minute instead of a 500 — and the
+    savepoint keeps the aborted statement from poisoning the session's
+    transaction (#235). The flat fields are computed before this runs; it
+    never touches them."""
+    global _h2h_card_last_warn
+    try:
+        async with db.begin_nested():
+            profile = await _h2h_profile_block(db, target_id)
+            modes = await _h2h_modes_cached(db, viewer_steam_id, target_steam_id, viewer_id, target_id)
+            return profile, modes
+    except Exception as ex:
+        now = time.monotonic()
+        if now - _h2h_card_last_warn > 60.0:
+            _h2h_card_last_warn = now
+            print(f"[H2H-CARD] blocks failed: {type(ex).__name__}: {ex}")
+        return None, None
+
+
 @app.get("/api/v1/h2h/{steam_id}/{opponent_steam_id}", response_model=H2HSummaryResponse, tags=["Players"])
 async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
                       db: AsyncSession = Depends(get_db)):
@@ -7527,6 +7798,17 @@ async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
     last_played_days_ago is the whole-UTC-day distance from last_played_at's
     date to that boundary's date (null with it), computed here so the
     client's relative-day copy uses no clock of its own (review r6 LOW).
+    Mini-profile card (Sept 6 Group 4 item a; design v2 A-2/A-4/A-5): two
+    ADDITIVE optional members, `profile` and `modes`, declared after every
+    flat field, which stay exactly as they are. profile — one player, read
+    fresh on every request: display_name, title (+colour), tier (+colour),
+    rating_1v1, rd_1v1 and level are ALWAYS present (already public on the
+    boards); is_online and last_seen_s are NULL when the opponent has
+    appear_offline; gold and Discord identity are NOT carried. modes — the
+    caller's own history against the opponent in every mode, never hidden,
+    cached 60 s per (caller, opponent) pair (_h2h_modes_block). Both null
+    for an unknown opponent, and both null when a card statement failed
+    (the line's fields survive — _h2h_card_blocks).
     The response carries counters, a display name, one timestamp and that
     integer — no room name, match id or series id (#463). Primary-only:
     not on the edge's replica read list.
@@ -7634,6 +7916,10 @@ async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
                else last_played_at.replace(tzinfo=timezone.utc))
         last_played_days_ago = (day_start.date() - _lp.astimezone(timezone.utc).date()).days
 
+    # Sept 6 Group 4 item a: the card's two additive members, after every
+    # flat value above is final — profile fresh, modes from the 60 s cache.
+    profile, modes = await _h2h_card_blocks(db, steam_id, opponent_steam_id, me_row["id"], opp_row["id"])
+
     return H2HSummaryResponse(
         opponent_display_name=opp_name,
         games_total=games_won + games_lost,
@@ -7646,6 +7932,8 @@ async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
         last_played_at=last_played_at,
         last_played_days_ago=last_played_days_ago,
         played_today=played_today,
+        profile=profile,
+        modes=modes,
     )
 
 
