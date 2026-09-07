@@ -1,5 +1,5 @@
 -- 300_mail_inbox_rev.sql — the inbox delivery counter behind /mail/status
--- (Sept 6 batch, Group 4 item b, review r1; follows 297_mail.sql).
+-- (Sept 6 batch, Group 4 item b, reviews r1 + r2; follows 297_mail.sql).
 --
 -- /mail/status's `revision` was the newest delivered message id by
 -- created_at. A send that starts first but commits last carries the OLDER
@@ -19,10 +19,31 @@
 -- The FK cascade is decorative under anonymise-in-place (#437):
 -- delete_player_data removes the row by name.
 --
--- Deploy order: after 297 and BEFORE the api build that bumps and reads the
+-- Review r2 adds two pieces:
+--
+-- 1. The delivery TRIGGER. Between this migration and the api rebuild the
+--    previous api build is still serving: its fan-out inserts envelopes
+--    without touching this table, so a client whose inbox was empty at its
+--    first status fetch would see `unread` rise with no revision change and
+--    no toast. A statement-level AFTER INSERT trigger on mail_recipients
+--    advances the counter for EVERY writer, old or new, inside the inserting
+--    transaction — the same set-wise, sorted, row-locked delta the api runs
+--    itself (two overlapping sends take their rows in one order). The api
+--    keeps its own bump as well, so under the new build a send advances the
+--    counter twice. That is fine and intended: the value is a CHANGE signal
+--    — the client compares it for inequality and never reads it as a count
+--    — and the api's statement stays an executed, test-pinned step of the
+--    send.
+-- 2. mail_messages.recipient_count: a broadcast's delivered-envelope count,
+--    written in the sending transaction and replayed verbatim by a same-key
+--    retry, so a recipient who deleted their account between the commit and
+--    the retry cannot change the replayed answer. NULL on direct messages.
+--
+-- Deploy order: after 297, BEFORE the api build that bumps and reads the
 -- table (the fan-out inserts into it on every send; /mail/status selects
--- from it). Idempotent: IF NOT EXISTS + ON CONFLICT DO NOTHING, so a second
--- application is a no-op.
+-- from it); the trigger covers sends made by the old build in between.
+-- Idempotent: IF NOT EXISTS + ON CONFLICT DO NOTHING + CREATE OR REPLACE +
+-- DROP TRIGGER IF EXISTS, so a second application is a no-op.
 
 BEGIN;
 
@@ -38,5 +59,34 @@ SELECT recipient_id, COUNT(*)
  WHERE delivery = 'delivered'
  GROUP BY recipient_id
 ON CONFLICT (recipient_id) DO NOTHING;
+
+ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER NULL;
+
+-- One delta per recipient per INSERT statement, visited in recipient order
+-- (the api's _MAIL_REV_BUMP_SQL shape): a transition table keeps this
+-- set-wise, so the lock order never follows the insert order of the rows.
+CREATE OR REPLACE FUNCTION mail_inbox_rev_bump()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO mail_inbox_rev (recipient_id, rev)
+    SELECT recipient_id, COUNT(*)
+      FROM inserted
+     WHERE delivery = 'delivered'
+     GROUP BY recipient_id
+     ORDER BY recipient_id
+    ON CONFLICT (recipient_id) DO UPDATE
+       SET rev = mail_inbox_rev.rev + EXCLUDED.rev, updated_at = NOW();
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_mail_inbox_rev_bump ON mail_recipients;
+CREATE TRIGGER trg_mail_inbox_rev_bump
+    AFTER INSERT ON mail_recipients
+    REFERENCING NEW TABLE AS inserted
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION mail_inbox_rev_bump();
 
 COMMIT;

@@ -730,7 +730,7 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log?.LogWarning("[MAIL] self-test failed to run: " + ex.GetType().Name); }
         }
 
-        internal const int SELFTEST_CASES = 17;
+        internal const int SELFTEST_CASES = 19;
 
         /// <summary>Runs every canned case; returns the number run and reports
         /// the mismatches in <paramref name="fail"/>. Cases marked (control)
@@ -826,6 +826,22 @@ namespace CompetitiveRounds
                 Case("mail_routes_are_sensitive", ApiClient.IsMailRoute("http://x/api/v1/mail") && ApiClient.IsMailRoute("https://x/api/v1/mail/abc/report")
                      && ApiClient.IsMailRoute("http://x/api/v1/mail/inbox?limit=25") && ApiClient.IsMailRoute("http://x/api/v1/mail/status")
                      && !ApiClient.IsMailRoute("http://x/api/v1/mailbox") && !ApiClient.IsMailRoute("http://x/api/v1/leaderboard") && !ApiClient.IsMailRoute(null), false);
+
+                // 14-15: the idempotency fingerprint is unambiguous over its fields
+                // (review r2 M7): no delimiter or length-like text inside a field
+                // can move a boundary, and moving an id between to and cc changes it.
+                var one = new List<string> { "76561198000000001" };
+                var none = new List<string>();
+                string fpA = MailUI.FingerprintOf(false, null, false, one, none, "x|y", "z");
+                string fpB = MailUI.FingerprintOf(false, null, false, one, none, "x", "y|z");
+                string fpA2 = MailUI.FingerprintOf(false, null, false, one, none, "x|y", "z");
+                string fpC = MailUI.FingerprintOf(false, null, false, one, none, "3:abc;", "");
+                string fpD = MailUI.FingerprintOf(false, null, false, one, none, "", "3:abc;");
+                string fpE = MailUI.FingerprintOf(false, null, false, new List<string> { "1", "2" }, none, "s", "b");
+                string fpF = MailUI.FingerprintOf(false, null, false, new List<string> { "1" }, new List<string> { "2" }, "s", "b");
+                Case("fingerprint_fields_do_not_collide", fpA != fpB && fpA == fpA2 && fpC != fpD && fpE != fpF, false);
+                // control: the delimiter-joined form the fingerprint replaced collides on the first pair.
+                Case("naive_join_collides", ("x|y" + "|" + "z") == ("x" + "|" + "y|z"), true);
             }
             catch (Exception ex)
             {
