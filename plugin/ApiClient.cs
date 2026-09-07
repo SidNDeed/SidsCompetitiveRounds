@@ -19411,6 +19411,25 @@ namespace CompetitiveRounds
         /// deliberate: match-report HMACs are deterrent-tier (the secret
         /// ships in every DLL, #188 family), so blocking them would break
         /// core reporting for fallback users while protecting nothing.</summary>
+        /// <summary>Sept 6 item b (review r1 HIGH): every mail route is a
+        /// SENSITIVE surface. A send, reply or report carries player-authored
+        /// private text in its own request body, and the reads return it, so
+        /// the whole /api/v1/mail tree is refused on plaintext-to-public
+        /// transport BEFORE a request is built — the r3 bearer withholding
+        /// alone would only have made the server reject a request whose
+        /// private payload had already crossed in the clear. Exact-segment
+        /// match: "/api/v1/mail" as the last segment, or followed by '/' or
+        /// '?', so a future "/api/v1/mailbox" is not silently claimed.</summary>
+        internal static bool IsMailRoute(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return false;
+            const string seg = "/api/v1/mail";
+            int i = url.IndexOf(seg, StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return false;
+            int end = i + seg.Length;
+            return end == url.Length || url[end] == '/' || url[end] == '?';
+        }
+
         private static bool _loggedSensitiveBlocked;
         private static bool SensitiveTransportBlocked(string url, string json,
             Action<bool, string> callback)
@@ -19448,6 +19467,10 @@ namespace CompetitiveRounds
                     || url.IndexOf("/admin/", StringComparison.OrdinalIgnoreCase) >= 0
                     || url.IndexOf("/chat/moderate/", StringComparison.OrdinalIgnoreCase) >= 0
                     || url.IndexOf("admin_steam_id=", StringComparison.OrdinalIgnoreCase) >= 0
+                    // Sept 6 item b (review r1 HIGH): the mail tree — private
+                    // text rides in the REQUEST (send/reply/report bodies) and
+                    // in the responses (inbox, message, blocks).
+                    || IsMailRoute(url)
                     || (json != null
                         && (json.IndexOf("\"admin_steam_id\":", StringComparison.Ordinal) >= 0
                             || json.IndexOf("\"password\":", StringComparison.Ordinal) >= 0));
@@ -19455,7 +19478,7 @@ namespace CompetitiveRounds
                 if (!_loggedSensitiveBlocked)
                 {
                     _loggedSensitiveBlocked = true;
-                    Plugin.Log.LogWarning("[API] plaintext public endpoint — admin/password requests are refused this session");
+                    Plugin.Log.LogWarning("[API] plaintext public endpoint — admin/password/mail requests are refused this session");
                 }
             }
             catch { return false; }
@@ -19542,9 +19565,20 @@ namespace CompetitiveRounds
             string body = "";
             try { body = request.downloadHandler?.text ?? ""; } catch { }
             if (body.Length > 300) body = body.Substring(0, 300);
-            return request.responseCode > 0
+            string line = request.responseCode > 0
                 ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}"
                 : request.error;
+            // Sept 6 item b (review r1 M14): a 429 says WHEN to retry in its
+            // Retry-After header, and for the daily window that header is the
+            // only honest figure — carry it as a trailing line so a caller can
+            // hold its retry for the real interval (MailClient.RetryAfterSeconds
+            // reads it). It FOLLOWS the "HTTP <code>: <body>" text, so every
+            // prefix-matching consumer (outbox permanence, the detail
+            // extractors) sees exactly what it saw before.
+            string retryAfter = null;
+            try { retryAfter = request.GetResponseHeader("Retry-After"); } catch { }
+            if (!string.IsNullOrEmpty(retryAfter) && !string.IsNullOrEmpty(line)) line += "\nRetry-After: " + retryAfter.Trim();
+            return line;
         }
 
         // ── Sept 6 (Sid, in-game mail): request + slicer aliases for MailClient.cs ──

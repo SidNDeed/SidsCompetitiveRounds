@@ -328,26 +328,133 @@ namespace CompetitiveRounds
             return list;
         }
 
-        /// <summary>Human line for a failed call: FastAPI's <c>detail</c> out of
-        /// "HTTP nnn: {json}" (the server's own wording — censor hits, the
-        /// recipient cap, formatting refusals), else a short local reading of
-        /// the status, else the transport error.</summary>
-        internal static string ErrorDetail(string resp)
+        /// <summary>The server's machine code behind a failed call, out of
+        /// ApiClient's "HTTP nnn: {json}" shape: FastAPI's string <c>detail</c>,
+        /// or for the rate limiter's object detail its <c>error</c> member. The
+        /// transport sentinels (no-consent, outdated, insecure-transport, not
+        /// ready) pass through; a status without a code becomes "http_nnn"; a
+        /// bare transport error becomes "". Pure, so the self-test drives it.
+        /// Review r1 M13: the code is a KEY into ErrorDetail's catalogue — it is
+        /// never what a player reads.</summary>
+        internal static string ErrorCode(string resp)
         {
-            if (string.IsNullOrEmpty(resp)) return I18n.Tr("Request failed - try again.");
-            if (resp == "no-consent") return I18n.Tr("Data sharing is off - allow it in Settings to use mail.");
-            if (resp == "outdated") return I18n.Tr("Update the mod to use mail.");
+            if (string.IsNullOrEmpty(resp)) return "";
+            if (resp == "no-consent" || resp == "outdated" || resp == "insecure-transport" || resp == "not ready") return resp;
             int brace = resp.IndexOf('{');
             if (brace >= 0)
             {
-                string d = ApiClient.ExtractJsonStringPublic(resp.Substring(brace), "detail");
+                string json = resp.Substring(brace);
+                string d = ApiClient.ExtractJsonStringPublic(json, "detail");
                 if (!string.IsNullOrEmpty(d)) return d;
+                string e = ApiClient.ExtractJsonStringPublic(json, "error");     // {"detail":{"error":"rate_limited","retry_after":N}}
+                if (!string.IsNullOrEmpty(e)) return e;
             }
-            if (resp.StartsWith("HTTP 401")) return I18n.Tr("Sign-in is not ready yet - try again in a moment.");
-            if (resp.StartsWith("HTTP 403")) return I18n.Tr("Not allowed.");
-            if (resp.StartsWith("HTTP 404")) return I18n.Tr("Not found - it may have been deleted.");
-            if (resp.StartsWith("HTTP 429")) return I18n.Tr("Too many messages - wait a minute and try again.");
-            return resp.Length > 160 ? resp.Substring(0, 160) : resp;
+            if (resp.StartsWith("HTTP ", StringComparison.Ordinal))
+            {
+                int end = 5;
+                while (end < resp.Length && char.IsDigit(resp[end])) end++;
+                if (end > 5) return "http_" + resp.Substring(5, end - 5);
+            }
+            return "";
+        }
+
+        /// <summary>Integer member of a JSON object by key (numbers are not
+        /// quoted, so the string extractor cannot read them); 0 when absent.</summary>
+        internal static int JsonInt(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return 0;
+            int i = json.IndexOf("\"" + key + "\":", StringComparison.Ordinal);
+            if (i < 0) return 0;
+            i += key.Length + 3;
+            while (i < json.Length && json[i] == ' ') i++;
+            int start = i;
+            while (i < json.Length && char.IsDigit(json[i])) i++;
+            int n;
+            return i > start && int.TryParse(json.Substring(start, i - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out n) ? n : 0;
+        }
+
+        /// <summary>Seconds the server asked us to wait before retrying (review
+        /// r1 M14): the trailing "Retry-After: N" line ApiClient appends from a
+        /// 429's header, else the limiter's own <c>retry_after</c> member; 0 when
+        /// the response carries neither.</summary>
+        internal static int RetryAfterSeconds(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return 0;
+            int i = resp.LastIndexOf("\nRetry-After:", StringComparison.Ordinal);
+            if (i >= 0)
+            {
+                int n;
+                if (int.TryParse(resp.Substring(i + 13).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out n) && n > 0) return n;
+            }
+            int brace = resp.IndexOf('{');
+            return brace >= 0 ? Math.Max(0, JsonInt(resp.Substring(brace), "retry_after")) : 0;
+        }
+
+        /// <summary>The limiter's wording with the REAL wait (review r1 M14), in
+        /// the coarsest unit that is still honest (rounded up).</summary>
+        internal static string RateLimitText(int seconds)
+        {
+            if (seconds >= 3600) return I18n.TrF("Too many messages - try again in {0} hours.", (seconds + 3599) / 3600);
+            if (seconds >= 60) return I18n.TrF("Too many messages - try again in {0} minutes.", (seconds + 59) / 60);
+            if (seconds > 0) return I18n.TrF("Too many messages - try again in {0} seconds.", seconds);
+            return I18n.Tr("Too many messages - wait a minute and try again.");
+        }
+
+        /// <summary>Human line for a failed call (review r1 M13): the server's
+        /// code, or the status, or the transport sentinel, LOCALISED through the
+        /// catalogue below — a player never reads "too_many_recipients". A code
+        /// this build does not know (a newer server) is framed in a localised
+        /// sentence, so it is still recognisable in a bug report.</summary>
+        internal static string ErrorDetail(string resp)
+        {
+            string code = ErrorCode(resp);
+            switch (code)
+            {
+                case "": return I18n.Tr("Request failed - try again.");
+                case "not ready": return I18n.Tr("Request failed - try again.");
+                case "no-consent": return I18n.Tr("Data sharing is off - allow it in Settings to use mail.");
+                case "outdated": return I18n.Tr("Update the mod to use mail.");
+                case "insecure-transport": return I18n.Tr("Mail needs a secure connection to the server - it is unavailable on this connection.");
+                case "session_required":
+                case "http_401": return I18n.Tr("Sign-in is not ready yet - try again in a moment.");
+                case "not_found":
+                case "http_404": return I18n.Tr("Not found - it may have been deleted.");
+                case "rate_limited":
+                case "http_429": return RateLimitText(RetryAfterSeconds(resp));
+                case "not_authorised":
+                case "admin_required":
+                case "http_403": return I18n.Tr("Not allowed.");
+                case "mod_required": return I18n.Tr("This account is not ready for mail yet - try again later.");
+                case "banned": return I18n.Tr("This account cannot send mail.");
+                case "muted": return I18n.Tr("You are muted - mail is unavailable while the mute lasts.");
+                case "censored": return I18n.Tr("The message contains a word that is not allowed.");
+                case "recipients_empty": return I18n.Tr("Add at least one recipient.");
+                case "too_many_recipients":
+                case "recipient_list_too_large": return I18n.Tr("Too many recipients for one message.");
+                case "recipient_unknown": return I18n.Tr("One of the recipients could not be found.");
+                case "recipient_invalid":
+                case "steam_id_invalid":
+                case "player_unknown": return I18n.Tr("That player could not be found.");
+                case "subject_empty": return I18n.Tr("Add a subject.");
+                case "subject_too_long": return I18n.TrF("The subject is too long ({0} characters max).", SUBJECT_MAX);
+                case "subject_newline": return I18n.Tr("The subject must be a single line.");
+                case "subject_control_character": return I18n.Tr("The subject contains characters that are not allowed.");
+                case "subject_repeated_characters": return I18n.Tr("The subject repeats one character too many times.");
+                case "body_empty": return I18n.Tr("Write a message first.");
+                case "body_too_long": return I18n.TrF("The message is too long ({0} characters max).", BODY_MAX);
+                case "body_control_character": return I18n.Tr("The message contains characters that are not allowed.");
+                case "body_repeated_characters": return I18n.Tr("The message repeats one character too many times.");
+                case "reason_too_long": return I18n.Tr("The report details are too long.");
+                case "reason_control_character": return I18n.Tr("The report details contain characters that are not allowed.");
+                case "reason_repeated_characters": return I18n.Tr("The report details repeat one character too many times.");
+                case "reply_all_refused": return I18n.Tr("Reply all is not available for this message.");
+                case "cannot_report_broadcast": return I18n.Tr("System notices cannot be reported.");
+                case "cannot_block_self": return I18n.Tr("You cannot block yourself.");
+                case "too_many_blocks": return I18n.Tr("Your block list is full - unblock someone first.");
+            }
+            string shown = code.StartsWith("http_", StringComparison.Ordinal) ? code.Substring(5) : code;
+            if (shown.Length > 40) shown = shown.Substring(0, 40);
+            return I18n.TrF("The server refused this request ({0}).", shown);
         }
 
         // ── Requests ────────────────────────────────────────────────────────
@@ -562,7 +669,9 @@ namespace CompetitiveRounds
         public static IEnumerator StatusLoop()
         {
             MaybeSelfTest();
-            yield return new WaitForSeconds(45f);
+            // Unscaled waits (review r1 L3): a zero-timescale menu or result
+            // screen must not stop the poll or the queued toast's wake-ups.
+            yield return new WaitForSecondsRealtime(45f);
             while (true)
             {
                 try { MailUI.TickPending(); } catch { }
@@ -579,15 +688,23 @@ namespace CompetitiveRounds
                 {
                     Plugin.Log.LogWarning($"[MAIL] status tick failed: {ex.Message}");
                 }
-                yield return new WaitForSeconds(5f);
+                yield return new WaitForSecondsRealtime(5f);
             }
         }
 
         // ── Parser self-test (H2HRules.SelfTest shape) ──────────────────────
         private static ConfigEntry<bool> selfTestLever;
 
+        /// <summary>The run is UNCONDITIONAL (review r1 L2): these fixtures are
+        /// the only automated check the slicer has, and a default-off lever meant
+        /// a regression compiled and shipped with nothing failing. Seventeen
+        /// string parses cost nothing at startup; the lever now controls only
+        /// the per-case verbosity. The summary line is the positive signal
+        /// (#438) — logged as an ERROR on a FAIL, so the launch log a build is
+        /// verified against carries it without anyone toggling a lever.</summary>
         private static void MaybeSelfTest()
         {
+            bool verbose = false;
             try
             {
                 ConfigFile cf = Plugin.ConfigFileForLevers;
@@ -595,21 +712,25 @@ namespace CompetitiveRounds
                     selfTestLever = cf.Bind(
                         "Mail", "MailParseSelfTest",
                         false,
-                        "Development only: once at startup, run the mail parser over canned server responses (subjects carrying { ] \" and \\, a subject that looks like an id member, a truncated page) and log one [MAIL] selftest line per case plus a summary line. Nothing is shown, sent or persisted.");
+                        "Development only: log every [MAIL] selftest case line at startup. The parser self-test itself always runs (its summary line is logged regardless, as an error when it fails). Nothing is shown, sent or persisted.");
+                verbose = selfTestLever != null && selfTestLever.Value;
             }
             catch (Exception ex) { Plugin.Log?.LogWarning("[MAIL] self-test bind failed: " + ex.Message); }
-            bool run = false;
-            try { run = selfTestLever != null && selfTestLever.Value; } catch { }
-            if (!run) return;
             try
             {
                 int fail;
-                SelfTest(s => Plugin.Log?.LogInfo(s), out fail);
+                SelfTest(s =>
+                {
+                    bool summary = s.IndexOf("selftest summary", StringComparison.Ordinal) >= 0;
+                    bool failed = s.EndsWith(" FAIL", StringComparison.Ordinal) || s.IndexOf("harness failed", StringComparison.Ordinal) >= 0;
+                    if (summary && failed) Plugin.Log?.LogError(s);
+                    else if (summary || failed || verbose) Plugin.Log?.LogInfo(s);
+                }, out fail);
             }
             catch (Exception ex) { Plugin.Log?.LogWarning("[MAIL] self-test failed to run: " + ex.GetType().Name); }
         }
 
-        internal const int SELFTEST_CASES = 13;
+        internal const int SELFTEST_CASES = 17;
 
         /// <summary>Runs every canned case; returns the number run and reports
         /// the mismatches in <paramref name="fail"/>. Cases marked (control)
@@ -685,6 +806,26 @@ namespace CompetitiveRounds
 
                 // 10: unquote escapes.
                 Case("unquote_escapes", Unquote("\"\\u0041\\n\\\"x\\\"\"") == "A\n\"x\"" && Unquote("null") == null && Unquote(" 12 ") == "12", false);
+
+                // 11-12: error codes and the Retry-After plumbing (review r1 M13/M14).
+                Case("error_code_detail", ErrorCode("HTTP 400: {\"detail\":\"censored\"}") == "censored"
+                     && ErrorCode("HTTP 429: {\"detail\":{\"error\":\"rate_limited\",\"retry_after\":3600}}\nRetry-After: 3600") == "rate_limited"
+                     && ErrorCode("HTTP 502: <html>bad gateway</html>") == "http_502"
+                     && ErrorCode("insecure-transport") == "insecure-transport" && ErrorCode("Cannot connect") == "" && ErrorCode(null) == "", false);
+                Case("retry_after_header_then_member",
+                     RetryAfterSeconds("HTTP 429: {\"detail\":{\"error\":\"rate_limited\",\"retry_after\":25}}\nRetry-After: 3600") == 3600
+                     && RetryAfterSeconds("HTTP 429: {\"detail\":{\"error\":\"rate_limited\",\"retry_after\":25}}") == 25
+                     && RetryAfterSeconds("HTTP 400: {\"detail\":\"censored\"}") == 0 && RetryAfterSeconds(null) == 0, false);
+                // control: the localiser returns the bare code for NEITHER a known nor an unknown code.
+                string known = ErrorDetail("HTTP 400: {\"detail\":\"too_many_recipients\"}");
+                string unknown = ErrorDetail("HTTP 400: {\"detail\":\"zz_new_code\"}");
+                Case("error_detail_never_bare_code", known != "too_many_recipients" && known.Length > 0
+                     && unknown != "zz_new_code" && unknown.IndexOf("zz_new_code", StringComparison.Ordinal) >= 0, true);
+
+                // 13: the transport gate classifies the whole mail tree (review r1 HIGH 2).
+                Case("mail_routes_are_sensitive", ApiClient.IsMailRoute("http://x/api/v1/mail") && ApiClient.IsMailRoute("https://x/api/v1/mail/abc/report")
+                     && ApiClient.IsMailRoute("http://x/api/v1/mail/inbox?limit=25") && ApiClient.IsMailRoute("http://x/api/v1/mail/status")
+                     && !ApiClient.IsMailRoute("http://x/api/v1/mailbox") && !ApiClient.IsMailRoute("http://x/api/v1/leaderboard") && !ApiClient.IsMailRoute(null), false);
             }
             catch (Exception ex)
             {
