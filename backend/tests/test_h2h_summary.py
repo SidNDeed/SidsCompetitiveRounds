@@ -160,6 +160,14 @@ class FakeSession:
         params = params or {}
         if "FROM steam_sessions" in sql:
             return _Rows([self.session_row] if self.session_row else [])
+        # Sept 6 item a: the mini-profile card's statements run AFTER the flat
+        # facts, inside their own savepoint (main._h2h_card_blocks). The profile
+        # statement also reads FROM players p, so they are recognised BEFORE the
+        # handler's own players lookup. They answer empty here so the flat line is exercised on its own; their
+        # text and rows are test_h2h_profile_card.py's to pin.
+        if ("LEFT JOIN glicko_ratings gr" in sql or "WITH team_games AS (" in sql or "AS vchange" in sql
+                or "AS ranked_w" in sql or "AS p1w" in sql or "rank_role_colors" in sql):
+            return _Rows([])
         if "FROM players p" in sql:
             wanted = {params["me"], params["opp"]}
             return _Rows([p for p in self.players if p["steam_id"] in wanted])
@@ -183,10 +191,11 @@ class FakeSession:
                            "series_won": sum(1 for vw, pw in oriented if vw > pw),
                            "series_lost": sum(1 for vw, pw in oriented if vw < pw),
                            "series_tied": sum(1 for vw, pw in oriented if vw == pw)}])
-        # The stats helper's own two statements (its match counters and its
-        # decided-only series read) are not ones this handler may issue: every
-        # aggregate comes from the facts CTE above, so a bare "FROM matches m"
-        # or "FROM ranked_series rs" is unexpected.
+        # Before the card runs, the stats helper's own two statements (its
+        # match counters and its decided-only series read) are not ones this
+        # handler may issue: every flat aggregate comes from the facts CTE
+        # above, so a bare "FROM matches m" or "FROM ranked_series rs" is
+        # unexpected.
         raise AssertionError(f"unexpected statement: {sql[:80]}")
 
 
@@ -286,16 +295,21 @@ def test_gate_is_the_strict_one_and_runs_before_the_first_statement():
 
 def test_response_schema_is_exactly_the_aggregates_and_carries_nothing_room_derived():
     fields = set(schemas.H2HSummaryResponse.model_fields)
-    assert fields == {
+    flat = {
         "opponent_display_name",
         "games_total", "games_won", "games_lost",
         "series_total", "series_won", "series_lost", "series_tied",
         "last_played_at", "played_today", "last_played_days_ago",
     }
+    # Sept 6 item a (design v2 A-4): the mini-profile card rides this response
+    # as exactly two ADDITIVE optional members and nothing else; the flat set
+    # above is unchanged. Their contents are test_h2h_profile_card.py's.
+    assert fields == flat | {"profile", "modes"}
     for name in fields:
         for banned in ("room", "_id", "region", "token", "code", "match_"):
             assert banned not in name, f"{name} looks room-derived"
     empty = schemas.H2HSummaryResponse()
+    assert empty.profile is None and empty.modes is None
     assert empty.opponent_display_name is None
     assert empty.last_played_at is None
     assert empty.last_played_days_ago is None
@@ -370,15 +384,21 @@ def test_counts_exclude_misroutes_and_invalidated_rows_and_ties_count_for_neithe
     assert (r.series_won, r.series_lost, r.series_tied, r.series_total) == (3, 2, 2, 7)
     assert r.opponent_display_name == "Opp Name"
     kinds = [s for s in session.statements]
-    assert sum("FROM steam_sessions" in s for s in kinds) == 1
-    assert sum("FROM players p" in s for s in kinds) == 1
-    assert sum("WITH pair_matches" in s for s in kinds) == 1
-    # every aggregate comes from the facts CTE — neither of the stats
-    # helper's standalone statements is issued
-    standalone = [s for s in kinds if "WITH pair_matches" not in s]
+    # every flat aggregate comes from the facts CTE: up to and including it,
+    # the handler issues exactly the gate, the players lookup and the facts
+    # statement, and neither of the stats helper's standalone statements. The
+    # mini-profile card's statements (Sept 6 item a) follow the facts inside
+    # their own savepoint and are pinned by test_h2h_profile_card.py (its
+    # profile statement also reads "FROM players p", hence the scoping).
+    facts_at = next(i for i, s in enumerate(kinds) if "WITH pair_matches" in s)
+    flat_line = kinds[:facts_at + 1]
+    assert sum("FROM steam_sessions" in s for s in flat_line) == 1
+    assert sum("FROM players p" in s for s in flat_line) == 1
+    assert sum("WITH pair_matches" in s for s in flat_line) == 1
+    standalone = [s for s in flat_line if "WITH pair_matches" not in s]
     assert sum("FROM matches m" in s for s in standalone) == 0
     assert sum("FROM ranked_series rs" in s for s in standalone) == 0
-    assert len(kinds) == 3
+    assert len(flat_line) == 3
 
 
 def test_a_completed_two_two_series_is_one_tie_and_one_series():
