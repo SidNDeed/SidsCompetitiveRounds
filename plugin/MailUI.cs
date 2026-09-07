@@ -82,6 +82,12 @@ namespace CompetitiveRounds
         private static string cReplyToId, cReplyToName, cReplySubject;
         private static bool cReplyAll, cSending;
         private static int cReplyOthers, composeVersion, composePainted = -1, paintedSubjLen = -1, paintedBodyLen = -1;
+        private static string cIdemFor;                      // the payload fingerprint cIdem was minted for (review r1 M17)
+        private static float sendHoldUntil = -1f;            // realtime clock: the limiter's Retry-After hold (review r1 M14)
+        /// <summary>Free-text detail of a report. The wire reason is
+        /// "&lt;code&gt;: &lt;detail&gt;", which stays well inside the server's
+        /// MAIL_REASON_MAX (test_mail.py pins the two against each other).</summary>
+        internal const int REPORT_DETAIL_MAX = 200;
 
         // ── focus / modal state (read by CompetitiveUI) ─────────────────────
         private static bool fieldFocused, dropFocusPending;
@@ -105,6 +111,10 @@ namespace CompetitiveRounds
         private static DateTime newestSeenUtc = DateTime.MinValue;
         private static string pendingToast;
         private static readonly HashSet<string> toastedIds = new HashSet<string>();
+        private static int statusGen;                        // inbox-head fetch generation (review r1 M15)
+        private static int pendingToastTries;                // slot refusals of the queued toast (review r1 M16)
+        private const int PENDING_TOAST_MAX_TRIES = 36;      // 3 minutes of 5 s ticks outside a match
+        private static readonly HashSet<string> readClaims = new HashSet<string>();   // MarkRead in flight, per id (review r1 L4)
 
         // ── blocked senders (Settings) ──────────────────────────────────────
         private static List<MailClient.Block> blocks;
@@ -251,7 +261,11 @@ namespace CompetitiveRounds
         /// repaints the tab label; a REVISION change (not a count change) fetches
         /// inbox page 1 and toasts the newest message once, and only when it is
         /// newer than anything this install has already listed — so a delete
-        /// that moves the revision back to an older message stays silent.</summary>
+        /// that moves the revision back to an older message stays silent. The
+        /// persisted baseline advances to the new revision only once that fetch
+        /// has SUCCEEDED (review r1 M15): a timed-out fetch leaves it where it
+        /// was, so the next poll carrying the same revision tries again instead
+        /// of the toast edge being consumed by the failure.</summary>
         public static void OnStatus(MailClient.Status st)
         {
             if (st == null) return;
@@ -259,14 +273,23 @@ namespace CompetitiveRounds
             if (!baselineLoaded) LoadBaseline();
             string rev = st.revision ?? "";
             if (rev == (lastRevision ?? "")) return;
-            bool hadBaseline = lastRevision != null;
-            lastRevision = rev;
-            SaveBaseline();
-            if (!hadBaseline) return;                 // first poll on this install: baseline only
-            if (rev.Length == 0 || st.unread <= 0) return;
+            if (lastRevision == null || rev.Length == 0 || st.unread <= 0)
+            {
+                // First poll on this install (baseline only), or a change with
+                // nothing unread to announce: nothing is fetched, so the
+                // baseline moves at once.
+                lastRevision = rev;
+                SaveBaseline();
+                return;
+            }
+            int gen = ++statusGen;
             MailClient.FetchInbox(null, (ok, page, err) =>
             {
-                if (!ok || page == null || page.items.Count == 0) return;
+                if (gen != statusGen) return;              // a newer poll owns the edge
+                if (!ok || page == null) return;           // baseline untouched: retried on the next poll
+                lastRevision = rev;
+                SaveBaseline();
+                if (page.items.Count == 0) return;
                 // Refresh the inbox list with the fresh head (dedupe against the loaded tail).
                 MergeInboxHead(page);
                 var newest = page.items[0];
@@ -277,21 +300,33 @@ namespace CompetitiveRounds
                 toastedIds.Add(newest.id);
                 string who = newest.sender != null ? newest.sender.name : "?";
                 pendingToast = I18n.TrF("New mail from {0}: {1}", San(Trunc(who, 24)), San(Trunc(OneLine(newest.subject), 60)));
+                pendingToastTries = 0;
                 TickPending();
             });
         }
 
         /// <summary>Called every 5 s from the status loop (and after a toast is
         /// queued): nothing shows while a match is being tracked — the toast
-        /// waits until the match ends.</summary>
+        /// waits until the match ends. The queued line is cleared only once the
+        /// notification slot has ACCEPTED it (review r1 M16): a critical cue
+        /// owning the slot when the match ends refuses it, and it is offered
+        /// again on the next tick — bounded, so it cannot linger for ever.</summary>
         public static void TickPending()
         {
             if (pendingToast == null) return;
             if (GameStateWatcher.IsTracking) return;
-            string t = pendingToast;
-            pendingToast = null;
+            bool wanted = true;
+            try { wanted = Plugin.ShowNotifications.Value; } catch { }
+            if (!wanted) { pendingToast = null; pendingToastTries = 0; return; }   // toasts are off: nothing to wait for
             bool shown = false;
-            try { shown = CompetitiveUI.ShowNotification(t, C_TOAST, 7f); } catch { }
+            try { shown = CompetitiveUI.ShowNotification(pendingToast, C_TOAST, 7f); } catch { }
+            if (!shown)
+            {
+                if (++pendingToastTries < PENDING_TOAST_MAX_TRIES) return;
+                Plugin.Log.LogInfo("[MAIL] toast dropped after " + pendingToastTries + " refused attempts");
+            }
+            pendingToast = null;
+            pendingToastTries = 0;
             if (shown) PlayMailSound();
         }
 
@@ -859,12 +894,22 @@ namespace CompetitiveRounds
                 else
                 {
                     current = msg;
-                    if (!fromSent && s.IsUnread)
+                    // One MarkRead in flight per message id and one badge
+                    // decrement per message (review r1 L4): a row reopened
+                    // before its first callback returns takes no second claim,
+                    // and the callback decrements only while the captured row
+                    // still reads unread (DeleteCurrent marks it read when IT
+                    // takes the decrement).
+                    if (!fromSent && s.IsUnread && readClaims.Add(s.id))
                         MailClient.MarkRead(s.id, (ok2, r2) =>
                         {
+                            readClaims.Remove(s.id);
                             if (!ok2) return;
+                            bool dec = s.IsUnread;
                             s.readAt = "read";
-                            if (Unread > 0) Unread--;
+                            int at = IndexOfId(inboxItems, s.id);
+                            if (at >= 0) inboxItems[at].readAt = "read";
+                            if (dec && Unread > 0) Unread--;
                             listVersion++;
                             NativeUI.MarkDirty();
                         });
@@ -913,13 +958,19 @@ namespace CompetitiveRounds
             var m = current;
             if (m == null) return;
             string id = m.id;
-            bool wasUnread = readerSummary != null && !readerFromSent && readerSummary.IsUnread;
+            var summary = (readerSummary != null && !readerFromSent) ? readerSummary : null;
             CompetitiveUI.OpenConfirm(I18n.Tr("Delete this message?"), () =>
                 MailClient.Delete(id, (ok, r) =>
                 {
                     if (!ok) { CompetitiveUI.ShowNotification(MailClient.ErrorDetail(r), Color.yellow, 5f); return; }
                     RemoveId(inboxItems, id); RemoveId(sentItems, id);
-                    if (wasUnread && Unread > 0) Unread--;
+                    // Judged NOW, not at click time: a MarkRead that landed in
+                    // between has already taken this row's decrement (review r1 L4).
+                    if (summary != null && summary.IsUnread)
+                    {
+                        summary.readAt = "read";
+                        if (Unread > 0) Unread--;
+                    }
                     listVersion++;
                     if (view == View.Reader && current != null && current.id == id) ShowView(readerFromSent ? View.Sent : View.Inbox);
                     NativeUI.MarkDirty();
@@ -936,8 +987,12 @@ namespace CompetitiveRounds
         {
             if (reportSending || string.IsNullOrEmpty(reportId)) return;
             reportSending = true;
-            string detail = (reportText ?? "").Trim();
-            if (detail.Length > 200) detail = detail.Substring(0, 200);
+            // The subject's character rule applies to the free text too (the
+            // server judges a reason like a body: no C0/C1 controls), then the
+            // client-side bound. The wire reason "<code>: <detail>" stays well
+            // inside the server's MAIL_REASON_MAX (pinned by test_mail.py).
+            string detail = CleanSubject(reportText ?? "").Trim();
+            if (detail.Length > REPORT_DETAIL_MAX) detail = detail.Substring(0, REPORT_DETAIL_MAX);
             string reason = REPORT_CODES[Mathf.Clamp(reportReason, 0, REPORT_CODES.Length - 1)] + (detail.Length > 0 ? ": " + detail : "");
             MailClient.Report(reportId, reason, (ok, r) =>
             {
@@ -977,7 +1032,7 @@ namespace CompetitiveRounds
             cSubject = ""; cBody = ""; cStatus = "";
             cReplyToId = null; cReplyToName = null; cReplySubject = null; cReplyAll = false; cReplyOthers = 0;
             cSending = false;
-            cIdem = Guid.NewGuid().ToString();                   // one key per composer session; regenerated only here
+            cIdem = Guid.NewGuid().ToString(); cIdemFor = null;  // a fresh key; SendCurrent re-mints it whenever the payload changes (review r1 M17)
             composeVersion++;
         }
 
@@ -997,13 +1052,29 @@ namespace CompetitiveRounds
         private static void SendCurrent()
         {
             if (cSending) return;
+            float hold = sendHoldUntil - Time.realtimeSinceStartup;
+            if (hold > 0f)
+            {
+                // The limiter's Retry-After is honoured locally (review r1 M14):
+                // nothing is dispatched until it has elapsed, and the status line
+                // says how long that is.
+                SetComposeStatus(MailClient.RateLimitText((int)Math.Ceiling(hold)), true);
+                return;
+            }
             bool reply = cReplyToId != null;
             string subj = CleanSubject(cSubject).Trim();
             string body = CleanBody(cBody);
             if (!reply && cTo.Count == 0) { SetComposeStatus(I18n.Tr("Add at least one recipient."), true); return; }
             if (!reply && subj.Length == 0) { SetComposeStatus(I18n.Tr("Add a subject."), true); return; }
             if (body.Trim().Length == 0) { SetComposeStatus(I18n.Tr("Write a message first."), true); return; }
-            if (cIdem == null) cIdem = Guid.NewGuid().ToString();
+            // The idempotency key identifies ONE payload (review r1 M17): a retry
+            // of the identical send reuses it (the server answers with the
+            // original id), while any edit since the last attempt mints a new
+            // key — so a send whose response was lost after the server committed
+            // body A can never be replayed under A's key with body B and be
+            // reported as "Sent".
+            string fp = Fingerprint(reply, subj, body);
+            if (cIdem == null || cIdemFor != fp) { cIdem = Guid.NewGuid().ToString(); cIdemFor = fp; }
             cSending = true;
             SetComposeStatus(I18n.Tr("Sending..."), false);
             dropFocusPending = true;
@@ -1021,8 +1092,13 @@ namespace CompetitiveRounds
                 }
                 else
                 {
-                    // Server wording on 4xx (censor hit, recipient cap, formatting); the same
-                    // idempotency key stays for a retry of this exact send.
+                    // A 429 carries the real wait (review r1 M14): hold the Send
+                    // button for it on the unscaled clock. Otherwise the server's
+                    // refusal, localised (censor hit, recipient cap, formatting);
+                    // the key stays bound to this exact payload for an unchanged
+                    // retry and is re-minted by any edit.
+                    int wait = MailClient.RetryAfterSeconds(err);
+                    if (wait > 0) sendHoldUntil = Time.realtimeSinceStartup + wait;
                     SetComposeStatus(MailClient.ErrorDetail(err), true);
                 }
             };
@@ -1035,6 +1111,21 @@ namespace CompetitiveRounds
             }
             composeVersion++;
             NativeUI.MarkDirty();
+        }
+
+        /// <summary>Everything the server would store for this send: mode,
+        /// reply target, recipients in order, subject and body. Two composer
+        /// states with the same fingerprint are the same payload and may share
+        /// an idempotency key; any difference is a new send.</summary>
+        private static string Fingerprint(bool reply, string subj, string body)
+        {
+            var sb = new StringBuilder(64 + (subj?.Length ?? 0) + (body?.Length ?? 0));
+            sb.Append(reply ? "R|" : "N|").Append(cReplyToId ?? "").Append('|').Append(cReplyAll ? '1' : '0').Append('|');
+            foreach (var p in cTo) sb.Append(p.steamId).Append(',');
+            sb.Append('|');
+            foreach (var p in cCc) sb.Append(p.steamId).Append(',');
+            sb.Append('|').Append(subj ?? "").Append('|').Append(body ?? "");
+            return sb.ToString();
         }
 
         private static void DiscardCurrent()
@@ -1071,6 +1162,10 @@ namespace CompetitiveRounds
         private static void DrawComposerFields()
         {
             EnsureStyles();
+            // Read-only while a send is in flight (review r1 M17): what the
+            // player is looking at is exactly what was dispatched.
+            bool prevEnabled = GUI.enabled;
+            GUI.enabled = prevEnabled && !cSending;
             if (cReplyToId == null && subjectAnchor != null)
             {
                 Rect r = ScreenRect(subjectAnchor);
@@ -1099,6 +1194,7 @@ namespace CompetitiveRounds
                     if (next != cBody) { cBody = next.Replace("\t", " "); if (cBody.Length > MailClient.BODY_MAX) cBody = cBody.Substring(0, MailClient.BODY_MAX); }
                 }
             }
+            GUI.enabled = prevEnabled;
             // Live counts repaint without a full dirty cycle (one string set when a length changes).
             PaintCounts();
         }
@@ -1122,7 +1218,7 @@ namespace CompetitiveRounds
                     reportReason = i;
             GUI.Label(new Rect(x + 12, y + 156, w - 24, 22), I18n.Tr("Details (optional)"), styleModalLabel);
             GUI.SetNextControlName(REPORT_CTRL);
-            reportText = GUI.TextField(new Rect(x + 12, y + 180, w - 24, 28), reportText ?? "", 200, styleField);
+            reportText = GUI.TextField(new Rect(x + 12, y + 180, w - 24, 28), reportText ?? "", REPORT_DETAIL_MAX, styleField);
             if (GUI.GetNameOfFocusedControl() == REPORT_CTRL) fieldFocused = true;
             if (GUI.Button(new Rect(x + 12, y + h - 44, 130, 32), I18n.Tr("Cancel"))) cancel = true;
             GUI.enabled = !reportSending;

@@ -8193,13 +8193,30 @@ async def _modcase_click(interaction, custom_id):
                                     allowed_mentions=discord.AllowedMentions.none())
 
 
+# Sent-but-unacked memory for the generic announce queue (the #167 pattern the
+# stream-post loop already uses; Sept 6 item b review r1): post id -> the
+# Discord message id of a send whose ACK (or a later step) has not succeeded.
+# Consulted BEFORE any send, so a tick that retries an un-acked row acks
+# instead of posting the same content (and the same buttons) again. Entries
+# leave when the ack lands. A restart between send and ack can still duplicate
+# ONCE — the documented at-least-once trade-off.
+_channel_post_sent: dict = {}
+
+
 @tasks.loop(seconds=30)
 async def poll_channel_posts():
     """Generic announce queue (v1.30): the API's pending_channel_posts table
     holds messages destined for arbitrary channels (first use: the #scr-faq
     sheet, migration 110). Ack-after-send (learning #105) so a bot restart
     can't drop a queued post; a failed send just retries next tick. Posts are
-    delivered in (sort_order, id) order, one batch per tick."""
+    delivered in (sort_order, id) order, one batch per tick.
+
+    Every step's RESULT is checked (review r1): the ack is the LAST step of a
+    row, so anything before it — the send, and for a moderation case the
+    notified stamp — is retried by the outbox itself on the next tick, while
+    the sent-memory above keeps that retry from posting twice. A row whose
+    ack did not answer "acked" stays pending and is re-driven, never treated
+    as done."""
     if http_session is None or not API_SECRET_KEY:
         return
     data = await api_get("/internal/channel-posts/pending")
@@ -8218,22 +8235,30 @@ async def poll_channel_posts():
             # the user — but never let queued content ping @everyone/roles.
             # Sept 6 item b: a moderation case's post carries the api's
             # [MODCASE:<uuid>] marker as its first line — strip it, attach the
-            # Mute/Ban/Dismiss buttons (custom_id = case id only, B-2) and
-            # stamp notified_at after the ack. Any other post is unchanged.
+            # Mute/Ban/Dismiss buttons (custom_id = case id only, B-2), stamp
+            # notified_at, THEN ack. Any other post is unchanged.
             case_id, content = _modcase_parse(p["content"])
-            send_kw = {"allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False)}
+            if p["id"] not in _channel_post_sent:
+                send_kw = {"allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False)}
+                if case_id:
+                    send_kw["view"] = _modcase_view(case_id)
+                msg = await ch.send(content[:2000], **send_kw)
+                _channel_post_sent[p["id"]] = getattr(msg, "id", None) or True
+                print(f"[CHANNEL-POST] posted {p['id']} to {p['channel_id']}")
             if case_id:
-                send_kw["view"] = _modcase_view(case_id)
-            await ch.send(content[:2000], **send_kw)
-            await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
-            print(f"[CHANNEL-POST] posted {p['id']} to {p['channel_id']}")
-            if case_id:
-                # Bookkeeping only: the post is out either way; a failed stamp
-                # leaves notified_at NULL and is logged, never retried by
-                # re-posting.
+                # The stamp precedes the ack so a failed stamp leaves the row
+                # pending and is retried next tick (the send is remembered,
+                # so the retry stamps without re-posting). The api's stamp is
+                # COALESCE(notified_at, NOW()): re-stamping is a no-op.
                 stamped = await api_post(f"/internal/moderation-cases/{case_id}/notified")
                 if not stamped or stamped.get("status") != "ok":
-                    print(f"[MODCASE] notified stamp failed for {case_id}: {stamped}")
+                    print(f"[MODCASE] notified stamp failed for {case_id}: {stamped} — will retry")
+                    return
+            ack = await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
+            if not ack or ack.get("status") != "acked":
+                print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, send remembered")
+                return
+            _channel_post_sent.pop(p["id"], None)
         except discord.Forbidden:
             print(f"[CHANNEL-POST] forbidden in channel {p['channel_id']} — leaving post {p['id']} queued")
             return

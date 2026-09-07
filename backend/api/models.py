@@ -1359,3 +1359,17 @@ class MailCensorHit(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     sender_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class MailInboxRev(Base):
+    """One row per recipient: the inbox delivery counter behind
+    /mail/status's `revision` (B-6; migration 300). `rev` is bumped by a
+    DB delta once per delivered envelope, in the sending transaction, so it
+    advances in commit order and never moves on a read or a delete. Personal
+    state: delete-account removes the row by name (the FK cascade is
+    decorative under anonymise-in-place)."""
+    __tablename__ = "mail_inbox_rev"
+
+    recipient_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    rev = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
