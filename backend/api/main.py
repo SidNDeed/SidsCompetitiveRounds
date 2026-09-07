@@ -13540,7 +13540,132 @@ def _region_agreed(a, b):
     return a or b
 
 
-def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
+# ── Sept 7 item 3: the pair's own Photon ping maps (design v2 section 7) ─────
+#
+# A client carrying the sweep (Sept 7 batch) pings Photon's region list with its own UDP pinger and
+# sends the result twice: on the 1v1 /queue/join body (`region_pings`,
+# `region_pings_age_s`) and, while it keeps polling, as the request header
+# `X-Region-Pings: us=42,eu=31;age=12` for the three polls after a new sweep.
+# Both arrive through ONE validator; a map that fails it is stored as NULL at
+# join and ignored at poll (a poll never clears the columns). The columns are
+# deliberately NOT declared on the RankedQueue ORM model — raw SQL on both
+# ends, the 296 pattern; migration 301 enumerates every writer and reader.
+#
+# What a client can and cannot do with its own map (#283): it writes only its
+# OWN row, so it can move the pair only to a region the OPPONENT measured
+# within 20 ms of that opponent's own baseline — at most a 20 ms cost to an
+# honest seat — or withhold the map and get today's ladder exactly. Nothing
+# here moves a match result, a rating, gold or another player's game beyond
+# that bound.
+
+REGION_PINGS_MAX_ENTRIES = 24
+REGION_PINGS_MAX_MS = 5000
+REGION_PINGS_MAX_AGE_S = 900           # accepted at join / poll
+REGION_PINGS_ISSUANCE_MAX_AGE_S = 180  # fresh enough to decide a room (7/3-1)
+REGION_PINGS_PARETO_MS = 20
+_REGION_PINGS_DIGITS_RE = _re.compile(r"^[0-9]{1,6}$")
+
+
+def _region_pings_clean(pings):
+    """The map as {token: ms}, or None unless EVERY entry is well-formed: a
+    JSON object with 1..24 entries, every key already a canonical region token
+    (`_region_token(k) == k`), every value an int in 1..5000 (bool excluded).
+    An empty object carries no information and is treated as absent."""
+    if not isinstance(pings, dict) or not (1 <= len(pings) <= REGION_PINGS_MAX_ENTRIES):
+        return None
+    clean = {}
+    for key, ms in pings.items():
+        if not isinstance(key, str) or _region_token(key) != key:
+            return None
+        if isinstance(ms, bool) or not isinstance(ms, int) or not (1 <= ms <= REGION_PINGS_MAX_MS):
+            return None
+        clean[key] = ms
+    return clean
+
+
+def _region_pings_validate(pings, age):
+    """(json_text, age) for a well-formed map and an int age in 0..900, else
+    (None, None) — the join writes both columns NULL from that answer and the
+    poll leaves them untouched."""
+    clean = _region_pings_clean(pings)
+    if clean is None:
+        return None, None
+    if isinstance(age, bool) or not isinstance(age, int) or not (0 <= age <= REGION_PINGS_MAX_AGE_S):
+        return None, None
+    return _json.dumps(clean, sort_keys=True, separators=(",", ":")), age
+
+
+def _region_pings_from_header(value):
+    """`X-Region-Pings: us=42,eu=31;age=12` -> the join validator's answer.
+    Exactly one ';', an `age=<digits>` tail, `code=<digits>` entries with no
+    duplicate code; anything else -> (None, None)."""
+    if not value or not isinstance(value, str) or len(value) > 512:
+        return None, None
+    map_part, sep, age_part = value.partition(";")
+    if not sep or ";" in age_part:
+        return None, None
+    age_part = age_part.strip()
+    if not age_part.startswith("age="):
+        return None, None
+    age_txt = age_part[4:]
+    if not _REGION_PINGS_DIGITS_RE.match(age_txt):
+        return None, None
+    pings = {}
+    for item in map_part.split(","):
+        code, eq, ms_txt = item.strip().partition("=")
+        if not eq or not _REGION_PINGS_DIGITS_RE.match(ms_txt) or code in pings:
+            return None, None
+        pings[code] = int(ms_txt)
+    return _region_pings_validate(pings, int(age_txt))
+
+
+def _pick_region_by_pings(p1, p2, ladder_pick):
+    """Rung 0 of the room-region pick: pure and swap-invariant.
+
+    Given both seats' clean maps and the ladder's answer L: the candidates are
+    the regions BOTH seats measured; the choice c minimises the pair's WORST
+    ping (tie: the sum; tie: fixed order by code). Each seat's baseline is its
+    own measurement of L when it has one, else its own best region; c is
+    accepted only when it costs NEITHER seat more than 20 ms over its own
+    baseline — a Pareto improvement within tolerance judged on each seat's
+    OWN numbers, never one seat's latency traded for the other's. Otherwise L
+    stands. Returns (pick, why, worst_ms): why is "pings" when c was taken,
+    else "no-maps" / "no-overlap" / "pareto"."""
+    if not p1 or not p2:
+        return ladder_pick, "no-maps", None
+    common = sorted(set(p1) & set(p2))
+    if not common:
+        return ladder_pick, "no-overlap", None
+    c = min(common, key=lambda r: (max(p1[r], p2[r]), p1[r] + p2[r], r))
+    base1 = p1[ladder_pick] if ladder_pick in p1 else min(p1.values())
+    base2 = p2[ladder_pick] if ladder_pick in p2 else min(p2.values())
+    if p1[c] <= base1 + REGION_PINGS_PARETO_MS and p2[c] <= base2 + REGION_PINGS_PARETO_MS:
+        return c, "pings", max(p1[c], p2[c])
+    return ladder_pick, "pareto", None
+
+
+def _region_pings_at_issuance(pings, pings_at, now):
+    """A queue row's stored map when it may decide a room: well-formed and
+    stamped within the issuance window. Returns (map or None, state) with
+    state in "absent" / "stale" / "fresh"."""
+    if isinstance(pings, (str, bytes)):
+        try:
+            pings = _json.loads(pings)
+        except ValueError:
+            return None, "absent"
+    clean = _region_pings_clean(pings)
+    if clean is None or pings_at is None:
+        return None, "absent"
+    if pings_at.tzinfo is None:
+        pings_at = pings_at.replace(tzinfo=timezone.utc)
+    if now - pings_at > timedelta(seconds=REGION_PINGS_ISSUANCE_MAX_AGE_S):
+        return None, "stale"
+    return clean, "fresh"
+
+
+def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
+                      p1_pings=None, p2_pings=None, p1_pings_at=None, p2_pings_at=None,
+                      now=None):
     """Room-region decision for a 1v1 queue pair (Aug 15 item 5, Jarvis/Nix).
 
     History: the pick used to be `entry.region or opp.region or "us"` —
@@ -13572,11 +13697,17 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
     live" is the case that strands a pair behind a series that already exists,
     and it is invisible otherwise.
 
-    What this does NOT claim: that the chosen region is the best one for a
+    What the ladder does NOT claim: that its answer is the best one for a
     cross-region pair. Steering on a stored home region was refused for good
     reasons — a persistent, untimestamped best-region cache steers a player who
-    relocated by where they used to be — and the measurement that would settle
-    it does not exist yet.
+    relocated by where they used to be. Since Sept 7 (item 3) the measurement
+    that settles it exists as RUNG 0, run after the ladder has answered: both
+    seats' own ping maps (the kwargs; each with its stamp), taken within the
+    last 180 s, may replace the ladder's answer — but only by a region that
+    costs NEITHER seat more than 20 ms over its own measured baseline
+    (_pick_region_by_pings). A missing, stale or malformed map on either side
+    leaves the ladder's answer exactly as it was. The positional signature is
+    unchanged; `now` is injectable for tests only.
     """
     mr, orr = _region_token(my_region), _region_token(opp_region)
     mh, oh = _region_token(my_home), _region_token(opp_home)
@@ -13586,13 +13717,81 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
     # forever, so a retired one could never age out of the map that is there
     # to notice exactly that.
     if mh and mh == oh:
-        chosen = mh
+        ladder = mh
     else:
-        chosen = _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us"
+        ladder = _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us"
+    # Rung 0 (Sept 7 item 3): the pair's own ping maps, judged AFTER the ladder
+    # has answered — see _pick_region_by_pings for the acceptance rule. Both
+    # seats are treated identically, so the answer stays swap-invariant.
+    if now is None:
+        now = datetime.now(timezone.utc)
+    m1, s1 = _region_pings_at_issuance(p1_pings, p1_pings_at, now)
+    m2, s2 = _region_pings_at_issuance(p2_pings, p2_pings_at, now)
+    if m1 is None or m2 is None:
+        chosen, why, worst = ladder, ("stale" if "absent" not in (s1, s2) else "no-maps"), None
+    else:
+        chosen, why, worst = _pick_region_by_pings(m1, m2, ladder)
+    if why == "pings":
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=pings worst={worst} ladder={ladder}")
+    else:
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=ladder why={why}")
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
           f"seen={'y' if _region_corroborated(chosen) else 'n'} "
           f"live=({mr},{orr}) home=({mh},{oh})")
     return chosen
+
+
+async def _queue_join_upsert(db: AsyncSession, *, player_id, steam_id, display_name,
+                             rating, rating_deviation, region, home_region, ranked_only,
+                             region_pings, region_pings_age) -> None:
+    """The 1v1 queue row, written by ONE INSERT ... ON CONFLICT DO UPDATE.
+
+    Raw SQL rather than the ORM upsert it replaced (Sept 7 item 3): the two
+    ping columns are not declared on RankedQueue (migration 301), and an ORM
+    statement cannot carry an undeclared column (#346). The column list and
+    the conflict SET are the ORM statement's, unchanged; `region_pings` /
+    `region_pings_at` are the validator's answer — NULL/NULL when it refused,
+    so a rejoin never inherits a stale map — bound TYPED (`CAST(:region_pings
+    AS JSONB)`, `make_interval(secs => :region_pings_age)`, #275/#448) so the
+    driver never infers them. ranked_only is INERT: written since launch, read
+    by no matchmaking logic; kept so a future consumer inherits real data —
+    do not document it as a working preference."""
+    now = datetime.now(timezone.utc)
+    await db.execute(text("""
+        INSERT INTO ranked_queue
+            (player_id, steam_id, display_name, rating, rating_deviation,
+             region, home_region, ranked_only, status, matched_with, room_name,
+             room_region, ready, joined_at, matched_at, last_polled,
+             region_pings, region_pings_at)
+        VALUES
+            (:pid, :sid, :name, :rating, :rd,
+             :region, :home_region, :ranked_only, 'searching', NULL, NULL,
+             NULL, false, :now, NULL, :now,
+             CAST(:region_pings AS JSONB),
+             NOW() - make_interval(secs => :region_pings_age))
+        ON CONFLICT (player_id) DO UPDATE SET
+            status = 'searching',
+            rating = EXCLUDED.rating,
+            rating_deviation = EXCLUDED.rating_deviation,
+            region = EXCLUDED.region,
+            home_region = EXCLUDED.home_region,
+            ranked_only = EXCLUDED.ranked_only,
+            matched_with = NULL,
+            room_name = NULL,
+            room_region = NULL,
+            ready = false,
+            joined_at = EXCLUDED.joined_at,
+            matched_at = NULL,
+            last_polled = EXCLUDED.last_polled,
+            region_pings = EXCLUDED.region_pings,
+            region_pings_at = EXCLUDED.region_pings_at
+    """), {
+        "pid": player_id, "sid": steam_id, "name": display_name,
+        "rating": float(rating), "rd": float(rating_deviation),
+        "region": region, "home_region": home_region, "ranked_only": bool(ranked_only),
+        "now": now,
+        "region_pings": region_pings, "region_pings_age": region_pings_age,
+    })
 
 
 @app.post("/api/v1/queue/join", tags=["Queue"])
@@ -13666,47 +13865,17 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     # snapshot keeps its original job below, as one of the four candidates the
     # room-region pick chooses between.
 
-    # Upsert into queue
-    stmt = pg_insert(RankedQueue).values(
-        player_id=player.id,
-        steam_id=req.steam_id,
-        display_name=player.display_name,
-        rating=cur_rating,
-        rating_deviation=cur_rd,
-        region=req.region,
-        home_region=_home_region,
-        # ranked_only is INERT: written here (and in the conflict-update
-        # below) since launch, read by no matchmaking logic. Kept only so a
-        # future consumer inherits real data; do not document it as a
-        # working preference (Codex wiki-batch finding).
-        ranked_only=req.ranked_only,
-        status="searching",
-        matched_with=None,
-        room_name=None,
-        room_region=None,
-        ready=False,
-        joined_at=datetime.now(timezone.utc),
-        matched_at=None,
-        last_polled=datetime.now(timezone.utc),
-    ).on_conflict_do_update(
-        index_elements=[RankedQueue.player_id],
-        set_={
-            "status": "searching",
-            "rating": cur_rating,
-            "rating_deviation": cur_rd,
-            "region": req.region,
-            "home_region": _home_region,
-            "ranked_only": req.ranked_only,
-            "matched_with": None,
-            "room_name": None,
-            "room_region": None,
-            "ready": False,
-            "joined_at": datetime.now(timezone.utc),
-            "matched_at": None,
-            "last_polled": datetime.now(timezone.utc),
-        },
-    )
-    await db.execute(stmt)
+    # Sept 7 item 3: the client's own Photon ping map (design v2 section 7).
+    # ONE validator for this body and the poll header; a refused or absent map
+    # writes NULL to both columns, so a rejoin never inherits a stale map.
+    _pings_json, _pings_age = _region_pings_validate(req.region_pings, req.region_pings_age_s)
+
+    # Upsert into queue — one raw INSERT ... ON CONFLICT, see _queue_join_upsert.
+    await _queue_join_upsert(
+        db, player_id=player.id, steam_id=req.steam_id, display_name=player.display_name,
+        rating=cur_rating, rating_deviation=cur_rd, region=req.region,
+        home_region=_home_region, ranked_only=req.ranked_only,
+        region_pings=_pings_json, region_pings_age=_pings_age)
     await db.commit()
 
     return {"status": "searching", "message": "Joined ranked queue"}
@@ -14283,6 +14452,10 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     _presence_touch(steam_id)
+    # Sept 7 item 3: a fresh ping map rides the poll as a header for the three
+    # polls after each new sweep. Same validator as the join; a refused or
+    # absent header leaves the heartbeat UPDATE below exactly as it was.
+    _hdr_pings, _hdr_age = _region_pings_from_header(request.headers.get("x-region-pings"))
     # Clean up expired blocks opportunistically without waiting on a concurrent
     # decline/account cleanup that is touching another block row.
     await db.execute(text("""
@@ -14333,7 +14506,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                    rq.rating_deviation, rq.status, rq.matched_with,
                    rq.room_name, rq.room_region, rq.region, rq.home_region,
-                   rq.ready, rq.joined_at, rq.matched_at
+                   rq.ready, rq.joined_at, rq.matched_at,
+                   rq.region_pings, rq.region_pings_at
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -14377,7 +14551,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                        rq.rating_deviation, rq.status, rq.matched_with,
                        rq.room_name, rq.room_region, rq.region, rq.home_region,
-                       rq.ready, rq.joined_at, rq.matched_at
+                       rq.ready, rq.joined_at, rq.matched_at,
+                       rq.region_pings, rq.region_pings_at
                 FROM ranked_queue rq
                 JOIN players p ON rq.player_id = p.id
                 WHERE p.steam_id = :sid
@@ -14400,11 +14575,24 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
     wait_seconds = int((now - entry["joined_at"]).total_seconds())
     my_pid = entry["player_id"]
 
-    # Heartbeat — update last_polled so cleanup knows we're alive
-    await db.execute(
-        text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),
-        {"pid": my_pid},
-    )
+    # Heartbeat — update last_polled so cleanup knows we're alive. With a valid
+    # X-Region-Pings header the SAME statement also refreshes the map (typed
+    # binds, #275/#448); the fragment is chosen in code, never by a NULL test
+    # on a bound parameter (#448). A poll never NULLs the columns.
+    if _hdr_pings is not None:
+        await db.execute(
+            text("""UPDATE ranked_queue
+                       SET last_polled = NOW(),
+                           region_pings = CAST(:region_pings AS JSONB),
+                           region_pings_at = NOW() - make_interval(secs => :region_pings_age)
+                     WHERE player_id = :pid"""),
+            {"pid": my_pid, "region_pings": _hdr_pings, "region_pings_age": _hdr_age},
+        )
+    else:
+        await db.execute(
+            text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),
+            {"pid": my_pid},
+        )
 
     # Check for expiry (only applies to searching state)
     if entry["status"] == "searching" and wait_seconds > QUEUE_EXPIRE_MINUTES * 60:
@@ -14425,7 +14613,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         opp_result = await db.execute(
             text("""
                 SELECT player_id, steam_id, display_name, rating, ready, room_name,
-                       region, home_region, status, matched_with
+                       region, home_region, region_pings, region_pings_at,
+                       status, matched_with
                 FROM ranked_queue WHERE player_id = :oid
             """),
             {"oid": entry["matched_with"]},
@@ -14514,7 +14703,9 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 # live snapshot (see _pick_room_region).
                 chosen_region = _pick_room_region(
                     entry["region"], entry["home_region"],
-                    opp["region"], opp["home_region"], room_name)
+                    opp["region"], opp["home_region"], room_name,
+                    p1_pings=entry["region_pings"], p2_pings=opp["region_pings"],
+                    p1_pings_at=entry["region_pings_at"], p2_pings_at=opp["region_pings_at"])
                 _region_out = chosen_region
                 # v1.40.1: ONE conditional stamp over both rows, proven by
                 # RETURNING — both 'matched', both ready, both room-less, each
@@ -14793,7 +14984,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     entry_result = await db.execute(
         text("""
             SELECT player_id, status, matched_with, room_name, room_region, region,
-                   home_region, ready
+                   home_region, ready, region_pings, region_pings_at
             FROM ranked_queue WHERE player_id = :pid
         """),
         {"pid": player.id},
@@ -14829,7 +15020,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     opp_result = await db.execute(
         text("""
             SELECT player_id, steam_id, ready, room_name, region, home_region,
-                   status, matched_with
+                   region_pings, region_pings_at, status, matched_with
             FROM ranked_queue WHERE player_id = :oid
         """),
         {"oid": entry["matched_with"]},
@@ -14902,7 +15093,9 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
             # branch (the both-ready gate above).
             chosen_region = _pick_room_region(
                 entry["region"], entry["home_region"],
-                opp["region"], opp["home_region"], room_name)
+                opp["region"], opp["home_region"], room_name,
+                p1_pings=entry["region_pings"], p2_pings=opp["region_pings"],
+                p1_pings_at=entry["region_pings_at"], p2_pings_at=opp["region_pings_at"])
             # v1.40.1: ONE conditional stamp over both rows, RETURNING-proven —
             # same helper and same dissolution rule as the poll's both-ready branch.
             if not await _queue_stamp_room_reciprocal(db, player.id, opp["player_id"], room_name, chosen_region):

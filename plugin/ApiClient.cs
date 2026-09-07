@@ -10636,8 +10636,15 @@ namespace CompetitiveRounds
             // best region is cached (RegionHandler.SummaryToCache), hence the
             // semicolon and comma guards.
             string homeRegion = HomeRegionFromPhotonCache();
+            // Sept 7 item 3 (design v2 section 7): the last completed region ping
+            // map and its age ride this body when under 15 min old; a stale or
+            // absent map starts a sweep that serves the NEXT join — this join
+            // never waits on pings. Only this 1v1 body: the team/OVT/FFA joins
+            // are separate sites and carry no map (owner's call, 2026-09-07).
+            string regionPings = "";
+            try { RegionPingSweep.NoteJoinQueue(); regionPings = RegionPingSweep.JoinBodyFields(); } catch { regionPings = ""; }
             string safeName = Escape(displayName ?? steamId);
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"home_region\":\"{Escape(homeRegion)}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}}}";
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"home_region\":\"{Escape(homeRegion)}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}{regionPings}}}";
 
             int gen = ++queueGen;  // new lifecycle starts at SEND, not at the ack
             Plugin.Instance.StartCoroutine(PostRequest(
@@ -10871,6 +10878,11 @@ namespace CompetitiveRounds
 
             int gen = queueGen;
             string sentTok = SteamAuth.SessionToken;   // the credential THIS poll rides out with
+            // Sept 7 item 3: a completed sweep with a new revision rides the next
+            // three polls as the X-Region-Pings header (a header, never a query
+            // string); null on every other poll and nothing is stamped.
+            string regionPingsHeader = null;
+            try { regionPingsHeader = RegionPingSweep.PollHeaderValue(); } catch { regionPingsHeader = null; }
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/queue/poll/{steamId}",
                 (success, response) =>
@@ -11021,7 +11033,9 @@ namespace CompetitiveRounds
                         Plugin.Log.LogWarning($"[QUEUE] Poll parse error: {ex.Message}");
                     }
                 },
-                detailedErrors: true, sessionAware: true
+                detailedErrors: true, sessionAware: true,
+                extraHeaderName: regionPingsHeader != null ? "X-Region-Pings" : null,
+                extraHeaderValue: regionPingsHeader
             ));
         }
 
@@ -19498,8 +19512,12 @@ namespace CompetitiveRounds
         /// private reads (my-submissions, cosmetic-preview; N1), and since
         /// v1.40.1 the 1v1 queue poll (session-required; UpdateQueuePoll) —
         /// while the ~100 public-read callers keep their exact current behavior.</param>
+        /// <param name="extraHeaderName">Sept 7 item 3: one optional caller-named
+        /// request header (the 1v1 queue poll's X-Region-Pings), stamped only when
+        /// both name and value are given. Every other caller passes nothing.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
-            bool detailedErrors = false, bool sessionAware = false)
+            bool detailedErrors = false, bool sessionAware = false,
+            string extraHeaderName = null, string extraHeaderValue = null)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, null, callback)) yield break;
@@ -19507,6 +19525,8 @@ namespace CompetitiveRounds
             using (var request = UnityWebRequest.Get(url))
             {
                 StampVersionHeader(request);
+                if (!string.IsNullOrEmpty(extraHeaderName) && extraHeaderValue != null)
+                    request.SetRequestHeader(extraHeaderName, extraHeaderValue);
                 // Capture the token this request rides out with (same pattern
                 // as PostRequest): the compare inside HandleSessionReject
                 // guards the race where a slow 401 lands after a newer

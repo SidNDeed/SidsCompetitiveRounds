@@ -2816,6 +2816,7 @@ namespace CompetitiveRounds
             // the player-seat branch was cut in review — see the class comment).
             try { OverlayIdleClose.Tick(); } catch { }
             try { MusicStreamProbe.Tick(); } catch { }
+            try { RegionPingSweep.Tick(); } catch { }   // Sept 7 item 3: 250 ms self-throttled main-thread poll
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
@@ -4109,7 +4110,12 @@ namespace CompetitiveRounds
         }
 
         public void OnConnected() { }
-        public void OnConnectedToMaster() { }
+        public void OnConnectedToMaster()
+        {
+            // Sept 7 item 3: trigger (a) of the region ping sweep — ignored in
+            // OfflineMode inside, scheduled 3 s out. JoinWhenMasterReady is untouched.
+            try { RegionPingSweep.NoteConnectedToMaster(); } catch { }
+        }
         public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
         {
             // Release B §1: the head-to-head line dies with the room — first

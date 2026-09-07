@@ -2290,7 +2290,7 @@
           ],
           "main",
           "queue_join",
-          "df8a4f520f2a9f8923d7682eb92df9fd64f85917"
+          "11ca819248328c94961c86eaf87c8bc60b2e1e6c"
         ],
         [
           "/api/v1/queue/leave",
@@ -2308,7 +2308,7 @@
           ],
           "main",
           "queue_poll",
-          "27ca2e220482f5e06ac0408b2526c43cd516fb45"
+          "86d699b0fae738f5eb8aa35c58e7aadcbabea633"
         ],
         [
           "/api/v1/queue/ready",
@@ -2317,7 +2317,7 @@
           ],
           "main",
           "queue_ready",
-          "9c690b731693539caffb8d0ac77f1ca7a53c3893"
+          "26e128a70dc808139860d64a763e0f213e1193ce"
         ],
         [
           "/api/v1/queue/recent-joins",
