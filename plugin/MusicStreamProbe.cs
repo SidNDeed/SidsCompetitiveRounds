@@ -162,6 +162,10 @@ namespace CompetitiveRounds
         /// line means no measurement was ever taken; a run whose tap reported a
         /// clean zero must not print the same marker.</summary>
         private static bool _runHadTap;
+        /// <summary>r3 M4 (F3): cycles whose tap was still inside a callback
+        /// when the bounded quiesce wait ran out. The fold that followed may
+        /// have missed a run, so the bar cannot be shown to hold: a bar row.</summary>
+        private static int _runTapQuiesceTimeouts;
         // Bound on deferring the post-run collection while a room is live.
         private static float _cleanupGcDeadline;
         // Bounded mask across a scripted transition, instead of masking whole
@@ -243,11 +247,12 @@ namespace CompetitiveRounds
                 float now = Time.realtimeSinceStartup;
                 // A deferred end record must not die with the process: a quit
                 // inside the cleanup window writes it with the native row
-                // unmeasured (a bar row on the broadcast seat, so a FAIL there).
+                // unmeasured — the marker prints on every seat (r3 F4); it is
+                // a bar row, so a FAIL, on the broadcast seat only.
                 if (!_quitHooked)
                 {
                     _quitHooked = true;
-                    try { Application.quitting += () => FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(quit inside the cleanup window)" : null); } catch { }
+                    try { Application.quitting += () => { try { FinishEndRecord("unmeasured(quit inside the cleanup window)", false); } catch { } }; } catch { }
                 }
                 // Only while enabled: a seat with the probe off must not read
                 // the config file every two seconds forever.
@@ -288,7 +293,7 @@ namespace CompetitiveRounds
                         {
                             _cleanupGcAt = -1f;
                             Plugin.Log?.LogInfo("[MUSIC-PROBE] cleanup collection abandoned — context=" + ctxNow + " outlasted the window");
-                            FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(cleanup abandoned: " + ctxNow + " outlasted the window)" : null);
+                            FinishEndRecord("unmeasured(cleanup abandoned: " + ctxNow + " outlasted the window)", false);
                         }
                         else _cleanupGcAt = now + 5f;
                     }
@@ -309,18 +314,20 @@ namespace CompetitiveRounds
                         long natNow = NativeAlloc();
                         bool natAvail = natNow >= 0 && _nat0 >= 0;
                         long natDelta = natAvail ? natNow - _nat0 : 0L;
+                        bool natPass = natAvail && natDelta <= 1048576L;
                         string natVerdict = !BroadcastMode.IsBroadcastIdentity ? "measured-only(not the broadcast seat: other activity is not excluded)"
                             : !natAvail ? "FAIL(native allocation unavailable)"
-                            : natDelta <= 1048576L ? "pass" : "FAIL";
+                            : natPass ? "pass" : "FAIL";
                         Plugin.Log?.LogInfo("[MUSIC-PROBE] bar-memory key=" + _cleanupKey + " d_native_alloc_mb=" + (natAvail ? Dmb(natDelta) : "?") + " bound=+1.0 verdict=" + natVerdict);
                         // impl2 r2 M4: the end record — the runner's stop signal
                         // — is written only now, with this row folded into its
                         // bar, so a `bar=pass` can never precede a native growth
-                        // measured after it.
-                        FinishEndRecord(!BroadcastMode.IsBroadcastIdentity ? null
-                            : !natAvail ? "native_after_cleanup=unavailable"
-                            : natDelta <= 1048576L ? null
-                            : "native_after_cleanup=" + Dmb(natDelta) + ">+1.0");
+                        // measured after it. The row prints on every seat; it
+                        // counts against the bar on the broadcast seat only.
+                        FinishEndRecord(!natAvail ? "unavailable"
+                            : !BroadcastMode.IsBroadcastIdentity ? Dmb(natDelta) + "(measured-only)"
+                            : natPass ? Dmb(natDelta) + "(pass)"
+                            : Dmb(natDelta) + ">+1.0", natPass);
                     }
                 }
                 if (_req == null && _src == null)
@@ -432,7 +439,7 @@ namespace CompetitiveRounds
                 Plugin.Log?.LogInfo("[MUSIC-PROBE] pending cleanup for " + (_cleanupKey ?? "?")
                                     + " dropped — a new run started inside its window");
             _cleanupSampleAt = -1f; _cleanupGcAt = -1f;
-            FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(a new run started inside the cleanup window)" : null);
+            FinishEndRecord("unmeasured(a new run started inside the cleanup window)", false);
             _gen++;
             _audioWallSeconds = 0f;
             _runMaxGapTicks = 0L;
@@ -444,6 +451,7 @@ namespace CompetitiveRounds
             _mode = wanted;
             _key = key;
             _runHadTap = false;
+            _runTapQuiesceTimeouts = 0;
             // r2 LOW 3: every counter belongs to THIS run, reset before the
             // request so a failed open reports zeros, not the previous run.
             _stallMax = 0f; _stalls = 0; _wraps = 0; _driftPeak = 0f; _lastDrift = 0f; _frameMax = 0f;
@@ -1023,10 +1031,27 @@ namespace CompetitiveRounds
 
         private static void CloseObjects()
         {
-            // Fold BEFORE the release, or a churn cycle's gaps and delivered
-            // frames leave with the tap that recorded them.
+            // r3 M4 (F3): STOP FIRST, QUIESCE, THEN FOLD. The fold used to
+            // read the silent-run count and ring while the source still
+            // played, so the audio thread could deliver the qualifying second
+            // zero buffer of an unscripted run after the read and before
+            // Stop — a run missing from the snapshot, and a `bar=pass` over
+            // it. Now the source is stopped, the tap is disarmed with a full
+            // fence and the main thread waits (bounded) for any callback
+            // already inside the tap to leave; only then are the counters
+            // and the ring folded, so every run the tap ever stamped is in
+            // them. A Stop that throws keeps its handle for the retry as
+            // before; the disarm alone ends the recording either way.
+            if ((object)_src != null) Release(_src, "source");
             if ((object)_tap != null)
             {
+                if (!QuiesceTap(_tap))
+                {
+                    _runTapQuiesceTimeouts++;
+                    Plugin.Log?.LogWarning("[MUSIC-PROBE] tap still inside a callback " + TAP_QUIESCE_MS + " ms after the disarm — the fold below may miss a run; counted against the bar");
+                }
+                // Fold BEFORE the release, or a churn cycle's gaps and delivered
+                // frames leave with the tap that recorded them.
                 if (_tap.MaxGapTicks > _runMaxGapTicks) _runMaxGapTicks = _tap.MaxGapTicks;
                 if (_tap.SilentRunMax > _runSilentRunMax) _runSilentRunMax = _tap.SilentRunMax;
                 // impl2 r2 M4: every silent run of >= 2 buffers is judged, not
@@ -1041,7 +1066,6 @@ namespace CompetitiveRounds
                 _runHadTap = true;
                 _runFramesDelivered += _tap.FramesDelivered;
             }
-            if ((object)_src != null) Release(_src, "source");
             if ((object)_tap != null) Release(_tap, "tap");
             if ((object)_go != null) Release(_go, "host");
             if ((object)_clip != null) Release(_clip, "clip");
@@ -1051,15 +1075,41 @@ namespace CompetitiveRounds
             HostDestroyed = false;
         }
 
+        private const int TAP_QUIESCE_MS = 20;
+
+        /// <summary>r3 M4 (F3): disarms the tap and confirms, on the main
+        /// thread, that no callback is still writing. Dekker-shaped with the
+        /// tap's OnAudioFilterRead: the audio side marks InCallback with a
+        /// full fence BEFORE it reads Armed; this side writes Armed and
+        /// fences BEFORE it reads InCallback — so a callback that saw Armed
+        /// set is seen here as in flight and waited out, and one that starts
+        /// after the fence sees Armed clear and writes nothing but the mark.
+        /// The wait is bounded (a callback's work is a zero scan over one
+        /// buffer, microseconds); false past the bound is a bar failure, not
+        /// a hang. No allocation on either side.</summary>
+        private static bool QuiesceTap(ProbeTap tap)
+        {
+            tap.Armed = false;
+            Thread.MemoryBarrier();
+            long deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * TAP_QUIESCE_MS / 1000L;
+            while (Volatile.Read(ref tap.InCallback) != 0)
+            {
+                if (Stopwatch.GetTimestamp() > deadline) return false;
+                Thread.Yield();
+            }
+            return true;
+        }
+
         private static void Stop(string why)
         {
             // RELEASE FIRST. The record below builds a string, formats six
             // numbers and calls into the logger; a throw anywhere in it used to
             // strand the tap, the host object and up to seven spinning
-            // background threads, because every release sat underneath it. The
-            // one value that does not survive the release is read into a local
-            // first; the starvation numbers are run-scoped and CloseObjects
-            // folds the outgoing tap into them, so they are complete after it.
+            // background threads, because every release sat underneath it.
+            // Every tap number is run-scoped and CloseObjects folds the
+            // outgoing tap into the run totals AFTER stopping the source and
+            // quiescing the tap (r3 M4), so they are complete — and final —
+            // only after it; nothing is read off the tap before that.
             // Run-scoped, like the gap and the deficit: in churn mode the tap
             // is rebuilt every cycle, and the last cycle's number is not the
             // run's. -1 stays the "no tap ever existed" marker — and it is
@@ -1067,16 +1117,14 @@ namespace CompetitiveRounds
             // is zero. A churn cycle whose tap reported a clean zero used to
             // come out as -1, i.e. as no measurement at all, which is the
             // opposite reading of the best possible result.
-            int silentRunMax = (object)_tap != null
-                ? Math.Max(_runSilentRunMax, _tap.SilentRunMax)
-                : (_runHadTap ? _runSilentRunMax : -1);
             if (_busy != null) StopBusy();
             _openPending = false;
             CloseObjects();
+            int silentRunMax = _runHadTap ? _runSilentRunMax : -1;
             // A record still pending from an earlier stop (nothing should get
             // here twice without a run start between, which flushes it) is
             // written before it could be overwritten.
-            FinishEndRecord(BroadcastMode.IsBroadcastIdentity ? "native_after_cleanup=unmeasured(superseded by a later stop)" : null);
+            FinishEndRecord("unmeasured(superseded by a later stop)", false);
             // The bar is judged AFTER CloseObjects: the run totals (delivered
             // frames, gaps, every silent run's start) are folded there.
             // impl2 r2 M4: every silent run of >= 2 buffers must have STARTED
@@ -1089,18 +1137,21 @@ namespace CompetitiveRounds
             // Every row but one is final here. The native-after-cleanup row is
             // measured on a later tick, and the `end` record is the runner's
             // stop signal — so the record is BUILT here and WRITTEN by
-            // FinishEndRecord once that row is judged (impl2 r2 M4): its
-            // `bar=` is final, never a pass a later measurement would have to
-            // retract. `closing` marks the stop itself in the log.
+            // FinishEndRecord after the post-cleanup sample, or at once with
+            // an unmeasured marker when the run is cut short (a new run, a
+            // quit, a cleanup abandoned to a live room, a later stop) — on
+            // every seat (impl2 r2 M4, r3 F4): its `bar=` is final, never a
+            // pass a later measurement would have to retract. `closing`
+            // marks the stop itself in the log.
             _endBar = BarVerdict(why, silentRunMax, unscripted);
             _endRecord = "[MUSIC-PROBE] end key=" + _key + " why=" + why + " mode=" + _mode + " wraps=" + _wraps
                 + " stalls=" + _stalls + " stall_max_ms=" + F0(_stallMax * 1000f) + " drift_peak_ms=" + F0(_driftPeak * 1000f)
-                + " silent_run_max=" + silentRunMax + " silent_runs=" + silentRuns + " silent_runs_unscripted=" + unscripted
+                + " silent_run_max=" + silentRunMax + " silent_runs=" + silentRuns + " silent_runs_unscripted=" + unscripted + " tap_quiesce_timeouts=" + _runTapQuiesceTimeouts
                 + " audio_gap_max_ms=" + F1(MaxGapMs()) + " audio_deficit_ms=" + F0(DeficitMs()) + " audio_deficit_peak_ms=" + F0(_deficitPeakMs)
                 + " open_block_ms=" + F1(_openBlockMs) + " first_sample_ms=" + (_firstSampleMs < 0f ? "?" : F1(_firstSampleMs))
                 + " controls_pass=" + _controlsPass + " controls_fail=" + _controlsFail + " controls_done=" + (_controlsDone ? 1 : 0)
                 + " time_at_death=" + (_timeAtDeath < 0f ? "?" : F1(_timeAtDeath));
-            Plugin.Log?.LogInfo("[MUSIC-PROBE] closing key=" + _key + " why=" + why + " — the end record follows the post-cleanup native sample");
+            Plugin.Log?.LogInfo("[MUSIC-PROBE] closing key=" + _key + " why=" + why + " — the end record follows the post-cleanup native sample, or is written at once with an unmeasured marker if the run is cut short");
             _cleanupKey = _key;
             _cleanupSampleAt = Time.realtimeSinceStartup + 2f;
             _cleanupGcAt = Time.realtimeSinceStartup + 5f;
@@ -1108,28 +1159,32 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Writes the deferred `end` record with its FINAL bar (impl2
-        /// r2 M4). Once per run: after the post-cleanup native sample was
-        /// judged (`nativeFail` null for pass, or for a seat where the row is
-        /// measured-only), or when that sample can no longer happen — the
+        /// r2 M4). Once per run: after the post-cleanup native sample, or at
+        /// once with an unmeasured marker when the run is cut short — the
         /// cleanup abandoned to a live room, a new run inside the window, a
-        /// quit — with the row's failure text on the broadcast seat, where it
-        /// is a bar row. Churn runs carry no bar. A no-op when nothing is
-        /// pending.</summary>
-        private static void FinishEndRecord(string nativeFail)
+        /// quit, a later stop. `nativeRow` is the row's text and is printed
+        /// on EVERY seat as `native_after_cleanup=<row>` (r3 F4: a cancelled
+        /// cleanup used to pass a null row off the broadcast seat and print
+        /// an ordinary `bar=pass`); `nativePass` false adds the row to the
+        /// bar on the broadcast seat only, where it is a bar row (impl2 r1
+        /// M4: judged where it is measured). Churn runs carry no bar. A
+        /// no-op when nothing is pending.</summary>
+        private static void FinishEndRecord(string nativeRow, bool nativePass)
         {
             string rec = _endRecord;
             if (rec == null) return;
             _endRecord = null;
             var fails = _endBar;
             _endBar = null;
+            string row = "native_after_cleanup=" + (nativeRow ?? "unmeasured(no reason given)");
             string bar;
             if (fails == null) bar = "n/a(churn)";
             else
             {
-                if (nativeFail != null) fails.Add(nativeFail);
+                if (!nativePass && BroadcastMode.IsBroadcastIdentity) fails.Add(row);
                 bar = fails.Count == 0 ? "pass" : "FAIL[" + string.Join(",", fails.ToArray()) + "]";
             }
-            Plugin.Log?.LogInfo(rec + " bar=" + bar);
+            Plugin.Log?.LogInfo(rec + " " + row + " bar=" + bar);
         }
 
         /// <summary>The longest interval between two consecutive audio
@@ -1222,6 +1277,7 @@ namespace CompetitiveRounds
             if (_driftPeak * 1000f > 60f) fail.Add("drift_peak=" + F0(_driftPeak * 1000f) + ">60");
             if (silentRunMax < 0 || silentRunMax > 2) fail.Add("silent_run_max=" + silentRunMax + (silentRunMax < 0 ? "(no tap)" : ">2"));
             if (unscripted > 0) fail.Add("silent_runs_unscripted=" + unscripted);
+            if (_runTapQuiesceTimeouts > 0) fail.Add("tap_quiesce_timeouts=" + _runTapQuiesceTimeouts);
             if (MaxGapMs() > 100f) fail.Add("audio_gap_max=" + F1(MaxGapMs()) + ">100");
             if (DeficitMs() > 100f) fail.Add("audio_deficit_end=" + F0(DeficitMs()) + ">100");
             if (_deficitPeakMs > 100f) fail.Add("audio_deficit_peak=" + F0(_deficitPeakMs) + ">100");
@@ -1241,8 +1297,11 @@ namespace CompetitiveRounds
         /// <summary>Audio-thread tap on the probe source's output: counts
         /// buffers, the current and longest run of all-zero buffers, and the
         /// Stopwatch tick of the first non-zero sample. Written on the audio
-        /// thread, read on the main thread (diagnostic: torn reads tolerated).
-        /// OnDestroy flags the host so the owner releases what it still holds.</summary>
+        /// thread; the mid-run polls on the main thread are diagnostic (torn
+        /// reads tolerated), the fold at the stop is complete — it runs after
+        /// QuiesceTap has disarmed the tap and seen no callback in flight
+        /// (r3 M4). OnDestroy flags the host so the owner releases what it
+        /// still holds.</summary>
         private sealed class ProbeTap : MonoBehaviour
         {
             public volatile int Buffers, SilentRun, SilentRunMax;
@@ -1272,6 +1331,16 @@ namespace CompetitiveRounds
             public readonly long[] SilentRunStartTicks = new long[SilentRunRing];
             public volatile int SilentRunCount;
             private long _silentRunStartTicks;
+            /// <summary>r3 M4 (F3): the tap records only while ARMED. Reset
+            /// arms it last (the volatile write publishes the cleared fields
+            /// with it); QuiesceTap clears it, fences, and waits for
+            /// InCallback — set with a full fence at the top of every
+            /// callback, before Armed is read, and cleared at its exit — to
+            /// read zero, so the fold that follows sees every write the tap
+            /// ever made and no callback writes after it. InCallback is
+            /// deliberately not reset: a callback may be inside the mark.</summary>
+            public volatile bool Armed;
+            public int InCallback;
             public void Reset()
             {
                 Buffers = 0; SilentRun = 0; SilentRunMax = 0;
@@ -1279,6 +1348,7 @@ namespace CompetitiveRounds
                 LastCallbackTicks = 0; MaxGapTicks = 0; FramesDelivered = 0;
                 SilentRunCount = 0; _silentRunStartTicks = 0;
                 CallbacksPaused = false; SilenceExpected = false;
+                Armed = true;
             }
             /// <summary>The scripted PAUSE, where Unity stops calling the
             /// filter at all. Nothing is measured across it: no delivery, no
@@ -1305,6 +1375,18 @@ namespace CompetitiveRounds
             /// which are audible and are the point.</summary>
             public volatile bool SilenceExpected;
             private void OnAudioFilterRead(float[] data, int channels)
+            {
+                // r3 M4 (F3): mark in-flight (full fence) BEFORE reading Armed
+                // — see QuiesceTap; the disarmed path writes nothing else.
+                Interlocked.Exchange(ref InCallback, 1);
+                try
+                {
+                    if (!Armed) return;
+                    Record(data, channels);
+                }
+                finally { Interlocked.Exchange(ref InCallback, 0); }
+            }
+            private void Record(float[] data, int channels)
             {
                 if (CallbacksPaused) { SilentRun = 0; LastCallbackTicks = 0; return; }
                 long stamp = Stopwatch.GetTimestamp();

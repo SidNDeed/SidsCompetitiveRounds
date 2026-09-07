@@ -301,11 +301,29 @@ namespace CompetitiveRounds
             public string RetiredWhy;
         }
         private static readonly List<HostEntry> Hosts = new List<HostEntry>();
-        /// <summary>Rule (e): set by RetireHost when the retired entry was the
-        /// adopted host; drained by TickPlayback on a LATER frame, after that
-        /// host's OnDestroy has (or has not) respawned a fresh one.</summary>
-        private static string _hostRetiredPending;
-        private static int _hostRetiredFrame;
+        /// <summary>Rule (e), impl2 r3 F2: retirements of the ADOPTED host
+        /// are COUNTED, never latched — RetireHost increments, TickPlayback
+        /// drains on a frame after the FIRST undrained retirement (a retired
+        /// host's Destroy is deferred to end of frame, so only a later frame
+        /// can tell a respawn from none) and charges every counted
+        /// retirement against the current track's one resume; a retirement
+        /// of a track whose resume is already charged faults in RetireHost
+        /// itself. A scalar pending value keyed on the LATEST retirement was
+        /// overwritten, and never drained, while the release sweep retired
+        /// the freshly rebound host every frame.</summary>
+        private static int _hostRetiredCount;
+        private static int _hostRetiredFirstFrame;
+        private static string _hostRetiredWhy;
+        /// <summary>impl2 r3 F1: set whenever a spawn leaves the engine
+        /// without a host (SpawnHost threw, or the host's Awake did not
+        /// adopt). A host-less engine has no Update to tick it, so the retry
+        /// is driven by RetryHostSpawn from the plugin's persistent per-frame
+        /// poll (Plugin.cs CompetitiveRoundsBehaviour.Update, beside
+        /// MusicStreamProbe.Tick).</summary>
+        private static bool _hostSpawnDue;
+        private static float _hostSpawnRetryRt = -999f;
+        private static int _hostSpawnRetries;
+        private const int HOST_SPAWN_RETRY_CAP = 12;   // 0.5,1,2,4,8,16 s then 30 s: ~3.5 min of retries
         private static bool _initialized;
         private static bool _patchDead;      // suppression prefixes failed to attach (#83) — engine may never own
         private static bool _quitting;
@@ -401,6 +419,8 @@ namespace CompetitiveRounds
                 try { MusicEntitlements.Changed += OnEntitlementsChanged; } catch (Exception ex) { LogOnce("ent-sub", "[MUSIC] entitlement subscribe failed: " + ex.Message, true); }
                 SpawnHost();
                 // [I1] no host = no tick = no repair loop — never pretend.
+                // impl2 r3 F1: the fault releases suppression now; the spawn
+                // itself is retried by RetryHostSpawn (armed in SpawnHost).
                 if (_host == null) EnterDurableFaultNoThrow("host-spawn-failed");
                 Reconcile("initialize");
             }
@@ -1740,36 +1760,55 @@ namespace CompetitiveRounds
         {
             var s = S;
             var h = _host;
-            // impl2 r2 rule (e): the adopted host was retired on an EARLIER
-            // frame (a source of it failed rule b). Its OnDestroy respawned a
-            // fresh host at that frame's end, and the rehydration cleared
-            // currentStarted, so EnsureMainPlaying below restarts the current
-            // from resumePositionSec — charged here as the classifier's ONE
-            // counted resume (a stalled death, §7 2-7): a second death of this
-            // track is the durable fault it would be anywhere else. No fresh
-            // host (the Destroy threw, the respawn failed) is a durable fault
-            // outright — nothing can own playback.
-            if (_hostRetiredPending != null && Time.frameCount > _hostRetiredFrame)
+            // impl2 r2 rule (e), r3 F2: retirements of the adopted host (a
+            // source of it failed rule b) are COUNTED at RetireHost and
+            // drained here on a frame after the FIRST undrained one — the
+            // retired host's Destroy is deferred to end of frame, so only a
+            // later frame can tell "respawned" from "no respawn came". Each
+            // counted retirement is charged against the current track's ONE
+            // resume (the rehydration a respawn performs restarts the current
+            // from resumePositionSec; it is that restart being charged, as a
+            // stalled death, §7 2-7). The charge is per TRACK and survives
+            // the clip assignment rehydration performs (EnsureMainPlaying no
+            // longer resets it), so with a source that throws on every detach
+            // the sequence is: retire -> respawn and one charged resume on the
+            // fresh host -> retire again -> durable fault. The second
+            // retirement faults in RetireHost itself when this drain has
+            // already charged the resume, or here when it landed in the frame
+            // before the drain could (the sweep runs earlier in Tick); either
+            // way the fault precedes the end of that frame, so the host its
+            // Destroy respawns finds a faulted engine and binds nothing — no
+            // third host enters the cycle. A retirement of THIS frame is
+            // still counted (its OnDestroy is pending, its charge is not). No
+            // fresh host at all — the Destroy threw, or the respawn failed —
+            // is a durable fault outright: nothing can own playback.
+            if (_hostRetiredCount > 0 && Time.frameCount > _hostRetiredFirstFrame)
             {
-                string why = _hostRetiredPending;
-                _hostRetiredPending = null;
-                if ((object)h == null || HostIsRetired(h))
+                int retirements = _hostRetiredCount;
+                string why = _hostRetiredWhy;
+                _hostRetiredCount = 0;
+                _hostRetiredWhy = null;
+                bool noRespawn = (object)h == null || (HostIsRetired(h, out int retiredFrame) && Time.frameCount > retiredFrame);
+                if (noRespawn)
                 {
                     if (!s.faultDurable) EnterDurableFaultNoThrow("host-retired without a respawn: " + why);
                     return;
                 }
                 if (s.mode == MusicMode.Custom && s.current.HasValue)
                 {
-                    if (!s.currentPrematureRetried)
+                    for (int i = 0; i < retirements; i++)
                     {
-                        s.currentPrematureRetried = true;
-                        _prematureResumeCount++;
-                        Plugin.Log?.LogWarning($"[MUSIC] main source host-retired at {s.resumePositionSec:F1}s ({why}) — attempting one resume on the respawned host");
-                    }
-                    else
-                    {
-                        EnterDurableFaultNoThrow("host-retired after the one resume: " + why);
-                        return;
+                        if (!s.currentPrematureRetried)
+                        {
+                            s.currentPrematureRetried = true;
+                            _prematureResumeCount++;
+                            Plugin.Log?.LogWarning($"[MUSIC] main source host-retired at {s.resumePositionSec:F1}s ({why}) — attempting one resume on the respawned host ({retirements} retirement(s) drained)");
+                        }
+                        else
+                        {
+                            EnterDurableFaultNoThrow("host-retired after the one resume: " + why);
+                            return;
+                        }
                     }
                 }
             }
@@ -3428,7 +3467,12 @@ namespace CompetitiveRounds
             var clip = ResolveReadyClip(s.current.Value);
             if (clip == null) { KickDesiredLoads(); return; }
             var m = h.Main;
-            if (m.clip != clip) { m.clip = clip; s.currentStarted = false; s.mainPausedByUs = false; s.currentPrematureRetried = false; ArmDeliveryTap(); }
+            // r3 F2 (rule e): the one-resume charge is per TRACK — reset where
+            // the current CHANGES (adopt, PlayTrack, Previous, preview
+            // restore, current cleared), never here: this assignment is also
+            // what rehydration performs on a fresh host, and a reset here let
+            // every retirement buy the same track a new resume.
+            if (m.clip != clip) { m.clip = clip; s.currentStarted = false; s.mainPausedByUs = false; ArmDeliveryTap(); }
             if (m.isPlaying && s.currentStarted)
             {
                 // [K2] steady state — but the source may still carry the
@@ -3993,16 +4037,59 @@ namespace CompetitiveRounds
 
         // ── host lifecycle (#16: HideAndDontSave + OnDestroy respawn) ────
 
+        /// <summary>Never throws (impl2 r3 F1): the logger in its catch is
+        /// itself guarded, and whether the spawn adopted a host is judged by
+        /// _host afterwards — Awake runs inside AddComponent, and an Awake
+        /// that threw is logged by Unity, not raised here. Leaving without a
+        /// host arms RetryHostSpawn and destroys the object whose Awake did
+        /// not adopt, so a retry cannot leak one GameObject per attempt.</summary>
         private static void SpawnHost()
         {
+            GameObject go = null;
             try
             {
-                var go = new GameObject("CR_MusicEngine");
+                go = new GameObject("CR_MusicEngine");
                 go.hideFlags = HideFlags.HideAndDontSave;
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 go.AddComponent<MusicEngineHost>();
             }
-            catch (Exception ex) { Plugin.Log?.LogError($"[MUSIC] host spawn failed: {ex.Message}"); }
+            catch (Exception ex) { try { Plugin.Log?.LogError($"[MUSIC] host spawn failed: {ex.Message}"); } catch { } }
+            finally
+            {
+                _hostSpawnDue = _host == null;
+                if (_hostSpawnDue && go != null) { try { UnityEngine.Object.Destroy(go); } catch { } }
+            }
+        }
+
+        /// <summary>impl2 r3 F1: the spawn retry for a host-less engine. The
+        /// engine's Tick is the host's Update, so nothing inside the engine
+        /// can run without one — this is called every frame from the plugin's
+        /// persistent poll (Plugin.cs CompetitiveRoundsBehaviour.Update,
+        /// beside MusicStreamProbe.Tick) and re-issues SpawnHost with a
+        /// backoff (0.5 s doubling to 30 s) until a host is adopted or the
+        /// cap is spent; a no-op whenever a host exists. Giving up is safe:
+        /// the durable fault that accompanied the failed spawn already
+        /// released suppression, so vanilla music plays.</summary>
+        internal static void RetryHostSpawn()
+        {
+            if (!_initialized || _quitting || !_hostSpawnDue) return;
+            if (_host != null) { _hostSpawnDue = false; _hostSpawnRetries = 0; return; }
+            if (_hostSpawnRetries >= HOST_SPAWN_RETRY_CAP) return;
+            float rt = Time.realtimeSinceStartup;
+            float wait = Math.Min(30f, 0.5f * (1 << Math.Min(_hostSpawnRetries, 6)));
+            if (rt - _hostSpawnRetryRt < wait) return;
+            _hostSpawnRetryRt = rt;
+            _hostSpawnRetries++;
+            SpawnHost();
+            if (_host != null)
+            {
+                _hostSpawnRetries = 0;
+                try { Plugin.Log?.LogWarning("[MUSIC] host spawn retry adopted a host — the engine ticks again"); } catch { }
+            }
+            else if (_hostSpawnRetries >= HOST_SPAWN_RETRY_CAP)
+            {
+                LogOnce("host-spawn-exhausted", $"[MUSIC] host spawn retries exhausted ({HOST_SPAWN_RETRY_CAP} attempts) — engine off for the session; vanilla music untouched (the durable fault released suppression)", true);
+            }
         }
 
         internal static void OnHostAwake(MusicEngineHost host)
@@ -4057,17 +4144,44 @@ namespace CompetitiveRounds
             // GameObject) whether or not the silence here succeeded. That is
             // what closes the surviving-source hole (impl2 r2 H2): a failed
             // silence no longer drops the entry the retire needs.
-            string why = SilenceSources(dying);
-            if (why != null && !_quitting) Plugin.Log?.LogWarning($"[MUSIC] dying host: {why} (entry stays listed until observed destroyed; the respawned host retires it)");
-            if (!ReferenceEquals(_host, dying)) return;   // a retired duplicate: no respawn
-            _host = null;
-            if (_quitting) return;
-            _dyingHost = dying;   // RetireOtherHosts tells this routine retire from an unexpected one
-            try { SpawnHost(); }
-            finally { _dyingHost = null; }
-            // [I1] failed respawn: nothing ticks again, so a held suppression
-            // would silence vanilla forever — durable fault releases it all.
-            if (_host == null) EnterDurableFaultNoThrow("host-respawn-failed");
+            //
+            // impl2 r3 F1 (#276): the respawn is the positive cleanup that
+            // ALWAYS runs. Everything best-effort — the silence and the
+            // warning it may log — sits in the try; a throw from any of it,
+            // the logger included, is swallowed, and the finally releases the
+            // adopted slot and respawns. This used to be straight-line code:
+            // a detach failure that recurred inside SilenceSources, then a
+            // logger that threw, exited before `_host = null` and SpawnHost,
+            // leaving Custom suppression held by a host that no longer ticked
+            // — dead air with no bound. SpawnHost never throws; a spawn that
+            // adopts nothing arms RetryHostSpawn (the plugin's per-frame
+            // poll) and the durable fault below releases suppression until
+            // the retry lands.
+            bool adopted = ReferenceEquals(_host, dying);
+            try
+            {
+                string why = SilenceSources(dying);
+                if (why != null && !_quitting) Plugin.Log?.LogWarning($"[MUSIC] dying host: {why} (entry stays listed until observed destroyed; the respawned host retires it)");
+            }
+            catch { }
+            finally
+            {
+                if (adopted)   // a retired duplicate is not the adopted host: no respawn
+                {
+                    _host = null;
+                    if (!_quitting)
+                    {
+                        _dyingHost = dying;   // RetireOtherHosts tells this routine retire from an unexpected one
+                        try { SpawnHost(); }
+                        catch { }
+                        finally { _dyingHost = null; }
+                        // [I1] failed respawn: nothing ticks again until the
+                        // retry lands, so a held suppression would silence
+                        // vanilla — durable fault releases it all now.
+                        if (_host == null) EnterDurableFaultNoThrow("host-respawn-failed");
+                    }
+                }
+            }
         }
         private static MusicEngineHost _dyingHost;
 
@@ -4119,8 +4233,9 @@ namespace CompetitiveRounds
         /// best-effort silence first, so a voice stops now rather than at end
         /// of frame. A Destroy that throws leaves the entry retired and never
         /// observed destroyed — every pair waiting on it holds at the window
-        /// (rule d). Retiring the adopted host is noted for TickPlayback
-        /// (rule e): its OnDestroy respawns as it always did.</summary>
+        /// (rule d). Retiring the adopted host is COUNTED for TickPlayback
+        /// (rule e, r3 F2): its OnDestroy respawns as it always did, and the
+        /// count — not a latch — is what charges each retirement.</summary>
         private static void RetireHost(HostEntry e, string why)
         {
             if (e.Retired) return;
@@ -4133,13 +4248,44 @@ namespace CompetitiveRounds
             try { UnityEngine.Object.Destroy(e.Go); }
             catch (Exception ex) { e.RetiredWhy = why = why + "; host destroy threw: " + ex.Message; routine = false; }
             string line = $"[MUSIC] host retired ({why}){(silence != null ? "; silence: " + silence : "")} — adopted={adopted}, listed={Hosts.Count}; the GameObject dies at end of frame and its entry leaves once observed destroyed";
-            if (routine) Plugin.Log?.LogInfo(line); else Plugin.Log?.LogWarning(line);
-            if (adopted) { _hostRetiredPending = why; _hostRetiredFrame = Time.frameCount; }
+            // r3 F1: a throwing logger must not abort this — RetireOtherHosts
+            // runs it inside the new host's Awake, before RouteSources.
+            try { if (routine) Plugin.Log?.LogInfo(line); else Plugin.Log?.LogWarning(line); } catch { }
+            if (adopted)
+            {
+                // r3 F2: the SECOND retirement of the adopted host while the
+                // same track is current — its one resume already charged by
+                // TickPlayback's drain — is the durable fault right here,
+                // before this host's Destroy can respawn another: the respawn
+                // finds a faulted engine and binds nothing. A retirement the
+                // drain has not charged yet is counted for it (the sweep can
+                // retire a fresh host in the frame before the drain runs, so
+                // the count, not a latch, carries every retirement).
+                var s = S;
+                if (s.mode == MusicMode.Custom && s.current.HasValue && s.currentPrematureRetried)
+                {
+                    _hostRetiredCount = 0;
+                    _hostRetiredWhy = null;
+                    EnterDurableFaultNoThrow("host-retired after the one resume: " + why);
+                }
+                else
+                {
+                    if (_hostRetiredCount == 0) _hostRetiredFirstFrame = Time.frameCount;
+                    _hostRetiredCount++;
+                    _hostRetiredWhy = why;
+                }
+            }
         }
 
-        private static bool HostIsRetired(MusicEngineHost h)
+        private static bool HostIsRetired(MusicEngineHost h, out int retiredFrame)
         {
-            for (int i = 0; i < Hosts.Count; i++) if (ReferenceEquals(Hosts[i].Host, h)) return Hosts[i].Retired;
+            retiredFrame = -1;
+            for (int i = 0; i < Hosts.Count; i++)
+            {
+                if (!ReferenceEquals(Hosts[i].Host, h)) continue;
+                retiredFrame = Hosts[i].RetiredFrame;
+                return Hosts[i].Retired;
+            }
             return false;
         }
 
@@ -4881,7 +5027,10 @@ namespace CompetitiveRounds
 
         private void OnDestroy()
         {
-            MusicEngine.OnHostDestroyed(this);
+            // impl2 r3 F1: OnHostDestroyed is non-throwing by construction
+            // (its respawn runs in a finally); the guard here is so no future
+            // edit to it can let Unity abort this load-bearing hook (#92).
+            try { MusicEngine.OnHostDestroyed(this); } catch { }
         }
     }
 

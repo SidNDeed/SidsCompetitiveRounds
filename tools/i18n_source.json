@@ -849,7 +849,6 @@
   "Cursor: <color=#88CCFF>{0}</color>",
   "Curved crimson horns for your inner demon.",
   "Custom faces",
-  "Custom music is not prepared — open F5 > Music at the main menu",
   "Custom player body colors: <color=#88FF88>ON</color>",
   "Custom player body colors: <color=#FF9966>OFF</color>",
   "Custom player body colors: shows shop-bought Body Colors on you and other modded players. Off = everyone falls back to default orange/blue.",
@@ -927,7 +926,6 @@
   "Double KO - nobody scored this round.",
   "Double Nova",
   "Downloading full album...",
-  "Downloading music ({0} of {1} ready)",
   "Downloading music previews...",
   "Downloading music...",
   "Downloading update...",
@@ -1326,6 +1324,8 @@
   "Lives",
   "Living on the Edge",
   "Loading achievements...",
+  "Loading music ({0} of {1} ready)",
+  "Loading music ({0}%)",
   "Loading recent series...",
   "Loading shop sales...",
   "Loading the reviewed cosmetic...",
@@ -1436,13 +1436,12 @@
   "Music",
   "Music credit toast: <color=#88FF88>ON</color>",
   "Music credit toast: <color=#FF9966>OFF</color>",
-  "Music download failed ({0}) — click to retry",
-  "Music download failed ({0}) — retry at the main menu",
-  "Music download failed ({0}) — retry in a moment",
   "Music download failed - press Retry",
   "Music download is rate-limited - waiting to retry",
+  "Music failed to load ({0}) — play the track to retry",
   "Music files are missing - reinstall the mod through your mod manager",
   "Music files failed verification - press Retry",
+  "Music files not installed",
   "Mustard",
   "Mute From Message...",
   "Mute Player...",
@@ -1647,10 +1646,6 @@
   "Premium: cold silver walls that glint to pure white, over gunmetal dark",
   "Premium: molten gold walls that glint to white-gold, over a deep bronze vault",
   "Premium: northern-lights walls shimmering between polar teal and violet in a polar night",
-  "Prepare music",
-  "Prepare music ({0} of {1} ready)",
-  "Prepare music at the main menu ({0} of {1} ready)",
-  "Preparing music ({0} of {1} ready)",
   "Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.",
   "Press Esc to leave",
   "Preview",
@@ -1659,7 +1654,7 @@
   "Preview: {0}",
   "Preview: {0}  <color=#888>({1})</color>",
   "Previews load at the main menu",
-  "Previous track is not prepared — open the Music tab at the main menu",
+  "Previous track is not loaded yet — use Previous at the main menu",
   "Price",
   "Prismatic",
   "Prismatic Wake",
@@ -6914,11 +6909,6 @@
    "location": "BuildVisibilitySeats",
    "kind": "Tr"
   },
-  "Custom music is not prepared — open F5 > Music at the main menu": {
-   "surface": "MusicEngine",
-   "location": "MaybeShowNotPreparedToast",
-   "kind": "Tr"
-  },
   "Custom player body colors: <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
    "location": "RefreshSettings",
@@ -7303,11 +7293,6 @@
    "surface": "MusicAssets",
    "location": "TierStatusLine",
    "kind": "Tr"
-  },
-  "Downloading music ({0} of {1} ready)": {
-   "surface": "MusicEngine",
-   "location": "PrepareStateLine",
-   "kind": "TrF"
   },
   "Downloading music previews...": {
    "surface": "MusicAssets",
@@ -9299,6 +9284,16 @@
    "location": "BuildCompareAchievementGrid",
    "kind": "Tr"
   },
+  "Loading music ({0} of {1} ready)": {
+   "surface": "MusicEngine",
+   "location": "MusicStatusLine",
+   "kind": "TrF"
+  },
+  "Loading music ({0}%)": {
+   "surface": "MusicEngine",
+   "location": "MusicStatusLine",
+   "kind": "TrF"
+  },
   "Loading recent series...": {
    "surface": "NativeUI",
    "location": "RefreshRecentSeries",
@@ -9849,21 +9844,6 @@
    "location": "RefreshSettings",
    "kind": "SetText"
   },
-  "Music download failed ({0}) — click to retry": {
-   "surface": "MusicEngine",
-   "location": "PrepareStateLine",
-   "kind": "TrF"
-  },
-  "Music download failed ({0}) — retry at the main menu": {
-   "surface": "MusicEngine",
-   "location": "PrepareStateLine",
-   "kind": "TrF"
-  },
-  "Music download failed ({0}) — retry in a moment": {
-   "surface": "MusicEngine",
-   "location": "PrepareStateLine",
-   "kind": "TrF"
-  },
   "Music download failed - press Retry": {
    "surface": "MusicAssets",
    "location": "TierStatusLine",
@@ -9874,6 +9854,11 @@
    "location": "TierStatusLine",
    "kind": "Tr"
   },
+  "Music failed to load ({0}) — play the track to retry": {
+   "surface": "MusicEngine",
+   "location": "MusicStatusLine",
+   "kind": "TrF"
+  },
   "Music files are missing - reinstall the mod through your mod manager": {
    "surface": "MusicAssets",
    "location": "TierStatusLine",
@@ -9882,6 +9867,11 @@
   "Music files failed verification - press Retry": {
    "surface": "MusicAssets",
    "location": "TierStatusLine",
+   "kind": "Tr"
+  },
+  "Music files not installed": {
+   "surface": "MusicEngine",
+   "location": "MusicStatusLine",
    "kind": "Tr"
   },
   "Mustard": {
@@ -10904,26 +10894,6 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
-  "Prepare music": {
-   "surface": "NativeUI",
-   "location": "BuildMusicTab",
-   "kind": "CreateButton"
-  },
-  "Prepare music ({0} of {1} ready)": {
-   "surface": "MusicEngine",
-   "location": "PrepareStateLine",
-   "kind": "TrF"
-  },
-  "Prepare music at the main menu ({0} of {1} ready)": {
-   "surface": "MusicEngine",
-   "location": "PrepareStateLine",
-   "kind": "TrF"
-  },
-  "Preparing music ({0} of {1} ready)": {
-   "surface": "MusicEngine",
-   "location": "PrepareStateLine",
-   "kind": "TrF"
-  },
   "Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.": {
    "surface": "NativeUI",
    "location": "OnLfpButton",
@@ -10964,7 +10934,7 @@
    "location": "TogglePreview",
    "kind": "Tr"
   },
-  "Previous track is not prepared — open the Music tab at the main menu": {
+  "Previous track is not loaded yet — use Previous at the main menu": {
    "surface": "MusicEngine",
    "location": "PlayPrevious",
    "kind": "Tr"
