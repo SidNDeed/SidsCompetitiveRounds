@@ -4382,7 +4382,6 @@ namespace CompetitiveRounds
         private static HashSet<string> _tsSnapDeselected;
         private static bool _tsSnapLoop, _tsSnapShuffle;
         // impl2 r1 M2 / M1: bounds on the two waits the oracles used to skip.
-        private const float TS_VANILLA_AUDIBLE_SEC = 5f;   // S2: vanilla Playing after the Loading edge
         private const float TS_LEDGER_SETTLE_SEC = 2f;     // S3: the three keys' state after the preview start; S4 after the 4th key; openall before its line
 
         internal static void TickTestScript()
@@ -4724,11 +4723,14 @@ namespace CompetitiveRounds
             }
         }
 
-        // S2 (§7 2-8): selection {0,1}, loop OFF, track 1 tombstoned -> Loading
-        // within 1 s of the end (no Waiting), vanilla AUDIBLE (the oracle reads
-        // Playing) within TS_VANILLA_AUDIBLE_SEC of that edge and still at 60 s,
-        // and the tombstoned key is never re-opened for 60 s (impl2 r1 M2:
-        // "Loading + suppress=false" alone is also what a failing re-entry shows).
+        // S2 (§7 2-8, oracle corrected 2026-09-07, design v3 §11): selection {0,1},
+        // loop OFF, track 1 tombstoned -> the playlist is EXHAUSTED at the end of
+        // track 0: the engine skips the tombstone and enters MutedByChoice within
+        // 1 s (deliberate silence, the mode machine's playlist-end rule, #457),
+        // vanilla stays silent, no fault, and the tombstoned key is never re-opened
+        // for 60 s. (v2's expectation of Loading + vanilla applies to a FAILING
+        // current track — S1's no-ready-track path and S6's durable fault — not
+        // to a natural end with nothing left to play.)
         // Final-cycle finding (2026-09-07): the selection reduction is inert on
         // the broadcast queue (it plays every owned album, album-major), so the
         // end adopted the next playable track instead of Loading. Every other
@@ -4774,12 +4776,12 @@ namespace CompetitiveRounds
                     if (_tsF0 < 0f && (!TsMainPlaying() || S.mode != MusicMode.Custom)) _tsF0 = rt;   // the end
                     if (_tsF0 >= 0f)
                     {
-                        if (S.mode == MusicMode.Loading)
+                        if (S.mode == MusicMode.MutedByChoice)
                         {
-                            if (S.suppress || S.waiting) { TsEnd(false, "Loading but suppress/waiting held: " + TsState()); return; }
+                            if (S.faultDurable) { TsEnd(false, "durable fault at the playlist end: " + TsState()); return; }
                             _tsT2 = rt; _tsF1 = -1f; _tsPhase = 3; return;
                         }
-                        if (rt - _tsF0 > 1f) TsEnd(false, "not Loading within 1 s of the end: " + TsState());
+                        if (rt - _tsF0 > 1f) TsEnd(false, "not MutedByChoice (deliberate silence, playlist exhausted) within 1 s of the end: " + TsState());
                         return;
                     }
                     if (rt - _tsT1 > 14f) TsEnd(false, "track 0 did not end within 14 s of the seek to len-10: " + TsState());
@@ -4787,17 +4789,11 @@ namespace CompetitiveRounds
                 case 3:
                     {
                         if (TsOpens(k1) != _tsI1) { TsEnd(false, $"tombstoned {k1} was re-opened: " + TsState()); return; }
-                        if (IsEngineOwned(S.mode) || S.suppress) { TsEnd(false, "engine re-owned or re-suppressed after the tombstoned end: " + TsState()); return; }
-                        string van = TsVanilla(true);
-                        bool audible = van == "Playing";
-                        if (audible && _tsF1 < 0f)
-                        {
-                            if (S.mode != MusicMode.Loading) { TsEnd(false, $"vanilla audible but mode={S.mode} (want Loading): " + TsState()); return; }
-                            _tsF1 = rt - _tsT2;   // first audible, seconds after the Loading edge
-                        }
-                        if (_tsF1 < 0f && rt - _tsT2 > TS_VANILLA_AUDIBLE_SEC) { TsEnd(false, $"vanilla not audible within {TS_VANILLA_AUDIBLE_SEC:F0} s of the Loading edge (oracle={van}, want Playing): " + TsState()); return; }
+                        if (S.faultDurable) { TsEnd(false, "durable fault during the deliberate silence: " + TsState()); return; }
+                        if (S.mode != MusicMode.MutedByChoice) { TsEnd(false, $"left deliberate silence (mode={S.mode}) after the playlist end: " + TsState()); return; }
+                        if (TsVanilla(true) == "Playing") { TsEnd(false, "vanilla audible during engine-owned silence (playlist exhausted, loop off): " + TsState()); return; }
                         if (rt - _tsT2 >= 60f)
-                            TsEnd(audible, $"Loading {(_tsT2 - _tsF0):F2}s after the end with loop off (no Waiting), unsuppressed; vanilla audible {_tsF1:F2}s after the edge (bound {TS_VANILLA_AUDIBLE_SEC:F0}) and at 60 s oracle={van} (want Playing) mode={S.mode}; opens[{k1}] delta 0 for 60 s; {TsState()}");
+                            TsEnd(true, $"MutedByChoice {(_tsT2 - _tsF0):F2}s after the end with loop off (playlist exhausted; tombstoned successor skipped, never re-opened; vanilla silent) held 60 s: " + TsState());
                         return;
                     }
             }
