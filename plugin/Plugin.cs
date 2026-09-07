@@ -58,6 +58,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<int> BroadcastFpsCap;
         internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
+        internal static ConfigEntry<bool> ShowInactiveOnBoards;   // [UI] item d: default off -- boards hide players inactive 90+ days
         internal static ConfigEntry<bool> LagNoticesEnabled;   // [Network] LagNotices — Release B §4, default off
         // Streamed-playback measurement (MusicStreamProbe), both in [Music].
         // Opt-in, default off; the command names the track and the mode.
@@ -157,6 +158,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastTestMapSkinSandbox;    // broadcast seat only — auto LOCAL→SANDBOX for the lever
         internal static ConfigEntry<int> BroadcastTestMapSkinTourSeconds; // broadcast seat only — advance a comma list every N s
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
+        internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
@@ -617,6 +619,16 @@ namespace CompetitiveRounds
                 "Show Photon ping and region alongside FPS when in a room"
             );
 
+            // Sept 6 item d: a NEW key with a false default -- Config.Bind writes a
+            // default once and never revisits it (#190), so this ships off for
+            // every install. ApiClient appends include_inactive=true to the four
+            // board fetches while it is on.
+            ShowInactiveOnBoards = Config.Bind(
+                "UI", "ShowInactiveOnBoards",
+                false,
+                "Show players inactive for 90+ days on the leaderboards"
+            );
+
             // Release B §4 (bug 332): opt-in lag notices. A NEW key with a
             // false default — Config.Bind writes a default once and never
             // revisits it (#190), so this ships off for every install.
@@ -1001,6 +1013,10 @@ namespace CompetitiveRounds
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
                 "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
+            );
+            BroadcastTestQuit = Config.Bind(
+                "Broadcast", "TestQuit", "",
+                "Broadcast seat only: set to any value that differs from the value at launch (e.g. quit-<timestamp>) to quit the game — Application.Quit, then a hard exit if the process is still alive 8 s later. Clear it afterwards; the value present at launch is the baseline and never fires."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
@@ -1566,6 +1582,29 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo("[QUEUE-JOINER] Disconnecting from Photon...");
                 }
 
+                // Sept 6 (bug 336 — the "matched but never connected" family, A2):
+                // vanilla's WaitForConnect is `while (!isConnectedToMaster)`, and
+                // that flag is set by OnConnectedToMaster — which PUN also raises
+                // for the OFFLINE menu room: leaving it fires OnLeftRoom (clears
+                // the flag) and then OnConnectedToMaster (sets it again). The
+                // Disconnect() above ends with DisconnectByClientLogic, a cause
+                // vanilla's OnDisconnected deliberately ignores, so the flag
+                // reaches this point TRUE with no connection behind it, the wait
+                // loop exits in the same frame ConnectToRegion began, and
+                // JoinOrCreateRoom fails with "Client is on NameServer ...
+                // (State: ConnectingToNameServer)". The retry repeats the same
+                // steps, so it fails the same way. Reset it here — after the
+                // Disconnect, before the coroutine below runs its first MoveNext
+                // synchronously inside StartCoroutine. `was=True` in a field log
+                // is the proof of this diagnosis.
+                try
+                {
+                    bool wasConnectedFlag = nch.isConnectedToMaster;
+                    nch.isConnectedToMaster = false;
+                    Plugin.Log.LogInfo($"[QUEUE-JOINER] connect flag reset (was={wasConnectedFlag}, offline={PhotonNetwork.OfflineMode}, state={PhotonNetwork.NetworkClientState})");
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[QUEUE-JOINER] connect flag reset failed: {ex.Message}"); }
+
                 // Close menus
                 try { CharacterCreatorHandler.instance?.CloseMenus(); } catch { }
                 try { MainMenuHandler.instance?.Close(); } catch { }
@@ -1612,90 +1651,18 @@ namespace CompetitiveRounds
 
                 // NCH handles: disconnect wait → ConnectToRegion → wait for master → execute callback
                 string capturedRoom = targetRoom;
+                int capturedGen = ++joinGeneration;
                 nch.StartCoroutine(nch.DoActionWhenConnected(() =>
                 {
-                    try
-                    {
-                        // Cancellation check (lobby impl review rounds 2+3):
-                        // the pending-room static is the cancellation token —
-                        // a Leave (or a replacement lock) clears/repoints it
-                        // between capture and connect, and a canceled join
-                        // must NOT still enter the dead room. Applies to all
-                        // modes. NEVER StopLoading here (round-3 find C1:
-                        // that is ROUNDS' match-found SUCCESS transition, not
-                        // a cancel — it can activate gameplay with no room).
-                        // Cleared -> the player wants OUT: NetworkRestart is
-                        // the codebase's one honest abort-to-menu lever.
-                        // Replaced -> the NEW room's joiner run owns the
-                        // loading screen and connection; this stale callback
-                        // simply dies.
-                        if (!string.Equals(Plugin.PendingRankedRoom, capturedRoom, StringComparison.Ordinal))
-                        {
-                            bool cleared = string.IsNullOrEmpty(Plugin.PendingRankedRoom);
-                            Plugin.Log.LogWarning($"[QUEUE-JOINER] pending room changed/cleared since capture ('{capturedRoom}' -> '{Plugin.PendingRankedRoom ?? "(none)"}') — aborting join (cleared={cleared})");
-                            if (cleared)
-                            {
-                                try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
-                            }
-                            return;
-                        }
-                        Plugin.Log.LogInfo($"[QUEUE-JOINER] Connected! JoinOrCreate: {capturedRoom}");
-                        // 2v2 rooms have a `team_` prefix (set by /team/queue/ready
-                        // server-side). Bump MaxPlayers to 4 + flag the room as
-                        // friendly-fire-on so a Harmony patch can read it during
-                        // ProjectileCollision and let teammate shots through.
-                        bool is2v2 = capturedRoom != null && capturedRoom.StartsWith("team_");
-                        // 1v2: ovt_ rooms hold 3. Review CRITICAL — without this the
-                        // room was created MaxPlayers=2 (the 1v1 default) and the
-                        // third player could never join, so 1v2 could never start.
-                        bool is1v2 = capturedRoom != null && capturedRoom.StartsWith("ovt_");
-                        // FFA: ffa_ rooms hold the locked lobby size (3-10) —
-                        // learning #146a: a missing MaxPlayers branch means the
-                        // Nth player can never join. The creator stamps the
-                        // lobby size as a room prop so late joiners (and any
-                        // client whose queue payload got lost) read one truth.
-                        bool isFfa = capturedRoom != null && capturedRoom.StartsWith("ffa_");
-                        int ffaCount = Plugin.PendingFfaCount > 0 ? Plugin.PendingFfaCount : 10;
-                        var roomProps = new ExitGames.Client.Photon.Hashtable
-                        {
-                            { "C2", capturedRoom }
-                        };
-                        if (is2v2) roomProps["cr_ff"] = true;
-                        // July 22 item 3: solo-extra-pick flag rides the ROOM
-                        // props (design doc: room-prop carrier) — all 3 clients
-                        // got it in the lock payload, so whichever creates the
-                        // room stamps it and late joiners read one truth.
-                        if (is1v2 && ApiClient.OvtSoloExtraPick) roomProps["cr_ovt_xp"] = true;
-                        if (isFfa) roomProps["cr_ffa_n"] = ffaCount;
-                        // Spectator seats (design §4.1): server-issued rooms
-                        // reserve SEAT_CAP extra Photon actors above the
-                        // fighter count. Vanilla match-found fires on a
-                        // hardcoded PlayerList.Length == 2, and every mod
-                        // force-start path counts PlayersNeeded — neither
-                        // reads MaxPlayers, so the bump is start-inert. The
-                        // grant server only admits spectators once the match
-                        // is live (all fighters attested "battle"), so a
-                        // spectator can never occupy a seat pre-assembly.
-                        int fighterTarget = is2v2 ? 4 : (is1v2 ? 3 : (isFfa ? ffaCount : 2));
-                        var roomOptions = new Photon.Realtime.RoomOptions
-                        {
-                            MaxPlayers = (byte)(fighterTarget + SpectatorSession.SEAT_CAP),
-                            IsOpen = true,
-                            // Queue rooms are joined by exact server-issued
-                            // name only — never listed, never lobby-matched.
-                            // Hidden so the reserved seats cannot be found by
-                            // room browsing (design §4.1, Codex r1 find 1).
-                            IsVisible = false,
-                            CustomRoomProperties = roomProps,
-                            CustomRoomPropertiesForLobby = new string[] { "C2" }
-                        };
-                        var lobby = new Photon.Realtime.TypedLobby("RoomCodeLobby", Photon.Realtime.LobbyType.SqlLobby);
-                        PhotonNetwork.JoinOrCreateRoom(capturedRoom, roomOptions, lobby);
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log.LogError($"[QUEUE-JOINER] JoinOrCreate failed: {ex.Message}");
-                    }
+                    // Sept 6 (bug 336, A2 second line): vanilla's callback means
+                    // "its own connected flag is set", not "the client is on the
+                    // master server". The join is issued by JoinWhenMasterReady,
+                    // which waits for ClientState.ConnectedToMasterServer with
+                    // OfflineMode off (CLAUDE.md hard rule, #21) inside the
+                    // joiner's own 30 s attempt budget, and dies silently when a
+                    // retry supersedes this attempt.
+                    try { nch.StartCoroutine(JoinWhenMasterReady(capturedRoom, capturedGen)); }
+                    catch (Exception ex) { Plugin.Log.LogError($"[QUEUE-JOINER] join scheduling failed: {ex.Message}"); }
                 }));
 
                 Plugin.Log.LogInfo($"[QUEUE-JOINER] Started NCH connection sequence for room: {targetRoom}");
@@ -1706,6 +1673,145 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogError($"[QUEUE-JOINER] StartNCHConnect failed: {ex.Message}");
                 joinInitiated = false;
+            }
+        }
+
+        // Sept 6 (A2): generation stamp — a retry bumps it, and the previous
+        // attempt's pending join dies instead of firing a second JoinOrCreate.
+        private int joinGeneration = 0;
+
+        /// <summary>Second line of the A2 fix: own the join gate (#21). Vanilla's
+        /// DoActionWhenConnected fires when ITS flag says connected; this waits,
+        /// frame by frame, for the real client state before issuing the join, and
+        /// gives up when a retry (new generation) or a reset (state left Connecting)
+        /// owns the connection. A pending-room change falls through to
+        /// IssueJoinOrCreate, whose cancellation check decides between abort-to-menu
+        /// and dying quietly — exactly as the inline callback did before the split.
+        /// Bounded by the joiner's 30 s attempt timer, which resets state to Idle.</summary>
+        private System.Collections.IEnumerator JoinWhenMasterReady(string capturedRoom, int gen)
+        {
+            int waitedFrames = 0;
+            while (true)
+            {
+                // Order matters: a pending-room change falls through to
+                // IssueJoinOrCreate FIRST, because the joiner's Update() resets
+                // state to Idle in the same frame the room is cleared — and the
+                // cleared case must still reach NetworkRestart, the one honest
+                // abort-to-menu lever, exactly as the inline callback did.
+                if (!string.Equals(Plugin.PendingRankedRoom, capturedRoom, StringComparison.Ordinal)) break;
+                if (gen != joinGeneration || state != JoinState.Connecting) yield break;
+                bool ready = false;
+                string st = "?";
+                try
+                {
+                    st = PhotonNetwork.NetworkClientState.ToString();
+                    ready = PhotonNetwork.NetworkClientState == Photon.Realtime.ClientState.ConnectedToMasterServer
+                            && !PhotonNetwork.OfflineMode;
+                }
+                catch { }
+                if (ready) break;
+                if (waitedFrames == 0)
+                    Plugin.Log.LogWarning($"[QUEUE-JOINER] connected callback fired with state={st} offline={PhotonNetwork.OfflineMode} — holding JoinOrCreate until ConnectedToMasterServer");
+                waitedFrames++;
+                yield return null;
+            }
+            if (waitedFrames > 0)
+                Plugin.Log.LogInfo($"[QUEUE-JOINER] master server ready after {waitedFrames} frames — issuing the join");
+            IssueJoinOrCreate(capturedRoom);
+        }
+
+        /// <summary>The former inline connected-callback body, unchanged apart from
+        /// logging the JoinOrCreateRoom result (A2, third line).</summary>
+        private void IssueJoinOrCreate(string capturedRoom)
+        {
+            try
+            {
+                // Cancellation check (lobby impl review rounds 2+3):
+                // the pending-room static is the cancellation token —
+                // a Leave (or a replacement lock) clears/repoints it
+                // between capture and connect, and a canceled join
+                // must NOT still enter the dead room. Applies to all
+                // modes. NEVER StopLoading here (round-3 find C1:
+                // that is ROUNDS' match-found SUCCESS transition, not
+                // a cancel — it can activate gameplay with no room).
+                // Cleared -> the player wants OUT: NetworkRestart is
+                // the codebase's one honest abort-to-menu lever.
+                // Replaced -> the NEW room's joiner run owns the
+                // loading screen and connection; this stale callback
+                // simply dies.
+                if (!string.Equals(Plugin.PendingRankedRoom, capturedRoom, StringComparison.Ordinal))
+                {
+                    bool cleared = string.IsNullOrEmpty(Plugin.PendingRankedRoom);
+                    Plugin.Log.LogWarning($"[QUEUE-JOINER] pending room changed/cleared since capture ('{capturedRoom}' -> '{Plugin.PendingRankedRoom ?? "(none)"}') — aborting join (cleared={cleared})");
+                    if (cleared)
+                    {
+                        try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
+                    }
+                    return;
+                }
+                Plugin.Log.LogInfo($"[QUEUE-JOINER] Connected! JoinOrCreate: {capturedRoom}");
+                // 2v2 rooms have a `team_` prefix (set by /team/queue/ready
+                // server-side). Bump MaxPlayers to 4 + flag the room as
+                // friendly-fire-on so a Harmony patch can read it during
+                // ProjectileCollision and let teammate shots through.
+                bool is2v2 = capturedRoom != null && capturedRoom.StartsWith("team_");
+                // 1v2: ovt_ rooms hold 3. Review CRITICAL — without this the
+                // room was created MaxPlayers=2 (the 1v1 default) and the
+                // third player could never join, so 1v2 could never start.
+                bool is1v2 = capturedRoom != null && capturedRoom.StartsWith("ovt_");
+                // FFA: ffa_ rooms hold the locked lobby size (3-10) —
+                // learning #146a: a missing MaxPlayers branch means the
+                // Nth player can never join. The creator stamps the
+                // lobby size as a room prop so late joiners (and any
+                // client whose queue payload got lost) read one truth.
+                bool isFfa = capturedRoom != null && capturedRoom.StartsWith("ffa_");
+                int ffaCount = Plugin.PendingFfaCount > 0 ? Plugin.PendingFfaCount : 10;
+                var roomProps = new ExitGames.Client.Photon.Hashtable
+                {
+                    { "C2", capturedRoom }
+                };
+                if (is2v2) roomProps["cr_ff"] = true;
+                // July 22 item 3: solo-extra-pick flag rides the ROOM
+                // props (design doc: room-prop carrier) — all 3 clients
+                // got it in the lock payload, so whichever creates the
+                // room stamps it and late joiners read one truth.
+                if (is1v2 && ApiClient.OvtSoloExtraPick) roomProps["cr_ovt_xp"] = true;
+                if (isFfa) roomProps["cr_ffa_n"] = ffaCount;
+                // Spectator seats (design §4.1): server-issued rooms
+                // reserve SEAT_CAP extra Photon actors above the
+                // fighter count. Vanilla match-found fires on a
+                // hardcoded PlayerList.Length == 2, and every mod
+                // force-start path counts PlayersNeeded — neither
+                // reads MaxPlayers, so the bump is start-inert. The
+                // grant server only admits spectators once the match
+                // is live (all fighters attested "battle"), so a
+                // spectator can never occupy a seat pre-assembly.
+                int fighterTarget = is2v2 ? 4 : (is1v2 ? 3 : (isFfa ? ffaCount : 2));
+                var roomOptions = new Photon.Realtime.RoomOptions
+                {
+                    MaxPlayers = (byte)(fighterTarget + SpectatorSession.SEAT_CAP),
+                    IsOpen = true,
+                    // Queue rooms are joined by exact server-issued
+                    // name only — never listed, never lobby-matched.
+                    // Hidden so the reserved seats cannot be found by
+                    // room browsing (design §4.1, Codex r1 find 1).
+                    IsVisible = false,
+                    CustomRoomProperties = roomProps,
+                    CustomRoomPropertiesForLobby = new string[] { "C2" }
+                };
+                var lobby = new Photon.Realtime.TypedLobby("RoomCodeLobby", Photon.Realtime.LobbyType.SqlLobby);
+                bool accepted = PhotonNetwork.JoinOrCreateRoom(capturedRoom, roomOptions, lobby);
+                // Sept 6 (A2, third line): two attempts that fail identically
+                // must be visible as such — vanilla logs the failure text, this
+                // logs which attempt and from which client state.
+                if (accepted)
+                    Plugin.Log.LogInfo($"[QUEUE-JOINER] JoinOrCreateRoom({capturedRoom}) accepted (state={PhotonNetwork.NetworkClientState})");
+                else
+                    Plugin.Log.LogWarning($"[QUEUE-JOINER] JoinOrCreateRoom({capturedRoom}) returned false (state={PhotonNetwork.NetworkClientState}, offline={PhotonNetwork.OfflineMode})");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[QUEUE-JOINER] JoinOrCreate failed: {ex.Message}");
             }
         }
 
@@ -2030,6 +2136,8 @@ namespace CompetitiveRounds
         // STARTUP BASELINE — a click directive equal to it is inert whatever nonce
         // it carries (a 6-hex nonce collides 1 in 16.7M; the baseline closes even that).
         private static string _testLeverBaseline;
+        private static string _testQuitBaseline;
+        private static bool _testQuitFired;
         // Sept 4: a Music click replayed in the SAME tick as the page open is
         // refused by the engine ("no decode (entry: menu not open)" — its
         // admission wants the page open on the preceding frames). The first
@@ -2048,6 +2156,52 @@ namespace CompetitiveRounds
         // value distinct so the lever re-applies). r4 cut: only 'prepare' is
         // a lever action — see NativeUI.DevMusicClick.
 
+        /// <summary>Sept 6: the seat's own way to close the game. The elevated
+        /// ROUNDS on the broadcast VM stopped honouring WM_CLOSE from a
+        /// non-elevated shell (it had, #450), synthetic mouse input never
+        /// reached the menu (#420) and Enter submits the EventSystem's
+        /// selection rather than the highlighted ListMenu item — so a
+        /// verify cycle could not relaunch the game without Sid. Same lever
+        /// grammar as TestOpenTab: the value at launch is the baseline and
+        /// never fires; any different non-empty value quits once. Runs only
+        /// on the broadcast identity (the caller has already checked) and
+        /// after the same 2 s cfg reload.</summary>
+        private void TickTestQuit()
+        {
+            try
+            {
+                if (Plugin.BroadcastTestQuit == null || _testQuitFired) return;
+                string want = (Plugin.BroadcastTestQuit.Value ?? "").Trim();
+                if (_testQuitBaseline == null) { _testQuitBaseline = want; return; }
+                if (want.Length == 0 || string.Equals(want, _testQuitBaseline, StringComparison.Ordinal)) return;
+                _testQuitFired = true;
+                Plugin.Log.LogWarning($"[UI] TestQuit lever fired ({want}) — quitting the game");
+                QuitThenKill();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestQuit lever failed: {ex.Message}"); }
+        }
+
+        private static void QuitThenKill()
+        {
+            // r5 review M5: the hard-kill watchdog must not live on Unity's
+            // main thread -- Application.quitting can block (this mod copies
+            // the log there) and a coroutine would then never resume. A
+            // background thread ends the process 8 s after the quit request
+            // whatever the main thread is doing; if the quit succeeds first the
+            // process is gone and the thread with it.
+            try
+            {
+                var watchdog = new System.Threading.Thread(() =>
+                {
+                    System.Threading.Thread.Sleep(8000);
+                    try { System.Diagnostics.Process.GetCurrentProcess().Kill(); } catch { }
+                }) { IsBackground = true, Name = "scr-testquit-watchdog" };
+                watchdog.Start();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestQuit watchdog thread failed: {ex.Message}"); }
+            try { Application.Quit(); } catch (Exception ex) { Plugin.Log.LogWarning($"[UI] TestQuit Application.Quit threw: {ex.Message}"); }
+        }
+
         private void TickTestOpenTab()
         {
             if (Plugin.BroadcastTestOpenTab == null || !BroadcastMode.IsBroadcastIdentity) return;
@@ -2059,6 +2213,7 @@ namespace CompetitiveRounds
                 _testOpenTabCfgReloadAt = Time.realtimeSinceStartup;
                 try { Plugin.ConfigFileForLevers?.Reload(); } catch { }
             }
+            TickTestQuit();
             string raw = (Plugin.BroadcastTestOpenTab.Value ?? "").Trim();
             if (_testLeverBaseline == null) _testLeverBaseline = raw;
             if (raw == _lastTestOpenTab) return;
@@ -3298,8 +3453,13 @@ namespace CompetitiveRounds
 
     // ─────────────────────────────────────────────────────────────────────────
     // Bug #79 — the "Press Jump to Join does nothing" quickplay race. Vanilla's
-    // 15s region-churn timer (NetworkConnectionHandler.Update) is gated only on
-    // `InRoom && !GM_ArmsRace.instance`, and GM_ArmsRace activates ~2.5s AFTER
+    // 15s region-churn timer (NetworkConnectionHandler.Update) ticks whenever
+    // `m_searchingType` is neither HostRoom nor FriendInvite, the client is
+    // InRoom online, and GM_ArmsRace.instance is null. (An earlier version of
+    // this note said "gated only on InRoom and no GM_ArmsRace", which hid the
+    // search-type gate — and with it the fact that None, the value the mod's
+    // joiner sets, is NOT exempt: bugs 335/340, ModRoomChurnFreezePatch below.)
+    // GM_ArmsRace activates ~2.5s AFTER
     // an opponent joins (the MATCH FOUND jingle runs first). OnPlayerEnteredRoom
     // never resets the timer, so if the opponent arrives in the last ~2.5s of
     // the window, PlayOnBestActiveRegion() leaves the just-matched room mid-
@@ -3336,6 +3496,41 @@ namespace CompetitiveRounds
         }
     }
 
+    // ----------------------------------------------------------------------
+    // Sept 6 — bugs 335/340 (A1): the first player into a queue-issued room was
+    // evicted after 15 s. Vanilla's churn timer ticks whenever m_searchingType
+    // is neither HostRoom nor FriendInvite, the client is InRoom online, and
+    // GM_ArmsRace.instance is null; OnJoinedRoom re-arms it to 15f on every
+    // online join. The joiner sets the search type to None, which is NOT
+    // exempt, and the two bug-79 guards around this class only engage once a
+    // second fighter is present — so a partner who needed more than ~15 s (a
+    // slow connect, a room to leave first, or the A2 failure burning 30 s per
+    // attempt) found an empty room, while the waiter had been swept into a
+    // public quick-match search and, in bug 340, into a casual game against a
+    // random unmodded player. Freeze the timer on join for every mod-issued
+    // room; GameStateWatcher's [QUEUE-STALL] watchdog (toast, then a clean
+    // return to menu with no penalty) is the only eviction there. Room-code
+    // private games keep vanilla timing — out of scope by design. Positive
+    // field signal (#438): the log line below on every mod-room join.
+    // ----------------------------------------------------------------------
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "OnJoinedRoom")]
+    class ModRoomChurnFreezePatch
+    {
+        static void Postfix(NetworkConnectionHandler __instance)
+        {
+            try
+            {
+                if (__instance == null || !PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null || PhotonNetwork.OfflineMode) return;
+                string name = PhotonNetwork.CurrentRoom.Name ?? "";
+                if (!CompetitiveRoomDetect.IsModIssuedRoom(name, PhotonNetwork.CurrentRoom.CustomProperties)) return;
+                // Postfix: runs after vanilla's `untilTryOtherRegionCounter = 15f`.
+                __instance.untilTryOtherRegionCounter = float.MaxValue;
+                Plugin.Log.LogInfo($"[QUICKPLAY-GUARD] churn timer frozen - mod-issued room {name}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] mod-room freeze failed: {ex.Message}"); }
+        }
+    }
+
     [HarmonyPatch(typeof(NetworkConnectionHandler), "PlayOnBestActiveRegion")]
     class QuickplayChurnAbandonGuardPatch
     {
@@ -3364,6 +3559,21 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Sept 6 (bugs 335/340, A1 second line): a mod-issued room is never
+                // rotated out of by vanilla's timer, whatever the fighter count —
+                // the OnJoinedRoom postfix may not have been reached (#83), and a
+                // lone waiter is exactly the seat these reports lost. Freeze
+                // rather than re-arm: GameStateWatcher's [QUEUE-STALL] watchdog
+                // owns the exit from a mod-issued room, with its own toast and
+                // its own clock.
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null &&
+                    CompetitiveRoomDetect.IsModIssuedRoom(PhotonNetwork.CurrentRoom.Name, PhotonNetwork.CurrentRoom.CustomProperties))
+                {
+                    Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] PlayOnBestActiveRegion suppressed — mod-issued room {PhotonNetwork.CurrentRoom.Name}");
+                    try { NetworkConnectionHandler.instance.untilTryOtherRegionCounter = float.MaxValue; } catch { }
+                    __result = EmptyRoutine();
+                    return false;
+                }
                 if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null &&
                     RoomActors.ActiveFighterCount() >= 2)   // census: see churn-freeze twin above
                 {
@@ -5661,6 +5871,26 @@ namespace CompetitiveRounds
                 return n.StartsWith("ranked_") || n.StartsWith("team_") || n.StartsWith("sct-")
                     || n.StartsWith("ovt_")
                     || (n.StartsWith("ffa_") && FfaMode.EngineActive());
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Mod-issued room by PRE-JOIN facts alone (Sept 6, A1): the
+        /// server-issued name prefix or the 2v2 friendly-fire property. Unlike
+        /// IsCompetitiveRoom this does not consult FfaMode.EngineActive() — at
+        /// OnJoinedRoom the FFA engine has not decided yet, and the churn freeze
+        /// must hold from the first frame in the room. Not a replacement for
+        /// IsCompetitiveRoom, which is load-bearing elsewhere (see the note on
+        /// VanillaFixSupport.GameplayScope).</summary>
+        public static bool IsModIssuedRoom(string name, ExitGames.Client.Photon.Hashtable props)
+        {
+            try
+            {
+                if (props != null && props.ContainsKey("cr_ff")) return true;
+                string n = name ?? "";
+                return n.StartsWith("ranked_", StringComparison.Ordinal) || n.StartsWith("team_", StringComparison.Ordinal)
+                    || n.StartsWith("sct-", StringComparison.Ordinal) || n.StartsWith("ovt_", StringComparison.Ordinal)
+                    || n.StartsWith("ffa_", StringComparison.Ordinal);
             }
             catch { return false; }
         }

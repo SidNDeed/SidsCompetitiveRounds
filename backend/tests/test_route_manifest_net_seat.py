@@ -77,7 +77,14 @@ def _is_script_guard(node):
     return (isinstance(node, ast.If)
             and isinstance(node.test, ast.Compare)
             and isinstance(node.test.left, ast.Name)
-            and node.test.left.id == "__name__")
+            and node.test.left.id == "__name__"
+            # r16: the exemption is for the canonical script guard ONLY. A `!=`
+            # or an `in` on __name__ RUNS at import and stays indexed.
+            and len(node.test.ops) == 1
+            and isinstance(node.test.ops[0], ast.Eq)
+            and len(node.test.comparators) == 1
+            and isinstance(node.test.comparators[0], ast.Constant)
+            and node.test.comparators[0].value == "__main__")
 
 
 def _index_module(path):
@@ -146,33 +153,66 @@ def _index_module(path):
                 names.add(sub.attr)
         return names
 
+    def header_refs(node):
+        """r2 (Sept 6): the names a block HEADER references -- the `if` test,
+        the `with` expressions. `try:` has none of its own; each handler adds
+        its exception type below. A header's TEXT was already fingerprinted,
+        but the object a name in it denotes was not part of the closure: a
+        tuple of exception classes or a feature flag could change what the
+        block admits with no fingerprint moving."""
+        if isinstance(node, ast.If):
+            return referenced(node.test)
+        if isinstance(node, ast.With):
+            names = set()
+            for item in node.items:
+                names |= referenced(item.context_expr)
+            return names
+        return set()
+
     def guard_header(node):
         """The controlling line(s) of a module-level block -- `if ...:`,
         `try:`, `with ...:` -- down to its first statement. Prepended to every
-        binding inside, including the ones in `else`/`except`/`finally`,
-        because one condition governs all of them."""
+        binding inside, because the condition a binding exists under is part
+        of what was reviewed."""
         return "".join(lines[node.lineno - 1:node.body[0].lineno - 1])
 
-    def bind(name, kind, node, guard=""):
-        text, refs = guard + segment(node), referenced(node)
+    def handler_header(handler):
+        """r16: an `except ...:` header, down to the handler's first
+        statement. `guard_header` alone reused the `try:` line for every
+        handler, so `except Exception` could become `except ImportError` --
+        a different set of failures reaching a different binding -- with no
+        fingerprint moving."""
+        return "".join(lines[handler.lineno - 1:handler.body[0].lineno - 1])
+
+    def part_header(previous, part):
+        """r16: the `else:` / `finally:` header of a block's later part. The
+        ast gives those parts no node of their own, so the header is the
+        source between the last statement of the part before and the first
+        statement of this one."""
+        if not part:
+            return ""
+        return "".join(lines[previous.end_lineno:part[0].lineno - 1])
+
+    def bind(name, kind, node, guard="", guard_refs=frozenset()):
+        text, refs = guard + segment(node), referenced(node) | set(guard_refs)
         if name in table:
             prev_kind, prev_text, prev_refs = table[name]
             table[name] = (prev_kind, prev_text + text, prev_refs | refs)
         else:
             table[name] = (kind, text, refs)
 
-    def visit(body, guard=""):
+    def visit(body, guard="", guard_refs=frozenset()):
         for node in body:
             if isinstance(node, _DEF_NODES):
-                bind(node.name, "def", node, guard)
+                bind(node.name, "def", node, guard, guard_refs)
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
                     for sub in ast.walk(target):
                         if isinstance(sub, ast.Name):
-                            bind(sub.id, "data", node, guard)
+                            bind(sub.id, "data", node, guard, guard_refs)
             elif isinstance(node, ast.AnnAssign):
                 if isinstance(node.target, ast.Name):
-                    bind(node.target.id, "data", node, guard)
+                    bind(node.target.id, "data", node, guard, guard_refs)
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 # r15. An import binds a name, and WHICH object a name denotes
                 # is part of what a handler does. Removing a batch-added
@@ -185,16 +225,29 @@ def _index_module(path):
                 # import lines change far more rarely than code does.
                 for alias in node.names:
                     bind(alias.asname or alias.name.split(".")[0], "import", node,
-                         guard)
+                         guard, guard_refs)
             elif isinstance(node, (ast.If, ast.Try, ast.With)):
                 if _is_script_guard(node):
                     continue
                 inner = guard + guard_header(node)
-                visit(node.body, inner)
-                visit(getattr(node, "orelse", []), inner)
-                visit(getattr(node, "finalbody", []), inner)
+                inner_refs = guard_refs | header_refs(node)
+                visit(node.body, inner, inner_refs)
+                # r16: each later part carries ITS OWN header on top of the
+                # block's, walked in source order so "the statement before"
+                # is always the one the header follows.
+                last = node.body[-1]
                 for handler in getattr(node, "handlers", []):
-                    visit(handler.body, inner)
+                    handler_refs = inner_refs | (
+                        referenced(handler.type) if handler.type is not None else set())
+                    visit(handler.body, inner + handler_header(handler), handler_refs)
+                    last = handler.body[-1]
+                orelse = getattr(node, "orelse", [])
+                if orelse:
+                    visit(orelse, inner + part_header(last, orelse), inner_refs)
+                    last = orelse[-1]
+                finalbody = getattr(node, "finalbody", [])
+                if finalbody:
+                    visit(finalbody, inner + part_header(last, finalbody), inner_refs)
 
     visit(ast.parse(source).body)
     return {name: (kind, text, frozenset(refs))
@@ -283,12 +336,13 @@ def _binding_key(obj):
     return (module, name)
 
 
-def _walk_bindings(seeds):
+def _walk_bindings(seeds, index=None):
     """{(module, name): kind} for every binding the seeds reach, seeds included.
 
     THREE TIERS, and the middle one is what keeps this affordable. A def or
     class is EXPANDED THROUGH -- every name inside it is followed. A data
-    binding is followed only into OTHER DATA BINDINGS. An import is a leaf.
+    binding is followed only into OTHER DATA BINDINGS. An import is a leaf,
+    except for the guards that SELECT it (Group 2 review, Sept 6).
 
     The middle tier is the whole cost control, not a compromise: letting a data
     binding follow names of any kind makes `app = FastAPI(...)` a hub that every
@@ -309,7 +363,7 @@ def _walk_bindings(seeds):
     first -- on a name two modules share, both enter. That widens the reviewed
     surface rather than narrowing it, which is the only direction this gate may
     be wrong in."""
-    index = _binding_index()
+    index = _binding_index() if index is None else index
     reached = {}
     frontier = list(seeds)
     while frontier:
@@ -322,10 +376,13 @@ def _walk_bindings(seeds):
             continue
         kind, _text, refs = binding
         reached[key] = kind
-        if kind == "import":
-            # An import names something defined outside this api. Its own line
-            # is fingerprinted; there is nothing of ours beneath it to follow.
-            continue
+        # An import names something defined outside this api. Its own line is
+        # fingerprinted; there is nothing of ours beneath it to follow -- EXCEPT
+        # the guards that select it (Group 2 review, Sept 6): under
+        # `if FEATURE: import fast as engine / else: import slow as engine`
+        # FEATURE decides which implementation a route runs. An import's refs
+        # are only ever its block headers' names (r2), so following them costs
+        # nothing on an unguarded import and closes the hole on a guarded one.
         order = [module] + [other for other in index if other != module]
         for ref in refs:
             for other in order:
@@ -646,7 +703,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 309
+    assert len(manifest) == 311   # Sept 6 item k: +2 rating-preview routes (309 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -657,7 +714,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 308
+    assert len(static) == 310   # Sept 6 item k: +2 rating-preview routes (308 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -1531,3 +1588,108 @@ def test_a_script_only_block_is_in_no_routes_reviewed_surface():
         + ", ".join(leaked)
     )
 
+
+def test_a_later_part_of_a_block_carries_its_own_header(tmp_path):
+    """r16: `guard_header` reused the `try:` line for every handler, so
+    `except Exception` could become `except ImportError` -- a different set of
+    failures reaching a different binding -- with no fingerprint moving, and
+    `else`/`finally` bodies had no header at all. Each later part now carries
+    its own header on top of the block's."""
+    module = tmp_path / "m.py"
+    module.write_text(
+        "try:\n"
+        "    import nothing_here\n"
+        "    FLAG = True\n"
+        "except Exception:\n"
+        "    FLAG = False\n"
+        "else:\n"
+        "    MODE = 'have'\n"
+        "finally:\n"
+        "    DONE = 1\n",
+        encoding="utf-8")
+    before = _index_module(module)
+    assert "except Exception:" in before["FLAG"][1], before["FLAG"][1]
+    assert "else:" in before["MODE"][1], before["MODE"][1]
+    assert "finally:" in before["DONE"][1], before["DONE"][1]
+    # The block's own header is still on every part.
+    for name in ("FLAG", "MODE", "DONE"):
+        assert before[name][1].lstrip().startswith("try:"), before[name][1]
+
+    module.write_text(module.read_text(encoding="utf-8").replace(
+        "except Exception:", "except ImportError:"), encoding="utf-8")
+    after = _index_module(module)
+    assert after["FLAG"][1] != before["FLAG"][1]
+    # A header change in one part moves only that part's bindings.
+    assert after["MODE"][1] == before["MODE"][1]
+    assert after["DONE"][1] == before["DONE"][1]
+
+
+def test_only_the_canonical_script_guard_is_exempt():
+    """r16: `_is_script_guard` accepted any comparison whose left side was
+    `__name__`, so `if __name__ != "__main__":` -- a block that RUNS at import
+    -- was excluded from every fingerprint while its work still happened."""
+    canonical = ast.parse('if __name__ == "__main__":\n    pass\n').body[0]
+    assert _is_script_guard(canonical)
+    for text in ('if __name__ != "__main__":\n    pass\n',
+                 'if __name__ in ("__main__", "x"):\n    pass\n',
+                 'if __name__ == "not_main":\n    pass\n',
+                 'if "__main__" == __name__:\n    pass\n'):
+        assert not _is_script_guard(ast.parse(text).body[0]), text
+
+
+def test_a_name_referenced_only_by_a_block_header_is_in_the_closure(tmp_path):
+    """r2 (Sept 6): a header's TEXT was fingerprinted (r16), but a name it
+    references was not in the binding's closure. `except ERRORS:` with
+    `ERRORS = (ImportError,)` -- changing the tuple changes which failures
+    reach the handler's binding with no fingerprint moving; the same for a
+    feature flag in an `if`. The header's names join the closure; the text
+    seam is unchanged."""
+    module = tmp_path / "m.py"
+    module.write_text(
+        "ERRORS = (ImportError,)\n"
+        "FEATURE = True\n"
+        "LOCK = object()\n"
+        "try:\n"
+        "    import nothing_here\n"
+        "    FLAG = True\n"
+        "except ERRORS:\n"
+        "    FLAG = False\n"
+        "else:\n"
+        "    MODE_TRY = 'have'\n"
+        "if FEATURE:\n"
+        "    MODE = 'on'\n"
+        "with LOCK:\n"
+        "    HELD = 1\n",
+        encoding="utf-8")
+    index = _index_module(module)
+    assert "ERRORS" in index["FLAG"][2], sorted(index["FLAG"][2])
+    assert "FEATURE" in index["MODE"][2], sorted(index["MODE"][2])
+    assert "LOCK" in index["HELD"][2], sorted(index["HELD"][2])
+    # The handler's type belongs to the handler's bindings only: the `else`
+    # part of the same try did not run under `except ERRORS`.
+    assert "ERRORS" not in index["MODE_TRY"][2], sorted(index["MODE_TRY"][2])
+    # The text seam is what it was: the header is still on the binding.
+    assert "except ERRORS:" in index["FLAG"][1], index["FLAG"][1]
+
+
+def test_a_guarded_import_follows_its_guard(tmp_path):
+    """Group 2 review (Sept 6): the closure walk treated every import as a leaf
+    BEFORE following its refs, and an import's refs are exactly the names of
+    the block headers that select it (r2). `if FEATURE: import fast as engine`
+    / `else: import slow as engine` -- FEATURE decides which implementation a
+    route runs, so it belongs in the route's closure; an unguarded import stays
+    a leaf."""
+    module = tmp_path / "m.py"
+    module.write_text(
+        "FEATURE = True\n"
+        "if FEATURE:\n"
+        "    import json as engine\n"
+        "else:\n"
+        "    import re as engine\n"
+        "import os\n",
+        encoding="utf-8")
+    index = {"m": _index_module(module)}
+    reached = _walk_bindings([("m", "engine")], index=index)
+    assert ("m", "FEATURE") in reached, sorted(reached)
+    assert reached[("m", "engine")] == "import"
+    assert _walk_bindings([("m", "os")], index=index) == {("m", "os"): "import"}

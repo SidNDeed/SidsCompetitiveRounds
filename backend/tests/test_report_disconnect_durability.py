@@ -223,7 +223,7 @@ class FakeSession:
                  named_series=None, series_fresh=True, series_still_eligible=True,
                  deadlocks=0, lock_sqlstate="40P01", grant_series_id=None,
                  bracket_states=(), series_fixture=None, authority_ok=False,
-                 idle=False, superseded_at_write=False):
+                 idle=False, superseded_at_write=False, pair_lock_busy=False):
         self.players = list(players)
         self.event_exists = event_exists
         self.insert_wins = insert_wins
@@ -277,6 +277,10 @@ class FakeSession:
         # judgement and the write. The row locks this endpoint holds do not
         # prevent it -- a new grant is a row that did not exist to be locked.
         self.superseded_at_write = superseded_at_write
+        # r2 (Sept 6): whether a publish for the pair holds the pair lock at
+        # the moment the report tries it. Busy is a 503 refusal, never a wait.
+        self.pair_lock_available = not pair_lock_busy
+        self.pair_lock_attempts = 0
         self.supersession_rechecks = 0
         self.grant_lookups = 0
         self.bracket_locks = 0
@@ -426,6 +430,21 @@ class FakeSession:
             )
             self.increments += 1
             return _Result([(self.stored_count,)])
+        if sql.startswith("SELECT pg_try_advisory_xact_lock("):
+            # r2 (Sept 6): the pair lock that closes the supersession window.
+            # Routed on the function, which nothing else in the handler calls,
+            # and on its own label (#306).
+            assert "AS pair_locked" in sql, sql
+            assert "LEAST(" in sql and "GREATEST(" in sql, (
+                "the key must be order-independent: (a, b) and (b, a) are one pair"
+            )
+            assert "pg_advisory_xact_lock(" not in sql.replace("pg_try_advisory_xact_lock(", ""), (
+                "the report must TRY the lock, never await it: it already holds "
+                "the pair's row locks, and the publisher's caller may be waiting "
+                "on them"
+            )
+            self.pair_lock_attempts += 1
+            return _Result([(self.pair_lock_available,)])
         raise AssertionError(f"unexpected statement: {sql[:90]}")
 
     async def commit(self):
@@ -1769,11 +1788,42 @@ def test_a_complete_temp_is_recovered_because_it_is_the_newer_queue():
     assert "!live.whole || stranded.generation" in choose, (
         "a first creation has no live copy for the temp to outrank"
     )
-    assert (choose.index("if (takeStranded) return stranded;")
-            < choose.index("salvaging = true;")
-            and choose.index("if (live.whole) return live;")
-            < choose.index("salvaging = true;")), (
-        "salvage must be unreachable while any complete queue exists"
+    # r16 HIGH: a complete live copy does NOT make salvage unreachable. A temp
+    # that parses but did not verify is the newest write there is -- persist
+    # writes the temp first and promotes it only once it verifies -- so beside
+    # a complete live copy it holds the enqueue that copy predates. The live
+    # copy wins outright only once the temp has been found to hold nothing;
+    # otherwise the union of the two is taken and nothing queued is discarded.
+    assert choose.index("if (takeStranded) return stranded;") < choose.index("if (live.whole)")
+    live_arm = choose[choose.index("if (live.whole)"):]
+    # r2 (Sept 6) MEDIUM: a complete-bodied temp with ZERO entries is the
+    # removal case -- the queue after its last report was delivered -- and it
+    # is the newer file; returning the live copy re-sent the delivered report.
+    # Emptiness decides nothing once the body is complete.
+    assert "if (stranded.salvaged && (stranded.bodyComplete || stranded.entries.Count > 0))" in live_arm, (
+        "a complete live copy must still yield to a temp whose body is complete, "
+        "or that holds reports"
+    )
+    assert (live_arm.index("stranded.salvaged && (stranded.bodyComplete")
+            < live_arm.index("return live;")), (
+        "the live copy may win outright only after the temp has been found to "
+        "be torn AND empty"
+    )
+    # Torn TRAILER: the body is complete, so the temp is the newer queue and a
+    # report the temp dropped after delivery is not re-sent. No trailer: the
+    # tail may be cut, so the two are unioned.
+    assert "return stranded.bodyComplete ? stranded : Union(stranded, live);" in live_arm
+    assert "result.bodyComplete = true;" in reader_all, (
+        "a torn trailer must mark the body complete or every torn temp is unioned"
+    )
+    union = _cs_method_body(
+        API_CLIENT_CS,
+        "private static OutboxGeneration Union(OutboxGeneration newer, OutboxGeneration older)")
+    assert "n.url == e.url && n.json == e.json" in union, (
+        "the union has to merge by identity or the same report is queued twice"
+    )
+    assert union.index("new List<PendingReport>(newer.entries)") < union.index("foreach (var e in older.entries)"), (
+        "the newer copy's order is kept; the older copy only adds what is missing"
     )
     assert "ChooseOutboxCopy(live, stranded, out takeStranded, out salvaging)" in load
     # recovered means promoted, and a loser is removed rather than re-weighed
@@ -2260,9 +2310,24 @@ def test_publishing_a_sitting_stamps_activity_and_the_grant_together():
 
     series = SimpleNamespace(id=NAMED_SERIES, player1_id=REPORTER, player2_id=LEAVER)
     asyncio.run(main._publish_pair_sitting(_Rec(), series))
-    assert len(seen) == 2, seen
-    stamp, grant = seen[0][0], seen[1][0]
+    # r2 (Sept 6): three statements -- the stamp, the PAIR LOCK, the grant.
+    # The lock sits between them on purpose: the stamp's row lock on the
+    # series is taken first (players -> series is every writer's order), and
+    # the grant is written only once the pair lock is held, so a report that
+    # holds the lock has seen every grant that exists.
+    assert len(seen) == 3, seen
+    stamp, lock, grant = seen[0][0], seen[1][0], seen[2][0]
     assert "UPDATE ranked_series SET last_activity_at = NOW()" in stamp
+    assert lock.startswith("SELECT pg_advisory_xact_lock("), lock
+    assert "pg_try_" not in lock, (
+        "the PUBLISHER blocks; only the report tries -- a publisher that gave "
+        "up on a busy lock would publish a sitting the report never saw"
+    )
+    assert " ".join(main._DC_PAIR_LOCK_KEY_SQL.split()) in lock, lock
+    assert seen[1][1] == {"a": str(REPORTER), "b": str(LEAVER)}, (
+        "the ids are passed as TEXT: the key expression casts them, and an "
+        "asyncpg bind of a UUID against a text cast is a type error"
+    )
     assert "INSERT INTO series_dc_grants" in grant
     assert "ON CONFLICT (holder_id, series_id) DO UPDATE SET last_seen_at = NOW()" in grant, (
         "a resume must re-stamp the sitting rather than fail or duplicate"
@@ -2272,7 +2337,7 @@ def test_publishing_a_sitting_stamps_activity_and_the_grant_together():
         "only one direction of the grant is written, so one seat's report is "
         "judged by a record that does not exist"
     )
-    assert seen[1][1]["a"] == REPORTER and seen[1][1]["b"] == LEAVER
+    assert seen[2][1]["a"] == REPORTER and seen[2][1]["b"] == LEAVER
 
 
 def test_the_activity_stamp_exists_in_exactly_one_place():
@@ -3089,6 +3154,68 @@ def test_the_supersession_recheck_is_the_last_question_before_the_commit():
         "something else is asked after it; the re-check must be the last "
         "statement in the transaction"
     )
+    # r2: and the pair lock is tried IMMEDIATELY before it -- after every
+    # row lock and write, so a busy lock costs a rollback and nothing else,
+    # and nothing this transaction does after acquiring it can wait.
+    lock = [i for i, sql in enumerate(session.statements)
+            if sql.startswith("SELECT pg_try_advisory_xact_lock(")]
+    assert lock == [recheck[0] - 1], (session.statements[-3:], lock, recheck)
+
+
+def test_a_publish_in_flight_for_the_pair_is_a_503_that_keeps_nothing():
+    """r2 (Sept 6): the pair lock is busy -- a sitting for this pair is being
+    published at this instant. The report must not wait for it (it holds the
+    players and series rows the publisher's caller may be about to wait on),
+    and it must not commit under it either: the grant about to land could
+    supersede the sitting this report names. So it gives everything back and
+    asks the client to try again; 503 keeps the report in the outbox with its
+    budget intact, where a 403 would settle it (#430)."""
+    session = FakeSession(_players(), named_series=_series_row(),
+                          pair_lock_busy=True)
+    with pytest.raises(main.HTTPException) as caught:
+        _call(session, str(NAMED_SERIES))
+    assert caught.value.status_code == 503, caught.value.detail
+    assert session.pair_lock_attempts == 1
+    assert session.commits == 0, "nothing may commit under a lock the report does not hold"
+    assert session.rollbacks == 1, "the increment has to be given back"
+    assert session.supersession_rechecks == 0, (
+        "the re-ask without the lock is the window this lock exists to close; "
+        "it must not run at all when the lock is busy"
+    )
+
+
+def test_the_pair_lock_is_the_same_key_on_both_sides():
+    """r2: the lock closes the window only if the publisher and the report hash
+    the SAME pair to the SAME key. Both sides render `_DC_PAIR_LOCK_KEY_SQL`;
+    this pins that the publisher's blocking acquire and the report's try are
+    one expression (#341/#444), that the publisher takes it BEFORE the grant
+    insert, and that the publisher blocks where the report only tries."""
+    session = FakeSession(_players(), named_series=_series_row())
+    _call(session, str(NAMED_SERIES))
+    tried = [sql for sql in session.statements
+             if sql.startswith("SELECT pg_try_advisory_xact_lock(")]
+    assert len(tried) == 1, session.statements
+
+    class _Recorder:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement, params=None):
+            self.statements.append(" ".join(str(statement).split()))
+            return _Result([])
+
+    recorder = _Recorder()
+    asyncio.run(main._publish_pair_sitting(
+        recorder, SimpleNamespace(id=NAMED_SERIES, player1_id=REPORTER,
+                                  player2_id=LEAVER)))
+    taken = [i for i, sql in enumerate(recorder.statements)
+             if sql.startswith("SELECT pg_advisory_xact_lock(")]
+    inserted = [i for i, sql in enumerate(recorder.statements)
+                if sql.startswith("INSERT INTO series_dc_grants")]
+    assert len(taken) == 1 and inserted and taken[0] < inserted[0], recorder.statements
+    key = " ".join(main._DC_PAIR_LOCK_KEY_SQL.split())
+    assert key in recorder.statements[taken[0]], recorder.statements[taken[0]]
+    assert key in tried[0], tried[0]
 
 
 def test_the_ranked_post_attests_to_its_own_claim_and_not_the_stored_pair():
@@ -3132,7 +3259,14 @@ def test_the_outbox_ladder_outlasts_the_window_the_server_accepts_in():
     attempts = int(_api_client_const("OUTBOX_MAX_ATTEMPTS", "int"))
     interval = _api_client_const("OUTBOX_RETRY_SECONDS", "float")
     cap = _api_client_const("OUTBOX_RETRY_MAX_MULTIPLIER", "float")
-    span = sum(interval * min(cap, n) for n in range(1, attempts + 1))
+    # r16 LOW: the backoff scheduled after attempt N is only waited if attempt
+    # N+1 exists. OutboxPass drops the report the moment attempts reaches the
+    # cap, without waiting the backoff it just scheduled, so the ladder has
+    # attempts - 1 waits. Counting the last one overstated the span by a full
+    # capped interval and let a cap of 92 pass a gate it fails. The 30 s /
+    # 120 s initial delay (OutboxInitialDelay) is left OUT: it only lengthens
+    # the real span, and a gate wants the lower bound.
+    span = sum(interval * min(cap, n) for n in range(1, attempts))
 
     assert span >= main.DC_LIVE_WINDOW_SECONDS, (
         f"the ladder spans {span:.0f}s but the server still accepts a report "

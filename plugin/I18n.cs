@@ -954,6 +954,51 @@ namespace CompetitiveRounds
             catch { return template; }
         }
 
+        /// <summary>Contextual form (Sept 6 item e). One English word can need
+        /// a different translation per noun it qualifies — "Uncommon" as a
+        /// card rarity is feminine in Russian, as an item rarity masculine —
+        /// so a call site names the noun and owns its own catalogue key:
+        /// `english + ContextSeparator + context`. U+0004 appears in no UI
+        /// string, so a composite can never collide with a plain key, and
+        /// tools/i18n_extract.py emits exactly this composite (plus a
+        /// "TrC:&lt;context&gt;" record the portal shows beside the English),
+        /// so the compiled allowlist admits a server correction for it.
+        /// Lookup order mirrors Tr — server overlay, embedded catalogue — and
+        /// a miss falls back to Tr(english): the plain translation keeps
+        /// applying until a contextual one is approved, so converting a site
+        /// never un-translates it. `context` must be ONE short string literal
+        /// at the call site with no braces, tags or quotes; the extractor
+        /// refuses anything else, because a key it cannot harvest is a key
+        /// no pack can reach.</summary>
+        public const string ContextSeparator = "\u0004";
+
+        public static string TrC(string context, string english)
+        {
+            if (string.IsNullOrEmpty(english)) return english;
+            if (string.IsNullOrEmpty(context) || _pseudo || _locale == LOCALE_EN) return Tr(english);
+            string key = NormalizeLf(english) + ContextSeparator + context;
+            var ov = _serverOverlay;
+            if (ov != null && _serverOverlayLocale == _locale)
+            {
+                string o;
+                if (ov.TryGetValue(key, out o) && !string.IsNullOrEmpty(o)) return o;
+            }
+            Dictionary<string, string> cat;
+            if (_catalogues.TryGetValue(_locale, out cat))
+            {
+                string t;
+                if (cat.TryGetValue(key, out t) && !string.IsNullOrEmpty(t)) return t;
+            }
+            return Tr(english);
+        }
+
+        /// <summary>TrF with a context: TrC the TEMPLATE, then string.Format.</summary>
+        public static string TrCF(string context, string template, params object[] args)
+        {
+            try { return string.Format(CultureInfo.InvariantCulture, TrC(context, template), args); }
+            catch { return template; }
+        }
+
         // ── validation ──
 
         /// <summary>Ordered TMP tag-token comparison (the injection vector —

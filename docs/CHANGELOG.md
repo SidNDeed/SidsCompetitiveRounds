@@ -1,5 +1,143 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — 2026-09-06 (Sept 6 triage batch; version to be named at the bump)
+
+**Matched but never connected (bugs 335, 336, 340)**
+
+- The first player into a queue-issued room is no longer moved out of it after
+  15 seconds. The game's own region-rotation timer runs in every room the mod
+  issues (the mod's search type is not one of the two the game exempts), and
+  the mod's earlier guards only engaged once both fighters were present, so a
+  partner who needed more than about 15 seconds to arrive found an empty room
+  while the waiter had been swept into a public quick-match search — which is
+  how a queued player ended up in a casual game against a random unmodded
+  opponent. The timer is now frozen on joining any mod-issued room and its
+  rotation is refused there; the mod's own 60-second wait (toast at 15 s now,
+  was 25 s) is the only exit. Log line: `[QUICKPLAY-GUARD] churn timer frozen -
+  mod-issued room <name>`. Room-code private games keep the game's timing.
+- Queueing from the menu right after an online match (the game parks the menu
+  in an offline room) made the join fire while Photon was still connecting,
+  twice, then give up after 60 seconds ("JoinOrCreateRoom failed … State:
+  ConnectingToNameServer"). The game's connect-wait keyed on a flag that stays
+  set after offline mode; the joiner now clears it before connecting and issues
+  the join only from the master-server state. Log lines: `[QUEUE-JOINER]
+  connect flag reset (was=…)` and the result of every JoinOrCreateRoom call.
+- Queue-issued 2v2 rooms now share the 1v1 rooms' wait: a lobby that has not
+  filled after 90 seconds (toast at 30 s) returns you to the menu and leaves
+  the team queue, instead of sitting on a notification with no way out.
+
+**Overpower with a box in the blast (bug 327)**
+
+- The game hands Overpower's per-player handler every damageable object in
+  range, including boxes, which carry no player data; the handler threw and the
+  rest of the explosion was skipped, so a player processed after the box was
+  not hit. Non-player targets are now skipped, and one collider's exception can
+  no longer abort the others. Applies in every room type.
+
+**Press Jump to Join (bug 329)**
+
+- The stall where the other player is standing in the lobby and the match
+  never starts is fixed at its source. The game creates a player's body before
+  it publishes which slot that player holds, and every other seat reads the
+  slot exactly once, the frame after the body appears. When the two messages
+  land a frame apart the slot reads as 0 — the host's — so the guest's body
+  takes the host's place in the player list, the list never reaches two, and
+  the game never starts; no error is raised anywhere. The mod now holds a
+  newly arrived body's setup until its slot has landed (bounded, then derived
+  from the host/guest rule), and publishes its own slot before its own body so
+  an unmodded opponent never sees the reverse order either. Applies to every
+  online 1v1 room, ranked included. Log lines: `[VANILLA-FIX]
+  RemotePlayerIdOrder attached`, `[VANILLA-FIX] LocalPlayerIdPublish attached`,
+  and `remote player body arrived before its p_id/t_id … deferring` when the
+  race is caught.
+- The other shape — a full room where the other player's body never appears
+  at all (a seat that never pressed Jump, or whose game is stuck on its ready
+  prompt) — had no exit but Esc. After 20 seconds in that state the escape
+  hatch appears with Requeue (quick match only) and Return to menu; nothing
+  counts against you. Mod-issued rooms are unaffected — they have their own
+  wait.
+
+**Match history rows**
+
+- The stray "repli" at the end of the Ping cell is gone: it was the start of a
+  peer-reported replica-age estimate added with the v1.40.1 telemetry, clipped
+  by the cell. The opponent cell is wider (296 px, was 240) and is fitted by
+  pixels rather than by a character count, so a name is only shortened when the
+  cell genuinely cannot hold it; when the name plus title do not fit, the title
+  is dropped from the row instead of rendering as "[Beginne..]". The ranked
+  series header gets the same treatment.
+
+**Online players on the leaderboards (bug 342)**
+
+- A green dot marks players who are online on the 1v1, 2v2, FFA and 1v2
+  leaderboards. Online means the mod's presence heartbeat was seen within the
+  last 3 minutes and the player has not enabled Appear Offline. The boards are
+  served from a read replica, so the marker also checks that the replica is
+  fresh (within 90 seconds) and shows no dots rather than stale ones when it is
+  not. Presence now has its own column (`presence_seen_at`, migration 296),
+  written by the heartbeat alone — a match report that mentions a player no
+  longer counts as that player being present. Only a heartbeat carrying the
+  player's own verified session moves the marker or the 90-day activity clock,
+  and a change to Appear Offline reaches the boards within replication delay,
+  at most the 90-second freshness gate.
+- The 2v2 leaderboard refreshes every 30 seconds while it is open; it used to
+  load once per session.
+
+**Dance emotes (bug 341)**
+
+- The shop lists each dance with its duration, the emote wheel shows it on the
+  highlighted slice, and while your emote plays a thin ring above your own
+  player counts down the time remaining. Only you see the ring; nothing extra
+  is sent over the network.
+
+**No sound effects (bug 337)**
+
+- A report of "no SFX" carried no fault signature anywhere in the log. The mod
+  now writes one line describing the audio stack's current settings at every
+  match start and at the end of every bug-report bundle, plus a line whenever
+  the listener volume changes that names the writer when it was the mod's own
+  (the background focus mute included). Read-only: nothing here changes audio.
+
+**Minimised chat (bug 333)**
+
+- The minimised chat is drawn with TextMeshPro instead of the IMGUI font, so
+  emoji and non-Latin names render there the way they do in the full chat
+  (monochrome for now; colour emoji is a separate follow-up). Long lines are
+  shortened on character boundaries with a translated "[see F5]" suffix.
+
+**Leaderboards hide inactive players**
+
+- Players with no contact in the last 90 days are hidden from the leaderboards
+  by default. A toggle on the board shows everyone (their rows are marked
+  inactive), and the Discord `/lb` command gains an option to include them.
+  Podium places, and the titles that come with them, are held by shown players
+  only. Tournament sign-up and seeding lists are not filtered, and a player's
+  own position is still reported while they are inactive.
+
+**Rating previews**
+
+- New read-only endpoints preview rating changes before a game:
+  `GET /api/v1/rating-preview/ffa?ids=` (what first, last and each place would
+  do to every listed player) and `GET /api/v1/rating-preview/2v2?team_a=&team_b=`
+  (its response says when the win probability is an estimate). The FFA preview
+  takes the lobby's score target (`score_target`, also an option on `/elo ffa`)
+  and states the assumption it computed under. The Discord
+  `/elo` command becomes a group: `/elo 1v1`, `/elo 2v2`, `/elo ffa`. The live
+  FFA settlement runs through the same helper the preview uses; the two were
+  checked bit-identical on every recorded settlement.
+
+**Translations**
+
+- Strings whose translation depends on context (the card rarity words, the
+  betting window's LOCKED) now carry a context so they can be translated
+  separately; the portal shows the context as a badge. Five strings need one
+  re-translation; every other string keeps its existing translation.
+
+**Broadcast seat**
+
+- A config-driven quit lever (`[Broadcast] TestQuit`, broadcast identity only)
+  for the seat's maintenance workflow.
+
 ## Unreleased — 2026-09-04 (version to be named at the bump)
 
 **In-game library: Spirit's charts**

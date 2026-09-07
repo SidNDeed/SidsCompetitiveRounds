@@ -349,6 +349,7 @@ namespace CompetitiveRounds
             DrawChatInput();
             DrawQuickChat();   // §2.6 hold-Q radial quick-chat wheel (Aug 31)
             DrawDanceWheel();  // hold-E dance wheel (Aug 31 item 5)
+            DrawDanceCountdown();   // bug 341: countdown ring over the LOCAL dancer only
             DrawAdminPrompt();
             DrawConfirm();
             DrawBugReportModal();
@@ -3196,6 +3197,39 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(x, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
             GUI.DrawTexture(new Rect(x + w - 1, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
 
+            // Sept 6 (bug 329): the half-spawned variant — our player is in, another
+            // fighter's never appeared. Same frame, different title, different exits:
+            // Requeue only in the vanilla quick-match context, Return to menu always.
+            if (GameStateWatcher.HalfSpawnedRoom)
+            {
+                GUI.Label(new Rect(x + 14, y + 8, w - 28, 22),
+                          I18n.Tr("<color=#FFD080>The other player has not joined the game yet</color>"),
+                          stuckTitleStyle);
+                GUI.Label(new Rect(x + 14, y + 32, w - 28, 50),
+                          I18n.TrF("<color=#CCCCCC>Players in: <b>{0}</b>. Your player is in, but the other player has not pressed Jump to join — their game may be unfocused or stuck on its ready prompt. Leaving here costs nothing: no match has started.</color>", GameStateWatcher.HalfSpawnedCounts),
+                          stuckTextStyle);
+                float bx = x + 14;
+                if (GameStateWatcher.InVanillaQuickmatch())
+                {
+                    if (GUI.Button(new Rect(bx, y + h - 38, 150, 28), I18n.Tr("Requeue"), stuckButtonStyle))
+                    {
+                        GameStateWatcher.RequestQuickplayRecovery(true);
+                        GameStateWatcher.DismissMatchFoundStuckOverlay();
+                    }
+                    bx += 160f;
+                }
+                if (GUI.Button(new Rect(bx, y + h - 38, 170, 28), I18n.Tr("Return to menu"), stuckButtonStyle))
+                {
+                    GameStateWatcher.RequestQuickplayRecovery(false);
+                    GameStateWatcher.DismissMatchFoundStuckOverlay();
+                }
+                if (GUI.Button(new Rect(x + w - 174, y + h - 38, 160, 28), I18n.Tr("Dismiss (1 min)"), stuckButtonStyle))
+                {
+                    GameStateWatcher.DismissMatchFoundStuckOverlay();
+                }
+                return;
+            }
+
             int secs = GameStateWatcher.SecondsInUnstartedRoom;
             GUI.Label(new Rect(x + 14, y + 8, w - 28, 22),
                       I18n.Tr("<color=#FFD080>Match-found screen might be stuck</color>"),
@@ -3787,67 +3821,16 @@ namespace CompetitiveRounds
 
         // ── In-game chat overlay ─────────────────────────────────
         // Persistent left-side panel so players see messages without opening F5.
-        // Hidden while F5 is open (NativeUI has its own full log) and behind the
-        // consent modal.
-        private static GUIStyle ingameChatStyle;
-
-        // Item 7: lines were drawn into a fixed 20px rect, which clipped
-        // descenders on the bottom row and silently cut wrapped messages after
-        // the first visual line. Each entry now gets its measured wrapped
-        // height, capped at CHAT_MAX_WRAP_LINES with an explicit indicator.
-        private const int CHAT_MAX_WRAP_LINES = 3;
-        private const string CHAT_CUT_SUFFIX = " ... [see F5]";
-        private struct ChatLineLayout { public string Disp; public float H; }
-        private static readonly Dictionary<string, ChatLineLayout> chatLayoutCache =
-            new Dictionary<string, ChatLineLayout>();
+        // Hidden while the F5 Home chat pane is up (it shows the full log) and
+        // behind the consent modal. Bug 333: rendered by ChatOverlayTmp (TMP).
+        // Bug 333: the panel is TextMeshPro now — measurement, the 3-line cut
+        // with its "[see F5]" indicator and the drawing live in ChatOverlayTmp.
+        // This file keeps the gates, the fade math and the two scratch buffers
+        // below (OnGUI runs several times per rendered frame, #162, so they are
+        // reused rather than allocated).
         private static readonly List<NativeUI.ChatEntry> _chatEntryScratch =
             new List<NativeUI.ChatEntry>(8);
-        private static ChatLineLayout[] _chatLayoutScratch = new ChatLineLayout[8];
         private static float[] _chatAlphaScratch = new float[8];
-
-        private static ChatLineLayout MeasureChatLine(string line, float w)
-        {
-            ChatLineLayout cached;
-            if (chatLayoutCache.TryGetValue(line, out cached)) return cached;
-            if (chatLayoutCache.Count > 256) chatLayoutCache.Clear();
-
-            float maxH = ingameChatStyle.lineHeight * CHAT_MAX_WRAP_LINES + 4f;
-            var layout = new ChatLineLayout { Disp = line };
-            layout.H = ingameChatStyle.CalcHeight(new GUIContent(line), w);
-            if (layout.H > maxH)
-            {
-                // Too tall even at 3 wrapped lines: trim until it fits with the
-                // indicator appended. Never cut before the last rich-text tag
-                // (name/title markup lives at the head; only the plain message
-                // tail is trimmable — user-typed <> are converted to parens
-                // upstream by NativeUI.Escape, so '>' only appears in our own
-                // markup), and binary-search so the once-per-entry cost stays
-                // trivial.
-                int minCut = line.LastIndexOf('>') + 1;
-                if (minCut < 1) minCut = 1;
-                if (minCut >= line.Length - 1)
-                {
-                    // Nothing trimmable after the markup (markup-final line):
-                    // keep the full measured height rather than appending a
-                    // false truncation indicator to an uncut line.
-                    chatLayoutCache[line] = layout;
-                    return layout;
-                }
-                int lo = Math.Min(minCut + 1, line.Length), hi = line.Length, best = lo;
-                while (lo <= hi)
-                {
-                    int mid = (lo + hi) / 2;
-                    string candidate = line.Substring(0, mid).TrimEnd() + CHAT_CUT_SUFFIX;
-                    if (ingameChatStyle.CalcHeight(new GUIContent(candidate), w) <= maxH)
-                    { best = mid; lo = mid + 1; }
-                    else hi = mid - 1;
-                }
-                layout.Disp = line.Substring(0, best).TrimEnd() + CHAT_CUT_SUFFIX;
-                layout.H = ingameChatStyle.CalcHeight(new GUIContent(layout.Disp), w);
-            }
-            chatLayoutCache[line] = layout;
-            return layout;
-        }
 
         // ── Chat overlay mode: ONE key cycles three states (bugs 211 + 213) ──
         // Sid's chosen design, M cycles:
@@ -4062,15 +4045,16 @@ namespace CompetitiveRounds
             try
             {
                 if (BroadcastMode.IsBroadcastIdentity
-                    && Plugin.BroadcastHideChatPane != null && Plugin.BroadcastHideChatPane.Value) return;
+                    && Plugin.BroadcastHideChatPane != null && Plugin.BroadcastHideChatPane.Value)
+                { ChatOverlayTmp.Hide(); return; }
             }
             catch { }
             // Bug 211/213: Muted is stored AS ShowIngameChat=false, so this is
             // the same predicate the old guard used — one state for both the
             // Settings toggle and the M hotkey.
             var chatMode = CurrentChatOverlayMode();
-            if (chatMode == ChatOverlayMode.Muted) return;
-            if (!Plugin.DataConsentGranted) return;
+            if (chatMode == ChatOverlayMode.Muted) { ChatOverlayTmp.Hide(); return; }
+            if (!Plugin.DataConsentGranted) { ChatOverlayTmp.Hide(); return; }
             /* Aug 7 item 3: the old `if (NativeUI.IsOpen) return;` assumed "the
              * F5 chat panel covers this" — true only on the Home tab. Now chat
              * stays visible on every OTHER menu tab, repositioned to the right
@@ -4078,22 +4062,11 @@ namespace CompetitiveRounds
              * tables. Display-only IMGUI (no input path), so #141/#200 are
              * moot; IMGUI paints above the uGUI page, and DrawUI order keeps
              * every modal painting above THIS. */
-            if (NativeUI.HomeChatPaneVisible) return;  // the Home tab chat pane covers this
+            if (NativeUI.HomeChatPaneVisible) { ChatOverlayTmp.Hide(); return; }  // the Home tab chat pane covers this
 
             NativeUI.CopyChatTail(_chatEntryScratch, 8);
             var entries = _chatEntryScratch;
-            if (entries.Count == 0) return;
-
-            if (ingameChatStyle == null)
-            {
-                ingameChatStyle = new GUIStyle(GUI.skin.label)
-                {
-                    fontSize = 14,
-                    wordWrap = true,
-                    richText = true,
-                    alignment = TextAnchor.UpperLeft,
-                };
-            }
+            if (entries.Count == 0) { ChatOverlayTmp.Hide(); return; }
 
             // Compute alphas first so the backdrop can match the most-visible line.
             var now = DateTime.UtcNow;
@@ -4136,81 +4109,35 @@ namespace CompetitiveRounds
                 alphas[i] = a;
                 if (a > 0.02f) { visibleCount++; if (a > maxAlpha) maxAlpha = a; }
             }
-            if (visibleCount == 0) return;
+            if (visibleCount == 0) { ChatOverlayTmp.Hide(); return; }
 
             // Anchor bottom-left always (Sid, Aug 8: the right-edge menu
             // placement was jarring — chat lives on the left everywhere except
-            // the Home tab, where the dedicated pane shows instead).
-            float w = 440, padding = 6, lineGap = 2;
-            float x = 12;
-
-            // Measure every visible line first so the backdrop matches the
-            // true stacked height (wrapped lines are taller than one row).
-            // Scratch buffer reused across frames — OnGUI runs multiple times
-            // per rendered frame, so a fresh array here would be steady GC
-            // pressure in the in-match hot path.
-            if (_chatLayoutScratch.Length < entries.Count)
-                _chatLayoutScratch = new ChatLineLayout[entries.Count];
-            var layouts = _chatLayoutScratch;
-            float totalH = 0f;
-            for (int i = 0; i < entries.Count; i++)
-            {
-                if (alphas[i] <= 0.02f) continue;
-                layouts[i] = MeasureChatLine(entries[i].Line, w);
-                totalH += layouts[i].H + lineGap;
-            }
+            // the Home tab, where the dedicated pane shows instead). Bug 333:
+            // the panel itself is TextMeshPro (ChatOverlayTmp) — the same text
+            // system as the F5 pane, so emoji and non-Latin glyphs render
+            // through the OS fallback chain instead of as boxes. This method
+            // keeps every gate above and the fade math; it only hands the
+            // lines over, newest first (entries[last] is the bottom row).
+            //
             // Bug 213: who in this room has chat muted, as a dim header row
             // inside the same panel (Sid picked the chat panel as the place
             // for the indicator). "" whenever nobody is muted or we are not in
-            // an online room, and the row is then omitted entirely.
-            // SCOPE, stated so nobody mistakes this for a persistent HUD
-            // element: it is an annotation ON the chat panel, so it appears
-            // only while the panel itself is up (there is recent, still-
-            // visible chat and this seat is not Muted). The always-available
-            // surface is the F5 Home chat pane, which renders the same string
-            // from MutedPlayersLine().
+            // an online room, and the row is then omitted entirely. SCOPE: an
+            // annotation ON the chat panel, so it appears only while the panel
+            // itself is up; the always-available surface is the F5 Home chat
+            // pane, which renders the same string from MutedPlayersLine().
             string muteLine = MutedPlayersLine();
-            var muteLayout = default(ChatLineLayout);
-            bool hasMuteLine = muteLine.Length > 0;
-            if (hasMuteLine)
-            {
-                muteLayout = MeasureChatLine(muteLine, w);
-                totalH += muteLayout.H + lineGap;
-            }
-            float panelH = totalH - lineGap + padding * 2;
-            float yBottom = Screen.height - 90;   // above FPS/ping overlay, clear of HUD
-            float yTop = yBottom - panelH;
-
-            GUI.DrawTexture(new Rect(x - 4, yTop, w + 8, panelH),
-                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
-                new Color(0, 0, 0, 0.55f * maxAlpha), 0, 0);
-
-            // Render newest-at-bottom. entries[last] is newest. The y cursor
-            // walks upward by each line's own measured height, so every row —
-            // including the bottom one — gets its full rect (no clipped
-            // descenders).
-            float yCursor = yBottom - padding;
+            ChatOverlayTmp.Begin();
             for (int i = entries.Count - 1; i >= 0; i--)
             {
                 float a = alphas[i];
                 if (a <= 0.02f) continue;
-                var prev = GUI.contentColor;
-                GUI.contentColor = new Color(1f, 1f, 1f, a);
-                yCursor -= layouts[i].H;
-                GUI.Label(new Rect(x, yCursor, w, layouts[i].H), layouts[i].Disp, ingameChatStyle);
-                GUI.contentColor = prev;
-                yCursor -= lineGap;
+                ChatOverlayTmp.Add(entries[i].Line, a, Color.white);
             }
-            if (hasMuteLine)
-            {
-                // Top row of the panel — the cursor has already walked past
-                // every message, so this lands exactly at yTop + padding.
-                var prevC = GUI.contentColor;
-                GUI.contentColor = new Color(0.72f, 0.76f, 0.84f, maxAlpha * 0.75f);
-                yCursor -= muteLayout.H;
-                GUI.Label(new Rect(x, yCursor, w, muteLayout.H), muteLayout.Disp, ingameChatStyle);
-                GUI.contentColor = prevC;
-            }
+            if (muteLine.Length > 0)
+                ChatOverlayTmp.Add(muteLine, maxAlpha * 0.75f, new Color(0.72f, 0.76f, 0.84f));
+            ChatOverlayTmp.End(0.55f * maxAlpha);
         }
 
         // ── Admin prompt (IMGUI overlay) ─────────────────────────
@@ -5959,6 +5886,12 @@ namespace CompetitiveRounds
             sb.AppendLine();
             sb.AppendLine($"===== Unity Player.log [{UnityLogPath() ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
             sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
+            // Bug 337: the audio self-check rides at the END of the bundle.
+            // SubmitBugReport keeps the tail-most window of the text, so a
+            // block at the head could be trimmed away with the oldest log.
+            sb.AppendLine();
+            sb.AppendLine("===== audio self-check (at submit) =====");
+            sb.AppendLine(AudioSelfCheck.Snapshot());
             return sb.ToString();
         }
 
@@ -7244,9 +7177,66 @@ namespace CompetitiveRounds
                         ScaleMode.StretchToFill, true, 0, new Color(0.10f, 0.08f, 0.14f, 0.72f), 0, 0);
                 int di = dwIds[i];
                 string label = di >= 0 && di < DanceEmotes.Defs.Length ? I18n.Tr(DanceEmotes.Defs[di].Name) : "?";
+                // Bug 341: the highlighted slice also says how long it locks you.
+                if (hi && di >= 0 && di < DanceEmotes.Defs.Length)
+                    label += " <size=11><color=#C8B0C0>" + DanceEmotes.Defs[di].Duration.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " s</color></size>";
                 GUI.Label(new Rect(lx - 100f, ly - 16f, 200f, 32f),
                           hi ? $"<color=#FFFFFF>{label}</color>" : $"<color=#E0C8D8>{label}</color>",
                           hi ? qcLabelHiStyle : qcLabelStyle);
+            }
+        }
+
+        // ── Bug 341: countdown ring over the LOCAL dancer ───────────────────
+        // Only the dancing seat sees it (Sid's constraint): the predicate is
+        // DanceEmotes' local install key, never a remote actor. IMGUI, Repaint
+        // only, projected with the spawn spotlight's world->screen recipe so
+        // it follows the body and shrinks with the camera zoom. The ring
+        // empties clockwise from 12 o'clock as the dance runs out. No cooldown
+        // bar: SEND_THROTTLE_S (2.5 s) is shorter than every dance (4-6 s), so
+        // the only moment a send can be throttled is while this ring shows.
+        private const int RING_SEGMENTS = 40;
+
+        private static void DrawDanceCountdown()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            try
+            {
+                float remaining, duration; Transform body;
+                if (!DanceEmotes.TryGetLocalDanceProgress(out remaining, out duration, out body) || duration <= 0f) return;
+                Camera cam = null;
+                try { cam = MainCam.instance != null ? MainCam.instance.cam : Camera.main; } catch { }
+                if (cam == null) return;
+                Vector3 sp = cam.WorldToScreenPoint(body.position);
+                if (sp.z < 0f) return;
+                // Body radius in pixels, the spotlight's way: half the ~1.06-unit body.
+                Vector3 up = cam.WorldToScreenPoint(body.position + cam.transform.up * 0.53f);
+                float playerR = Vector2.Distance(new Vector2(sp.x, sp.y), new Vector2(up.x, up.y));
+                if (playerR < 6f) playerR = 6f;
+                float cx = sp.x;
+                float cy = Screen.height - sp.y - playerR * 2.6f;   // IMGUI y is top-down; sit above the head
+                float r = Mathf.Clamp(playerR * 0.55f, 7f, 22f);
+                float frac = Mathf.Clamp01(remaining / duration);
+                DrawRing(cx, cy, r, 1f, new Color(0.10f, 0.08f, 0.14f, 0.55f), 3.5f);      // track
+                DrawRing(cx, cy, r, frac, new Color(1f, 0.78f, 0.94f, 0.92f), 2f);         // remaining, wheel pink
+            }
+            catch (Exception ex) { VanillaFixSupport.DiagLimited("DanceCountdown", "draw failed: " + ex.Message, 3); }
+        }
+
+        /// <summary>An arc covering <paramref name="frac"/> of a turn, clockwise
+        /// from 12 o'clock, as GuiLine segments (IMGUI has no arc primitive).</summary>
+        private static void DrawRing(float cx, float cy, float r, float frac, Color color, float width)
+        {
+            frac = Mathf.Clamp01(frac);
+            int segs = Mathf.CeilToInt(RING_SEGMENTS * frac);
+            if (segs <= 0) return;
+            float step = 2f * Mathf.PI / RING_SEGMENTS;
+            var prev = new Vector2(cx, cy - r);
+            for (int i = 1; i <= segs; i++)
+            {
+                float a = i == segs ? 2f * Mathf.PI * frac : step * i;   // exact end point
+                var next = new Vector2(cx + Mathf.Sin(a) * r, cy - Mathf.Cos(a) * r);
+                GuiLine(prev, next, color, width);
+                prev = next;
             }
         }
 

@@ -764,7 +764,10 @@ namespace CompetitiveRounds
             Box(p, 70f, y, 500f, 28f, new Color(0.20f, 0.62f, 0.34f, 0.88f));
             Box(p, 570f, y, 520f, 28f, new Color(0.68f, 0.22f, 0.24f, 0.88f));
             Lbl(p, I18n.Tr("OPEN"), 13f, Color.white, 260f, y + 4f, 100f, 20f, UIFactory.AlignMidCenter);
-            Lbl(p, I18n.Tr("LOCKED"), 13f, Color.white, 780f, y + 4f, 100f, 20f, UIFactory.AlignMidCenter);
+            // Sept 6 item e: the betting WINDOW is what is locked (gendered in
+            // es/ru/uk), so the label owns a contextual key and falls back to the
+            // plain "LOCKED" translation until a contextual one is approved.
+            Lbl(p, I18n.TrC("betting window", "LOCKED"), 13f, Color.white, 780f, y + 4f, 100f, 20f, UIFactory.AlignMidCenter);
             float[] marks = { 70f, 310f, 570f, 835f, 1090f };
             foreach (float x in marks)
                 Line(p, new Vector2(x, y - 8f), new Vector2(x, y + 38f), AXIS_COL, 1.5f);

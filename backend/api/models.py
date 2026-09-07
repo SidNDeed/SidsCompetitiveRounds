@@ -18,6 +18,13 @@ class Base(DeclarativeBase):
     pass
 
 
+# Player also owns presence_seen_at TIMESTAMPTZ in SQL (migration 296), NOT
+# declared below on purpose: /presence/ping writes it with a raw UPDATE and the
+# leaderboards read it with raw SELECTs, nothing else -- so an api deployed
+# ahead of the migration loses the online dots and nothing else. Never assign
+# it through the ORM (an undeclared column is a silent no-op, learning #346);
+# stamp it in SQL or not at all. (Kept outside the class body so the route
+# manifest's Player fingerprint does not move for a comment.)
 class Player(Base):
     __tablename__ = "players"
 

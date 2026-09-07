@@ -534,6 +534,14 @@ class LeaderboardEntry(BaseModel):
     rank: int
     steam_id: str
     display_name: str
+    # Bug 342: seen within 3 minutes and not "appear offline" -- decided in
+    # SQL from players.last_seen so the edge-routed standby answers it too
+    # (the in-process presence map does not replicate).
+    is_online: bool = False
+    # Item d (Sept 6): not seen for LEADERBOARD_ACTIVE_DAYS days, decided in
+    # SQL from players.last_seen (any API contact; is_online reads the heartbeat-only presence_seen_at). Such rows are only
+    # returned when the board is fetched with include_inactive=true.
+    inactive: bool = False
     rating: int
     rd: int
     total_matches: int
@@ -1157,6 +1165,14 @@ class Team2v2LeaderboardEntry(BaseModel):
     rank: int
     steam_id: str
     display_name: str
+    # Bug 342: seen within 3 minutes and not "appear offline" -- decided in
+    # SQL from players.last_seen so the edge-routed standby answers it too
+    # (the in-process presence map does not replicate).
+    is_online: bool = False
+    # Item d (Sept 6): not seen for LEADERBOARD_ACTIVE_DAYS days, decided in
+    # SQL from players.last_seen (any API contact; is_online reads the heartbeat-only presence_seen_at). Such rows are only
+    # returned when the board is fetched with include_inactive=true.
+    inactive: bool = False
     rating: int
     rd: int
     # Aug 12 item 2: peak was only reachable through /team/team-stats.
@@ -1240,6 +1256,14 @@ class Ovt1v2LeaderboardEntry(BaseModel):
     rank: int
     steam_id: str
     display_name: str
+    # Bug 342: seen within 3 minutes and not "appear offline" -- decided in
+    # SQL from players.last_seen so the edge-routed standby answers it too
+    # (the in-process presence map does not replicate).
+    is_online: bool = False
+    # Item d (Sept 6): not seen for LEADERBOARD_ACTIVE_DAYS days, decided in
+    # SQL from players.last_seen (any API contact; is_online reads the heartbeat-only presence_seen_at). Such rows are only
+    # returned when the board is fetched with include_inactive=true.
+    inactive: bool = False
     games_played: int
     wins: int
     losses: int
@@ -1415,6 +1439,14 @@ class FfaLeaderboardEntry(BaseModel):
     rank: int
     steam_id: str
     display_name: str
+    # Bug 342: seen within 3 minutes and not "appear offline" -- decided in
+    # SQL from players.last_seen so the edge-routed standby answers it too
+    # (the in-process presence map does not replicate).
+    is_online: bool = False
+    # Item d (Sept 6): not seen for LEADERBOARD_ACTIVE_DAYS days, decided in
+    # SQL from players.last_seen (any API contact; is_online reads the heartbeat-only presence_seen_at). Such rows are only
+    # returned when the board is fetched with include_inactive=true.
+    inactive: bool = False
     rating: int
     rd: int
     # Aug 12 item 2: glicko_ratings_ffa.peak_rating has been maintained on

@@ -213,6 +213,16 @@ GLICKO2_DEFAULT_RATING = float(os.getenv("GLICKO2_DEFAULT_RATING", "1500"))
 GLICKO2_DEFAULT_RD = float(os.getenv("GLICKO2_DEFAULT_RD", "350"))
 GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06"))
 
+# Sept 6 item d: every leaderboard hides players not seen for this many days
+# unless the caller passes include_inactive=true. players.last_seen is written
+# by the 60 s presence ping while the mod runs, so "seen" means "ran the mod".
+# 90 days; env-overridable. Kept an int on purpose: the parameterised boards
+# bind it as CAST(:active_days AS integer) inside make_interval (#448 -- typed
+# binds, never a string-built interval), and the parameter-less podium
+# statements below interpolate it through an f-string, which is safe only
+# because an int renders as digits. Must stay defined ABOVE _PODIUM_QUERY.
+LEADERBOARD_ACTIVE_DAYS = int(os.environ.get("LEADERBOARD_ACTIVE_DAYS", "90"))
+
 # How long a pair's `active` ranked_series stays the "current" one for reuse.
 # A new game between the same two players within this window joins the existing
 # series (one BO3 = one series); after it, a fresh sit-down starts a fresh series.
@@ -413,7 +423,11 @@ PODIUM_TITLES = {
 # ORM lookups compare equal.
 _podium_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 
-_PODIUM_QUERY = """
+# Item d: the same LEADERBOARD_ACTIVE_DAYS filter the boards apply, so the
+# titles and the doubled bonus follow the ACTIVE top 3 (a returning player's
+# first presence ping refreshes last_seen; the next 60 s refresh re-grants).
+# f-string: the constant is an int, so the interpolation renders digits only.
+_PODIUM_QUERY = f"""
     WITH series_stats AS (
         SELECT sub.player_id, COUNT(*) AS total
         FROM (
@@ -442,6 +456,7 @@ _PODIUM_QUERY = """
     LEFT JOIN combined c ON c.player_id = p.id
     WHERE COALESCE(c.total, 0) >= 1
       AND p.deleted_at IS NULL
+      AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
     ORDER BY gr.rating DESC
     LIMIT 3
 """
@@ -602,22 +617,26 @@ PODIUM_TITLES_FFA = {
 _podium_2v2_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 _podium_ffa_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 
-_PODIUM_2V2_QUERY = """
+# Item d: both mode podiums carry the boards' activity filter too (f-string
+# over the int constant, see _PODIUM_QUERY).
+_PODIUM_2V2_QUERY = f"""
     SELECT p.id
       FROM glicko_ratings_2v2 g2
       JOIN players p ON p.id = g2.player_id
      WHERE COALESCE(g2.completed_series, 0) >= 1
        AND p.deleted_at IS NULL
+       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
      ORDER BY g2.rating DESC
      LIMIT 3
 """
 
-_PODIUM_FFA_QUERY = """
+_PODIUM_FFA_QUERY = f"""
     SELECT p.id
       FROM glicko_ratings_ffa g
       JOIN players p ON p.id = g.player_id
      WHERE COALESCE(g.games_played, 0) >= 1
        AND p.deleted_at IS NULL
+       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
      ORDER BY g.rating DESC
      LIMIT 3
 """
@@ -828,6 +847,33 @@ def _group_game_positively_live(group_id) -> bool:
     return at is not None and (time.monotonic() - at) <= IN_MATCH_TTL_SEC
 
 
+# Sept 6 (bug 342 review, Codex Group 2 M1 + L1): the online marker on the four
+# boards, ONE expression. presence_seen_at is stamped only by /presence/ping
+# (the mod's ~60 s heartbeat) -- never by get_or_create_player, which also
+# stamps last_seen for the OTHER participants of a report, so a queued report
+# about an opponent who had already quit lit their dot for up to three
+# minutes. The boards are edge-routed to the streaming standby, whose rows lag
+# the primary: a marker computed there must also require the replica to be
+# current. Every running client pings within 60 s, so while anyone is online
+# the newest replayed commit is never older than that; a replay timestamp
+# older than 90 s means either nobody is online (no dots is correct) or
+# replication is stalled (no dots is the privacy-safe reading: a freshly
+# enabled appear_offline must not be undone by lag). The primary is never in
+# recovery, so the clause is TRUE there. 3 minutes = PRESENCE_TTL_SEC.
+# Residual (r5 M2, accepted): the marker is read on the standby, so a toggle to
+# Appear Offline reaches the boards only once replication delivers it -- at
+# most the 90 s freshness gate late, after which a stalled standby shows no
+# dots at all rather than stale ones. Nothing shorter is available to a
+# replica read; the bound is what the CHANGELOG states.
+_ONLINE_MARKER_SQL = (
+    "(p.presence_seen_at > NOW() - INTERVAL '3 minutes'"
+    " AND p.appear_offline = FALSE"
+    " AND (NOT pg_is_in_recovery()"
+    " OR COALESCE(pg_last_xact_replay_timestamp(), 'epoch'::timestamptz)"
+    " > NOW() - INTERVAL '90 seconds'))"
+)
+
+
 def _presence_is_online(steam_id: str | None) -> bool:
     """True iff this steam_id's MOD CLIENT is running right now (presence ping
     within the TTL). The only uncontaminated liveness signal: players.last_seen
@@ -874,6 +920,16 @@ def _series_pair_filter(pid_a, pid_b):
 _TM_DECIDED_STATES = ("completed", "forfeit", "double_forfeit", "bye_auto")
 
 
+# Sept 6 (hotfix review r2): the pair lock that closes report_disconnect's
+# supersession window. ONE expression for both sides -- the publisher takes it
+# (blocking) before its grant insert, the report tries it before its final
+# re-ask -- so the two cannot drift apart (#341/#444). LEAST/GREATEST make
+# (a, b) and (b, a) the same key; the ids are passed as text.
+_DC_PAIR_LOCK_KEY_SQL = (
+    "hashtext('dcpair:' || LEAST(CAST(:a AS text), CAST(:b AS text))"
+    " || ':' || GREATEST(CAST(:a AS text), CAST(:b AS text)))")
+
+
 async def _publish_pair_sitting(db, series) -> None:
     """Record that the server has THIS pair in THIS sitting, as of now.
 
@@ -918,10 +974,24 @@ async def _publish_pair_sitting(db, series) -> None:
     The one `FOR UPDATE` on a ranked_series row (the admin restoration path)
     locks its players FIRST and the series second -- the same direction as
     every other writer -- so it waits on a publish rather than racing it.
+
+    THE PAIR LOCK (Sept 6, hotfix review r2). `report_disconnect` re-asks
+    whether a newer sitting exists as the last statement of its transaction;
+    a grant committing between that read and its COMMIT was still unobserved.
+    The advisory lock below closes that window: it is keyed on the VALUE of
+    the pair (#207 -- the grant rows may not exist yet when the report asks),
+    taken here BEFORE the grant insert and held to this transaction's commit,
+    and TRIED (never awaited) by the report. So the only transaction that can
+    ever block on it is this publisher, waiting for a report that holds its
+    row locks and has nothing left to wait for -- no cycle. A report that
+    finds it busy refuses with 503 and is retried by the client's outbox.
     """
     await db.execute(text(
         "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
         {"sid": series.id})
+    await db.execute(text(
+        f"SELECT pg_advisory_xact_lock({_DC_PAIR_LOCK_KEY_SQL})"),
+        {"a": str(series.player1_id), "b": str(series.player2_id)})
     await db.execute(text(
         "INSERT INTO series_dc_grants (holder_id, counterparty_id, series_id)"
         " VALUES (:a, :b, :sid), (:b, :a, :sid)"
@@ -7138,12 +7208,16 @@ async def get_leaderboard(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     min_matches: int = Query(5, ge=0, description="Minimum matches to appear"),
+    # Item d: the board hides players not seen for LEADERBOARD_ACTIVE_DAYS days
+    # (players.last_seen, refreshed by the presence ping). True lists everyone
+    # and flags each row `inactive`; the rank and total follow the same filter.
+    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get the ranked leaderboard sorted by Glicko-2 rating."""
 
     # Leaderboard counts: completed series W/L + legacy individual ranked matches
-    query = text("""
+    query = text(f"""
         WITH series_stats AS (
             SELECT
                 sub.player_id,
@@ -7202,18 +7276,22 @@ async def get_leaderboard(
             COALESCE(p.hide_gold, false) AS hide_gold,
             si.name          AS title,
             si.preview_color AS title_color,
-            si.sku           AS title_sku
+            si.sku           AS title_sku,
+            {_ONLINE_MARKER_SQL} AS is_online,
+            NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
         FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
         LEFT JOIN shop_items si ON si.id = p.active_title_id
         WHERE COALESCE(c.total, 0) >= :min_matches
           AND p.deleted_at IS NULL
+          AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
         ORDER BY gr.rating DESC
         LIMIT :limit OFFSET :offset
     """)
 
-    result = await db.execute(query, {"min_matches": min_matches, "limit": limit, "offset": offset})
+    result = await db.execute(query, {"min_matches": min_matches, "limit": limit, "offset": offset,
+                                      "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})
     rows = result.mappings().all()
 
     _colors = await _rank_colors(db)
@@ -7254,9 +7332,12 @@ async def get_leaderboard(
             title_color=_title_color,
             rank_name=_rank,
             rank_color=_colors.get(_rank) or _rank_fallback_color(_rank),
+            is_online=bool(row["is_online"]),
+            inactive=bool(row["inactive"]),
         ))
 
-    # Total players who qualify
+    # Total players who qualify -- as SHOWN: same deleted_at and activity
+    # terms as the page query (item d), so the total counts the board's rows.
     count_query = text("""
         WITH series_stats AS (
             SELECT sub.player_id, COUNT(*) AS total
@@ -7284,8 +7365,11 @@ async def get_leaderboard(
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
         WHERE COALESCE(c.total, 0) >= :min_matches
+          AND p.deleted_at IS NULL
+          AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
     """)
-    total = (await db.execute(count_query, {"min_matches": min_matches})).scalar() or 0
+    total = (await db.execute(count_query, {"min_matches": min_matches,
+                                            "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).scalar() or 0
 
     return LeaderboardResponse(
         entries=entries,
@@ -8492,6 +8576,9 @@ async def get_player_stats(
     # /team/leaderboard and /ffa/leaderboard with only limit + sort_by (so
     # min_series and min_games both default to 1), and /ovt/leaderboard with
     # role=combined — so the number always agrees with the row the player sees.
+    # Item d: each also applies the boards' LEADERBOARD_ACTIVE_DAYS activity
+    # filter (bound as CAST(:active_days AS integer)), so "#N of M" is the
+    # DEFAULT board's numbering and an inactive player reads as not on it.
     #
     # Standing is COMPETITION-STYLE: 1 + the count of eligible players strictly
     # ahead. The boards break exact ties with ROW_NUMBER (arbitrary among
@@ -8542,12 +8629,13 @@ async def get_player_stats(
                       JOIN players p ON p.id = gr.player_id
                       LEFT JOIN combined c ON c.player_id = p.id
                      WHERE COALESCE(c.total, 0) >= 1 AND p.deleted_at IS NULL
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT rating FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
                        (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if srow:
                 standing_pop = int(srow["pop"] or 0)
                 if int(srow["on_board"] or 0) > 0:
@@ -8561,12 +8649,13 @@ async def get_player_stats(
                       JOIN players p ON p.id = g2.player_id
                      WHERE COALESCE(g2.completed_series, 0) >= 1
                        AND p.deleted_at IS NULL
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT rating FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
                        (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if trow2:
                 team_standing_pop = int(trow2["pop"] or 0)
                 if int(trow2["on_board"] or 0) > 0:
@@ -8580,12 +8669,13 @@ async def get_player_stats(
                       JOIN players p ON p.id = g.player_id
                      WHERE COALESCE(g.games_played, 0) >= 1
                        AND p.deleted_at IS NULL
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT rating FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
                        (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if frow2:
                 ffa_standing_pop = int(frow2["pop"] or 0)
                 if int(frow2["on_board"] or 0) > 0:
@@ -8617,6 +8707,7 @@ async def get_player_stats(
                       FROM per_player pp
                       JOIN players p ON p.id = pp.pid
                      WHERE p.deleted_at IS NULL AND pp.games >= 1
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT games, wr FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
@@ -8625,7 +8716,7 @@ async def get_player_stats(
                             OR (e.games = me.games
                                 AND COALESCE(e.wr, -1) > COALESCE(me.wr, -1))) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if orow2:
                 ovt_standing_pop = int(orow2["pop"] or 0)
                 if int(orow2["on_board"] or 0) > 0:
@@ -8916,6 +9007,179 @@ async def get_rating_preview(
             "loss_delta": round(b_loss - b["rating"], 1),
         },
         "win_probability": round(win_prob, 3),
+    }
+
+
+# ── Rating previews for 2v2 and FFA (Sept 6 item k — the Discord `/elo` command) ──
+# Read-only GETs shaped like get_rating_preview above; both are safe on the
+# replica (no writes, no session state). Whether the edge sends them to the
+# standby is decided by the read-routing allowlist in the ZAP nginx config,
+# which lives OUTSIDE this repo (see the read-replica notes near IS_REPLICA):
+# until that list names these paths the primary serves them -- correct, just
+# not offloaded. Nothing to do here for that.
+
+def _parse_steam_id_list(raw: str, lo: int, hi: int, label: str) -> list[str]:
+    """Comma-separated steam ids -> list. 400 unless it holds lo..hi DISTINCT
+    ASCII-digit ids of at most 20 chars (the Query's max_length bounds the raw
+    string; this bounds what is inside it)."""
+    ids = [t.strip() for t in (raw or "").split(",") if t.strip()]
+    if not (lo <= len(ids) <= hi):
+        want = f"{lo}" if lo == hi else f"{lo}-{hi}"
+        raise HTTPException(status_code=400, detail=f"{label}: expected {want} steam ids, got {len(ids)}")
+    for sid in ids:
+        if len(sid) > 20 or not (sid.isascii() and sid.isdigit()):
+            raise HTTPException(status_code=400, detail=f"{label}: invalid steam id")
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=400, detail=f"{label}: duplicate steam id")
+    return ids
+
+
+async def _load_mode_rating_rows(db: AsyncSession, table: str, ids: list[str],
+                                 defaults: tuple) -> list[dict]:
+    """players LEFT JOIN one mode's glicko table, returned in the caller's id
+    order as {steam_id, display_name, rating, rd, vol}. 404 naming any id with
+    no players row (never-seen ids are not previewable -- get_rating_preview's
+    rule). A player with no MODE row yet takes the mode defaults, exactly as
+    the rated paths do for a first game."""
+    assert table in ("glicko_ratings_ffa", "glicko_ratings_2v2")
+    rows = (await db.execute(text(f"""
+        SELECT p.steam_id, p.display_name, g.rating, g.rating_deviation, g.volatility
+        FROM players p
+        LEFT JOIN {table} g ON g.player_id = p.id
+        WHERE p.steam_id = ANY(CAST(:sids AS text[])) AND p.deleted_at IS NULL
+    """), {"sids": ids})).mappings().all()
+    by_sid = {r["steam_id"]: r for r in rows}
+    missing = [sid for sid in ids if sid not in by_sid]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Player not found: {', '.join(missing)}")
+    d_r, d_rd, d_vol = defaults
+    out = []
+    for sid in ids:
+        r = by_sid[sid]
+        out.append({
+            "steam_id": sid,
+            "display_name": r["display_name"],
+            "rating": float(r["rating"]) if r["rating"] is not None else d_r,
+            "rd": float(r["rating_deviation"]) if r["rating_deviation"] is not None else d_rd,
+            "vol": float(r["volatility"]) if r["volatility"] is not None else d_vol,
+        })
+    return out
+
+
+@app.get("/api/v1/rating-preview/ffa", tags=["Players"])
+async def get_rating_preview_ffa(
+    ids: str = Query(..., max_length=230, description="3-10 comma-separated steam ids (one FFA lobby)"),
+    score_target: int | None = Query(None, ge=2, le=50,
+                                     description="the lobby's score target (first to N); default: the FFA config default. w(N) follows it (r5 M4)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hypothetical FFA Glicko-2 deltas for a field of 3-10 players (feeds the
+    Discord `/elo ffa` preview). The SAME function as the rated path,
+    _ffa_rating_deltas, so the adjacency bound, upset inclusion and w(N) all
+    apply. A field has n! finishing orders and they are NOT enumerated: every
+    figure fixes ONE player's place and assumes the others finish in rating
+    order (highest first, canonical steam order on equal ratings), no ties,
+    at the default score target. first_delta / last_delta are that player at
+    1st / at nth; place_deltas[k-1] is the same player at place k. Players
+    with no glicko_ratings_ffa row take the rated path's defaults. Public
+    read -- ratings are public."""
+    sids = _parse_steam_id_list(ids, 3, 10, "ids")
+    rows = await _load_mode_rating_rows(db, "glicko_ratings_ffa", sids, (1500.0, 350.0, 0.06))
+    pre = {r["steam_id"]: (r["rating"], r["rd"], r["vol"]) for r in rows}
+    n = len(sids)
+    score_target = int(score_target) if score_target is not None else int(FFA_CONFIG_DEFAULTS["score_target"])
+    by_strength = sorted(sids, key=lambda s: (-pre[s][0], _ffa_sort_key(s)))
+    players = []
+    for r in rows:
+        sid = r["steam_id"]
+        others = [s for s in by_strength if s != sid]
+        place_deltas = []
+        for place in range(1, n + 1):
+            finish = others[:place - 1] + [sid] + others[place - 1:]
+            placements = {s: i + 1 for i, s in enumerate(finish)}
+            new_r = _ffa_rating_deltas(sids, frozenset(), placements, pre, score_target, only=sid)[sid][0]
+            place_deltas.append(round(new_r - pre[sid][0], 1))
+        players.append({
+            "steam_id": sid,
+            "display_name": r["display_name"],
+            "rating": round(pre[sid][0], 1),
+            "first_delta": place_deltas[0],
+            "last_delta": place_deltas[-1],
+            "place_deltas": place_deltas,
+        })
+    return {
+        "players": players,
+        "field_size": n,
+        "field_average_rating": round(sum(pre[s][0] for s in sids) / n, 1),
+        "score_target": score_target,
+        "assumption": ("each delta fixes one player's place; the others finish in rating order, "
+                       f"no ties, first to {score_target} -- the n! orderings are not enumerated"),
+    }
+
+
+@app.get("/api/v1/rating-preview/2v2", tags=["Players"])
+async def get_rating_preview_2v2(
+    team_a: str = Query(..., max_length=41, description="two comma-separated steam ids"),
+    team_b: str = Query(..., max_length=41, description="two comma-separated steam ids"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hypothetical 2v2 Glicko-2 deltas if team A wins / loses a ranked series
+    (feeds the Discord `/elo 2v2` preview). Per player the update is the rated
+    path's update_player verbatim (_complete_team_series_with_ratings and
+    submit_team_match): one rating period, a TWO-opponent list -- the other
+    team, both scored 1.0 on a win and 0.0 on a loss -- GLICKO2_TAU, and the
+    GLICKO2_DEFAULT_* values for a player with no glicko_ratings_2v2 row yet.
+    Team rating is the mean of the two ratings. win_probability is an
+    ESTIMATE: the rated path never computes one for teams, so this applies
+    _glicko_expectancy to the team means with the RD of a mean of two
+    independent ratings, sqrt(rd1^2 + rd2^2) / 2. Public read -- ratings are
+    public."""
+    a_ids = _parse_steam_id_list(team_a, 2, 2, "team_a")
+    b_ids = _parse_steam_id_list(team_b, 2, 2, "team_b")
+    if set(a_ids) & set(b_ids):
+        raise HTTPException(status_code=400, detail="a player cannot be on both teams")
+    defaults = (GLICKO2_DEFAULT_RATING, GLICKO2_DEFAULT_RD, GLICKO2_DEFAULT_VOLATILITY)
+    rows = await _load_mode_rating_rows(db, "glicko_ratings_2v2", a_ids + b_ids, defaults)
+    by_sid = {r["steam_id"]: r for r in rows}
+    side_a = [by_sid[s] for s in a_ids]
+    side_b = [by_sid[s] for s in b_ids]
+
+    def _side(players, opps_pre):
+        # update_player(p, opps_pre, won) from the rated paths, evaluated for
+        # both outcomes: every opponent carries the player's team result.
+        out = []
+        for p in players:
+            win, _, _ = calculate_new_rating(
+                p["rating"], p["rd"], p["vol"],
+                [(o["rating"], o["rd"], 1.0) for o in opps_pre], GLICKO2_TAU)
+            loss, _, _ = calculate_new_rating(
+                p["rating"], p["rd"], p["vol"],
+                [(o["rating"], o["rd"], 0.0) for o in opps_pre], GLICKO2_TAU)
+            out.append({
+                "steam_id": p["steam_id"], "display_name": p["display_name"],
+                "rating": round(p["rating"], 1),
+                "win_delta": round(win - p["rating"], 1),
+                "loss_delta": round(loss - p["rating"], 1),
+            })
+        return out
+
+    def _team(players):
+        mean = (players[0]["rating"] + players[1]["rating"]) / 2.0
+        rd = math.sqrt(players[0]["rd"] ** 2 + players[1]["rd"] ** 2) / 2.0
+        return mean, rd
+
+    ra, rda = _team(side_a)
+    rb, rdb = _team(side_b)
+    p_a = _glicko_expectancy(ra, rda, rb, rdb)
+    return {
+        "team_a": {"rating": round(ra, 1), "win_probability": round(p_a, 3),
+                   "players": _side(side_a, side_b)},
+        "team_b": {"rating": round(rb, 1), "win_probability": round(1.0 - p_a, 3),
+                   "players": _side(side_b, side_a)},
+        "win_probability": round(p_a, 3),
+        "win_probability_is_estimate": True,
+        "note": ("deltas follow the series-completion math exactly; the win probability is an "
+                 "estimate from the team means and is not something the rated path computes"),
     }
 
 
@@ -13131,7 +13395,13 @@ async def presence_ping(request: Request,
     ~60s while the game is running; the response carries the current online
     count for the queue tab's 'N online' readout. Since v1.33 the ping also
     stamps players.last_seen so the Home tab's 'recently online' list stays
-    fresh."""
+    fresh. Since the Sept 6 batch it is also the ONLY writer of
+    players.presence_seen_at (migration 296), which the leaderboards' online
+    marker reads (_ONLINE_MARKER_SQL): last_seen is stamped by
+    get_or_create_player for every participant a report names, so it could
+    light the dot of an opponent who had already quit. Both stamps require
+    the caller's verified Steam session for the named id (r5 M1); an
+    unverified ping is answered but stamps nothing."""
     _presence_touch(steam_id)
     # in_match=<lobby/series id> means "I am IN a game for this group right now".
     # Optional on purpose: pre-v1.35.3 clients never send it, and every consumer
@@ -13230,26 +13500,32 @@ async def presence_ping(request: Request,
         # parameter and the whole statement fails with AmbiguousParameterError
         # — which silently stopped EVERY last_seen stamp after b7fcd72
         # (learning #275's class; caught at the v1.39.2 deploy smoke).
-        # The EXISTS predicate
-        # mirrors the FFA queue's session check: a gate-validated version is
-        # stamped only when the token is verified, unexpired, and bound to the
-        # named player. Missing/invalid sessions still refresh last_seen on a
-        # matching non-deleted player row.
+        # The `ok` predicate mirrors the FFA queue's session check: the
+        # token must be verified, unexpired and bound to the named player.
+        # Sept 6 review (r5 M1): EVERY stamp is gated on it, not only the
+        # version. last_seen is the 90-day leaderboard/podium authority and
+        # presence_seen_at lights the online dot, so a ping that merely names
+        # a Steam id must not keep either fresh; an unverified ping still
+        # answers (online count, alerts revision) and writes nothing.
         await db.execute(text("""
+            WITH ok AS (
+                SELECT EXISTS (
+                    SELECT 1 FROM steam_sessions ss
+                     WHERE ss.token_hash = :session_hash
+                       AND ss.steam_id = :sid
+                       AND ss.verified
+                       AND (ss.expires_at IS NULL OR ss.expires_at >= NOW())
+                ) AS verified
+            )
             UPDATE players AS p
-               SET last_seen = NOW(),
+               SET last_seen = CASE WHEN ok.verified THEN NOW() ELSE p.last_seen END,
+                   presence_seen_at = CASE WHEN ok.verified THEN NOW() ELSE p.presence_seen_at END,
                    mod_version = CASE
-                       WHEN CAST(:mod_version AS VARCHAR) IS NOT NULL
-                        AND EXISTS (
-                            SELECT 1 FROM steam_sessions ss
-                             WHERE ss.token_hash = :session_hash
-                               AND ss.steam_id = p.steam_id
-                               AND ss.verified
-                               AND (ss.expires_at IS NULL OR ss.expires_at >= NOW())
-                        )
+                       WHEN CAST(:mod_version AS VARCHAR) IS NOT NULL AND ok.verified
                        THEN CAST(:mod_version AS VARCHAR)
                        ELSE p.mod_version
                    END
+              FROM ok
              WHERE p.steam_id = :sid AND p.deleted_at IS NULL
         """), {"sid": steam_id,
                  "mod_version": observed_version,
@@ -14887,16 +15163,34 @@ async def _report_disconnect_once(
     # and the pair's next sitting could begin between the judgement and the
     # write.
     #
-    # This NARROWS the window to this statement; it does not close it. A grant
-    # committing between this read and the COMMIT below is still unobserved.
-    # Closing it needs a lock keyed on the PAIR rather than on a row (#207),
-    # taken by the publisher too — a new lock on a hot write path, which is not
-    # a change to make without a database to validate it against.
+    # The pair lock below is what CLOSES the window (r2). The publisher takes
+    # the same key before its grant insert and holds it to its own commit, so
+    # with the lock held here every grant the pair has is committed and
+    # visible to the re-ask, and none can commit before this transaction does.
+    # The lock is TRIED, never awaited: this transaction already holds the
+    # pair's players rows and the series row, and the publisher's caller may
+    # be about to wait on those very rows -- a blocking acquire here would be
+    # the second edge of a cycle. Busy means a sitting for this pair is being
+    # published right now: nothing was judged, so 503 and not 403 -- the
+    # outbox keeps the report and retries it with its budget intact (#430).
+    # The expression is shared with the publisher (_DC_PAIR_LOCK_KEY_SQL) and
+    # was run against the production database before it shipped.
+    _pair_locked = (await db.execute(text(
+        f"SELECT pg_try_advisory_xact_lock({_DC_PAIR_LOCK_KEY_SQL}) AS pair_locked"),
+        {"a": str(reporter.id), "b": str(disconnected.id)})).scalar()
+    if not _pair_locked:
+        await db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="a sitting for this pair is being published; retry")
     #
-    # The compatibility arm is untouched. A pair with no grant for this series
-    # makes the inner SELECT return no row, the comparison NULL, and this
-    # refuses nothing: only a report judged BY a grant can be refused for that
-    # grant's supersession.
+    # The compatibility arm is covered too (r16 MEDIUM). That arm admits a
+    # report only while the pair has NO grant at all, so a grant for the pair
+    # that exists at this statement with none naming this series means a
+    # sitting was published between the judgement and here -- the premise the
+    # admission rested on is gone, and the report is refused the same way. A
+    # grant for THIS series arriving late is not supersession: the first arm
+    # then asks whether anything newer exists, and nothing does.
     #
     # Labelled `AS superseded` because the fake session routes on markers that
     # exist for no other purpose (#306) — recognising this statement by its
@@ -14904,10 +15198,13 @@ async def _report_disconnect_once(
     _superseded = (await db.execute(text(
         "SELECT 1 AS superseded FROM series_dc_grants g2"
         " WHERE g2.holder_id = :rp AND g2.counterparty_id = :dp"
-        "   AND (g2.last_seen_at, g2.series_id)"
-        "     > (SELECT g.last_seen_at, g.series_id FROM series_dc_grants g"
-        "         WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
-        "           AND g.series_id = CAST(:sid AS uuid))"
+        "   AND ((g2.last_seen_at, g2.series_id)"
+        "          > (SELECT g.last_seen_at, g.series_id FROM series_dc_grants g"
+        "              WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
+        "                AND g.series_id = CAST(:sid AS uuid))"
+        "        OR NOT EXISTS (SELECT 1 FROM series_dc_grants g"
+        "                        WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
+        "                          AND g.series_id = CAST(:sid AS uuid)))"
         " LIMIT 1"
     ), {"rp": reporter.id, "dp": disconnected.id,
         "sid": str(resolved_series_id)})).first()
@@ -19890,7 +20187,7 @@ user-select:none;cursor:not-allowed}
 .tl-warn{font-size:11px;color:#ffc46b;margin:2px 0;min-height:14px}
 .badge{font-size:11px;border-radius:3px;padding:1px 6px;margin-left:6px}
 .b-machine{background:#5a4a18}.b-approved{background:#1e4a24}.b-stale{background:#5a1e1e}
-.b-sensitive{background:#4a1e3a}.b-pending{background:#1e3a5a}
+.b-sensitive{background:#4a1e3a}.b-pending{background:#1e3a5a}.b-ctx{background:#24405e;color:#cfe3ff}
 .err{color:#ff8888;white-space:pre-wrap}.muted{color:#889}
 /* Filter bars — CENTRED (Sid, Aug 12 item 11c). The chips are inline-block
    buttons, so text-align does the centring and the row still wraps cleanly on
@@ -20112,6 +20409,16 @@ async function runKeepAlive(){
 }
 const el=(tag,cls,txt)=>{const e=document.createElement(tag);if(cls)e.className=cls;
   if(txt!==undefined)e.textContent=txt;return e};
+// Sept 6 item e: a TrC key is english + U+0004 + context (I18n.ContextSeparator),
+// stored whole as msgctxt. Every surface that renders a source string shows the
+// English as the text and the context as a badge; the tag-locked editor is
+// seeded from the English half. Display only: proposals, reviews and reverts
+// travel by key_id, so the composite never has to make a round trip.
+const CTX_SEP=String.fromCharCode(4);
+function srcText(s){const t=(s===undefined||s===null)?"":String(s);const i=t.indexOf(CTX_SEP);return i<0?t:t.slice(0,i);}
+function srcEl(cls,s){const t=(s===undefined||s===null)?"":String(s);const i=t.indexOf(CTX_SEP);
+  const d=el("div",cls,i<0?t:t.slice(0,i));
+  if(i>=0)d.appendChild(el("span","badge b-ctx","["+t.slice(i+1)+"]"));return d;}
 function setStatus(msg,isErr){const s=document.getElementById("status");
   if(!s)return;s.className=isErr?"err":"muted";s.textContent=msg||"";}
 // FastAPI sends its message as {"detail": "..."} — print the sentence, not the
@@ -20614,7 +20921,7 @@ function renderKeys(){
     if(k.pending){pendBadge=el("span","badge b-pending",k.pending+" pending");
       head.appendChild(pendBadge);}
     box.appendChild(head);
-    box.appendChild(el("div","src",k.source));
+    box.appendChild(srcEl("src",k.source));
     // Only on the untagged path: beside the chips this would show a STALE
     // tag skeleton the translator is likely to copy from (review find).
     if(k.target&&k.source.indexOf("<")<0)box.appendChild(el("div","tgt",k.target));
@@ -20623,7 +20930,7 @@ function renderKeys(){
     // reassembled from the SOURCE's captured tag array, so markup cannot be
     // authored here at all (the server enforces the same rule independently
     // — this is UX, not the security boundary).
-    const ed=mkEditor(k.source,k.target||"");box.appendChild(ed.node);
+    const ed=mkEditor(srcText(k.source),k.target||"");box.appendChild(ed.node);
     const send=el("button",null,"Propose");
     const msg=el("div","err","");
     const rowLang=KEYS_LANG;   // find 12: bind the row's language, not the global
@@ -20676,7 +20983,7 @@ function renderKeys(){
         // r2 find 12: the header names the namespace + game-table context so
         // the PS/Xbox twins and cross-namespace homonyms stay tellable apart.
         hbox.appendChild(el("div","muted",(h.namespace||"client")+(h.context?" · "+h.context:"")));
-        hbox.appendChild(el("div","h-src",h.source));
+        hbox.appendChild(srcEl("h-src",h.source));
         if(h.current){
           const c=el("div","hrow h-approved");
           c.appendChild(el("div","tgt",h.current.target||"(none)"));
@@ -20952,7 +21259,7 @@ function renderQueue(d){
     if(p.namespace&&p.namespace!=="client")head.appendChild(el("span","badge b-stale",p.namespace));
     box.appendChild(head);
     if(p.context)box.appendChild(el("div","muted",p.context));
-    box.appendChild(el("div","src",p.source));
+    box.appendChild(srcEl("src",p.source));
     box.appendChild(el("div","tgt",p.target));
     const msg=el("div","err","");
     const act=(a)=>async()=>{msg.textContent="";
@@ -21027,7 +21334,7 @@ function renderApproved(d){
     if(e.namespace==="game")head.appendChild(el("span","badge b-pending","ships next release"));
     if(e.self_approved)head.appendChild(el("span","badge b-machine","self-approved"));
     box.appendChild(head);
-    box.appendChild(el("div","h-src",e.source));
+    box.appendChild(srcEl("h-src",e.source));
     box.appendChild(el("div","tgt",e.target||"(empty)"));
     // approved_at IS i18n_entries.updated_at — there is no approved_at column.
     let who="Approved by "+(e.approved_by_name||e.approved_by||"unknown");
@@ -33605,7 +33912,8 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
 # widen an existing cosmetic's meaning.
 _ovt_podium_cache: dict = {"at": 0.0, "ids": []}
 
-_OVT_PODIUM_QUERY = """
+# Item d: activity filter as on /ovt/leaderboard (f-string over the int).
+_OVT_PODIUM_QUERY = f"""
     WITH per_player AS (
         SELECT pid, SUM(played) AS games, SUM(won) AS wins
         FROM (
@@ -33624,6 +33932,7 @@ _OVT_PODIUM_QUERY = """
       FROM per_player pp
       JOIN players p ON p.id = pp.pid
      WHERE p.deleted_at IS NULL AND pp.games >= 1
+       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
      ORDER BY pp.games DESC, pp.wins::float / NULLIF(pp.games, 0) DESC NULLS LAST
      LIMIT 3
 """
@@ -34769,13 +35078,14 @@ async def ovt_series_active(steam_id: str = Query(...), db: AsyncSession = Depen
 async def ovt_leaderboard(
     limit: int = 200,
     role: str = "combined",
+    include_inactive: bool = False,   # item d -- see get_leaderboard
     db: AsyncSession = Depends(get_db),
 ):
     """1v2 stats leaderboard, optionally scoped to solo or duo games."""
     if role not in {"combined", "solo", "duo"}:
         role = "combined"
 
-    rows = (await db.execute(text("""
+    rows = (await db.execute(text(f"""
         WITH per_player AS (
             SELECT pid, SUM(played) AS games, SUM(won) AS wins,
                    SUM(solo_g) AS solo_games, SUM(duo_g) AS duo_games,
@@ -34813,13 +35123,16 @@ async def ovt_leaderboard(
                sc.solo_wins, sc.duo_wins, sc.scoped_games, sc.scoped_wins,
                sc.last_played,
                si.name AS title_name, si.preview_color AS title_color, si.sku AS title_sku,
-               gr.rating AS rating_1v1
+               gr.rating AS rating_1v1,
+               {_ONLINE_MARKER_SQL} AS is_online,
+               NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
           FROM scoped sc
           JOIN players p ON p.id = sc.pid
           LEFT JOIN shop_items si ON si.id = p.active_title_id
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
          WHERE p.deleted_at IS NULL
            AND sc.scoped_games >= 1
+           AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
          ORDER BY
                CASE WHEN :role = 'combined' THEN sc.games END DESC,
                CASE WHEN :role = 'combined'
@@ -34830,7 +35143,8 @@ async def ovt_leaderboard(
                     END DESC NULLS LAST,
                CASE WHEN :role IN ('solo', 'duo') THEN sc.scoped_games END DESC
          LIMIT :lim
-    """), {"lim": max(1, min(limit, 500)), "role": role})).mappings().all()
+    """), {"lim": max(1, min(limit, 500)), "role": role,
+           "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).mappings().all()
 
     _colors = await _rank_colors(db)
     _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
@@ -34858,7 +35172,11 @@ async def ovt_leaderboard(
             duo_wins=duo_w, duo_losses=duo_g - duo_w,
             level=lvl, title=t_name, title_color=t_color,
             last_played=r["last_played"].isoformat() if r["last_played"] else None,
+            is_online=bool(r["is_online"]),
+            inactive=bool(r["inactive"]),
         ))
+    # Item d: len(entries) below already follows the activity filter (the
+    # rows ARE the filtered set), so no separate count was added here.
     # KNOWN NIT, deliberately NOT fixed here: total_players is len(entries),
     # so it reports the PAGE SIZE rather than the population (limit=1 says "1
     # player total"). The 1v1 and 2v2 boards run a real COUNT; the FFA board was
@@ -35417,6 +35735,80 @@ def _ffa_sort_key(steam_id: str) -> tuple:
     reporter implements the identical comparison — the HMAC canonical and
     slot assignment must byte-match without either side parsing int64."""
     return (len(steam_id or ""), steam_id or "")
+
+
+def _ffa_rating_deltas(order, unrated, placements, pre, score_target, only=None):
+    """PURE Glicko-2 update for one FFA game -- no db, no clock, nothing but
+    the tuning constants. The ONLY implementation: submit_ffa_match (the rated
+    path) and GET /rating-preview/ffa (the Discord `/elo ffa` preview) both
+    call it, so the preview cannot drift from what a real game does.
+
+    order        every roster steam_id in REPORT order. Fixes the result
+                 dict's order and nothing else -- each value depends only on
+                 `placements` and `pre`, never on another player's result.
+    unrated      steam_ids on the roster but not rated this game (ghosts,
+                 early leavers under grace): skipped, and excluded from every
+                 other player's comparison set.
+    placements   steam_id -> competition-style place (1, 2, 2, 4 on ties).
+    pre          steam_id -> (rating, rd, volatility) PRE-game snapshot.
+    score_target the lobby's first-to-N; feeds w(N) below.
+    only         compute this one steam_id instead of the whole roster (the
+                 preview asks one hypothetical per player per place).
+    Returns steam_id -> (new_rating, new_rd, new_volatility) for rated players.
+
+    Rating comparisons are BOUNDED to the placement-adjacent opponents (up to
+    FFA_MAX_RATED_OPPONENTS, nearest placements first): raw full pairwise
+    would make a 10-player game move ratings ~4.5x as much as a 3-player game
+    and crush RD after a handful of lobbies (Codex design find 14). Adjacent
+    placements are also the most informative comparisons. Deterministic:
+    sorted by |placement gap| then the canonical steam ordering.
+    """
+    out = {}
+    for sid in (order if only is None else (only,)):
+        if sid in unrated:
+            continue   # not in this game -- no rating period for them
+        my_place = placements[sid]
+        ranked_opps = sorted(
+            (q for q in order if q != sid and q not in unrated),
+            key=lambda q: (abs(placements[q] - my_place), _ffa_sort_key(q)))
+        picks = list(ranked_opps[:FFA_MAX_RATED_OPPONENTS])
+        # Bug 195: upset inclusion -- see FFA_UPSET_INCLUDE_GAP. Scans only
+        # opponents the adjacency picks EXCLUDED (a no-op in games of <=5
+        # rated players, i.e. ~94% of history).
+        if len(ranked_opps) > FFA_MAX_RATED_OPPONENTS:
+            my_r = pre[sid][0]
+            upsets = []
+            for q in ranked_opps[FFA_MAX_RATED_OPPONENTS:]:
+                q_r = pre[q][0]
+                gap = abs(my_r - q_r)
+                if gap < FFA_UPSET_INCLUDE_GAP:
+                    continue
+                q_place = placements[q]
+                lower_rated_placed_above = (
+                    (my_r < q_r and my_place < q_place)
+                    or (q_r < my_r and q_place < my_place))
+                if lower_rated_placed_above:
+                    upsets.append((gap, _ffa_sort_key(q), q))
+            if upsets:
+                upsets.sort(key=lambda t: (-t[0], t[1]))
+                picks.append(upsets[0][2])
+        opponents = []
+        for q in picks:
+            score = (1.0 if my_place < placements[q]
+                     else 0.0 if my_place > placements[q] else 0.5)
+            opponents.append((pre[q][0], pre[q][1], score))
+        old_r, old_rd, old_vol = pre[sid]
+        # w(N) = min(1, (N-1)/4): a game to a shorter score target carries
+        # less information, so it counts as a fraction of a game (section 5e --
+        # scales variance AND update). N=5 (today's default) gives w=1.0,
+        # byte-identical to the unweighted path; clamped at 1.0 above N=5
+        # so grinding long lobbies is never the rating-efficient path.
+        _wN = min(1.0, (score_target - 1) / 4.0)
+        out[sid] = calculate_new_rating(
+            old_r, old_rd, old_vol, opponents,
+            tau=GLICKO2_TAU,
+            weights=([_wN] * len(opponents)) if _wN < 1.0 else None)
+    return out
 
 
 def _ffa_hmac_canonical(report: FfaMatchReport, include_kills: bool) -> str:
@@ -39262,59 +39654,22 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             r = by_pid.get(pid)
             pre[sid_] = ((float(r["rating"]), float(r["rating_deviation"]), float(r["volatility"]))
                          if r else (1500.0, 350.0, 0.06))
-        # Rating comparisons are BOUNDED to the placement-adjacent opponents
-        # (up to FFA_MAX_RATED_OPPONENTS, nearest placements first): raw full
-        # pairwise would make a 10-player game move ratings ~4.5x as much as a
-        # 3-player game and crush RD after a handful of lobbies (Codex design
-        # find 14). Adjacent placements are also the most informative
-        # comparisons. Deterministic: sorted by |placement gap| then the
-        # canonical steam ordering.
+        # Opponent selection and the Glicko-2 update are _ffa_rating_deltas
+        # (pure; ALSO the engine of GET /rating-preview/ffa, so the Discord
+        # `/elo ffa` preview cannot drift from the rated path). Every rated
+        # player's new state is computed from the pre-game snapshot BEFORE
+        # any row is written: each update only ever read `pre`, so the values
+        # are identical to the former per-player compute-then-INSERT
+        # interleaving -- only the INSERTs' timing moved, inside this one
+        # transaction.
+        _new_ffa = _ffa_rating_deltas([p.steam_id for p in report.players],
+                                      unrated, placements, pre, _score_target)
         for p in report.players:
             if p.steam_id in unrated:
                 continue   # not in this game — no rating period for them
             my_place = placements[p.steam_id]
-            ranked_opps = sorted(
-                (q for q in report.players
-                 if q.steam_id != p.steam_id and q.steam_id not in unrated),
-                key=lambda q: (abs(placements[q.steam_id] - my_place),
-                               _ffa_sort_key(q.steam_id)))
-            picks = list(ranked_opps[:FFA_MAX_RATED_OPPONENTS])
-            # Bug 195: upset inclusion — see FFA_UPSET_INCLUDE_GAP. Scans only
-            # opponents the adjacency picks EXCLUDED (a no-op in games of <=5
-            # rated players, i.e. ~94% of history).
-            if len(ranked_opps) > FFA_MAX_RATED_OPPONENTS:
-                my_r = pre[p.steam_id][0]
-                upsets = []
-                for q in ranked_opps[FFA_MAX_RATED_OPPONENTS:]:
-                    q_r = pre[q.steam_id][0]
-                    gap = abs(my_r - q_r)
-                    if gap < FFA_UPSET_INCLUDE_GAP:
-                        continue
-                    q_place = placements[q.steam_id]
-                    lower_rated_placed_above = (
-                        (my_r < q_r and my_place < q_place)
-                        or (q_r < my_r and q_place < my_place))
-                    if lower_rated_placed_above:
-                        upsets.append((gap, _ffa_sort_key(q.steam_id), q))
-                if upsets:
-                    upsets.sort(key=lambda t: (-t[0], t[1]))
-                    picks.append(upsets[0][2])
-            opponents = []
-            for q in picks:
-                score = (1.0 if my_place < placements[q.steam_id]
-                         else 0.0 if my_place > placements[q.steam_id] else 0.5)
-                opponents.append((pre[q.steam_id][0], pre[q.steam_id][1], score))
-            old_r, old_rd, old_vol = pre[p.steam_id]
-            # w(N) = min(1, (N-1)/4): a game to a shorter score target carries
-            # less information, so it counts as a fraction of a game (§5e —
-            # scales variance AND update). N=5 (today's default) gives w=1.0,
-            # byte-identical to the unweighted path; clamped at 1.0 above N=5
-            # so grinding long lobbies is never the rating-efficient path.
-            _wN = min(1.0, (_score_target - 1) / 4.0)
-            new_r, new_rd, new_vol = calculate_new_rating(
-                old_r, old_rd, old_vol, opponents,
-                tau=GLICKO2_TAU,
-                weights=([_wN] * len(opponents)) if _wN < 1.0 else None)
+            old_r = pre[p.steam_id][0]
+            new_r, new_rd, new_vol = _new_ffa[p.steam_id]
             rating_changes[p.steam_id] = round(new_r - old_r, 1)
             pid = id_by_steam[p.steam_id]
             await db.execute(text("""
@@ -39708,6 +40063,7 @@ _FFA_LB_SORTS = {
 
 @app.get("/api/v1/ffa/leaderboard", response_model=FfaLeaderboardResponse, tags=["FFA Matches"])
 async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "rating",
+                          include_inactive: bool = False,   # item d -- see get_leaderboard
                           db: AsyncSession = Depends(get_db)):
     """FFA leaderboard — RANKED. sort_by resolves through a dict allowlist
     (never interpolate the raw param — learning #188)."""
@@ -39718,15 +40074,19 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
                g.rating, g.rating_deviation, g.peak_rating,
                g.games_played, g.wins, g.top3, g.placement_sum,
                si.name AS title_name, si.preview_color AS title_color, si.sku AS title_sku,
-               gr.rating AS rating_1v1
+               gr.rating AS rating_1v1,
+               {_ONLINE_MARKER_SQL} AS is_online,
+               NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
           FROM glicko_ratings_ffa g
           JOIN players p ON p.id = g.player_id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
          WHERE g.games_played >= :ming AND p.deleted_at IS NULL
+           AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
          ORDER BY {order_sql}
          LIMIT :lim
-    """), {"ming": max(1, min_games), "lim": max(1, min(limit, 500))})).mappings().all()
+    """), {"ming": max(1, min_games), "lim": max(1, min(limit, 500)),
+           "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).mappings().all()
     _colors = await _rank_colors(db)
     # Unconditional: this is where the FFA podium title gets granted at all.
     # See bootstrap_mode_podium_titles — the render-time guard below cannot
@@ -39758,6 +40118,8 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
             level=lvl, title=t_name, title_color=t_color,
             ffa_gold_earned=(-1 if r["hide_gold"] else int(r["ffa_gold_earned"] or 0)),
             ffa_xp_earned=int(r["ffa_xp_earned"] or 0),
+            is_online=bool(r["is_online"]),
+            inactive=bool(r["inactive"]),
         ))
     # total_players is the POPULATION, not the page size. It used to be
     # len(entries), so it tracked `limit` — limit=1 reported "1 player total".
@@ -39767,8 +40129,9 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
     _ffa_total = (await db.execute(text(
         "SELECT COUNT(*) FROM glicko_ratings_ffa g"
         " JOIN players p ON p.id = g.player_id"
-        " WHERE g.games_played >= :ming AND p.deleted_at IS NULL"),
-        {"ming": max(1, min_games)})).scalar() or 0
+        " WHERE g.games_played >= :ming AND p.deleted_at IS NULL"
+        " AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))"),
+        {"ming": max(1, min_games), "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).scalar() or 0
     return FfaLeaderboardResponse(
         entries=entries, total_players=int(_ffa_total),
         last_updated=datetime.now(timezone.utc), is_ranked=True)
@@ -41577,6 +41940,42 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     await _assert_no_service_subject(
         db, affected_player_ids=[series["t1a_id"], series["t1b_id"],
                                  series["t2a_id"], series["t2b_id"]])
+    # Sept 6 (hotfix review r2 MEDIUM): a report the server has ALREADY applied
+    # -- the client's outbox re-sending after a lost 2xx, or the same report
+    # resurrected from a crashed queue file -- is answered as the duplicate it
+    # is, BEFORE the status gate below can quarantine it. The identity is
+    # uq_team_match's own: this room, these four members (every 2v2 game has
+    # its own room -- confirmed on production, 3 games = 3 rooms). On the
+    # active path the same duplicate used to fail the unique constraint; here
+    # it returns what the first delivery returned, so the client dequeues it.
+    # HMAC and score sanity have already passed above.
+    _dup = (await db.execute(text(
+        "SELECT tm.id, tm.winner_team FROM team_matches tm"
+        "  JOIN players a ON a.id = tm.t1a_id JOIN players b ON b.id = tm.t1b_id"
+        "  JOIN players c ON c.id = tm.t2a_id JOIN players d ON d.id = tm.t2b_id"
+        " WHERE tm.photon_room_id = :room AND tm.series_id = :sid"
+        "   AND a.steam_id = :t1a AND b.steam_id = :t1b"
+        "   AND c.steam_id = :t2a AND d.steam_id = :t2b"
+        " LIMIT 1"),
+        {"room": report.photon_room_id, "sid": series_uuid,
+         "t1a": report.t1a.steam_id, "t1b": report.t1b.steam_id,
+         "t2a": report.t2a.steam_id, "t2b": report.t2b.steam_id})).first()
+    if _dup is not None:
+        await db.rollback()
+        _dup_team = 1 if report.reported_by_steam_id in (
+            report.t1a.steam_id, report.t1b.steam_id) else 2
+        _dup_t1w = int(series["t1_series_wins"] or 0)
+        _dup_t2w = int(series["t2_series_wins"] or 0)
+        print(f"[TEAM-MATCH] duplicate report for series={series_uuid} "
+              f"room={report.photon_room_id} -> already recorded as {_dup.id}")
+        return TeamMatchResponse(
+            match_id=_dup.id,
+            series_id=series_uuid,
+            series_status=series["status"],
+            series_score=(f"{_dup_t1w}-{_dup_t2w}" if _dup_team == 1
+                          else f"{_dup_t2w}-{_dup_t1w}"),
+            winner_team=int(_dup.winner_team or report.winner_team),
+            message="Team match already recorded (duplicate report)")
     if series["status"] != "active":
         # July 30 lifecycle audit item 1: this rejection fires BEFORE the
         # team_matches insert, so without capture the whole GAME is destroyed —
@@ -42884,6 +43283,8 @@ async def team_leaderboard(
     limit: int = Query(200, ge=1, le=500),
     min_series: int = Query(1, ge=0),
     sort_by: str = Query("rating"),
+    # Item d -- see get_leaderboard.
+    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Top players by 2v2 Glicko rating. Includes title, avg teammate elo,
@@ -42965,7 +43366,9 @@ async def team_leaderboard(
             si.name AS title,
             si.preview_color AS title_color,
             si.sku AS title_sku,
-            g1.rating AS rating_1v1
+            g1.rating AS rating_1v1,
+            {_ONLINE_MARKER_SQL} AS is_online,
+            NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
         FROM glicko_ratings_2v2 g2
         JOIN players p ON p.id = g2.player_id
         LEFT JOIN series_stats ss ON ss.player_id = p.id
@@ -42974,10 +43377,12 @@ async def team_leaderboard(
         LEFT JOIN glicko_ratings g1 ON g1.player_id = p.id
         WHERE g2.completed_series >= :min_series
           AND p.deleted_at IS NULL
+          AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
         ORDER BY {order_clause}
         LIMIT :limit
     """)
-    rows = (await db.execute(q, {"min_series": min_series, "limit": limit})).mappings().all()
+    rows = (await db.execute(q, {"min_series": min_series, "limit": limit,
+                                 "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).mappings().all()
     _colors = await _rank_colors(db)
     # Podium maps only for the ladders some row wears a podium title from.
     # Unconditional: this is where the 2v2 podium title gets granted at all.
@@ -43013,10 +43418,18 @@ async def team_leaderboard(
             avg_teammate_elo=int(r["avg_teammate_elo"] or 0),
             team_gold_earned=int(r["team_gold_earned"] or 0),
             team_xp_earned=int(r["team_xp_earned"] or 0),
+            is_online=bool(r["is_online"]),
+            inactive=bool(r["inactive"]),
         ))
+    # Item d: the population as SHOWN -- same players join, same deleted_at
+    # and activity terms as the page query above (glicko_ratings_2v2.player_id
+    # is the players FK).
     cnt = (await db.execute(
-        text("SELECT COUNT(*) FROM glicko_ratings_2v2 WHERE completed_series >= :m"),
-        {"m": min_series},
+        text("SELECT COUNT(*) FROM glicko_ratings_2v2 g2"
+             " JOIN players p ON p.id = g2.player_id"
+             " WHERE g2.completed_series >= :m AND p.deleted_at IS NULL"
+             " AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))"),
+        {"m": min_series, "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive},
     )).scalar() or 0
     return Team2v2LeaderboardResponse(entries=entries, total_players=cnt, last_updated=datetime.now(timezone.utc))
 

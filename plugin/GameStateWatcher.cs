@@ -1290,6 +1290,8 @@ namespace CompetitiveRounds
             // backstop was unreachable in exactly the stuck state it exists
             // for). Cheap flag checks.
             try { SpectatorSession.TickPendingClear(); } catch { }
+            AudioSelfCheck.Tick();   // bug 337: one float compare; a delta line names our writer
+
 
             // SPECTATOR (design §3.5): the whole watcher sleeps — no room
             // watchdogs, no match tracking, no card/FPS/telemetry publishing,
@@ -1676,14 +1678,17 @@ namespace CompetitiveRounds
             catch { roomlessSince = -1f; fullRoomNoGameSince = -1f; }
         }
 
-        private static void FireRequeue(string why)
+        private static void FireRequeue(string why, bool userRequested = false, bool wantRequeue = true)
         {
             roomlessSince = -1f; fullRoomNoGameSince = -1f;
             // Context fork: only vanilla quickplay searches get auto-requeued.
+            // Sept 6 (bug 329): a player clicking Requeue on the half-spawned
+            // overlay is not "auto" — the click is honoured regardless of the
+            // auto-requeue setting; the loop cap below still applies.
             int searching = 0;
             try { searching = (int)NetworkConnectionHandler.instance.m_searchingType; } catch { }
-            rqQuickmatch = searching == 1
-                           && (Plugin.AutoRequeueOnMatchmakingBug == null || Plugin.AutoRequeueOnMatchmakingBug.Value);
+            rqQuickmatch = searching == 1 && wantRequeue
+                           && (userRequested || Plugin.AutoRequeueOnMatchmakingBug == null || Plugin.AutoRequeueOnMatchmakingBug.Value);
             // Loop cap: max 2 auto-requeues per rolling 5 minutes, else a
             // region/Photon outage would ping-pong the player forever.
             if (rqQuickmatch)
@@ -2892,6 +2897,32 @@ namespace CompetitiveRounds
         private static DateTime _stuckOverlayDismissedAt = DateTime.MinValue;
         public static bool ShouldShowMatchFoundStuckOverlay { get; private set; }
         public static int SecondsInUnstartedRoom { get; private set; }
+        // Sept 6 (bug 329, predicate D): the half-spawned room — our player is in,
+        // another fighter's never appeared. Surfaced to the escape hatch.
+        public static bool HalfSpawnedRoom { get; private set; }
+        public static string HalfSpawnedCounts { get; private set; } = "";
+        private static float halfSpawnedSince = -1f;
+        private static bool halfSpawnedLogged = false;
+
+        /// <summary>True while vanilla's own search context is Quickmatch (1) — the
+        /// only context where "Requeue" means something.</summary>
+        public static bool InVanillaQuickmatch()
+        {
+            try { return NetworkConnectionHandler.instance != null && (int)NetworkConnectionHandler.instance.m_searchingType == 1; }
+            catch { return false; }
+        }
+
+        /// <summary>Bug 329 escape hatch. Runs the dead-state recovery machine (kill
+        /// any sweep, NetworkRestart, then QuickMatch() when <paramref name="requeue"/>
+        /// and the context is vanilla quick match; otherwise the machine ends at the
+        /// menu). A click is not "auto", so the auto-requeue setting is not consulted;
+        /// the loop cap still is.</summary>
+        public static void RequestQuickplayRecovery(bool requeue)
+        {
+            if (rqPhase != RqPhase.Idle) return;
+            FireRequeue(requeue ? "half-spawned room, player chose requeue" : "half-spawned room, player chose menu",
+                        userRequested: true, wantRequeue: requeue);
+        }
         public static void DismissMatchFoundStuckOverlay()
         {
             _stuckOverlayDismissedAt = DateTime.UtcNow;
@@ -2997,6 +3028,7 @@ namespace CompetitiveRounds
                     try
                     {
                         _preMuteAudioVolume = UnityEngine.AudioListener.volume;
+                        AudioSelfCheck.NoteOurWrite("focus-mute", 0f);   // bug 337: attribute the delta
                         UnityEngine.AudioListener.volume = 0f;
                         muted = true;
                     }
@@ -3011,7 +3043,10 @@ namespace CompetitiveRounds
                 else
                 {
                     // Cheap held-state assertion only. Never write while focused.
-                    try { UnityEngine.AudioListener.volume = 0f; } catch { }
+                    // Bug 337 review: this hold is our write too -- without the
+                    // note, game code raising the volume while unfocused had
+                    // the re-zero logged as "writer: not ours".
+                    try { UnityEngine.AudioListener.volume = 0f; AudioSelfCheck.NoteOurWrite("focus-mute-hold", 0f); } catch { }
                 }
                 return;
             }
@@ -3021,6 +3056,7 @@ namespace CompetitiveRounds
                 bool restored = false;
                 try
                 {
+                    AudioSelfCheck.NoteOurWrite("focus-unmute", _preMuteAudioVolume);   // bug 337
                     UnityEngine.AudioListener.volume = _preMuteAudioVolume;
                     restored = true;
                 }
@@ -3064,6 +3100,8 @@ namespace CompetitiveRounds
                 SecondsInUnstartedRoom = secs;
                 bool isModIssued = false;
                 bool playersSpawned = false;
+                int spawnedCount = 0, fighterCount = 0;
+                bool gameAlive = false;
                 try
                 {
                     var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
@@ -3075,7 +3113,10 @@ namespace CompetitiveRounds
                                 || rname.StartsWith("ovt_")
                                 || FfaMode.EngineActive();
                     var pm = PlayerManager.instance;
-                    playersSpawned = pm != null && pm.players != null && pm.players.Count >= 1;
+                    spawnedCount = (pm != null && pm.players != null) ? pm.players.Count : 0;
+                    playersSpawned = spawnedCount >= 1;
+                    fighterCount = RoomActors.ActiveFighterCount();   // census: fighters, not spectators
+                    gameAlive = GM_ArmsRace.instance != null;
                 }
                 catch { }
                 // Sandbox / offline practice runs in PhotonNetwork.OfflineMode — it's a
@@ -3089,13 +3130,44 @@ namespace CompetitiveRounds
                 bool isOffline = false;
                 try { isOffline = PhotonNetwork.OfflineMode; } catch { }
                 bool dismissExpired = (DateTime.UtcNow - _stuckOverlayDismissedAt).TotalSeconds > 60;
+                // Sept 6 (bug 329, predicate D — the half-spawned room). The room is
+                // full, the game object is alive and OUR player spawned, but another
+                // fighter's player never registered. The 329 log's own cause — the
+                // joiner's body arriving before its p_id and registering over the
+                // master's slot — is FIXED at the source (VanillaFixes
+                // RemotePlayerIdOrderPatch / LocalPlayerIdPublishPatch), so this
+                // predicate now covers what remains: a seat that never pressed jump
+                // on its ready prompt (PlayerAssigner.LateUpdate creates the player
+                // on the join button), or whose game is stuck there. Neither
+                // recovery covered it — the dead-state detector wants
+                // GM_ArmsRace.instance == null and this overlay wanted NO spawned
+                // players — so the only exit was Esc. Held 20 s on its OWN clock,
+                // not the join clock: a partner who arrives late must get the full
+                // window. Mod-issued rooms stay out (they have the QUEUE-STALL path)
+                // and so does offline.
+                bool halfSpawned = !isModIssued && !isOffline && gameAlive
+                                   && fighterCount >= 2 && spawnedCount >= 1 && spawnedCount < fighterCount;
+                if (!halfSpawned) { halfSpawnedSince = -1f; halfSpawnedLogged = false; }
+                else if (halfSpawnedSince < 0f) halfSpawnedSince = Time.unscaledTime;
+                float halfHeld = halfSpawned ? Time.unscaledTime - halfSpawnedSince : 0f;
+                bool halfSpawnedStuck = halfSpawned && halfHeld >= 20f;
+                if (halfSpawnedStuck && !halfSpawnedLogged)
+                {
+                    halfSpawnedLogged = true;
+                    Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] half-spawned room ({spawnedCount}/{fighterCount}) for {(int)halfHeld}s — offering the escape hatch");
+                }
+                HalfSpawnedRoom = halfSpawnedStuck;
+                HalfSpawnedCounts = $"{spawnedCount}/{fighterCount}";
                 ShouldShowMatchFoundStuckOverlay =
-                    !isModIssued && !isOffline && !playersSpawned && secs >= 25 && dismissExpired;
+                    !isModIssued && !isOffline && dismissExpired
+                    && ((!playersSpawned && secs >= 25) || halfSpawnedStuck);
             }
             else
             {
                 SecondsInUnstartedRoom = 0;
                 ShouldShowMatchFoundStuckOverlay = false;
+                HalfSpawnedRoom = false;
+                halfSpawnedSince = -1f; halfSpawnedLogged = false;
             }
 
             if (inRoom && !wasInRoom)
@@ -3528,9 +3600,15 @@ namespace CompetitiveRounds
             // NetworkRestart during loading). Detect the stall, tell the player
             // what happened, and return to menu cleanly. No match ever started,
             // so no DC/leave penalty applies on either side.
+            // Sept 6 (hotfix review r1 HIGH): queue-issued 2v2 rooms (team_) had no
+            // exit once assembly stalled — the 30 s force-start path only shows a
+            // notification (bug #167's deliberate cut) and the server's cancellation
+            // is poll-driven — so a lone waiter sat there until Esc. They share this
+            // watchdog now: toast at 30 s, back to the menu at 90 s.
             if (inRoom && !rankedRoomStallHandled
                 && (photonRoomId.StartsWith("ranked_") || photonRoomId.StartsWith("sct-")
-                    || photonRoomId.StartsWith("ovt_") || photonRoomId.StartsWith("ffa_")))
+                    || photonRoomId.StartsWith("ovt_") || photonRoomId.StartsWith("ffa_")
+                    || photonRoomId.StartsWith("team_")))
             {
                 // Tournament rooms get a much longer solo window: the opponent
                 // has a 5-10 min no-show grace server-side, so bailing at 60s
@@ -3545,13 +3623,30 @@ namespace CompetitiveRounds
                 bool isTournamentRoom = photonRoomId.StartsWith("sct-");
                 bool isOvtRoom = photonRoomId.StartsWith("ovt_");
                 bool isFfaRoom = FfaMode.EngineActive();
+                bool isTeamRoom = photonRoomId.StartsWith("team_");
                 // FFA: up to 10 clients have to load in — the longest window.
-                double bailAfter = isTournamentRoom ? 360 : (isFfaRoom ? 120 : (isOvtRoom ? 90 : 60));
-                double warnAfter = isTournamentRoom ? 90 : (isFfaRoom ? 45 : (isOvtRoom ? 35 : 25));
-                int fullAt = isFfaRoom ? Diag2v2.PlayersNeeded() : (isOvtRoom ? 3 : 2);
+                // 2v2: four clients, and its own force-start path has already given
+                // up (notification only) at 30 s by the time this bails.
+                double bailAfter = isTournamentRoom ? 360 : (isFfaRoom ? 120 : ((isOvtRoom || isTeamRoom) ? 90 : 60));
+                // Sept 6 (bugs 335/340): with vanilla's 15 s churn timer frozen in
+                // mod-issued rooms (ModRoomChurnFreezePatch), this toast is the
+                // first thing a lone waiter sees — moved from 25 s to 15 s so the
+                // wait is explained at the moment the old behaviour used to end it.
+                double warnAfter = isTournamentRoom ? 90 : (isFfaRoom ? 45 : (isOvtRoom ? 35 : (isTeamRoom ? 30 : 15)));
+                int fullAt = isFfaRoom ? Diag2v2.PlayersNeeded() : (isTeamRoom ? 4 : (isOvtRoom ? 3 : 2));
                 int pc = 0;
                 try { pc = RoomActors.ActiveFighterCount(); } catch { }   // census: fighters fill a room, spectators don't
-                if (pc >= fullAt) rankedRoomEverFull = true;
+                // Sept 6 (hotfix review r2 HIGH): an actor in the room is not a
+                // fighter in the game. Auto-spawn rooms (1v1, 1v2, 2v2, tournament)
+                // register one body per seat as each client's spawn lands, and a
+                // seat whose spawn never lands (the 12 s Auto2v2SpawnCoroutine
+                // timeout, bug 329's unpublished ids) leaves a room full of actors
+                // with a game that cannot start — latching on the actor count here
+                // disarmed the bail for exactly that room. FFA keeps the actor
+                // census: its lobby waits for the host to start, so bodies do not
+                // exist until long after the room has filled.
+                int bodies = isFfaRoom ? pc : RegisteredFighterBodies();
+                if (bodies >= fullAt) rankedRoomEverFull = true;
                 if (!rankedRoomEverFull && !isTracking)
                 {
                     double waited = (DateTime.UtcNow - roomJoinTime).TotalSeconds;
@@ -3562,20 +3657,22 @@ namespace CompetitiveRounds
                             ? "Opponent hasn't connected yet — they have a few minutes of grace. Hang tight..."
                             : isOvtRoom
                             ? "Waiting for all 3 players to connect — hang tight..."
-                            : isFfaRoom
+                            : (isFfaRoom || isTeamRoom)
                             ? $"Waiting for all {fullAt} players to connect — hang tight..."
                             : "Opponent hasn't connected yet — hang tight...", new Color(1f, 0.8f, 0.3f), 6f);
                     }
                     if (waited >= bailAfter)
                     {
                         rankedRoomStallHandled = true;
-                        Plugin.Log.LogWarning($"[QUEUE-STALL] Room {photonRoomId} never filled ({pc}/{fullAt}) after {(int)waited}s — returning to menu (no match started, no penalty)");
+                        Plugin.Log.LogWarning($"[QUEUE-STALL] Room {photonRoomId} never filled ({bodies} bodies, {pc} actors, need {fullAt}) after {(int)waited}s — returning to menu (no match started, no penalty)");
                         CompetitiveUI.ShowNotification(isTournamentRoom
                             ? "Your opponent never joined. Returning to menu - you stay ready, and the server forfeits the match to you if they don't show."
                             : isOvtRoom
                             ? "1v2 lobby never filled — returning to menu. Requeue when ready."
                             : isFfaRoom
                             ? "FFA lobby never filled — returning to menu. Requeue when ready."
+                            : isTeamRoom
+                            ? "2v2 lobby never filled — returning to menu. Requeue when ready."
                             : "Opponent failed to join — returning to menu. Requeue when ready.", new Color(1f, 0.5f, 0.4f), 10f);
                         // Leaving the ovt queue dissolves the never-filled lock
                         // server-side (cancels the series, resets the other two
@@ -3586,6 +3683,15 @@ namespace CompetitiveRounds
                         // outcome, and the in-room fence must not veto it.
                         if (isOvtRoom) { try { ApiClient.OvtLeaveQueue("assembly_bail"); } catch { } }
                         if (isFfaRoom) { try { ApiClient.FfaLeaveQueue("assembly_bail"); } catch { } }
+                        // 2v2: the fenced queue leave is what tells the server this
+                        // seat is gone, so the never-filled match dissolves for the
+                        // other seats instead of waiting on a poll nobody sends.
+                        // Sept 6 (hotfix review r2 MEDIUM): NOT the gated
+                        // LeaveTeamQueue — the queue state machine goes Idle the
+                        // moment the room is assigned, so that call returned without
+                        // sending anything. AbandonTeamAssembly posts the fenced
+                        // leave regardless of local state; NetworkRestart is the exit.
+                        if (isTeamRoom) { try { ApiClient.AbandonTeamAssembly(MatchTracker.LocalSteamId); } catch { } }
                         try { NetworkConnectionHandler.instance.NetworkRestart(); }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[QUEUE-STALL] NetworkRestart failed: {ex.Message}"); }
                     }
@@ -6104,8 +6210,27 @@ namespace CompetitiveRounds
         /// OnMatchStarted so the FFA game-start hook (which can't ride the
         /// vanilla match-start path — see OnFfaMatchStarted) resets exactly
         /// the same windows instead of a hand-copied subset that drifts.</summary>
+        /// <summary>Fighter bodies registered with ROUNDS' PlayerManager — what
+        /// GM_ArmsRace.PlayerJoined has actually counted, as opposed to the Photon
+        /// actors present in the room (hotfix review r2 HIGH). 0 on any error, so
+        /// a failure here can only keep the stall watchdog ARMED.</summary>
+        private static int RegisteredFighterBodies()
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return 0;
+                int n = 0;
+                for (int i = 0; i < pm.players.Count; i++)
+                    if (pm.players[i] != null) n++;
+                return n;
+            }
+            catch { return 0; }
+        }
+
         private static void ResetPerMatchCombatCounters()
         {
+            AudioSelfCheck.LogSnapshot("match start");   // bug 337: what the audio stack is set to
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
             LocalKeysThisMatch = 0;

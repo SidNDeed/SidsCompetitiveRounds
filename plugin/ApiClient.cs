@@ -90,6 +90,12 @@ namespace CompetitiveRounds
             // v1.29 — rank tier (mirrors Discord rank roles; color synced from Discord).
             public string rank_name;
             public string rank_color;
+            // Bug 342: seen within 3 minutes and not appear-offline. Server-decided
+            // (SQL over players.last_seen), so an older server simply omits it -> false.
+            public bool is_online;
+            // Item d: not seen for 90 days (server-decided). Only ever true in a
+            // board fetched with include_inactive=true; absent -> false.
+            public bool inactive;
         }
 
         [Serializable]
@@ -806,9 +812,13 @@ namespace CompetitiveRounds
             public bool present;
             public bool readable;
             public bool whole;
-            /// <summary>Entries recovered from a file that is NOT whole -- a
-            /// last resort, never preferred over a complete queue.</summary>
+            /// <summary>Entries recovered from a file that is NOT whole.</summary>
             public bool salvaged;
+            /// <summary>The trailer STARTED, so every body line before it was
+            /// written: the entries are the complete queue as of that write.
+            /// False for a temp with no trailer at all, whose last lines may be
+            /// the ones the crash cut.</summary>
+            public bool bodyComplete;
             public long generation;
             public List<PendingReport> entries;
         }
@@ -869,9 +879,9 @@ namespace CompetitiveRounds
                     // Returning here handed the caller an EMPTY queue, and on
                     // the temp path that also left `salvaged` false, which is
                     // what let the file be deleted with its reports in it. The
-                    // body is parsed exactly as an untrailed file's is; nothing
-                    // acts on it unless there is no whole queue anywhere.
+                    // body is parsed exactly as an untrailed file's is.
                     result.salvaged = true;
+                    result.bodyComplete = true;
                 }
             }
             else if (!allowLegacy)
@@ -1134,7 +1144,37 @@ namespace CompetitiveRounds
                            && (!live.whole || stranded.generation > live.generation);
             salvaging = false;
             if (takeStranded) return stranded;
-            if (live.whole) return live;
+            if (live.whole)
+            {
+                // r16 HIGH. A temp that is NOT whole but parses is the newest
+                // write there is: persist writes the temp first and promotes it
+                // only once it verifies, so a torn temp beside a complete live
+                // copy was written AFTER that copy. Returning the live copy here
+                // handed back the queue as it stood before the last enqueue and
+                // then deleted the temp -- a report queued in the final seconds
+                // before a crash was gone. Exactly one change separates the two
+                // files: the persist that crashed was either an enqueue (the
+                // temp is the live copy plus one entry at the END) or a removal
+                // after a delivery (the live copy minus one). A temp whose
+                // trailer started has its whole body, so it IS the newer queue:
+                // take it alone, and a delivered report is not re-sent. A temp
+                // with no trailer may have lost its tail, so the union is taken:
+                // an entry the temp dropped because it was delivered re-queues at
+                // worst, and the server refuses a spent report; an entry lost is
+                // lost.
+                //
+                // r2 MEDIUM: a complete-bodied temp with ZERO entries is the removal
+                // case — the queue after its last report was delivered — and it is
+                // the newer of the two files; handing back the live copy re-sent
+                // the delivered report. Emptiness decides nothing once the body is
+                // complete; only a torn body needs entries before it can count.
+                if (stranded.salvaged && (stranded.bodyComplete || stranded.entries.Count > 0))
+                {
+                    salvaging = true;
+                    return stranded.bodyComplete ? stranded : Union(stranded, live);
+                }
+                return live;
+            }
             // Nothing whole anywhere. Prefer whichever unfinished copy actually
             // carries reports; the choice is between these and none.
             if (stranded.salvaged && stranded.entries.Count > 0)
@@ -1148,6 +1188,28 @@ namespace CompetitiveRounds
                 return live;
             }
             return live;
+        }
+
+        /// <summary>Every entry of <paramref name="newer"/>, then every entry of
+        /// <paramref name="older"/> not already present (same url and body). Not
+        /// whole -- it was assembled, not verified -- so a later load that finds
+        /// both files again does the same thing and arrives at the same queue.</summary>
+        private static OutboxGeneration Union(OutboxGeneration newer, OutboxGeneration older)
+        {
+            var merged = new OutboxGeneration
+            {
+                present = true, readable = true, whole = false, salvaged = true,
+                generation = Math.Max(newer.generation, older.generation),
+                entries = new List<PendingReport>(newer.entries)
+            };
+            foreach (var e in older.entries)
+            {
+                bool seen = false;
+                foreach (var n in merged.entries)
+                    if (n.url == e.url && n.json == e.json) { seen = true; break; }
+                if (!seen) merged.entries.Add(e);
+            }
+            return merged;
         }
 
         private static void LoadOutbox()
@@ -1184,8 +1246,12 @@ namespace CompetitiveRounds
                                           + "unknown, so nothing will be written over it until it can be");
 
                 if (salvaging)
-                    Plugin.Log.LogWarning($"[OUTBOX] no complete queue on disk; recovering {chosen.entries.Count} "
-                                          + "report(s) from an unfinished write rather than discarding them");
+                    Plugin.Log.LogWarning(live.whole
+                        ? "[OUTBOX] an unfinished write newer than the completed queue holds reports; keeping "
+                          + $"{(stranded.bodyComplete ? "it" : "its union with the completed copy")} "
+                          + $"({chosen.entries.Count} report(s)) rather than the completed copy alone"
+                        : $"[OUTBOX] no complete queue on disk; recovering {chosen.entries.Count} "
+                          + "report(s) from an unfinished write rather than discarding them");
 
                 if (takeStranded)
                 {
@@ -1532,13 +1598,15 @@ namespace CompetitiveRounds
                     // whose evidence has not landed. "We could not decide" must
                     // not spend the report the way "no" does.
                     //
-                    // The twenty-attempt budget below does NOT bound this
+                    // The attempt budget below (OUTBOX_MAX_ATTEMPTS: 94 tries on
+                    // a 60 s base backoff capped at 4x, about six hours, sized to
+                    // outlast the server's DC_LIVE_WINDOW) does NOT bound this
                     // across launches: the outbox persists url and body and
                     // reloads with attempts = 0, so a report that can never be
-                    // judged would get a fresh twenty every session. What
-                    // actually retires one is the server, which turns the same
-                    // refusal into a 403 once the sitting has been idle past
-                    // its live window.
+                    // judged gets a fresh six hours every session. What actually
+                    // retires one is the server, which turns the same refusal
+                    // into a 403 once the sitting has been idle past its live
+                    // window.
                     bool retryableTransient =
                         resp != null
                         && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
@@ -6593,13 +6661,23 @@ namespace CompetitiveRounds
 
         // ── Data fetching ─────────────────────────────────────
 
+        // Item d (Sept 6): the server hides players not seen for 90 days
+        // (LEADERBOARD_ACTIVE_DAYS) from every board unless the fetch says
+        // include_inactive=true, and then flags each such row `inactive`. ONE
+        // helper for all four board fetches, driven by the Settings toggle.
+        private static string InactiveQuery()
+        {
+            return (Plugin.ShowInactiveOnBoards != null && Plugin.ShowInactiveOnBoards.Value)
+                ? "&include_inactive=true" : "";
+        }
+
         // limit 100 → 500 (v1.29): with 105 ranked players the top-100 fetch cut
         // the bottom of the board off. The tab already pages locally at 100/page.
         public static void FetchLeaderboard(int limit = 500, int minMatches = 1)
         {
             IsLoading = true;
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/leaderboard?limit={limit}&min_matches={minMatches}",
+                $"{baseUrl}/api/v1/leaderboard?limit={limit}&min_matches={minMatches}{InactiveQuery()}",
                 (success, response) =>
                 {
                     IsLoading = false;
@@ -6665,6 +6743,8 @@ namespace CompetitiveRounds
                                 entry.title_color = ExtractJsonString(chunk, "title_color");
                                 entry.rank_name = ExtractJsonString(chunk, "rank_name");
                                 entry.rank_color = ExtractJsonString(chunk, "rank_color");
+                                entry.is_online = ExtractJsonBool(chunk, "is_online");
+                                entry.inactive = ExtractJsonBool(chunk, "inactive");
 
                                 if (!string.IsNullOrEmpty(entry.steam_id))
                                     entries.Add(entry);
@@ -12255,6 +12335,48 @@ namespace CompetitiveRounds
             ));
         }
 
+        /// <summary>The QUEUE-STALL watchdog's server notice for a 2v2 room that
+        /// never assembled (hotfix review r2 MEDIUM). Unlike LeaveTeamQueue this is
+        /// NOT gated on the local queue state machine: the machine goes Idle the
+        /// moment the room is assigned, so the gated leave returned without
+        /// sending anything and the other seats waited on a poll nobody sends.
+        /// Fenced on the series incarnation this seat believes it is in, exactly
+        /// like the gated path (F3), and the belief clears on the response, both
+        /// outcomes (#249). Polling is disarmed first so a fresh poll cannot
+        /// re-adopt the dead room while the leave is in flight.</summary>
+        public static void AbandonTeamAssembly(string steamId)
+        {
+            string fenceSeriesId = ActiveTeamSeriesId;
+            IsTeamQueuePolling = false;
+            LastTeamPollData = null;
+            Plugin.ClearPending2v2Slot();
+            string leaveUrl = $"{baseUrl}/api/v1/team/queue/leave?steam_id={Escape(steamId)}";
+            if (!string.IsNullOrEmpty(fenceSeriesId))
+                leaveUrl += $"&expected_series_id={UnityWebRequest.EscapeURL(fenceSeriesId)}";
+            Plugin.Log.LogInfo($"[QUEUE-STALL] 2v2 assembly abandoned — posting the fenced leave (series {(string.IsNullOrEmpty(fenceSeriesId) ? "unknown" : fenceSeriesId)})");
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                leaveUrl, "",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        if (ExtractJsonBool(response ?? "", "stale"))
+                            Plugin.Log.LogInfo("[QUEUE-STALL] fenced leave hit a newer incarnation — the stalled seat was already gone");
+                        else
+                            Plugin.Log.LogInfo("[QUEUE-STALL] server notified: 2v2 seat released, never-filled match dissolves");
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[QUEUE-STALL] 2v2 assembly leave failed after retries: {response} — the server prunes the stale row");
+                    }
+                    if (string.Equals(ActiveTeamSeriesId, fenceSeriesId, StringComparison.Ordinal))
+                        ActiveTeamSeriesId = null;
+                    NativeUI.MarkDirty();
+                },
+                maxRetries: 3, retryDelay: 2f
+            ));
+        }
+
         public static void ReadyUpTeam(string steamId)
         {
             if (CurrentTeamQueueState != TeamQueueState.Matched) return;
@@ -13042,6 +13164,8 @@ namespace CompetitiveRounds
             public int rank;
             public string steam_id;
             public string display_name;
+            public bool is_online;   // bug 342, server-decided (see LeaderboardEntry)
+            public bool inactive;    // item d, server-decided (see LeaderboardEntry)
             public int rating;
             public int rd;
             // Aug 12 item 2. Previously reachable only through
@@ -13529,14 +13653,20 @@ namespace CompetitiveRounds
             ));
         }
 
+        private static int _teamLbRequestGen;   // r5 L2: only the NEWEST 2v2 request may land
         public static void FetchTeamLeaderboard(int limit = 200, string sortBy = "rating")
         {
             CachedTeamLeaderboardSort = sortBy;
+            int gen = ++_teamLbRequestGen;
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/team/leaderboard?limit={limit}&sort_by={sortBy}",
+                $"{baseUrl}/api/v1/team/leaderboard?limit={limit}&sort_by={sortBy}{InactiveQuery()}",
                 (success, response) =>
                 {
                     if (!success) return;
+                    // r5 L2: the 30 s ticker's rating fetch can land AFTER the
+                    // user switched the sort; an older response must not
+                    // re-order the rows under the newer highlight.
+                    if (gen != _teamLbRequestGen) return;
                     try
                     {
                         var entries = new List<TeamLeaderboardEntry>();
@@ -13565,6 +13695,8 @@ namespace CompetitiveRounds
                                 avg_teammate_elo = ExtractJsonInt(chunk, "avg_teammate_elo"),
                                 team_gold_earned = ExtractJsonInt(chunk, "team_gold_earned"),
                                 team_xp_earned = ExtractJsonInt(chunk, "team_xp_earned"),
+                                is_online = ExtractJsonBool(chunk, "is_online"),
+                                inactive = ExtractJsonBool(chunk, "inactive"),
                             });
                         }
                         CachedTeamLeaderboard = entries;
@@ -13586,6 +13718,8 @@ namespace CompetitiveRounds
         public class OvtLeaderboardEntry
         {
             public int rank; public string steam_id, display_name;
+            public bool is_online;   // bug 342, server-decided (see LeaderboardEntry)
+            public bool inactive;    // item d, server-decided (see LeaderboardEntry)
             public int games_played, wins, losses, solo_games, duo_games, level;
             // July 22 item 3: W/L split by role (as solo vs as duo half).
             public int solo_wins, solo_losses, duo_wins, duo_losses;
@@ -14050,7 +14184,7 @@ namespace CompetitiveRounds
         public static void FetchOvtLeaderboard(int limit = 200, string role = "combined")
         {
             string roleQ = (role == "solo" || role == "duo") ? role : "combined";
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/leaderboard?limit={limit}&role={roleQ}", (ok, resp) =>
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/leaderboard?limit={limit}&role={roleQ}{InactiveQuery()}", (ok, resp) =>
             {
                 if (!ok) return;
                 try
@@ -14085,6 +14219,8 @@ namespace CompetitiveRounds
                                 title = ExtractJsonString(chunk, "title"),
                                 title_color = ExtractJsonString(chunk, "title_color"),
                                 last_played = ExtractJsonString(chunk, "last_played"),
+                                is_online = ExtractJsonBool(chunk, "is_online"),
+                                inactive = ExtractJsonBool(chunk, "inactive"),
                             });
                         }
                     }
@@ -14482,6 +14618,8 @@ namespace CompetitiveRounds
         public class FfaLeaderboardEntry
         {
             public int rank, rating, rd, games_played, wins, top3, level;
+            public bool is_online;   // bug 342, server-decided (see LeaderboardEntry)
+            public bool inactive;    // item d, server-decided (see LeaderboardEntry)
             // Aug 12 item 2. The server has maintained glicko_ratings_ffa
             // .peak_rating on every rated game since FFA shipped; this board is
             // the first surface to receive it. It falls back to the row's own
@@ -17455,7 +17593,7 @@ namespace CompetitiveRounds
 
         public static void FetchFfaLeaderboard(int limit = 200, string sortBy = "rating")
         {
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/leaderboard?limit={limit}&sort_by={UnityWebRequest.EscapeURL(sortBy)}", (ok, resp) =>
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/leaderboard?limit={limit}&sort_by={UnityWebRequest.EscapeURL(sortBy)}{InactiveQuery()}", (ok, resp) =>
             {
                 if (!ok) return;
                 try
@@ -17490,6 +17628,8 @@ namespace CompetitiveRounds
                                 title_color = ExtractJsonString(chunk, "title_color"),
                                 ffa_gold_earned = ExtractJsonInt(chunk, "ffa_gold_earned"),
                                 ffa_xp_earned = ExtractJsonInt(chunk, "ffa_xp_earned"),
+                                is_online = ExtractJsonBool(chunk, "is_online"),
+                                inactive = ExtractJsonBool(chunk, "inactive"),
                             });
                         }
                     }

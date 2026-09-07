@@ -28,6 +28,11 @@ except Exception as _mpl_ex:
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
 LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
+# Item d: the api hides players not seen for LEADERBOARD_ACTIVE_DAYS days
+# (default 90) unless a fetch passes include_inactive=true. Display-only
+# mirror of that server setting for footer/label text -- the filtering itself
+# is server-side, so a mismatch here can only mislabel, never mis-filter.
+LB_ACTIVE_DAYS = int(os.getenv("LEADERBOARD_ACTIVE_DAYS", "90"))
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
@@ -815,7 +820,8 @@ async def _faq_elo_delta(message):
             f"{pb['display_name']}'s side: win **+{pb['win_delta']:.1f}** / loss **{pb['loss_delta']:.1f}**. "
             f"Win probability for {pa['display_name']}: **{prob * 100:.0f}%**.\n"
             f"*(Glicko-2 — ratings move per completed BO3 series, and swings shrink "
-            f"as your rating settles.)*"
+            f"as your rating settles.)*\n"
+            f"Also `/elo 2v2` and `/elo ffa` preview team and FFA games."
 )
 
 
@@ -4213,7 +4219,11 @@ def _twitch_out_format(entry: dict) -> str:
     # abbreviations the client deliberately retired, and this string is what
     # the Twitch audience reads (owner report, Aug 30).
     tag = {"ingame": "[Game]", "discord": "[Discord]", "youtube": "[YouTube]"}.get(src, "[?]")
-    name = str(entry.get("display_name") or "player")[:40]
+    # Sept 6 (overlay item j review): the broadcast overlay rebuilds this line
+    # into "<name>: <msg>" by splitting at the FIRST ": ", so a colon inside a
+    # name would move the boundary. Names carry U+A789 (modifier letter
+    # colon) instead; the overlay applies the same substitution before pairing.
+    name = str(entry.get("display_name") or "player")[:40].replace(":", "\ua789")
     msg = str(entry.get("message") or "")
     msg = msg.replace("\r", " ").replace("\n", " ").strip()
     # The fixed prefix guarantees user text never LEADS the message, so a
@@ -4665,6 +4675,17 @@ async def get_lb_position(steam_id):
     if not data or not data.get("entries"): return "?"
     for e in data["entries"]:
         if e["steam_id"] == steam_id: return str(e["rank"])
+    # Item d: the default board hides players not seen for LB_ACTIVE_DAYS days.
+    # Look once more with everyone included so a dormant player reads as
+    # "#N (inactive 90d+)" rather than as unranked; "Unranked" is kept only for
+    # a player absent from BOTH lists. The api's limit cap (500) is used here
+    # because the unfiltered list is the longer one.
+    data = await api_get("/leaderboard?limit=500&min_matches=1&include_inactive=true")
+    for e in (data or {}).get("entries") or []:
+        if e["steam_id"] == steam_id:
+            if e.get("inactive"):
+                return f"{e['rank']} (inactive {LB_ACTIVE_DAYS}d+)"
+            return str(e["rank"])
     return "Unranked"
 
 
@@ -4858,9 +4879,17 @@ def _split_lb_descriptions(lines, first_header=""):
     return chunks
 
 
-@bot.hybrid_command(name="lb", description="Show the ranked leaderboard (50 per page)")
-@app_commands.describe(page="Page number (default: 1)")
-async def cmd_leaderboard(ctx, page: int = 1):
+@bot.hybrid_command(name="lb", description="Show the ranked leaderboard (50 per page); add 'all' to include inactive players")
+@app_commands.describe(page=f"Page number (default: 1), or 'all' to include players inactive {LB_ACTIVE_DAYS}+ days",
+                       scope=f"'all' to include players inactive {LB_ACTIVE_DAYS}+ days (e.g. /lb 2 all)")
+async def cmd_leaderboard(ctx, page: str = "1", scope: str = ""):
+    # Item d: `all` in EITHER argument lists everyone, inactive players
+    # included (/lb all, /lb 2 all, /lb all 2). A page that is neither a
+    # number nor `all` falls back to 1. `page` is a str now so the word can
+    # travel in the first slot too.
+    _args = [str(page or "").strip().lower(), str(scope or "").strip().lower()]
+    include_inactive = "all" in _args
+    page = next((int(a) for a in _args if a.isdigit()), 1)
     # 50/page (Sid, v1.32.1): 100 real rows (rank + emoji + bold names +
     # ratings + W/L) blew the splitter's 5700-char whole-message budget around
     # row ~66 and the tail truncated — the "cuts off at #67" report. 50 rows
@@ -4869,7 +4898,8 @@ async def cmd_leaderboard(ctx, page: int = 1):
     per_page = 50  # match the #scr-leaderboard channel board (LB_PAGE_SIZE)
     page = max(1, page)
     offset = (page - 1) * per_page
-    data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1")
+    data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1"
+                         + ("&include_inactive=true" if include_inactive else ""))
     if not data or not data.get("entries"): await ctx.send("❌ No data."); return
     # Rank is derived from offset + position, NOT from entry["rank"] — the
     # server double-adds offset to an already-absolute ROW_NUMBER (see
@@ -4890,7 +4920,9 @@ async def cmd_leaderboard(ctx, page: int = 1):
         )
         if ci == len(descs) - 1:
             em.set_footer(text=f"Page {page}/{total_pages} • {total} ranked players"
-                          + (f" • /lb {page+1} for next page" if page < total_pages else ""))
+                          + (" • incl. inactive" if include_inactive else "")
+                          + (f" • /lb {page+1}{' all' if include_inactive else ''} for next page"
+                             if page < total_pages else ""))
         embeds.append(em)
     await ctx.send(embeds=embeds)
 
@@ -5579,6 +5611,214 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
     if footnotes:
         embed.set_footer(text=(" • ".join(footnotes))[:2048])
     await ctx.send(embed=embed, file=file)
+
+
+# ── /elo — rating previews for 1v1, 2v2 and FFA (Sept 6 item k) ─────────────
+# One hybrid GROUP: `/elo 1v1|2v2|ffa` as slash commands, `!elo 1v1 @a @b`
+# etc. as prefix commands, and bare `!elo @a [@b]` falls through to the 1v1
+# preview (a slash group is never invoked bare, so that path is prefix-only).
+# 1v1 IS the FAQ calculator (_faq_elo_delta -- `/faq elo_delta` stays and now
+# points here); 2v2 and FFA call the two read-only preview endpoints that
+# shipped with this command. Slash commands cannot take variadic members, so
+# FFA has fixed optional slots p4..p10 (10 = the lobby cap) plus `me` to count
+# the caller in. Members are deduped by id; bots are dropped.
+
+_ELO_USAGE = ("`/elo 1v1 @player [@player2]` · `/elo 2v2 @teammate @opp1 @opp2 [you:@player]` · "
+              "`/elo ffa @p1 @p2 @p3 [@p4 … @p10] [me:true]`\n"
+              "Every account named must be linked (`/link`).")
+
+
+def _elo_members(*members):
+    """Drop Nones and bots, dedupe by id, keep first-seen order."""
+    out, seen = [], set()
+    for m in members:
+        if m is None or getattr(m, "bot", False) or m.id in seen:
+            continue
+        seen.add(m.id)
+        out.append(m)
+    return out
+
+
+async def _elo_links(members):
+    """Discord -> Steam for every member at once (independent lookups,
+    gathered -- the FAQ calculator's own pattern, so a slash interaction
+    reaches an answer or a friendly failure inside its window). Returns
+    (steam_id by member id, unlinked display names, api_error)."""
+    results = await asyncio.gather(*(_faq_discord_link(m.id) for m in members))
+    steam, unlinked, error = {}, [], False
+    for m, (state, link) in zip(members, results):
+        if state == "ok":
+            steam[m.id] = link["steam_id"]
+        elif state == "unlinked":
+            unlinked.append(m.display_name)
+        else:
+            error = True
+    return steam, unlinked, error
+
+
+async def _elo_refused(ctx, unlinked, error) -> bool:
+    """Send the standard refusal; True means the preview cannot run."""
+    if error:
+        await ctx.send("Couldn't reach the player database right now — try again in a minute.")
+        return True
+    if unlinked:
+        await ctx.send("❌ Not linked yet — they need `/link` first: "
+                       + ", ".join(f"**{n}**" for n in unlinked))
+        return True
+    return False
+
+
+def _elo_num(v, signed=True):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{f:+.1f}" if signed else f"{f:.0f}"
+
+
+async def _elo_1v1(ctx, members):
+    """[a] -> the caller vs a; [a, b] -> a vs b. The FAQ calculator's own code
+    path and markdown: the request dict is what cmd_faq hands it (mentions in
+    content order, the members supplied as its resolution cache)."""
+    if not members:
+        await ctx.send("Mention the opponent, e.g. `/elo 1v1 @player` — or two players to compare them.\n"
+                       + _ELO_USAGE)
+        return
+    pair = members[:2]
+    if len(pair) == 1 and pair[0].id == ctx.author.id:
+        await ctx.send("That's you — mention an opponent, or two players to compare them.")
+        return
+    await _maybe_defer(ctx)
+    request = {
+        "content": " ".join(f"<@{m.id}>" for m in pair),
+        "author": ctx.author,
+        "guild": ctx.guild,
+        "mentions": list(pair),
+    }
+    try:
+        answer = await _faq_elo_delta(request)
+    except Exception as ex:
+        print(f"[ELO] 1v1 preview failed: {ex}")
+        answer = None
+    if not answer:
+        await ctx.send("Couldn't compute that right now — try again in a minute.")
+        return
+    await ctx.send(embed=discord.Embed(title="📈 Elo preview — 1v1",
+                                       description=answer[:4096], color=0x57F287))
+
+
+async def _elo_2v2(ctx, you, teammate, opp1, opp2):
+    side_a = _elo_members(you or ctx.author, teammate)
+    side_b = _elo_members(opp1, opp2)
+    everyone = _elo_members(*side_a, *side_b)
+    if len(side_a) != 2 or len(side_b) != 2 or len(everyone) != 4:
+        await ctx.send("❌ 2v2 needs four different players: you (or `you:`) and a teammate "
+                       "against two opponents.")
+        return
+    await _maybe_defer(ctx)
+    steam, unlinked, error = await _elo_links(everyone)
+    if await _elo_refused(ctx, unlinked, error):
+        return
+    prev = await api_get("/rating-preview/2v2?team_a={}&team_b={}".format(
+        ",".join(steam[m.id] for m in side_a), ",".join(steam[m.id] for m in side_b)))
+    if not prev:
+        await ctx.send("Couldn't compute that right now — try again in a minute.")
+        return
+    p_a = float(prev.get("win_probability", 0.5))
+    lines = []
+    for label, team, prob in (("Team A", prev.get("team_a") or {}, p_a),
+                              ("Team B", prev.get("team_b") or {}, 1.0 - p_a)):
+        lines.append(f"**{label}** — team rating **{_elo_num(team.get('rating'), signed=False)}**, "
+                     f"win chance ~**{prob * 100:.0f}%**")
+        for p in team.get("players") or []:
+            lines.append(f"• **{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+                         f"win **{_elo_num(p.get('win_delta'))}** / loss **{_elo_num(p.get('loss_delta'))}**")
+        lines.append("")
+    lines.append("*(Glicko-2 per completed 2v2 series, each player rated against both opponents. "
+                 "The win chance is an estimate from the team means — the rated path never "
+                 "computes one.)*")
+    await ctx.send(embed=discord.Embed(title="📈 Elo preview — 2v2",
+                                       description="\n".join(lines)[:4096], color=0x57F287))
+
+
+async def _elo_ffa(ctx, members, me, score_target=None):
+    field = _elo_members(*(([ctx.author] if me else []) + list(members)))
+    if len(field) < 3:
+        await ctx.send("❌ FFA needs at least three different players (add `me:true` to count yourself in).")
+        return
+    if len(field) > 10:
+        await ctx.send("❌ An FFA lobby holds at most 10 players.")
+        return
+    await _maybe_defer(ctx)
+    steam, unlinked, error = await _elo_links(field)
+    if await _elo_refused(ctx, unlinked, error):
+        return
+    # r5 M4: the preview's w(N) follows the score target; a first-to-3 lobby
+    # shown at the default target would display the wrong deltas silently.
+    if score_target is not None and not (2 <= int(score_target) <= 50):
+        await ctx.send("❌ Score target must be between 2 and 50.")
+        return
+    target_q = f"&score_target={int(score_target)}" if score_target is not None else ""
+    prev = await api_get("/rating-preview/ffa?ids=" + ",".join(steam[m.id] for m in field) + target_q)
+    if not prev:
+        await ctx.send("Couldn't compute that right now — try again in a minute.")
+        return
+    players = prev.get("players") or []
+    lines = [f"Field of **{len(players)}** — average rating "
+             f"**{_elo_num(prev.get('field_average_rating'), signed=False)}** · first to **{prev.get('score_target')}**", ""]
+    for p in players:
+        lines.append(f"**{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+                     f"1st **{_elo_num(p.get('first_delta'))}** · last **{_elo_num(p.get('last_delta'))}**")
+        row = p.get("place_deltas") or []
+        if row:
+            lines.append("`" + " · ".join(f"{i}:{_elo_num(d)}" for i, d in enumerate(row, start=1)) + "`")
+    lines.append("")
+    # The API states its own assumptions (score target included); show them
+    # rather than a fixed footnote that could drift from the computation.
+    assumption = prev.get("assumption") or ("each delta fixes one player's place; the others finish "
+                                            "in rating order -- the n! orderings are not enumerated")
+    lines.append(f"*(Glicko-2 per game against up to 4 placement-adjacent opponents; {assumption}. "
+                 "Add `score_target` for a lobby that is not first-to-default.)*")
+    await ctx.send(embed=discord.Embed(title="📈 Elo preview — FFA",
+                                       description="\n".join(lines)[:4096], color=0x57F287))
+
+
+@bot.hybrid_group(name="elo", description="Preview rating changes for a 1v1, 2v2 or FFA game",
+                  invoke_without_command=True)
+async def cmd_elo(ctx, player1: discord.Member = None, player2: discord.Member = None):
+    """Bare prefix form (`!elo @a [@b]`): the 1v1 preview. Slash callers always
+    land in a subcommand -- Discord never invokes a group bare."""
+    if ctx.invoked_subcommand is not None:
+        return
+    await _elo_1v1(ctx, _elo_members(player1, player2))
+
+
+@cmd_elo.command(name="1v1", description="Rating change if one player beats another in a ranked series")
+@app_commands.describe(player1="Your opponent — or the first player, when player2 is given",
+                       player2="Optional: compare these two players instead of you vs player1")
+async def cmd_elo_1v1(ctx, player1: discord.Member, player2: discord.Member = None):
+    await _elo_1v1(ctx, _elo_members(player1, player2))
+
+
+@cmd_elo.command(name="2v2", description="Rating changes for a 2v2 series: you + teammate vs two opponents")
+@app_commands.describe(teammate="Your teammate", opponent1="First opponent", opponent2="Second opponent",
+                       you="Whose side to compute from (defaults to yourself)")
+async def cmd_elo_2v2(ctx, teammate: discord.Member, opponent1: discord.Member,
+                      opponent2: discord.Member, you: discord.Member = None):
+    await _elo_2v2(ctx, you, teammate, opponent1, opponent2)
+
+
+@cmd_elo.command(name="ffa", description="Rating changes for an FFA game of 3-10 players (1st, last, each place)")
+@app_commands.describe(p1="Player", p2="Player", p3="Player",
+                       p4="Optional player", p5="Optional player", p6="Optional player",
+                       p7="Optional player", p8="Optional player", p9="Optional player",
+                       p10="Optional player", me="Count yourself in the field",
+                       score_target="The lobby's score target (first to N); default: the server's standard")
+async def cmd_elo_ffa(ctx, p1: discord.Member, p2: discord.Member, p3: discord.Member,
+                      p4: discord.Member = None, p5: discord.Member = None, p6: discord.Member = None,
+                      p7: discord.Member = None, p8: discord.Member = None, p9: discord.Member = None,
+                      p10: discord.Member = None, me: bool = False, score_target: int = None):
+    await _elo_ffa(ctx, (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10), me, score_target)
 
 
 # ── /game — one recorded game by its short code (July 22 item 6) ─────────
@@ -7426,7 +7666,8 @@ LB_PAGE_SIZE = 50
 LB_TOTAL_FETCH = 500
 
 
-def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: int) -> list:
+def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: int,
+                     hidden_inactive: int = 0) -> list:
     """Render one page of the auto-posted leaderboard as a LIST of embeds
     (a worst-case 50-row page can exceed a single embed's 4096-char
     description; up to 3 embeds travel in one message). Pure function so the
@@ -7457,7 +7698,12 @@ def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: 
             timestamp=datetime.utcnow() if ci == len(descs) - 1 else None,
         )
         if ci == len(descs) - 1:
-            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players • Auto-updated")
+            # Item d: the board hides players not seen for LB_ACTIVE_DAYS days;
+            # publish_lb passes how many, and 0 (or a failed count) shows nothing.
+            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players"
+                          + (f" • {hidden_inactive} inactive hidden ({LB_ACTIVE_DAYS} days)"
+                             if hidden_inactive > 0 else "")
+                          + " • Auto-updated")
         embeds.append(em)
     return embeds
 
@@ -7467,10 +7713,11 @@ class LeaderboardPaginator(discord.ui.View):
     so page flips don't re-hit the API. Long timeout (24h) — refreshed on every
     publish_lb tick (sync_roles_periodic loop, every 30 min) so users always have
     a working set of buttons within an hour of clicking."""
-    def __init__(self, entries: list, total_players: int):
+    def __init__(self, entries: list, total_players: int, hidden_inactive: int = 0):
         super().__init__(timeout=86400)
         self.entries = entries
         self.total_players = total_players
+        self.hidden_inactive = hidden_inactive   # item d footer suffix, kept across page flips
         self.total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
         self.page = 0
 
@@ -7488,7 +7735,8 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = max(0, self.page - 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages),
+            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
+                                    self.hidden_inactive),
             view=self,
         )
 
@@ -7497,7 +7745,8 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = min(self.total_pages - 1, self.page + 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages),
+            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
+                                    self.hidden_inactive),
             view=self,
         )
 
@@ -7524,9 +7773,20 @@ async def publish_lb(guild):
         return
     entries = data["entries"]
     total_players = data.get("total_players", 0)
+    # Item d: the fetch above is the DEFAULT board, so inactive players are
+    # already hidden. One extra 1-row fetch with everyone included yields the
+    # population; the footer says how many are hidden. A failed fetch or a
+    # non-positive difference just omits the suffix -- never blocks the post.
+    hidden_inactive = 0
+    try:
+        _all = await api_get("/leaderboard?limit=1&min_matches=1&include_inactive=true")
+        if _all:
+            hidden_inactive = int(_all.get("total_players", 0) or 0) - int(total_players or 0)
+    except Exception as e:
+        print(f"[LB] inactive count fetch failed ({e}) — footer suffix skipped")
     total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
-    embeds = _build_lb_embeds(entries, total_players, 0, total_pages)
-    view = LeaderboardPaginator(entries, total_players)
+    embeds = _build_lb_embeds(entries, total_players, 0, total_pages, hidden_inactive)
+    view = LeaderboardPaginator(entries, total_players, hidden_inactive)
     view._update_buttons()
     # Fast path: edit the message we already know about. Logged on success too —
     # a silently-successful loop is indistinguishable from a dead one in the logs
