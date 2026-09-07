@@ -26,6 +26,7 @@ import pytest
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CS_PATH = os.path.join(REPO, "plugin", "EmojiSprites.cs")
 TOOL_PATH = os.path.join(REPO, "tools", "emoji_atlas.py")
+ZWJ = chr(0x200D)           # zero-width joiner
 
 pytestmark = pytest.mark.skipif(shutil.which("dotnet") is None, reason="no dotnet SDK on this seat")
 
@@ -52,6 +53,24 @@ def _matcher_class_text() -> str:
     return text
 
 
+def _wrapper_methods_text() -> str:
+    """The wrapper's sanitiser, verbatim: `NeutraliseSpriteTags` and `IsOwnTag`
+    (static methods of the outer EmojiSprites class), from the sanitiser's doc
+    comment to the closing brace of IsOwnTag at method indent (round 3)."""
+    with open(CS_PATH, "r", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    decl = next(i for i, l in enumerate(lines) if l.strip().startswith("internal static string NeutraliseSpriteTags("))
+    start = decl
+    while start > 0 and lines[start - 1].strip().startswith("///"):
+        start -= 1
+    own = next(i for i in range(decl, len(lines)) if lines[i].strip().startswith("internal static bool IsOwnTag("))
+    indent = len(lines[own]) - len(lines[own].lstrip())
+    end = next(i for i in range(own + 1, len(lines)) if lines[i] == indent * " " + "}")
+    text = "\n".join(lines[start:end + 1])
+    assert "SPRITE_NAME_PREFIX" in text and "0x200B" in text
+    return text
+
+
 PROGRAM = r'''
 using System;
 using System.Collections.Generic;
@@ -61,7 +80,12 @@ using System.Text;
 
 namespace Harness
 {
-    internal static class EmojiSprites { internal const string SPRITE_NAME_PREFIX = "e_"; }
+    internal static class EmojiSprites
+    {
+        internal const string SPRITE_NAME_PREFIX = "e_";
+        // ---- the wrapper's sanitiser, verbatim from plugin/EmojiSprites.cs ----
+__WRAPPER__
+    }
 
     // ---- EmojiMatcher, verbatim from plugin/EmojiSprites.cs ----
 __MATCHER__
@@ -96,7 +120,8 @@ __MATCHER__
                 if (line.Trim().Length == 0) continue;
                 string[] parts = line.Split(' ');
                 bool tint = parts[0] == "T";
-                Console.Out.WriteLine("OUT " + Encode(m.Substitute(Decode(parts, 1), tint)));   // prefixed: an empty result is still a line
+                // The production wrapper's order: sanitise, then match (EmojiSprites.Substitute).
+                Console.Out.WriteLine("OUT " + Encode(m.Substitute(EmojiSprites.NeutraliseSpriteTags(Decode(parts, 1)), tint)));   // prefixed: an empty result is still a line
             }
             Console.Out.WriteLine("COUNT " + m.Count.ToString(CultureInfo.InvariantCulture));
             return rc;
@@ -135,7 +160,8 @@ class Harness:
         self.dir = tmp_path / "harness"
         self.dir.mkdir()
         (self.dir / "harness.csproj").write_text(CSPROJ, encoding="utf-8")
-        (self.dir / "Program.cs").write_text(PROGRAM.replace("__MATCHER__", _matcher_class_text()), encoding="utf-8")
+        source = PROGRAM.replace("__MATCHER__", _matcher_class_text()).replace("__WRAPPER__", _wrapper_methods_text())
+        (self.dir / "Program.cs").write_text(source, encoding="utf-8")
         env = dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT="1", DOTNET_NOLOGO="1",
                    DOTNET_SKIP_FIRST_TIME_EXPERIENCE="1", MSBUILDTERMINALLOGGER="off")
         self.env = env
@@ -188,7 +214,7 @@ def test_the_harness_has_teeth_a_missing_key_changes_the_output(harness):
     family = "1F468-200D-1F469-200D-1F467"
     keys = [k for k in ea.SELF_CHECK_KEYS if k != family]
     assert family in ea.SELF_CHECK_KEYS and len(keys) == len(ea.SELF_CHECK_KEYS) - 1
-    inp = "\U0001F468‍\U0001F469‍\U0001F467"
+    inp = "\U0001F468" + ZWJ + "\U0001F469" + ZWJ + "\U0001F467"
     full, _ = harness.run(list(ea.SELF_CHECK_KEYS), [(inp, False)])
     partial, count = harness.run(keys, [(inp, False)])
     assert full[0] == '<sprite name="e_%s">' % family
@@ -210,3 +236,37 @@ def test_the_compiled_matcher_leaves_existing_tags_and_unknown_code_points_alone
     assert outputs[1] == "plain ascii, no emoji"
     assert outputs[2] == "\U0001F9FF unknown"
     assert outputs[3] == '<b><sprite name="e_1F600"></b>'
+
+
+ZWSP = chr(0x200B)          # zero-width space, the sanitiser marker
+
+
+def test_the_wrapper_is_idempotent_and_neutralises_foreign_sprite_tags(harness):
+    """Round 3: the sanitiser + matcher, compiled from the plugin. Output fed back
+    in is unchanged (the matcher's own tags pass the sanitiser), while every
+    sprite tag that is not the matcher's own becomes inert text."""
+    ea = _tool()
+    keys = list(ea.SELF_CHECK_KEYS)
+    inputs = [inp for inp, _ in ea.SELF_CHECK_VECTORS] + ["hi \U0001F600 <sprite name=\"e_1F600\"> there"]
+    first, _ = harness.run(keys, [(t, False) for t in inputs])
+    second, _ = harness.run(keys, [(t, False) for t in first])
+    assert second == first, "Substitute(Substitute(x)) must equal Substitute(x)"
+    foreign = [
+        '<sprite index=3>',                        # another asset's cell by index
+        '<SPRITE name="e_1F600">',                 # case variant of a tag the matcher never emits
+        '<sprite="Other" name="x">',               # another sprite asset by name
+        '<sprite name="e_1F600-">',                # trailing dash: impossible matcher output
+        '<sprite name="e_-1F600">',                # leading dash
+        '<sprite name="e_1F600--200D">',           # doubled dash
+        '<sprite name="e_1f600">',                 # lower-case hex
+        '<sprite name="e_">',                      # empty key
+    ]
+    outs, _ = harness.run(keys, [(t, False) for t in foreign])
+    for t, got in zip(foreign, outs):
+        assert got == "<" + ZWSP + t[1:], "foreign tag must be neutralised: %r -> %r" % (t, got)
+    own = ['<sprite name="e_1F600">', '<sprite name="e_1F468-200D-1F469-200D-1F467" tint=1>']
+    outs, _ = harness.run(keys, [(t, False) for t in own])
+    assert outs == own, "the matcher's own tags pass untouched"
+    # negative control (#391): a sanitiser that neutralised nothing would fail the foreign cases above,
+    # and one that neutralised everything fails here
+    assert ZWSP not in outs[0]

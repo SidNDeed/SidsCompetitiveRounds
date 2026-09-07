@@ -167,10 +167,19 @@ namespace CompetitiveRounds
         {
             string head = "<sprite name=\"" + SPRITE_NAME_PREFIX;
             if (string.CompareOrdinal(text, at, head, 0, head.Length) != 0) return false;
-            int p = at + head.Length, keyStart = p;
-            while (p < text.Length && ((text[p] >= '0' && text[p] <= '9') || (text[p] >= 'A' && text[p] <= 'F') || text[p] == '-')) p++;
-            if (p == keyStart || p >= text.Length || text[p] != '"') return false;
-            p++;
+            int p = at + head.Length;
+            // The key grammar EmojiMatcher.Tag emits: upper-case hex groups joined by
+            // single dashes -- no empty group, so no leading, doubled or trailing dash
+            // (round 3).
+            while (true)
+            {
+                int g = p;
+                while (p < text.Length && ((text[p] >= '0' && text[p] <= '9') || (text[p] >= 'A' && text[p] <= 'F'))) p++;
+                if (p == g || p >= text.Length) return false;
+                if (text[p] == '-') { p++; continue; }
+                if (text[p] == '"') { p++; break; }
+                return false;
+            }
             const string tint = " tint=1";
             if (string.CompareOrdinal(text, p, tint, 0, tint.Length) == 0) p += tint.Length;
             return p < text.Length && text[p] == '>';
