@@ -985,9 +985,13 @@ namespace CompetitiveRounds
                 // 2-arg lookup misses them. Match by prefix (SoundEvent-
                 // compatible, Transform) with every remaining parameter
                 // optional, and invoke with their declared defaults.
-                MethodInfo m = AccessTools.Method(smType, name,
-                    new Type[] { evt.GetType(), typeof(Transform) });
-                if (m == null)
+                // Sept 4: the exact 2-arg AccessTools lookup MISSES Stop (its
+                // third parameter is optional) and HarmonyX logs a warning for
+                // every miss — 46 per session, two per Phoenix stop, on every
+                // seat — before the scan below found the right overload each
+                // time. Go straight to the scan; it is the only path that ever
+                // resolved Stop.
+                MethodInfo m = null;
                 {
                     foreach (var cand in smType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
                     {
@@ -1976,21 +1980,23 @@ namespace CompetitiveRounds
     ///   num2 = 1 + num · TimeHandler.deltaTime · localScale.x · muiltiplier
     ///   projectileHit.damage *= num2;  shake *= num2;
     ///
-    /// Over the 30-unit growth window bullet speed cancels and the total
-    /// multiplier is  M = exp(30 · dt · s · m)  — exponential in the SHOOTER's
+    /// Over the 40-unit growth window bullet speed cancels and the total
+    /// multiplier is  M = exp(40 · dt · s · m)  — exponential in the SHOOTER's
     /// frame time (damage is shooter-authoritative: the value crosses the wire
-    /// once via RPCA_SendTakeDamage). At s·m=1 that is ×1.07 at 400 FPS but
-    /// ×1.53 at 60 FPS and ×2.31 at 30 FPS; stacked builds SQUARE the gap
-    /// (s·m=4: ×1.29 vs ×5.47 vs ×28.5). A single 200 ms hitch frame multiplies
-    /// ×2.16 on its own (Δd and dt both spike). Hence "60-FPS players one-shot
-    /// with Grow + any explosive" while 400-FPS players see +20-40%.
+    /// once via RPCA_SendTakeDamage). One copy is s·m=4: the A_Grow prefab's
+    /// muiltiplier is 4 and removeAt 40 (read from sharedassets0.assets on Sept 8;
+    /// the C# defaults 1/30 are NOT what ships) - about ×1.4 at 400 FPS but ×9.4
+    /// at 60 FPS and ×82 at 30 FPS, and every extra copy raises that to the next
+    /// power (three: ×2.8 vs ×737 vs ×285,000). A single 200 ms hitch frame
+    /// multiplies ×5.6 on its own (Δd and dt both spike). Hence "60-FPS players
+    /// one-shot with Grow + any explosive" while 400-FPS players see +40%.
     ///
     /// Fix: a one-load TRANSPILER on TrickShot.Update swaps its single
     /// TimeHandler.deltaTime read for <see cref="GrowFpsNormalizePatch.EffectiveDt"/>,
     /// which returns the compiled constant <see cref="RefScaledDt"/> for
     /// normalized bullets and the live vanilla value otherwise — growth
     /// becomes (to first order — see the patch-class residual note) a function
-    /// of distance flown (M ≈ exp(30·REF·s·m) for every shooter at every frame
+    /// of distance flown (M ≈ exp(40·REF·s·m) for every shooter at every frame
     /// rate), the dt² hitch amplifier disappears, and remote simulations of
     /// the same bullet converge instead of drifting. Vanilla's body otherwise
     /// runs untouched (distance window, stacking, slow-mo pause via Δd→0,
@@ -2013,9 +2019,13 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class GrowNormalize
     {
-        /// <summary>Capability prop. cr_grow1 must never be reused for changed
-        /// semantics — a semantic change gets cr_grow2 (the PoisonSync rule).</summary>
-        internal const string CapabilityProp = "cr_grow1";
+        /// <summary>Capability prop. A key is never reused for changed semantics
+        /// (the PoisonSync rule): cr_grow1 was the 240 FPS clock (v1.40.1 and
+        /// earlier, retired Sept 8); cr_grow2 is the 120 FPS clock. A seat that
+        /// looks for the other key sees no quorum, so a mixed room falls back
+        /// to vanilla growth on EVERY seat - never two clocks in one room.
+        /// The next clock change gets cr_grow3.</summary>
+        internal const string CapabilityProp = "cr_grow2";
         internal const int CapabilityValue = 1;
 
         /// <summary>Ranked-INTENT prop (private-arm design r4, Codex-shaped):
@@ -2047,7 +2057,7 @@ namespace CompetitiveRounds
         /// bullets in a casual room — and a modified HOST can additionally
         /// spoof a mod-issued identity (a recognized prefix or the cr_ff
         /// prop) to bypass a victim's ranked-off intent entirely. All of it
-        /// is the same class as forging cr_grow1/cr_pois2 or patching one's
+        /// is the same class as forging cr_grow2/cr_pois2 or patching one's
         /// own damage code: no client-attested protocol prevents it,
         /// server-side anti-cheat is the only real answer (#166 family), and
         /// the honest claim here is only that HONEST clients always agree.</summary>
@@ -2111,13 +2121,17 @@ namespace CompetitiveRounds
 
         /// <summary>THE BALANCE KNOB — the growth rate every shooter gets,
         /// expressed as the scaled frame time of a reference-FPS player
-        /// (TimeHandler.deltaTime = Time.deltaTime × 0.85). At 240-FPS-equivalent
-        /// a full 30-unit flight gives +11% base, +23% at s·m=2, +53% at s·m=4 —
-        /// the high-FPS experience Sid described as sane, and the card stays
-        /// meaningful. MUST remain a compiled constant: a config value would let
-        /// any client legally buff its own damage (shooter authority). Changing
-        /// it later changes rated-game balance → release-notes-worthy.</summary>
-        internal const float RefScaledDt = 0.85f / 240f;
+        /// (TimeHandler.deltaTime = Time.deltaTime × 0.85). At 120-FPS-equivalent
+        /// a full 40-unit flight gives ×3.11 for one copy (s·m=4), ×9.65 for two,
+        /// ×30 for three (Sept 8: 240 -> 120 per Sid; the 240 clock gave
+        /// ×1.76/×3.11/×5.48; the +24/+53/+134% figures quoted before Sept 8 used
+        /// the C# defaults 1/30 instead of the prefab's 4/40). The card
+        /// stays meaningful and still never pays for a worse computer. MUST
+        /// remain a compiled constant: a config value would let any client
+        /// legally buff its own damage (shooter authority). Changing it changes
+        /// rated-game balance → release-notes-worthy AND a new CapabilityProp
+        /// key, so two clocks can never meet in one room.</summary>
+        internal const float RefScaledDt = 0.85f / 120f;
 
         /// <summary>Set by the patch class's [HarmonyCleanup] only when the
         /// TrickShot patch really attached — never advertise an authority we
@@ -2149,7 +2163,7 @@ namespace CompetitiveRounds
                 // completes seconds after startup, long before any human can
                 // join a room, so staging still always precedes the first
                 // connect. (This is why there is no "Awake" stage call for
-                // cr_grow1, unlike cr_pois2.)
+                // cr_grow2, unlike cr_pois2.)
                 if (!Plugin.compatCheckComplete) return;
 
                 if (PhotonNetwork.InRoom)
@@ -2163,7 +2177,7 @@ namespace CompetitiveRounds
                 // landing after LoadBalancingClient snapshots enterRoomParams
                 // but before room entry is silently undelivered). PoisonSync
                 // stages at Awake where Disconnected/PeerCreated suffices;
-                // cr_grow1 stages AFTER the compat verdict (see above), by
+                // cr_grow2 stages AFTER the compat verdict (see above), by
                 // which time ROUNDS may already sit idle on the master server
                 // — an equally safe state (no join in flight; the local merge
                 // rides the next join op's snapshot). Idle states only:
@@ -2255,7 +2269,7 @@ namespace CompetitiveRounds
         /// DIFFERENTLY, splitting rules in steady state for as long as the
         /// intruder stays. With the raw list, every seat counts the same
         /// actors from the same replicated data: an uninvited prop-less actor
-        /// (no cr_spec, no cr_grow1 — indistinguishable by props from an
+        /// (no cr_spec, no cr_grow2 — indistinguishable by props from an
         /// unmodded quickplay opponent, which MUST read as incapable) makes
         /// allCap false on EVERY seat symmetrically — the whole room drops to
         /// vanilla, today's baseline, until the spectator system kicks it.
@@ -2401,7 +2415,7 @@ namespace CompetitiveRounds
     /// Residual, documented not fixed (Codex find 9): the growth product
     /// Π(1+k·Δd) is partition-dependent to second order — very coarse frames
     /// UNDER-grow slightly (~4% at s·m=4, 60 FPS vs fine partitions), and a
-    /// hitch that crosses the 30-unit cap loses the final segment (~13%
+    /// hitch that crosses the 40-unit cap loses the final segment (~13%
     /// worst observed direction). Both err SMALLER, never toward the nuke.</summary>
     [HarmonyPatch(typeof(TrickShot), "Update")]
     internal static class GrowFpsNormalizePatch
@@ -3091,6 +3105,53 @@ namespace CompetitiveRounds
         }
 
         /// <summary>0 = leave alone; 1 = ownerDead; 2 = posDead; 3 = armedFrozen.</summary>
+        /// <summary>Bug 337 self-check: Sonigon voice slots and how many hold a
+        /// live voice — every event's transform instances, their container
+        /// holders, their voice holders — through the surface Resolve() binds.
+        /// False when it did not resolve. Read-only; touches nothing.</summary>
+        internal static bool TryCountVoices(out int active, out int slots)
+        {
+            active = 0; slots = 0;
+            try
+            {
+                if (!Resolve()) return false;
+                object manager = _pInstance.GetValue(null, null);
+                if (manager == null) return false;
+                object data = _pData.GetValue(manager, null);
+                var eventDict = data != null ? _fEventDict.GetValue(data) as IDictionary : null;
+                if (eventDict == null) return false;
+                foreach (DictionaryEntry eventEntry in eventDict)
+                {
+                    var transformDict = eventEntry.Value != null
+                        ? _fTransformDict.GetValue(eventEntry.Value) as IDictionary : null;
+                    if (transformDict == null) continue;
+                    foreach (DictionaryEntry instEntry in transformDict)
+                    {
+                        object inst = instEntry.Value;
+                        if (inst == null) continue;
+                        var holders = _fHolders.GetValue(inst) as Array;
+                        if (holders == null) continue;
+                        for (int h = 0; h < holders.Length; h++)
+                        {
+                            object holder = holders.GetValue(h);
+                            if (holder == null) continue;
+                            var voices = _fHolderVoices.GetValue(holder) as Array;
+                            if (voices == null) continue;
+                            for (int v = 0; v < voices.Length; v++)
+                            {
+                                object vh = voices.GetValue(v);
+                                if (vh == null) continue;
+                                slots++;
+                                if (_fVoice.GetValue(vh) != null) active++;
+                            }
+                        }
+                    }
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
         private static int ClassifyLoopVoice(object vh)
         {
             try
@@ -4398,4 +4459,273 @@ namespace CompetitiveRounds
                 20);
         }
     }
+
+    /// <summary>Bug 327 — Overpower "does nothing" when a box is in the blast.
+    /// Vanilla <c>Explosion.DoExplosionEffects</c> resolves <c>CharacterData</c>
+    /// with <c>GetComponentInParent</c> for every <c>Damagable</c> in range and
+    /// then invokes <c>hitPlayerAction</c> unconditionally — for a box (a
+    /// Damagable with no CharacterData) the argument is null. The only subscriber
+    /// in the whole assembly (1.1.2 decompile: one <c>hitPlayerAction</c>
+    /// reference outside Explosion itself) is <c>Explosion_Overpower.HitPlayer</c>,
+    /// which dereferences <c>data.healthHandler</c> and <c>data.transform</c>. The
+    /// throw escapes <c>Explode()</c>'s collider loop, so every collider ordered
+    /// after the box is skipped; <c>OverlapCircleAll</c> order is arbitrary, hence
+    /// "sometimes nothing". Only the owner's seat computes the hit
+    /// (<c>SpawnedAttack.IsMine</c>), so a guard on the owner is complete.
+    /// Ungated by room type (#286: room-code games are most rated play).</summary>
+    [HarmonyPatch(typeof(Explosion_Overpower), "HitPlayer")]
+    internal static class OverpowerNonPlayerTargetPatch
+    {
+        private static bool Prefix(Explosion_Overpower __instance, CharacterData data)
+        {
+            try
+            {
+                if (data == null || data.healthHandler == null)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "OverpowerNonPlayerTarget",
+                        "Overpower skipped a non-player target in the blast (" +
+                        (data == null ? "no CharacterData" : "no HealthHandler") +
+                        ") — vanilla would have thrown here and skipped the remaining colliders (bug 327)",
+                        20);
+                    return false;
+                }
+                var spawned = __instance != null ? __instance.GetComponent<SpawnedAttack>() : null;
+                if (spawned == null || spawned.spawner == null || spawned.spawner.data == null)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "OverpowerNoSpawner",
+                        "Overpower skipped a hit with no spawner data (spawned=" + (spawned != null) + ")",
+                        20);
+                    return false;
+                }
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("OverpowerNonPlayerTarget", ex); }
+            return true;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("OverpowerNonPlayerTarget", exception);
+        }
+    }
+
+    /// <summary>Companion to the Overpower guard (bug 327): one collider's
+    /// exception must never abort the rest of an explosion. Swallow-only (#94):
+    /// nothing is destroyed or re-applied; <c>Explode()</c>'s loop simply moves to
+    /// the next collider, which is what vanilla does for every collider that does
+    /// not throw. Rate-limited diagnostic so a new thrower is visible in a log.</summary>
+    [HarmonyPatch(typeof(Explosion), "DoExplosionEffects")]
+    internal static class ExplosionPerColliderIsolationPatch
+    {
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+            {
+                VanillaFixSupport.DiagLimited(
+                    "ExplosionPerCollider-swallowed",
+                    "DoExplosionEffects threw " + __exception.GetType().Name +
+                    " for one collider — swallowed so the remaining colliders are still processed (" +
+                    __exception.Message + ")",
+                    20);
+            }
+            return null;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("ExplosionPerColliderIsolation", exception);
+        }
+    }
+
+
+    /// <summary>Bug 329 — the game's own "Press Jump to Join" stall, the shape
+    /// where the other player's body is standing in the lobby and the match never
+    /// starts. Vanilla <c>PlayerAssigner.CreatePlayer</c> instantiates the body
+    /// FIRST (PlayerAssigner.cs:185) and publishes the owner's slot as the
+    /// <c>p_id</c>/<c>t_id</c> actor properties only afterwards (:213, via
+    /// <c>Player.AssignPlayerID</c>/<c>AssignTeamID</c>). On every other seat those
+    /// are two messages, and <c>Player.Start</c> (Player.cs:13548) reads the
+    /// properties exactly once, in the frame after the body is created; a property
+    /// that lands one frame later is never read again. A missing <c>p_id</c> reads
+    /// as 0 — the master's slot — so the joiner's body registers at index 0, over
+    /// the master's own player: <c>PlayerManager.players</c> stays at one entry and
+    /// <c>GM_ArmsRace.PlayerJoined</c> never counts two. The 329 log shows exactly
+    /// that: a second PlayerName label attached (the opponent's body), no
+    /// "Starting Game!", no exception anywhere. Two halves:
+    /// <list type="number">
+    /// <item><see cref="RemotePlayerIdOrderPatch"/>: a remote body whose owner has
+    /// not published its ids yet has its <c>Start</c> deferred, frame by frame,
+    /// until they land (bounded), then re-entered. If they never land in a
+    /// two-fighter room the ids are derived the way the owner derives them
+    /// (master 0, joiner 1) before Start runs.</item>
+    /// <item><see cref="LocalPlayerIdPublishPatch"/>: OUR body publishes its ids
+    /// before vanilla instantiates it, so an unmodded peer never sees our body
+    /// ahead of its slot — the ordering the 2v2 spawn path already uses.</item>
+    /// </list>
+    /// Both are inert offline; the team/1v2/FFA spawn paths publish their own
+    /// slots and are left alone.</summary>
+    [HarmonyPatch(typeof(global::Player), "Start")]
+    internal static class RemotePlayerIdOrderPatch
+    {
+        /// <summary>View ids whose wait has ended: the prefix lets vanilla run once.</summary>
+        private static readonly HashSet<int> released = new HashSet<int>();
+        private const float MaxWaitSeconds = 5f;
+
+        private static bool Prefix(global::Player __instance)
+        {
+            try
+            {
+                if (__instance == null || PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return true;
+                var view = __instance.data != null ? __instance.data.view : null;
+                if (view == null || view.IsMine) return true;
+                int id = view.ViewID;
+                if (released.Remove(id)) return true;             // re-entry after the wait
+                var owner = view.Owner;
+                if (owner == null || HasIds(owner)) return true;   // the ordinary case
+                if (Plugin.Instance == null) return true;
+                VanillaFixSupport.DiagLimited(
+                    "RemotePlayerIdOrder-deferred",
+                    "remote player body arrived before its p_id/t_id (actor " + owner.ActorNumber +
+                    ") — deferring Player.Start until they land (bug 329)", 20);
+                Plugin.Instance.StartCoroutine(StartWhenIdsLand(__instance, view, id, owner.IsMasterClient));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("RemotePlayerIdOrder", ex);
+                return true;
+            }
+        }
+
+        private static bool HasIds(Photon.Realtime.Player owner)
+        {
+            var props = owner.CustomProperties;
+            return props != null
+                && props.ContainsKey(global::Player.VAR_PLAYERID)
+                && props.ContainsKey(global::Player.VAR_TEAMID);
+        }
+
+        private static IEnumerator StartWhenIdsLand(global::Player player, PhotonView view, int id, bool ownerWasMaster)
+        {
+            float started = Time.unscaledTime;
+            int frames = 0;
+            while (true)
+            {
+                yield return null;
+                frames++;
+                if (player == null || view == null || !PhotonNetwork.InRoom) yield break;   // body or room gone
+                var owner = view.Owner;
+                if (owner == null) yield break;
+                if (HasIds(owner))
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "RemotePlayerIdOrder-landed",
+                        "p_id/t_id landed after " + frames + " frame(s) for actor " + owner.ActorNumber +
+                        " — running Player.Start now", 20);
+                    break;
+                }
+                if (Time.unscaledTime - started >= MaxWaitSeconds)
+                {
+                    int fighters = 0;
+                    try { fighters = RoomActors.ActiveFighterCount(); } catch { }
+                    if (fighters <= 0)
+                    {
+                        try { fighters = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0; } catch { }
+                    }
+                    if (fighters <= 2)
+                    {
+                        // The owner's own rule (PlayerAssigner.CreatePlayer: master 0,
+                        // else 1), applied to the role the owner HAD when the body
+                        // arrived (hotfix review r2 LOW): the PlayerID is fixed at
+                        // spawn time, while IsMasterClient moves with a master switch
+                        // during this wait and would then derive the other slot.
+                        int slot = ownerWasMaster ? 0 : 1;
+                        player.m_playerID = slot;
+                        player.m_teamID = slot;
+                        Plugin.Log.LogWarning("[VANILLA-FIX] RemotePlayerIdOrder: actor " + owner.ActorNumber +
+                            " never published p_id/t_id in " + MaxWaitSeconds + "s — deriving slot " + slot +
+                            " from the master rule and running Player.Start (bug 329)");
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning("[VANILLA-FIX] RemotePlayerIdOrder: actor " + owner.ActorNumber +
+                            " never published p_id/t_id in " + MaxWaitSeconds + "s with " + fighters +
+                            " fighters present — running Player.Start as vanilla would");
+                    }
+                    break;
+                }
+            }
+            if (player == null) yield break;
+            released.Add(id);
+            try { player.Start(); }
+            catch (Exception ex) { released.Remove(id); VanillaFixSupport.LogError("RemotePlayerIdOrder", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("RemotePlayerIdOrder", exception);
+        }
+    }
+
+    /// <summary>The other half of bug 329: publish our own slot before the body
+    /// (see <see cref="RemotePlayerIdOrderPatch"/>). Vanilla derives the slot as
+    /// master 0 / joiner 1 (PlayerAssigner.cs:167-174) and publishes it after the
+    /// instantiate; setting the same two properties first is idempotent with the
+    /// publish vanilla then makes, and gives an unmodded peer the slot before the
+    /// body. Only the vanilla 1v1 spawn is touched: the 2v2, 1v2 and FFA paths
+    /// publish server-issued slots of their own, and a spectator seat never
+    /// spawns.</summary>
+    [HarmonyPatch(typeof(PlayerAssigner), "CreatePlayer")]
+    internal static class LocalPlayerIdPublishPatch
+    {
+        private static void Prefix(PlayerAssigner __instance)
+        {
+            try
+            {
+                if (__instance == null || PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return;
+                if (__instance.hasCreatedLocalPlayer) return;           // vanilla returns before instantiating
+                if (__instance.players != null && __instance.players.Count >= __instance.maxPlayers) return;
+                if (RoomActors.LocalIsSpectator) return;
+                var room = PhotonNetwork.CurrentRoom;
+                string rname = room != null ? (room.Name ?? "") : "";
+                var rp = room != null ? room.CustomProperties : null;
+                if (rname.StartsWith("team_", StringComparison.Ordinal)
+                    || rname.StartsWith("ovt_", StringComparison.Ordinal)
+                    || rname.StartsWith("ffa_", StringComparison.Ordinal)
+                    || (rp != null && rp.ContainsKey("cr_ff"))
+                    || FfaMode.EngineActive()) return;                    // those spawn paths publish their own slots
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                int slot = PhotonNetwork.IsMasterClient ? 0 : 1;
+                var have = local.CustomProperties;
+                if (have != null
+                    && have.ContainsKey(global::Player.VAR_PLAYERID) && Equals(have[global::Player.VAR_PLAYERID], slot)
+                    && have.ContainsKey(global::Player.VAR_TEAMID) && Equals(have[global::Player.VAR_TEAMID], slot)) return;
+                var pre = new ExitGames.Client.Photon.Hashtable();
+                pre[global::Player.VAR_PLAYERID] = slot;
+                pre[global::Player.VAR_TEAMID] = slot;
+                local.SetCustomProperties(pre);
+                VanillaFixSupport.DiagLimited(
+                    "LocalPlayerIdPublish",
+                    "published p_id/t_id=" + slot + " ahead of the local spawn so peers read the slot before the body (bug 329)", 20);
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("LocalPlayerIdPublish", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("LocalPlayerIdPublish", exception);
+        }
+    }
+
 }

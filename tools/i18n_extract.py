@@ -42,6 +42,18 @@ Python's universal-newline default), and I18n.NormalizeLf converts at lookup
 and install time. Do NOT "fix" it by rewriting those literals into \n-joined
 regular strings — that changes the English source, which re-keys them and
 orphans every existing es/ru translation (learning #289).
+
+CONTEXT FOR TRANSLATORS (Sept 6 item e) — output format 2.
+I18n.TrC("ctx", "text") and I18n.TrCF("ctx", "fmt", ...) harvest the COMPOSITE
+key  text + U+0004 + ctx  (I18n.ContextSeparator — a character no UI string
+carries), so one English word can carry a different translation per noun it
+qualifies; the plain English is harvested from the same site too, because TrC
+falls back to Tr(english) and so still reads it. Every key also gets a context
+record — surface (file stem), location (enclosing method, a heuristic) and
+kind (the helper: "CreateText", "Tr", "TrC:card rarity") — written under
+"contexts"; "strings" stays the flat sorted list format 1 wrote, so older
+readers keep working. tools/i18n_sync_keys.py turns the record into
+i18n_keys.context, which the portal shows under each source string.
 """
 import io
 import json
@@ -77,6 +89,26 @@ FILES = [
     # deliberately absent: album/track/artist text stays raw (#368) and their
     # log lines are not user-visible.
     "MusicAssets.cs", "MusicEngine.cs",
+    # Overlay idle-close (Sept 4) — broadcast-only since review r4, so it has
+    # no translation sites today; listed so a future player-seat variant
+    # (which would need a toast) is harvested the moment it appears.
+    "OverlayIdleClose.cs",
+    # In-room head-to-head line (Sept 4, Release B §1) — banner/Tab-Info
+    # templates and the relative-day phrases, all at I18n.Tr/TrF sites.
+    "H2HSummary.cs",
+    # Lag notices (Sept 4, Release B §4) — the four corner-notice texts at
+    # I18n.Tr/TrF sites; its [LAG-NOTICE] log lines are not user-visible.
+    "LagNotices.cs",
+    # Sept 6 batch, Group 4 (all at I18n.Tr/TrF sites): the hover profile card,
+    # the in-game mail client + screens, the session report model + view and
+    # the rating-graph axes. The list is FIXED, so every new source file with
+    # display strings must be named here or its strings ship untranslated
+    # (found by the Sept 6 integration: 195 sites in six unnamed files).
+    "ProfileCard.cs", "MailClient.cs", "MailUI.cs",
+    "SessionReportModel.cs", "SessionReportView.cs", "RatingGraphAxis.cs",
+    # Older omissions found by the same sweep: the minimised-chat suffix
+    # (Sept 6 Group 2, bug 333) and the team-colour point announcements.
+    "ChatOverlayTmp.cs", "TeamColorIdentity.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
@@ -362,8 +394,306 @@ def arg_literals(arg: str) -> list:
     return []
 
 
+# ── Context for translators (Sept 6 item e) ──────────────────────────────────
+# I18n.TrC("ctx", "text") / I18n.TrCF("ctx", "fmt", ...) give one English word
+# a translation PER NOUN it qualifies. The catalogue key is the composite
+# text + CTX_SEP + ctx, byte-for-byte what I18n.TrC looks up (U+0004 appears
+# in no UI string, so a composite can never collide with a plain key).
+CTX_SEP = "\u0004"
+CTX_SITES = [
+    (re.compile(r'I18n\.TrC\s*\('), "TrC"),
+    (re.compile(r'I18n\.TrCF\s*\('), "TrCF"),
+]
+# A context is a short noun phrase. No braces, no '<', no quotes: the server
+# validator reads the whole msgctxt as the source, so a brace or a tag inside
+# the context would become a hole/tag every translation had to reproduce.
+CTX_OK = re.compile(r"[A-Za-z][A-Za-z0-9 _/-]{1,59}")
+
+
+class ExtractError(Exception):
+    """A call site this tool cannot harvest. FAIL LOUD (the shop_strings.json
+    rule): the client's pack allowlist is this tool's output, so a key that
+    silently never made it here is a key no server correction can reach."""
+
+
+def context_literal(arg: str, fn: str, helper: str) -> str:
+    """The context argument of a TrC/TrCF call: exactly ONE plain literal."""
+    lits = [x.group(1) for x in STR_LIT.finditer(arg)]
+    residue = re.sub(r"\s+", "", STR_LIT.sub("", arg))
+    if len(lits) != 1 or residue != "":
+        raise ExtractError(f"{fn}: {helper} context must be one string literal, got {arg[:60]!r}")
+    ctx = unescape(lits[0])
+    if not CTX_OK.fullmatch(ctx):
+        raise ExtractError(f"{fn}: {helper} context {ctx!r} must be 2-60 letters, digits, "
+                           "spaces, '-', '/' or '_' (no braces, tags or quotes)")
+    return ctx
+
+
+def kind_of(m) -> str:
+    """The helper a harvested string went through, read off the matched call
+    text: 'UIFactory.CreateText(' -> 'CreateText', 'I18n.TrF(' -> 'TrF'."""
+    return re.sub(r"[\s(]+$", "", m.group(0)).split(".")[-1]
+
+
+def _mask_cs(src: str) -> str:
+    """Length-preserving copy of a C# source with comment text and the INSIDE
+    of string/char literals blanked, so brace depth and method signatures can
+    be read without a '{' in a log line or a '(' in a format string counting.
+    Newlines survive, so an offset into the result is an offset into `src`.
+    Regular, verbatim (@"", "" escapes) and interpolated prefixes are handled;
+    a nested quote inside an interpolation hole may mis-tokenize a few
+    characters, which is why enclosing_method is documented as a heuristic."""
+    out = list(src)
+    n = len(src)
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    i = 0
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        nxt2 = src[i + 2] if i + 2 < n else ""
+        if c == "/" and nxt == "/":
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif c == "/" and nxt == "*":
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+        elif c == '"' or (c in "@$" and nxt == '"') or (c in "@$" and nxt in "@$" and nxt2 == '"'):
+            q = src.index('"', i)                 # the opening quote
+            verbatim = "@" in src[i:q]
+            j = q + 1
+            while j < n:
+                ch = src[j]
+                if verbatim:
+                    if ch == '"':
+                        if j + 1 < n and src[j + 1] == '"':
+                            j += 2
+                            continue
+                        break
+                else:
+                    if ch == "\\":
+                        j += 2
+                        continue
+                    if ch == '"' or ch == "\n":
+                        break
+                j += 1
+            blank(q + 1, j)
+            i = j + 1
+        elif c == "'":
+            if nxt == "\\":
+                j = src.find("'", i + 3)
+                j = -1 if j < 0 else j
+            else:
+                j = i + 2
+            if 0 <= j < n and src[j] == "'":
+                blank(i + 1, j)
+                i = j + 1
+            else:
+                i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+# A method-shaped member: at least one modifier, a return type, a name, a
+# parameter list, then a block or an expression body. Matched on the MASKED
+# text, so literals and comments cannot fake one. Constructors, properties
+# and local functions without modifiers are deliberately not indexed — a site
+# inside one reports the enclosing indexed member or "(file scope)".
+_SIG = re.compile(
+    r"(?<![\w.])(?:(?:public|private|protected|internal|static|override|virtual|sealed|async)\s+)+"
+    r"[\w<>\[\],.?\s]+?\s+(\w+)\s*(?:<[^<>(){};]*>)?\s*\([^(){};]*\)\s*(?:where\b[^{;]*?)?(\{|=>)")
+
+
+def _block_end(masked: str, open_brace: int) -> int:
+    depth = 0
+    for i in range(open_brace, len(masked)):
+        c = masked[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(masked)
+
+
+def method_index(src: str) -> list:
+    """[(start, end, name)] for every method-shaped member of one source."""
+    masked = _mask_cs(src)
+    out = []
+    for m in _SIG.finditer(masked):
+        opener = m.end() - len(m.group(2))
+        if m.group(2) == "{":
+            end = _block_end(masked, opener)
+        else:
+            end = masked.find(";", opener)
+            end = len(masked) if end < 0 else end + 1
+        out.append((m.start(), end, m.group(1)))
+    return out
+
+
+def enclosing_method(methods: list, pos: int) -> str:
+    """The innermost indexed member containing `pos`, else '(file scope)'."""
+    best = None
+    for start, end, name in methods:
+        if start <= pos < end and (best is None or start > best[0]):
+            best = (start, name)
+    return best[1] if best else "(file scope)"
+
+
+def _joined(values, cap: int = 3) -> str:
+    vals = sorted(set(values))
+    text = ", ".join(vals[:cap])
+    if len(vals) > cap:
+        text += f" +{len(vals) - cap}"
+    return text
+
+
+def build_registry(found: dict, sites: dict) -> dict:
+    """The tools/i18n_source.json document. format 2 (Sept 6 item e) keeps
+    "strings" exactly as format 1 wrote it — a flat sorted list, so every
+    older reader (the sync tool's format-1 path, the seed migrations'
+    PREREQUISITE notes, --diff) keeps working — and adds "contexts": one
+    {surface, location, kind} record per key, each field the sorted distinct
+    values joined with ", " and capped at three (a key used from thirty
+    places would otherwise flood the 160-char column it is bound for).
+    Deterministic: sorted keys, fixed field order."""
+    entries = sorted(found.keys())
+    contexts = {}
+    for key in entries:
+        recs = sites.get(key) or set()
+        contexts[key] = {
+            "surface": _joined(r[0] for r in recs),
+            "location": _joined(r[1] for r in recs),
+            "kind": _joined(r[2] for r in recs),
+        }
+    return {"format": 2, "strings": entries, "contexts": contexts}
+
+
+def cs_escape(s: str) -> str:
+    """One C# regular-string literal body for I18nSourceKeys.g.cs. Every
+    remaining control character (the U+0004 context separator, in practice)
+    becomes a \\uXXXX escape: a raw control byte in a generated .cs is legal
+    but invisible, and an editor that "cleans" it would silently drop the
+    key from the allowlist."""
+    s = (s.replace("\\", "\\\\").replace('"', '\\"')
+          .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+    return "".join(c if ord(c) >= 0x20 else "\\u%04x" % ord(c) for c in s)
+
+
+def harvest_source(fn: str, src: str, found: dict, sites: dict) -> None:
+    """Harvest ONE plugin source (LF-normalized text) into `found` and `sites`.
+
+    `found[key]` accumulates the file names a key appears in — the contract
+    this tool always had. `sites[key]` (Sept 6 item e) accumulates
+    (surface, location, kind) tuples: the file stem, the enclosing method
+    (enclosing_method — a heuristic; "(file scope)" when nothing indexed
+    encloses the site) and the helper the string went through ("CreateText",
+    "Tr", "TrC:card rarity", "table" for the initializer tables). They become
+    the portal's context line, so a translator sees WHERE a string is used.
+    Split out of extract() so a test can run it on a snippet.
+    """
+    stem = fn[:-3] if fn.endswith(".cs") else fn
+    methods = method_index(src)
+
+    def note(key, pos, kind):
+        found.setdefault(key, []).append(fn)
+        sites.setdefault(key, set()).add((stem, enclosing_method(methods, pos), kind))
+
+    def note_table(key, ident):
+        found.setdefault(key, []).append(fn)
+        sites.setdefault(key, set()).add((stem, ident, "table"))
+
+    for site in SITES:
+        site_re, arg_positions = site[0], site[1]
+        allow_braces = site[2] if len(site) > 2 else False
+        for m in site_re.finditer(src):
+            body = find_call_body(src, m.end() - 1)
+            if not body:
+                continue
+            args = split_top_level_args(body)
+            for pos in arg_positions:
+                if pos >= len(args):
+                    continue
+                for s in arg_literals(args[pos].strip()):
+                    s = lf(s)
+                    if looks_translatable(s, allow_braces=allow_braces):
+                        note(s, m.start(), kind_of(m))
+    # Contextual sites (Sept 6 item e): I18n.TrC("ctx", "text") and
+    # I18n.TrCF("ctx", "fmt", ...). Position 0 is the CONTEXT, position 1 the
+    # English; the emitted key is english + CTX_SEP + ctx, byte-for-byte the
+    # composite I18n.TrC looks up. The plain English is recorded from the same
+    # site: TrC falls back to Tr(english) on a miss, so that key is still read
+    # here and converting a site retires nothing on the server. The context
+    # must be ONE pure literal (context_literal raises otherwise): a key this
+    # tool cannot harvest is a key no server pack can reach.
+    for site_re, helper in CTX_SITES:
+        for m in site_re.finditer(src):
+            body = find_call_body(src, m.end() - 1)
+            if not body:
+                continue
+            args = split_top_level_args(body)
+            if len(args) < 2:
+                raise ExtractError(f"{fn}: {helper}(context, text) needs two arguments, got ({body[:80]!r})")
+            ctx = context_literal(args[0].strip(), fn, helper)
+            for s in arg_literals(args[1].strip()):
+                s = lf(s)
+                if looks_translatable(s, allow_braces=True):
+                    note(s + CTX_SEP + ctx, m.start(), f"{helper}:{ctx}")
+                    note(s, m.start(), f"{helper} fallback")
+    # QuickChat phrase table: the wire keys ARE the English sources.
+    if fn == "QuickChat.cs":
+        block = re.search(r"Phrases\s*=\s*\{(.*?)\};", src, re.S)
+        if block:
+            for x in STR_LIT.finditer(block.group(1)):
+                s = lf(unescape(x.group(1)))
+                if looks_translatable(s):
+                    note_table(s, "Phrases")
+    # Achievement definition table (ApiClient.cs): display name + desc
+    # live in a dict INITIALIZER, never at a harvested call site (the
+    # render sites pass def[0]/def[1] variables). Harvest ONLY the
+    # literals inside each row's value array (new[]{ name, desc }) — the
+    # dictionary KEYS are wire ids ("regicide", "on_fire"); pure-alpha
+    # ids would pass looks_translatable and pollute the key set if the
+    # whole block were harvested QuickChat-style.
+    if fn == "ApiClient.cs":
+        block = re.search(
+            r"AchievementDefs\s*=\s*new\s+Dictionary<string,\s*string\[\]>\s*\{(.*?)\n\s*\};",
+            src, re.S)
+        if block:
+            for arr in re.finditer(r"new\[\]\s*\{([^}]*)\}", block.group(1)):
+                for x in STR_LIT.finditer(arr.group(1)):
+                    s = lf(unescape(x.group(1)))
+                    if looks_translatable(s):
+                        note_table(s, "AchievementDefs")
+    # Shop category descriptions (NativeUI.cs): the per-tab description
+    # lives in a string-ARRAY initializer, never at a harvested call site
+    # (both render sites pass SHOP_TAB_DESCS[i] through I18n.Tr —
+    # Tr(variable) is invisible to call-site harvesting, #295a). Harvest
+    # the initializer literals directly, the AchievementDefs pattern.
+    # Impl-r2 I16 residual: these descs and the section headers had never
+    # been translatable.
+    if fn == "NativeUI.cs":
+        block = re.search(r"SHOP_TAB_DESCS\s*=\s*\{(.*?)\n\s*\};", src, re.S)
+        if block:
+            for x in STR_LIT.finditer(block.group(1)):
+                s = lf(unescape(x.group(1)))
+                if looks_translatable(s):
+                    note_table(s, "SHOP_TAB_DESCS")
+
+
 def extract():
     found = {}
+    sites = {}
     # Server-data display strings (Sid Aug-3 item 3: shop/cosmetic names +
     # descriptions are translated now). The client renders them via
     # I18n.Tr(variable) — invisible to call-site harvesting — so the key set
@@ -389,6 +719,7 @@ def extract():
             s = lf(s)
             if looks_translatable(s):
                 found.setdefault(s, []).append("shop_strings.json")
+                sites.setdefault(s, set()).add(("shop catalog", "cosmetic name/description", "shop"))
     except SystemExit:
         raise
     except Exception as ex:
@@ -404,65 +735,16 @@ def extract():
         # implicit behaviour that let the client and the catalogue disagree
         # about verbatim literals — see the module docstring.
         src = lf(io.open(path, encoding="utf-8", newline="").read())
-        for site in SITES:
-            site_re, arg_positions = site[0], site[1]
-            allow_braces = site[2] if len(site) > 2 else False
-            for m in site_re.finditer(src):
-                body = find_call_body(src, m.end() - 1)
-                if not body:
-                    continue
-                args = split_top_level_args(body)
-                for pos in arg_positions:
-                    if pos >= len(args):
-                        continue
-                    for s in arg_literals(args[pos].strip()):
-                        s = lf(s)
-                        if looks_translatable(s, allow_braces=allow_braces):
-                            found.setdefault(s, []).append(f"{fn}")
-        # QuickChat phrase table: the wire keys ARE the English sources.
-        if fn == "QuickChat.cs":
-            block = re.search(r"Phrases\s*=\s*\{(.*?)\};", src, re.S)
-            if block:
-                for x in STR_LIT.finditer(block.group(1)):
-                    s = lf(unescape(x.group(1)))
-                    if looks_translatable(s):
-                        found.setdefault(s, []).append(fn)
-        # Achievement definition table (ApiClient.cs): display name + desc
-        # live in a dict INITIALIZER, never at a harvested call site (the
-        # render sites pass def[0]/def[1] variables). Harvest ONLY the
-        # literals inside each row's value array (new[]{ name, desc }) — the
-        # dictionary KEYS are wire ids ("regicide", "on_fire"); pure-alpha
-        # ids would pass looks_translatable and pollute the key set if the
-        # whole block were harvested QuickChat-style.
-        if fn == "ApiClient.cs":
-            block = re.search(
-                r"AchievementDefs\s*=\s*new\s+Dictionary<string,\s*string\[\]>\s*\{(.*?)\n\s*\};",
-                src, re.S)
-            if block:
-                for arr in re.finditer(r"new\[\]\s*\{([^}]*)\}", block.group(1)):
-                    for x in STR_LIT.finditer(arr.group(1)):
-                        s = lf(unescape(x.group(1)))
-                        if looks_translatable(s):
-                            found.setdefault(s, []).append(fn)
-        # Shop category descriptions (NativeUI.cs): the per-tab description
-        # lives in a string-ARRAY initializer, never at a harvested call site
-        # (both render sites pass SHOP_TAB_DESCS[i] through I18n.Tr —
-        # Tr(variable) is invisible to call-site harvesting, #295a). Harvest
-        # the initializer literals directly, the AchievementDefs pattern.
-        # Impl-r2 I16 residual: these descs and the section headers had never
-        # been translatable.
-        if fn == "NativeUI.cs":
-            block = re.search(r"SHOP_TAB_DESCS\s*=\s*\{(.*?)\n\s*\};", src, re.S)
-            if block:
-                for x in STR_LIT.finditer(block.group(1)):
-                    s = lf(unescape(x.group(1)))
-                    if looks_translatable(s):
-                        found.setdefault(s, []).append(fn)
-    return found
+        harvest_source(fn, src, found, sites)
+    return found, sites
 
 
 def main():
-    found = extract()
+    try:
+        found, sites = extract()
+    except ExtractError as ex:
+        print(f"ERROR: {ex}")
+        sys.exit(1)
     entries = sorted(found.keys())
     if "--diff" in sys.argv and os.path.exists(OUT):
         old = set(json.load(io.open(OUT, encoding="utf-8"))["strings"])
@@ -477,21 +759,19 @@ def main():
             print(f"\nCHURN BUDGET: this pass invalidates {len(removed)} approved "
                   f"translations per shipped language (localization-design Q5).")
         return
-    json.dump({"format": 1, "strings": entries},
+    json.dump(build_registry(found, sites),
               io.open(OUT, "w", encoding="utf-8", newline="\n"),
               ensure_ascii=False, indent=1)
     total_chars = sum(len(s) for s in entries)
     print(f"extracted {len(entries)} distinct display strings "
-          f"({total_chars} chars) -> {os.path.relpath(OUT, REPO)}")
+          f"({total_chars} chars; {sum(1 for e in entries if CTX_SEP in e)} contextual) "
+          f"-> {os.path.relpath(OUT, REPO)}")
     # Compiled source-key registry (round-3 find N5): the client's pack
     # allowlist must be the EXTRACTED source set, not the translated
     # dictionaries — an extracted-but-not-yet-translated key is exactly the
     # one a server correction needs to reach. Regenerate + rebuild whenever
     # extraction changes.
     cs = os.path.join(PLUGIN, "I18nSourceKeys.g.cs")
-    def cs_escape(s):
-        return (s.replace("\\", "\\\\").replace('"', '\\"')
-                 .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
     with io.open(cs, "w", encoding="utf-8", newline="\n") as f:
         f.write("// AUTO-GENERATED by tools/i18n_extract.py — do not edit.\n")
         f.write("// The extracted translatable source set; I18n's pack\n")

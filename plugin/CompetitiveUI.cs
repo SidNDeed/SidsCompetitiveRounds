@@ -37,9 +37,12 @@ namespace CompetitiveRounds
 
         public static void ToggleOverlay() => NativeUI.Toggle();
 
-        public static void ShowNotification(string text, Color color, float duration = 5f)
+        /// <summary>Returns whether the toast was actually placed in the slot
+        /// (Sept 4, idle-close r1 MEDIUM 4): a caller that promises the player a
+        /// warning must not act on a toast this surface dropped.</summary>
+        public static bool ShowNotification(string text, Color color, float duration = 5f)
         {
-            if (!Plugin.ShowNotifications.Value) return;
+            if (!Plugin.ShowNotifications.Value) return false;
             // A critical cue owns the slot for its whole duration (Aug 12
             // review r2): ordinary toasts write the same three fields, so an
             // FFA pick toast landing a second after the leave-confirm cue
@@ -48,7 +51,7 @@ namespace CompetitiveRounds
             // not queued: this surface is latest-wins by design, and queueing
             // them (self-audit) let a busy FFA stack minutes of stale toasts
             // that then replayed out of context.
-            if (Time.unscaledTime < notifCriticalUntil) return;
+            if (Time.unscaledTime < notifCriticalUntil) return false;
             // L10n chokepoint for the IMGUI toast surface (Codex client
             // review find 7): these render via GUI.Label, never through
             // UIFactory, so without this the exact catalogue entries for
@@ -58,6 +61,7 @@ namespace CompetitiveRounds
             notifText = text;
             notifColor = color;
             notifTimer = duration;
+            return true;
         }
 
         public static void QueueNotification(string text, Color color, float duration = 5f)
@@ -283,7 +287,11 @@ namespace CompetitiveRounds
             // backdrop-less, so a click outside their box would otherwise reach
             // the very rows they exist to guard.
             || SpectatorHud.MenuOpen
-            || confirmOpen;
+            || confirmOpen
+            // Sept 6 mail: the report-reason picker (IMGUI, backdrop-less).
+            || MailUI.ModalOpen
+            // Sept 6 item c: the full-screen IMGUI session report over the F5 page.
+            || SessionReportView.Active;
 
         // AnyModalOwnsInput — the above PLUS every modal that raises its own
         // uGUI backdrop. A backdrop absorbs EventSystem clicks; NOTHING absorbs
@@ -295,12 +303,44 @@ namespace CompetitiveRounds
         // hotkey surfaces gated by this property, so including it would make
         // DrawChatInput's guard close the popup that DrawQuickChat is drawing.
         // Each consumer ORs it in explicitly where it means "a modal is up".
-        private static bool AnyModalOwnsInput =>
+        //
+        // Sept 7 item 1: the utility popup (Mail / Music, its own uGUI backdrop)
+        // joins here — ONE term that covers ModalBlockInput and the three hotkey
+        // guards. OtherModalOwnsInput is the same set WITHOUT the popup's own
+        // term: NativeUI.OpenUtilityPopup refuses while it is true, so a modal
+        // raised elsewhere never sits under a popup.
+        internal static bool OtherModalOwnsInput =>
                BackdroplessModalOpen
             || NativeUI.InfoPopupOpen || NativeUI.TournBetsPopupOpen
             || NativeUI.RecentTournPopupOpen
             || NativeUI.PickerOpen || NativeUI.LangPromptOpen
+            // Sept 8 r1b M1: the card preview's backdrop is a raw ClickHandler with
+            // no occlusion test, so the Card Stats rows under it stayed live and a
+            // backdrop click could open ANOTHER preview instead of dismissing this one.
+            || NativeUI.CardPreviewOpen
             || !Plugin.DataConsentAsked;
+        private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
+
+        // Sept 8 item 1: IMGUI is painted after the mod's uGUI canvases, so a page's
+        // IMGUI (the search boxes, the hover graphs, the session report, the shop
+        // previews, the ranked-hint callout) drew OVER the Music/Mail popup's
+        // backdrop and box. Input was already gated (AnyModalOwnsInput); only the
+        // paint order was wrong. Every PAGE-level IMGUI draw checks this ONE
+        // predicate - the popups' own IMGUI (the mail composer, confirms, the
+        // recipient picker) and the global overlays do not.
+        // PopupCoversPage = a uGUI surface on the overlay canvas covers the page.
+        // The metric/card picker is such a surface too (design round HIGH: with
+        // both fields painted, typing reached the Compare filter under the
+        // picker), so PageImguiHidden includes it and the picker's OWN field is
+        // drawn alone, after the block, while no popup covers the picker.
+        internal static bool PopupCoversPage =>
+               NativeUI.UtilityPopupOpen || NativeUI.InfoPopupOpen
+            || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
+            || NativeUI.CardPreviewOpen
+            // Sept 8 r1b L2: the language chooser is a backdrop modal too (Home has the
+            // ranked-hint callout + caret as page IMGUI).
+            || NativeUI.LangPromptOpen;
+        internal static bool PageImguiHidden => PopupCoversPage || NativeUI.PickerOpen;
 
         /// <summary>Called from OnGUI. FPS + notifications + match status. The server-down
         /// banner moved to the F5 menu (NativeUI.RefreshServerBanner) — it was constantly
@@ -327,9 +367,14 @@ namespace CompetitiveRounds
             // debug input overlay and every modal paint over it.
             DrawMusicCredit();
             DrawFPS();
+            DrawH2HBanner();          // Release B §1: "vs NAME · last played · H2H" (10 s)
+            DrawLagNotices();   // Release B §4: opt-in network notices under the corner label
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
-            PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
-            DrawDancePreview();   // dance shop preview puppet (Aug 31 item 5)
+            if (!PageImguiHidden)   // Sept 8 item 1: page IMGUI never paints over a popup
+            {
+                PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
+                DrawDancePreview();   // dance shop preview puppet (Aug 31 item 5)
+            }
             DrawSpawnSpotlight();
             // Item 10: the horizontal multi-entry band draws BEFORE the single
             // slot, because DrawNotification reads NotificationSetLift() to
@@ -343,6 +388,7 @@ namespace CompetitiveRounds
             DrawChatInput();
             DrawQuickChat();   // §2.6 hold-Q radial quick-chat wheel (Aug 31)
             DrawDanceWheel();  // hold-E dance wheel (Aug 31 item 5)
+            DrawDanceCountdown();   // bug 341: countdown ring over the LOCAL dancer only
             DrawAdminPrompt();
             DrawConfirm();
             DrawBugReportModal();
@@ -357,22 +403,37 @@ namespace CompetitiveRounds
             // positived during normal matchmaking (being in the queue room legitimately
             // looks like "in a room with no match"), which is the flicker Sid reported.
             // DrawMatchFoundStuckOverlay();  // intentionally not called — kept for reference
-            DrawCardHoverTooltip();
-            DrawScoreHoverGraph();
-            DrawFpsHoverGraph();
-            DrawCompareSearch();
-            DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
-            DrawLeaderboardSearch();
-            DrawCardStatsSearch();   // Aug 31 — Card Stats card search
-            DrawHistorySearch();  // Bug 263 — My Stats opponent search
-            DrawInfoSearch();     // Aug 23 r2 — Info library article search
+            // Sept 8 item 1: the page-level IMGUI block. Painted only while no
+            // overlay-canvas popup is up (PageImguiHidden) - IMGUI would otherwise
+            // draw over the popup. The popups' own IMGUI below is NOT inside.
+            if (!PageImguiHidden)
+            {
+                DrawCardHoverTooltip();
+                DrawScoreHoverGraph();
+                DrawFpsHoverGraph();
+                SessionReportView.Draw();   // Sept 6 item c: above the F5 hover popups, below the search overlays
+                DrawCompareSearch();
+                DrawLeaderboardSearch();
+                DrawCardStatsSearch();   // Aug 31 — Card Stats card search
+                DrawHistorySearch();  // Bug 263 — My Stats opponent search
+                DrawInfoSearch();     // Aug 23 r2 — Info library article search
+            }
+            // The picker's own search field, alone: the picker is one of the surfaces
+            // the block hides under (its field and the page's must not share focus).
+            if (NativeUI.PickerOpen && !PopupCoversPage)
+                DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
+            // The shop's trail preview lives on a uGUI canvas ABOVE the popups'
+            // (30001 vs 30000) and follows the cursor: end it the frame a popup
+            // covers the page instead of painting through the popup.
+            if (PageImguiHidden && TrailPreview.IsActive) TrailPreview.Stop();
             DrawMapColorToast();
             DrawCustomBetPrompt();
             DrawLfpPrompt();
             DrawArtistInput();
             DrawArtistPicker();
             DrawPlayerSearch();
-            DrawCosmeticTestPreview();
+            MailUI.DrawImgui();   // Sept 6 mail: composer fields over their uGUI anchors + the report modal
+            if (!PageImguiHidden) DrawCosmeticTestPreview();   // Sept 8 item 1
             DrawCosmeticReview();
             DrawCosmeticReleaseQueue();
             DrawFlagEvidence();
@@ -392,7 +453,7 @@ namespace CompetitiveRounds
             // Wave-2 find 10: the quick-chat popup can overlap live F5 buttons —
             // a phrase click must not ALSO fire the shop/queue control
             // underneath, on EITHER input path.
-            DrawRankedHintCallout();
+            if (!PageImguiHidden) DrawRankedHintCallout();   // Sept 8 item 1: the callout is IMGUI too
             bool anyModal = BackdroplessModalOpen || quickChatOpen || danceWheelOpen;
             NativeUI.SetClickBlocker(anyModal);
             // The raw-poll half additionally covers the modals that DO raise
@@ -401,6 +462,10 @@ namespace CompetitiveRounds
             // ClickHandler polling Input.GetMouseButtonDown itself (#141/#200).
             // Adding them to anyModal instead would double-blocker them.
             ClickHandler.ModalBlockInput = AnyModalOwnsInput || quickChatOpen || danceWheelOpen;
+            // Sept 7 item 1 (contract 7 / 1-1a): a backdropless modal is topmost
+            // by definition, so while one is up every popup's bypass handlers
+            // are inert as well. Single writer, beside ModalBlockInput's.
+            ClickHandler.BypassSuspended = BackdroplessModalOpen;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -1847,6 +1912,11 @@ namespace CompetitiveRounds
         public static void ClearCardHoverRegions()
         {
             _cardHoverRegions.Clear();
+            // Sept 6 item a, review a-M2: the profile-card name targets are NOT cleared
+            // here. The FFA and 2v2 boards register their names and then call this to
+            // re-register the recent-row hovers, which erased the names a moment after
+            // registration. Name targets are cleared on tab switch (NativeUI.SwitchTab)
+            // and page teardown (ProfileCard.Teardown); refreshes re-register by component.
             _scoreGraphRegions.Clear();
             _fpsGraphRegions.Clear();
         }
@@ -1963,7 +2033,7 @@ namespace CompetitiveRounds
         }
 
         // Rotated-texture line segment — IMGUI has no native line primitive.
-        private static void GuiLine(Vector2 a, Vector2 b, Color color, float width)
+        internal static void GuiLine(Vector2 a, Vector2 b, Color color, float width)
         {
             var prev = GUI.color;
             GUI.color = color;
@@ -3190,6 +3260,39 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(x, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
             GUI.DrawTexture(new Rect(x + w - 1, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
 
+            // Sept 6 (bug 329): the half-spawned variant — our player is in, another
+            // fighter's never appeared. Same frame, different title, different exits:
+            // Requeue only in the vanilla quick-match context, Return to menu always.
+            if (GameStateWatcher.HalfSpawnedRoom)
+            {
+                GUI.Label(new Rect(x + 14, y + 8, w - 28, 22),
+                          I18n.Tr("<color=#FFD080>The other player has not joined the game yet</color>"),
+                          stuckTitleStyle);
+                GUI.Label(new Rect(x + 14, y + 32, w - 28, 50),
+                          I18n.TrF("<color=#CCCCCC>Players in: <b>{0}</b>. Your player is in, but the other player has not pressed Jump to join — their game may be unfocused or stuck on its ready prompt. Leaving here costs nothing: no match has started.</color>", GameStateWatcher.HalfSpawnedCounts),
+                          stuckTextStyle);
+                float bx = x + 14;
+                if (GameStateWatcher.InVanillaQuickmatch())
+                {
+                    if (GUI.Button(new Rect(bx, y + h - 38, 150, 28), I18n.Tr("Requeue"), stuckButtonStyle))
+                    {
+                        GameStateWatcher.RequestQuickplayRecovery(true);
+                        GameStateWatcher.DismissMatchFoundStuckOverlay();
+                    }
+                    bx += 160f;
+                }
+                if (GUI.Button(new Rect(bx, y + h - 38, 170, 28), I18n.Tr("Return to menu"), stuckButtonStyle))
+                {
+                    GameStateWatcher.RequestQuickplayRecovery(false);
+                    GameStateWatcher.DismissMatchFoundStuckOverlay();
+                }
+                if (GUI.Button(new Rect(x + w - 174, y + h - 38, 160, 28), I18n.Tr("Dismiss (1 min)"), stuckButtonStyle))
+                {
+                    GameStateWatcher.DismissMatchFoundStuckOverlay();
+                }
+                return;
+            }
+
             int secs = GameStateWatcher.SecondsInUnstartedRoom;
             GUI.Label(new Rect(x + 14, y + 8, w - 28, 22),
                       I18n.Tr("<color=#FFD080>Match-found screen might be stuck</color>"),
@@ -3781,67 +3884,16 @@ namespace CompetitiveRounds
 
         // ── In-game chat overlay ─────────────────────────────────
         // Persistent left-side panel so players see messages without opening F5.
-        // Hidden while F5 is open (NativeUI has its own full log) and behind the
-        // consent modal.
-        private static GUIStyle ingameChatStyle;
-
-        // Item 7: lines were drawn into a fixed 20px rect, which clipped
-        // descenders on the bottom row and silently cut wrapped messages after
-        // the first visual line. Each entry now gets its measured wrapped
-        // height, capped at CHAT_MAX_WRAP_LINES with an explicit indicator.
-        private const int CHAT_MAX_WRAP_LINES = 3;
-        private const string CHAT_CUT_SUFFIX = " ... [see F5]";
-        private struct ChatLineLayout { public string Disp; public float H; }
-        private static readonly Dictionary<string, ChatLineLayout> chatLayoutCache =
-            new Dictionary<string, ChatLineLayout>();
+        // Hidden while the F5 Home chat pane is up (it shows the full log) and
+        // behind the consent modal. Bug 333: rendered by ChatOverlayTmp (TMP).
+        // Bug 333: the panel is TextMeshPro now — measurement, the 3-line cut
+        // with its "[see F5]" indicator and the drawing live in ChatOverlayTmp.
+        // This file keeps the gates, the fade math and the two scratch buffers
+        // below (OnGUI runs several times per rendered frame, #162, so they are
+        // reused rather than allocated).
         private static readonly List<NativeUI.ChatEntry> _chatEntryScratch =
             new List<NativeUI.ChatEntry>(8);
-        private static ChatLineLayout[] _chatLayoutScratch = new ChatLineLayout[8];
         private static float[] _chatAlphaScratch = new float[8];
-
-        private static ChatLineLayout MeasureChatLine(string line, float w)
-        {
-            ChatLineLayout cached;
-            if (chatLayoutCache.TryGetValue(line, out cached)) return cached;
-            if (chatLayoutCache.Count > 256) chatLayoutCache.Clear();
-
-            float maxH = ingameChatStyle.lineHeight * CHAT_MAX_WRAP_LINES + 4f;
-            var layout = new ChatLineLayout { Disp = line };
-            layout.H = ingameChatStyle.CalcHeight(new GUIContent(line), w);
-            if (layout.H > maxH)
-            {
-                // Too tall even at 3 wrapped lines: trim until it fits with the
-                // indicator appended. Never cut before the last rich-text tag
-                // (name/title markup lives at the head; only the plain message
-                // tail is trimmable — user-typed <> are converted to parens
-                // upstream by NativeUI.Escape, so '>' only appears in our own
-                // markup), and binary-search so the once-per-entry cost stays
-                // trivial.
-                int minCut = line.LastIndexOf('>') + 1;
-                if (minCut < 1) minCut = 1;
-                if (minCut >= line.Length - 1)
-                {
-                    // Nothing trimmable after the markup (markup-final line):
-                    // keep the full measured height rather than appending a
-                    // false truncation indicator to an uncut line.
-                    chatLayoutCache[line] = layout;
-                    return layout;
-                }
-                int lo = Math.Min(minCut + 1, line.Length), hi = line.Length, best = lo;
-                while (lo <= hi)
-                {
-                    int mid = (lo + hi) / 2;
-                    string candidate = line.Substring(0, mid).TrimEnd() + CHAT_CUT_SUFFIX;
-                    if (ingameChatStyle.CalcHeight(new GUIContent(candidate), w) <= maxH)
-                    { best = mid; lo = mid + 1; }
-                    else hi = mid - 1;
-                }
-                layout.Disp = line.Substring(0, best).TrimEnd() + CHAT_CUT_SUFFIX;
-                layout.H = ingameChatStyle.CalcHeight(new GUIContent(layout.Disp), w);
-            }
-            chatLayoutCache[line] = layout;
-            return layout;
-        }
 
         // ── Chat overlay mode: ONE key cycles three states (bugs 211 + 213) ──
         // Sid's chosen design, M cycles:
@@ -3920,7 +3972,7 @@ namespace CompetitiveRounds
         // ── "chat muted" marker, published to the room (bug 213) ──────────
         // A courtesy indicator, NOT a capability gate: it carries no gameplay
         // meaning, so eventual consistency is fine and it does not need the
-        // pre-join staging discipline (#287) that cr_pois2 / cr_grow1 do.
+        // pre-join staging discipline (#287) that cr_pois2 / cr_grow2 do.
         internal const string CHAT_MUTE_PROP = "cr_cmute";
         private static string chatMuteLine = "";
         private static float chatMuteLineCachedAt = -999f;
@@ -4056,15 +4108,16 @@ namespace CompetitiveRounds
             try
             {
                 if (BroadcastMode.IsBroadcastIdentity
-                    && Plugin.BroadcastHideChatPane != null && Plugin.BroadcastHideChatPane.Value) return;
+                    && Plugin.BroadcastHideChatPane != null && Plugin.BroadcastHideChatPane.Value)
+                { ChatOverlayTmp.Hide(); return; }
             }
             catch { }
             // Bug 211/213: Muted is stored AS ShowIngameChat=false, so this is
             // the same predicate the old guard used — one state for both the
             // Settings toggle and the M hotkey.
             var chatMode = CurrentChatOverlayMode();
-            if (chatMode == ChatOverlayMode.Muted) return;
-            if (!Plugin.DataConsentGranted) return;
+            if (chatMode == ChatOverlayMode.Muted) { ChatOverlayTmp.Hide(); return; }
+            if (!Plugin.DataConsentGranted) { ChatOverlayTmp.Hide(); return; }
             /* Aug 7 item 3: the old `if (NativeUI.IsOpen) return;` assumed "the
              * F5 chat panel covers this" — true only on the Home tab. Now chat
              * stays visible on every OTHER menu tab, repositioned to the right
@@ -4072,22 +4125,11 @@ namespace CompetitiveRounds
              * tables. Display-only IMGUI (no input path), so #141/#200 are
              * moot; IMGUI paints above the uGUI page, and DrawUI order keeps
              * every modal painting above THIS. */
-            if (NativeUI.HomeChatPaneVisible) return;  // the Home tab chat pane covers this
+            if (NativeUI.HomeChatPaneVisible) { ChatOverlayTmp.Hide(); return; }  // the Home tab chat pane covers this
 
             NativeUI.CopyChatTail(_chatEntryScratch, 8);
             var entries = _chatEntryScratch;
-            if (entries.Count == 0) return;
-
-            if (ingameChatStyle == null)
-            {
-                ingameChatStyle = new GUIStyle(GUI.skin.label)
-                {
-                    fontSize = 14,
-                    wordWrap = true,
-                    richText = true,
-                    alignment = TextAnchor.UpperLeft,
-                };
-            }
+            if (entries.Count == 0) { ChatOverlayTmp.Hide(); return; }
 
             // Compute alphas first so the backdrop can match the most-visible line.
             var now = DateTime.UtcNow;
@@ -4130,81 +4172,35 @@ namespace CompetitiveRounds
                 alphas[i] = a;
                 if (a > 0.02f) { visibleCount++; if (a > maxAlpha) maxAlpha = a; }
             }
-            if (visibleCount == 0) return;
+            if (visibleCount == 0) { ChatOverlayTmp.Hide(); return; }
 
             // Anchor bottom-left always (Sid, Aug 8: the right-edge menu
             // placement was jarring — chat lives on the left everywhere except
-            // the Home tab, where the dedicated pane shows instead).
-            float w = 440, padding = 6, lineGap = 2;
-            float x = 12;
-
-            // Measure every visible line first so the backdrop matches the
-            // true stacked height (wrapped lines are taller than one row).
-            // Scratch buffer reused across frames — OnGUI runs multiple times
-            // per rendered frame, so a fresh array here would be steady GC
-            // pressure in the in-match hot path.
-            if (_chatLayoutScratch.Length < entries.Count)
-                _chatLayoutScratch = new ChatLineLayout[entries.Count];
-            var layouts = _chatLayoutScratch;
-            float totalH = 0f;
-            for (int i = 0; i < entries.Count; i++)
-            {
-                if (alphas[i] <= 0.02f) continue;
-                layouts[i] = MeasureChatLine(entries[i].Line, w);
-                totalH += layouts[i].H + lineGap;
-            }
+            // the Home tab, where the dedicated pane shows instead). Bug 333:
+            // the panel itself is TextMeshPro (ChatOverlayTmp) — the same text
+            // system as the F5 pane, so emoji and non-Latin glyphs render
+            // through the OS fallback chain instead of as boxes. This method
+            // keeps every gate above and the fade math; it only hands the
+            // lines over, newest first (entries[last] is the bottom row).
+            //
             // Bug 213: who in this room has chat muted, as a dim header row
             // inside the same panel (Sid picked the chat panel as the place
             // for the indicator). "" whenever nobody is muted or we are not in
-            // an online room, and the row is then omitted entirely.
-            // SCOPE, stated so nobody mistakes this for a persistent HUD
-            // element: it is an annotation ON the chat panel, so it appears
-            // only while the panel itself is up (there is recent, still-
-            // visible chat and this seat is not Muted). The always-available
-            // surface is the F5 Home chat pane, which renders the same string
-            // from MutedPlayersLine().
+            // an online room, and the row is then omitted entirely. SCOPE: an
+            // annotation ON the chat panel, so it appears only while the panel
+            // itself is up; the always-available surface is the F5 Home chat
+            // pane, which renders the same string from MutedPlayersLine().
             string muteLine = MutedPlayersLine();
-            var muteLayout = default(ChatLineLayout);
-            bool hasMuteLine = muteLine.Length > 0;
-            if (hasMuteLine)
-            {
-                muteLayout = MeasureChatLine(muteLine, w);
-                totalH += muteLayout.H + lineGap;
-            }
-            float panelH = totalH - lineGap + padding * 2;
-            float yBottom = Screen.height - 90;   // above FPS/ping overlay, clear of HUD
-            float yTop = yBottom - panelH;
-
-            GUI.DrawTexture(new Rect(x - 4, yTop, w + 8, panelH),
-                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
-                new Color(0, 0, 0, 0.55f * maxAlpha), 0, 0);
-
-            // Render newest-at-bottom. entries[last] is newest. The y cursor
-            // walks upward by each line's own measured height, so every row —
-            // including the bottom one — gets its full rect (no clipped
-            // descenders).
-            float yCursor = yBottom - padding;
+            ChatOverlayTmp.Begin();
             for (int i = entries.Count - 1; i >= 0; i--)
             {
                 float a = alphas[i];
                 if (a <= 0.02f) continue;
-                var prev = GUI.contentColor;
-                GUI.contentColor = new Color(1f, 1f, 1f, a);
-                yCursor -= layouts[i].H;
-                GUI.Label(new Rect(x, yCursor, w, layouts[i].H), layouts[i].Disp, ingameChatStyle);
-                GUI.contentColor = prev;
-                yCursor -= lineGap;
+                ChatOverlayTmp.Add(entries[i].Line, a, Color.white);
             }
-            if (hasMuteLine)
-            {
-                // Top row of the panel — the cursor has already walked past
-                // every message, so this lands exactly at yTop + padding.
-                var prevC = GUI.contentColor;
-                GUI.contentColor = new Color(0.72f, 0.76f, 0.84f, maxAlpha * 0.75f);
-                yCursor -= muteLayout.H;
-                GUI.Label(new Rect(x, yCursor, w, muteLayout.H), muteLayout.Disp, ingameChatStyle);
-                GUI.contentColor = prevC;
-            }
+            if (muteLine.Length > 0)
+                ChatOverlayTmp.Add(muteLine, maxAlpha * 0.75f, new Color(0.72f, 0.76f, 0.84f));
+            ChatOverlayTmp.End(0.55f * maxAlpha);
         }
 
         // ── Admin prompt (IMGUI overlay) ─────────────────────────
@@ -4256,6 +4252,29 @@ namespace CompetitiveRounds
             confirmMessage = message ?? "Are you sure?";
             confirmOnYes = onYes;
             confirmOpen = true;
+        }
+
+        /// <summary>Sept 7 item 1 — read-only views for MailUI and NativeUI's
+        /// utility popup: the composer yields under a confirm (contract 7 /
+        /// 1-1b); the popup's backdrop self-vetoes while a prompt is up.</summary>
+        public static bool ConfirmOpen => confirmOpen;
+        public static bool PromptOpen => confirmOpen || playerSearchOpen;
+        /// <summary>MailUI.OnPopupClosed: the resets DrawConfirm / DrawPlayerSearch
+        /// perform when the page is not open, callable. The callback reference
+        /// is nulled with the flag, so a cancelled prompt cannot fire later.</summary>
+        public static void CancelPrompts()
+        {
+            confirmOpen = false; confirmOnYes = null;
+            playerSearchOpen = false; playerSearchOnPick = null;
+        }
+        /// <summary>NativeUI.Tick, Escape with a utility popup open: a confirm
+        /// answers No, the recipient picker cancels; true when one was consumed.
+        /// Runs in Update, before the IMGUI draw would see the same press.</summary>
+        public static bool ConsumePromptEscape()
+        {
+            if (confirmOpen) { confirmOpen = false; confirmOnYes = null; return true; }
+            if (playerSearchOpen) { playerSearchOpen = false; playerSearchOnPick = null; return true; }
+            return false;
         }
 
         private static void DrawConfirm()
@@ -5953,6 +5972,12 @@ namespace CompetitiveRounds
             sb.AppendLine();
             sb.AppendLine($"===== Unity Player.log [{UnityLogPath() ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
             sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
+            // Bug 337: the audio self-check rides at the END of the bundle.
+            // SubmitBugReport keeps the tail-most window of the text, so a
+            // block at the head could be trimmed away with the oldest log.
+            sb.AppendLine();
+            sb.AppendLine("===== audio self-check (at submit) =====");
+            sb.AppendLine(AudioSelfCheck.Snapshot());
             return sb.ToString();
         }
 
@@ -6592,7 +6617,9 @@ namespace CompetitiveRounds
                 // Aug 23 r2: the Info library search field, same contract.
                 || infoSearchFocused
                 // Aug 31: the Card Stats search field, same contract.
-                || cardStatsSearchFocused) { quickChatOpen = false; DwClose(); CloseChatInput(discardDraft: false); return; }
+                || cardStatsSearchFocused
+                // Sept 6: the mail composer's subject/body fields, same contract (design B-4).
+                || MailUI.AnyFieldFocused) { quickChatOpen = false; DwClose(); CloseChatInput(discardDraft: false); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -6748,7 +6775,7 @@ namespace CompetitiveRounds
                 }
                 else if (ev.keyCode == KeyCode.Tab)
                 {
-                    // Tab no longer cycles (Shift does), but keep swallowing it:
+                    // Tab no longer cycles (a tap of Alt does), but keep swallowing it:
                     // unconsumed, IMGUI treats Tab as focus navigation and would
                     // yank the caret out of the box mid-message.
                     ev.Use();
@@ -7099,7 +7126,8 @@ namespace CompetitiveRounds
             if (chatInputOpen || AnyModalOwnsInput || quickChatOpen
                 || compareSearchFocused || lbSearchFocused
                 || histSearchFocused || infoSearchFocused
-                || pickerSearchFocused || cardStatsSearchFocused) { DwClose(); return; }
+                || pickerSearchFocused || cardStatsSearchFocused
+                || MailUI.AnyFieldFocused) { DwClose(); return; }
             if (IsVanillaChatTyping()) { DwClose(); return; }
 
             var ev = Event.current;
@@ -7238,9 +7266,66 @@ namespace CompetitiveRounds
                         ScaleMode.StretchToFill, true, 0, new Color(0.10f, 0.08f, 0.14f, 0.72f), 0, 0);
                 int di = dwIds[i];
                 string label = di >= 0 && di < DanceEmotes.Defs.Length ? I18n.Tr(DanceEmotes.Defs[di].Name) : "?";
+                // Bug 341: the highlighted slice also says how long it locks you.
+                if (hi && di >= 0 && di < DanceEmotes.Defs.Length)
+                    label += " <size=11><color=#C8B0C0>" + DanceEmotes.Defs[di].Duration.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " s</color></size>";
                 GUI.Label(new Rect(lx - 100f, ly - 16f, 200f, 32f),
                           hi ? $"<color=#FFFFFF>{label}</color>" : $"<color=#E0C8D8>{label}</color>",
                           hi ? qcLabelHiStyle : qcLabelStyle);
+            }
+        }
+
+        // ── Bug 341: countdown ring over the LOCAL dancer ───────────────────
+        // Only the dancing seat sees it (Sid's constraint): the predicate is
+        // DanceEmotes' local install key, never a remote actor. IMGUI, Repaint
+        // only, projected with the spawn spotlight's world->screen recipe so
+        // it follows the body and shrinks with the camera zoom. The ring
+        // empties clockwise from 12 o'clock as the dance runs out. No cooldown
+        // bar: SEND_THROTTLE_S (2.5 s) is shorter than every dance (4-6 s), so
+        // the only moment a send can be throttled is while this ring shows.
+        private const int RING_SEGMENTS = 40;
+
+        private static void DrawDanceCountdown()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            try
+            {
+                float remaining, duration; Transform body;
+                if (!DanceEmotes.TryGetLocalDanceProgress(out remaining, out duration, out body) || duration <= 0f) return;
+                Camera cam = null;
+                try { cam = MainCam.instance != null ? MainCam.instance.cam : Camera.main; } catch { }
+                if (cam == null) return;
+                Vector3 sp = cam.WorldToScreenPoint(body.position);
+                if (sp.z < 0f) return;
+                // Body radius in pixels, the spotlight's way: half the ~1.06-unit body.
+                Vector3 up = cam.WorldToScreenPoint(body.position + cam.transform.up * 0.53f);
+                float playerR = Vector2.Distance(new Vector2(sp.x, sp.y), new Vector2(up.x, up.y));
+                if (playerR < 6f) playerR = 6f;
+                float cx = sp.x;
+                float cy = Screen.height - sp.y - playerR * 2.6f;   // IMGUI y is top-down; sit above the head
+                float r = Mathf.Clamp(playerR * 0.55f, 7f, 22f);
+                float frac = Mathf.Clamp01(remaining / duration);
+                DrawRing(cx, cy, r, 1f, new Color(0.10f, 0.08f, 0.14f, 0.55f), 3.5f);      // track
+                DrawRing(cx, cy, r, frac, new Color(1f, 0.78f, 0.94f, 0.92f), 2f);         // remaining, wheel pink
+            }
+            catch (Exception ex) { VanillaFixSupport.DiagLimited("DanceCountdown", "draw failed: " + ex.Message, 3); }
+        }
+
+        /// <summary>An arc covering <paramref name="frac"/> of a turn, clockwise
+        /// from 12 o'clock, as GuiLine segments (IMGUI has no arc primitive).</summary>
+        private static void DrawRing(float cx, float cy, float r, float frac, Color color, float width)
+        {
+            frac = Mathf.Clamp01(frac);
+            int segs = Mathf.CeilToInt(RING_SEGMENTS * frac);
+            if (segs <= 0) return;
+            float step = 2f * Mathf.PI / RING_SEGMENTS;
+            var prev = new Vector2(cx, cy - r);
+            for (int i = 1; i <= segs; i++)
+            {
+                float a = i == segs ? 2f * Mathf.PI * frac : step * i;   // exact end point
+                var next = new Vector2(cx + Mathf.Sin(a) * r, cy - Mathf.Cos(a) * r);
+                GuiLine(prev, next, color, width);
+                prev = next;
             }
         }
 
@@ -7328,7 +7413,8 @@ namespace CompetitiveRounds
                 || histSearchFocused
                 || infoSearchFocused
                 || pickerSearchFocused
-                || cardStatsSearchFocused) { QcClose(); return; }
+                || cardStatsSearchFocused
+                || MailUI.AnyFieldFocused) { QcClose(); return; }
             if (IsVanillaChatTyping()) { QcClose(); return; }
 
             bool inRoom = false;
@@ -7716,6 +7802,76 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(6, 4, fpsLabelWidth, 18), fpsLabel, fpsStyle);
         }
 
+        // ── Head-to-head banner (Release B §1) ──────────────────────────────
+        // One line directly under the corner label for the first 10 s after
+        // H2HSummary is Ready — "vs NAME · Last played 3 days ago · H2H 12-8 ·
+        // Ranked series 4" or "First time playing NAME". The text is cached in
+        // H2HSummary (rebuilt only on a catalogue change); richText is OFF so
+        // the server-returned name can carry no markup into the label.
+        private static GUIStyle h2hBannerStyle;
+
+        private static void DrawH2HBanner()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            // Whole body guarded: DrawUI has no outer try/catch (#255).
+            try
+            {
+                string text = H2HSummary.BannerLine;
+                if (string.IsNullOrEmpty(text)) return;
+                if (h2hBannerStyle == null)
+                {
+                    h2hBannerStyle = new GUIStyle(GUI.skin.label);
+                    h2hBannerStyle.fontSize = 12;
+                    h2hBannerStyle.fontStyle = FontStyle.Bold;
+                    h2hBannerStyle.richText = false;
+                    h2hBannerStyle.normal.textColor = new Color(0.85f, 0.85f, 0.85f, 0.9f);
+                }
+                GUI.Label(new Rect(6, 22, 900, 20), text, h2hBannerStyle);
+            }
+            catch { }
+        }
+
+        // ── Lag notices (Release B §4, bug 332) ───────────────────────────────
+        // A "network notices" stack directly under the corner FPS/ping label:
+        // one grey line per active state (LagNotices.ActiveLines, at most
+        // four), same style as the label, never the toast slot. The lines are
+        // rebuilt at window close only, so Repaint reads one array reference.
+        // Gates: the [Network] LagNotices setting, never the broadcast identity
+        // (hidden there regardless of the setting, §9 Q3), never a spectator;
+        // the plain-1v1 fighter gate is applied where the lines are produced.
+        // Rect registered in the avoided-rects comment above NOTIF_SET_BASE_Y.
+        private static GUIStyle lagNoticeStyle;
+
+        private static void DrawLagNotices()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            try
+            {
+                // Once per process (a bool check after that): binds the
+                // setting-off edge and the [Network] LagNoticesSelfTest run —
+                // BEFORE the setting gate, so the self-test's log lines are the
+                // positive signal on seats where the HUD itself never draws.
+                LagNotices.EnsureStartup();
+                if (Plugin.LagNoticesEnabled == null || !Plugin.LagNoticesEnabled.Value) return;
+                if (BroadcastMode.IsBroadcastIdentity) return;
+                if (RoomActors.LocalIsSpectator) return;
+                var lines = LagNotices.ActiveLines;
+                if (lines == null || lines.Length == 0) return;
+                if (lagNoticeStyle == null)
+                {
+                    lagNoticeStyle = new GUIStyle(GUI.skin.label);
+                    lagNoticeStyle.fontSize = 11;
+                    lagNoticeStyle.normal.textColor = new Color(0.5f, 0.5f, 0.5f, 0.7f);
+                }
+                int n = Math.Min(lines.Length, LagNotices.MAX_LINES);
+                // Sits under the H2H banner (y=22, 10 s) while that is visible, else directly under the corner label.
+                int lagBaseY = 24 + (string.IsNullOrEmpty(H2HSummary.BannerLine) ? 0 : 20);
+                for (int i = 0; i < n; i++)
+                    GUI.Label(new Rect(6, lagBaseY + 16 * i, 640, 16), lines[i], lagNoticeStyle);
+            }
+            catch { }
+        }
+
         // ── Music credit line (music feature §7) ────────────────────────────
         // One small grey line, bottom-left, same visual weight as DrawFPS.
         // Two gates share it: the broadcast seat's permanent attribution
@@ -7983,6 +8139,14 @@ namespace CompetitiveRounds
         //   spectator roster   : x Screen.width-420.., Screen.height-28 .. -6
         //   F5 menu bottom bar : a 26px row at roughly Screen.height - 30
         //   debug input overlay: Screen.height - 14
+        //   lag notices        : x 6..646, y 24..88 — or y 44..108 while the
+        //                        H2H banner (y 22..42, 10 s) is up, which the
+        //                        stack sits under via lagBaseY (r3 L8); up to
+        //                        four 16px grey lines under the FPS/ping label; opt-in
+        //                        [Network] LagNotices, plain-1v1 fighter seats
+        //                        only, never the broadcast identity; drawn right
+        //                        after DrawFPS, so every later overlay paints
+        //                        over it — Release B §4.)
         //   music credit line  : x 12.., Screen.height-26 .. -8 (one ~18px
         //                        grey line, width follows the label; broadcast
         //                        attribution / opt-in now-playing toast; drawn

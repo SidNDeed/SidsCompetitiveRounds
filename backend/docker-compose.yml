@@ -85,6 +85,25 @@ services:
       # check reads as PRIMARY. Never write SCR_REPLICA_MODE=0 into a .env:
       # os.getenv would return the string "0", which is truthy.
       SCR_REPLICA_MODE: ${SCR_REPLICA_MODE:-}
+      # M4 arming switches. Same rule as SCR_REPLICA_MODE above and for the same
+      # reason: without these lines the keys reach compose for interpolation and
+      # never reach the process, so `os.getenv` returns "" forever and both
+      # fences ship permanently inert with every log line looking normal
+      # (#438/#443). Both default to empty = OFF.
+      #
+      # DC_REQUIRE_VERIFIED_SEAT: a disconnect reported before any game in the
+      # series finished requires the accused's own session-verified live-points
+      # post, with NO fallback for accounts that have never held a verified
+      # session. Only arm it once verified sessions are broadly held — 162 of
+      # 4663 accounts have ever held one — or genuine reports start failing.
+      DC_REQUIRE_VERIFIED_SEAT: ${DC_REQUIRE_VERIFIED_SEAT:-}
+      # LIVE_POINTS_REFUSE_MISMATCHED_SEAT: refuse a live-points post whose
+      # session token names a different player than the post claims. It does NOT
+      # make posts caller-bound — a post carrying no token at all is still
+      # accepted, because refusing those would break the betting cutoff for
+      # every client without a verified session. Narrow and safe: no honest
+      # client can produce the case it refuses.
+      LIVE_POINTS_REFUSE_MISMATCHED_SEAT: ${LIVE_POINTS_REFUSE_MISMATCHED_SEAT:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`

@@ -67,12 +67,13 @@ Concretely: with one GROW, `scale × multiplier = 4`, so the exponent over a ful
 | 30  | ×82   | ×5,371 | ×285,016 |
 | 60  | ×9.4  | ×85    | ×737 |
 | 100 | ×3.9  | ×14.9  | ×56.6 |
+| 120 | ×3.1  | ×9.6   | ×30.0 |
 | 144 | ×2.6  | ×6.6   | ×16.8 |
 | 240 | ×1.8  | ×3.1   | ×5.5 |
 | 400 | ×1.4  | ×2.0   | ×2.8 |
 
 A cleaner way to say the same thing: **at 60 FPS you reached full-range Grow damage
-in a quarter of the distance** a 240 FPS player needed. At 30 FPS, in an eighth of
+in half the distance** a 120 FPS player needed. At 30 FPS, in a quarter of
 it. Growth per unit of distance flown scaled directly with your frame time.
 
 Two consequences worth knowing:
@@ -104,7 +105,7 @@ the next power:
 
 > **N copies of GROW = (one-copy multiplier) ^ N**
 
-Check it against the table: at 240 FPS one GROW is ×1.76, and 1.76² = 3.11, 1.76³ = 5.47.
+Check it against the table: at 120 FPS one GROW is ×3.11, and 3.11² = 9.65, 3.11³ = 30.0.
 Exactly the 2- and 3-copy columns. That's why stacked Grow feels so absurd — it's not
 additive, it's a power.
 
@@ -129,21 +130,26 @@ buffed to 90 is 810. The rate is fixed; the base it multiplies is not.
 ## 5. What Sid's Competitive Rounds changes
 
 The mod replaces the single `frametime` read inside `TrickShot` with a fixed constant:
-`0.85 / 240` — one frame at 240 FPS. Nothing else in the card is touched. The 40-unit
+`0.85 / 120` — one frame at 120 FPS (it was `0.85 / 240` until the Sept 8 batch). Nothing else in the card is touched. The 40-unit
 window, the stacking behaviour, slow-motion pausing growth, the sound, the trail — all
 still vanilla.
 
-The result is that **every player gets what a 240 FPS player used to get**, regardless
+The result is that **every player gets what a 120 FPS player used to get**, regardless
 of the frame rate they actually run:
 
 | Copies of GROW | Normalized multiplier (full 40-unit flight) |
 |---|---|
-| 1 | ×1.76 |
-| 2 | ×3.11 |
-| 3 | ×5.47 |
+| 1 | ×3.11 |
+| 2 | ×9.65 |
+| 3 | ×30.0 |
 
 Growth is now purely a function of how far the bullet flew. At shorter ranges you get
-proportionally less — roughly ×1.15 at 10 units, ×1.33 at 20, ×1.53 at 30, ×1.76 at 40.
+proportionally less — roughly ×1.33 at 10 units, ×1.76 at 20, ×2.34 at 30, ×3.11 at 40.
+
+The reference was 240 FPS (×1.76 for one copy) until the Sept 8 batch. The clock
+rides a room capability key that changes with it, so a client on the old clock and
+a client on the new one sharing a room both fall back to vanilla growth rather than
+pinning two different clocks in the same fight.
 
 The card is still strong and still rewards long shots and stacking. It just no longer
 pays you for having a worse computer.
@@ -201,6 +207,12 @@ Everything above was read out of the shipped game rather than inferred:
 | per-frame formula, 40-unit cutoff | `TrickShot.Update` |
 | how `scale` is set at spawn | `Gun.cs` projectile-object attach block |
 | `frametime = Time.deltaTime × 0.85` | `TimeHandler.Update` |
+
+Re-verified 2026-09-08 by reading the serialized `TrickShot` component straight out of
+`sharedassets0.assets` (the one instance in the game, path id 11248): `muiltiplier = 4.0`,
+`removeAt = 40.0`. The C# field defaults (`1f`, `30f`) are what a decompile shows and are
+NOT what ships; the in-game article and the code comments were corrected to these
+constants in the same pass.
 
 Multipliers in the tables are the real frame-by-frame product (which also accounts for
 the engine clamping bullet movement to 0.02 s per frame), not just the exponential

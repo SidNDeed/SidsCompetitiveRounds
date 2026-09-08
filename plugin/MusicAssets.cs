@@ -125,6 +125,13 @@ namespace CompetitiveRounds
         // Dedicated immutable release — never /latest/ [F22][G3].
         private const string RELEASE_BASE =
             "https://github.com/SidNDeed/SidsCompetitiveRounds/releases/download/music-" + ASSET_REVISION + "/";
+        // Bug 333 step 2: the colour-emoji atlas rides the same shape - a DEDICATED
+        // immutable release (never /latest/, #458/#474) whose bytes the DLL pins
+        // (EmojiSprites.INDEX_SHA256). Consumed by EmojiSprites; changed bytes =
+        // next revision, never an edit of a published release.
+        internal const string EMOJI_ATLAS_REVISION = "v1";
+        internal const string EMOJI_RELEASE_BASE =
+            "https://github.com/SidNDeed/SidsCompetitiveRounds/releases/download/emoji-atlas-" + EMOJI_ATLAS_REVISION + "/";
 
         private const int DOWNLOAD_ATTEMPTS = 4;       // in-worker transient attempts
         private const float READY_TTL_SECONDS = 5f;    // TierReady revalidation throttle

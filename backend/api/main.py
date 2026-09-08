@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -57,6 +57,7 @@ from schemas import (
     MatchReport,
     MatchResponse,
     PlayerStatsResponse,
+    H2HSummaryResponse,
     QueueJoinRequest,
     QueueDeclineRequest,
     QueuePollResponse,
@@ -96,6 +97,22 @@ from schemas import (
     SpectateLeaseBody,
     SpectateValidateBody,
     AllowSpectatorsBody,
+)
+# Sept 6 Group 4 item a — the mini-profile card's models, imported in their
+# OWN statement on purpose: backend/tests/test_route_manifest_net_seat.py
+# fingerprints a binding by the text of the statement that binds it, so a name
+# added to the shared block above re-fingerprints every route that reaches any
+# schema name (45 handlers to re-review for an import line). Kept apart, the
+# only route whose fingerprint moves is the one that reaches these: h2h_summary.
+from schemas import (
+    H2HProfileBlock,
+    H2HModesBlock,
+    H2HRanked1v1,
+    H2HWinLoss,
+    H2HFfa,
+    H2HOvt,
+    H2HLastMeeting,
+    H2HStreak,
 )
 
 # ── Config from environment ────────────────────────────────────
@@ -186,13 +203,50 @@ def _replica_skip(name: str) -> None:
         _REPLICA_SKIPS_SEEN.add(name)
         print(f"[REPLICA] skipped write path {name!r} "
               f"(read replica; the primary owns this work)")
+
+
+# Retention sweeps that are allowed to fail announce themselves the same way,
+# and for the same reason: a refusal with no trace is invisible, and a line per
+# request buries the log once the cause is persistent. These sweeps are
+# best-effort by design, so this line and the table's own size are the ONLY
+# evidence that one has stopped running.
+_PRUNE_SKIPS_SEEN: set = set()
+
+# Monotonic throttle for the link_codes sweep (see link_discord).
+_link_codes_last_prune = 0.0
+
+
+def _prune_skip(table: str, exc: BaseException) -> None:
+    if table not in _PRUNE_SKIPS_SEEN:
+        _PRUNE_SKIPS_SEEN.add(table)
+        print(f"[PRUNE] retention sweep for {table!r} did not run: "
+              f"{type(exc).__name__}: {exc}")
 # Code-owned deliberately: the old env knob was never used intentionally,
 # .env is opaque to tooling, and a live pin could silently defeat a code
 # change (learning #190's persisted-default class).
 GLICKO2_TAU = 0.6
+# Sept 6 batch (Group 4 item c, migration 299): the series-completion writer
+# stamps its two rating_history snapshots with the series they belong to, so
+# the session report joins the snapshot by IDENTITY instead of a time window.
+# Typed binds (#275/#448); the column is raw-SQL-only, see RatingHistory.
+_RATING_HISTORY_LINK_SQL = """
+    UPDATE rating_history
+       SET series_id = CAST(:sid AS uuid)
+     WHERE id = ANY(CAST(:ids AS uuid[]))
+"""
 GLICKO2_DEFAULT_RATING = float(os.getenv("GLICKO2_DEFAULT_RATING", "1500"))
 GLICKO2_DEFAULT_RD = float(os.getenv("GLICKO2_DEFAULT_RD", "350"))
 GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06"))
+
+# Sept 6 item d: every leaderboard hides players not seen for this many days
+# unless the caller passes include_inactive=true. players.last_seen is written
+# by the 60 s presence ping while the mod runs, so "seen" means "ran the mod".
+# 90 days; env-overridable. Kept an int on purpose: the parameterised boards
+# bind it as CAST(:active_days AS integer) inside make_interval (#448 -- typed
+# binds, never a string-built interval), and the parameter-less podium
+# statements below interpolate it through an f-string, which is safe only
+# because an int renders as digits. Must stay defined ABOVE _PODIUM_QUERY.
+LEADERBOARD_ACTIVE_DAYS = int(os.environ.get("LEADERBOARD_ACTIVE_DAYS", "90"))
 
 # How long a pair's `active` ranked_series stays the "current" one for reuse.
 # A new game between the same two players within this window joins the existing
@@ -394,7 +448,11 @@ PODIUM_TITLES = {
 # ORM lookups compare equal.
 _podium_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 
-_PODIUM_QUERY = """
+# Item d: the same LEADERBOARD_ACTIVE_DAYS filter the boards apply, so the
+# titles and the doubled bonus follow the ACTIVE top 3 (a returning player's
+# first presence ping refreshes last_seen; the next 60 s refresh re-grants).
+# f-string: the constant is an int, so the interpolation renders digits only.
+_PODIUM_QUERY = f"""
     WITH series_stats AS (
         SELECT sub.player_id, COUNT(*) AS total
         FROM (
@@ -423,6 +481,7 @@ _PODIUM_QUERY = """
     LEFT JOIN combined c ON c.player_id = p.id
     WHERE COALESCE(c.total, 0) >= 1
       AND p.deleted_at IS NULL
+      AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
     ORDER BY gr.rating DESC
     LIMIT 3
 """
@@ -583,22 +642,26 @@ PODIUM_TITLES_FFA = {
 _podium_2v2_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 _podium_ffa_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 
-_PODIUM_2V2_QUERY = """
+# Item d: both mode podiums carry the boards' activity filter too (f-string
+# over the int constant, see _PODIUM_QUERY).
+_PODIUM_2V2_QUERY = f"""
     SELECT p.id
       FROM glicko_ratings_2v2 g2
       JOIN players p ON p.id = g2.player_id
      WHERE COALESCE(g2.completed_series, 0) >= 1
        AND p.deleted_at IS NULL
+       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
      ORDER BY g2.rating DESC
      LIMIT 3
 """
 
-_PODIUM_FFA_QUERY = """
+_PODIUM_FFA_QUERY = f"""
     SELECT p.id
       FROM glicko_ratings_ffa g
       JOIN players p ON p.id = g.player_id
      WHERE COALESCE(g.games_played, 0) >= 1
        AND p.deleted_at IS NULL
+       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
      ORDER BY g.rating DESC
      LIMIT 3
 """
@@ -662,6 +725,37 @@ async def _podium_maps_for(db: AsyncSession, skus) -> tuple[dict, dict, dict]:
         (await _podium_map_2v2(db)) if TITLE_PODIUM_2V2_SKU in s else {},
         (await _podium_map_ffa(db)) if TITLE_PODIUM_FFA_SKU in s else {},
     )
+
+
+def _podium_maps_cached(skus) -> tuple[dict, dict, dict]:
+    """READ-ONLY twin of _podium_maps_for for render sites that must not write.
+
+    The refreshing lookups above can grant or revoke the podium cosmetics
+    (_sync_podium_holders) when their 60 s cache has expired; a hover
+    profile card (Sept 6 item a) is a plain read and may not do that on
+    another player's behalf. This returns whatever the three caches hold
+    right now -- the boards refresh them -- and an empty map when a ladder's
+    cache is cold or older than _PODIUM_CACHED_MAX_AGE_S (round 2: a map the
+    boards have not refreshed for that long may name an ex-holder), in which
+    case the title renders by its static name."""
+    s = {x for x in skus if x}
+    now = time.monotonic()
+
+    def usable(cache: dict) -> bool:
+        at = cache.get("at")
+        return isinstance(at, (int, float)) and at > 0 and (now - at) <= _PODIUM_CACHED_MAX_AGE_S
+
+    return (
+        dict(_podium_cache.get("map") or {}) if TITLE_PODIUM_SKU in s and usable(_podium_cache) else {},
+        dict(_podium_2v2_cache.get("map") or {}) if TITLE_PODIUM_2V2_SKU in s and usable(_podium_2v2_cache) else {},
+        dict(_podium_ffa_cache.get("map") or {}) if TITLE_PODIUM_FFA_SKU in s and usable(_podium_ffa_cache) else {},
+    )
+
+
+# How old a podium map a read-only render (the hover card) may still serve:
+# ten refresh periods of the boards' 60 s cache. Beyond it the card shows the
+# title's static name rather than a possibly superseded podium placing.
+_PODIUM_CACHED_MAX_AGE_S = 600.0
 
 
 async def bootstrap_mode_podium_titles(db: AsyncSession) -> None:
@@ -809,6 +903,33 @@ def _group_game_positively_live(group_id) -> bool:
     return at is not None and (time.monotonic() - at) <= IN_MATCH_TTL_SEC
 
 
+# Sept 6 (bug 342 review, Codex Group 2 M1 + L1): the online marker on the four
+# boards, ONE expression. presence_seen_at is stamped only by /presence/ping
+# (the mod's ~60 s heartbeat) -- never by get_or_create_player, which also
+# stamps last_seen for the OTHER participants of a report, so a queued report
+# about an opponent who had already quit lit their dot for up to three
+# minutes. The boards are edge-routed to the streaming standby, whose rows lag
+# the primary: a marker computed there must also require the replica to be
+# current. Every running client pings within 60 s, so while anyone is online
+# the newest replayed commit is never older than that; a replay timestamp
+# older than 90 s means either nobody is online (no dots is correct) or
+# replication is stalled (no dots is the privacy-safe reading: a freshly
+# enabled appear_offline must not be undone by lag). The primary is never in
+# recovery, so the clause is TRUE there. 3 minutes = PRESENCE_TTL_SEC.
+# Residual (r5 M2, accepted): the marker is read on the standby, so a toggle to
+# Appear Offline reaches the boards only once replication delivers it -- at
+# most the 90 s freshness gate late, after which a stalled standby shows no
+# dots at all rather than stale ones. Nothing shorter is available to a
+# replica read; the bound is what the CHANGELOG states.
+_ONLINE_MARKER_SQL = (
+    "(p.presence_seen_at > NOW() - INTERVAL '3 minutes'"
+    " AND p.appear_offline = FALSE"
+    " AND (NOT pg_is_in_recovery()"
+    " OR COALESCE(pg_last_xact_replay_timestamp(), 'epoch'::timestamptz)"
+    " > NOW() - INTERVAL '90 seconds'))"
+)
+
+
 def _presence_is_online(steam_id: str | None) -> bool:
     """True iff this steam_id's MOD CLIENT is running right now (presence ping
     within the TTL). The only uncontaminated liveness signal: players.last_seen
@@ -827,6 +948,490 @@ def _series_pair_filter(pid_a, pid_b):
         and_(RankedSeries.player1_id == pid_a, RankedSeries.player2_id == pid_b),
         and_(RankedSeries.player1_id == pid_b, RankedSeries.player2_id == pid_a),
     )
+
+
+# The bracket states in which a tournament match has been DECIDED. A forfeit or
+# double-forfeit terminal deliberately leaves its RankedSeries active -- bracket
+# status owns that outcome, not series status -- so "the series is still active"
+# is not the same question as "the match is still open", and the two must not be
+# answered by the same column. One tuple, so the two places that ask cannot
+# drift apart.
+#
+# DECIDED and not OPEN, which is the whole point of the tuple:
+#
+#   * 'pending' is the column default (models.py, TournamentMatch.status).
+#     EVERY bracket row starts there. An open-state list is a list somebody has
+#     to remember to add to, and the first draft of this one forgot exactly
+#     that state -- which made a leave in a not-yet-readied tournament match a
+#     permanent refusal, and a permanent refusal is a report the client deletes.
+#   * Enumerating decided states puts the unhandled case on the safe side. A
+#     bracket state added next year is read as still-open, so the report
+#     survives and is judged by the authority, evidence and dedup gates like any
+#     other; the alternative reading deletes it (#276).
+#
+# These four are the same four the rest of main.py already names as decided
+# (the room-binding lookup, the preflight, the pair-history check and the
+# tournament-room resolver). `test_the_decided_states_are_the_ones_the_rest_of_
+# the_server_already_names` holds them together.
+_TM_DECIDED_STATES = ("completed", "forfeit", "double_forfeit", "bye_auto")
+
+
+# Sept 6 (hotfix review r2): the pair lock that closes report_disconnect's
+# supersession window. ONE expression for both sides -- the publisher takes it
+# (blocking) before its grant insert, the report tries it before its final
+# re-ask -- so the two cannot drift apart (#341/#444). LEAST/GREATEST make
+# (a, b) and (b, a) the same key; the ids are passed as text.
+_DC_PAIR_LOCK_KEY_SQL = (
+    "hashtext('dcpair:' || LEAST(CAST(:a AS text), CAST(:b AS text))"
+    " || ':' || GREATEST(CAST(:a AS text), CAST(:b AS text)))")
+
+
+async def _publish_pair_sitting(db, series) -> None:
+    """Record that the server has THIS pair in THIS sitting, as of now.
+
+    ONE function, because the two writes it makes must never diverge. #509 is
+    the entry: the series id and its room binding were two assignments a caller
+    had to remember to write together, and a grep of the two files that looked
+    relevant missed a seventh call site the compiler then found. The same trap
+    is available here -- an activity stamp without a grant is a sitting the
+    freshness bound calls live and the authority record has never heard of.
+
+    The two writes:
+
+      last_activity_at   the freshness bound the LEGACY eligibility arm reads.
+      series_dc_grants   the authority the new arm reads: the server put this
+                         pair here, and here is when it last saw them.
+
+    Both directions of the grant are written, because they are judged
+    separately -- the holder is whoever's report is being weighed, and a lookup
+    should never have to know which side of the pair it is on. Two rows with
+    different primary keys, so the upsert cannot affect one row twice.
+
+    Idempotent by construction: a resume re-stamps `last_seen_at` and the
+    sitting becomes newest again. There is no retire step, and therefore no
+    un-retire step to forget.
+
+    LOCKS. The grant INSERT has foreign keys to `players` and `ranked_series`,
+    so it takes `FOR KEY SHARE` on both referenced rows automatically -- a lock
+    no ordering discipline written in this file can see (#202). Checked rather
+    than assumed, because a new foreign key enrols its parents in every lock
+    graph that touches them:
+
+      * KEY SHARE conflicts with exactly ONE mode, `FOR UPDATE`. Nothing in
+        this codebase takes `FOR UPDATE` on `players`; every participant lock
+        is `FOR NO KEY UPDATE`, which is KEY-SHARE-compatible. So the grant's
+        share on a player row never waits, and cannot be the edge that closes
+        a cycle.
+      * On `ranked_series` the share is redundant: the statement immediately
+        above already holds that row at `FOR NO KEY UPDATE` strength (a plain
+        non-key UPDATE takes exactly that), so the INSERT adds no wait the
+        UPDATE had not already taken.
+
+    The one `FOR UPDATE` on a ranked_series row (the admin restoration path)
+    locks its players FIRST and the series second -- the same direction as
+    every other writer -- so it waits on a publish rather than racing it.
+
+    THE PAIR LOCK (Sept 6, hotfix review r2). `report_disconnect` re-asks
+    whether a newer sitting exists as the last statement of its transaction;
+    a grant committing between that read and its COMMIT was still unobserved.
+    The advisory lock below closes that window: it is keyed on the VALUE of
+    the pair (#207 -- the grant rows may not exist yet when the report asks),
+    taken here BEFORE the grant insert and held to this transaction's commit,
+    and TRIED (never awaited) by the report. So the only transaction that can
+    ever block on it is this publisher, waiting for a report that holds its
+    row locks and has nothing left to wait for -- no cycle. A report that
+    finds it busy refuses with 503 and is retried by the client's outbox.
+    """
+    await db.execute(text(
+        "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
+        {"sid": series.id})
+    await db.execute(text(
+        f"SELECT pg_advisory_xact_lock({_DC_PAIR_LOCK_KEY_SQL})"),
+        {"a": str(series.player1_id), "b": str(series.player2_id)})
+    await db.execute(text(
+        "INSERT INTO series_dc_grants (holder_id, counterparty_id, series_id)"
+        " VALUES (:a, :b, :sid), (:b, :a, :sid)"
+        " ON CONFLICT (holder_id, series_id) DO UPDATE SET last_seen_at = NOW()"),
+        {"a": series.player1_id, "b": series.player2_id, "sid": series.id})
+
+
+async def _newest_grant_series_id(db, holder_id, counterparty_id):
+    """The sitting the server most recently put this pair into, or None.
+
+    The SAME question the eligibility predicate's supersession term asks, asked
+    once and answered in one place. Resolving "the pair's current series" a
+    different way than the predicate judges it is how a room-aware answer and a
+    room-blind answer came to disagree about the same pair.
+
+    Ordered by (last_seen_at, series_id) to match the predicate EXACTLY.
+    `last_seen_at` alone is not unique within a pair -- the backfill stamps each
+    sitting with its own last activity, and `NOW()` is the transaction
+    timestamp -- so a sort on it can tie, and a tie resolved arbitrarily here
+    while the predicate resolves it by series_id is a resolver that hands the
+    judge a sitting the judge will refuse.
+    """
+    row = (await db.execute(text(
+        "SELECT series_id FROM series_dc_grants"
+        " WHERE holder_id = :h AND counterparty_id = :c"
+        " ORDER BY last_seen_at DESC, series_id DESC LIMIT 1"
+    ), {"h": holder_id, "c": counterparty_id})).first()
+    return row[0] if row is not None else None
+
+
+# Which live-points surface an attestation belongs to. There are three, with
+# three different parent tables, which is why series_progress carries a
+# discriminator instead of a foreign key (295).
+SEAT_SURFACE_RANKED = "ranked"
+SEAT_SURFACE_TEAM = "team"
+SEAT_SURFACE_FFA = "ffa"
+
+
+async def _record_seat_attestation(db, surface, subject_id, player_id, verdict,
+                                   observed_points) -> bool:
+    """Record that THIS seat posted an observation of THIS sitting. The ONE
+    writer of series_progress; every live-points surface goes through it.
+
+    `observed_points` is what THIS POST claimed, never what the row now holds.
+    That distinction is the point of the column: the stored series totals are a
+    GREATEST of both seats' posts, so reading them back would re-admit the
+    counterparty-written evidence this table exists to exclude. Kept monotonic
+    per seat, because a seat that once observed two points of play has observed
+    them and a later 0-0 post does not un-observe it.
+
+    Returns whether a row was written, so a caller can gate on the fact rather
+    than infer it from the verdict a second time.
+
+    ONLY a SEAT_VERIFIED post writes a row, and that is the whole design.
+
+    The first draft recorded UNBOUND posts too, with session_verified false, so
+    that the evidence rule would have something to read while verified sessions
+    are rare. That put the forgery straight back: this endpoint's identity is a
+    QUERY PARAMETER signed with a secret every client holds, so an UNBOUND row
+    naming a player is a row the OTHER player could have written. An attestation
+    that the counterparty can write is not a missing answer, it is a wrong one —
+    the same defect class as a column documented as written that nothing writes.
+
+    So the record stays small and true, and the evidence rule handles its own
+    sparsity: it asks for an attestation only from an account that has provably
+    run a ticket-auth client, and falls back to the pre-M4 rule for everyone
+    else. Sparse-and-honest composes; dense-and-forgeable does not.
+
+    A repeat post from the same seat moves last_seen_at and can only RAISE
+    observed_points. There is nothing to un-prove: a seat that attested once in
+    this sitting has attested, and its next post arriving without a token
+    (tokens lapse and are re-minted on a 60s loop) simply records nothing new.
+
+    Never raises. This runs on the betting hot path and an attestation that
+    fails to record must cost the caller nothing — it degrades the DC evidence
+    rule toward its bootstrap arm, never the availability of the write it rides
+    behind. The isolation is a SAVEPOINT and not a bare try/except, because
+    under asyncpg a caught statement error still leaves the whole TRANSACTION
+    aborted (#235): swallowing the exception without one would take down the
+    points write this is supposed to be harmless to, and the 503 it produced
+    would be blamed on betting."""
+    if verdict != SEAT_VERIFIED:
+        return False
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO series_progress"
+                "  (surface, subject_id, player_id, observed_points)"
+                " VALUES (:sf, :sub, :pid, :obs)"
+                " ON CONFLICT (surface, subject_id, player_id) DO UPDATE"
+                "    SET last_seen_at = NOW(),"
+                "        observed_points = GREATEST(series_progress.observed_points,"
+                "                                   EXCLUDED.observed_points)"),
+                {"sf": surface, "sub": subject_id, "pid": player_id,
+                 "obs": int(observed_points or 0)})
+        return True
+    except Exception as ex:
+        print(f"[DC-EVIDENCE] attestation not recorded ({surface}): {type(ex).__name__}")
+        return False
+
+
+# ── the eligibility predicate, in fragments both askers share ──────────────
+#
+# Two statements ask it: the unlocked validation of a NAMED series, and the
+# locked re-ask that holds its answer to the insert (#208). They were two
+# hand-written SQL strings that had drifted apart once already, and two clusters
+# of this review were each rewriting one of them -- applied independently, the
+# second would have overwritten the first. They are now one definition.
+
+# AUTHORITY. The server put this pair into this sitting, and has not since put
+# them into a newer one.
+#
+# The tuple comparison is what makes "newer" TOTAL. `last_seen_at` is not
+# unique within one (holder, counterparty): 294 stamps each backfilled sitting
+# with its own last activity, so two of a pair's sittings whose activity landed
+# in the same instant carry the same value, and `NOW()` is the TRANSACTION
+# timestamp, so any two publishes for one pair inside a single transaction tie
+# exactly. On a tie, "no strictly greater row exists" is true of BOTH rows --
+# the term stops bounding anything and two different sittings are nameable at
+# once. `_newest_grant_series_id` sorts by the same tuple for the same reason:
+# a judge and a resolver that break ties differently disagree about one pair.
+_DC_GRANT_TERM = (
+    "EXISTS (SELECT 1 FROM series_dc_grants g"
+    "         WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
+    "           AND g.series_id = s.id"
+    "           AND NOT EXISTS (SELECT 1 FROM series_dc_grants g2"
+    "                            WHERE g2.holder_id = g.holder_id"
+    "                              AND g2.counterparty_id = g.counterparty_id"
+    "                              AND (g2.last_seen_at, g2.series_id)"
+    "                                > (g.last_seen_at, g.series_id)))")
+
+# COMPATIBILITY. Reachable ONLY for a pair the server has no grant record for
+# at all -- a sitting that predates this table, or one whose publish nobody
+# swept. It extinguishes itself the first time that pair is published.
+#
+# It is not a weaker rule kept for convenience: without it, every pair mid-
+# sitting at deploy time loses its queued reports, which is the deploy-window
+# deletion this arm exists to prevent. Its freshness bound is kept because a
+# pair with no grant has no authority record to lean on, so recency is all
+# there is. The grant arm deliberately has NO clock -- see the docstring on
+# report_disconnect.
+_DC_LEGACY_TERM = (
+    "(NOT EXISTS (SELECT 1 FROM series_dc_grants g3"
+    "              WHERE g3.holder_id = :rp AND g3.counterparty_id = :dp)"
+    " AND (s.completed_at IS NULL"
+    "   OR s.id = (SELECT s2.id FROM ranked_series s2"
+    "               WHERE ((s2.player1_id = :rp AND s2.player2_id = :dp)"
+    "                   OR (s2.player1_id = :dp AND s2.player2_id = :rp))"
+    "               ORDER BY s2.created_at DESC LIMIT 1))"
+    " AND COALESCE(s.last_activity_at, s.created_at)"
+    "     >= NOW() - CAST(:live_window AS interval))")
+
+# BRACKET. A forfeit or double-forfeit terminalises the tournament match and
+# deliberately leaves the RankedSeries active, so every row-shape test above
+# still called such a series nameable and a post-result accusation could be
+# filed against a match that was already decided (r14 MEDIUM 3).
+_DC_BRACKET_TERM = (
+    "NOT EXISTS (SELECT 1 FROM tournament_matches tm"
+    "             WHERE tm.series_id = s.id"
+    "               AND tm.status IN ('completed', 'forfeit',"
+    "                                 'double_forfeit', 'bye_auto'))")
+
+# EVIDENCE. Something has to have happened in the sitting — and, since M4, it
+# has to be something the REPORTING SEAT DID NOT AUTHOR BY ITSELF.
+#
+# The arm this replaces read ranked_series.live_p1_points / live_p2_points. Those
+# columns are written by POST /series/{id}/live-points, which authenticates with
+# a secret every client holds and takes the poster's identity from a QUERY
+# PARAMETER — so "the server's own record that a sitting happened" was a record
+# the accusing seat could write. That is not a corroboration; it is the same
+# claim twice.
+#
+# Two arms. The FIRST is unchanged from before M4; the corroboration lives
+# inside the second, because that is the one the accuser could satisfy alone.
+#
+#   MATCH   a committed match row for the series. Say what this is: it is
+#           authored by ONE seat (the lower Steam id reports matches), so it is
+#           not independent testimony either. What it is instead is expensive
+#           and auditable — it moved both ratings and left a row anyone can
+#           read afterwards — and it is unchanged from the rule that was here
+#           before, so nothing about a finished game gets harder. This arm does
+#           NOT make a leave honest; it makes a leave in a series that visibly
+#           progressed count the way it always has.
+#
+#   THE ACCUSED'S OWN OBSERVATION   for a player who can attest: that player's
+#           own verified posts for this sitting reached the threshold. This is
+#           the arm the item exists for. A leave during game 1 leaves no match
+#           row, so the points sum was the only evidence — and a live-points
+#           post carries a shared HMAC and names its author in a query
+#           parameter, so the reporting seat could write it.
+#
+#           The threshold is asked of series_progress.observed_points, NOT of
+#           ranked_series.live_p*_points. The series columns are a GREATEST of
+#           both seats' posts, so asking them let the accused's single 0-0 post
+#           arm the corroboration while the COUNTERPARTY's posts carried the sum
+#           — presence standing in for observation, which is the substitution
+#           this arm exists to refuse. Narrower than the rule it replaces rather
+#           than merely different: the endpoint GREATESTs the same pair into
+#           those columns, so observed_points >= the threshold implies the
+#           series sum did too.
+#
+# WHY THE CORROBORATION IS SCOPED BY WHETHER THE ACCUSED CAN ATTEST AT ALL.
+# `players.steam_auth_seen_at` is the monotonic per-account arming column
+# _check_steam_session already uses: it is stamped at the first verified mint
+# and never cleared. An account that has provably run a ticket-auth client must
+# corroborate its own game-1 leave; an account that never has falls back to the
+# rule that was already here. That keeps the fence off the ~96% of accounts
+# that cannot yet produce the evidence it asks for (#276/#503 — a rule whose
+# evidence must be EARNED has to say what the not-yet-earned class competes
+# against), and it cannot be worked by the REPORTER, who can neither write the
+# accused's attestation nor clear the accused's arming stamp.
+#
+# WHAT THE ACCUSED CAN DO: an armed account that suppresses its own live-points
+# posts escapes a GAME-1 leave count. It escapes nothing once a game finishes —
+# that is the match arm, and it is why the match arm is not gated the same way.
+#
+# DC_REQUIRE_VERIFIED_SEAT removes the unarmed fallback entirely, so every
+# game-1 leave needs the accused's verified post. It ships OFF and stays off
+# until verified sessions are broadly held (162 of 4663 accounts are armed
+# today; 19 of 308 active players hold a live verified session).
+# Three flat arms rather than a threshold shared between two of them, so each
+# arm names the evidence it stands on and no arm can borrow another's.
+_DC_EVIDENCE_TERM = (
+    "(EXISTS (SELECT 1 FROM matches m WHERE m.series_id = s.id)"
+    " OR EXISTS (SELECT 1 FROM series_progress sp"
+    "             WHERE sp.surface = 'ranked' AND sp.subject_id = s.id"
+    "               AND sp.player_id = :dp"
+    "               AND sp.observed_points >= :min_points)"
+    " OR (NOT CAST(:require_verified_seat AS boolean)"
+    "     AND NOT EXISTS (SELECT 1 FROM players pa"
+    "                      WHERE pa.id = :dp"
+    "                        AND pa.steam_auth_seen_at IS NOT NULL)"
+    "     AND COALESCE(s.live_p1_points, 0)"
+    "         + COALESCE(s.live_p2_points, 0) >= :min_points))")
+
+_DC_ELIGIBLE_TERMS = (
+    "(" + _DC_GRANT_TERM + " OR " + _DC_LEGACY_TERM + ")"
+    " AND " + _DC_BRACKET_TERM +
+    " AND " + _DC_EVIDENCE_TERM)
+
+# The same question with the evidence arm removed. A report that fails only the
+# evidence arm has not been REFUSED — the evidence can arrive seconds later (the
+# disconnect-win match row commits after the report that caused it; the accused's
+# last live-points post is still in flight) — so it must be answered with
+# something the client keeps rather than something it deletes. Built from the
+# same fragments as the full predicate so the two cannot come to disagree about
+# authority, which is the whole reason the fragments exist.
+_DC_AUTHORITY_ONLY_TERMS = (
+    "(" + _DC_GRANT_TERM + " OR " + _DC_LEGACY_TERM + ")"
+    " AND " + _DC_BRACKET_TERM)
+
+
+# The conditions the LOCKED re-ask adds on top of the shared predicate: the row
+# really is this pair's, and its integrity invalidation (if any) is the
+# janitor's own no-match-reported. Both are authority-class, so the diagnostic
+# below has to carry them too — a diagnostic that asks a WIDER question than the
+# statement it is explaining will call a settled refusal retryable.
+_DC_LOCKED_ROW_TERMS = (
+    "((s.player1_id = :rp AND s.player2_id = :dp)"
+    "  OR (s.player1_id = :dp AND s.player2_id = :rp))"
+    " AND (s.invalidated_at IS NULL OR s.invalidation_reason = :exempt)")
+
+
+def _dc_require_verified_seat() -> bool:
+    """Whether the accused's attestation must be session-bound. Read from the
+    environment at call time, like STEAM_AUTH_ENFORCE, so arming it is a restart
+    and not a release."""
+    return os.getenv("DC_REQUIRE_VERIFIED_SEAT", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _live_points_refuse_mismatched_seat() -> bool:
+    """Whether a live-points post whose session token names a DIFFERENT player
+    than the post claims is refused outright.
+
+    NAMED FOR WHAT IT DOES. The first name was REQUIRE_BOUND_SEAT, which
+    overpromised: this does not make a post caller-bound, because a post with no
+    token at all is still accepted. Requiring a bound seat would refuse the
+    betting cutoff for every client without a verified session, which is most of
+    them — that is the same arming sequence DC_REQUIRE_VERIFIED_SEAT waits on,
+    and it is not this switch.
+
+    What it does buy is narrow and safe: no honest client can produce the case
+    it refuses, since the client signs with the id whose token it holds.
+
+    Separate from DC_REQUIRE_VERIFIED_SEAT and separately armable, because the
+    two protect different things: that one decides whether a leave is counted,
+    this one guards a BETTING cutoff, and gold is the consumer that crosses the
+    integrity bar a leave-% does not.
+
+    Ships OFF."""
+    return os.getenv("LIVE_POINTS_REFUSE_MISMATCHED_SEAT", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+async def _seat_gate_for_live_points(request, steam_id: str, db: AsyncSession) -> str:
+    """The transport verdict for a live-points post, plus the one refusal that
+    is armed from it. Three surfaces call this — 1v1, 2v2 and FFA — so the rule
+    is written once and a mismatch cannot come to mean different things on
+    different endpoints (#432: the flag names a line, the defect is a class)."""
+    verdict = await _seat_attestation_verdict(request, steam_id, db)
+    if verdict == SEAT_MISMATCH and _live_points_refuse_mismatched_seat():
+        raise HTTPException(
+            status_code=403,
+            detail="session token does not name the reporting seat")
+    return verdict
+
+
+async def _refuse_named_series(db, series_id, reporter_id, disconnected_id,
+                               detail, row_terms="", extra_binds=None):
+    """Refuse a disconnect report, with the status code its REASON deserves.
+    Always raises.
+
+    Every eligibility failure used to be a 403, and the client treats a 4xx as
+    settled: it deletes the queued report. That is right for an authority
+    failure — the server has put this pair into a newer sitting, or the bracket
+    has decided the match, and no number of retries changes either. It is wrong
+    for an evidence failure, because evidence can still ARRIVE:
+
+      * the accused's own live-points post is in flight, or is being re-sent by
+        their client's retry layer, which keeps running after they leave the
+        Photon room;
+      * the sitting is resumed later and they post again.
+
+    NOT for the reason the first draft gave. That said the disconnect-win match
+    row commits after the report that caused it — it does not: the client emits
+    a leave report only while both scores are below match point, and submits a
+    disconnect win only at match point, so the two are mutually exclusive on the
+    stock client. The claim was wrong and is recorded here rather than quietly
+    dropped, because it was the stated justification for this whole split.
+
+    So this re-asks the same question with the evidence arm removed, from the
+    same fragments the predicate itself is built from, and asks one more thing:
+    whether anything has happened in the sitting recently. Authority satisfied,
+    sitting still live → 503, which the client keeps and re-presents. Authority
+    satisfied but the sitting has been idle past the live window → 403, because
+    evidence for a sitting nothing has happened in for six hours is not coming.
+
+    THAT BOUND IS NOT COSMETIC. The client's twenty-attempt budget is per
+    PROCESS: the outbox persists url and body but reloads with attempts = 0, so
+    a permanently ineligible report gets a fresh twenty attempts on every launch,
+    forever. The server is therefore the only place a doomed report can be
+    settled, and this is where. (Note it is NOT the delivery clock r14 removed
+    from the authority arm — that decided whether a report could be FILED. This
+    decides only how a refusal is spent.)
+
+    A diagnostic that cannot answer says 503, not 403. The two errors are not
+    symmetric: a wrongly settled report is deleted and unrecoverable, a wrongly
+    retried one costs bounded requests and is settled by the idle bound above as
+    soon as the lookup works again.
+
+    The diagnostic is a plain read. At the locked site the caller already holds
+    the row; taking a second, weaker lock on it here would say nothing and the
+    answer is only used to pick a status code for a request that is about to
+    fail either way."""
+    binds = {"sid": str(series_id), "rp": reporter_id, "dp": disconnected_id,
+             "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS}
+    binds.update(extra_binds or {})
+    try:
+        row = (await db.execute(text(
+            # The label exists to be recognised and for no other reason (#306).
+            # This statement is the shared predicate MINUS its evidence arm, so
+            # it is otherwise textually a subset of the two real asks — nothing
+            # in it could identify it that a mutation of the fragments could not
+            # also produce in one of them.
+            "SELECT 1 AS authority_only,"
+            "       (COALESCE(s.last_activity_at, s.created_at)"
+            "        < NOW() - CAST(:live_window AS interval)) AS idle"
+            "  FROM ranked_series s"
+            " WHERE s.id = CAST(:sid AS uuid)"
+            + (("   AND " + row_terms) if row_terms else "") +
+            "   AND " + _DC_AUTHORITY_ONLY_TERMS +
+            " LIMIT 1"
+        ), binds)).first()
+        authority_ok = row is not None
+        idle = bool(row[1]) if row is not None else False
+    except Exception as ex:
+        print(f"[DC] refusal diagnostic failed (kept as retryable): {type(ex).__name__}")
+        authority_ok, idle = True, False
+    if authority_ok and not idle:
+        raise HTTPException(
+            status_code=503,
+            detail="not enough recorded evidence for this sitting yet; retry")
+    raise HTTPException(status_code=403, detail=detail)
 
 
 async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
@@ -3354,6 +3959,23 @@ async def queue_cleanup_loop():
                     print(f"[SPECTATE-CLEANUP] closed {_n} stale game row(s)")
         except Exception as e:
             print(f"[SPECTATE-CLEANUP] sweep error: {e}")
+        # ── Mail retention (Sept 6 item b; migration 297) ────────────────
+        # Own try/except like every arm above (#228). Hourly cadence inside
+        # the 60 s loop: the sweep is bounded DELETEs over indexed columns and
+        # nothing a player can see changes on the minute. The statements live
+        # in _mail_retention_sweep so the boot-time EXPLAIN self-test reaches
+        # them through this call.
+        try:
+            if time.monotonic() >= _MAIL_RETENTION_STATE["next"]:
+                _MAIL_RETENTION_STATE["next"] = time.monotonic() + 3600
+                async with async_session() as db:
+                    _expired, _purged, _hits = await _mail_retention_sweep(db)
+                    await db.commit()
+                    if _expired or _purged or _hits:
+                        print(f"[MAIL-RETENTION] expired {_expired} read envelope(s), "
+                              f"purged {_purged} message(s), pruned {_hits} censor-hit row(s)")
+        except Exception as e:
+            print(f"[MAIL-RETENTION] sweep error: {e}")
         # ── Stranded-bet reconciliation (bet-lifecycle backstop) ────────
         # Wagers can outlive their lobby/series: a closure path without bet
         # handling (the NotNic 500g class), a settle savepoint rollback on a
@@ -3900,6 +4522,11 @@ _RL_SENSITIVE_PREFIXES = (
     # submit route (/api/v1/bug-reports, no slash), which is unauthenticated
     # and already has its own per-steam daily cap.
     "/api/v1/bug-reports/",
+    # In-room head-to-head summary (Release B §1). A literal prefix of its
+    # own because this table matches by startswith: "/api/v1/players/"
+    # would throttle every player read. The trailing slash keeps it from
+    # matching any sibling path.
+    "/api/v1/h2h/",
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
     # Lobby-phase wagers (migration 207). startswith also covers
@@ -5827,6 +6454,11 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # ADVISORY, outside the frozen 7-field HMAC canonical (hard rule #5).
         p1_end_stats=_clean_end_stats(report.player1.end_stats),
         p2_end_stats=_clean_end_stats(report.player2.end_stats),
+        # Sept 6 batch (Group 4 item c, migration 298): the reporter-minted
+        # session id, already a UUID-or-None by the schema. Stored as sent;
+        # ADVISORY, outside the frozen 7-field HMAC canonical, groups nothing
+        # here — the report endpoint resolves sittings from this column only.
+        session_uuid=report.session_uuid,
         **_match_net_seat_values(report, reporter_is_p1),
     )
     db.add(match)
@@ -5911,6 +6543,51 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             series_status="invalidated", series_score="",
             gold_gained=0, gold_bonuses=[],
         )
+
+    # This match was played somewhere, and it was accepted — which is the only
+    # fact this process has about whether a region can actually be reached. The
+    # flagged path above returns before here on purpose, so an invalidated
+    # match contributes nothing. Reporter only: recording the opponent as well
+    # would let one account supply both halves of the two-player bar.
+    #
+    # THE REGION IS NOT READ FROM THE REPORT (r13 HIGH). `report.region` is
+    # outside the seven-field HMAC, so establishing the session proves who is
+    # speaking and nothing about the region named in the sentence. What is read
+    # instead is the region THIS SERVER issued for this room, looked up by the
+    # room id — which the HMAC does cover. A room the server never issued (a
+    # private or tournament room) has no binding and contributes nothing.
+    #
+    # The lookup takes the room name the client DERIVED its report id from as
+    # well as the id itself: the id is the room name plus a per-game suffix, so
+    # the equality test alone never matched anything (r14 HIGH).
+    #
+    # And the row must have been issued to THESE TWO PLAYERS. Recording the
+    # region without the pair meant any accepted report naming the room fed the
+    # map; the pair is what makes the row say "the server sent these two here".
+    #
+    # NOT PUBLISHED YET, either (r13 MEDIUM): the map is process memory and the
+    # match is not committed here. A rollback below would leave a sighting for a
+    # game that was never recorded, and two of those would corroborate a region
+    # on the strength of two failures. The pair is held and noted after commit.
+    _region_sighting = None
+    if _session_was_verified(request) and report.photon_room_id:
+        _rooms = _issued_room_candidates(report.photon_room_id)
+        # Two scalar binds and not an array one. The id as sent and the room
+        # name derived from it are the only two candidates there will ever be,
+        # and a varchar bind is the form the rest of this file uses and this
+        # deploy can actually verify.
+        _issued_region = (await db.execute(text(
+            "SELECT region FROM issued_room_regions"
+            " WHERE (room_name = :room_full OR room_name = :room_base)"
+            "   AND issued_at >= NOW() - CAST(:ttl AS interval)"
+            "   AND player1_id IS NOT NULL AND player2_id IS NOT NULL"
+            "   AND ((player1_id = :pa AND player2_id = :pb)"
+            "     OR (player1_id = :pb AND player2_id = :pa))"
+        ), {"room_full": _rooms[0], "room_base": _rooms[-1],
+            "pa": p1.id, "pb": p2.id,
+            "ttl": "%d seconds" % int(_REGION_SEEN_TTL_SECONDS)})).scalar() if _rooms else None
+        if _issued_region:
+            _region_sighting = (_issued_region, report.reported_by_steam_id)
 
     # Increment games_in_period for both players
     for pid in [p1.id, p2.id]:
@@ -6188,6 +6865,22 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # Link match to series
         match.series_id = series.id
 
+        # ...and stamp the series ACTIVE (r14 MEDIUM 5). The DC path's
+        # freshness bound reads COALESCE(last_activity_at, created_at), and
+        # this path -- the one that proves a game was actually played -- was
+        # the one path that never stamped it. A delayed game-2 report could
+        # advance an old resumable series to 1-1 and then the queued game-3 DC
+        # was refused as stale, with a match row committed seconds earlier in
+        # this same transaction. The contract said accepted reports stamp
+        # activity; nothing did.
+        #
+        # RAW UPDATE, not `series.last_activity_at = ...`: the column is
+        # deliberately NOT declared on the RankedSeries model (see the note
+        # there), so an ORM assignment would land in __dict__, emit no SQL and
+        # raise nothing -- a silent no-op (#346). Same statement as
+        # /queue/ready's both-ready branch and the preflight resume.
+        await _publish_pair_sitting(db, series)
+
         # Increment series wins for the match winner
         if winner.id == series.player1_id:
             series.p1_series_wins += 1
@@ -6378,6 +7071,12 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             gold_gained=0, gold_bonuses=[],
         )
 
+    # Committed. NOW the sighting is real evidence: a game that is on disk, in a
+    # room this server sent two players to. The duplicate branch above returns
+    # before here, because a report that recorded nothing witnesses nothing.
+    if _region_sighting:
+        _note_region_seen(*_region_sighting)
+
     # Trigger Glicko recalculation only when a series completes
     # (for non-ranked matches, Glicko is not affected)
     if series_completed:
@@ -6470,17 +7169,36 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 g2.updated_at = now
 
                 # Save rating history snapshots (powers the Elo-over-time graph)
+                snapshot_ids = []
                 for pid, r, rd, vol in [
                     (p1.id, new_r1, new_rd1, new_vol1),
                     (p2.id, new_r2, new_rd2, new_vol2),
                 ]:
+                    snapshot_id = uuid.uuid4()
+                    snapshot_ids.append(str(snapshot_id))
                     db.add(RatingHistory(
+                        id=snapshot_id,
                         player_id=pid,
                         rating=r,
                         rating_deviation=rd,
                         volatility=vol,
                         period_end=now,
                     ))
+                # Sept 6 batch (Group 4 item c, migration 299): link the two
+                # snapshots to THIS series by identity, so the session report
+                # joins rating_history.series_id instead of guessing from a
+                # time window. Raw SQL under a SAVEPOINT on purpose: the column
+                # is deliberately NOT declared on the model (see RatingHistory),
+                # so a box whose schema predates 299 skips the link here and
+                # keeps the rating update — an ORM column would have failed the
+                # whole Glicko commit in the deploy window (#477/#235).
+                await db.flush()
+                try:
+                    async with db.begin_nested():
+                        await db.execute(text(_RATING_HISTORY_LINK_SQL),
+                                         {"sid": str(series.id), "ids": snapshot_ids})
+                except Exception as _lx:
+                    print(f"[REPORT] rating_history series link skipped: {_lx}")
 
                 # Auto-grant rating achievements (Master / Grand Master) when
                 # either player crosses a threshold on this Glicko update.
@@ -6587,12 +7305,16 @@ async def get_leaderboard(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     min_matches: int = Query(5, ge=0, description="Minimum matches to appear"),
+    # Item d: the board hides players not seen for LEADERBOARD_ACTIVE_DAYS days
+    # (players.last_seen, refreshed by the presence ping). True lists everyone
+    # and flags each row `inactive`; the rank and total follow the same filter.
+    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get the ranked leaderboard sorted by Glicko-2 rating."""
 
     # Leaderboard counts: completed series W/L + legacy individual ranked matches
-    query = text("""
+    query = text(f"""
         WITH series_stats AS (
             SELECT
                 sub.player_id,
@@ -6651,18 +7373,22 @@ async def get_leaderboard(
             COALESCE(p.hide_gold, false) AS hide_gold,
             si.name          AS title,
             si.preview_color AS title_color,
-            si.sku           AS title_sku
+            si.sku           AS title_sku,
+            {_ONLINE_MARKER_SQL} AS is_online,
+            NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
         FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
         LEFT JOIN shop_items si ON si.id = p.active_title_id
         WHERE COALESCE(c.total, 0) >= :min_matches
           AND p.deleted_at IS NULL
+          AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
         ORDER BY gr.rating DESC
         LIMIT :limit OFFSET :offset
     """)
 
-    result = await db.execute(query, {"min_matches": min_matches, "limit": limit, "offset": offset})
+    result = await db.execute(query, {"min_matches": min_matches, "limit": limit, "offset": offset,
+                                      "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})
     rows = result.mappings().all()
 
     _colors = await _rank_colors(db)
@@ -6703,9 +7429,12 @@ async def get_leaderboard(
             title_color=_title_color,
             rank_name=_rank,
             rank_color=_colors.get(_rank) or _rank_fallback_color(_rank),
+            is_online=bool(row["is_online"]),
+            inactive=bool(row["inactive"]),
         ))
 
-    # Total players who qualify
+    # Total players who qualify -- as SHOWN: same deleted_at and activity
+    # terms as the page query (item d), so the total counts the board's rows.
     count_query = text("""
         WITH series_stats AS (
             SELECT sub.player_id, COUNT(*) AS total
@@ -6733,8 +7462,11 @@ async def get_leaderboard(
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
         WHERE COALESCE(c.total, 0) >= :min_matches
+          AND p.deleted_at IS NULL
+          AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
     """)
-    total = (await db.execute(count_query, {"min_matches": min_matches})).scalar() or 0
+    total = (await db.execute(count_query, {"min_matches": min_matches,
+                                            "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).scalar() or 0
 
     return LeaderboardResponse(
         entries=entries,
@@ -6834,6 +7566,476 @@ async def _viewer_h2h_counts(db, viewer_id, player_id):
     return ranked_w, ranked_l, casual_w, casual_l, series_w, series_l
 
 
+# ── In-room head-to-head summary (Release B §1) ───────────────────────────
+# Per-(caller, opponent) debounce, the music_rate debounce's shape
+# (_music_rate_last_write): only a request that passed the session gate
+# arms it, so a refused request cannot burn the window for the seat that
+# owns it. retry_after rides the BODY — the client's HTTP wrapper forwards
+# code+body only (#252d); the header is for ordinary HTTP citizens.
+_H2H_DEBOUNCE_SECONDS = 5.0
+# The client's retry delays (plugin/H2HRules.cs: TRANSPORT_RETRY_DELAY and
+# DEBOUNCE_RETRY_FALLBACK, both 6 s; after a 429, the body's retry_after
+# + 1 s) sit beyond this window, so a re-send after an ambiguous transport
+# failure — the first request may have been accepted and armed it — is
+# not refused as an echo (review r6 LOW). test_h2h_summary.py pins the
+# literals on both sides.
+# The table is bounded two ways (design r3 §1.1 LOW): keys older than the
+# TTL are dropped, and the oldest are evicted past the hard cap — a session
+# holder rotating opponent ids mints a fresh key per request, so the TTL
+# alone does not bound the table.
+_H2H_DEBOUNCE_TTL_SECONDS = 60.0
+_H2H_DEBOUNCE_MAX_KEYS = 4096
+_h2h_last_read: dict[tuple[str, str], float] = {}
+
+
+def _utc_now() -> datetime:
+    """The wall clock behind h2h_summary's UTC-day boundary and
+    _strict_steam_session_ok's expiry check — one seam, so the contract
+    tests freeze the clock those two read instead of anchoring their
+    fixtures to a calendar date that expires (review r6 LOW)."""
+    return datetime.now(timezone.utc)
+
+
+# ── Mini-profile card (Sept 6 Group 4 item a) ─────────────────────────────
+# The card's two members ride the strict-session H2H read below as ADDITIVE
+# optional members (design v2 A-4). Split cache (A-2): `modes` is immutable
+# history, cached 60 s per (viewer, target) and capped at 2,000 entries;
+# `profile` is one indexed row read fresh on every request so a privacy
+# toggle (appear_offline) applies immediately. The route stays PRIMARY-ONLY
+# (A-3): nothing about its gate, debounce or routing changes.
+_H2H_MODES_TTL_SECONDS = 60.0
+_H2H_MODES_MAX_KEYS = 2000
+_h2h_modes_cache: dict[tuple[str, str], tuple[float, H2HModesBlock]] = {}
+_h2h_card_last_warn = 0.0
+
+
+def _h2h_cache_clock() -> float:
+    """Monotonic seconds behind the modes cache — one seam, so the card's
+    tests drive the TTL with a fake clock instead of sleeping."""
+    return time.monotonic()
+
+
+async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
+    """The card's header for ONE player, read fresh on every request.
+
+    Field matrix (design v2 A-5, pinned by test_h2h_profile_card.py):
+    display_name, title (+colour), tier (+colour), the 1v1 rating and RD,
+    and level are ALWAYS present — every one is already public on the
+    boards. is_online and last_seen_s are NULL when the player has
+    appear_offline set; otherwise is_online is the boards' shared marker
+    (_ONLINE_MARKER_SQL — the same rule, replica replay gate included) and
+    last_seen_s is the whole seconds since the later of last_seen and the
+    presence heartbeat. Gold and Discord identity are NOT in the response.
+    Title and tier strings come from the canonical utilities the boards use
+    (_display_title_sync with the podium maps, _rank_info), never a
+    re-derivation (A-L)."""
+    row = (await db.execute(text(f"""
+        SELECT p.steam_id, p.display_name, p.total_xp,
+               si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,
+               gr.rating AS rating, gr.rating_deviation AS rd,
+               CASE WHEN p.appear_offline THEN NULL ELSE {_ONLINE_MARKER_SQL} END AS is_online,
+               CASE WHEN p.appear_offline THEN NULL
+                    ELSE CAST(GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW()
+                         - GREATEST(p.last_seen, COALESCE(p.presence_seen_at, p.last_seen)))))) AS BIGINT)
+               END AS last_seen_s
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE p.id = :pid
+    """), {"pid": target_id})).mappings().first()
+    if row is None:
+        return None
+    rating = float(row["rating"]) if row["rating"] is not None else 1500.0
+    rd = float(row["rd"]) if row["rd"] is not None else 350.0
+    colors = await _rank_colors(db)
+    # Review a-H1: the cached, non-refreshing maps -- this read must never grant
+    # or revoke a cosmetic (the refreshing lookup can, through the podium sync).
+    pmap, pmap2, pmapf = _podium_maps_cached((row["title_sku"],))
+    pkey = str(target_id)
+    title, title_color = _display_title_sync(
+        colors, row["title_sku"], row["title"], row["title_color"], rating,
+        podium_pos=pmap.get(pkey), podium_pos_2v2=pmap2.get(pkey), podium_pos_ffa=pmapf.get(pkey))
+    tier, tier_color = await _rank_info(db, rating)
+    return H2HProfileBlock(
+        display_name=_clean_display_name(row["display_name"], row["steam_id"]),
+        title=title,
+        title_color=title_color,
+        tier=tier,
+        tier_color=tier_color,
+        rating_1v1=int(round(rating)),
+        rd_1v1=int(round(rd)),
+        level=level_from_xp(int(row["total_xp"] or 0))[0],
+        is_online=None if row["is_online"] is None else bool(row["is_online"]),
+        last_seen_s=None if row["last_seen_s"] is None else int(row["last_seen_s"]),
+    )
+
+
+def _h2h_series_streak_and_net(rows) -> tuple[H2HStreak | None, int]:
+    """Streak and net rating from the pair's decided ranked series, NEWEST
+    FIRST, each row oriented to the viewer (vw, pw, vchange). The streak is
+    the run of consecutive series won by one side, counted from the latest;
+    a level row ends the run (2-2 is decided under the helper's rule and is
+    nobody's win), and no decided series means no streak. net is the
+    viewer's summed rating change over the SAME rows — a NULL change (a
+    series older than the column) counts as 0."""
+    net = 0.0
+    n = 0
+    holder = None
+    run_open = True
+    for r in rows:
+        net += float(r["vchange"] or 0.0)
+        vw, pw = int(r["vw"] or 0), int(r["pw"] or 0)
+        winner = "viewer" if vw > pw else ("target" if vw < pw else None)
+        if not run_open:
+            continue
+        if winner is None or (holder is not None and winner != holder):
+            run_open = False
+            continue
+        holder = winner
+        n += 1
+    return (H2HStreak(n=n, holder=holder) if n > 0 else None), int(round(net))
+
+
+def _uuid_bind(name: str):
+    """A typed UUID bind for a text() statement: the parameter is declared, not
+    inferred from whichever column it is first compared with (learnings #275/#448)."""
+    from sqlalchemy import bindparam
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+    return bindparam(name, type_=PG_UUID(as_uuid=True))
+
+
+async def _h2h_modes_block(db, viewer_id, target_id) -> H2HModesBlock:
+    """Every mode's head-to-head for one pair, oriented to the VIEWER.
+
+    ranked_1v1 and casual_1v1 are _viewer_h2h_counts's answer — the helper
+    is CALLED (A-L), so its rules hold without repetition: decided series
+    only, a completed tie for neither, misroutes and invalidated rows
+    excluded. The other modes are one statement, one CTE each. team_2v2:
+    2v2 games where the pair stood on OPPOSITE teams (the four slot
+    columns; the same team is not a meeting). ffa: games both played, by
+    who placed higher — a shared placement for neither, roster ghosts
+    excluded with the FFA history's `absent` rule. ovt: split by the
+    viewer's role (as_solo — the target was in the duo; as_duo — the target
+    was the solo). last_meeting is the newest counted game across every
+    mode with its mode and the viewer's result; its 1v1 leg repeats the
+    helper's pair / invalidation / room-prefix predicates only because the
+    helper returns counters and no timestamp (the card's test pins them).
+    streak and net_rating_1v1 come from the pair's decided ranked series,
+    newest first, under the helper's own predicates, so the three ranked
+    figures describe one set of rows."""
+    (ranked_w, ranked_l, casual_w, casual_l,
+     series_w, series_l) = await _viewer_h2h_counts(db, viewer_id, target_id)
+    facts = (await db.execute(text("""
+        WITH team_games AS (
+            SELECT tm.ended_at, tm.winner_team,
+                   CASE WHEN (tm.t1a_id = :vid OR tm.t1b_id = :vid) THEN 1 ELSE 2 END AS vteam
+              FROM team_matches tm
+             WHERE tm.invalidated_at IS NULL
+               AND (((tm.t1a_id = :vid OR tm.t1b_id = :vid) AND (tm.t2a_id = :pid OR tm.t2b_id = :pid))
+                 OR ((tm.t2a_id = :vid OR tm.t2b_id = :vid) AND (tm.t1a_id = :pid OR tm.t1b_id = :pid)))
+        ), ffa_games AS (
+            SELECT fm.ended_at, mv.placement AS vpl, mt.placement AS tpl
+              FROM ffa_matches fm
+              JOIN ffa_match_players mv ON mv.match_id = fm.id AND mv.player_id = :vid AND NOT mv.absent
+              JOIN ffa_match_players mt ON mt.match_id = fm.id AND mt.player_id = :pid AND NOT mt.absent
+             WHERE fm.invalidated_at IS NULL
+        ), ovt_games AS (
+            SELECT om.ended_at, om.winner_side,
+                   CASE WHEN om.solo_id = :vid THEN 1 ELSE 2 END AS vside
+              FROM ovt_matches om
+             WHERE om.invalidated_at IS NULL
+               AND ((om.solo_id = :vid AND (om.duo_a_id = :pid OR om.duo_b_id = :pid))
+                 OR (om.solo_id = :pid AND (om.duo_a_id = :vid OR om.duo_b_id = :vid)))
+        ), pair_1v1 AS (
+            SELECT m.ended_at, m.is_ranked, m.winner_id
+              FROM matches m
+             WHERE ((m.player1_id = :vid AND m.player2_id = :pid)
+                 OR (m.player1_id = :pid AND m.player2_id = :vid))
+               AND m.invalidated_at IS NULL
+               AND m.winner_id IS NOT NULL
+               AND (m.photon_room_id IS NULL OR (
+                       LEFT(m.photon_room_id, 5) <> 'team_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ovt_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ffa_'))
+        ), meetings AS (
+            SELECT ended_at,
+                   CASE WHEN is_ranked THEN 'ranked_1v1' ELSE 'casual_1v1' END AS mode,
+                   CASE WHEN winner_id = :vid THEN 'W' ELSE 'L' END AS result
+              FROM pair_1v1
+            UNION ALL
+            SELECT ended_at, 'team_2v2',
+                   CASE WHEN winner_team = vteam THEN 'W' ELSE 'L' END
+              FROM team_games
+            UNION ALL
+            SELECT ended_at, 'ffa',
+                   CASE WHEN vpl < tpl THEN 'W' WHEN vpl > tpl THEN 'L' ELSE 'T' END
+              FROM ffa_games
+            UNION ALL
+            SELECT ended_at, 'ovt',
+                   CASE WHEN winner_side = vside THEN 'W' ELSE 'L' END
+              FROM ovt_games
+        )
+        SELECT
+            (SELECT COUNT(*) FROM team_games tg WHERE tg.winner_team = tg.vteam) AS team_w,
+            (SELECT COUNT(*) FROM team_games tg WHERE tg.winner_team <> tg.vteam) AS team_l,
+            (SELECT COUNT(*) FROM ffa_games fg WHERE fg.vpl < fg.tpl) AS ffa_above,
+            (SELECT COUNT(*) FROM ffa_games fg WHERE fg.vpl > fg.tpl) AS ffa_below,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 1 AND og.winner_side = 1) AS ovt_solo_w,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 1 AND og.winner_side = 2) AS ovt_solo_l,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 2 AND og.winner_side = 2) AS ovt_duo_w,
+            (SELECT COUNT(*) FROM ovt_games og WHERE og.vside = 2 AND og.winner_side = 1) AS ovt_duo_l,
+            lm.ended_at AS last_at, lm.mode AS last_mode, lm.result AS last_result
+          FROM (SELECT 1) AS one
+          LEFT JOIN (SELECT mt.ended_at, mt.mode, mt.result FROM meetings mt
+                      ORDER BY mt.ended_at DESC, mt.mode DESC, mt.result DESC LIMIT 1) AS lm ON TRUE
+    """).bindparams(_uuid_bind("vid"), _uuid_bind("pid")), {"vid": viewer_id, "pid": target_id})).mappings().first()
+    series_rows = (await db.execute(text("""
+        SELECT CASE WHEN rs.player1_id = :vid THEN rs.p1_series_wins ELSE rs.p2_series_wins END AS vw,
+               CASE WHEN rs.player1_id = :vid THEN rs.p2_series_wins ELSE rs.p1_series_wins END AS pw,
+               CASE WHEN rs.player1_id = :vid THEN rs.p1_rating_change ELSE rs.p2_rating_change END AS vchange
+          FROM ranked_series rs
+         WHERE rs.status = 'completed'
+           AND rs.invalidated_at IS NULL
+           AND ((rs.player1_id = :vid AND rs.player2_id = :pid)
+             OR (rs.player1_id = :pid AND rs.player2_id = :vid))
+           AND (rs.p1_series_wins >= 2 OR rs.p2_series_wins >= 2)
+         ORDER BY rs.completed_at DESC NULLS LAST, rs.created_at DESC
+    """).bindparams(_uuid_bind("vid"), _uuid_bind("pid")), {"vid": viewer_id, "pid": target_id})).mappings().all()
+    streak, net = _h2h_series_streak_and_net(series_rows)
+
+    def _c(key):
+        return int(facts[key] or 0) if facts else 0
+
+    last = None
+    if facts and facts["last_at"] is not None:
+        last = H2HLastMeeting(at=facts["last_at"], mode=str(facts["last_mode"]),
+                              result=str(facts["last_result"]))
+    return H2HModesBlock(
+        ranked_1v1=H2HRanked1v1(series_w=series_w, series_l=series_l, games_w=ranked_w, games_l=ranked_l),
+        casual_1v1=H2HWinLoss(w=casual_w, l=casual_l),
+        team_2v2=H2HWinLoss(w=_c("team_w"), l=_c("team_l")),
+        ffa=H2HFfa(above=_c("ffa_above"), below=_c("ffa_below")),
+        ovt=H2HOvt(as_solo=H2HWinLoss(w=_c("ovt_solo_w"), l=_c("ovt_solo_l")),
+                   as_duo=H2HWinLoss(w=_c("ovt_duo_w"), l=_c("ovt_duo_l"))),
+        last_meeting=last,
+        streak=streak,
+        net_rating_1v1=net,
+    )
+
+
+async def _h2h_modes_cached(db, viewer_steam_id, target_steam_id, viewer_id, target_id) -> H2HModesBlock:
+    """60 s per-pair cache over _h2h_modes_block, capped at
+    _H2H_MODES_MAX_KEYS: past the cap, expired keys are dropped first, then
+    the oldest until the cap holds (the debounce table's shape). Keyed by
+    the steam-id pair the request names, oriented — (A, B) and (B, A) are
+    two entries, because each is oriented to its own viewer."""
+    now = _h2h_cache_clock()
+    key = (viewer_steam_id, target_steam_id)
+    hit = _h2h_modes_cache.get(key)
+    if hit is not None and (now - hit[0]) < _H2H_MODES_TTL_SECONDS:
+        return hit[1]
+    block = await _h2h_modes_block(db, viewer_id, target_id)
+    _h2h_modes_cache[key] = (now, block)
+    if len(_h2h_modes_cache) > _H2H_MODES_MAX_KEYS:
+        cut = now - _H2H_MODES_TTL_SECONDS
+        for k in [k for k, v in _h2h_modes_cache.items() if v[0] <= cut]:
+            _h2h_modes_cache.pop(k, None)
+        over = len(_h2h_modes_cache) - _H2H_MODES_MAX_KEYS
+        if over > 0:
+            for k in sorted(_h2h_modes_cache, key=lambda k: _h2h_modes_cache[k][0])[:over]:
+                _h2h_modes_cache.pop(k, None)
+    return block
+
+
+async def _h2h_card_blocks(db, viewer_steam_id, target_steam_id, viewer_id, target_id):
+    """(profile, modes) for the response, inside a savepoint. The card is
+    cosmetic and the flat line it rides on is a shipped feature, so a failed
+    card statement (a column the standby has not replayed yet, say) yields
+    (None, None) and one warning a minute instead of a 500 — and the
+    savepoint keeps the aborted statement from poisoning the session's
+    transaction (#235). The flat fields are computed before this runs; it
+    never touches them."""
+    global _h2h_card_last_warn
+    try:
+        async with db.begin_nested():
+            profile = await _h2h_profile_block(db, target_id)
+            modes = await _h2h_modes_cached(db, viewer_steam_id, target_steam_id, viewer_id, target_id)
+            return profile, modes
+    except Exception as ex:
+        now = time.monotonic()
+        if now - _h2h_card_last_warn > 60.0:
+            _h2h_card_last_warn = now
+            print(f"[H2H-CARD] blocks failed: {type(ex).__name__}: {ex}")
+        return None, None
+
+
+@app.get("/api/v1/h2h/{steam_id}/{opponent_steam_id}", response_model=H2HSummaryResponse, tags=["Players"])
+async def h2h_summary(steam_id: str, opponent_steam_id: str, request: Request,
+                      db: AsyncSession = Depends(get_db)):
+    """Aggregates-only head-to-head between the caller and one opponent, for
+    the client's in-room "vs NAME · last played · H2H · ranked series" line.
+
+    Requires the caller's OWN valid Steam session (_strict_steam_session_ok,
+    fail-closed — the gate queue_poll uses), checked before any other
+    statement; the 401 detail literal "session_required" is what
+    ApiClient.HandleSessionReject matches to re-mint. The opponent id is a
+    17-digit path parameter and must differ from the caller; anything else
+    is 400. Match rules are _viewer_h2h_counts's (its pair, invalidation
+    and room-prefix predicates are repeated verbatim in the one facts
+    statement, whose games_won / games_lost are its ranked + casual
+    counters folded): an admin-invalidated match never counts, nor a
+    team_/ovt_/ffa_ misroute, and a game with no winner counts for neither.
+    Series (design r3 §1.1 MEDIUM): EVERY completed, non-invalidated series
+    between the pair is classified, oriented to the caller — more wins is
+    series_won, fewer is series_lost, level is series_tied — and
+    series_total is the sum of the three, so a completed 2-2 row is one
+    tie and one series (no "decided" pre-filter ahead of the tie count;
+    the stats endpoint's helper keeps its own decided-only rule).
+    last_played_at is the latest counted game that ended strictly before
+    the caller's current UTC day (typed bind, TIMESTAMPTZ); played_today
+    reports whether any counted game ended on or after that boundary;
+    last_played_days_ago is the whole-UTC-day distance from last_played_at's
+    date to that boundary's date (null with it), computed here so the
+    client's relative-day copy uses no clock of its own (review r6 LOW).
+    Mini-profile card (Sept 6 Group 4 item a; design v2 A-2/A-4/A-5): two
+    ADDITIVE optional members, `profile` and `modes`, declared after every
+    flat field, which stay exactly as they are. profile — one player, read
+    fresh on every request: display_name, title (+colour), tier (+colour),
+    rating_1v1, rd_1v1 and level are ALWAYS present (already public on the
+    boards); is_online and last_seen_s are NULL when the opponent has
+    appear_offline; gold and Discord identity are NOT carried. modes — the
+    caller's own history against the opponent in every mode, never hidden,
+    cached 60 s per (caller, opponent) pair (_h2h_modes_block). Both null
+    for an unknown opponent, and both null when a card statement failed
+    (the line's fields survive — _h2h_card_blocks).
+    The response carries counters, a display name, one timestamp and that
+    integer — no room name, match id or series id (#463). Primary-only:
+    not on the edge's replica read list.
+    """
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    if (len(opponent_steam_id) != 17 or not opponent_steam_id.isdigit()
+            or opponent_steam_id == steam_id):
+        raise HTTPException(status_code=400, detail="bad_request")
+
+    _nowm = time.monotonic()
+    _dkey = (steam_id, opponent_steam_id)
+    _last = _h2h_last_read.get(_dkey)
+    if _last is not None and (_nowm - _last) < _H2H_DEBOUNCE_SECONDS:
+        _retry_s = max(1, math.ceil(_H2H_DEBOUNCE_SECONDS - (_nowm - _last)))
+        raise HTTPException(status_code=429,
+                            detail={"error": "rate_debounced",
+                                    "retry_after": _retry_s},
+                            headers={"Retry-After": str(_retry_s)})
+    _h2h_last_read[_dkey] = _nowm
+    if len(_h2h_last_read) > _H2H_DEBOUNCE_MAX_KEYS:
+        # TTL pruning first, then oldest-first eviction until the cap holds.
+        # The key just written is the newest, so it survives; an evicted
+        # younger key's pair can be read again inside its window — the
+        # accepted cost of the bound (r3 §1.1 LOW).
+        _cut = _nowm - _H2H_DEBOUNCE_TTL_SECONDS
+        for _k in [k for k, v in _h2h_last_read.items() if v < _cut]:
+            _h2h_last_read.pop(_k, None)
+        _over = len(_h2h_last_read) - _H2H_DEBOUNCE_MAX_KEYS
+        if _over > 0:
+            for _k in sorted(_h2h_last_read, key=_h2h_last_read.__getitem__)[:_over]:
+                _h2h_last_read.pop(_k, None)
+
+    rows = (await db.execute(text("""
+        SELECT p.steam_id, p.id, p.display_name
+          FROM players p
+         WHERE p.steam_id IN (CAST(:me AS VARCHAR), CAST(:opp AS VARCHAR))
+    """), {"me": steam_id, "opp": opponent_steam_id})).mappings().all()
+    me_row = next((r for r in rows if r["steam_id"] == steam_id), None)
+    opp_row = next((r for r in rows if r["steam_id"] == opponent_steam_id), None)
+    if me_row is None or opp_row is None:
+        # Unknown opponent (or a caller with no players row yet): zeros and
+        # no name — the client renders its "first time" line.
+        return H2HSummaryResponse()
+
+    opp_name = _clean_display_name(opp_row["display_name"], opponent_steam_id)
+
+    day_start = _utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # One statement for every aggregate. pair_matches: the pair's valid 1v1
+    # games under _viewer_h2h_counts's predicates, verbatim — games_won /
+    # games_lost are its ranked + casual counters folded (a game with no
+    # winner counts for neither). pair_series: every completed, valid series
+    # between the pair with its wins oriented to the caller (vw = the
+    # caller's side, pw = the opponent's), classified in the projection and
+    # not pre-filtered, so a level row reaches series_tied and
+    # won + lost + tied is the row count.
+    facts = (await db.execute(text("""
+        WITH pair_matches AS (
+            SELECT m.ended_at, m.winner_id
+              FROM matches m
+             WHERE ((m.player1_id = :vid AND m.player2_id = :pid)
+                 OR (m.player1_id = :pid AND m.player2_id = :vid))
+               AND m.invalidated_at IS NULL
+               AND (m.photon_room_id IS NULL OR (
+                       LEFT(m.photon_room_id, 5) <> 'team_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ovt_'
+                   AND LEFT(m.photon_room_id, 4) <> 'ffa_'))
+        ), pair_series AS (
+            SELECT CASE WHEN rs.player1_id = :vid THEN rs.p1_series_wins ELSE rs.p2_series_wins END AS vw,
+                   CASE WHEN rs.player1_id = :vid THEN rs.p2_series_wins ELSE rs.p1_series_wins END AS pw
+              FROM ranked_series rs
+             WHERE rs.status = 'completed'
+               AND rs.invalidated_at IS NULL
+               AND ((rs.player1_id = :vid AND rs.player2_id = :pid)
+                 OR (rs.player1_id = :pid AND rs.player2_id = :vid))
+        )
+        SELECT
+            (SELECT COUNT(*) FROM pair_matches pm WHERE pm.winner_id = :vid) AS games_won,
+            (SELECT COUNT(*) FROM pair_matches pm WHERE pm.winner_id = :pid) AS games_lost,
+            (SELECT MAX(pm.ended_at) FROM pair_matches pm
+              WHERE pm.ended_at < CAST(:day_start AS TIMESTAMPTZ)) AS last_played_at,
+            EXISTS (SELECT 1 FROM pair_matches pm
+                     WHERE pm.ended_at >= CAST(:day_start AS TIMESTAMPTZ)) AS played_today,
+            (SELECT COUNT(*) FROM pair_series ps WHERE ps.vw > ps.pw) AS series_won,
+            (SELECT COUNT(*) FROM pair_series ps WHERE ps.vw < ps.pw) AS series_lost,
+            (SELECT COUNT(*) FROM pair_series ps WHERE ps.vw = ps.pw) AS series_tied
+    """), {"vid": me_row["id"], "pid": opp_row["id"], "day_start": day_start})).mappings().first()
+    games_won = int(facts["games_won"] or 0) if facts else 0
+    games_lost = int(facts["games_lost"] or 0) if facts else 0
+    last_played_at = facts["last_played_at"] if facts else None
+    played_today = bool(facts["played_today"]) if facts else False
+    series_won = int(facts["series_won"] or 0) if facts else 0
+    series_lost = int(facts["series_lost"] or 0) if facts else 0
+    series_tied = int(facts["series_tied"] or 0) if facts else 0
+    # Whole UTC days from the last counted pre-today game's UTC date to the
+    # caller's current UTC date, on the clock that set day_start — the
+    # client renders "yesterday / N days ago" from this integer and never
+    # subtracts a server timestamp from its own clock (review r6 LOW). The
+    # facts statement bounds last_played_at strictly below day_start, so a
+    # non-null value is at least 1. A naive row is read as UTC, the
+    # column's zone.
+    last_played_days_ago = None
+    if last_played_at is not None:
+        _lp = (last_played_at if last_played_at.tzinfo is not None
+               else last_played_at.replace(tzinfo=timezone.utc))
+        last_played_days_ago = (day_start.date() - _lp.astimezone(timezone.utc).date()).days
+
+    # Sept 6 Group 4 item a: the card's two additive members, after every
+    # flat value above is final — profile fresh, modes from the 60 s cache.
+    profile, modes = await _h2h_card_blocks(db, steam_id, opponent_steam_id, me_row["id"], opp_row["id"])
+
+    return H2HSummaryResponse(
+        opponent_display_name=opp_name,
+        games_total=games_won + games_lost,
+        games_won=games_won,
+        games_lost=games_lost,
+        series_total=series_won + series_lost + series_tied,
+        series_won=series_won,
+        series_lost=series_lost,
+        series_tied=series_tied,
+        last_played_at=last_played_at,
+        last_played_days_ago=last_played_days_ago,
+        played_today=played_today,
+        profile=profile,
+        modes=modes,
+    )
+
+
 @app.get("/api/v1/players/{steam_id}", response_model=PlayerStatsResponse, tags=["Players"])
 async def get_player_stats(
     steam_id: str,
@@ -6878,51 +8080,19 @@ async def get_player_stats(
 
     # Rating history — was capped at last 20 in v1.26.7 and earlier, which
     # made the leaderboard graph appear to "lose" older points for active
-    # players. v1.26.8 bumps to 500 (covers ~6 months of heavy play) and
-    # switches to ASC ordering so the client can plot left-to-right
-    # chronologically. Client buckets to ~100 points when this is large.
-    history_result = await db.execute(
-        select(RatingHistory)
-        .where(RatingHistory.player_id == player.id)
-        .order_by(RatingHistory.period_end.asc())
-        .limit(500)
-    )
-    history = [
-        {"rating": round(h.rating), "rd": round(h.rating_deviation), "date": h.period_end.isoformat()}
-        for h in history_result.scalars().all()
-    ]
+    # players. v1.26.8 bumped the cap to 500 and switched to ASC ordering so
+    # the client can plot left-to-right chronologically. Sept 6 (item f): the
+    # window is the NEWEST 500 rows, not the oldest — a player past 500 rating
+    # updates saw a graph frozen in the past. One implementation, shared with
+    # the lean /rating-history feed: _rating_history_window.
+    history = await _rating_history_window(db, player.id)
 
     # Aug 7 — the same series for FFA. There is no rating_history table for FFA
     # ratings, but every rated FFA game already snapshots rating_after on the
-    # per-player row, so the game rows ARE the history. Same 500 cap and same
-    # ASC ordering as the 1v1 list above so both feed one client graph.
-    # Filters: ranked only (a casual game leaves rating_after NULL), roster
-    # ghosts excluded (they held a slot but did not play — #227), invalidated
-    # matches excluded (every other FFA aggregate in this file does), and
-    # rating_after NOT NULL so a null can never land in the plotted series.
-    #
-    # Each entry carries the timestamp under BOTH keys on purpose. The frozen
-    # contract names the field 'recorded_at'; the 1v1 client parser this one is
-    # copied from reads 'date'. Emitting both means neither end can be wrong,
-    # and the split-on-"rating" parser is unaffected by the extra key.
-    ffa_history_rows = (await db.execute(text("""
-        SELECT fmp.rating_after, fm.created_at
-          FROM ffa_match_players fmp
-          JOIN ffa_matches fm ON fm.id = fmp.match_id
-         WHERE fmp.player_id = :pid
-           AND fm.is_ranked IS TRUE
-           AND fm.invalidated_at IS NULL
-           AND NOT fmp.absent
-           AND fmp.rating_after IS NOT NULL
-         ORDER BY fm.created_at ASC
-         LIMIT 500
-    """), {"pid": player.id})).mappings().all()
-    ffa_history = [
-        {"rating": round(float(r["rating_after"]), 1),
-         "recorded_at": r["created_at"].isoformat(),
-         "date": r["created_at"].isoformat()}
-        for r in ffa_history_rows
-    ]
+    # per-player row, so the game rows ARE the history. Same window and same
+    # ASC ordering as the 1v1 list above so both feed one client graph — see
+    # _ffa_rating_history_window for the row filters and the key aliases.
+    ffa_history = await _ffa_rating_history_window(db, player.id)
 
     # Top cards by pick count, with pass-rate from card_offers (additive — old
     # matches without offer rows just yield times_offered=0, pass_rate=0).
@@ -7761,6 +8931,9 @@ async def get_player_stats(
     # /team/leaderboard and /ffa/leaderboard with only limit + sort_by (so
     # min_series and min_games both default to 1), and /ovt/leaderboard with
     # role=combined — so the number always agrees with the row the player sees.
+    # Item d: each also applies the boards' LEADERBOARD_ACTIVE_DAYS activity
+    # filter (bound as CAST(:active_days AS integer)), so "#N of M" is the
+    # DEFAULT board's numbering and an inactive player reads as not on it.
     #
     # Standing is COMPETITION-STYLE: 1 + the count of eligible players strictly
     # ahead. The boards break exact ties with ROW_NUMBER (arbitrary among
@@ -7811,12 +8984,13 @@ async def get_player_stats(
                       JOIN players p ON p.id = gr.player_id
                       LEFT JOIN combined c ON c.player_id = p.id
                      WHERE COALESCE(c.total, 0) >= 1 AND p.deleted_at IS NULL
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT rating FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
                        (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if srow:
                 standing_pop = int(srow["pop"] or 0)
                 if int(srow["on_board"] or 0) > 0:
@@ -7830,12 +9004,13 @@ async def get_player_stats(
                       JOIN players p ON p.id = g2.player_id
                      WHERE COALESCE(g2.completed_series, 0) >= 1
                        AND p.deleted_at IS NULL
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT rating FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
                        (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if trow2:
                 team_standing_pop = int(trow2["pop"] or 0)
                 if int(trow2["on_board"] or 0) > 0:
@@ -7849,12 +9024,13 @@ async def get_player_stats(
                       JOIN players p ON p.id = g.player_id
                      WHERE COALESCE(g.games_played, 0) >= 1
                        AND p.deleted_at IS NULL
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT rating FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
                        (SELECT COUNT(*) FROM elig e, me WHERE e.rating > me.rating) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if frow2:
                 ffa_standing_pop = int(frow2["pop"] or 0)
                 if int(frow2["on_board"] or 0) > 0:
@@ -7886,6 +9062,7 @@ async def get_player_stats(
                       FROM per_player pp
                       JOIN players p ON p.id = pp.pid
                      WHERE p.deleted_at IS NULL AND pp.games >= 1
+                       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
                 ),
                 me AS (SELECT games, wr FROM elig WHERE pid = :pid)
                 SELECT (SELECT COUNT(*) FROM elig) AS pop,
@@ -7894,7 +9071,7 @@ async def get_player_stats(
                             OR (e.games = me.games
                                 AND COALESCE(e.wr, -1) > COALESCE(me.wr, -1))) AS ahead,
                        (SELECT COUNT(*) FROM me) AS on_board
-            """), {"pid": player.id})).mappings().first()
+            """), {"pid": player.id, "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().first()
             if orow2:
                 ovt_standing_pop = int(orow2["pop"] or 0)
                 if int(orow2["on_board"] or 0) > 0:
@@ -8058,6 +9235,102 @@ async def get_player_stats(
     )
 
 
+# Sept 6 (item f) — the rating-history window shared by the full stats payload
+# and the lean /rating-history feed. Both used to take the OLDEST 500 rows in
+# ascending order, so a player past 500 rating updates saw a graph frozen in
+# the past while every new series landed outside the window. The window is
+# taken from the newest end (ORDER BY period_end DESC LIMIT n) and only then
+# re-ordered ascending for the plotters. One implementation on purpose: the
+# Discord bot reads the lean feed and the client reads the stats payload, and
+# two copies of the query would drift (#279).
+RATING_HISTORY_WINDOW = 500
+
+
+async def _rating_history_window(db: AsyncSession, player_id, limit: int = RATING_HISTORY_WINDOW) -> list[dict]:
+    """The newest `limit` rating_history rows for one player, oldest-first.
+
+    Row shape is additive over the v1.26.8 contract: `rating`, `rd` and `date`
+    are unchanged; `period_end` is the same timestamp under the column's own
+    name, which is what the axis code on both clients reads first. The table
+    carries no pre-update rating (rating / rd / volatility / period_end only),
+    so a plotter's first drawn point is the first row's rating — no baseline
+    is invented server-side either."""
+    # created_at / id break period_end ties deterministically (review f residual):
+    # two rows written in one period must land on the same side of the window
+    # boundary on every read, and plot in the same order.
+    newest = (
+        select(RatingHistory.rating, RatingHistory.rating_deviation, RatingHistory.period_end,
+               RatingHistory.created_at, RatingHistory.id)
+        .where(RatingHistory.player_id == player_id)
+        .order_by(RatingHistory.period_end.desc(), RatingHistory.created_at.desc(), RatingHistory.id.desc())
+        .limit(limit)
+        .subquery("newest")
+    )
+    rows = (await db.execute(
+        select(newest.c.rating, newest.c.rating_deviation, newest.c.period_end)
+        .order_by(newest.c.period_end.asc(), newest.c.created_at.asc(), newest.c.id.asc())
+    )).all()
+    return [
+        {
+            "rating": round(r.rating),
+            "rd": round(r.rating_deviation),
+            "date": r.period_end.isoformat(),
+            "period_end": r.period_end.isoformat(),
+        }
+        for r in rows
+    ]
+
+
+async def _ffa_rating_history_window(db: AsyncSession, player_id, limit: int = RATING_HISTORY_WINDOW) -> list[dict]:
+    """The newest `limit` rated FFA game rows for one player, oldest-first —
+    the FFA counterpart of _rating_history_window (there is no rating_history
+    table for FFA; the per-player game row snapshots rating_after).
+
+    Filters: ranked only (a casual game leaves rating_after NULL), roster
+    ghosts excluded (they held a slot but did not play — #227), invalidated
+    matches excluded (every other FFA aggregate in this file does), and
+    rating_after NOT NULL so a null can never land in the plotted series.
+
+    Each entry carries the timestamp under THREE keys on purpose. The frozen
+    contract names the field 'recorded_at'; the 1v1 parser the client shares
+    reads 'date'; 'period_end' is the Sept 6 name both clients try first.
+
+    Unlike rating_history, the FFA row DOES snapshot the pre-update rating
+    (fmp.rating_before, written by the settlement beside rating_after), so
+    it rides along as `rating_before` when present (review f-M1): the plotters'
+    first drawn point is then the value the player really held before the
+    window's first game, not that game's result. The key is omitted when the
+    column is NULL rather than sent as null. fm.id breaks created_at ties so
+    the window boundary and the plot order are the same on every read."""
+    rows = (await db.execute(text("""
+        WITH newest AS (
+            SELECT fmp.rating_after, fmp.rating_before, fm.created_at, fm.id AS match_id
+              FROM ffa_match_players fmp
+              JOIN ffa_matches fm ON fm.id = fmp.match_id
+             WHERE fmp.player_id = :pid
+               AND fm.is_ranked IS TRUE
+               AND fm.invalidated_at IS NULL
+               AND NOT fmp.absent
+               AND fmp.rating_after IS NOT NULL
+             ORDER BY fm.created_at DESC, fm.id DESC
+             LIMIT CAST(:lim AS INTEGER)
+        )
+        SELECT rating_after, rating_before, created_at FROM newest ORDER BY created_at ASC, match_id ASC
+    """), {"pid": player_id, "lim": int(limit)})).mappings().all()
+    out = []
+    for r in rows:
+        entry = {
+            "rating": round(float(r["rating_after"]), 1),
+            "recorded_at": r["created_at"].isoformat(),
+            "date": r["created_at"].isoformat(),
+            "period_end": r["created_at"].isoformat(),
+        }
+        if r["rating_before"] is not None:
+            entry["rating_before"] = round(float(r["rating_before"]), 1)
+        out.append(entry)
+    return out
+
+
 @app.get("/api/v1/players/{steam_id}/rating-history", tags=["Players"])
 async def get_player_rating_history(
     steam_id: str,
@@ -8068,23 +9341,15 @@ async def get_player_rating_history(
     shape from the full /players/{steam_id} response, standalone. The full
     stats endpoint runs ~15 queries (streak walks, card aggregates, ...);
     the Discord bot's compare graphs only need this slice. Public read, same
-    trust level as the stats endpoint."""
+    trust level as the stats endpoint. Sept 6 (item f): the newest `limit`
+    rows, ascending, with `period_end` on every row — _rating_history_window."""
     row = (await db.execute(
         select(Player.id, Player.display_name).where(Player.steam_id == steam_id)
     )).first()
     if row is None:
         raise HTTPException(status_code=404, detail="Player not found")
     pid, display_name = row
-    history_result = await db.execute(
-        select(RatingHistory)
-        .where(RatingHistory.player_id == pid)
-        .order_by(RatingHistory.period_end.asc())
-        .limit(limit)
-    )
-    history = [
-        {"rating": round(h.rating), "rd": round(h.rating_deviation), "date": h.period_end.isoformat()}
-        for h in history_result.scalars().all()
-    ]
+    history = await _rating_history_window(db, pid, limit)
     return {"steam_id": steam_id, "display_name": display_name, "history": history}
 
 
@@ -8188,6 +9453,179 @@ async def get_rating_preview(
     }
 
 
+# ── Rating previews for 2v2 and FFA (Sept 6 item k — the Discord `/elo` command) ──
+# Read-only GETs shaped like get_rating_preview above; both are safe on the
+# replica (no writes, no session state). Whether the edge sends them to the
+# standby is decided by the read-routing allowlist in the ZAP nginx config,
+# which lives OUTSIDE this repo (see the read-replica notes near IS_REPLICA):
+# until that list names these paths the primary serves them -- correct, just
+# not offloaded. Nothing to do here for that.
+
+def _parse_steam_id_list(raw: str, lo: int, hi: int, label: str) -> list[str]:
+    """Comma-separated steam ids -> list. 400 unless it holds lo..hi DISTINCT
+    ASCII-digit ids of at most 20 chars (the Query's max_length bounds the raw
+    string; this bounds what is inside it)."""
+    ids = [t.strip() for t in (raw or "").split(",") if t.strip()]
+    if not (lo <= len(ids) <= hi):
+        want = f"{lo}" if lo == hi else f"{lo}-{hi}"
+        raise HTTPException(status_code=400, detail=f"{label}: expected {want} steam ids, got {len(ids)}")
+    for sid in ids:
+        if len(sid) > 20 or not (sid.isascii() and sid.isdigit()):
+            raise HTTPException(status_code=400, detail=f"{label}: invalid steam id")
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=400, detail=f"{label}: duplicate steam id")
+    return ids
+
+
+async def _load_mode_rating_rows(db: AsyncSession, table: str, ids: list[str],
+                                 defaults: tuple) -> list[dict]:
+    """players LEFT JOIN one mode's glicko table, returned in the caller's id
+    order as {steam_id, display_name, rating, rd, vol}. 404 naming any id with
+    no players row (never-seen ids are not previewable -- get_rating_preview's
+    rule). A player with no MODE row yet takes the mode defaults, exactly as
+    the rated paths do for a first game."""
+    assert table in ("glicko_ratings_ffa", "glicko_ratings_2v2")
+    rows = (await db.execute(text(f"""
+        SELECT p.steam_id, p.display_name, g.rating, g.rating_deviation, g.volatility
+        FROM players p
+        LEFT JOIN {table} g ON g.player_id = p.id
+        WHERE p.steam_id = ANY(CAST(:sids AS text[])) AND p.deleted_at IS NULL
+    """), {"sids": ids})).mappings().all()
+    by_sid = {r["steam_id"]: r for r in rows}
+    missing = [sid for sid in ids if sid not in by_sid]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Player not found: {', '.join(missing)}")
+    d_r, d_rd, d_vol = defaults
+    out = []
+    for sid in ids:
+        r = by_sid[sid]
+        out.append({
+            "steam_id": sid,
+            "display_name": r["display_name"],
+            "rating": float(r["rating"]) if r["rating"] is not None else d_r,
+            "rd": float(r["rating_deviation"]) if r["rating_deviation"] is not None else d_rd,
+            "vol": float(r["volatility"]) if r["volatility"] is not None else d_vol,
+        })
+    return out
+
+
+@app.get("/api/v1/rating-preview/ffa", tags=["Players"])
+async def get_rating_preview_ffa(
+    ids: str = Query(..., max_length=230, description="3-10 comma-separated steam ids (one FFA lobby)"),
+    score_target: int | None = Query(None, ge=2, le=50,
+                                     description="the lobby's score target (first to N); default: the FFA config default. w(N) follows it (r5 M4)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hypothetical FFA Glicko-2 deltas for a field of 3-10 players (feeds the
+    Discord `/elo ffa` preview). The SAME function as the rated path,
+    _ffa_rating_deltas, so the adjacency bound, upset inclusion and w(N) all
+    apply. A field has n! finishing orders and they are NOT enumerated: every
+    figure fixes ONE player's place and assumes the others finish in rating
+    order (highest first, canonical steam order on equal ratings), no ties,
+    at the default score target. first_delta / last_delta are that player at
+    1st / at nth; place_deltas[k-1] is the same player at place k. Players
+    with no glicko_ratings_ffa row take the rated path's defaults. Public
+    read -- ratings are public."""
+    sids = _parse_steam_id_list(ids, 3, 10, "ids")
+    rows = await _load_mode_rating_rows(db, "glicko_ratings_ffa", sids, (1500.0, 350.0, 0.06))
+    pre = {r["steam_id"]: (r["rating"], r["rd"], r["vol"]) for r in rows}
+    n = len(sids)
+    score_target = int(score_target) if score_target is not None else int(FFA_CONFIG_DEFAULTS["score_target"])
+    by_strength = sorted(sids, key=lambda s: (-pre[s][0], _ffa_sort_key(s)))
+    players = []
+    for r in rows:
+        sid = r["steam_id"]
+        others = [s for s in by_strength if s != sid]
+        place_deltas = []
+        for place in range(1, n + 1):
+            finish = others[:place - 1] + [sid] + others[place - 1:]
+            placements = {s: i + 1 for i, s in enumerate(finish)}
+            new_r = _ffa_rating_deltas(sids, frozenset(), placements, pre, score_target, only=sid)[sid][0]
+            place_deltas.append(round(new_r - pre[sid][0], 1))
+        players.append({
+            "steam_id": sid,
+            "display_name": r["display_name"],
+            "rating": round(pre[sid][0], 1),
+            "first_delta": place_deltas[0],
+            "last_delta": place_deltas[-1],
+            "place_deltas": place_deltas,
+        })
+    return {
+        "players": players,
+        "field_size": n,
+        "field_average_rating": round(sum(pre[s][0] for s in sids) / n, 1),
+        "score_target": score_target,
+        "assumption": ("each delta fixes one player's place; the others finish in rating order, "
+                       f"no ties, first to {score_target} -- the n! orderings are not enumerated"),
+    }
+
+
+@app.get("/api/v1/rating-preview/2v2", tags=["Players"])
+async def get_rating_preview_2v2(
+    team_a: str = Query(..., max_length=41, description="two comma-separated steam ids"),
+    team_b: str = Query(..., max_length=41, description="two comma-separated steam ids"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hypothetical 2v2 Glicko-2 deltas if team A wins / loses a ranked series
+    (feeds the Discord `/elo 2v2` preview). Per player the update is the rated
+    path's update_player verbatim (_complete_team_series_with_ratings and
+    submit_team_match): one rating period, a TWO-opponent list -- the other
+    team, both scored 1.0 on a win and 0.0 on a loss -- GLICKO2_TAU, and the
+    GLICKO2_DEFAULT_* values for a player with no glicko_ratings_2v2 row yet.
+    Team rating is the mean of the two ratings. win_probability is an
+    ESTIMATE: the rated path never computes one for teams, so this applies
+    _glicko_expectancy to the team means with the RD of a mean of two
+    independent ratings, sqrt(rd1^2 + rd2^2) / 2. Public read -- ratings are
+    public."""
+    a_ids = _parse_steam_id_list(team_a, 2, 2, "team_a")
+    b_ids = _parse_steam_id_list(team_b, 2, 2, "team_b")
+    if set(a_ids) & set(b_ids):
+        raise HTTPException(status_code=400, detail="a player cannot be on both teams")
+    defaults = (GLICKO2_DEFAULT_RATING, GLICKO2_DEFAULT_RD, GLICKO2_DEFAULT_VOLATILITY)
+    rows = await _load_mode_rating_rows(db, "glicko_ratings_2v2", a_ids + b_ids, defaults)
+    by_sid = {r["steam_id"]: r for r in rows}
+    side_a = [by_sid[s] for s in a_ids]
+    side_b = [by_sid[s] for s in b_ids]
+
+    def _side(players, opps_pre):
+        # update_player(p, opps_pre, won) from the rated paths, evaluated for
+        # both outcomes: every opponent carries the player's team result.
+        out = []
+        for p in players:
+            win, _, _ = calculate_new_rating(
+                p["rating"], p["rd"], p["vol"],
+                [(o["rating"], o["rd"], 1.0) for o in opps_pre], GLICKO2_TAU)
+            loss, _, _ = calculate_new_rating(
+                p["rating"], p["rd"], p["vol"],
+                [(o["rating"], o["rd"], 0.0) for o in opps_pre], GLICKO2_TAU)
+            out.append({
+                "steam_id": p["steam_id"], "display_name": p["display_name"],
+                "rating": round(p["rating"], 1),
+                "win_delta": round(win - p["rating"], 1),
+                "loss_delta": round(loss - p["rating"], 1),
+            })
+        return out
+
+    def _team(players):
+        mean = (players[0]["rating"] + players[1]["rating"]) / 2.0
+        rd = math.sqrt(players[0]["rd"] ** 2 + players[1]["rd"] ** 2) / 2.0
+        return mean, rd
+
+    ra, rda = _team(side_a)
+    rb, rdb = _team(side_b)
+    p_a = _glicko_expectancy(ra, rda, rb, rdb)
+    return {
+        "team_a": {"rating": round(ra, 1), "win_probability": round(p_a, 3),
+                   "players": _side(side_a, side_b)},
+        "team_b": {"rating": round(rb, 1), "win_probability": round(1.0 - p_a, 3),
+                   "players": _side(side_b, side_a)},
+        "win_probability": round(p_a, 3),
+        "win_probability_is_estimate": True,
+        "note": ("deltas follow the series-completion math exactly; the win probability is an "
+                 "estimate from the team means and is not something the rated path computes"),
+    }
+
+
 @app.get("/api/v1/players/{steam_id}/matches/summary", tags=["Players"])
 async def get_player_matches_summary(steam_id: str, db: AsyncSession = Depends(get_db)):
     """Totals for the My Stats history pager (v1.33 lazy loading): the client
@@ -8217,6 +9655,64 @@ async def get_player_matches_summary(steam_id: str, db: AsyncSession = Depends(g
 
 
 # ── Routes: Match History ──────────────────────────────────────
+
+# Sept 8 item 5: a player's SITTINGS - the server twin of the My Stats "Session
+# Info" rule (plugin/GameStateWatcher.cs SESSION_INACTIVITY_HOURS): a new sitting
+# starts where the gap since the player's previous finished game exceeds this
+# many hours. The two literals are pinned to each other by
+# test_session_report.py (grep both sides of a shared contract, #341/#152).
+SITTING_GAP_HOURS = 3
+
+# The ONE definition of a sitting, shared by the history projection (sitting_head)
+# and the report's `sitting` selector. {pid} is the bind of the player whose
+# sittings these are (:pid in the history, :cpid in the report); the use site
+# substitutes it through _sitting_ctes(). Activity = every finished game the
+# player took part in, in ANY mode - 1v1 (matches, the legacy team_ rows included,
+# a game is activity whatever box shows it), 2v2 (team_matches), 1v2 (ovt_matches)
+# and FFA (present seats only - an absent FFA seat is a frozen-roster ghost, not
+# activity) - invalidated games excluded. Window functions only, no LATERAL
+# (asyncpg); the gap is a typed make_interval, never a text-concatenated
+# interval (#275/#448). No room column is named anywhere in it (the report's
+# statements are pinned room-free).
+_SITTING_CTES = """acts AS (
+            SELECT DISTINCT a.ended_at FROM (
+                SELECT m.ended_at FROM matches m
+                 WHERE CAST({pid} AS uuid) IN (m.player1_id, m.player2_id)
+                   AND m.invalidated_at IS NULL AND m.ended_at IS NOT NULL
+                UNION ALL
+                SELECT t.ended_at FROM team_matches t
+                 WHERE CAST({pid} AS uuid) IN (t.t1a_id, t.t1b_id, t.t2a_id, t.t2b_id)
+                   AND t.invalidated_at IS NULL AND t.ended_at IS NOT NULL
+                UNION ALL
+                SELECT o.ended_at FROM ovt_matches o
+                 WHERE CAST({pid} AS uuid) IN (o.solo_id, o.duo_a_id, o.duo_b_id)
+                   AND o.invalidated_at IS NULL AND o.ended_at IS NOT NULL
+                UNION ALL
+                SELECT f.ended_at FROM ffa_matches f
+                  JOIN ffa_match_players fp ON fp.match_id = f.id
+                 WHERE fp.player_id = CAST({pid} AS uuid) AND NOT fp.absent
+                   AND f.invalidated_at IS NULL AND f.ended_at IS NOT NULL
+            ) a
+        ),
+        seq AS (
+            SELECT ended_at,
+                   CASE WHEN LAG(ended_at) OVER (ORDER BY ended_at) IS NULL
+                          OR ended_at - LAG(ended_at) OVER (ORDER BY ended_at)
+                             > make_interval(hours => GAP_HOURS)
+                        THEN 1 ELSE 0 END AS brk
+              FROM acts
+        ),
+        sit AS (
+            SELECT ended_at, SUM(brk) OVER (ORDER BY ended_at ROWS UNBOUNDED PRECEDING) AS sn
+              FROM seq
+        )""".replace("GAP_HOURS", str(SITTING_GAP_HOURS))
+
+
+def _sitting_ctes(pid_bind: str) -> str:
+    """The sitting CTEs for one bind name (":pid" / ":cpid"); the caller types the
+    value it binds there as a uuid."""
+    return _SITTING_CTES.replace("{pid}", pid_bind)
+
 
 @app.get("/api/v1/players/{steam_id}/matches", response_model=list[MatchHistoryEntry], tags=["Players"])
 async def get_player_matches(
@@ -8255,11 +9751,24 @@ async def get_player_matches(
                     "ELSE p1.display_name END) ILIKE :namepat ESCAPE '\\'\n")
 
     query = text(f"""
+        WITH {_sitting_ctes(':pid')}
         SELECT
             m.id AS match_id,
             m.ended_at,
             m.winner_id,
             m.is_ranked,
+            m.session_uuid,
+            -- Sept 8 item 5. ONE Session button per (sitting, opponent) in each box,
+            -- on the newest valid game of the group. The partition keys on the
+            -- opponent by the same CASE the projection uses (there is no opponent
+            -- column), on is_ranked (the two boxes) and on validity, so an
+            -- invalidated row (sn NULL, its own partition) never takes the head
+            -- from a live one and is itself never a head.
+            (m.invalidated_at IS NULL AND ROW_NUMBER() OVER (
+                PARTITION BY sit.sn,
+                             CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END,
+                             m.is_ranked, (m.invalidated_at IS NULL)
+                ORDER BY m.ended_at DESC, m.created_at DESC, m.id DESC) = 1) AS sitting_head,
             CASE WHEN m.player1_id = :pid THEN m.p1_rounds_won ELSE m.p2_rounds_won END AS player_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p2_rounds_won ELSE m.p1_rounds_won END AS opp_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p1_points_total ELSE m.p2_points_total END AS player_points,
@@ -8346,6 +9855,7 @@ async def get_player_matches(
                   AND m.series_id IS NOT NULL
             ), 0) AS series_gold_gained
         FROM matches m
+        LEFT JOIN sit ON sit.ended_at = m.ended_at
         JOIN players p1 ON p1.id = m.player1_id
         JOIN players p2 ON p2.id = m.player2_id
         LEFT JOIN shop_items si1 ON si1.id = p1.active_title_id
@@ -8355,7 +9865,7 @@ async def get_player_matches(
         LEFT JOIN ranked_series rs ON rs.id = m.series_id
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
-{name_sql}        ORDER BY m.ended_at DESC
+{name_sql}        ORDER BY m.ended_at DESC, m.created_at DESC, m.id DESC
         LIMIT :limit OFFSET :offset
     """)
     rows = (await db.execute(query, params)).mappings().all()
@@ -8472,6 +9982,14 @@ async def get_player_matches(
             # Aug 12 item 1 — end-of-game builds, viewer-relative.
             player_end_stats=row["pl_end_stats"],
             opp_end_stats=row["op_end_stats"],
+            # Sept 6 batch (Group 4 item c): the opaque session id the game was
+            # filed under (migration 298) — an additive column so the history
+            # box can group a casual sitting for its "Session" button. None on
+            # every row without one; never a room identifier.
+            session_uuid=str(row["session_uuid"]) if row["session_uuid"] else None,
+            # Sept 8 item 5: the row that carries this box's one Session button for
+            # its (sitting, opponent) group; the button opens ?sitting=<this match>.
+            sitting_head=bool(row["sitting_head"]),
         ))
 
     return entries
@@ -10838,24 +12356,91 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
             "verified": verified}
 
 
+SEAT_VERIFIED = "verified"
+SEAT_UNBOUND = "unbound"
+SEAT_MISMATCH = "mismatch"
+
+
+async def _seat_attestation_verdict(request, steam_id: str, db: AsyncSession) -> str:
+    """What the transport can say about WHO sent this request, in one indexed
+    read. Three answers, and the middle one is the point:
+
+      SEAT_VERIFIED   a session token rode along, is known, unexpired, verified,
+                      and names the same steam_id the request claims.
+      SEAT_MISMATCH   a token rode along and names a DIFFERENT steam_id. This is
+                      the only outcome carrying positive evidence that the
+                      claimed identity is not the sender's.
+      SEAT_UNBOUND    everything else — no token, unknown token, expired,
+                      unverified, or the lookup itself failed. It means "the
+                      transport cannot say", NOT "the claim is false": the
+                      ordinary client today holds no verified session at all.
+
+    Never raises, and never enforces. #499 is the rule it serves — a check that
+    soft-fails by design cannot be read as evidence unless it records its
+    verdict — so this returns the verdict instead of a boolean that would fold
+    "we could not tell" together with "we checked and it was wrong".
+
+    MISMATCH is classified BEFORE expiry and verification deliberately. A token
+    that names someone else names someone else whether or not it is still valid,
+    and that fact is the one a caller acts on.
+
+    The read is inside a SAVEPOINT. Returning UNBOUND from an `except` is only
+    fail-soft if the transaction survives it, and under asyncpg a caught
+    statement error still leaves the whole transaction ABORTED (#235) — so
+    without one, a blip on this lookup would take down the very write this is
+    supposed to be harmless to, and the caller's next statement would raise. The
+    read-only callers this function was extracted from never noticed; the
+    live-points write path would have."""
+    try:
+        token = request.headers.get("X-Session-Token") if request is not None else None
+        if not token:
+            return SEAT_UNBOUND
+        async with db.begin_nested():
+            row = (await db.execute(text(
+                "SELECT steam_id, verified, expires_at FROM steam_sessions "
+                "WHERE token_hash = :th"
+            ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
+        if row is None:
+            return SEAT_UNBOUND
+        if row["steam_id"] != steam_id:
+            return SEAT_MISMATCH
+        if row["expires_at"] is not None and row["expires_at"] < _utc_now():
+            return SEAT_UNBOUND
+        if not row["verified"]:
+            return SEAT_UNBOUND
+        return SEAT_VERIFIED
+    except Exception:
+        return SEAT_UNBOUND
+
+
 async def _strict_steam_session_ok(request, steam_id: str, db: AsyncSession) -> bool:
     """Fail-CLOSED session validity — for privilege checks (admin rate-limit
     exemption), NOT the compatibility write-path gate below. Every failure
     (missing token, unknown/expired/unverified row, id mismatch, infra error)
-    returns False; there are no soft/grace carve-outs here by design."""
+    returns False; there are no soft/grace carve-outs here by design.
+
+    One read, one classifier: this is `_seat_attestation_verdict` with the two
+    negative verdicts collapsed. It used to carry its own copy of the same
+    SELECT and the same four conditions, which is how two readings of one
+    question come to disagree (#432)."""
+    return await _seat_attestation_verdict(request, steam_id, db) == SEAT_VERIFIED
+
+
+def _mark_session_verified(request, ok):
+    """Stamp the session verdict on the request. Fail-quiet: a caller reading
+    it back defaults to False, and a request object without `state` (internal
+    direct calls pass None) simply carries no verdict — which reads as
+    unverified, the conservative direction."""
     try:
-        token = request.headers.get("X-Session-Token") if request is not None else None
-        if not token:
-            return False
-        row = (await db.execute(text(
-            "SELECT steam_id, verified, expires_at FROM steam_sessions "
-            "WHERE token_hash = :th"
-        ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
-        if row is None or not row["verified"]:
-            return False
-        if row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc):
-            return False
-        return row["steam_id"] == steam_id
+        if request is not None:
+            request.state.scr_session_verified = bool(ok)
+    except Exception:
+        pass
+
+
+def _session_was_verified(request):
+    try:
+        return bool(getattr(request.state, "scr_session_verified", False))
     except Exception:
         return False
 
@@ -10872,6 +12457,14 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
     never take down the write path it protects. Internal callers (bot) send
     no X-Mod-Version, so enforce is always False for them; `request` may be
     None on direct internal function calls (place_discord_bet → place_bet)."""
+    # Record the verdict on the request so a caller can ask whether the
+    # claimed steam_id was ESTABLISHED, not merely accepted. The soft-fail
+    # conditions above are deliberate — this check must never take down the
+    # write path it protects — but that makes "we did not raise" a weaker fact
+    # than "we verified", and anything treating the id as evidence needs the
+    # stronger one. Set false first: every later exit either raises or leaves
+    # this alone, so an unreachable code path cannot read as verified.
+    _mark_session_verified(request, False)
     token = None
     try:
         if request is not None:
@@ -10899,6 +12492,7 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
             print(f"[STEAM-AUTH] session lookup error (soft): {type(ex).__name__}")
             return
     if reason is None:
+        _mark_session_verified(request, True)
         return
     key_set = bool(os.getenv("STEAM_WEB_API_KEY"))
     # Master soak switch (July 22): even with the key set, enforcement stays
@@ -11164,7 +12758,63 @@ async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_n
              OR (player_id = :b AND matched_with = :a))
          RETURNING player_id"""), {"room": room_name, "region": region, "a": my_pid, "b": opp_pid})
     updated = {r[0] for r in res.fetchall()}
-    return updated == {my_pid, opp_pid}
+    if updated != {my_pid, opp_pid}:
+        return False
+    # KEEP WHAT THIS SERVER DECIDED (r13 HIGH). The queue rows carry the issued
+    # region too, but they are cleared when the pair leaves the queue, and the
+    # match report arrives long after that. This row survives to report time,
+    # keyed by the room name — which is one of the seven fields the match HMAC
+    # covers, so a report can only ever reach the binding for the room it was
+    # signed for. DO NOTHING on conflict: room names are fresh uuids, so a
+    # collision would be a reused name and the FIRST issuance is the one that
+    # sent two players somewhere.
+    await db.execute(text(
+        "INSERT INTO issued_room_regions (room_name, region, player1_id, player2_id) "
+        "VALUES (:room, :region, :a, :b) ON CONFLICT (room_name) DO NOTHING"
+    ), {"room": room_name, "region": region or "", "a": my_pid, "b": opp_pid})
+    # The pair is stored because the region alone did not say who the room was
+    # issued TO, so any accepted report naming it fed the map (r14 HIGH).
+    #
+    # And the table is pruned HERE, on the path that adds to it. Migration 292
+    # promised deletion past 30 days and nothing deleted anything: there is no
+    # cron for this table and adding one would be a second thing to keep alive.
+    #
+    # BOUNDED and ISOLATED (r14 LOW 6). The previous version was a bare
+    # unbounded DELETE, and the comment above it called that "a bounded range
+    # delete" on the strength of the index alone -- an index bounds the SCAN,
+    # never the row count or the lock time. It ran here, after the UPDATE whose
+    # row locks are held until the caller commits, so one backlogged sweep
+    # extended every concurrent room issuance. Three properties, each answering
+    # a different way that fails:
+    #
+    #   ctid IN (... LIMIT)     a delete whose row count is unbounded is a lock
+    #                           window that is unbounded too. 200 per call
+    #                           against a table gaining a handful of rows a
+    #                           minute drains any backlog within an hour of
+    #                           queueing and never sweeps the whole table once;
+    #   FOR UPDATE SKIP LOCKED  two concurrent issuances must not serialise
+    #                           behind each other over ancient rows neither of
+    #                           them is about;
+    #   the savepoint           maintenance must never fail room issuance. A
+    #                           statement error would otherwise abort the whole
+    #                           transaction, so catching it without a savepoint
+    #                           would swallow the exception and still lose the
+    #                           issuance.
+    #
+    # The isolation covers THIS statement alone. The INSERT above is NOT
+    # best-effort: it is the binding a later match report is judged against, so
+    # widening the guard over it would silently undo the r14 HIGH repair and
+    # report success. That scoping is asserted by a test, not just written here.
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "DELETE FROM issued_room_regions WHERE ctid IN ("
+                " SELECT ctid FROM issued_room_regions"
+                " WHERE issued_at < NOW() - INTERVAL '30 days'"
+                " ORDER BY issued_at LIMIT 200 FOR UPDATE SKIP LOCKED)"))
+    except Exception as exc:
+        _prune_skip("issued_room_regions", exc)
+    return True
 
 
 _CROSS_QUEUE_TABLES = ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")
@@ -11701,7 +13351,395 @@ async def _enrollment_identity_gate(db: AsyncSession, steam_id: str) -> None:
             raise HTTPException(status_code=410, detail="account_deleted")
 
 
-def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
+# A region token as clients report it. Anything else is treated as ABSENT
+# rather than pinned: the value is handed back to both clients to connect to,
+# and there is no recovery from a room neither of them can reach.
+# The reason _prune_stale_series writes when it abandons a series that never
+# had a match reported against it. Named once because report_disconnect reads
+# it back: a literal in two places is a literal that drifts in one of them.
+PRUNE_REASON_NO_MATCH = "no_match_reported"
+
+_REGION_TOKEN_RE = _re.compile(r"^[a-z]{2,5}$")
+
+
+def _region_token(value):
+    v = (value or "").strip().lower()
+    return v if _REGION_TOKEN_RE.match(v) else ""
+
+
+# ── Which regions this process has actually seen somebody connected to ───────
+#
+# CORROBORATION, NOT AN ALLOWLIST, and the distinction is the whole point. A
+# fixed list of regions was refused for the ranked queue with a good argument:
+# the room name is server-generated and the region goes straight to
+# PhotonNetwork, which accepts regions the game's own selector does not offer —
+# hk and uae are both in this project's match history. A list would move a pair
+# that was connecting fine to a worse room, and would need editing every time
+# Photon changes its map.
+#
+# This is built instead from the region on an ACCEPTED MATCH REPORT — a game
+# that was played, submitted and recorded. A region ROUNDS adds tomorrow
+# qualifies the first time somebody finishes a game there, and one that is
+# retired stops appearing and ages out on its own. It is used ONLY to break a
+# tie between two candidates that are already in play — never to reject a
+# region outright, and never to introduce one — so the worst it can do is
+# choose the same way the code without it would have.
+#
+# IT IS NOT READ FROM THE REPORT, which is the design. Neither the join-time
+# CloudRegion snapshot (what this read first) nor the match report's `region`
+# field (what it read second) is signed: the match HMAC covers seven fields and
+# the region is not one of them, so establishing a session proves WHO is
+# speaking and nothing about the region named in the sentence.
+#
+# What it is NOT is a region no client had a hand in. _pick_room_region chooses
+# from the two seats' own region and home_region tokens, so the candidates come
+# from clients and the DECISION is the server's — and it is the decision that
+# is recorded here, against the pair it was made for. The claim a sighting
+# carries is therefore exactly this and no more: this server committed these
+# two players to this region, and a game from that room came back and was
+# accepted. It is not "a client named this region".
+#
+# The token is the region THIS SERVER ISSUED for the room, read back from
+# issued_room_regions by the room id — which the HMAC does cover. So the claim
+# behind a sighting is: the server told two players to play here, and a game
+# from that room was reported and accepted. A region that cannot be reached
+# produces no such game, which is what keeps this from being the server
+# corroborating its own guesses. A room the server did not issue (private,
+# tournament) has no binding and contributes nothing.
+#
+# Three guards on what reaches the map. A token counts only once it has been
+# seen from more than one distinct player, and only the REPORTER's own id is
+# recorded — never the opponent's, or one account naming an opponent would
+# supply both halves of "two players"; a sighting is recorded only from a
+# request whose session the API actually established; and the whole map is
+# bounded and aged, so it cannot grow without limit or hold a sighting forever.
+#
+# EVERY REPORTER CARRIES ITS OWN CLOCK, which is the shape this needs and not
+# the obvious one. A single last-seen stamp per token is refreshed by whoever
+# reported most recently, so one player queueing from a region daily keeps a
+# second player's year-old sighting alive and the quorum with it — the map would
+# say "two players recently" on the strength of one. Per reporter, an old
+# sighting stops counting on its own schedule whatever anyone else is doing.
+#
+# In-process on purpose. It is empty at boot and refills as games are reported,
+# and while it is empty the tie-break falls back to the stable order below —
+# i.e. to exactly what this did before corroboration existed.
+#
+# A REPORT WHOSE SESSION IS NOT ESTABLISHED CONTRIBUTES NOTHING, and that is
+# the fail-closed direction: while the fleet's steam-auth arming is soft, a
+# client whose token has not been minted yet is served normally and is simply
+# not a witness. What keeps that from being a permanent hole is that the source
+# is a RECURRING event. Every accepted report re-stamps the reporter's sighting,
+# so an unminted session costs the reports made before its token exists and
+# nothing after — unlike a one-shot join-time snapshot, which recorded a player
+# once and never looked again (r12 MEDIUM: two genuine clients that joined
+# before their tokens were minted could never be re-noted at all).
+#
+# token -> {steam_id: time.monotonic() of that reporter's last sighting}
+_REGION_SEEN = {}
+_REGION_SEEN_TTL_SECONDS = 7 * 24 * 3600
+
+# The client appends `_<HHmmss>_r<n>` to the Photon room name to build the
+# per-game report id (GameStateWatcher.BuildGameReportIdPrefix + the `_r`
+# suffix, and the FFA path that builds the same shape). issued_room_regions is
+# keyed by the room name the queue ISSUED, so comparing the two for equality
+# never matched and the corroboration map never received a sighting from a real
+# game (r14 HIGH).
+#
+# Stripping the suffix is safe because the whole id is one of the seven fields
+# the match HMAC covers: the derived name is a pure function of signed input.
+# The pattern is anchored at both ends and the suffix shape is fixed, so a room
+# name that itself contains underscores -- every ranked and tournament name --
+# survives intact. Both the derived name and the id as sent are offered, so a
+# client that ever reports the bare room name still resolves.
+_ISSUED_ROOM_SUFFIX_RE = _re.compile(r"^(?P<room>.+)_[0-9]{6}_r[0-9]+$")
+
+
+def _issued_room_candidates(report_room_id):
+    """The room names an accepted report could have been issued under."""
+    rid = str(report_room_id or "")
+    if not rid:
+        return []
+    out = [rid]
+    m = _ISSUED_ROOM_SUFFIX_RE.match(rid)
+    if m and m.group("room") and m.group("room") != rid:
+        out.append(m.group("room"))
+    return out
+_REGION_SEEN_MAX_TOKENS = 64
+_REGION_SEEN_MIN_PLAYERS = 2
+_REGION_SEEN_IDS_PER_TOKEN = 8
+# What the corroborated pool may hold WHEN THE MAP IS FULL AND SOMETHING HAS TO
+# GO. It is not a partition maintained at every instant — promoting nursery
+# tokens can take the corroborated count past it while the map is inside its
+# bound, and nothing is evicted then, because evicting real evidence to hold
+# empty space open would be the wrong trade. What it guarantees is the only
+# thing that matters: at the moment a newcomer needs a slot, corroborated
+# tokens above this share are what pays for it. The remaining 16 are where a
+# region that only one player has reported so far waits for its second reporter (r12 MEDIUM: with no such floor, a full map of
+# corroborated tokens evicted every first honest sighting the moment it was
+# made, because a single-reporter token is by definition the least-corroborated
+# entry — so the second reporter never found it there and the region could not
+# corroborate at all, indefinitely). 48 keeps evidence dominant: a nursery big
+# enough to survive a burst of new regions, small enough that three quarters of
+# the map is still what two players have actually been connected to.
+_REGION_SEEN_CORROBORATED_CAP = 48
+
+
+def _note_region_seen(token, steam_id):
+    """One sighting, from one identified reporter, for a game that happened.
+
+    The caller is the accepted-match path and passes the region the match was
+    recorded in together with the steam id whose session it established. Never
+    a stored home region (a cache must not corroborate itself), never a
+    menu-time snapshot (see the block comment above), and never the opponent's
+    id (one reporter must not be able to produce two reporters)."""
+    token = _region_token(token)
+    if not token or not steam_id:
+        return
+    now = time.monotonic()
+    ids = _REGION_SEEN.get(token)
+    if ids is None:
+        ids = {}
+        _REGION_SEEN[token] = ids
+    ids[str(steam_id)] = now
+    for expired in [rid for rid, ts in ids.items()
+                    if now - ts > _REGION_SEEN_TTL_SECONDS]:
+        ids.pop(expired, None)
+    # A PER-REPORTER QUOTA WAS CONSIDERED HERE AND IS NOT PRESENT (r13 MEDIUM).
+    # The finding was that one reporter cycling new tokens can fill the nursery
+    # and evict honest first sightings before their second player arrives. That
+    # is true of a token a client can choose. It is not true of this one: the
+    # token is the region the SERVER issued for the room, so the whole token
+    # space is the set of regions this server picks from, and "a new token" is
+    # not something a reporter can produce on demand. A quota would only have
+    # cost an honest player who genuinely played in two regions nobody else has
+    # reported their older claim. If a client-supplied string is ever fed to
+    # this function again, the quota comes back with it.
+    # Bounded per token by evicting the OLDEST reporter, not by refusing the
+    # newest: a fixed first-eight would let a region's original reporters hold
+    # the quorum open long after they stopped playing there.
+    while len(ids) > _REGION_SEEN_IDS_PER_TOKEN:
+        ids.pop(min(ids, key=ids.get), None)
+    _evict_region_tokens(now)
+
+
+def _evict_region_tokens(now):
+    """Bound the map without letting either class starve the other.
+
+    Purely-oldest eviction lets any new token push out a corroborated one, so a
+    full map of real regions could be turned over by tokens nobody has played
+    in. Evicting the least-corroborated first has the opposite failure and it
+    is the one that was real (r12 MEDIUM): a single-reporter token is always
+    the least-corroborated entry, so once the map was full of corroborated
+    ones, every first sighting of a genuine new region was evicted in the same
+    call that made it, and the second reporter arrived to find nothing to join.
+    A region can only corroborate if its first sighting is allowed to WAIT.
+
+    So the map is two pools with a floor between them. Corroborated tokens may
+    hold at most _REGION_SEEN_CORROBORATED_CAP slots; the rest is the nursery.
+    Whichever pool is over its share gives up its OLDEST members — recency
+    within a pool, never evidence across pools. A new token therefore competes
+    with other new tokens, and only with them."""
+    over = len(_REGION_SEEN) - _REGION_SEEN_MAX_TOKENS
+    if over <= 0:
+        return
+
+    def last_seen(tok):
+        ids = _REGION_SEEN.get(tok) or {}
+        return max(ids.values()) if ids else 0.0
+
+    corroborated = [t for t in _REGION_SEEN if _region_corroborated(t, now)]
+    settled = set(corroborated)
+    nursery = [t for t in _REGION_SEEN if t not in settled]
+
+    victims = []
+    surplus = len(corroborated) - _REGION_SEEN_CORROBORATED_CAP
+    if surplus > 0:
+        victims.extend(sorted(corroborated, key=last_seen)[:min(surplus, over)])
+    if len(victims) < over:
+        victims.extend(sorted(nursery, key=last_seen)[:over - len(victims)])
+    if len(victims) < over:
+        # Both pools are inside their share and the map is still over: only
+        # reachable if the cap is ever raised to the map size. Oldest first,
+        # so the bound is never merely advisory.
+        chosen = set(victims)
+        rest = [t for t in _REGION_SEEN if t not in chosen]
+        victims.extend(sorted(rest, key=last_seen)[:over - len(victims)])
+    for stale in victims:
+        _REGION_SEEN.pop(stale, None)
+
+
+def _region_corroborated(token, now=None):
+    """Whether two distinct reporters have been connected to `token` inside the
+    TTL. `now` is passed in when two candidates are being compared, so both are
+    decided against one reading of the clock — otherwise a token can be fresh
+    for the first comparison and expired for the second, and which one loses
+    depends on where the TTL boundary fell between two statements."""
+    ids = _REGION_SEEN.get(_region_token(token))
+    if not ids:
+        return False
+    if now is None:
+        now = time.monotonic()
+    live = sum(1 for ts in ids.values() if now - ts <= _REGION_SEEN_TTL_SECONDS)
+    return live >= _REGION_SEEN_MIN_PLAYERS
+
+
+def _region_agreed(a, b):
+    """One region from two signals of the same kind, SYMMETRICALLY.
+
+    The answer must not depend on the argument order, because the caller's
+    order is "whichever seat's request triggered issuance" — i.e. whichever
+    client polled first, which correlates with having the better connection to
+    this API. That made the room land on the faster poller's region and gave
+    the same seat the advantage it was already enjoying.
+
+    When only one signal exists it is the answer; when they agree, that is the
+    answer. When two signals genuinely DISAGREE, prefer the one this process
+    has seen a client connected to — that is the only fact available here about
+    whether a region still exists, and it is what stops a stale cache naming a
+    retired region from winning by sorting first. With both corroborated or
+    neither, the tie goes to a fixed order: a coin flip made stable, not a
+    latency decision, and written down as such so nobody reads the result as a
+    preference. The pair has no comparable latency measurement, which is the
+    whole reason region steering was cut.
+    """
+    if a and b:
+        if a == b:
+            return a
+        now = time.monotonic()
+        ca, cb = _region_corroborated(a, now), _region_corroborated(b, now)
+        if ca != cb:
+            return a if ca else b
+        return min(a, b)
+    return a or b
+
+
+# ── Sept 7 item 3: the pair's own Photon ping maps (design v2 section 7) ─────
+#
+# A client carrying the sweep (Sept 7 batch) pings Photon's region list with its own UDP pinger and
+# sends the result twice: on the 1v1 /queue/join body (`region_pings`,
+# `region_pings_age_s`) and, while it keeps polling, as the request header
+# `X-Region-Pings: us=42,eu=31;age=12` for the three polls after a new sweep.
+# Both arrive through ONE validator; a map that fails it is stored as NULL at
+# join and ignored at poll (a poll never clears the columns). The columns are
+# deliberately NOT declared on the RankedQueue ORM model — raw SQL on both
+# ends, the 296 pattern; migration 301 enumerates every writer and reader.
+#
+# What a client can and cannot do with its own map (#283): it writes only its
+# OWN row, so it can move the pair only to a region the OPPONENT measured
+# within 20 ms of that opponent's own baseline — at most a 20 ms cost to an
+# honest seat — or withhold the map and get today's ladder exactly. Nothing
+# here moves a match result, a rating, gold or another player's game beyond
+# that bound.
+
+REGION_PINGS_MAX_ENTRIES = 24
+REGION_PINGS_MAX_MS = 5000
+REGION_PINGS_MAX_AGE_S = 900           # accepted at join / poll
+REGION_PINGS_ISSUANCE_MAX_AGE_S = 180  # fresh enough to decide a room (7/3-1)
+REGION_PINGS_PARETO_MS = 20
+_REGION_PINGS_DIGITS_RE = _re.compile(r"^[0-9]{1,6}$")
+
+
+def _region_pings_clean(pings):
+    """The map as {token: ms}, or None unless EVERY entry is well-formed: a
+    JSON object with 1..24 entries, every key already a canonical region token
+    (`_region_token(k) == k`), every value an int in 1..5000 (bool excluded).
+    An empty object carries no information and is treated as absent."""
+    if not isinstance(pings, dict) or not (1 <= len(pings) <= REGION_PINGS_MAX_ENTRIES):
+        return None
+    clean = {}
+    for key, ms in pings.items():
+        if not isinstance(key, str) or _region_token(key) != key:
+            return None
+        if isinstance(ms, bool) or not isinstance(ms, int) or not (1 <= ms <= REGION_PINGS_MAX_MS):
+            return None
+        clean[key] = ms
+    return clean
+
+
+def _region_pings_validate(pings, age):
+    """(json_text, age) for a well-formed map and an int age in 0..900, else
+    (None, None) — the join writes both columns NULL from that answer and the
+    poll leaves them untouched."""
+    clean = _region_pings_clean(pings)
+    if clean is None:
+        return None, None
+    if isinstance(age, bool) or not isinstance(age, int) or not (0 <= age <= REGION_PINGS_MAX_AGE_S):
+        return None, None
+    return _json.dumps(clean, sort_keys=True, separators=(",", ":")), age
+
+
+def _region_pings_from_header(value):
+    """`X-Region-Pings: us=42,eu=31;age=12` -> the join validator's answer.
+    Exactly one ';', an `age=<digits>` tail, `code=<digits>` entries with no
+    duplicate code; anything else -> (None, None)."""
+    if not value or not isinstance(value, str) or len(value) > 512:
+        return None, None
+    map_part, sep, age_part = value.partition(";")
+    if not sep or ";" in age_part:
+        return None, None
+    age_part = age_part.strip()
+    if not age_part.startswith("age="):
+        return None, None
+    age_txt = age_part[4:]
+    if not _REGION_PINGS_DIGITS_RE.match(age_txt):
+        return None, None
+    pings = {}
+    for item in map_part.split(","):
+        code, eq, ms_txt = item.strip().partition("=")
+        if not eq or not _REGION_PINGS_DIGITS_RE.match(ms_txt) or code in pings:
+            return None, None
+        pings[code] = int(ms_txt)
+    return _region_pings_validate(pings, int(age_txt))
+
+
+def _pick_region_by_pings(p1, p2, ladder_pick):
+    """Rung 0 of the room-region pick: pure and swap-invariant.
+
+    Given both seats' clean maps and the ladder's answer L: the candidates are
+    the regions BOTH seats measured; the choice c minimises the pair's WORST
+    ping (tie: the sum; tie: fixed order by code). Each seat's baseline is its
+    own measurement of L when it has one, else its own best region; c is
+    accepted only when it costs NEITHER seat more than 20 ms over its own
+    baseline — a Pareto improvement within tolerance judged on each seat's
+    OWN numbers, never one seat's latency traded for the other's. Otherwise L
+    stands. Returns (pick, why, worst_ms): why is "pings" when c was taken,
+    else "no-maps" / "no-overlap" / "pareto"."""
+    if not p1 or not p2:
+        return ladder_pick, "no-maps", None
+    common = sorted(set(p1) & set(p2))
+    if not common:
+        return ladder_pick, "no-overlap", None
+    c = min(common, key=lambda r: (max(p1[r], p2[r]), p1[r] + p2[r], r))
+    base1 = p1[ladder_pick] if ladder_pick in p1 else min(p1.values())
+    base2 = p2[ladder_pick] if ladder_pick in p2 else min(p2.values())
+    if p1[c] <= base1 + REGION_PINGS_PARETO_MS and p2[c] <= base2 + REGION_PINGS_PARETO_MS:
+        return c, "pings", max(p1[c], p2[c])
+    return ladder_pick, "pareto", None
+
+
+def _region_pings_at_issuance(pings, pings_at, now):
+    """A queue row's stored map when it may decide a room: well-formed and
+    stamped within the issuance window. Returns (map or None, state) with
+    state in "absent" / "stale" / "fresh"."""
+    if isinstance(pings, (str, bytes)):
+        try:
+            pings = _json.loads(pings)
+        except ValueError:
+            return None, "absent"
+    clean = _region_pings_clean(pings)
+    if clean is None or pings_at is None:
+        return None, "absent"
+    if pings_at.tzinfo is None:
+        pings_at = pings_at.replace(tzinfo=timezone.utc)
+    if now - pings_at > timedelta(seconds=REGION_PINGS_ISSUANCE_MAX_AGE_S):
+        return None, "stale"
+    return clean, "fresh"
+
+
+def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
+                      p1_pings=None, p2_pings=None, p1_pings_at=None, p2_pings_at=None,
+                      now=None):
     """Room-region decision for a 1v1 queue pair (Aug 15 item 5, Jarvis/Nix).
 
     History: the pick used to be `entry.region or opp.region or "us"` —
@@ -11715,21 +13753,119 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name=""):
       1. Both HOME regions (Photon best-region ping cache, sent by 1.38.7+
          clients) agree -> use them. Same-region pairs now always land home
          no matter what either client was connected to at join time.
-      2. Otherwise the old live-snapshot chain, then the home regions as
-         further fallbacks — ANY region signal beats the "us" default
-         (empty+empty previously fell straight through to us).
+      2. Otherwise the live snapshots, then the home regions — ANY region
+         signal beats the "us" default (empty+empty previously fell straight
+         through to us). Each rung is resolved SYMMETRICALLY: this function's
+         argument order is "whichever seat's request triggered issuance", i.e.
+         whichever client polled first, which correlates with having the
+         better connection to this API. The old chain
+         `my_region or opp_region or mh or oh` therefore put the room wherever
+         the faster poller was, handing the seat that was already ahead the
+         region as well.
+    A signal that is not a well-formed region token counts as ABSENT rather
+    than being pinned: it would be handed to both clients to connect to, and
+    there is no recovery from a room neither of them can reach.
     The one-line log makes the next region report diagnosable from logs:api
-    without a repro.
+    without a repro. It carries the corroboration state of whatever was
+    chosen, because "both cached regions disagree and neither has been seen
+    live" is the case that strands a pair behind a series that already exists,
+    and it is invisible otherwise.
+
+    What the ladder does NOT claim: that its answer is the best one for a
+    cross-region pair. Steering on a stored home region was refused for good
+    reasons — a persistent, untimestamped best-region cache steers a player who
+    relocated by where they used to be. Since Sept 7 (item 3) the measurement
+    that settles it exists as RUNG 0, run after the ladder has answered: both
+    seats' own ping maps (the kwargs; each with its stamp), taken within the
+    last 180 s, may replace the ladder's answer — but only by a region that
+    costs NEITHER seat more than 20 ms over its own measured baseline
+    (_pick_region_by_pings). A missing, stale or malformed map on either side
+    leaves the ladder's answer exactly as it was. The positional signature is
+    unchanged; `now` is injectable for tests only.
     """
-    mh = (my_home or "").strip().lower()
-    oh = (opp_home or "").strip().lower()
+    mr, orr = _region_token(my_region), _region_token(opp_region)
+    mh, oh = _region_token(my_home), _region_token(opp_home)
+    # NOTHING is recorded here. Only queue_join feeds the corroboration map,
+    # and only with a player id attached: refreshing a token's timestamp from
+    # issuance would keep a region the picker itself chose looking recent
+    # forever, so a retired one could never age out of the map that is there
+    # to notice exactly that.
     if mh and mh == oh:
-        chosen = mh
+        ladder = mh
     else:
-        chosen = my_region or opp_region or mh or oh or "us"
+        ladder = _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us"
+    # Rung 0 (Sept 7 item 3): the pair's own ping maps, judged AFTER the ladder
+    # has answered — see _pick_region_by_pings for the acceptance rule. Both
+    # seats are treated identically, so the answer stays swap-invariant.
+    if now is None:
+        now = datetime.now(timezone.utc)
+    m1, s1 = _region_pings_at_issuance(p1_pings, p1_pings_at, now)
+    m2, s2 = _region_pings_at_issuance(p2_pings, p2_pings_at, now)
+    if m1 is None or m2 is None:
+        chosen, why, worst = ladder, ("stale" if "absent" not in (s1, s2) else "no-maps"), None
+    else:
+        chosen, why, worst = _pick_region_by_pings(m1, m2, ladder)
+    if why == "pings":
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=pings worst={worst} ladder={ladder}")
+    else:
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=ladder why={why}")
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
-          f"live=({my_region},{opp_region}) home=({mh},{oh})")
+          f"seen={'y' if _region_corroborated(chosen) else 'n'} "
+          f"live=({mr},{orr}) home=({mh},{oh})")
     return chosen
+
+
+async def _queue_join_upsert(db: AsyncSession, *, player_id, steam_id, display_name,
+                             rating, rating_deviation, region, home_region, ranked_only,
+                             region_pings, region_pings_age) -> None:
+    """The 1v1 queue row, written by ONE INSERT ... ON CONFLICT DO UPDATE.
+
+    Raw SQL rather than the ORM upsert it replaced (Sept 7 item 3): the two
+    ping columns are not declared on RankedQueue (migration 301), and an ORM
+    statement cannot carry an undeclared column (#346). The column list and
+    the conflict SET are the ORM statement's, unchanged; `region_pings` /
+    `region_pings_at` are the validator's answer — NULL/NULL when it refused,
+    so a rejoin never inherits a stale map — bound TYPED (`CAST(:region_pings
+    AS JSONB)`, `make_interval(secs => :region_pings_age)`, #275/#448) so the
+    driver never infers them. ranked_only is INERT: written since launch, read
+    by no matchmaking logic; kept so a future consumer inherits real data —
+    do not document it as a working preference."""
+    now = datetime.now(timezone.utc)
+    await db.execute(text("""
+        INSERT INTO ranked_queue
+            (player_id, steam_id, display_name, rating, rating_deviation,
+             region, home_region, ranked_only, status, matched_with, room_name,
+             room_region, ready, joined_at, matched_at, last_polled,
+             region_pings, region_pings_at)
+        VALUES
+            (:pid, :sid, :name, :rating, :rd,
+             :region, :home_region, :ranked_only, 'searching', NULL, NULL,
+             NULL, false, :now, NULL, :now,
+             CAST(:region_pings AS JSONB),
+             NOW() - make_interval(secs => :region_pings_age))
+        ON CONFLICT (player_id) DO UPDATE SET
+            status = 'searching',
+            rating = EXCLUDED.rating,
+            rating_deviation = EXCLUDED.rating_deviation,
+            region = EXCLUDED.region,
+            home_region = EXCLUDED.home_region,
+            ranked_only = EXCLUDED.ranked_only,
+            matched_with = NULL,
+            room_name = NULL,
+            room_region = NULL,
+            ready = false,
+            joined_at = EXCLUDED.joined_at,
+            matched_at = NULL,
+            last_polled = EXCLUDED.last_polled,
+            region_pings = EXCLUDED.region_pings,
+            region_pings_at = EXCLUDED.region_pings_at
+    """), {
+        "pid": player_id, "sid": steam_id, "name": display_name,
+        "rating": float(rating), "rd": float(rating_deviation),
+        "region": region, "home_region": home_region, "ranked_only": bool(ranked_only),
+        "now": now,
+        "region_pings": region_pings, "region_pings_age": region_pings_age,
+    })
 
 
 @app.post("/api/v1/queue/join", tags=["Queue"])
@@ -11795,48 +13931,25 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     # (the live CloudRegion snapshot) — the room-region pick prefers two
     # AGREEING home regions over either snapshot.
     _home_region = (req.home_region or "").strip().lower()[:8] or None
+    # NOT a corroboration source. This snapshot fed the region-tie map until
+    # r12: it is the strongest region signal available here, but it is still
+    # only a client saying where it is, and the session check standing above it
+    # binds the speaker rather than the sentence. The map is fed from accepted
+    # match reports instead — see the block comment on _REGION_SEEN. The
+    # snapshot keeps its original job below, as one of the four candidates the
+    # room-region pick chooses between.
 
-    # Upsert into queue
-    stmt = pg_insert(RankedQueue).values(
-        player_id=player.id,
-        steam_id=req.steam_id,
-        display_name=player.display_name,
-        rating=cur_rating,
-        rating_deviation=cur_rd,
-        region=req.region,
-        home_region=_home_region,
-        # ranked_only is INERT: written here (and in the conflict-update
-        # below) since launch, read by no matchmaking logic. Kept only so a
-        # future consumer inherits real data; do not document it as a
-        # working preference (Codex wiki-batch finding).
-        ranked_only=req.ranked_only,
-        status="searching",
-        matched_with=None,
-        room_name=None,
-        room_region=None,
-        ready=False,
-        joined_at=datetime.now(timezone.utc),
-        matched_at=None,
-        last_polled=datetime.now(timezone.utc),
-    ).on_conflict_do_update(
-        index_elements=[RankedQueue.player_id],
-        set_={
-            "status": "searching",
-            "rating": cur_rating,
-            "rating_deviation": cur_rd,
-            "region": req.region,
-            "home_region": _home_region,
-            "ranked_only": req.ranked_only,
-            "matched_with": None,
-            "room_name": None,
-            "room_region": None,
-            "ready": False,
-            "joined_at": datetime.now(timezone.utc),
-            "matched_at": None,
-            "last_polled": datetime.now(timezone.utc),
-        },
-    )
-    await db.execute(stmt)
+    # Sept 7 item 3: the client's own Photon ping map (design v2 section 7).
+    # ONE validator for this body and the poll header; a refused or absent map
+    # writes NULL to both columns, so a rejoin never inherits a stale map.
+    _pings_json, _pings_age = _region_pings_validate(req.region_pings, req.region_pings_age_s)
+
+    # Upsert into queue — one raw INSERT ... ON CONFLICT, see _queue_join_upsert.
+    await _queue_join_upsert(
+        db, player_id=player.id, steam_id=req.steam_id, display_name=player.display_name,
+        rating=cur_rating, rating_deviation=cur_rd, region=req.region,
+        home_region=_home_region, ranked_only=req.ranked_only,
+        region_pings=_pings_json, region_pings_age=_pings_age)
     await db.commit()
 
     return {"status": "searching", "message": "Joined ranked queue"}
@@ -11974,7 +14087,13 @@ async def presence_ping(request: Request,
     ~60s while the game is running; the response carries the current online
     count for the queue tab's 'N online' readout. Since v1.33 the ping also
     stamps players.last_seen so the Home tab's 'recently online' list stays
-    fresh."""
+    fresh. Since the Sept 6 batch it is also the ONLY writer of
+    players.presence_seen_at (migration 296), which the leaderboards' online
+    marker reads (_ONLINE_MARKER_SQL): last_seen is stamped by
+    get_or_create_player for every participant a report names, so it could
+    light the dot of an opponent who had already quit. Both stamps require
+    the caller's verified Steam session for the named id (r5 M1); an
+    unverified ping is answered but stamps nothing."""
     _presence_touch(steam_id)
     # in_match=<lobby/series id> means "I am IN a game for this group right now".
     # Optional on purpose: pre-v1.35.3 clients never send it, and every consumer
@@ -12073,26 +14192,32 @@ async def presence_ping(request: Request,
         # parameter and the whole statement fails with AmbiguousParameterError
         # — which silently stopped EVERY last_seen stamp after b7fcd72
         # (learning #275's class; caught at the v1.39.2 deploy smoke).
-        # The EXISTS predicate
-        # mirrors the FFA queue's session check: a gate-validated version is
-        # stamped only when the token is verified, unexpired, and bound to the
-        # named player. Missing/invalid sessions still refresh last_seen on a
-        # matching non-deleted player row.
+        # The `ok` predicate mirrors the FFA queue's session check: the
+        # token must be verified, unexpired and bound to the named player.
+        # Sept 6 review (r5 M1): EVERY stamp is gated on it, not only the
+        # version. last_seen is the 90-day leaderboard/podium authority and
+        # presence_seen_at lights the online dot, so a ping that merely names
+        # a Steam id must not keep either fresh; an unverified ping still
+        # answers (online count, alerts revision) and writes nothing.
         await db.execute(text("""
+            WITH ok AS (
+                SELECT EXISTS (
+                    SELECT 1 FROM steam_sessions ss
+                     WHERE ss.token_hash = :session_hash
+                       AND ss.steam_id = :sid
+                       AND ss.verified
+                       AND (ss.expires_at IS NULL OR ss.expires_at >= NOW())
+                ) AS verified
+            )
             UPDATE players AS p
-               SET last_seen = NOW(),
+               SET last_seen = CASE WHEN ok.verified THEN NOW() ELSE p.last_seen END,
+                   presence_seen_at = CASE WHEN ok.verified THEN NOW() ELSE p.presence_seen_at END,
                    mod_version = CASE
-                       WHEN CAST(:mod_version AS VARCHAR) IS NOT NULL
-                        AND EXISTS (
-                            SELECT 1 FROM steam_sessions ss
-                             WHERE ss.token_hash = :session_hash
-                               AND ss.steam_id = p.steam_id
-                               AND ss.verified
-                               AND (ss.expires_at IS NULL OR ss.expires_at >= NOW())
-                        )
+                       WHEN CAST(:mod_version AS VARCHAR) IS NOT NULL AND ok.verified
                        THEN CAST(:mod_version AS VARCHAR)
                        ELSE p.mod_version
                    END
+              FROM ok
              WHERE p.steam_id = :sid AND p.deleted_at IS NULL
         """), {"sid": steam_id,
                  "mod_version": observed_version,
@@ -12401,6 +14526,10 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     _presence_touch(steam_id)
+    # Sept 7 item 3: a fresh ping map rides the poll as a header for the three
+    # polls after each new sweep. Same validator as the join; a refused or
+    # absent header leaves the heartbeat UPDATE below exactly as it was.
+    _hdr_pings, _hdr_age = _region_pings_from_header(request.headers.get("x-region-pings"))
     # Clean up expired blocks opportunistically without waiting on a concurrent
     # decline/account cleanup that is touching another block row.
     await db.execute(text("""
@@ -12451,7 +14580,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                    rq.rating_deviation, rq.status, rq.matched_with,
                    rq.room_name, rq.room_region, rq.region, rq.home_region,
-                   rq.ready, rq.joined_at, rq.matched_at
+                   rq.ready, rq.joined_at, rq.matched_at,
+                   rq.region_pings, rq.region_pings_at
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -12495,7 +14625,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                        rq.rating_deviation, rq.status, rq.matched_with,
                        rq.room_name, rq.room_region, rq.region, rq.home_region,
-                       rq.ready, rq.joined_at, rq.matched_at
+                       rq.ready, rq.joined_at, rq.matched_at,
+                       rq.region_pings, rq.region_pings_at
                 FROM ranked_queue rq
                 JOIN players p ON rq.player_id = p.id
                 WHERE p.steam_id = :sid
@@ -12518,11 +14649,43 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
     wait_seconds = int((now - entry["joined_at"]).total_seconds())
     my_pid = entry["player_id"]
 
-    # Heartbeat — update last_polled so cleanup knows we're alive
-    await db.execute(
-        text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),
-        {"pid": my_pid},
-    )
+    # Heartbeat — update last_polled so cleanup knows we're alive. With a valid
+    # X-Region-Pings header the SAME statement also refreshes the map (typed
+    # binds, #275/#448); the fragment is chosen in code, never by a NULL test
+    # on a bound parameter (#448). A poll never NULLs the columns.
+    if _hdr_pings is not None:
+        # Impl review r1 M1 (7/3-1): issuance in THIS request must see what the
+        # statement writes. `entry` is the snapshot taken under the locks
+        # BEFORE the heartbeat, so the chooser below would otherwise judge the
+        # map and stamp this poll replaces. Overlay the validated map and its
+        # stamp onto that snapshot rather than re-selecting: no extra
+        # statement, the lock set and order untouched. The opponent's map is
+        # read below, after this UPDATE, from its own row.
+        # Impl review r2 M1: the row and the snapshot take ONE stamp, computed
+        # here and bound typed. NOW() is the transaction's start time, taken
+        # at the discovery read before the ordered lock wait, while `now` was
+        # read after it; dating the row `NOW() - age` and the snapshot
+        # `now - age` left the lock wait between them, so near the window's
+        # edge the row could already be past it while the snapshot still read
+        # fresh. The chooser judges the window on its own clock a few ms
+        # after `now`; both clocks are aware UTC.
+        _hdr_stamp = now - timedelta(seconds=_hdr_age)
+        await db.execute(
+            text("""UPDATE ranked_queue
+                       SET last_polled = NOW(),
+                           region_pings = CAST(:region_pings AS JSONB),
+                           region_pings_at = CAST(:region_pings_at AS TIMESTAMPTZ)
+                     WHERE player_id = :pid"""),
+            {"pid": my_pid, "region_pings": _hdr_pings, "region_pings_at": _hdr_stamp},
+        )
+        entry = dict(entry)
+        entry["region_pings"] = _hdr_pings
+        entry["region_pings_at"] = _hdr_stamp
+    else:
+        await db.execute(
+            text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),
+            {"pid": my_pid},
+        )
 
     # Check for expiry (only applies to searching state)
     if entry["status"] == "searching" and wait_seconds > QUEUE_EXPIRE_MINUTES * 60:
@@ -12543,7 +14706,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         opp_result = await db.execute(
             text("""
                 SELECT player_id, steam_id, display_name, rating, ready, room_name,
-                       region, home_region, status, matched_with
+                       region, home_region, region_pings, region_pings_at,
+                       status, matched_with
                 FROM ranked_queue WHERE player_id = :oid
             """),
             {"oid": entry["matched_with"]},
@@ -12632,7 +14796,9 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 # live snapshot (see _pick_room_region).
                 chosen_region = _pick_room_region(
                     entry["region"], entry["home_region"],
-                    opp["region"], opp["home_region"], room_name)
+                    opp["region"], opp["home_region"], room_name,
+                    p1_pings=entry["region_pings"], p2_pings=opp["region_pings"],
+                    p1_pings_at=entry["region_pings_at"], p2_pings_at=opp["region_pings_at"])
                 _region_out = chosen_region
                 # v1.40.1: ONE conditional stamp over both rows, proven by
                 # RETURNING — both 'matched', both ready, both room-less, each
@@ -12674,9 +14840,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             # there), so an ORM assignment would land in __dict__, emit no SQL,
             # and raise nothing — a silent no-op. Review round 1 caught exactly
             # that here.
-            await db.execute(text(
-                "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
-                {"sid": series.id})
+            await _publish_pair_sitting(db, series)
             await db.commit()
             # Room JUST issued (gated — this both-ready branch replays every
             # poll until the clients join, Codex find 6) — both players are
@@ -12882,8 +15046,16 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     """
     import uuid as uuid_mod
 
-    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
-    await _check_steam_session(request, steam_id, db)
+    # Requires the caller's OWN valid Steam session: the same fail-closed gate
+    # queue_poll uses (_strict_steam_session_ok), placed before the first
+    # statement so a refused request writes no ready flag, stamps no room and
+    # answers no room name. The 401 detail literal is LOAD-BEARING:
+    # ApiClient.HandleSessionReject matches "session_required" to drop the
+    # token so the heartbeat re-mints. A refused ready returns the client to
+    # Searching; the queue-leave decision stays with the poll's time-windowed
+    # refusal rule (see queue_poll).
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
 
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
@@ -12905,7 +15077,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     entry_result = await db.execute(
         text("""
             SELECT player_id, status, matched_with, room_name, room_region, region,
-                   home_region, ready
+                   home_region, ready, region_pings, region_pings_at
             FROM ranked_queue WHERE player_id = :pid
         """),
         {"pid": player.id},
@@ -12941,7 +15113,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     opp_result = await db.execute(
         text("""
             SELECT player_id, steam_id, ready, room_name, region, home_region,
-                   status, matched_with
+                   region_pings, region_pings_at, status, matched_with
             FROM ranked_queue WHERE player_id = :oid
         """),
         {"oid": entry["matched_with"]},
@@ -13014,7 +15186,9 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
             # branch (the both-ready gate above).
             chosen_region = _pick_room_region(
                 entry["region"], entry["home_region"],
-                opp["region"], opp["home_region"], room_name)
+                opp["region"], opp["home_region"], room_name,
+                p1_pings=entry["region_pings"], p2_pings=opp["region_pings"],
+                p1_pings_at=entry["region_pings_at"], p2_pings_at=opp["region_pings_at"])
             # v1.40.1: ONE conditional stamp over both rows, RETURNING-proven —
             # same helper and same dissolution rule as the poll's both-ready branch.
             if not await _queue_stamp_room_reciprocal(db, player.id, opp["player_id"], room_name, chosen_region):
@@ -13056,9 +15230,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         # meaningful for every series regardless of how it was born.
         # RAW UPDATE — see the note on the RankedSeries model: the column is
         # intentionally unmapped, so an ORM assignment here would be silent.
-        await db.execute(text(
-            "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
-            {"sid": existing_series.id})
+        await _publish_pair_sitting(db, existing_series)
 
         await db.commit()
         # Room just issued — the pair is committed to a 1v1 game; drop their
@@ -13247,11 +15419,48 @@ async def get_player_blocks(steam_id: str, db: AsyncSession = Depends(get_db)):
 
 # ── Routes: Disconnect Reporting ─────────────────────────────────
 
+DC_LIVE_WINDOW_SECONDS = 6 * 3600
+"""How stale a series' last activity may be and still take a disconnect report.
+
+r13 MEDIUM. `completed_at IS NULL` was doing the work of "still running", and it
+cannot: a tournament forfeit deliberately leaves its series row active with both
+terminal timestamps null FOREVER, so every old forfeited series of a pair stayed
+nameable and each one was worth one disconnect against the opponent. A running
+series is one something has happened in recently, which is a fact the server
+holds itself — `last_activity_at` is stamped by live points, by match reports,
+by the resume path and by both queue both-ready branches.
+
+Six hours against a client retry budget of twenty attempts a minute apart: wide
+enough for a report persisted across a restart and sent at the next launch,
+far too narrow to walk back through a pair's history."""
+
+DC_MIN_LIVE_POINTS = 2
+"""The gameplay bar, asked of the SERVER's own record (r13 MEDIUM).
+
+The client already refuses to report a leave before two total points, and until
+now that was the only place the rule existed — so an authenticated participant
+could report an opponent at 0-0, from a series in which nothing had happened,
+and the count went up. The same bar is asked here of `live_p1_points +
+live_p2_points`, which the live-points endpoint writes, or satisfied by a
+recorded match, which is the same evidence one game later."""
+
+DC_DEADLOCK_ATTEMPTS = 2
+"""How many times a DC report may be re-run after PostgreSQL picks it as a
+deadlock victim (SQLSTATE 40P01). Two, not more: a second abort means the
+counterparty is still holding, and waiting inside the request is worse for the
+caller than answering something its outbox will bring back."""
+
+
 @app.post("/api/v1/report-disconnect", tags=["Players"])
 async def report_disconnect(
     request: Request,
     reporter_steam_id: str = Query(...),
     disconnected_steam_id: str = Query(...),
+    series_id: str | None = Query(
+        None,
+        description="The series the leave was observed in. Clients that send it "
+                    "get a durable report; clients that omit it keep the "
+                    "resolve-at-delivery behaviour."),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -13260,6 +15469,66 @@ async def report_disconnect(
     Only counts if the match was ranked and enough gameplay occurred.
     The client enforces eligibility (ranked, >=2 total points, neither has >=4 rounds).
     """
+    # r12 MEDIUM. This endpoint locks the two participants and then the series
+    # (the 1v1 order, #206). Tournament completion runs the other way round: it
+    # holds FOR SHARE on every bound bracket series through commit — that is
+    # the pre-mint veto, and holding it IS the mechanism — and then writes the
+    # podium players. A delayed report about a semifinal leaver meets that
+    # completion and the two wait on each other; PostgreSQL breaks the cycle by
+    # aborting one of them with 40P01.
+    #
+    # Neither side's order is wrong, and neither is movable: series-then-
+    # players here would put this endpoint in an ABBA against every other 1v1
+    # writer, and the veto cannot enumerate its podium players in advance
+    # (#204 — the row the ordering never covers is what makes the cycle
+    # unpreventable). So the cycle stays and the ABORT is what gets handled.
+    # The tournament side already does this: completion catches its own 40P01,
+    # retracts the claim and lets the next tick complete it.
+    #
+    # A deadlock abort rolls this transaction back whole — nothing is half
+    # written, the dc_events row is the only thing that decides a count, and
+    # re-running re-reads everything under fresh locks. The retry is the whole
+    # request because the ORM objects loaded before the abort are gone with it.
+    for attempt in range(DC_DEADLOCK_ATTEMPTS):
+        try:
+            return await _report_disconnect_once(
+                request, reporter_steam_id, disconnected_steam_id, series_id, db)
+        except DBAPIError as exc:
+            if getattr(getattr(exc, "orig", None), "sqlstate", None) != "40P01":
+                raise
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            print(f"[DC] deadlock victim on attempt {attempt + 1} of "
+                  f"{DC_DEADLOCK_ATTEMPTS} for {reporter_steam_id} -> "
+                  f"{disconnected_steam_id}")
+    # Still contended. 503 and not 500: the client's outbox drops a 4xx as
+    # settled and keeps everything else, so this says "not judged, ask again"
+    # in the vocabulary that queue already speaks — the report is delayed by
+    # one outbox pass rather than thrown away as a verdict.
+    #
+    # NOT "never lost", which the client cannot promise (r13 LOW): a queued
+    # report is dropped once it has spent OUTBOX_MAX_ATTEMPTS, whatever the
+    # response was, and a persistent 503 spends them like anything else. That
+    # bound is deliberate — an unbounded queue is its own failure — and the
+    # drop is logged rather than silent. What this answer buys is that the
+    # report keeps its budget instead of being retired on the first abort.
+    raise HTTPException(
+        status_code=503,
+        detail="disconnect report contended, retry")
+
+
+async def _report_disconnect_once(
+    request: Request,
+    reporter_steam_id: str,
+    disconnected_steam_id: str,
+    series_id: str | None,
+    db: AsyncSession,
+):
+    """One attempt at the report above. Every read, every lock and the write
+    live here, so a caller that rolls back and calls again starts from a clean
+    state rather than from half-loaded ORM objects."""
     # Codex (bug-321 audit): the F5 hardening below verifies the PAIR (shared
     # active series + per-series dedup) but never verified the CALLER — any
     # third party who can read the live-games listings could pin one spurious
@@ -13291,36 +15560,406 @@ async def report_disconnect(
     # both have ancient created_at, and the old gate 403'd exactly the leaver-
     # accountability DCs the FAQ promises to record. The per-series dedup
     # below still prevents replay inflation.
-    series = await _find_current_active_series(db, reporter.id, disconnected.id)
+    #
+    # WHICH SERIES (r10 restore of r8's M3). Without a named series this
+    # endpoint answers "the pair's series right now", which is the same answer
+    # for the observation and for a retry delivered minutes later — so a report
+    # that could not be delivered while the series ran was either attributed to
+    # the pair's NEXT series or dropped for want of one. A client that keeps an
+    # undelivered report now names the series it watched the leave in, and that
+    # name is what this endpoint files against; the resolve-at-delivery path
+    # below stays for clients that do not send one.
+    #
+    # A named series is checked against the database, never trusted. Three
+    # r12 findings all landed on the shape of that check, and they are one
+    # question: WHICH series may a name reach?
+    #
+    # 1. NOT the pair's whole recent history. The unnamed path can only ever
+    #    reach one series, and naming used to reach every series of the pair
+    #    inside a week — so a participant could file one disconnect per
+    #    normally-completed series against the other, and the leave-%
+    #    denominator is what that feeds. A name may reach a series that has not
+    #    completed (running, or abandoned with no match reported, which is what
+    #    a leave in game 1 produces), or the pair's MOST RECENT series, which is
+    #    the one a report queued moments ago is about. That is at most one
+    #    completed series at any time, which restores the unnamed path's bound.
+    #
+    # 2. NOT bounded by created_at. Resume-forever is the whole point of the
+    #    helper this endpoint switched to in July, and the comment above says
+    #    so: a resumed series and game 3 of a long BO3 both have an ancient
+    #    created_at, and a created_at bound refuses exactly the
+    #    leaver-accountability reports the naming was added to save. Freshness
+    #    is asked of the series' END instead — completed_at, or the
+    #    invalidated_at the sweep stamps — and a series that has neither is
+    #    live, which is not a staleness state at all.
+    #
+    # 3. A WRONG NAME IS NOT A WRONG REPORT. A name that does not resolve, or
+    #    resolves to some other pair's series, used to be a permanent refusal.
+    #    But the name is an assertion about which series the observation belongs
+    #    to; when the assertion is false the server knows nothing worse than it
+    #    knows without one, so it falls back to the unnamed resolution — the
+    #    behaviour every client without a name already gets, with every check on
+    #    that path still applied. An INVALIDATED named series is different and
+    #    still refuses: that is evidence, and it points the conservative way.
+    #
+    # Every containment that was already here still applies on top: the
+    # Steam-session binding, and uq_dc_event_series_player, which lets one
+    # (series, leaver) count exactly once however many times it is reported.
+    series = None
+    if series_id:
+        try:
+            claimed = uuid.UUID(str(series_id))
+        except (ValueError, AttributeError, TypeError):
+            # 4xx: a client holding this report treats it as settled and stops
+            # retrying, which is right — a malformed id can never resolve.
+            raise HTTPException(status_code=400, detail="invalid series id")
+        named = (await db.execute(
+            select(RankedSeries).where(RankedSeries.id == claimed)
+        )).scalar_one_or_none()
+        if named is None or {named.player1_id, named.player2_id} != {reporter.id, disconnected.id}:
+            # Point 3 above: the name is wrong, which is not evidence that the
+            # report is. Fall through to the unnamed resolution rather than
+            # refusing it forever. Said out loud, because a client naming a
+            # series that is not the pair's is a client fault worth seeing.
+            print(f"[DC] named series {claimed} is not this pair's "
+                  f"({reporter_steam_id} vs {disconnected_steam_id}) — "
+                  f"resolving from the pair instead")
+        else:
+            series = named
+        # An invalidated series is refused, with ONE exception, written as an
+        # allow-list of a single reason so every other reason - and any reason
+        # added later - keeps refusing.
+        #
+        # _prune_stale_series abandons an active series that is half an hour old
+        # and has no match reported against it, and stamps it
+        # PRUNE_REASON_NO_MATCH. A leave during game 1 produces exactly that
+        # row: the game is not counted, so no match is ever reported, so the
+        # sweep abandons the series the report names. Refusing on that reason
+        # would discard the report for the case durability exists for, because
+        # the outbox treats a 4xx as settled. The reason is not evidence
+        # against the report; it is the report restated by the janitor.
+        #
+        # Every other containment still applies underneath: the pair check
+        # above, the Steam-session binding, the age bound below, and
+        # uq_dc_event_series_player, which admits one row per (series, leaver)
+        # however many times it is reported.
+        if (series is not None and series.invalidated_at is not None
+                and (series.invalidation_reason or "") != PRUNE_REASON_NO_MATCH):
+            raise HTTPException(status_code=403, detail="named series was invalidated")
+    if series is not None:
+        # Asked in SQL against the DATABASE clock rather than a python "now" -
+        # an api container with a skewed clock must not be able to widen or
+        # narrow any bound - and asked from the shared fragments above, so this
+        # and the locked re-ask below cannot drift apart. They already had.
+        #
+        # What the terms are, and why the shape changed (r14 MEDIUM 3/6):
+        #
+        #   AUTHORITY  the server put this pair into this sitting and has not
+        #              since put them into a newer one. This replaces
+        #              "uncompleted, or the pair's most recent series", which
+        #              was a question about RECENCY - and two players who meet,
+        #              leave and meet again make either sitting answer it.
+        #   BRACKET    a forfeit terminalises the tournament match and leaves
+        #              the RankedSeries active on purpose, so no row-shape test
+        #              could see that the match was already decided.
+        #   EVIDENCE   a committed match row, OR the points threshold together
+        #              with corroboration from the ACCUSED - required of an
+        #              account that has provably run a ticket-auth client and
+        #              can therefore produce it. The corroboration is the M4
+        #              addition and it applies exactly where the old rule was
+        #              weakest: a leave during game 1 leaves no match row, so
+        #              the points columns were the only evidence, and they are
+        #              written by an endpoint that names its author in a query
+        #              parameter - the accuser's own testimony.
+        #
+        # A refusal by the evidence arm is NOT settled and does not answer 403
+        # while the sitting is still live - see _refuse_named_series. Evidence
+        # can still arrive; authority cannot.
+        #
+        # NOTE WHAT IS NOT IN THE AUTHORITY ARM: a clock. The delivery-time
+        # freshness bound survives only on the legacy arm, for pairs the server
+        # has no grant for at all. A grant ends when the server observes the
+        # sitting end - a newer publish for the pair, or the bracket row going
+        # terminal - not when a client failed to get its report delivered
+        # quickly enough. That fence refused a legitimate report queued during
+        # an outage and delivered on the next launch, which is precisely what
+        # the outbox exists to make survivable.
+        nameable = (await db.execute(text(
+            "SELECT 1 FROM ranked_series s"
+            " WHERE s.id = CAST(:sid AS uuid)"
+            "   AND " + _DC_ELIGIBLE_TERMS +
+            " LIMIT 1"
+        ), {"sid": str(series.id), "rp": reporter.id, "dp": disconnected.id,
+            "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+            "require_verified_seat": _dc_require_verified_seat(),
+            "min_points": DC_MIN_LIVE_POINTS})).first()
+        if nameable is None:
+            await _refuse_named_series(db, series.id, reporter.id, disconnected.id,
+                                       "named series is not one this report can be filed against")
     if series is None:
-        raise HTTPException(status_code=403, detail="no current shared ranked series for this DC report")
-    series_id = series.id
+        # ONE resolver, and it asks the same question the predicate judges.
+        # Resolving "the pair's current series" one way here and judging it
+        # another way below is how a room-aware answer and a room-blind answer
+        # came to disagree about the same pair; the grant is the authority in
+        # both places.
+        _granted_id = await _newest_grant_series_id(db, reporter.id, disconnected.id)
+        if _granted_id is not None:
+            series = (await db.execute(
+                select(RankedSeries).where(RankedSeries.id == _granted_id)
+            )).scalar_one_or_none()
+        if series is None:
+            # Only for a pair with no grant at all - the same condition the
+            # legacy arm of the predicate is reachable under, so the resolver
+            # and the judge agree about which regime this report is in.
+            series = await _find_current_active_series(db, reporter.id, disconnected.id)
+        if series is None:
+            raise HTTPException(status_code=403, detail="no current shared ranked series for this DC report")
+    resolved_series_id = series.id
     await _assert_no_service_subject(
         db, affected_player_ids=[series.player1_id, series.player2_id])
+
+    # ── One protected validation, held to the insert (#208) ─────────────────
+    #
+    # Everything decided above was read WITHOUT a lock, and the insert and the
+    # counter increment below happen afterwards — so an integrity invalidation
+    # committing in that window would be checked against a state that no longer
+    # existed, and the report would still be counted. Re-ask the predicate under
+    # a lock this transaction holds until it commits, which is the same rule the
+    # bet payout path follows for the same reason.
+    #
+    # ORDER IS THE 1v1 PROTOCOL'S: participants sorted by str(id), THEN
+    # ranked_series (#206). /api/v1/matches and the payout path both take that
+    # sequence; series-then-players is the 2v2 order (its table is disjoint) and
+    # taking it here would form an ABBA against every 1v1 writer. FOR NO KEY
+    # UPDATE per #202 — the weakest mode that still conflicts with the plain
+    # status/invalidation UPDATEs, while staying compatible with the FK KEY
+    # SHARE that this endpoint's own dc_events insert takes.
+    for _pid in sorted({reporter.id, disconnected.id}, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+        ), {"pid": _pid})
+    # The predicate lives INSIDE the locking read, so the row that comes back is
+    # the row that satisfies it — there is no gap between establishing the fact
+    # and holding it. It carries the REACHABILITY term as well as the pair and
+    # the invalidation, because a series completing in that same window is a
+    # state change this report has to see: without it, a report validated
+    # against a running series could be filed against one that finished while
+    # the locks were being taken. The unnamed path satisfies the term for free
+    # — the series it resolves is active. The FRESHNESS bound is deliberately
+    # not re-asked: it is a property of the clock, not of a row another writer
+    # can move underneath this one.
+    #
+    # THE UNNAMED PATH IS BOUND BY THIS TOO, which is why the whole predicate is
+    # asked here and not only where a name is validated: resolving "the pair's
+    # current sitting" says which series, never that anything happened in it or
+    # that the server still considers the pair to be in it. Both paths reach
+    # this statement, and it is built from the SAME fragments as the unlocked
+    # ask above so the two can never say different things.
+    still_eligible = (await db.execute(text(
+        "SELECT 1 FROM ranked_series s"
+        " WHERE s.id = CAST(:sid AS uuid)"
+        "   AND " + _DC_LOCKED_ROW_TERMS +
+        "   AND " + _DC_ELIGIBLE_TERMS +
+        " FOR NO KEY UPDATE OF s"
+    ), {"sid": str(resolved_series_id), "rp": reporter.id, "dp": disconnected.id,
+        "exempt": PRUNE_REASON_NO_MATCH,
+        "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+        "require_verified_seat": _dc_require_verified_seat(),
+        "min_points": DC_MIN_LIVE_POINTS})).first()
+    if still_eligible is None:
+        # Settled or not-yet, decided by WHICH arm failed — see
+        # _refuse_named_series. Authority is settled and answers 403; evidence
+        # is not, and answers 503 so the outbox keeps the report.
+        await _refuse_named_series(
+            db, resolved_series_id, reporter.id, disconnected.id,
+            "series is no longer eligible for a DC report",
+            row_terms=_DC_LOCKED_ROW_TERMS,
+            extra_binds={"exempt": PRUNE_REASON_NO_MATCH})
+
+    # ── The bracket lifecycle, under a lock, over EVERY row ────────────────
+    #
+    # The predicate's bracket term is a NOT EXISTS read without a lock, so a
+    # terminalisation committing between it and the insert would not be seen.
+    # This re-asks it holding the rows.
+    #
+    # LOCK ORDER: players -> ranked_series -> tournament_matches. That is the
+    # order `_acquire_tournament_match_action_gate` already takes (it locks the
+    # series FOR NO KEY UPDATE and then the bracket row FOR UPDATE), so this
+    # pass nests inside the same direction and cannot form a cycle with it.
+    # Taking the bracket first would have inverted that and produced one.
+    #
+    # EVERY row, not LIMIT 1: a series can carry more than one bracket row, and
+    # a locked pass that reads a different subset than the unlocked term did is
+    # not a re-ask of the same question (#205 - compare the SET, not a sample).
+    if getattr(series, "is_tournament", False):
+        _bracket_states = (await db.execute(text(
+            "SELECT tm.status FROM tournament_matches tm"
+            " WHERE tm.series_id = CAST(:sid AS uuid)"
+            " ORDER BY tm.id FOR UPDATE"
+        ), {"sid": str(resolved_series_id)})).scalars().all()
+        if not _bracket_states:
+            # 503, NOT 409 or 403. A tournament series whose bracket row has
+            # not appeared yet is a question this server cannot answer, and the
+            # two refusals differ in what they COST: the client treats 4xx as
+            # settled and deletes the report, spending nothing and losing
+            # everything, while a 503 leaves it in the outbox with its retry
+            # budget intact. "We could not judge this" and "the answer is no"
+            # must not be the same reply (#430).
+            raise HTTPException(
+                status_code=503,
+                detail="tournament bracket row not available yet; retry")
+        if any(st in _TM_DECIDED_STATES for st in _bracket_states):
+            raise HTTPException(
+                status_code=403,
+                detail="the tournament match for this series is already decided")
+
     # Per-series dedup: one DC increment per (series, disconnected player). A
     # FlaggedMatch-style marker row would be heavier; reuse AdminAction's audit
     # table is wrong here, so dedup via a dc-events guard on ranked_dc_count by
     # checking we haven't already logged this series for this player this window.
     already = (await db.execute(text(
         "SELECT 1 FROM dc_events WHERE series_id = :sid AND disconnected_player_id = :dp LIMIT 1"
-    ), {"sid": series_id, "dp": disconnected.id})).first()
+    ), {"sid": resolved_series_id, "dp": disconnected.id})).first()
     if already:
+        # The ORM row was loaded before the insert below decided anything, so
+        # for a request that lost the conflict it is one behind by
+        # construction — it would answer N while the committed value is N+1.
+        # Ask the database for the number this response reports.
+        _committed = (await db.execute(text(
+            "SELECT ranked_dc_count FROM players WHERE id = :dp"
+        ), {"dp": disconnected.id})).scalar()
+        # Release the lock pass before answering. ROLLBACK, not commit: this
+        # request wrote nothing, and saying so is the accurate statement — the
+        # locks are all it is holding, and a settled duplicate has no reason to
+        # hold two participants and their series through its response.
+        await db.rollback()
         return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
-                "ranked_dc_count": disconnected.ranked_dc_count or 0}
+                "ranked_dc_count": _committed if _committed is not None else 0}
 
-    # Increment the disconnected player's DC count
-    disconnected.ranked_dc_count = (disconnected.ranked_dc_count or 0) + 1
-    await db.execute(text(
+    # THE ROW DECIDES, NOT THE READ ABOVE (review r8 MEDIUM 3). The client
+    # keeps an unsent DC report in the durable outbox, so the same report can
+    # arrive twice at once -- the immediate attempt whose response was lost,
+    # and the retry that replaced it. Both would clear the SELECT above and
+    # both would add 1, while uq_dc_event_series_player (migration 101) kept
+    # only one row: a leave-% denominator inflated by the retry that made the
+    # report durable. So the INSERT is the gate. RETURNING tells this request
+    # whether it is the one that recorded the event, and only that request
+    # counts it; a loser answers exactly like the fast path above.
+    inserted = (await db.execute(text(
         "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id) "
-        "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING"
-    ), {"sid": series_id, "dp": disconnected.id, "rp": reporter.id})
+        "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING RETURNING 1"
+    ), {"sid": resolved_series_id, "dp": disconnected.id, "rp": reporter.id})).first()
+    if inserted is None:
+        # The ORM row was loaded before the insert below decided anything, so
+        # for a request that lost the conflict it is one behind by
+        # construction — it would answer N while the committed value is N+1.
+        # Ask the database for the number this response reports.
+        _committed = (await db.execute(text(
+            "SELECT ranked_dc_count FROM players WHERE id = :dp"
+        ), {"dp": disconnected.id})).scalar()
+        # Nothing was written here either: the insert conflicted and did
+        # nothing. Release the locks, do not claim a write.
+        await db.rollback()
+        return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
+                "ranked_dc_count": _committed if _committed is not None else 0}
+
+    # The grant this report was judged by has now been used. Written only on the
+    # branch that WON the insert, so the count and the mark cannot disagree, and
+    # only for the reporter's own direction -- that is the row the predicate
+    # read. `spent_at IS NULL` keeps it first-write-wins, so a replay that
+    # somehow reached here cannot move a timestamp that already means something.
+    #
+    # Nothing reads this in a predicate and nothing should: one accepted report
+    # per (series, leaver) is already enforced by uq_dc_event_series_player, and
+    # a second bound that can disagree with the first is a second thing to keep
+    # correct. It exists so "was this grant ever used" is answerable from the
+    # data instead of from a join that re-derives which grant applied.
+    await db.execute(text(
+        "UPDATE series_dc_grants SET spent_at = NOW()"
+        " WHERE holder_id = :rp AND series_id = CAST(:sid AS uuid)"
+        "   AND spent_at IS NULL"
+    ), {"rp": reporter.id, "sid": str(resolved_series_id)})
+
+    # A DELTA, never an absolute write (learning #326): the read-modify-write
+    # this replaces was computed from a row read before the insert decided.
+    new_count = (await db.execute(text(
+        "UPDATE players SET ranked_dc_count = COALESCE(ranked_dc_count, 0) + 1 "
+        "WHERE id = :dp RETURNING ranked_dc_count"
+    ), {"dp": disconnected.id})).scalar()
+
+    # The grant must STILL be the pair's newest, asked as late as it can be.
+    #
+    # _DC_GRANT_TERM makes only the newest grant authoritative, and the locked
+    # re-ask above answered that while holding both players rows and the series
+    # row. None of those locks stop a new grant appearing: a grant insert takes
+    # FOR KEY SHARE on players through its foreign keys, which does not conflict
+    # with FOR NO KEY UPDATE, and a row that does not exist yet cannot be locked
+    # at all. So that answer was about a set another writer could still add to,
+    # and the pair's next sitting could begin between the judgement and the
+    # write.
+    #
+    # The pair lock below is what CLOSES the window (r2). The publisher takes
+    # the same key before its grant insert and holds it to its own commit, so
+    # with the lock held here every grant the pair has is committed and
+    # visible to the re-ask, and none can commit before this transaction does.
+    # The lock is TRIED, never awaited: this transaction already holds the
+    # pair's players rows and the series row, and the publisher's caller may
+    # be about to wait on those very rows -- a blocking acquire here would be
+    # the second edge of a cycle. Busy means a sitting for this pair is being
+    # published right now: nothing was judged, so 503 and not 403 -- the
+    # outbox keeps the report and retries it with its budget intact (#430).
+    # The expression is shared with the publisher (_DC_PAIR_LOCK_KEY_SQL) and
+    # was run against the production database before it shipped.
+    _pair_locked = (await db.execute(text(
+        f"SELECT pg_try_advisory_xact_lock({_DC_PAIR_LOCK_KEY_SQL}) AS pair_locked"),
+        {"a": str(reporter.id), "b": str(disconnected.id)})).scalar()
+    if not _pair_locked:
+        await db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="a sitting for this pair is being published; retry")
+    #
+    # The compatibility arm is covered too (r16 MEDIUM). That arm admits a
+    # report only while the pair has NO grant at all, so a grant for the pair
+    # that exists at this statement with none naming this series means a
+    # sitting was published between the judgement and here -- the premise the
+    # admission rested on is gone, and the report is refused the same way. A
+    # grant for THIS series arriving late is not supersession: the first arm
+    # then asks whether anything newer exists, and nothing does.
+    #
+    # Labelled `AS superseded` because the fake session routes on markers that
+    # exist for no other purpose (#306) — recognising this statement by its
+    # table would collide with the resolver and the spend.
+    _superseded = (await db.execute(text(
+        "SELECT 1 AS superseded FROM series_dc_grants g2"
+        " WHERE g2.holder_id = :rp AND g2.counterparty_id = :dp"
+        "   AND ((g2.last_seen_at, g2.series_id)"
+        "          > (SELECT g.last_seen_at, g.series_id FROM series_dc_grants g"
+        "              WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
+        "                AND g.series_id = CAST(:sid AS uuid))"
+        "        OR NOT EXISTS (SELECT 1 FROM series_dc_grants g"
+        "                        WHERE g.holder_id = :rp AND g.counterparty_id = :dp"
+        "                          AND g.series_id = CAST(:sid AS uuid)))"
+        " LIMIT 1"
+    ), {"rp": reporter.id, "dp": disconnected.id,
+        "sid": str(resolved_series_id)})).first()
+    if _superseded is not None:
+        await db.rollback()
+        # 403 and not 503. Grants only move forward, so a superseded grant can
+        # never become authoritative again and a retry can only fail the same
+        # way. Settled, so the client stops spending its budget on it (#430).
+        raise HTTPException(
+            status_code=403,
+            detail="a newer sitting for this pair has superseded the one this "
+                   "report names")
+
     await db.commit()
 
-    print(f"[DC] {reporter_steam_id} reported disconnect by {disconnected_steam_id} (total: {disconnected.ranked_dc_count})")
+    print(f"[DC] {reporter_steam_id} reported disconnect by {disconnected_steam_id} (total: {new_count})")
     return {
         "status": "recorded",
         "disconnected_steam_id": disconnected_steam_id,
-        "ranked_dc_count": disconnected.ranked_dc_count,
+        "ranked_dc_count": new_count,
     }
 
 
@@ -13644,8 +16283,27 @@ async def link_discord(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="bot-only endpoint")
-    # Clean up expired codes
-    await db.execute(text("DELETE FROM link_codes WHERE expires_at < now()"))
+    # Clean up expired codes -- bounded and throttled (r14 LOW 6's class).
+    #
+    # Deliberately NOT savepoint-isolated, unlike the issued_room_regions
+    # sweep. The two callers can tolerate opposite things: there, losing the
+    # sweep is harmless and losing the issuance is not; here, a rollback that
+    # silently leaves expired codes in place is the failure, and the only thing
+    # between that and a stale code being accepted is the belt-and-braces
+    # predicate on the lookup below. So this one stays in the caller's failure
+    # domain, and that predicate is asserted by a test rather than trusted.
+    #
+    # The throttle is what makes the bound safe: with a row LIMIT and no
+    # throttle, a backlog larger than the limit would never drain, because
+    # every call would delete the same first 500 and stop.
+    global _link_codes_last_prune
+    _now_mono = _time_mod.monotonic()
+    if _now_mono - _link_codes_last_prune > 3600:
+        _link_codes_last_prune = _now_mono
+        await db.execute(text(
+            "DELETE FROM link_codes WHERE ctid IN ("
+            " SELECT ctid FROM link_codes WHERE expires_at < now()"
+            " ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED)"))
 
     # Find the code
     # The expires_at predicate is deliberate belt-and-braces: today this lookup
@@ -15611,6 +18269,32 @@ async def chat_moderate_delete(req: _ChatModDeleteReq, request: Request,
     return {"status": "ok", "message_id": req.message_id, "channel": chan}
 
 
+async def _chat_mute_apply(db, *, target_steam_id: str, channel: str | None,
+                           by_steam_id: str, reason: str | None, minutes: int) -> None:
+    """The chat-mute WRITE core, shared by chat_moderate_mute and the mail
+    moderation-case act path (Sept 6 item b, B-2). Supersede any live mute
+    with the SAME scope so the newest terms win and `mutes` never shows two
+    overlapping rows for one (player, channel), then insert the new row;
+    minutes <= 0 = permanent. Runs in the caller's transaction — the caller
+    owns authorisation and the audit row. make_interval, not
+    `:mins || ' minutes'` — the concat form types the param as TEXT while
+    `:mins > 0` needs an INT, an asyncpg #275-class hazard this statement
+    carried untested (chat_mutes had zero rows when checked 2026-08-29, so
+    the timed arm had never once executed)."""
+    mins = int(minutes or 0)
+    await db.execute(text(
+        "UPDATE chat_mutes SET revoked_at = NOW()"
+        " WHERE steam_id = :sid AND revoked_at IS NULL"
+        "   AND channel IS NOT DISTINCT FROM :chan"
+    ), {"sid": target_steam_id[:32], "chan": channel})
+    await db.execute(text(
+        "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
+        " VALUES (:sid, :chan, :by, :why,"
+        "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
+    ), {"sid": target_steam_id[:32], "chan": channel, "by": by_steam_id[:32],
+        "why": (reason or "")[:256] or None, "mins": mins})
+
+
 class _ChatModMuteReq(BaseModel):
     steam_id: str                      # the MODERATOR / admin
     target_steam_id: str               # who is being muted
@@ -15665,23 +18349,8 @@ async def chat_moderate_mute(req: _ChatModMuteReq, request: Request,
     mins = int(req.duration_minutes) if req.duration_minutes else 0
     if mins > 0 and mins > 60 * 24 * 365:
         raise HTTPException(400, "duration_minutes too large")
-    # Supersede any live mute with the SAME scope so the newest terms win and
-    # `mutes` never shows two overlapping rows for one (player, channel).
-    await db.execute(text(
-        "UPDATE chat_mutes SET revoked_at = NOW()"
-        " WHERE steam_id = :sid AND revoked_at IS NULL"
-        "   AND channel IS NOT DISTINCT FROM :chan"
-    ), {"sid": req.target_steam_id[:32], "chan": chan})
-    # make_interval, not `:mins || ' minutes'` — the concat form types the
-    # param as TEXT while `:mins > 0` needs an INT, an asyncpg #275-class
-    # hazard this statement carried untested (chat_mutes had zero rows when
-    # checked 2026-08-29, so the timed arm had never once executed).
-    await db.execute(text(
-        "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
-        " VALUES (:sid, :chan, :by, :why,"
-        "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
-    ), {"sid": req.target_steam_id[:32], "chan": chan, "by": req.steam_id[:32],
-        "why": (req.reason or "")[:256] or None, "mins": mins})
+    await _chat_mute_apply(db, target_steam_id=req.target_steam_id, channel=chan,
+                           by_steam_id=req.steam_id, reason=req.reason, minutes=mins)
     await _log_admin_action(
         db, admin_steam_id=req.steam_id, action="chat_mute",
         target_steam_id=req.target_steam_id,
@@ -16611,14 +19280,18 @@ async def internal_chat_mod_actions_ack(
         " WHERE id = ANY(:ids) AND acked_at IS NULL RETURNING id"
     ), {"ids": ids, "u": undeliverable})).scalars().all()
     # Time-gated retention sweep: ACKED rows only, 7 days (the unacked feed
-    # never ages out by design).
+    # never ages out by design). Throttled already; the row bound and
+    # SKIP LOCKED were added with its two siblings (r14 LOW 6's class) -- the
+    # throttle bounds how OFTEN this runs, which is not the same as bounding
+    # how long it holds locks when it does.
     now = _time_mod.monotonic()
     if now - _mod_actions_last_prune > 3600:
         _mod_actions_last_prune = now
         await db.execute(text(
-            "DELETE FROM chat_mod_actions"
+            "DELETE FROM chat_mod_actions WHERE ctid IN ("
+            " SELECT ctid FROM chat_mod_actions"
             " WHERE acked_at IS NOT NULL AND acked_at < NOW() - INTERVAL '7 days'"
-        ))
+            " ORDER BY acked_at LIMIT 500 FOR UPDATE SKIP LOCKED)"))
     await db.commit()
     return {"status": "ok", "acked": len(acked)}
 
@@ -18260,7 +20933,7 @@ user-select:none;cursor:not-allowed}
 .tl-warn{font-size:11px;color:#ffc46b;margin:2px 0;min-height:14px}
 .badge{font-size:11px;border-radius:3px;padding:1px 6px;margin-left:6px}
 .b-machine{background:#5a4a18}.b-approved{background:#1e4a24}.b-stale{background:#5a1e1e}
-.b-sensitive{background:#4a1e3a}.b-pending{background:#1e3a5a}
+.b-sensitive{background:#4a1e3a}.b-pending{background:#1e3a5a}.b-ctx{background:#24405e;color:#cfe3ff}
 .err{color:#ff8888;white-space:pre-wrap}.muted{color:#889}
 /* Filter bars — CENTRED (Sid, Aug 12 item 11c). The chips are inline-block
    buttons, so text-align does the centring and the row still wraps cleanly on
@@ -18482,6 +21155,16 @@ async function runKeepAlive(){
 }
 const el=(tag,cls,txt)=>{const e=document.createElement(tag);if(cls)e.className=cls;
   if(txt!==undefined)e.textContent=txt;return e};
+// Sept 6 item e: a TrC key is english + U+0004 + context (I18n.ContextSeparator),
+// stored whole as msgctxt. Every surface that renders a source string shows the
+// English as the text and the context as a badge; the tag-locked editor is
+// seeded from the English half. Display only: proposals, reviews and reverts
+// travel by key_id, so the composite never has to make a round trip.
+const CTX_SEP=String.fromCharCode(4);
+function srcText(s){const t=(s===undefined||s===null)?"":String(s);const i=t.indexOf(CTX_SEP);return i<0?t:t.slice(0,i);}
+function srcEl(cls,s){const t=(s===undefined||s===null)?"":String(s);const i=t.indexOf(CTX_SEP);
+  const d=el("div",cls,i<0?t:t.slice(0,i));
+  if(i>=0)d.appendChild(el("span","badge b-ctx","["+t.slice(i+1)+"]"));return d;}
 function setStatus(msg,isErr){const s=document.getElementById("status");
   if(!s)return;s.className=isErr?"err":"muted";s.textContent=msg||"";}
 // FastAPI sends its message as {"detail": "..."} — print the sentence, not the
@@ -18984,7 +21667,7 @@ function renderKeys(){
     if(k.pending){pendBadge=el("span","badge b-pending",k.pending+" pending");
       head.appendChild(pendBadge);}
     box.appendChild(head);
-    box.appendChild(el("div","src",k.source));
+    box.appendChild(srcEl("src",k.source));
     // Only on the untagged path: beside the chips this would show a STALE
     // tag skeleton the translator is likely to copy from (review find).
     if(k.target&&k.source.indexOf("<")<0)box.appendChild(el("div","tgt",k.target));
@@ -18993,7 +21676,7 @@ function renderKeys(){
     // reassembled from the SOURCE's captured tag array, so markup cannot be
     // authored here at all (the server enforces the same rule independently
     // — this is UX, not the security boundary).
-    const ed=mkEditor(k.source,k.target||"");box.appendChild(ed.node);
+    const ed=mkEditor(srcText(k.source),k.target||"");box.appendChild(ed.node);
     const send=el("button",null,"Propose");
     const msg=el("div","err","");
     const rowLang=KEYS_LANG;   // find 12: bind the row's language, not the global
@@ -19046,7 +21729,7 @@ function renderKeys(){
         // r2 find 12: the header names the namespace + game-table context so
         // the PS/Xbox twins and cross-namespace homonyms stay tellable apart.
         hbox.appendChild(el("div","muted",(h.namespace||"client")+(h.context?" · "+h.context:"")));
-        hbox.appendChild(el("div","h-src",h.source));
+        hbox.appendChild(srcEl("h-src",h.source));
         if(h.current){
           const c=el("div","hrow h-approved");
           c.appendChild(el("div","tgt",h.current.target||"(none)"));
@@ -19322,7 +22005,7 @@ function renderQueue(d){
     if(p.namespace&&p.namespace!=="client")head.appendChild(el("span","badge b-stale",p.namespace));
     box.appendChild(head);
     if(p.context)box.appendChild(el("div","muted",p.context));
-    box.appendChild(el("div","src",p.source));
+    box.appendChild(srcEl("src",p.source));
     box.appendChild(el("div","tgt",p.target));
     const msg=el("div","err","");
     const act=(a)=>async()=>{msg.textContent="";
@@ -19397,7 +22080,7 @@ function renderApproved(d){
     if(e.namespace==="game")head.appendChild(el("span","badge b-pending","ships next release"));
     if(e.self_approved)head.appendChild(el("span","badge b-machine","self-approved"));
     box.appendChild(head);
-    box.appendChild(el("div","h-src",e.source));
+    box.appendChild(srcEl("h-src",e.source));
     box.appendChild(el("div","tgt",e.target||"(empty)"));
     // approved_at IS i18n_entries.updated_at — there is no approved_at column.
     let who="Approved by "+(e.approved_by_name||e.approved_by||"unknown");
@@ -20235,13 +22918,18 @@ async def purchase_item(
     # compatible with the KEY SHARE concurrent purchases' player_items FK
     # inserts hold (#202). Every decision below reads THIS tuple; the ORM
     # `item` is only trusted for fields no endpoint mutates (kind, sku,
-    # rotation_pool, catalog_ready).
+    # rotation_pool). catalog_ready rides the locked read and is re-checked
+    # under it, so a row unpublished between the ORM snapshot and this lock
+    # gets the pre-lock refusal, not a debit. Rule: any later unpublish UPDATE
+    # must take a lock mode that conflicts with this FOR SHARE (#202).
     _locked = (await db.execute(text(
-        "SELECT price, artist_steam_id, stock_limit "
+        "SELECT price, artist_steam_id, stock_limit, catalog_ready "
         "FROM shop_items WHERE id = :iid FOR SHARE"
     ), {"iid": item.id})).mappings().first()
     if _locked is None:
         raise HTTPException(status_code=404, detail="Item not found")
+    if not _locked["catalog_ready"]:
+        raise HTTPException(status_code=409, detail="This cosmetic is approved but has not shipped in the mod yet")
     live_price = int(_locked["price"])
     live_artist = _locked["artist_steam_id"]
     live_stock = _locked["stock_limit"]
@@ -21393,6 +24081,24 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         "LIMIT 50"
     ))).all()
     changed = 0
+    # ONE TRANSACTION PER SERIES, not one per batch (r12 LOW, #204). Every
+    # loop below locks a series and then writes the players its bets belong
+    # to, and a single transaction around all three held every series and
+    # every bettor it had touched so far. A DC report for some OTHER series
+    # locks its two participants and then that series — so a batch holding a
+    # stale S1 while it reached the bettors of S2 could wait on a player the
+    # report held, while the report waited on S1. The row that closes the
+    # cycle is a bettor, which no lock ordering here enumerates; what removes
+    # it is the transaction ending at the item boundary.
+    #
+    # Safe to commit per item because every item is independent and already
+    # idempotent: all three modes now lock the series and re-ask their own
+    # selection predicate before writing (mode 1 gained that in r13 — until then
+    # it decided from the unlocked snapshot and overwrote whatever had arrived),
+    # _refund_series_bets claims the rows it pays, and a mode-1 abandon takes the
+    # series out of the 'active' predicate this job selects on. A failure
+    # mid-batch now leaves the items before it committed and the rest for the
+    # next call, which is the degradation #204 asks for.
     for sid, player1_id, player2_id in stale_rows_c:
         await _assert_no_service_subject(
             db, affected_player_ids=[player1_id, player2_id])
@@ -21408,8 +24114,10 @@ async def _prune_stale_series(db: AsyncSession) -> int:
             "  AND status = 'active' AND invalidated_at IS NULL "
             "FOR NO KEY UPDATE"), {"sid": str(sid)})).first()
         if _still_c is None:
+            await db.commit()
             continue
         n = await _refund_series_bets(db, sid, "refund_tournament_forfeit")
+        await db.commit()
         if n:
             changed += 1
             print(f"[SERIES] refunded {n} stranded tournament bet(s) on "
@@ -21429,34 +24137,73 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         # fresh recheck sees 2 wins / non-active and skips — or the report
         # waits for this refund's commit, after which its settlement
         # SELECT reads the claimed rows as settled and skips them.
+        # r13 MEDIUM: the re-check has to ask the SELECTION predicate, not a
+        # subset of it. Without the stall age and the unsettled-bet term, a
+        # series that was snapshotted stalled at 1-0 and then RESUMED — a fresh
+        # match committing at 1-1 while this loop was working — still satisfied
+        # active/<2 and had its wagers refunded out from under a live game.
         _still_b = (await db.execute(text(
-            "SELECT 1 FROM ranked_series WHERE id = :sid "
-            "  AND status = 'active' AND invalidated_at IS NULL "
-            "  AND p1_series_wins < 2 AND p2_series_wins < 2 "
-            "FOR NO KEY UPDATE"), {"sid": str(sid)})).first()
+            "SELECT 1 FROM ranked_series rs WHERE rs.id = :sid "
+            "  AND rs.status = 'active' AND rs.invalidated_at IS NULL "
+            "  AND rs.is_tournament = FALSE "
+            "  AND rs.p1_series_wins < 2 AND rs.p2_series_wins < 2 "
+            "  AND EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
+            "  AND EXISTS (SELECT 1 FROM bets b "
+            "               WHERE b.series_id = rs.id AND b.settled_at IS NULL) "
+            "  AND COALESCE(("
+            "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
+            "      ), rs.created_at) < NOW() - CAST(:stalled AS interval) "
+            "FOR NO KEY UPDATE OF rs"), {"sid": str(sid),
+                                         "stalled": "%d minutes" % int(stalled_min)})).first()
         if _still_b is None:
+            await db.commit()
             continue
         n = await _refund_series_bets(db, sid, "refund_abandoned")
+        await db.commit()
         if n:
             changed += 1
             print(f"[SERIES] refunded {n} bet(s) on stalled series {sid} (series stays resumable)")
     abandon_rows = [
-        (sid, player1_id, player2_id, "no_match_reported")
+        (sid, player1_id, player2_id, PRUNE_REASON_NO_MATCH)
         for sid, player1_id, player2_id in stale_rows_a
     ]
     for sid, player1_id, player2_id, prune_reason in abandon_rows:
         await _assert_no_service_subject(
             db, affected_player_ids=[player1_id, player2_id])
+        # LOCK AND RE-ASK THE WHOLE PREDICATE FIRST (r13 MEDIUM). This mode used
+        # to decide from the unlocked snapshot above and then write twice — a
+        # refund, then an unconditional status/invalidation overwrite. Two
+        # things could have happened in between. An admin reversal invalidates
+        # the series with its own reason, and this overwrote that reason with
+        # `no_match_reported`, which the disconnect path treats as exempt, so an
+        # admin-invalidated series became reportable again. A first match could
+        # also have been reported, making the row no longer stale at all.
+        #
+        # It also puts the series lock BEFORE the refund (r13 LOW), which is the
+        # order the admin reversal takes and the order modes 2 and 3 take, so a
+        # concurrent operation on one series waits instead of cycling.
+        _still_a = (await db.execute(text(
+            "SELECT 1 FROM ranked_series rs "
+            " WHERE rs.id = :sid "
+            "   AND rs.status = 'active' AND rs.invalidated_at IS NULL "
+            "   AND rs.is_tournament = FALSE "
+            "   AND rs.created_at < NOW() - CAST(:cutoff AS interval) "
+            "   AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
+            "FOR NO KEY UPDATE"
+        ), {"sid": str(sid),
+            "cutoff": "%d minutes" % int(cutoff_min)})).first()
+        if _still_a is None:
+            await db.commit()
+            continue
         n = await _refund_series_bets(db, sid, "refund_abandoned")
         await db.execute(text(
             "UPDATE ranked_series SET status = 'abandoned', "
             "  invalidated_at = NOW(), invalidation_reason = :reason "
             "WHERE id = :sid"
         ), {"sid": sid, "reason": prune_reason})
+        await db.commit()
         changed += 1
         print(f"[SERIES] abandoned stale series {sid} ({prune_reason}) — refunded {n} bet(s)")
-    if changed:
-        await db.commit()
     return changed
 
 
@@ -22103,9 +24850,7 @@ async def series_preflight(
         # invisible as before.
         # RAW UPDATE — see the note on the RankedSeries model: the column is
         # intentionally unmapped, so an ORM assignment here would be silent.
-        await db.execute(text(
-            "UPDATE ranked_series SET last_activity_at = NOW() WHERE id = :sid"),
-            {"sid": existing.id})
+        await _publish_pair_sitting(db, existing)
         await db.commit()
         # Aug 9 (Sid): a rated ROOMCODE game's only server touchpoints are
         # this preflight and the match report — neither evicted, so both
@@ -22195,6 +24940,13 @@ async def series_preflight(
     )
     db.add(series)
     await db.flush()
+    # The server has just put this pair into this sitting, so it says so -- in
+    # the same transaction as the row itself, before the commit. The reuse
+    # branch above publishes; this branch is where a series is BORN, and a
+    # sitting born without a grant is unreportable for any pair who has ever
+    # played together before: the authority arm sees their older grant, and the
+    # compatibility arm is gated on having no grant at all, so both refuse.
+    await _publish_pair_sitting(db, series)
     await db.commit()
     # Aug 9 (Sid): see the eviction note on the reuse branch above.
     try:
@@ -22222,6 +24974,7 @@ async def series_preflight(
 @app.post("/api/v1/series/{series_id}/live-points", tags=["Series"])
 async def update_live_points(
     series_id: str,
+    request: Request,
     p1_points: int = Query(..., ge=0, le=10),
     p2_points: int = Query(..., ge=0, le=10),
     reporter_steam_id: str = Query(...),
@@ -22264,6 +25017,11 @@ async def update_live_points(
     reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
     if reporter is None or reporter.id not in (series.player1_id, series.player2_id):
         raise HTTPException(status_code=403, detail="Reporter is not in this series")
+
+    # WHO is posting, as far as the transport can tell. Asked before the write
+    # so the armed refusal (M4) happens before anything is stored, and reused
+    # after it to record the attestation the DC evidence rule reads.
+    _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
 
     # Aug 31 (review r1 find 2, CONFIRMED): NO reporter swap. The client reads
     # GM_ArmsRace's p1/p2 point fields, which are GLOBAL team-slot values —
@@ -22309,6 +25067,14 @@ async def update_live_points(
     if _pts is None:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Series is not active")
+    # This seat was here. Recorded in the SAME transaction as the points it
+    # accompanies, so the two can never disagree about whether the post landed,
+    # and inside a savepoint so a failure to record cannot lose the points.
+    # The sum THIS post carried, not `_pts` -- `_pts` is the stored pair after
+    # GREATEST against whatever the counterparty had already written, which is
+    # exactly the evidence this attestation exists to be independent of.
+    await _record_seat_attestation(db, SEAT_SURFACE_RANKED, sid, reporter.id, _seat,
+                                   (new_p1 or 0) + (new_p2 or 0))
     await db.commit()
     series.live_p1_points, series.live_p2_points = _pts[0], _pts[1]
     # Aug 9 bet audit find 7: mirror the POST /bets predicate exactly. This
@@ -22329,6 +25095,7 @@ async def update_live_points(
 @app.post("/api/v1/team/series/{series_id}/live-points", tags=["Betting"])
 async def update_team_live_points(
     series_id: str,
+    request: Request,
     t1_points: int = Query(..., ge=0, le=10),
     t2_points: int = Query(..., ge=0, le=10),
     reporter_steam_id: str = Query(...),
@@ -22369,6 +25136,7 @@ async def update_team_live_points(
     if team_subjects is None:
         raise HTTPException(status_code=404, detail="Series not found")
     await _assert_no_service_subject(db, affected_player_ids=list(team_subjects))
+    _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
 
     # Participants only, and only while the series is genuinely live. Both
     # predicates ride INSIDE the UPDATE so a completion committing mid-request
@@ -22385,6 +25153,11 @@ async def update_team_live_points(
         await db.rollback()
         raise HTTPException(status_code=409,
                             detail="Series is not active, or reporter is not in it")
+    # Recorded after the UPDATE, because the UPDATE is where membership is
+    # actually established on this surface (":pid IN (t1a_id, ...)" rides inside
+    # it). Attesting before it would record a seat for a series it may not be in.
+    await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
+                                   (t1_points or 0) + (t2_points or 0))
     await db.commit()
     return {
         "status": "ok",
@@ -22397,6 +25170,7 @@ async def update_team_live_points(
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
 async def update_ffa_live_points(
     lobby_id: str,
+    request: Request,
     game_number: int = Query(..., ge=1, le=99),
     total_points: int = Query(..., ge=0, le=200),
     reporter_steam_id: str = Query(...),
@@ -22443,6 +25217,7 @@ async def update_ffa_live_points(
     if ffa_subjects is None:
         raise HTTPException(status_code=404, detail="Lobby not found")
     await _assert_no_service_subject(db, affected_player_ids=list(ffa_subjects or []))
+    _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
 
     # A NEW game resets the figure (its own game_number replaces the stored
     # one); the SAME game only ever ratchets upward. Both cases are one
@@ -22482,6 +25257,13 @@ async def update_ffa_live_points(
         raise HTTPException(status_code=409,
                             detail="Lobby is not live, reporter is not a member, "
                                    "or that game is not the one in progress")
+    # As on the 2v2 surface: membership is established by the UPDATE's own
+    # ":pid = ANY(member_ids)", so the attestation is recorded only once that
+    # statement has returned a row.
+    # 0, and not the game number: this surface reports which game is in
+    # progress, not a points pair, so there is no observation to record. No
+    # reader asks for one -- the evidence predicate is 'ranked' only.
+    await _record_seat_attestation(db, SEAT_SURFACE_FFA, lid, reporter.id, _seat, 0)
     await db.commit()
     return {
         "status": "ok",
@@ -26009,6 +28791,19 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM player_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
+    # In-game mail (Sept 6 item b, B-8; migration 297). The player row is
+    # ANONYMISED, so mail_blocks' ON DELETE CASCADE never fires (#437) — every
+    # mail table is handled by name. The inbox and addressee envelopes go
+    # (this player's property); both directions of their mail blocks go; their
+    # reports keep the evidence snapshot but lose the reporter_id; a bulk grant
+    # is live authority and dies with the account; the censor-hit ledger is
+    # personal. Messages they SENT stay — the recipients' property, now
+    # pointing at the anonymised row.
+    await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM mail_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
+    await db.execute(text("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM mail_bulk_grants WHERE steam_id = :sid"), {"sid": steam_id})
+    await db.execute(text("DELETE FROM mail_censor_hits WHERE sender_id = :pid"), {"pid": pid})
 
     # i18n surfaces (Codex wave-2 round-10 find 2): the portal token and
     # translate grants are LIVE AUTHORITY and must die with the account, and
@@ -26026,6 +28821,16 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         "       steam_id = :tomb WHERE steam_id = :sid"), {"sid": steam_id, "tomb": _tomb})
     await db.execute(text(
         "UPDATE language_grants SET granted_by_steam_id = :tomb WHERE granted_by_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    # Sept 6 item b (review r1): the two raw-identity columns the mail tables
+    # carry for an ACTING account — the moderator who resolved a case and the
+    # admin who granted a bulk cap — take the same tombstone as the i18n
+    # granted_by column above.
+    await db.execute(text(
+        "UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid"),
         {"sid": steam_id, "tomb": _tomb})
     await db.execute(text(
         "UPDATE i18n_proposals SET proposer_steam_id = :tomb WHERE proposer_steam_id = :sid"),
@@ -26139,6 +28944,21 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
             text("INSERT INTO deleted_steam_ids (steam_id_hash) VALUES (:h) ON CONFLICT DO NOTHING"),
             {"h": _hash_steam_id(steam_id)},
         )
+
+    # Sept 6 item b (review r1, the mail half of the lattice): the envelope
+    # sweep runs a SECOND time AFTER the anonymising UPDATE has been flushed.
+    # The mail fan-outs hold FOR KEY SHARE on each recipient's players row
+    # while they insert, and the steam_id rewrite above takes FOR UPDATE on
+    # that row — so a send racing this deletion either committed before the
+    # rewrite (its envelope is caught here) or blocks on the row, re-reads it
+    # after this commits and finds deleted_at set. The inbox revision row
+    # (migration 300) is personal state and goes with the envelopes; it is
+    # removed here rather than in the early sweep so the row-lock order
+    # (players, then mail_inbox_rev) matches the fan-out's and neither side
+    # can wait on the other.
+    await db.flush()
+    await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})
 
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
@@ -28037,16 +30857,11 @@ async def admin_list_bans(
     ], "total": int(total), "limit": limit, "offset": offset}
 
 
-class _AdminBanReq(BaseModel):
-    admin_steam_id: str
-    target_steam_id: str
-    reason: str = "violation"
-    hmac_signature: str | None = None
-
-
-@app.post("/api/v1/admin/ban", tags=["Admin"])
-async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
-    await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
+async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_steam_id: str) -> None:
+    """The ban-velocity gate, extracted verbatim from admin_ban (Sept 6 item
+    b, B-2) so the moderation-case act path runs the SAME gate. On refusal it
+    commits its own audit/alert rows and raises 429 — the caller's transaction
+    is over at that point, which is the behaviour the route always had."""
     # Aug 7 item 7: ban-velocity gate — 5+ COMMITTED bans by one admin inside
     # 5 minutes blocks further bans (429) and alerts #scr-admin. Counting
     # player_bans rows (not admin_actions) means already_banned no-ops never
@@ -28057,14 +30872,14 @@ async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     # advisory lock (#207's pattern: lock a VALUE that exists before any row).
     await db.execute(text(
         "SELECT pg_advisory_xact_lock(hashtext('ban-rate:' || CAST(:adm AS VARCHAR)))"
-    ), {"adm": req.admin_steam_id})
+    ), {"adm": admin_steam_id})
     recent_bans = (await db.execute(text(
         "SELECT COUNT(*) FROM player_bans "
         "WHERE banned_by_steam_id = :adm AND banned_at > NOW() - INTERVAL '5 minutes'"
-    ), {"adm": req.admin_steam_id})).scalar() or 0
+    ), {"adm": admin_steam_id})).scalar() or 0
     if int(recent_bans) >= 5:
-        await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="ban_rate_blocked",
-                                target_steam_id=req.target_steam_id,
+        await _log_admin_action(db, admin_steam_id=admin_steam_id, action="ban_rate_blocked",
+                                target_steam_id=target_steam_id,
                                 details={"recent_bans": int(recent_bans), "window": "5m"})
         # Alert once per burst: only on the FIRST blocked attempt (count==5
         # exactly would miss retries; instead check whether we already posted
@@ -28073,29 +30888,38 @@ async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
             "SELECT COUNT(*) FROM admin_actions "
             "WHERE admin_steam_id = :adm AND action = 'ban_rate_blocked' "
             "AND created_at > NOW() - INTERVAL '5 minutes'"
-        ), {"adm": req.admin_steam_id})).scalar() or 0
+        ), {"adm": admin_steam_id})).scalar() or 0
         if int(already_alerted) <= 1:  # the row we just wrote is #1
             try:
                 async with db.begin_nested():
                     await db.execute(text(
                         "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
                     ), {"ch": "1495392567687250061",
-                        "c": f"\N{WARNING SIGN} **Ban rate flag**: admin `{req.admin_steam_id}` "
+                        "c": f"\N{WARNING SIGN} **Ban rate flag**: admin `{admin_steam_id}` "
                              f"hit {int(recent_bans)} bans in 5 minutes — further bans are "
-                             f"blocked until the window passes. Latest target: `{req.target_steam_id}`."})
+                             f"blocked until the window passes. Latest target: `{target_steam_id}`."})
             except Exception as ex:
                 print(f"[ADMIN] ban-rate alert queue failed: {ex}")
         await db.commit()
         raise HTTPException(status_code=429,
                             detail="Ban rate limit: 5 bans in 5 minutes. Further bans are "
                                    "blocked for now - flagged to #scr-admin.")
+
+
+async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
+                          reason: str) -> dict:
+    """The ban WRITE core, extracted verbatim from admin_ban (Sept 6 item b,
+    B-2): identity lock, session and portal revocation, queue-row revocation,
+    the already_banned check, the PlayerBan + AdminAction rows. Does NOT
+    commit — admin_ban commits right after; the moderation-case act path
+    commits together with its case row. Returns the route's response dict."""
     # Identity lock FIRST, before any purge (round-13 find 6: with the lock
     # taken after the session purge, a steam_auth finalization holding the
     # lock could insert a fresh session AFTER our purge but BEFORE our ban
     # row committed — its post-await ban re-read must be forced to wait
     # behind, and therefore see, this whole transaction).
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
-                     {"sid": req.target_steam_id})
+                     {"sid": target_steam_id})
     # Revoke live Steam sessions (audit lower-pri item): without this a banned
     # player's existing verified session kept authenticating session-gated
     # endpoints until its 24h expiry. Ban checks at usage sites still apply;
@@ -28103,11 +30927,11 @@ async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     # (Codex review find) so re-banning also re-purges — the recovery lever
     # for any session that survived (migration 152 cleans pre-batch bans).
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"),
-                     {"sid": req.target_steam_id})
+                     {"sid": target_steam_id})
     # Portal tokens are live authority too (round-10 find 2): a banned
     # translator's open portal tab must die with the ban.
     await db.execute(text("DELETE FROM i18n_portal_sessions WHERE steam_id = :sid"),
-                     {"sid": req.target_steam_id})
+                     {"sid": target_steam_id})
     # Ban-time queue revocation (round-14 find 2): NON-LIVE matchmaking
     # authority — searching rows and open-lobby seats — dies with the ban,
     # or a row committed just before it stays matchable until its prune.
@@ -28119,7 +30943,7 @@ async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     # enrollment for the same identity.
     _bpid = (await db.execute(text(
         "SELECT id FROM players WHERE steam_id = :sid"
-    ), {"sid": req.target_steam_id})).scalar()
+    ), {"sid": target_steam_id})).scalar()
     if _bpid is not None:
         # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
         # branch was racy because it did partner WRITES from a status-filtered
@@ -28141,27 +30965,52 @@ async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
-    existing = await _is_banned(db, req.target_steam_id)
+    existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
-        await db.commit()
         return {"status": "already_banned", "reason": existing}
     # Normalize a blank reason at the boundary (find 3): the row's existence
     # is the ban; the reason is display-only and must never be empty.
     # Normalize AND truncate ONCE (round-17 find 4): every sink — ban row,
     # audit details, response — carries this exact value.
-    _ban_reason = ((req.reason or "").strip() or "violation")[:256]
-    db.add(PlayerBan(steam_id=req.target_steam_id, reason=_ban_reason, banned_by_steam_id=req.admin_steam_id))
+    _ban_reason = ((reason or "").strip() or "violation")[:256]
+    db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id))
     db.add(AdminAction(
-        admin_steam_id=req.admin_steam_id, action="ban", target_steam_id=req.target_steam_id,
+        admin_steam_id=admin_steam_id, action="ban", target_steam_id=target_steam_id,
         # The NORMALIZED reason (round-16 find 6): audit and ban row must
         # agree — raw whitespace here showed a different "reason" to audit
         # consumers than the ban itself carried.
         details={"reason": _ban_reason},
     ))
-    await db.commit()
     # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
     # posts it to #scr-admin (item 4).
-    return {"status": "banned", "steam_id": req.target_steam_id, "reason": _ban_reason}
+    return {"status": "banned", "steam_id": target_steam_id, "reason": _ban_reason}
+
+
+class _AdminBanReq(BaseModel):
+    admin_steam_id: str
+    target_steam_id: str
+    reason: str = "violation"
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/ban", tags=["Admin"])
+async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
+    # ONE lock order on every ban path (Sept 6 item b, review r2): the
+    # identity lattice first — both identities this transaction writes, in
+    # canonical order — THEN the per-admin ban-rate lock. The moderation-case
+    # ban (_moderation_case_act) takes them in exactly this order; a path
+    # taking them the other way round would let two concurrent bans by one
+    # admin wait on each other until PostgreSQL aborts one. Neither row has
+    # to exist here: a ban may pre-date the account, and the admin's
+    # authority is admin_users membership — the rows are locked when present.
+    await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
+                                optional=(req.admin_steam_id, req.target_steam_id))
+    await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id)
+    result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
+                                   target_steam_id=req.target_steam_id, reason=req.reason)
+    await db.commit()
+    return result
 
 
 @app.get("/api/v1/internal/recent-bans", tags=["Internal"])
@@ -31876,7 +34725,8 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
 # widen an existing cosmetic's meaning.
 _ovt_podium_cache: dict = {"at": 0.0, "ids": []}
 
-_OVT_PODIUM_QUERY = """
+# Item d: activity filter as on /ovt/leaderboard (f-string over the int).
+_OVT_PODIUM_QUERY = f"""
     WITH per_player AS (
         SELECT pid, SUM(played) AS games, SUM(won) AS wins
         FROM (
@@ -31895,6 +34745,7 @@ _OVT_PODIUM_QUERY = """
       FROM per_player pp
       JOIN players p ON p.id = pp.pid
      WHERE p.deleted_at IS NULL AND pp.games >= 1
+       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
      ORDER BY pp.games DESC, pp.wins::float / NULLIF(pp.games, 0) DESC NULLS LAST
      LIMIT 3
 """
@@ -33040,13 +35891,14 @@ async def ovt_series_active(steam_id: str = Query(...), db: AsyncSession = Depen
 async def ovt_leaderboard(
     limit: int = 200,
     role: str = "combined",
+    include_inactive: bool = False,   # item d -- see get_leaderboard
     db: AsyncSession = Depends(get_db),
 ):
     """1v2 stats leaderboard, optionally scoped to solo or duo games."""
     if role not in {"combined", "solo", "duo"}:
         role = "combined"
 
-    rows = (await db.execute(text("""
+    rows = (await db.execute(text(f"""
         WITH per_player AS (
             SELECT pid, SUM(played) AS games, SUM(won) AS wins,
                    SUM(solo_g) AS solo_games, SUM(duo_g) AS duo_games,
@@ -33084,13 +35936,16 @@ async def ovt_leaderboard(
                sc.solo_wins, sc.duo_wins, sc.scoped_games, sc.scoped_wins,
                sc.last_played,
                si.name AS title_name, si.preview_color AS title_color, si.sku AS title_sku,
-               gr.rating AS rating_1v1
+               gr.rating AS rating_1v1,
+               {_ONLINE_MARKER_SQL} AS is_online,
+               NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
           FROM scoped sc
           JOIN players p ON p.id = sc.pid
           LEFT JOIN shop_items si ON si.id = p.active_title_id
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
          WHERE p.deleted_at IS NULL
            AND sc.scoped_games >= 1
+           AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
          ORDER BY
                CASE WHEN :role = 'combined' THEN sc.games END DESC,
                CASE WHEN :role = 'combined'
@@ -33101,7 +35956,8 @@ async def ovt_leaderboard(
                     END DESC NULLS LAST,
                CASE WHEN :role IN ('solo', 'duo') THEN sc.scoped_games END DESC
          LIMIT :lim
-    """), {"lim": max(1, min(limit, 500)), "role": role})).mappings().all()
+    """), {"lim": max(1, min(limit, 500)), "role": role,
+           "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).mappings().all()
 
     _colors = await _rank_colors(db)
     _pmap, _pmap2, _pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
@@ -33129,7 +35985,11 @@ async def ovt_leaderboard(
             duo_wins=duo_w, duo_losses=duo_g - duo_w,
             level=lvl, title=t_name, title_color=t_color,
             last_played=r["last_played"].isoformat() if r["last_played"] else None,
+            is_online=bool(r["is_online"]),
+            inactive=bool(r["inactive"]),
         ))
+    # Item d: len(entries) below already follows the activity filter (the
+    # rows ARE the filtered set), so no separate count was added here.
     # KNOWN NIT, deliberately NOT fixed here: total_players is len(entries),
     # so it reports the PAGE SIZE rather than the population (limit=1 says "1
     # player total"). The 1v1 and 2v2 boards run a real COUNT; the FFA board was
@@ -33688,6 +36548,80 @@ def _ffa_sort_key(steam_id: str) -> tuple:
     reporter implements the identical comparison — the HMAC canonical and
     slot assignment must byte-match without either side parsing int64."""
     return (len(steam_id or ""), steam_id or "")
+
+
+def _ffa_rating_deltas(order, unrated, placements, pre, score_target, only=None):
+    """PURE Glicko-2 update for one FFA game -- no db, no clock, nothing but
+    the tuning constants. The ONLY implementation: submit_ffa_match (the rated
+    path) and GET /rating-preview/ffa (the Discord `/elo ffa` preview) both
+    call it, so the preview cannot drift from what a real game does.
+
+    order        every roster steam_id in REPORT order. Fixes the result
+                 dict's order and nothing else -- each value depends only on
+                 `placements` and `pre`, never on another player's result.
+    unrated      steam_ids on the roster but not rated this game (ghosts,
+                 early leavers under grace): skipped, and excluded from every
+                 other player's comparison set.
+    placements   steam_id -> competition-style place (1, 2, 2, 4 on ties).
+    pre          steam_id -> (rating, rd, volatility) PRE-game snapshot.
+    score_target the lobby's first-to-N; feeds w(N) below.
+    only         compute this one steam_id instead of the whole roster (the
+                 preview asks one hypothetical per player per place).
+    Returns steam_id -> (new_rating, new_rd, new_volatility) for rated players.
+
+    Rating comparisons are BOUNDED to the placement-adjacent opponents (up to
+    FFA_MAX_RATED_OPPONENTS, nearest placements first): raw full pairwise
+    would make a 10-player game move ratings ~4.5x as much as a 3-player game
+    and crush RD after a handful of lobbies (Codex design find 14). Adjacent
+    placements are also the most informative comparisons. Deterministic:
+    sorted by |placement gap| then the canonical steam ordering.
+    """
+    out = {}
+    for sid in (order if only is None else (only,)):
+        if sid in unrated:
+            continue   # not in this game -- no rating period for them
+        my_place = placements[sid]
+        ranked_opps = sorted(
+            (q for q in order if q != sid and q not in unrated),
+            key=lambda q: (abs(placements[q] - my_place), _ffa_sort_key(q)))
+        picks = list(ranked_opps[:FFA_MAX_RATED_OPPONENTS])
+        # Bug 195: upset inclusion -- see FFA_UPSET_INCLUDE_GAP. Scans only
+        # opponents the adjacency picks EXCLUDED (a no-op in games of <=5
+        # rated players, i.e. ~94% of history).
+        if len(ranked_opps) > FFA_MAX_RATED_OPPONENTS:
+            my_r = pre[sid][0]
+            upsets = []
+            for q in ranked_opps[FFA_MAX_RATED_OPPONENTS:]:
+                q_r = pre[q][0]
+                gap = abs(my_r - q_r)
+                if gap < FFA_UPSET_INCLUDE_GAP:
+                    continue
+                q_place = placements[q]
+                lower_rated_placed_above = (
+                    (my_r < q_r and my_place < q_place)
+                    or (q_r < my_r and q_place < my_place))
+                if lower_rated_placed_above:
+                    upsets.append((gap, _ffa_sort_key(q), q))
+            if upsets:
+                upsets.sort(key=lambda t: (-t[0], t[1]))
+                picks.append(upsets[0][2])
+        opponents = []
+        for q in picks:
+            score = (1.0 if my_place < placements[q]
+                     else 0.0 if my_place > placements[q] else 0.5)
+            opponents.append((pre[q][0], pre[q][1], score))
+        old_r, old_rd, old_vol = pre[sid]
+        # w(N) = min(1, (N-1)/4): a game to a shorter score target carries
+        # less information, so it counts as a fraction of a game (section 5e --
+        # scales variance AND update). N=5 (today's default) gives w=1.0,
+        # byte-identical to the unweighted path; clamped at 1.0 above N=5
+        # so grinding long lobbies is never the rating-efficient path.
+        _wN = min(1.0, (score_target - 1) / 4.0)
+        out[sid] = calculate_new_rating(
+            old_r, old_rd, old_vol, opponents,
+            tau=GLICKO2_TAU,
+            weights=([_wN] * len(opponents)) if _wN < 1.0 else None)
+    return out
 
 
 def _ffa_hmac_canonical(report: FfaMatchReport, include_kills: bool) -> str:
@@ -37533,59 +40467,22 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             r = by_pid.get(pid)
             pre[sid_] = ((float(r["rating"]), float(r["rating_deviation"]), float(r["volatility"]))
                          if r else (1500.0, 350.0, 0.06))
-        # Rating comparisons are BOUNDED to the placement-adjacent opponents
-        # (up to FFA_MAX_RATED_OPPONENTS, nearest placements first): raw full
-        # pairwise would make a 10-player game move ratings ~4.5x as much as a
-        # 3-player game and crush RD after a handful of lobbies (Codex design
-        # find 14). Adjacent placements are also the most informative
-        # comparisons. Deterministic: sorted by |placement gap| then the
-        # canonical steam ordering.
+        # Opponent selection and the Glicko-2 update are _ffa_rating_deltas
+        # (pure; ALSO the engine of GET /rating-preview/ffa, so the Discord
+        # `/elo ffa` preview cannot drift from the rated path). Every rated
+        # player's new state is computed from the pre-game snapshot BEFORE
+        # any row is written: each update only ever read `pre`, so the values
+        # are identical to the former per-player compute-then-INSERT
+        # interleaving -- only the INSERTs' timing moved, inside this one
+        # transaction.
+        _new_ffa = _ffa_rating_deltas([p.steam_id for p in report.players],
+                                      unrated, placements, pre, _score_target)
         for p in report.players:
             if p.steam_id in unrated:
                 continue   # not in this game — no rating period for them
             my_place = placements[p.steam_id]
-            ranked_opps = sorted(
-                (q for q in report.players
-                 if q.steam_id != p.steam_id and q.steam_id not in unrated),
-                key=lambda q: (abs(placements[q.steam_id] - my_place),
-                               _ffa_sort_key(q.steam_id)))
-            picks = list(ranked_opps[:FFA_MAX_RATED_OPPONENTS])
-            # Bug 195: upset inclusion — see FFA_UPSET_INCLUDE_GAP. Scans only
-            # opponents the adjacency picks EXCLUDED (a no-op in games of <=5
-            # rated players, i.e. ~94% of history).
-            if len(ranked_opps) > FFA_MAX_RATED_OPPONENTS:
-                my_r = pre[p.steam_id][0]
-                upsets = []
-                for q in ranked_opps[FFA_MAX_RATED_OPPONENTS:]:
-                    q_r = pre[q.steam_id][0]
-                    gap = abs(my_r - q_r)
-                    if gap < FFA_UPSET_INCLUDE_GAP:
-                        continue
-                    q_place = placements[q.steam_id]
-                    lower_rated_placed_above = (
-                        (my_r < q_r and my_place < q_place)
-                        or (q_r < my_r and q_place < my_place))
-                    if lower_rated_placed_above:
-                        upsets.append((gap, _ffa_sort_key(q.steam_id), q))
-                if upsets:
-                    upsets.sort(key=lambda t: (-t[0], t[1]))
-                    picks.append(upsets[0][2])
-            opponents = []
-            for q in picks:
-                score = (1.0 if my_place < placements[q.steam_id]
-                         else 0.0 if my_place > placements[q.steam_id] else 0.5)
-                opponents.append((pre[q.steam_id][0], pre[q.steam_id][1], score))
-            old_r, old_rd, old_vol = pre[p.steam_id]
-            # w(N) = min(1, (N-1)/4): a game to a shorter score target carries
-            # less information, so it counts as a fraction of a game (§5e —
-            # scales variance AND update). N=5 (today's default) gives w=1.0,
-            # byte-identical to the unweighted path; clamped at 1.0 above N=5
-            # so grinding long lobbies is never the rating-efficient path.
-            _wN = min(1.0, (_score_target - 1) / 4.0)
-            new_r, new_rd, new_vol = calculate_new_rating(
-                old_r, old_rd, old_vol, opponents,
-                tau=GLICKO2_TAU,
-                weights=([_wN] * len(opponents)) if _wN < 1.0 else None)
+            old_r = pre[p.steam_id][0]
+            new_r, new_rd, new_vol = _new_ffa[p.steam_id]
             rating_changes[p.steam_id] = round(new_r - old_r, 1)
             pid = id_by_steam[p.steam_id]
             await db.execute(text("""
@@ -37979,6 +40876,7 @@ _FFA_LB_SORTS = {
 
 @app.get("/api/v1/ffa/leaderboard", response_model=FfaLeaderboardResponse, tags=["FFA Matches"])
 async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "rating",
+                          include_inactive: bool = False,   # item d -- see get_leaderboard
                           db: AsyncSession = Depends(get_db)):
     """FFA leaderboard — RANKED. sort_by resolves through a dict allowlist
     (never interpolate the raw param — learning #188)."""
@@ -37989,15 +40887,19 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
                g.rating, g.rating_deviation, g.peak_rating,
                g.games_played, g.wins, g.top3, g.placement_sum,
                si.name AS title_name, si.preview_color AS title_color, si.sku AS title_sku,
-               gr.rating AS rating_1v1
+               gr.rating AS rating_1v1,
+               {_ONLINE_MARKER_SQL} AS is_online,
+               NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
           FROM glicko_ratings_ffa g
           JOIN players p ON p.id = g.player_id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
          WHERE g.games_played >= :ming AND p.deleted_at IS NULL
+           AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
          ORDER BY {order_sql}
          LIMIT :lim
-    """), {"ming": max(1, min_games), "lim": max(1, min(limit, 500))})).mappings().all()
+    """), {"ming": max(1, min_games), "lim": max(1, min(limit, 500)),
+           "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).mappings().all()
     _colors = await _rank_colors(db)
     # Unconditional: this is where the FFA podium title gets granted at all.
     # See bootstrap_mode_podium_titles — the render-time guard below cannot
@@ -38029,6 +40931,8 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
             level=lvl, title=t_name, title_color=t_color,
             ffa_gold_earned=(-1 if r["hide_gold"] else int(r["ffa_gold_earned"] or 0)),
             ffa_xp_earned=int(r["ffa_xp_earned"] or 0),
+            is_online=bool(r["is_online"]),
+            inactive=bool(r["inactive"]),
         ))
     # total_players is the POPULATION, not the page size. It used to be
     # len(entries), so it tracked `limit` — limit=1 reported "1 player total".
@@ -38038,8 +40942,9 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
     _ffa_total = (await db.execute(text(
         "SELECT COUNT(*) FROM glicko_ratings_ffa g"
         " JOIN players p ON p.id = g.player_id"
-        " WHERE g.games_played >= :ming AND p.deleted_at IS NULL"),
-        {"ming": max(1, min_games)})).scalar() or 0
+        " WHERE g.games_played >= :ming AND p.deleted_at IS NULL"
+        " AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))"),
+        {"ming": max(1, min_games), "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).scalar() or 0
     return FfaLeaderboardResponse(
         entries=entries, total_players=int(_ffa_total),
         last_updated=datetime.now(timezone.utc), is_ranked=True)
@@ -39848,6 +42753,42 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     await _assert_no_service_subject(
         db, affected_player_ids=[series["t1a_id"], series["t1b_id"],
                                  series["t2a_id"], series["t2b_id"]])
+    # Sept 6 (hotfix review r2 MEDIUM): a report the server has ALREADY applied
+    # -- the client's outbox re-sending after a lost 2xx, or the same report
+    # resurrected from a crashed queue file -- is answered as the duplicate it
+    # is, BEFORE the status gate below can quarantine it. The identity is
+    # uq_team_match's own: this room, these four members (every 2v2 game has
+    # its own room -- confirmed on production, 3 games = 3 rooms). On the
+    # active path the same duplicate used to fail the unique constraint; here
+    # it returns what the first delivery returned, so the client dequeues it.
+    # HMAC and score sanity have already passed above.
+    _dup = (await db.execute(text(
+        "SELECT tm.id, tm.winner_team FROM team_matches tm"
+        "  JOIN players a ON a.id = tm.t1a_id JOIN players b ON b.id = tm.t1b_id"
+        "  JOIN players c ON c.id = tm.t2a_id JOIN players d ON d.id = tm.t2b_id"
+        " WHERE tm.photon_room_id = :room AND tm.series_id = :sid"
+        "   AND a.steam_id = :t1a AND b.steam_id = :t1b"
+        "   AND c.steam_id = :t2a AND d.steam_id = :t2b"
+        " LIMIT 1"),
+        {"room": report.photon_room_id, "sid": series_uuid,
+         "t1a": report.t1a.steam_id, "t1b": report.t1b.steam_id,
+         "t2a": report.t2a.steam_id, "t2b": report.t2b.steam_id})).first()
+    if _dup is not None:
+        await db.rollback()
+        _dup_team = 1 if report.reported_by_steam_id in (
+            report.t1a.steam_id, report.t1b.steam_id) else 2
+        _dup_t1w = int(series["t1_series_wins"] or 0)
+        _dup_t2w = int(series["t2_series_wins"] or 0)
+        print(f"[TEAM-MATCH] duplicate report for series={series_uuid} "
+              f"room={report.photon_room_id} -> already recorded as {_dup.id}")
+        return TeamMatchResponse(
+            match_id=_dup.id,
+            series_id=series_uuid,
+            series_status=series["status"],
+            series_score=(f"{_dup_t1w}-{_dup_t2w}" if _dup_team == 1
+                          else f"{_dup_t2w}-{_dup_t1w}"),
+            winner_team=int(_dup.winner_team or report.winner_team),
+            message="Team match already recorded (duplicate report)")
     if series["status"] != "active":
         # July 30 lifecycle audit item 1: this rejection fires BEFORE the
         # team_matches insert, so without capture the whole GAME is destroyed —
@@ -41155,6 +44096,8 @@ async def team_leaderboard(
     limit: int = Query(200, ge=1, le=500),
     min_series: int = Query(1, ge=0),
     sort_by: str = Query("rating"),
+    # Item d -- see get_leaderboard.
+    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Top players by 2v2 Glicko rating. Includes title, avg teammate elo,
@@ -41236,7 +44179,9 @@ async def team_leaderboard(
             si.name AS title,
             si.preview_color AS title_color,
             si.sku AS title_sku,
-            g1.rating AS rating_1v1
+            g1.rating AS rating_1v1,
+            {_ONLINE_MARKER_SQL} AS is_online,
+            NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) AS inactive
         FROM glicko_ratings_2v2 g2
         JOIN players p ON p.id = g2.player_id
         LEFT JOIN series_stats ss ON ss.player_id = p.id
@@ -41245,10 +44190,12 @@ async def team_leaderboard(
         LEFT JOIN glicko_ratings g1 ON g1.player_id = p.id
         WHERE g2.completed_series >= :min_series
           AND p.deleted_at IS NULL
+          AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
         ORDER BY {order_clause}
         LIMIT :limit
     """)
-    rows = (await db.execute(q, {"min_series": min_series, "limit": limit})).mappings().all()
+    rows = (await db.execute(q, {"min_series": min_series, "limit": limit,
+                                 "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive})).mappings().all()
     _colors = await _rank_colors(db)
     # Podium maps only for the ladders some row wears a podium title from.
     # Unconditional: this is where the 2v2 podium title gets granted at all.
@@ -41284,10 +44231,18 @@ async def team_leaderboard(
             avg_teammate_elo=int(r["avg_teammate_elo"] or 0),
             team_gold_earned=int(r["team_gold_earned"] or 0),
             team_xp_earned=int(r["team_xp_earned"] or 0),
+            is_online=bool(r["is_online"]),
+            inactive=bool(r["inactive"]),
         ))
+    # Item d: the population as SHOWN -- same players join, same deleted_at
+    # and activity terms as the page query above (glicko_ratings_2v2.player_id
+    # is the players FK).
     cnt = (await db.execute(
-        text("SELECT COUNT(*) FROM glicko_ratings_2v2 WHERE completed_series >= :m"),
-        {"m": min_series},
+        text("SELECT COUNT(*) FROM glicko_ratings_2v2 g2"
+             " JOIN players p ON p.id = g2.player_id"
+             " WHERE g2.completed_series >= :m AND p.deleted_at IS NULL"
+             " AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))"),
+        {"m": min_series, "active_days": LEADERBOARD_ACTIVE_DAYS, "include_inactive": include_inactive},
     )).scalar() or 0
     return Team2v2LeaderboardResponse(entries=entries, total_players=cnt, last_updated=datetime.now(timezone.utc))
 
@@ -43489,3 +46444,2702 @@ async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
     """), {"v": bool(req.allow), "sid": req.steam_id})
     await db.commit()
     return {"status": "ok", "allow_spectators": bool(req.allow)}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Sept 6 batch — Group 4 item c: the session report envelope.
+#
+#   GET /api/v1/report?steam_id=<caller>&series=<uuid>
+#                                       | &match=<uuid>
+#                                       | &session=<uuid>
+#
+# ONE versioned envelope behind the client's interactive "Session" report.
+# It replaces nothing: the history endpoints keep their rows and the broadcast
+# renderer keeps its own feeds. The rules that shaped it (design v2 §c):
+#   - strict Steam session (fail-closed, checked before any other statement)
+#     and PARTICIPANT-ONLY, per GAME: the caller's player id is resolved first
+#     and every games statement requires it in the row (an FFA row counts only
+#     when the caller's ffa_match_players row is NOT absent — a frozen-roster
+#     ghost did not play that game, #227). The rows that come back must then
+#     share ONE roster — the set row's for a series, the newest game's
+#     otherwise — and a row with a different roster is dropped, so a
+#     client-chosen session uuid can only ever group games the caller played
+#     with the same people. A caller with no row, or not in the roster,
+#     receives the same 404 as a set that does not exist, so the endpoint
+#     confirms nothing about ids it will not serve;
+#   - exactly one selector, each a UUID: `series` resolves a ranked_series,
+#     team_series or ovt_series id; `match` one game in any of the four match
+#     tables; `session` the games sharing a reporter-minted
+#     matches.session_uuid (migration 298). Grouping is by that column ONLY —
+#     never by room, never by room+date;
+#   - NO room identifier of any kind is selected, let alone serialised (#463):
+#     every statement below names its columns and the serialiser builds each
+#     object field by field (test_session_report.py pins both);
+#   - every statistic is keyed by the player's steam id as a string and there
+#     is no viewer-relative field — the client decides what to colour;
+#   - stored sample series carry no timestamps of their own (fixed-cadence,
+#     decimated cumulative counters — #318), so sample i of n is stamped
+#     t = (i + 1) * duration_s / n: spread over the game it was recorded in.
+#     Point events keep their real seconds; the FFA half-point event list has
+#     none either and is index-stamped the same way. Per-game `available`
+#     lists the streams that exist so a missing panel renders "not recorded";
+#     per-game `totals` carries each player's stored counters (shots, hits,
+#     blocks, blocks_ok, keys, active_s, damage, deaths, kills) SPARSELY — an
+#     absent key is "not recorded", never zero (#257);
+#   - the rating snapshot is joined by IDENTITY (rating_history.series_id,
+#     migration 299, linked by the series-completion writer), never by a time
+#     window — two series completing seconds apart stay distinct;
+#   - set_summary is computed ONCE per set from the set's own row(s), never
+#     summed over match rows (C-7);
+#   - the envelope is BOUNDED (_REPORT_MAX_BYTES, asserted by
+#     test_session_report.py against worst-case fixtures): sample pairs,
+#     picks, deaths and names are budgeted per report, see the constants.
+# Read-only: no writes, no session-state mutation. Primary-only until the
+# edge's replica read list names it (deploy note, not code).
+# ══════════════════════════════════════════════════════════════════════════
+
+_REPORT_PALETTE = ("#99B3E6", "#E69988", "#8FD18F", "#E6C866",
+                   "#C48CFF", "#66D9E6", "#FFB347", "#F28CC8")
+# Games per envelope. A sitting can run longer; the NEWEST games are kept and
+# the envelope says so (`truncated` + `games_omitted`), because a 3-hour
+# x-axis is unreadable anyway and the byte budget below is sized for 24.
+_REPORT_MAX_GAMES = 24
+_REPORT_NOT_FOUND = "not_found"
+
+# ── the byte budget ───────────────────────────────────────────────────────
+# Bound: one envelope serialises to AT MOST _REPORT_MAX_BYTES (compact JSON,
+# the shape FastAPI emits). The caps below SIZE the envelope for the worst
+# shapes the test suite builds; the bound itself is ENFORCED on the way out by
+# _report_fit, which measures the assembled envelope exactly as it will be
+# emitted and drops the OLDEST games until it fits. (Review r2: the caps count
+# code points, not bytes, so 40 four-byte code points per card name put the
+# 1v1 worst case far past 512 KB - cap arithmetic can only estimate; the fit
+# step is what makes the number true.) A typical BO3 is ~40 KB; the sizing:
+#   sample pairs  <= _REPORT_SAMPLE_PAIRS_BUDGET (12,288 x <= 17 B = ~209 KB).
+#       Per stream per game the cap is
+#       clamp(budget // (games x players x 8), _REPORT_SAMPLES_MIN, _REPORT_SAMPLES_MAX):
+#       1 game 1v1 -> 128 samples; 24 games 1v1 -> 32; 24 games 2v2 -> 16
+#       (16 x 24 x 4 x 7 streams = 10,752 pairs); FFA is one game of <= 10
+#       players x 9 streams x 128 = 11,520 pairs. A stream longer than its
+#       cap is DECIMATED (evenly spaced indices, first and last kept — #318),
+#       never head- or tail-truncated.
+#   picks         <= _REPORT_CARD_BUDGET entries (~100 B each = ~100 KB) plus
+#       their end_build names (~44 KB): per player per game the newest
+#       clamp(budget // (games x players), _REPORT_CARDS_MIN, _REPORT_CARDS_MAX)
+#       picks are kept and the game says `picks_capped`; names are cut at
+#       _REPORT_CARD_NAME_MAX.
+#   deaths        <= _REPORT_DEATHS_MAX per game (24 x 48 x ~36 B = ~41 KB).
+#   end_stats     <= 300 chars each (_END_STATS_MAX_LEN), totals ~170 B each,
+#       display names cut at _REPORT_NAME_MAX.
+# Worst cases measured from the test worlds (compact JSON, 2026-09-06):
+# 24-game 1v1 387,940 B (~379 KB), 24-game 2v2 221,508 B (~216 KB), 10-player
+# FFA 215,425 B (~210 KB), an ordinary BO3 5,621 B — all under the 512 KB bound
+# with headroom. With maximal four-byte card names the same 1v1 world is
+# 611,716 B before the fit step and keeps 20 games (509,817 B) after it, while
+# one maximal FFA game is 268,705 B and still fits (the loop's precondition):
+# both are measured by test_the_bound_is_enforced_not_estimated (2026-09-06).
+# Change a constant here and the
+# test's literal bound is what tells you the truth.
+_REPORT_MAX_BYTES = 512 * 1024
+_REPORT_SAMPLE_PAIRS_BUDGET = 12288
+_REPORT_SAMPLES_MAX = 128
+_REPORT_SAMPLES_MIN = 16
+_REPORT_CARD_BUDGET = 1024
+_REPORT_CARDS_MAX = 32
+_REPORT_CARDS_MIN = 8
+_REPORT_CARD_NAME_MAX = 40
+_REPORT_DEATHS_MAX = 48
+_REPORT_NAME_MAX = 32
+# The divisor in the sample cap: the largest stream count a 2-to-4 player
+# mode carries (1v1: 8 incl. score). FFA carries 9 but is always ONE game,
+# which the budget arithmetic above absorbs (11,520 < 12,288).
+_REPORT_STREAMS_PER_PLAYER = 8
+
+# (stream name, slot column, pair index) — the pair index selects one side of
+# a "left:right" cumulative pair series; None means a plain integer series.
+_REPORT_SLOT_STREAMS = (
+    ("damage", "dmg", None),
+    ("shots", "hit", 0), ("hits", "hit", 1),
+    ("blocks", "block", 0), ("blocks_ok", "block", 1),
+    ("fps", "fps", None), ("ping", "ping", None),
+    ("kills", "killtl", None),          # FFA only (ffa_match_players.kill_timeline)
+)
+
+# The caller's player row, resolved BEFORE any games statement so every loader
+# can require it in the row (participant-only, per game).
+_REPORT_CALLER_SQL = """
+    SELECT p.id
+      FROM players p
+     WHERE p.steam_id = :sid
+     LIMIT 1
+"""
+# `total_rows` is the participant-filtered size of the whole set (the window
+# runs before LIMIT), so `games_omitted` is exact whatever the LIMIT hides.
+_REPORT_1V1_SQL = """
+    SELECT m.id, m.is_ranked, m.series_id, m.session_uuid,
+           m.started_at, m.ended_at, m.created_at,
+           COALESCE(m.duration_seconds, m.match_duration, 0) AS duration_s,
+           m.player1_id, m.player2_id,
+           m.p1_rounds_won, m.p2_rounds_won, m.p1_points_total, m.p2_points_total,
+           m.point_timeline, m.point_times,
+           m.p1_fps_timeline, m.p2_fps_timeline,
+           m.p1_ping_timeline, m.p2_ping_timeline,
+           m.p1_hit_timeline, m.p2_hit_timeline,
+           m.p1_block_timeline, m.p2_block_timeline,
+           m.p1_damage_timeline, m.p2_damage_timeline,
+           m.p1_end_stats, m.p2_end_stats,
+           m.p1_bullets_fired, m.p1_bullets_hit, m.p1_blocks_activated, m.p1_blocks_successful,
+           m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
+           m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
+           m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           BOOL_AND(m.is_ranked) OVER () AS all_ranked,
+           COUNT(*) OVER () AS total_rows
+      FROM matches m
+     WHERE {where} AND m.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)
+     ORDER BY COALESCE(m.started_at, m.ended_at, m.created_at) DESC, m.created_at DESC
+     LIMIT :lim
+"""
+_REPORT_1V1_WHERE = {
+    "series": "m.series_id = CAST(:key AS uuid)",
+    "session": "m.session_uuid = CAST(:key AS uuid)",
+    "match": "m.id = CAST(:key AS uuid)",
+    # Sept 8 item 5: every 1v1 game between the anchor game's two players whose
+    # end time lies inside the CALLER's sitting that contains the anchor
+    # (_SITTING_CTES, 3 h gap rule) - both boxes' games, so the one report per
+    # (sitting, opponent) is reachable from either box. The anchor must be a
+    # valid game of the caller (else the set is empty and the route 404s).
+    "sitting": """m.id IN (
+        WITH """ + _sitting_ctes(":cpid") + """,
+        anchor AS (
+            SELECT a.player1_id, a.player2_id, a.ended_at FROM matches a
+             WHERE a.id = CAST(:key AS uuid) AND a.invalidated_at IS NULL
+               AND CAST(:cpid AS uuid) IN (a.player1_id, a.player2_id)
+        ),
+        span AS (
+            SELECT MIN(s.ended_at) AS lo, MAX(s.ended_at) AS hi
+              FROM sit s
+             WHERE s.sn = (SELECT s1.sn FROM sit s1 JOIN anchor an ON an.ended_at = s1.ended_at)
+        )
+        SELECT g.id FROM matches g, anchor an, span sp
+         WHERE g.ended_at >= sp.lo AND g.ended_at <= sp.hi
+           AND LEAST(g.player1_id, g.player2_id) = LEAST(an.player1_id, an.player2_id)
+           AND GREATEST(g.player1_id, g.player2_id) = GREATEST(an.player1_id, an.player2_id)
+           AND g.invalidated_at IS NULL
+    )""",
+}
+_REPORT_RS_SQL = """
+    SELECT rs.id, rs.player1_id, rs.player2_id, rs.status, rs.completed_at,
+           rs.invalidated_at, rs.p1_rating_change, rs.p2_rating_change
+      FROM ranked_series rs
+     WHERE rs.id = CAST(:key AS uuid)
+"""
+_REPORT_TS_SQL = """
+    SELECT ts.id, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id, ts.status,
+           ts.completed_at, ts.invalidated_at,
+           ts.t1a_rating_change, ts.t1b_rating_change,
+           ts.t2a_rating_change, ts.t2b_rating_change
+      FROM team_series ts
+     WHERE ts.id = CAST(:key AS uuid)
+"""
+_REPORT_TEAM_SQL = """
+    SELECT tm.id, tm.series_id, tm.started_at, tm.ended_at,
+           COALESCE(tm.duration_seconds, 0) AS duration_s,
+           tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id,
+           tm.t1_rounds_won, tm.t2_rounds_won, tm.t1_points_total, tm.t2_points_total,
+           tm.t1a_end_stats, tm.t1b_end_stats, tm.t2a_end_stats, tm.t2b_end_stats,
+           COUNT(*) OVER () AS total_rows
+      FROM team_matches tm
+     WHERE {where} AND tm.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)
+     ORDER BY COALESCE(tm.started_at, tm.ended_at) DESC
+     LIMIT :lim
+"""
+_REPORT_TEAM_WHERE = {
+    "series": "tm.series_id = CAST(:key AS uuid)",
+    "match": "tm.id = CAST(:key AS uuid)",
+}
+_REPORT_TEAM_TELE_SQL = """
+    SELECT tt.match_id, tt.player_id, tt.fps_timeline, tt.ping_timeline,
+           tt.hit_timeline, tt.block_timeline, tt.damage_dealt_timeline,
+           tt.bullets_fired, tt.bullets_hit, tt.blocks_activated, tt.blocks_successful,
+           tt.keys_pressed, tt.active_seconds
+      FROM team_match_telemetry tt
+     WHERE tt.match_id = ANY(CAST(:mids AS uuid[]))
+"""
+_REPORT_OS_SQL = """
+    SELECT os.id, os.solo_id, os.duo_a_id, os.duo_b_id, os.status,
+           os.completed_at, os.invalidated_at,
+           os.solo_rating_change, os.duo_a_rating_change, os.duo_b_rating_change,
+           os.solo_gold_earned, os.duo_a_gold_earned, os.duo_b_gold_earned
+      FROM ovt_series os
+     WHERE os.id = CAST(:key AS uuid)
+"""
+_REPORT_OVT_SQL = """
+    SELECT om.id, om.series_id, om.started_at, om.ended_at,
+           COALESCE(om.duration_seconds, 0) AS duration_s,
+           om.solo_id, om.duo_a_id, om.duo_b_id,
+           om.solo_rounds_won, om.duo_rounds_won, om.solo_points_total, om.duo_points_total,
+           om.solo_damage_timeline, om.duo_a_damage_timeline, om.duo_b_damage_timeline,
+           om.solo_end_stats, om.duo_a_end_stats, om.duo_b_end_stats,
+           COUNT(*) OVER () AS total_rows
+      FROM ovt_matches om
+     WHERE {where} AND om.invalidated_at IS NULL
+       AND CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)
+     ORDER BY COALESCE(om.started_at, om.ended_at) DESC
+     LIMIT :lim
+"""
+_REPORT_OVT_WHERE = {
+    "series": "om.series_id = CAST(:key AS uuid)",
+    "match": "om.id = CAST(:key AS uuid)",
+}
+# The FFA match row counts for the caller only when the caller PLAYED it: an
+# `absent` roster row is a frozen-roster ghost (left in an earlier game of the
+# sitting, #227) — the same predicate the profile card uses.
+_REPORT_FFA_SQL = """
+    SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
+           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s
+      FROM ffa_matches fm
+     WHERE fm.id = CAST(:key AS uuid) AND fm.invalidated_at IS NULL
+       AND EXISTS (SELECT 1 FROM ffa_match_players fpx
+                    WHERE fpx.match_id = fm.id
+                      AND fpx.player_id = CAST(:cpid AS uuid)
+                      AND NOT fpx.absent)
+"""
+_REPORT_FFA_PLAYERS_SQL = """
+    SELECT fp.player_id, fp.slot, fp.placement, fp.rounds_won, fp.points_total,
+           fp.rating_before, fp.rating_after, fp.rating_change, fp.gold_gained,
+           fp.fps_timeline, fp.ping_timeline, fp.hit_timeline, fp.block_timeline,
+           fp.damage_dealt_timeline, fp.kill_timeline, fp.damage_dealt,
+           fp.end_stats, fp.color_hex,
+           fp.bullets_fired, fp.bullets_hit, fp.blocks_activated, fp.blocks_successful,
+           fp.keys_pressed, fp.active_seconds, fp.kills
+      FROM ffa_match_players fp
+     WHERE fp.match_id = CAST(:key AS uuid) AND NOT fp.absent
+     ORDER BY fp.placement ASC, fp.slot ASC
+"""
+_REPORT_ROSTER_SQL = """
+    SELECT p.id, p.steam_id, p.display_name
+      FROM players p
+     WHERE p.id = ANY(CAST(:pids AS uuid[]))
+"""
+_REPORT_GOLD_SQL = """
+    SELECT gt.player_id, SUM(gt.amount) AS amount
+      FROM gold_transactions gt
+     WHERE gt.reason = ANY(CAST(:reasons AS text[]))
+       AND gt.reference_id = ANY(CAST(:refs AS text[]))
+     GROUP BY gt.player_id
+"""
+# Identity join (migration 299): the snapshot the series-completion writer
+# linked to THIS series. No time window — a snapshot written for a series
+# completing seconds later carries that series' id, not this one's.
+_REPORT_RATING_SQL = """
+    SELECT rh.player_id, rh.rating, rh.period_end
+      FROM rating_history rh
+     WHERE rh.series_id = CAST(:key AS uuid)
+       AND rh.player_id = ANY(CAST(:pids AS uuid[]))
+     ORDER BY rh.period_end ASC
+"""
+# Card tables share the (match_id, player_id, card_name, pick_order) core;
+# the 1v2 table has no round_number and only the FFA table records `rolled`
+# (its rolling 5-card cap pushes older picks OUT of the build, migration 156).
+# Table names come from THIS tuple only: (table, has round_number, has rolled).
+_REPORT_CARD_TABLES = {
+    "1v1": ("match_cards", True, False),
+    "team": ("team_match_cards", True, False),
+    "ovt": ("ovt_match_cards", False, False),
+    "ffa": ("ffa_match_cards", True, True),
+}
+
+
+def _report_parse_uuid(raw):
+    """Canonical lowercase UUID string, or None for anything that is not one."""
+    try:
+        return str(uuid.UUID(str(raw).strip()))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _report_iso(dt):
+    try:
+        return dt.isoformat() if dt else None
+    except Exception:
+        return None
+
+
+def _report_sample_cap(games, players):
+    """Samples allowed per stream per game so the whole envelope stays inside
+    _REPORT_SAMPLE_PAIRS_BUDGET (see the budget comment above)."""
+    denom = max(1, int(games)) * max(1, int(players)) * _REPORT_STREAMS_PER_PLAYER
+    return max(_REPORT_SAMPLES_MIN, min(_REPORT_SAMPLES_MAX, _REPORT_SAMPLE_PAIRS_BUDGET // denom))
+
+
+def _report_card_cap(games, players):
+    """Picks kept per player per game (the NEWEST ones) so `picks` stays inside
+    _REPORT_CARD_BUDGET entries per envelope."""
+    denom = max(1, int(games)) * max(1, int(players))
+    return max(_REPORT_CARDS_MIN, min(_REPORT_CARDS_MAX, _REPORT_CARD_BUDGET // denom))
+
+
+def _report_decimate(pairs, cap):
+    """At most `cap` of the [t, v] pairs, evenly spaced, FIRST and LAST always
+    kept (#318: decimate interior samples; never cut the head or the tail of a
+    cumulative series — the tail carries the totals)."""
+    n = len(pairs)
+    if cap < 2 or n <= cap:
+        return pairs
+    last = n - 1
+    idx = sorted({round(k * last / (cap - 1)) for k in range(cap)})
+    return [pairs[i] for i in idx]
+
+
+def _report_samples(csv, duration_s, part=None, cap=_REPORT_SAMPLES_MAX):
+    """Delimited cumulative sample series -> [[t, v], ...], or None when the
+    column is empty or the game has no duration to spread the samples over.
+    Sample i of n is stamped (i + 1) * duration_s / n (#318: after decimation
+    only the SPAN is known, not the stride) BEFORE the envelope's own
+    decimation to `cap` samples, so every kept sample keeps its true position.
+    `part` picks one side of a "left:right" pair series; malformed tokens are
+    skipped, not zero-filled."""
+    if not csv or not isinstance(csv, str):
+        return None
+    toks = [t for t in csv.split(",") if t != ""]
+    n = len(toks)
+    try:
+        dur = float(duration_s or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if n == 0 or dur <= 0:
+        return None
+    out = []
+    for i, tok in enumerate(toks):
+        piece = tok
+        if part is not None:
+            bits = tok.split(":")
+            if len(bits) <= part:
+                continue
+            piece = bits[part]
+        try:
+            v = int(float(piece))
+        except (TypeError, ValueError):
+            continue
+        out.append([round((i + 1) * dur / n, 1), v])
+    return _report_decimate(out, cap) or None
+
+
+def _report_points(point_times, point_timeline, sid_a, sid_b, cap=_REPORT_SAMPLES_MAX):
+    """1v1 point events ("12,47" + "1:0,1:1") -> the two sides' cumulative
+    score streams plus the deaths they imply: in 1v1 a point ends when the
+    other fighter dies, so the side that did NOT score died at that second.
+    Score streams are decimated to `cap` pairs; deaths keep the first
+    _REPORT_DEATHS_MAX (a game with more points than that is not a game the
+    marks could show anyway)."""
+    if not point_times or not point_timeline:
+        return None, None, []
+    times = str(point_times).split(",")
+    totals = str(point_timeline).split(",")
+    n = min(len(times), len(totals))
+    score_a, score_b, deaths = [], [], []
+    prev_a = prev_b = 0
+    for i in range(n):
+        try:
+            t = round(float(times[i]), 1)
+            a_s, b_s = totals[i].split(":")[:2]
+            a, b = int(a_s), int(b_s)
+        except (TypeError, ValueError):
+            continue
+        score_a.append([t, a])
+        score_b.append([t, b])
+        if a > prev_a and len(deaths) < _REPORT_DEATHS_MAX:
+            deaths.append({"t": t, "id": sid_b})
+        if b > prev_b and len(deaths) < _REPORT_DEATHS_MAX:
+            deaths.append({"t": t, "id": sid_a})
+        prev_a, prev_b = a, b
+    if not score_a:
+        return None, None, []
+    return _report_decimate(score_a, cap), _report_decimate(score_b, cap), deaths
+
+
+def _report_ffa_scores(timeline, slots, duration_s, cap=_REPORT_SAMPLES_MAX):
+    """FFA score progression: the match row's half-point event list
+    ("slot[R][G]" per token — R = the half point converted a full point, which
+    clears everyone's live halves; migration 156, same grammar as the FFA
+    recent panel's hover graph) -> {slot: [[t, score], ...]} with score in
+    full points plus 0.5 per live half point. The list carries no times, so
+    event i of n is stamped (i + 1) * duration_s / n like the sample series."""
+    if not timeline or not isinstance(timeline, str) or not slots:
+        return {}
+    toks = [t.strip() for t in timeline.split(",") if t.strip()]
+    try:
+        dur = float(duration_s or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if not toks or dur <= 0:
+        return {}
+    known = set()
+    for s in slots:
+        try:
+            known.add(int(s))
+        except (TypeError, ValueError):
+            continue
+    full = {s: 0 for s in known}
+    halves = {s: 0 for s in known}
+    out = {s: [] for s in known}
+    n = len(toks)
+    for i, tok in enumerate(toks):
+        digits = ""
+        for ch in tok:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            continue
+        slot = int(digits)
+        if slot not in known:
+            continue
+        halves[slot] += 1
+        if "R" in tok[len(digits):]:
+            full[slot] += 1
+            for s in halves:
+                halves[s] = 0
+        t = round((i + 1) * dur / n, 1)
+        for s in known:
+            out[s].append([t, full[s] + 0.5 * halves[s]])
+    return {s: _report_decimate(v, cap) for s, v in out.items() if v}
+
+
+def _report_slot(pid, rounds, points, fps=None, ping=None, hit=None, block=None,
+                 dmg=None, end_stats=None, totals=None, killtl=None):
+    return {"pid": str(pid) if pid is not None else None, "rounds": rounds, "points": points,
+            "fps": fps, "ping": ping, "hit": hit, "block": block, "dmg": dmg, "killtl": killtl,
+            "end_stats": end_stats, "totals": totals or {}}
+
+
+def _report_totals(shots=None, hits=None, blocks=None, blocks_ok=None, keys=None,
+                   active_s=None, damage=None, deaths=None, kills=None):
+    """Per-game per-player counters as stored (page-3 totals strip). SPARSE:
+    a column that is NULL is simply absent, never zero (#257) — the client
+    renders an absent key as "not recorded". `blocks` doubles as the client's
+    era check for block pairs (v2 pairs end at the stored activations)."""
+    out = {}
+    for key, val in (("shots", shots), ("hits", hits), ("blocks", blocks),
+                     ("blocks_ok", blocks_ok), ("keys", keys), ("damage", damage),
+                     ("deaths", deaths), ("kills", kills)):
+        if val is None:
+            continue
+        try:
+            out[key] = int(val)
+        except (TypeError, ValueError):
+            continue
+    if active_s is not None:
+        try:
+            out["active_s"] = round(float(active_s), 1)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_MAX,
+                      card_cap=_REPORT_CARDS_MAX):
+    """One game of the envelope, every field keyed by steam id string. Only
+    the listed keys are ever copied out of `game` — nothing is passed through.
+    `sample_cap` / `card_cap` are the per-report budgets (_report_sample_cap,
+    _report_card_cap) that make the envelope's size bound true."""
+    duration_s = int(game.get("duration_s") or 0)
+    slots = game["slots"]
+    scores, points, timelines, end_build, end_stats, totals = {}, {}, {}, {}, {}, {}
+    available = set()
+    for s in slots:
+        sid = sid_of.get(s["pid"])
+        if sid is None:
+            continue
+        scores[sid] = int(s.get("rounds") or 0)
+        points[sid] = int(s.get("points") or 0)
+        if s.get("totals"):
+            totals[sid] = dict(s["totals"])
+        tl = {}
+        for key, col, part in _REPORT_SLOT_STREAMS:
+            series = _report_samples(s.get(col), duration_s, part, sample_cap)
+            if series:
+                tl[key] = series
+                available.add(key)
+        timelines[sid] = tl
+        end_build[sid] = []
+        es = _clean_end_stats(s.get("end_stats"))
+        if es:
+            end_stats[sid] = es
+    deaths = []
+    if game.get("point_times") and len(slots) == 2:
+        sid_a, sid_b = sid_of.get(slots[0]["pid"]), sid_of.get(slots[1]["pid"])
+        if sid_a and sid_b:
+            sa, sb, deaths = _report_points(game.get("point_times"), game.get("point_timeline"),
+                                            sid_a, sid_b, sample_cap)
+            if sa:
+                timelines.setdefault(sid_a, {})["score"] = sa
+                timelines.setdefault(sid_b, {})["score"] = sb
+                available.add("score")
+    if game.get("ffa_timeline"):
+        # FFA: the match row's half-point event list, one score stream per
+        # PLAYING slot (absent rows never reach `slots`).
+        by_slot = {}
+        for s in slots:
+            if s.get("slot") is not None and sid_of.get(s["pid"]) is not None:
+                by_slot[int(s["slot"])] = sid_of[s["pid"]]
+        for slot, series in _report_ffa_scores(game["ffa_timeline"], list(by_slot.keys()),
+                                               duration_s, sample_cap).items():
+            if series:
+                timelines.setdefault(by_slot[slot], {})["score"] = series
+                available.add("score")
+    # Picks in pick order, the NEWEST `card_cap` per player (the oldest are
+    # dropped and the game says `picks_capped`). A card the FFA rolling cap
+    # pushed out is a pick that happened (kept, flagged `rolled`) but is NOT
+    # part of the end build.
+    raw = []
+    for pid, card, _pick_order, _round_number, rolled in cards_by_match.get(str(game["id"]), []):
+        sid = sid_of.get(str(pid))
+        if sid is None or not card:
+            continue
+        raw.append((sid, str(card)[:_REPORT_CARD_NAME_MAX], bool(rolled)))
+    counts = {}
+    for sid, _card, _rolled in raw:
+        counts[sid] = counts.get(sid, 0) + 1
+    skip = {sid: max(0, n - card_cap) for sid, n in counts.items()}
+    picks_capped = any(v > 0 for v in skip.values())
+    picks, seen = [], {}
+    for sid, card, rolled in raw:
+        seen[sid] = seen.get(sid, 0) + 1
+        if seen[sid] <= skip[sid]:
+            continue
+        # No pick timestamp is recorded in any mode: t is null and the client
+        # draws the tick on the game divider, in pick order.
+        entry = {"t": None, "id": sid, "card": card}
+        if rolled:
+            entry["rolled"] = True
+        else:
+            end_build.setdefault(sid, []).append(card)
+        picks.append(entry)
+    out = {
+        "match_id": str(game["id"]),
+        "started_at": _report_iso(game.get("started_at")),
+        "duration_s": duration_s,
+        "scores": scores,
+        "points": points,
+        "timelines": timelines,
+        "available": sorted(available),
+        "picks": picks,
+        "deaths": deaths,
+        "end_build": end_build,
+        "end_stats": end_stats,
+        "totals": totals,
+    }
+    if picks_capped:
+        out["picks_capped"] = True
+    return out
+
+
+def _report_roster_key(slots):
+    """The roster of one game as a frozenset of player-id strings — the unit of
+    the consistency rule (every game in an envelope carries the same one)."""
+    return frozenset(str(s["pid"]) for s in slots if s.get("pid") is not None)
+
+
+async def _report_rows(db, sql, params):
+    return (await db.execute(text(sql), params)).mappings().all()
+
+
+def _report_take(rows):
+    """Newest-first rows (LIMIT max+1) -> (oldest-first rows, total_rows): the
+    participant-filtered size of the whole set from the statement's window
+    count, or the row count when a statement carries none."""
+    total = len(rows)
+    if rows and rows[0].get("total_rows") is not None:
+        try:
+            total = max(total, int(rows[0]["total_rows"]))
+        except (TypeError, ValueError):
+            pass
+    return list(reversed(rows[:_REPORT_MAX_GAMES])), total
+
+
+def _report_wire_bytes(payload):
+    """The size FastAPI's JSONResponse puts on the wire: compact separators,
+    UTF-8, non-ASCII unescaped (test_session_report._wire_bytes is its twin)."""
+    return len(_json.dumps(payload, separators=(",", ":"), ensure_ascii=False,
+                           default=str).encode("utf-8"))
+
+
+def _report_fit(envelope):
+    """ENFORCES _REPORT_MAX_BYTES on the assembled envelope: while it is over
+    the bound and more than one game remains, the OLDEST game (games are
+    oldest-first) is dropped and counted in `games_omitted`. Bounded: at most
+    _REPORT_MAX_GAMES - 1 passes, each one dumps of a shrinking payload. The
+    per-game caps keep any single game under the bound (the test measures a
+    maximal ten-player FFA game), so the loop always ends under it - the cap
+    arithmetic in the constants above is sizing; this is the guarantee."""
+    games = envelope["games"]
+    omitted = int(envelope["games_omitted"])
+    while len(games) > 1 and _report_wire_bytes(envelope) > _REPORT_MAX_BYTES:
+        del games[0]
+        omitted += 1
+    envelope["games_omitted"] = omitted
+    envelope["truncated"] = omitted > 0
+    return envelope
+
+
+async def _report_load_1v1(db, selector, key, cpid):
+    rows = await _report_rows(db, _REPORT_1V1_SQL.format(where=_REPORT_1V1_WHERE[selector]),
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
+    # Sept 8 r1b M2: the ranked/casual label is a claim about the WHOLE set, and
+    # the statement keeps only the newest _REPORT_MAX_GAMES rows - so the label
+    # comes from the set-wide window (BOOL_AND OVER ()), never from the retained
+    # rows. The row-scan fallback covers a statement without the window column.
+    all_ranked = all(bool(r["is_ranked"]) for r in rows)
+    if rows and rows[0].get("all_ranked") is not None:
+        all_ranked = bool(rows[0]["all_ranked"])
+    games = []
+    for r in rows:
+        games.append({
+            "id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+            "is_ranked": bool(r["is_ranked"]), "series_id": r["series_id"],
+            "point_times": r["point_times"], "point_timeline": r["point_timeline"],
+            "slots": [
+                _report_slot(r["player1_id"], r["p1_rounds_won"], r["p1_points_total"],
+                             r["p1_fps_timeline"], r["p1_ping_timeline"], r["p1_hit_timeline"],
+                             r["p1_block_timeline"], r["p1_damage_timeline"], r["p1_end_stats"],
+                             _report_totals(r["p1_bullets_fired"], r["p1_bullets_hit"],
+                                            r["p1_blocks_activated"], r["p1_blocks_successful"],
+                                            r["p1_keys_pressed"], r["p1_active_seconds"],
+                                            r["p1_damage_dealt"], r["p1_deaths"])),
+                _report_slot(r["player2_id"], r["p2_rounds_won"], r["p2_points_total"],
+                             r["p2_fps_timeline"], r["p2_ping_timeline"], r["p2_hit_timeline"],
+                             r["p2_block_timeline"], r["p2_damage_timeline"], r["p2_end_stats"],
+                             _report_totals(r["p2_bullets_fired"], r["p2_bullets_hit"],
+                                            r["p2_blocks_activated"], r["p2_blocks_successful"],
+                                            r["p2_keys_pressed"], r["p2_active_seconds"],
+                                            r["p2_damage_dealt"], r["p2_deaths"])),
+            ],
+        })
+    return games, total, all_ranked
+
+
+async def _report_load_team(db, selector, key, cpid):
+    rows = await _report_rows(db, _REPORT_TEAM_SQL.format(where=_REPORT_TEAM_WHERE[selector]),
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
+    games = []
+    if rows:
+        tele = await _report_rows(db, _REPORT_TEAM_TELE_SQL,
+                                  {"mids": [str(r["id"]) for r in rows]})
+        tele_by = {(str(t["match_id"]), str(t["player_id"])): t for t in tele}
+    for r in rows:
+        slots = []
+        for slot, team, rounds, points in (
+                ("t1a", 1, r["t1_rounds_won"], r["t1_points_total"]),
+                ("t1b", 1, r["t1_rounds_won"], r["t1_points_total"]),
+                ("t2a", 2, r["t2_rounds_won"], r["t2_points_total"]),
+                ("t2b", 2, r["t2_rounds_won"], r["t2_points_total"])):
+            pid = r[f"{slot}_id"]
+            if pid is None:
+                continue
+            t = tele_by.get((str(r["id"]), str(pid))) or {}
+            s = _report_slot(pid, rounds, points, t.get("fps_timeline"), t.get("ping_timeline"),
+                             t.get("hit_timeline"), t.get("block_timeline"),
+                             t.get("damage_dealt_timeline"), r[f"{slot}_end_stats"],
+                             _report_totals(t.get("bullets_fired"), t.get("bullets_hit"),
+                                            t.get("blocks_activated"), t.get("blocks_successful"),
+                                            t.get("keys_pressed"), t.get("active_seconds")))
+            s["team"] = team
+            slots.append(s)
+        games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+                      "series_id": r["series_id"], "slots": slots})
+    return games, total
+
+
+async def _report_load_ovt(db, selector, key, cpid):
+    rows = await _report_rows(db, _REPORT_OVT_SQL.format(where=_REPORT_OVT_WHERE[selector]),
+                              {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
+    rows, total = _report_take(rows)
+    games = []
+    for r in rows:
+        slots = []
+        for slot, team, rounds, points in (
+                ("solo", 1, r["solo_rounds_won"], r["solo_points_total"]),
+                ("duo_a", 2, r["duo_rounds_won"], r["duo_points_total"]),
+                ("duo_b", 2, r["duo_rounds_won"], r["duo_points_total"])):
+            pid = r[f"{slot}_id"]
+            if pid is None:
+                continue
+            s = _report_slot(pid, rounds, points, dmg=r[f"{slot}_damage_timeline"],
+                             end_stats=r[f"{slot}_end_stats"])
+            s["team"] = team
+            slots.append(s)
+        games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+                      "series_id": r["series_id"], "slots": slots})
+    return games, total
+
+
+async def _report_load_ffa(db, key, cpid):
+    """One FFA game — the match row (only when the caller PLAYED it) and its
+    PLAYING roster rows: `absent` rows are frozen-roster ghosts and are not
+    participants, not slots, not telemetry (#227)."""
+    rows = await _report_rows(db, _REPORT_FFA_SQL, {"key": key, "cpid": cpid})
+    if not rows:
+        return [], []
+    r = rows[0]
+    fps = await _report_rows(db, _REPORT_FFA_PLAYERS_SQL, {"key": key})
+    slots = []
+    for fp in fps:
+        s = _report_slot(fp["player_id"], fp["rounds_won"], fp["points_total"],
+                         fp["fps_timeline"], fp["ping_timeline"], fp["hit_timeline"],
+                         fp["block_timeline"], fp["damage_dealt_timeline"], fp["end_stats"],
+                         _report_totals(fp["bullets_fired"], fp["bullets_hit"],
+                                        fp["blocks_activated"], fp["blocks_successful"],
+                                        fp["keys_pressed"], fp["active_seconds"],
+                                        damage=fp["damage_dealt"], kills=fp["kills"]),
+                         killtl=fp["kill_timeline"])
+        s["slot"] = fp["slot"]
+        s["placement"] = fp["placement"]
+        s["rating_before"] = fp["rating_before"]
+        s["rating_after"] = fp["rating_after"]
+        s["rating_change"] = fp["rating_change"]
+        s["gold_gained"] = fp["gold_gained"]
+        s["color_hex"] = fp["color_hex"]
+        slots.append(s)
+    game = {"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
+            "ffa_timeline": r["timeline"], "slots": slots}
+    return [game], slots
+
+
+def _report_consistent(games, anchor):
+    """Oldest-first games -> those whose roster equals `anchor` (a frozenset of
+    player ids), plus the count dropped. The envelope shows ONE roster."""
+    kept = [g for g in games if _report_roster_key(g["slots"]) == anchor]
+    return kept, len(games) - len(kept)
+
+
+async def _report_load_cards(db, mode, mids):
+    """{match_id str: [(player_id, card_name, pick_order, round_number, rolled), ...]}
+    in pick order (round first where the table records one). `rolled` is
+    False for every table but FFA's, which is the only one that records it."""
+    if not mids:
+        return {}
+    table, with_round, with_rolled = _REPORT_CARD_TABLES[mode]
+    round_col = "c.round_number" if with_round else "NULL AS round_number"
+    rolled_col = "c.rolled" if with_rolled else "FALSE AS rolled"
+    order = "c.round_number NULLS FIRST, c.pick_order" if with_round else "c.pick_order"
+    rows = await _report_rows(db, f"""
+        SELECT c.match_id, c.player_id, c.card_name, c.pick_order, {round_col}, {rolled_col}
+          FROM {table} c
+         WHERE c.match_id = ANY(CAST(:mids AS uuid[]))
+         ORDER BY c.match_id, {order}""", {"mids": [str(m) for m in mids]})
+    out = {}
+    for r in rows:
+        out.setdefault(str(r["match_id"]), []).append(
+            (r["player_id"], r["card_name"], r["pick_order"], r["round_number"],
+             bool(r.get("rolled") or False)))
+    return out
+
+
+async def _report_roster(db, pids_in_order, team_of=None, color_of=None):
+    """Ordered, de-duplicated roster: [{pid, id (steam id), name, color, team}].
+    Colours come from the roster index (FFA rows may carry their own)."""
+    uniq = []
+    for p in pids_in_order:
+        if p is None:
+            continue
+        p = str(p)
+        if p not in uniq:
+            uniq.append(p)
+    if not uniq:
+        return []
+    rows = await _report_rows(db, _REPORT_ROSTER_SQL, {"pids": uniq})
+    by_id = {str(r["id"]): r for r in rows}
+    roster = []
+    for i, p in enumerate(uniq):
+        r = by_id.get(p)
+        if r is None:
+            continue
+        color = (color_of or {}).get(p) or _REPORT_PALETTE[i % len(_REPORT_PALETTE)]
+        roster.append({"pid": p, "id": str(r["steam_id"]),
+                       "name": (r["display_name"] or "")[:_REPORT_NAME_MAX],
+                       "color": color, "team": (team_of or {}).get(p)})
+    return roster
+
+
+async def _report_gold(db, reasons, refs):
+    """{player_id str: gold} for the named reasons against the named references
+    — one statement per set, whatever the number of games."""
+    if not refs:
+        return {}
+    rows = await _report_rows(db, _REPORT_GOLD_SQL,
+                              {"reasons": list(reasons), "refs": [str(x) for x in refs]})
+    return {str(r["player_id"]): int(r["amount"] or 0) for r in rows}
+
+
+async def _report_rating_after(db, pids, series_id):
+    """{player_id str: rating} from the rating_history snapshots the series
+    completion writer LINKED to this series (rating_history.series_id,
+    migration 299) — an identity, never a time window. Empty when the set has
+    no linked snapshot (pre-299 rows the backfill could not attribute), which
+    the client renders as the delta alone. Savepointed (#235): on a box whose
+    schema predates 299 this one panel reads "not recorded" instead of the
+    whole report failing."""
+    if series_id is None or not pids:
+        return {}
+    try:
+        async with db.begin_nested():
+            rows = await _report_rows(db, _REPORT_RATING_SQL,
+                                      {"pids": [str(p) for p in pids], "key": str(series_id)})
+    except Exception as ex:
+        print(f"[REPORT] rating snapshot lookup skipped: {ex}")
+        return {}
+    out = {}
+    for r in rows:
+        k = str(r["player_id"])
+        if k not in out and r["rating"] is not None:
+            out[k] = float(r["rating"])
+    return out
+
+
+def _report_rating_entry(after, delta):
+    """before/after/delta from an authoritative delta and the post-series
+    snapshot: before = after - delta, so the three always agree to 0.1."""
+    d = round(float(delta), 1)
+    if after is None:
+        return {"before": None, "after": None, "delta": d}
+    a = round(float(after), 1)
+    return {"before": round(a - d, 1), "after": a, "delta": d}
+
+
+async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
+    """rating {sid: {before, after, delta}} and gold {sid: n}, computed ONCE
+    per set from the set's own row(s) (C-7). Rating entries exist only where
+    the set is rated and completed; gold entries only where a ledger row
+    exists — an absent key means "not recorded", never zero."""
+    rating, gold = {}, {}
+    sid_of = {r["pid"]: r["id"] for r in roster}
+    if kind == "ranked" and selector == "series" and set_row is not None:
+        deltas = {str(set_row["player1_id"]): set_row["p1_rating_change"],
+                  str(set_row["player2_id"]): set_row["p2_rating_change"]}
+        after = {}
+        if set_row["status"] == "completed":
+            after = await _report_rating_after(db, list(deltas.keys()), set_row["id"])
+        for pid, d in deltas.items():
+            sid = sid_of.get(pid)
+            if sid is None or d is None:
+                continue
+            rating[sid] = _report_rating_entry(after.get(pid), d)
+        g = await _report_gold(db, ("series_win", "series_loss"), [key])
+        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+    elif kind == "team" and selector == "series" and set_row is not None:
+        for slot in ("t1a", "t1b", "t2a", "t2b"):
+            pid = set_row[f"{slot}_id"]
+            d = set_row[f"{slot}_rating_change"]
+            sid = sid_of.get(str(pid)) if pid is not None else None
+            if sid is None or d is None:
+                continue
+            # 2v2 ratings keep no history snapshots: the delta is the only
+            # authoritative number, before/after stay null ("not recorded").
+            rating[sid] = _report_rating_entry(None, d)
+        g = await _report_gold(db, ("team_series_win", "team_series_loss"), [key])
+        gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+    elif kind == "ovt" and selector == "series" and set_row is not None:
+        for slot in ("solo", "duo_a", "duo_b"):
+            pid = set_row[f"{slot}_id"]
+            sid = sid_of.get(str(pid)) if pid is not None else None
+            if sid is None:
+                continue
+            d = set_row[f"{slot}_rating_change"]
+            if d is not None:
+                rating[sid] = _report_rating_entry(None, d)
+            gold[sid] = int(set_row[f"{slot}_gold_earned"] or 0)
+    elif kind == "ffa":
+        for s in (games[0]["slots"] if games else []):
+            sid = sid_of.get(s["pid"])
+            if sid is None:
+                continue
+            if s.get("rating_change") is not None:
+                d = round(float(s["rating_change"]), 1)
+                rb = s.get("rating_before")
+                ra = s.get("rating_after")
+                rating[sid] = {"before": round(float(rb), 1) if rb is not None else None,
+                               "after": round(float(ra), 1) if ra is not None else None,
+                               "delta": d}
+            if s.get("gold_gained") is not None:
+                gold[sid] = int(s["gold_gained"])
+    else:
+        # One game or a casual sitting: no rating is at stake; gold is the
+        # per-game XP/level ledger, fetched ONCE for every game id in the set.
+        reasons = {"ovt": ("ovt_xp", "level_reward"),
+                   "team": ("team_xp", "level_reward")}.get(kind, ("xp", "level_reward"))
+        if kind in ("ranked", "casual", "ovt", "team"):
+            g = await _report_gold(db, reasons, [str(gm["id"]) for gm in games])
+            gold = {sid_of[p]: v for p, v in g.items() if p in sid_of}
+    return {"rating": rating, "gold": gold}
+
+
+@app.get("/api/v1/report", tags=["Players"])
+async def get_set_report(request: Request, steam_id: str = "",
+                         series: str | None = None, match: str | None = None,
+                         session: str | None = None,
+                         sitting: str | None = None,
+                         db: AsyncSession = Depends(get_db)):
+    """The session report envelope (v1) for one set — see the block comment
+    above. Errors: 401 "session_required" (fail-closed session check, first
+    statement); 400 "bad_request" for zero or several selectors or a selector
+    that is not a UUID; 404 "not_found" for an unknown, invalidated or empty
+    set AND for a caller who has no player row or is not in the roster of
+    the games (one detail for all of them).
+
+    Participation is decided PER GAME in SQL (the caller's player id must be
+    in the row), then the games are reduced to ONE roster: the set row's for
+    a series, the newest game's otherwise. `games_omitted` counts every game
+    of the set the envelope does not carry — dropped for a different roster
+    or beyond _REPORT_MAX_GAMES — and `truncated` is its boolean.
+
+    `sitting=<match uuid>` (Sept 8 item 5): the 1v1 games between that game's
+    two players whose end time falls inside the CALLER's sitting containing it
+    (_SITTING_CTES: the viewer's finished games in any mode, split at gaps over
+    SITTING_GAP_HOURS). Kind and summary follow the `session` rules: ranked only
+    when every game is, per-game gold, no rating."""
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    chosen = [(name, val) for name, val in
+              (("series", series), ("match", match), ("session", session),
+               ("sitting", sitting)) if val]
+    if len(chosen) != 1:
+        raise HTTPException(status_code=400, detail="bad_request")
+    selector, raw = chosen[0]
+    key = _report_parse_uuid(raw)
+    if key is None:
+        raise HTTPException(status_code=400, detail="bad_request")
+
+    caller = await _report_rows(db, _REPORT_CALLER_SQL, {"sid": str(steam_id)})
+    if not caller or caller[0]["id"] is None:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    cpid = str(caller[0]["id"])
+
+    kind, mode, games, total = None, None, [], 0
+    set_row, roster_pids, team_of, color_of = None, [], {}, {}
+
+    if selector == "series":
+        rs = await _report_rows(db, _REPORT_RS_SQL, {"key": key})
+        if rs:
+            set_row = rs[0]
+            if set_row["invalidated_at"] is not None:
+                raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+            kind, mode = "ranked", "1v1"
+            games, total, _ = await _report_load_1v1(db, "series", key, cpid)
+            roster_pids = [set_row["player1_id"], set_row["player2_id"]]
+        else:
+            ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
+            if ts:
+                set_row = ts[0]
+                if set_row["invalidated_at"] is not None:
+                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+                kind, mode = "team", "team"
+                games, total = await _report_load_team(db, "series", key, cpid)
+                roster_pids = [set_row["t1a_id"], set_row["t1b_id"], set_row["t2a_id"], set_row["t2b_id"]]
+                team_of = {str(set_row["t1a_id"]): 1, str(set_row["t1b_id"]): 1,
+                           str(set_row["t2a_id"]): 2, str(set_row["t2b_id"]): 2}
+            else:
+                os_ = await _report_rows(db, _REPORT_OS_SQL, {"key": key})
+                if not os_:
+                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+                set_row = os_[0]
+                if set_row["invalidated_at"] is not None:
+                    raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+                kind, mode = "ovt", "ovt"
+                games, total = await _report_load_ovt(db, "series", key, cpid)
+                roster_pids = [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]]
+                team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
+                           str(set_row["duo_b_id"]): 2}
+    elif selector in ("session", "sitting"):
+        kind, mode = "casual", "1v1"
+        games, total, all_ranked = await _report_load_1v1(db, selector, key, cpid)
+        if games and all_ranked:
+            kind = "ranked"
+    else:  # match
+        games, total, _ = await _report_load_1v1(db, "match", key, cpid)
+        if games:
+            mode = "1v1"
+            kind = "ranked" if games[0]["is_ranked"] else "casual"
+        else:
+            games, total = await _report_load_team(db, "match", key, cpid)
+            if games:
+                kind, mode = "team", "team"
+                team_of = {s["pid"]: s["team"] for s in games[0]["slots"]}
+            else:
+                games, total = await _report_load_ovt(db, "match", key, cpid)
+                if games:
+                    kind, mode = "ovt", "ovt"
+                    team_of = {s["pid"]: s["team"] for s in games[0]["slots"]}
+                else:
+                    games, ffa_slots = await _report_load_ffa(db, key, cpid)
+                    if games:
+                        kind, mode = "ffa", "ffa"
+                        total = 1
+                        color_of = {s["pid"]: s["color_hex"] for s in ffa_slots if s.get("color_hex")}
+    if not games:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+
+    # ONE roster per envelope: the set row's when there is one, else the
+    # newest game the caller played. Games with any other roster are dropped
+    # and counted in `games_omitted` — a session uuid groups only the caller's
+    # own games with the same people.
+    if set_row is not None:
+        anchor = frozenset(str(p) for p in roster_pids if p is not None)
+    else:
+        anchor = _report_roster_key(games[-1]["slots"])
+        roster_pids = [s["pid"] for s in games[-1]["slots"]]
+    if cpid not in anchor:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    games, _dropped = _report_consistent(games, anchor)
+    if not games:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    games_omitted = max(0, int(total) - len(games))
+
+    roster = await _report_roster(db, roster_pids, team_of, color_of)
+    # PARTICIPANT-ONLY, and indistinguishable from "no such set" on purpose.
+    if steam_id not in {r["id"] for r in roster}:
+        raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
+    sid_of = {r["pid"]: r["id"] for r in roster}
+
+    sample_cap = _report_sample_cap(len(games), len(roster))
+    card_cap = _report_card_cap(len(games), len(roster))
+    cards = await _report_load_cards(db, mode, [g["id"] for g in games])
+    games_json = [_report_game_json(g, sid_of, cards, sample_cap, card_cap) for g in games]
+    set_summary = await _report_set_summary(db, kind, selector, key, set_row, games, roster)
+    return _report_fit({
+        "v": 1,
+        "kind": kind,
+        "players": [{"id": r["id"], "name": r["name"], "color": r["color"], "team": r["team"]}
+                    for r in roster],
+        "games": games_json,
+        "set_summary": set_summary,
+        "truncated": games_omitted > 0,
+        "games_omitted": games_omitted,
+    })
+
+# ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
+
+# Routes: in-game mail (Sept 6 batch, Group 4 item b — server half;
+# migration 297). Design: ai-collab/sept6-triage/group4-design-v2.md §b
+# (B-1 .. B-14, B-L1 .. B-L3); the schema's shape decisions are recorded on
+# the migration. Player routes resolve their caller from X-Session-Token
+# ALONE — the API contract carries no steam_id — and then run the SAME
+# fail-closed gate the h2h route uses on the id the token names
+# (_strict_steam_session_ok: one read, one classifier, #432); the 401 literal
+# "session_required" is what ApiClient.HandleSessionReject matches to
+# re-mint. Refusals carry stable snake_case `detail` codes for the client to
+# translate; rate refusals are the h2h route's {"error", "retry_after"} shape
+# with a Retry-After header. Primary-only: none of these routes is on the
+# edge's replica read list. Integrity bar: no route here reads or writes a
+# match row, a rating, gold, or another player's game state.
+# ══════════════════════════════════════════════════════════════════════════
+
+MAIL_SUBJECT_MAX = 120
+MAIL_BODY_MAX = 2000
+MAIL_REASON_MAX = 500
+MAIL_RUN_MAX = 40                  # > 40 identical consecutive characters rejected (B-L1)
+MAIL_RECIPIENT_CAP = 8             # players, counted AFTER canonicalisation (B-L2)
+MAIL_ADMIN_RECIPIENT_CAP = 1000    # admin_users: the cap is lifted, the list stays bounded
+MAIL_INPUT_LIST_MAX = MAIL_ADMIN_RECIPIENT_CAP * 2   # raw to/cc entries per list: a payload bound (review r1),
+                                                     # never below what any grant can use; the policy cap is
+                                                     # counted AFTER canonicalisation against the caller's grant
+MAIL_RATE_PER_MINUTE = 10
+MAIL_RATE_PER_DAY = 100
+MAIL_PAGE_DEFAULT = 25
+MAIL_PAGE_MAX = 50
+MAIL_ADDRESSEES_MAX = 64           # addressees rendered per message (lists stay bounded)
+MAIL_BLOCKS_MAX = 500
+MAIL_BROADCAST_SEEN_DAYS = 180     # system_broadcast targets mod_seen_at within this window (B-12)
+MAIL_RETENTION_DAYS = 180
+MAIL_CENSOR_HITS_KEEP_DAYS = 2
+MAIL_SPAM_SAME_BODY = 5            # >= 5 same-body messages in a day (B-14)
+MAIL_SPAM_BULK_MESSAGES = 3        # >= 3 messages each reaching > 20 distinct recipients in an hour
+MAIL_SPAM_BULK_RECIPIENTS = 20
+MAIL_SPAM_CENSOR_HITS = 3          # >= 3 censor refusals in a day
+MAIL_FROM_VALUES = ("everyone", "played", "nobody")
+# #scr-admin — the same hardcoded channel id the automute and ban-rate posts use.
+MAIL_ADMIN_CHANNEL_ID = "1495392567687250061"
+# First line of a moderation case's outbox post: "[MODCASE:<uuid>]". The bot
+# strips it, attaches the Mute/Ban/Dismiss buttons and stamps notified_at; a
+# post without it is an ordinary announcement. The marker exists for no other
+# purpose (#306).
+MAIL_CASE_MARKER = "[MODCASE:"
+_MODCASE_ACTIONS = ("mute", "ban", "dismiss")
+_MAIL_RETENTION_STATE = {"next": 0.0}   # janitor cadence, monotonic seconds
+
+# The ONE fan-out statement (B-11): every addressee's envelope in one
+# INSERT ... SELECT, with `delivery` decided per recipient in SQL — a block
+# (blocker = recipient, blocked = sender), mail_from = 'nobody', or
+# mail_from = 'played' without a shared RECORDED PARTICIPANT SET (B-13:
+# matches in either slot, invalidated included — they still played;
+# team_matches in any of the four slots; an ffa_matches row both appear in;
+# ovt_matches in any of the three slots; ranked_series alone never
+# qualifies) writes 'suppressed'. Suppression is silent (B-7): the sender's
+# response is identical and every read path filters delivery = 'delivered'.
+_MAIL_FANOUT_SQL = (
+    "INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery)"
+    " SELECT CAST(:mid AS uuid), p.id, a.kind,"
+    "        CASE"
+    "          WHEN EXISTS (SELECT 1 FROM mail_blocks b"
+    "                        WHERE b.blocker_id = p.id AND b.blocked_id = CAST(:sid AS uuid))"
+    "            THEN 'suppressed'"
+    "          WHEN p.mail_from = 'nobody' THEN 'suppressed'"
+    "          WHEN p.mail_from = 'played' AND NOT ("
+    "                 EXISTS (SELECT 1 FROM matches mm"
+    "                          WHERE (mm.player1_id = p.id AND mm.player2_id = CAST(:sid AS uuid))"
+    "                             OR (mm.player2_id = p.id AND mm.player1_id = CAST(:sid AS uuid)))"
+    "              OR EXISTS (SELECT 1 FROM team_matches tm"
+    "                          WHERE CAST(:sid AS uuid) IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)"
+    "                            AND p.id IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id))"
+    "              OR EXISTS (SELECT 1 FROM ffa_match_players fa"
+    "                          JOIN ffa_match_players fb ON fb.match_id = fa.match_id"
+    "                          WHERE fa.player_id = CAST(:sid AS uuid) AND fb.player_id = p.id)"
+    "              OR EXISTS (SELECT 1 FROM ovt_matches om"
+    "                          WHERE CAST(:sid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)"
+    "                            AND p.id IN (om.solo_id, om.duo_a_id, om.duo_b_id))"
+    "               ) THEN 'suppressed'"
+    "          ELSE 'delivered'"
+    "        END"
+    "   FROM unnest(CAST(:rids AS uuid[]), CAST(:kinds AS text[])) AS a(id, kind)"
+    "   JOIN players p ON p.id = a.id AND p.deleted_at IS NULL"
+    "    FOR KEY SHARE OF p"
+)
+# FOR KEY SHARE OF p (review r1, the delete-account lattice): the envelope
+# insert holds a key-share lock on every recipient's players row until the
+# send commits. delete_player_data rewrites steam_id (a unique key), which
+# takes FOR UPDATE and therefore waits behind this send — and it re-sweeps
+# mail_recipients AFTER that rewrite, so an envelope written to an account
+# mid-deletion is caught there, while a send arriving after the rewrite
+# blocks, re-reads the row and finds deleted_at set. No per-recipient
+# advisory lock is needed for this (a broadcast has hundreds of recipients).
+
+# The system_broadcast fan-out (B-12): set-wise, preferences and blocks
+# bypassed, accounts that ran the mod inside the window only — never every
+# historical row. The same key-share lock as the direct fan-out.
+_MAIL_BROADCAST_FANOUT_SQL = (
+    "INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery)"
+    " SELECT CAST(:mid AS uuid), p.id, 'to', 'delivered'"
+    "   FROM players p"
+    "  WHERE p.deleted_at IS NULL"
+    "    AND p.mod_seen_at > NOW() - make_interval(days => CAST(:days AS integer))"
+    "    AND p.id <> CAST(:sid AS uuid)"
+    "    FOR KEY SHARE OF p"
+    " RETURNING 1"
+)
+
+# The inbox revision (B-6, review r1; migration 300): one row per recipient
+# in mail_inbox_rev whose `rev` is a DB delta (#326) bumped once per delivered
+# envelope, right after either fan-out, in the same transaction. Because the
+# bump is a row-locked increment, concurrent sends to one recipient serialise
+# on that row and the counter advances in COMMIT order — a send that started
+# first but commits last still moves it, which a newest-created_at or
+# insert-time-sequence cursor cannot do (the stalled-send race). Recipients
+# are visited in sorted order so two overlapping sends take their row locks
+# in the same order (no deadlock between them). /mail/status reads this
+# counter; the client toasts on a CHANGE of it.
+#
+# Migration 300 (review r2) also installs a statement-level AFTER INSERT
+# trigger on mail_recipients that runs this same sorted, set-wise delta for
+# EVERY writer — so envelopes inserted by the previous api build during the
+# deploy window (migration applied, api not yet rebuilt) still move the
+# counter. Under this build a send therefore advances it twice (trigger, then
+# this statement). That is deliberate: the value is a change signal, compared
+# by the client for inequality and never read as a count, and keeping this
+# statement keeps the bump an executed, test-pinned part of the send.
+_MAIL_REV_BUMP_SQL = (
+    "INSERT INTO mail_inbox_rev (recipient_id, rev)"
+    " SELECT r.recipient_id, 1"
+    "   FROM mail_recipients r"
+    "  WHERE r.message_id = CAST(:mid AS uuid) AND r.delivery = 'delivered'"
+    "  ORDER BY r.recipient_id"
+    " ON CONFLICT (recipient_id) DO UPDATE"
+    "   SET rev = mail_inbox_rev.rev + 1, updated_at = NOW()"
+)
+
+# Addressees of a page of messages, bounded per message by a window rank so
+# an admin's 1000-recipient message cannot blow up a Sent page; 'to' sorts
+# before 'cc'. Delivery is NOT selected: the sender never learns it (B-7).
+_MAIL_ADDRESSEES_SQL = (
+    "WITH a AS ("
+    "  SELECT r.message_id, r.kind, p.steam_id, p.display_name,"
+    "         ROW_NUMBER() OVER (PARTITION BY r.message_id"
+    "                            ORDER BY r.kind DESC, p.display_name, p.steam_id) AS rn"
+    "    FROM mail_recipients r JOIN players p ON p.id = r.recipient_id"
+    "   WHERE r.message_id = ANY(CAST(:mids AS uuid[])))"
+    " SELECT message_id, kind, steam_id, display_name FROM a"
+    "  WHERE rn <= CAST(:cap AS integer) ORDER BY message_id, rn"
+)
+
+
+class _MailSendReq(BaseModel):
+    to: list[str] = Field(default_factory=list)
+    cc: list[str] = Field(default_factory=list)
+    subject: str = ""
+    body: str = ""
+    idempotency_key: str = ""
+
+
+class _MailReplyReq(BaseModel):
+    body: str = ""
+    all: bool = False
+    idempotency_key: str = ""
+
+
+class _MailReportReq(BaseModel):
+    reason: str = ""
+
+
+class _MailBlockReq(BaseModel):
+    steam_id: str = ""
+
+
+class _MailSettingsReq(BaseModel):
+    mail_from: str = "everyone"
+
+
+class _AdminModCaseActReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    # Contract alias: the signer IS the actor; when given it must match.
+    actor_steam_id: str | None = None
+    action: str = ""
+    hours: int | None = None
+    reason: str = ""
+
+
+class _AdminMailBroadcastReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    actor_steam_id: str | None = None
+    subject: str = ""
+    body: str = ""
+    idempotency_key: str = ""
+
+
+class _AdminMailBulkGrantReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    steam_id: str = ""
+    max_recipients: int = 0
+    days: int = 0
+
+
+def _mail_iso(dt) -> str | None:
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _mail_parse_uuid(value, field: str) -> UUID:
+    try:
+        return UUID(str(value or "").strip())
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{field}_invalid")
+
+
+def _mail_normalise(s: str) -> str:
+    """B-L1 first step: CRLF -> LF, and NOTHING else. A lone CR is left in
+    place so the control scan refuses it (review r1: turning CR into LF or
+    trimming a boundary control would accept text the rules reject)."""
+    return (s or "").replace("\r\n", "\n")
+
+
+def _mail_control_problem(s: str, *, subject: bool) -> str | None:
+    """The prohibited-character half of B-L1, run on the UNTRIMMED text: the
+    body rejects C0/C1 controls except LF; the subject additionally rejects
+    LF, U+2028 and U+2029 (U+0085 is C1). `<` and `>` are allowed \u2014 escaping
+    is the client's job at render, so `2 < 3` passes."""
+    for ch in s:
+        o = ord(ch)
+        if ch == "\n":
+            if subject:
+                return "newline"
+        elif o < 0x20 or 0x7F <= o <= 0x9F:
+            return "control_character"
+        elif subject and ch in ("\u2028", "\u2029"):
+            return "newline"
+    return None
+
+
+def _mail_text_problem(s: str, *, subject: bool) -> str | None:
+    """B-L1 plain-text rules on a CRLF-normalised, UNTRIMMED string. Returns
+    None when the text is acceptable, else a short problem code. Order
+    matters (review r1): prohibited characters are judged BEFORE any trim, so
+    a subject ending in LF, U+0085 or U+2028 is refused rather than silently
+    shortened; emptiness, length and runs are then judged on the trimmed text
+    that would be stored."""
+    problem = _mail_control_problem(s, subject=subject)
+    if problem is not None:
+        return problem
+    t = s.strip()
+    if not t:
+        return "empty"
+    if len(t) > (MAIL_SUBJECT_MAX if subject else MAIL_BODY_MAX):
+        return "too_long"
+    run_ch, run = None, 0
+    for ch in t:
+        if ch == run_ch:
+            run += 1
+            if run > MAIL_RUN_MAX:
+                return "repeated_characters"
+        else:
+            run_ch, run = ch, 1
+    return None
+
+
+def _mail_text_or_raise(raw: str, *, field: str, subject: bool) -> str:
+    """Normalise CRLF, judge the rules on the untrimmed text, THEN trim.
+    Returns the text to store; raises 400 `<field>_<problem>` otherwise."""
+    s = _mail_normalise(raw)
+    problem = _mail_text_problem(s, subject=subject)
+    if problem is not None:
+        raise HTTPException(status_code=400, detail=f"{field}_{problem}")
+    return s.strip()
+
+
+def _mail_norm_body(body: str) -> str:
+    """The same-body key behind B-14's first trigger: case-folded (so
+    STRASSE and Stra\u00dfe agree) and EVERY run of Unicode whitespace collapsed
+    to one space (str.split with no separator is the whole Unicode class,
+    NBSP and NEL included), trimmed. Computed on the Python side ONLY \u2014
+    _mail_spam_check reads the sender's day of bodies and compares here, so
+    there is one normaliser and nothing in SQL to drift from it."""
+    return " ".join((body or "").casefold().split())
+
+
+def _mail_discord_safe(s: str, limit: int) -> str:
+    """Outbox content is sent by the bot with users-allowed mentions (#261):
+    neutralise mention syntax and code fences, collapse whitespace, bound."""
+    s = " ".join((s or "").split())[:limit]
+    s = s.replace("<", "(").replace(">", ")").replace("`", "'")
+    s = _re.sub(r"@everyone", "everyone", s, flags=_re.IGNORECASE)
+    s = _re.sub(r"@here", "here", s, flags=_re.IGNORECASE)
+    return s
+
+
+def _mail_cursor_encode(created_at, mid) -> str:
+    raw = f"{_mail_iso(created_at)}|{mid}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _mail_cursor_decode(cursor: str):
+    """Opaque keyset cursor -> (created_at, id); (None, None) for the first
+    page. Garbage is a 400, never a full-table page."""
+    if not cursor:
+        return None, None
+    try:
+        pad = "=" * (-len(cursor) % 4)
+        raw = base64.urlsafe_b64decode((cursor + pad).encode()).decode()
+        ts, mid = raw.split("|", 1)
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt, UUID(mid)
+    except Exception:
+        raise HTTPException(status_code=400, detail="cursor_invalid")
+
+
+def _mail_page(rows, limit: int):
+    """rows were fetched with LIMIT limit + 1: the extra row only says there
+    is a next page. Returns (page, next_cursor)."""
+    rows = list(rows)
+    if len(rows) > limit:
+        page = rows[:limit]
+        last = page[-1]
+        return page, _mail_cursor_encode(last["created_at"], last["id"])
+    return rows, None
+
+
+def _mail_canonical_steam_ids(sender_steam_id: str, to, cc) -> list:
+    """B-L2 on raw steam ids: normalise, drop self, deduplicate, To beats Cc
+    (every To entry is placed before any Cc entry is considered, whatever
+    the input order). Returns [(steam_id, kind)] in To-then-Cc order; the cap
+    is counted on THIS list, never on the raw input."""
+    to = list(to or [])
+    cc = list(cc or [])
+    # A payload bound, NOT the recipient policy (review r1): it is twice the
+    # largest cap any grant can carry, and it answers with its own code so a
+    # legitimately large admin/grant send is never told too_many_recipients
+    # before canonicalisation has even run.
+    if len(to) > MAIL_INPUT_LIST_MAX or len(cc) > MAIL_INPUT_LIST_MAX:
+        raise HTTPException(status_code=400, detail="recipient_list_too_large")
+    out: dict = {}
+    for kind, ids in (("to", to), ("cc", cc)):
+        for raw in ids:
+            sid = str(raw or "").strip()
+            if len(sid) != 17 or not sid.isdigit():
+                raise HTTPException(status_code=400, detail="recipient_invalid")
+            if sid == sender_steam_id or sid in out:
+                continue
+            out[sid] = kind
+    return list(out.items())
+
+
+def _mail_canonical_ids(self_id, pairs) -> list:
+    """B-L2 on resolved player ids [(id, kind)] — the reply path's input."""
+    out: dict = {}
+    for want in ("to", "cc"):
+        for pid, kind in pairs:
+            if kind != want or pid == self_id or pid in out:
+                continue
+            out[pid] = kind
+    return list(out.items())
+
+
+async def _mail_caller(request: Request, db: AsyncSession) -> dict:
+    """Resolve the caller from X-Session-Token alone, then run the h2h
+    route's fail-closed gate on the id the token names. Every failure is the
+    401 the client re-mints on; a deleted account resolves to no live row."""
+    token = None
+    try:
+        token = request.headers.get("X-Session-Token") if request is not None else None
+    except Exception:
+        token = None
+    if not token:
+        raise HTTPException(status_code=401, detail="session_required")
+    row = (await db.execute(text(
+        "SELECT steam_id FROM steam_sessions WHERE token_hash = :th"
+    ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
+    if row is None or not await _strict_steam_session_ok(request, row["steam_id"], db):
+        raise HTTPException(status_code=401, detail="session_required")
+    player = (await db.execute(text(
+        "SELECT id, steam_id, display_name, mod_seen_at, mail_from"
+        "  FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+    ), {"sid": row["steam_id"]})).mappings().first()
+    if player is None:
+        raise HTTPException(status_code=401, detail="session_required")
+    return dict(player)
+
+
+async def _mail_lock_sender(db: AsyncSession, sender_id) -> None:
+    """B-11: the send transaction is serialised per sender — idempotency
+    lookup, rate counts and the insert all happen under this lock (#207:
+    lock a VALUE that exists before any row does). The bind is typed as the
+    uuid it is (review r1 HIGH): `CAST(:sid AS uuid)` selects asyncpg's uuid
+    codec for the uuid.UUID value; the earlier `CAST(:sid AS text)` typed the
+    parameter as text and the driver refused the UUID object on every send
+    (#275 class). The outer cast to text feeds hashtext."""
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(hashtext('mail:' || CAST(CAST(:sid AS uuid) AS text)))"
+    ), {"sid": sender_id})
+
+
+# The identity re-read under the lattice lock, by the row's own id — the
+# stable handle. A deletion that committed while this transaction waited for
+# the lock has REWRITTEN steam_id, so a re-read by steam_id would simply miss
+# the row; by id it is found, tombstone and all, and that is what gets
+# written. FOR NO KEY UPDATE holds the row for the rest of the transaction:
+# delete-account's steam_id rewrite takes FOR UPDATE and waits behind it,
+# while the FK inserts that reference the row (envelopes, bans, blocks) take
+# KEY SHARE and are not blocked by it.
+_MAIL_IDENTITY_REREAD_SQL = (
+    "SELECT id, steam_id, deleted_at FROM players WHERE id = :pid FOR NO KEY UPDATE"
+)
+
+
+async def _mail_lock_identities(db: AsyncSession, *steam_ids, missing: dict | None = None,
+                                optional=(), handles: dict | None = None) -> dict:
+    """Join delete-account's identity lattice (review r1 HIGH, r2 HIGH; #282)
+    for EVERY identity this transaction is about to write: take the SAME
+    transaction-scoped advisory lock delete_player_data takes first
+    (`pg_advisory_xact_lock(hashtext(steam_id))`, also _apply_ban_core's and
+    the i18n grant routes') on each, in canonical sorted order (#197), then
+    re-read each row UNDER the lock by its id and hold it FOR NO KEY UPDATE.
+    The id comes from `handles` when the caller already holds it (its own
+    session row, a case's subject) and from an unlocked pre-read by steam_id
+    otherwise. A deletion that already held the lock committed its scrub
+    before this returns and the re-read finds the tombstone; one that arrives
+    later blocks behind this transaction and sweeps what it wrote.
+
+    Returns {steam id as given: row or None}, row = {id, steam_id (CURRENT),
+    deleted_at}. Callers write identities from THIS (_mail_identity_to_write),
+    never from their inputs. An identity that is not live — no row, or
+    deleted_at set — is refused with `missing`'s (status, detail) for it,
+    default the caller's own 401 (what _mail_caller answers for a deleted
+    account), unless it is in `optional`: an admin acts on admin_users
+    membership and needs no players row (locked when present, skipped when
+    absent), and a dismiss or a revoke completes against a subject deleted
+    meanwhile, writing the tombstone it re-read. `optional` tolerates an id
+    that never had a row: one with no row that the deletion ledger knows is
+    refused (403 account_deleted unless `missing` names it), so a route never
+    writes the raw id a scrub removed (review r3)."""
+    ids = sorted({str(s) for s in steam_ids if s})
+    handles = dict(handles or {})
+    for sid in ids:
+        if handles.get(sid) is None:
+            handles[sid] = (await db.execute(text(
+                "SELECT id FROM players WHERE steam_id = :sid"
+            ), {"sid": sid})).scalar()
+    for sid in ids:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": sid})
+    tolerated = {str(s) for s in optional}
+    out: dict = {}
+    for sid in ids:
+        row = None
+        if handles.get(sid) is not None:
+            found = (await db.execute(text(_MAIL_IDENTITY_REREAD_SQL),
+                                      {"pid": handles[sid]})).mappings().first()
+            row = dict(found) if found is not None else None
+        out[sid] = row
+        live = row is not None and row.get("deleted_at") is None
+        if not live and sid not in tolerated:
+            status, detail = (missing or {}).get(sid) or (401, "session_required")
+            raise HTTPException(status_code=status, detail=detail)
+        # review r3 MEDIUM 2: `optional` tolerates an identity that never had
+        # a row, not one whose row was scrubbed. A scrub rewrites steam_id to
+        # the tombstone, so a lookup by the raw id finds nothing and the
+        # fallback in _mail_identity_to_write would write the raw id the scrub
+        # removed. The deletion ledger (deleted_steam_ids, written by
+        # delete_player_data in the same transaction as the scrub, under this
+        # advisory lock) is read here, AFTER the lock: a deletion that
+        # committed before the lookup is refused, one that committed while
+        # this transaction waited was re-read above as the tombstone.
+        if row is None and sid in tolerated and await _is_steam_id_purged(db, sid):
+            status, detail = (missing or {}).get(sid) or (403, "account_deleted")
+            raise HTTPException(status_code=status, detail=detail)
+    return out
+
+
+def _mail_identity_to_write(rows: dict, steam_id: str) -> str:
+    """The identity a transaction WRITES for `steam_id` after the lattice
+    re-read: the row's current steam_id (the tombstone, if a deletion
+    committed first), or the id itself when there is no row at all (an admin
+    acting on admin_users membership; the lattice has already refused an
+    absent id the deletion ledger knows, review r3)."""
+    row = (rows or {}).get(str(steam_id))
+    return str((row or {}).get("steam_id") or steam_id)
+
+
+async def _mail_lock_admin(db: AsyncSession, admin_steam_id: str, *others: str,
+                           missing: dict | None = None, optional=(), handles: dict | None = None) -> dict:
+    """The admin routes' entry into the lattice: lock the admin and every
+    other identity written, re-read them, and re-prove the admin grant under
+    the lock (_require_admin ran before the lock; the i18n grant route
+    re-proves the same way). The admin's authority is admin_users membership
+    (review r2): the admin's players row is locked when it exists and skipped
+    when it does not; a route that needs that row for itself (a broadcast's
+    sender) checks the returned row. Returns the re-read rows."""
+    rows = await _mail_lock_identities(db, admin_steam_id, *others, missing=missing,
+                                       optional={str(admin_steam_id), *(str(s) for s in optional)},
+                                       handles=handles)
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(status_code=403, detail="Not an admin")
+    return rows
+
+
+async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, action: str,
+                                   target_steam_id: str | None = None, details: dict | None = None) -> None:
+    """The STRICT twin of _log_admin_action for mail's privileged actions
+    (review r1): the audit row is part of the action's own transaction — no
+    savepoint, nothing swallowed — so a broadcast, grant, revoke or case
+    resolution whose admin_actions insert fails does not commit. The soft
+    helper's other callers are unchanged; they chose #187's trade-off."""
+    await db.execute(text(
+        "INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, details)"
+        " VALUES (:a, :act, :t, CAST(:d AS jsonb))"
+    ), {"a": admin_steam_id[:20], "act": action[:32],
+        "t": (target_steam_id or None), "d": _json.dumps(details or {})})
+
+
+async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID):
+    """A repeated idempotency_key returns the ORIGINAL message id with the
+    same 200 body (B-11). Checked first thing under the lock, before every
+    gate, so a retry of an accepted send is never told 'muted' or
+    'rate_limited' for a message that already went out."""
+    prior = (await db.execute(text(
+        "SELECT id, kind, recipient_count FROM mail_messages"
+        " WHERE sender_id = :sid AND idempotency_key = :key"
+    ), {"sid": sender_id, "key": key})).mappings().first()
+    if prior is None:
+        return None
+    out = {"id": str(prior["id"]), "accepted": True}
+    if prior["kind"] == "system_broadcast":
+        # A broadcast's answer carries its recipient count: the count
+        # PERSISTED on the row in the sending transaction (migration 300,
+        # review r2), replayed verbatim — a recipient who deleted their
+        # account between the commit and the retry cannot change it. A row
+        # without one (written before the column existed) falls back to
+        # counting the envelopes it still has.
+        n = prior.get("recipient_count")
+        if n is None:
+            n = (await db.execute(text(
+                "SELECT COUNT(*) FROM mail_recipients"
+                " WHERE message_id = CAST(:mid AS uuid) AND delivery = 'delivered'"
+            ), {"mid": prior["id"]})).scalar() or 0
+        out["recipients"] = int(n)
+    return out
+
+
+async def _mail_sender_gates(db: AsyncSession, sender: dict) -> None:
+    """Who may send at all: the account must have run the mod (mod_seen_at),
+    an active player_bans row refuses, and a GLOBAL chat mute refuses (B-5:
+    `channel IS NULL` rows only — a channel-scoped mute silences one chat
+    room and does not touch mail; compare _is_chat_muted, which matches
+    either)."""
+    if sender.get("mod_seen_at") is None:
+        raise HTTPException(status_code=403, detail="mod_required")
+    if await _is_banned(db, sender["steam_id"]) is not None:
+        raise HTTPException(status_code=403, detail="banned")
+    muted = (await db.execute(text(
+        "SELECT 1 FROM chat_mutes"
+        " WHERE steam_id = :sid AND revoked_at IS NULL"
+        "   AND (expires_at IS NULL OR expires_at > NOW())"
+        "   AND channel IS NULL"
+        " LIMIT 1"
+    ), {"sid": sender["steam_id"]})).scalar()
+    if muted is not None:
+        raise HTTPException(status_code=403, detail="muted")
+
+
+async def _mail_recipient_cap(db: AsyncSession, sender: dict) -> int:
+    """8 for players; admin_users lift it to MAIL_ADMIN_RECIPIENT_CAP; a live
+    mail_bulk_grants row lifts it to the grant's max_recipients (B-14)."""
+    if await _is_admin(db, sender["steam_id"]):
+        return MAIL_ADMIN_RECIPIENT_CAP
+    grant = (await db.execute(text(
+        "SELECT max_recipients FROM mail_bulk_grants"
+        " WHERE steam_id = :sid AND expires_at > NOW()"
+    ), {"sid": sender["steam_id"]})).scalar()
+    if grant is not None and int(grant) > MAIL_RECIPIENT_CAP:
+        return min(int(grant), MAIL_ADMIN_RECIPIENT_CAP)
+    return MAIL_RECIPIENT_CAP
+
+
+async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
+    """10 per minute and 100 per day, counted on the sender's own message
+    rows under the sender lock (B-11). Broadcasts do not count."""
+    # Retry-After is the time until the OLDEST send inside the exhausted
+    # window leaves it (review r1) — computed in SQL against the same NOW()
+    # the counts use, so a limiter that says "retry in N seconds" is telling
+    # the truth for both windows instead of advertising a flat hour.
+    rate = (await db.execute(text(
+        "SELECT COUNT(*) FILTER (WHERE created_at > NOW() - make_interval(mins => 1)) AS per_minute,"
+        "       COUNT(*) AS per_day,"
+        "       CEIL(EXTRACT(EPOCH FROM ("
+        "            MIN(created_at) FILTER (WHERE created_at > NOW() - make_interval(mins => 1))"
+        "            + make_interval(mins => 1) - NOW()))) AS minute_wait,"
+        "       CEIL(EXTRACT(EPOCH FROM (MIN(created_at) + make_interval(days => 1) - NOW()))) AS day_wait"
+        "  FROM mail_messages"
+        " WHERE sender_id = :sid AND kind = 'direct'"
+        "   AND created_at > NOW() - make_interval(days => 1)"
+    ), {"sid": sender_id})).mappings().first()
+    per_minute = int((rate or {}).get("per_minute") or 0)
+    per_day = int((rate or {}).get("per_day") or 0)
+    # Every exhausted window contributes its wait and the LONGEST one is
+    # advertised (review r2): with both windows closed, the minute's wait
+    # alone would invite a retry the day window then refuses again.
+    waits = []
+    if per_minute >= MAIL_RATE_PER_MINUTE:
+        waits.append(int((rate or {}).get("minute_wait") or 60))
+    if per_day >= MAIL_RATE_PER_DAY:
+        waits.append(int((rate or {}).get("day_wait") or 86400))
+    if waits:
+        retry = max(1, max(waits))
+        raise HTTPException(status_code=429,
+                            detail={"error": "rate_limited", "retry_after": retry},
+                            headers={"Retry-After": str(retry)})
+
+
+async def _mail_open_case(db: AsyncSession, *, kind: str, subject_player_id, reporter_id,
+                          message_id, evidence: dict, bucket_key: str, bump: bool,
+                          post_text: str):
+    """One moderation_cases lifecycle for reports and spam buckets (B-10).
+    UNIQUE (kind, bucket_key): with bump=False a repeat is a no-op that
+    returns the existing id; with bump=True the evidence is merged and its
+    'hits' counter incremented, one row per bucket. Only a NEW row enqueues
+    the Discord post — through the existing durable outbox, in the same
+    transaction as the case and as PART of it (review r1): the post is how
+    the case reaches the moderators, so an outbox insert that fails fails
+    the request and the unique case row rolls back with it, to be created
+    (and enqueued) by the next report or send. No savepoint, nothing
+    swallowed — a case can never exist without its notification.
+    Returns (case_id, inserted)."""
+    params = {"kind": kind, "subj": subject_player_id, "rep": reporter_id, "mid": message_id,
+              "ev": _json.dumps(evidence), "bucket": bucket_key}
+    if bump:
+        row = (await db.execute(text(
+            "INSERT INTO moderation_cases"
+            "   (kind, subject_player_id, reporter_id, message_id, evidence, bucket_key, status)"
+            " VALUES (:kind, :subj, :rep, :mid, CAST(:ev AS jsonb), :bucket, 'open')"
+            " ON CONFLICT (kind, bucket_key) DO UPDATE"
+            "   SET evidence = (moderation_cases.evidence || EXCLUDED.evidence)"
+            "                  || jsonb_build_object('hits',"
+            "                       COALESCE(CAST(moderation_cases.evidence->>'hits' AS integer), 1) + 1),"
+            "       message_id = COALESCE(EXCLUDED.message_id, moderation_cases.message_id)"
+            " RETURNING id, (xmax = 0) AS inserted"
+        ), params)).mappings().first()
+        case_id, inserted = row["id"], bool(row["inserted"])
+    else:
+        row = (await db.execute(text(
+            "INSERT INTO moderation_cases"
+            "   (kind, subject_player_id, reporter_id, message_id, evidence, bucket_key, status)"
+            " VALUES (:kind, :subj, :rep, :mid, CAST(:ev AS jsonb), :bucket, 'open')"
+            " ON CONFLICT (kind, bucket_key) DO NOTHING"
+            " RETURNING id"
+        ), params)).mappings().first()
+        if row is None:
+            prior = (await db.execute(text(
+                "SELECT id FROM moderation_cases WHERE kind = :kind AND bucket_key = :bucket"
+            ), {"kind": kind, "bucket": bucket_key})).scalar()
+            return prior, False
+        case_id, inserted = row["id"], True
+    if inserted:
+        await db.execute(text(
+            "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
+        ), {"ch": MAIL_ADMIN_CHANNEL_ID,
+            "c": f"{MAIL_CASE_MARKER}{case_id}]\n{post_text}"[:2000]})
+    return case_id, inserted
+
+
+async def _mail_spam_case(db: AsyncSession, sender: dict, *, message_id, subject: str | None,
+                          body: str | None, same_body: int, bulk_hour: int, censor_hits: int) -> None:
+    day = _utc_now().strftime("%Y-%m-%d")
+    evidence = {
+        "sender_steam_id": sender["steam_id"], "sender_name": sender.get("display_name"),
+        "same_body_day": int(same_body), "bulk_hour": int(bulk_hour),
+        "censor_hits_day": int(censor_hits),
+        "latest_subject": (subject or "")[:MAIL_SUBJECT_MAX] or None,
+        "latest_body": (body or "")[:500] or None,
+        "latest_message_id": str(message_id) if message_id else None,
+        "updated_at": _mail_iso(_utc_now()), "hits": 1,
+    }
+    post = (f"\N{TRIANGULAR FLAG ON POST} **Mail spam** — "
+            f"**{_mail_discord_safe(sender.get('display_name') or '?', 64)}** (`{sender['steam_id']}`): "
+            f"{int(same_body)} same-body message(s) today, {int(bulk_hour)} bulk send(s) "
+            f"(> {MAIL_SPAM_BULK_RECIPIENTS} recipients) this hour, {int(censor_hits)} filter hit(s) today."
+            + (f" Latest subject: {_mail_discord_safe(subject, 120)}" if subject else ""))
+    await _mail_open_case(db, kind="mail_spam", subject_player_id=sender["id"], reporter_id=None,
+                          message_id=message_id, evidence=evidence,
+                          bucket_key=f"{sender['id']}:{day}", bump=True, post_text=post)
+
+
+async def _mail_censor_or_raise(db: AsyncSession, sender: dict, *fields: str) -> None:
+    """Both text fields pass the chat censor (_chat_censor_hit, in-memory,
+    fail-closed). A hit is recorded in mail_censor_hits and evaluated against
+    B-14's third trigger BEFORE the refusal is raised — the refusal is the
+    behaviour being counted, so the ledger row and any case must commit even
+    though the send does not. No auto-mute here: the design gives mail a
+    case, not a strike."""
+    for s in fields:
+        if _chat_censor_hit(s) is None:
+            continue
+        await db.execute(text(
+            "INSERT INTO mail_censor_hits (sender_id) VALUES (:sid)"
+        ), {"sid": sender["id"]})
+        hits = (await db.execute(text(
+            "SELECT COUNT(*) FROM mail_censor_hits"
+            " WHERE sender_id = :sid AND created_at > NOW() - make_interval(days => 1)"
+        ), {"sid": sender["id"]})).scalar() or 0
+        if int(hits) >= MAIL_SPAM_CENSOR_HITS:
+            await _mail_spam_case(db, sender, message_id=None, subject=None, body=None,
+                                  same_body=0, bulk_hour=0, censor_hits=int(hits))
+        await db.commit()
+        raise HTTPException(status_code=400, detail="censored")
+
+
+async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: str, body: str) -> None:
+    """B-14, evaluated inside the send transaction after the fan-out, so the
+    message just written counts. The same-body key is computed on ONE side
+    only (review r1): the sender's day of bodies is read (bounded by the
+    100/day window) and compared in Python with _mail_norm_body — casefold and
+    the whole Unicode whitespace class, which SQL's lower()/regexp cannot
+    reproduce. 'bulk' counts MESSAGES that each reached more than
+    MAIL_SPAM_BULK_RECIPIENTS distinct recipients."""
+    key = _mail_norm_body(body)
+    bodies = (await db.execute(text(
+        "SELECT body FROM mail_messages"
+        " WHERE sender_id = :sid AND kind = 'direct'"
+        "   AND created_at > NOW() - make_interval(days => 1)"
+    ), {"sid": sender["id"]})).scalars().all()
+    same_body = sum(1 for b in bodies if _mail_norm_body(b) == key)
+    row = (await db.execute(text(
+        "SELECT"
+        "  (SELECT COUNT(*) FROM ("
+        "     SELECT m.id FROM mail_messages m"
+        "       JOIN mail_recipients r ON r.message_id = m.id"
+        "      WHERE m.sender_id = :sid AND m.kind = 'direct'"
+        "        AND m.created_at > NOW() - make_interval(hours => 1)"
+        "      GROUP BY m.id"
+        "     HAVING COUNT(DISTINCT r.recipient_id) > CAST(:bulk_n AS integer)) x) AS bulk_hour,"
+        "  (SELECT COUNT(*) FROM mail_censor_hits"
+        "    WHERE sender_id = :sid AND created_at > NOW() - make_interval(days => 1)) AS censor_hits"
+    ), {"sid": sender["id"], "bulk_n": MAIL_SPAM_BULK_RECIPIENTS})).mappings().first()
+    bulk_hour = int((row or {}).get("bulk_hour") or 0)
+    censor_hits = int((row or {}).get("censor_hits") or 0)
+    if (same_body >= MAIL_SPAM_SAME_BODY or bulk_hour >= MAIL_SPAM_BULK_MESSAGES
+            or censor_hits >= MAIL_SPAM_CENSOR_HITS):
+        await _mail_spam_case(db, sender, message_id=message_id, subject=subject, body=body,
+                              same_body=same_body, bulk_hour=bulk_hour, censor_hits=censor_hits)
+
+
+async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, body: str,
+                            addressees: list, thread_id, in_reply_to, idempotency_key: UUID,
+                            cap: int | None = None) -> dict:
+    """Second half of the send transaction, shared by POST /mail and
+    /mail/{id}/reply: plain-text rules (judged on the RAW text, then
+    trimmed), censor, cap, rate window, the message row, the ONE fan-out
+    INSERT ... SELECT, the inbox-revision bump, the spam evaluation, the
+    commit. The caller holds the identity and sender locks and has already
+    answered a repeated idempotency_key. `addressees` = [(player_id,
+    'to'|'cc')], canonical; `cap` is the caller's already-read grant when it
+    checked the list before resolving ids (one grant read per send)."""
+    subject = _mail_text_or_raise(subject, field="subject", subject=True)
+    body = _mail_text_or_raise(body, field="body", subject=False)
+    await _mail_censor_or_raise(db, sender, subject, body)
+    if not addressees:
+        raise HTTPException(status_code=400, detail="recipients_empty")
+    if cap is None:
+        cap = await _mail_recipient_cap(db, sender)
+    if len(addressees) > cap:
+        raise HTTPException(status_code=400, detail="too_many_recipients")
+    await _mail_rate_or_raise(db, sender["id"])
+    mid = uuid.uuid4()
+    await db.execute(text(
+        "INSERT INTO mail_messages"
+        "   (id, sender_id, kind, thread_id, in_reply_to, subject, body, idempotency_key)"
+        " VALUES (:id, :sid, 'direct', :tid, :irt, :subj, :body, :key)"
+    ), {"id": mid, "sid": sender["id"], "tid": thread_id or mid, "irt": in_reply_to,
+        "subj": subject, "body": body, "key": idempotency_key})
+    await db.execute(text(_MAIL_FANOUT_SQL), {
+        "mid": mid, "sid": sender["id"],
+        "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees]})
+    await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
+    await _mail_spam_check(db, sender, mid, subject, body)
+    await db.commit()
+    return {"id": str(mid), "accepted": True}
+
+
+async def _mail_sender_colors(db: AsyncSession, rows) -> dict:
+    """title_color per sender (keyed by sender_pid text), rendered exactly
+    like the Home tab's online list: rank colours + podium titles."""
+    rows = list(rows)
+    if not rows:
+        return {}
+    colors = await _rank_colors(db)
+    pmap, pmap2, pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
+    out = {}
+    for r in rows:
+        _t, tc = _display_title_sync(
+            colors, r["title_sku"], r["title"], r["title_color"], float(r["rating"] or 1500),
+            podium_pos=pmap.get(r["sender_pid"]), podium_pos_2v2=pmap2.get(r["sender_pid"]),
+            podium_pos_ffa=pmapf.get(r["sender_pid"]))
+        out[r["sender_pid"]] = tc or ""
+    return out
+
+
+async def _mail_addressees(db: AsyncSession, message_ids: list) -> dict:
+    """{message_id: [{steam_id, name, kind}]} bounded per message."""
+    if not message_ids:
+        return {}
+    rows = (await db.execute(text(_MAIL_ADDRESSEES_SQL),
+                             {"mids": list(message_ids), "cap": MAIL_ADDRESSEES_MAX})).mappings().all()
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["message_id"], []).append(
+            {"steam_id": r["steam_id"], "name": r["display_name"], "kind": r["kind"]})
+    return out
+
+
+@app.post("/api/v1/mail", tags=["Mail"])
+async def mail_send(req: _MailSendReq, request: Request, db: AsyncSession = Depends(get_db)):
+    """Send to up to 8 canonical recipients (B-L2). Responds {id, accepted}
+    for every syntactically valid send whether or not a copy was suppressed
+    (B-7). Unknown or deleted recipients are an addressing error (400); the
+    cap is counted after canonicalisation."""
+    me = await _mail_caller(request, db)
+    key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    # Lock order everywhere in this block: identity (delete-account's lock)
+    # -> per-sender mail lock -> ban-rate. The identity re-read under the
+    # lock is what makes the sender row this transaction writes a LIVE one.
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
+    await _mail_lock_sender(db, me["id"])
+    prior = await _mail_prior_send(db, me["id"], key)
+    if prior is not None:
+        return prior
+    await _mail_sender_gates(db, me)
+    wanted = _mail_canonical_steam_ids(me["steam_id"], req.to, req.cc)
+    if not wanted:
+        raise HTTPException(status_code=400, detail="recipients_empty")
+    # The cap is the caller's ACTUAL grant, applied to the canonical list
+    # (deduplicated, self dropped) before any id is resolved (review r1), so
+    # the resolution query is bounded by the grant, not by the payload.
+    cap = await _mail_recipient_cap(db, me)
+    if len(wanted) > cap:
+        raise HTTPException(status_code=400, detail="too_many_recipients")
+    rows = (await db.execute(text(
+        "SELECT id, steam_id FROM players"
+        " WHERE steam_id = ANY(CAST(:sids AS text[])) AND deleted_at IS NULL"
+    ), {"sids": [s for s, _k in wanted]})).mappings().all()
+    by_sid = {r["steam_id"]: r["id"] for r in rows}
+    if any(s not in by_sid for s, _k in wanted):
+        raise HTTPException(status_code=400, detail="recipient_unknown")
+    addressees = [(by_sid[s], k) for s, k in wanted]
+    return await _mail_finish_send(
+        db, me, subject=req.subject, body=req.body,
+        addressees=addressees, thread_id=None, in_reply_to=None, idempotency_key=key, cap=cap)
+
+
+@app.post("/api/v1/mail/{message_id}/reply", tags=["Mail"])
+async def mail_reply(message_id: str, req: _MailReplyReq, request: Request,
+                     db: AsyncSession = Depends(get_db)):
+    """B-9: recipients are derived SERVER-side from the original's envelope
+    — the original sender, plus every DELIVERED addressee minus self when
+    all=true (never a suppressed one); all=true on a system_broadcast is
+    refused. thread_id/in_reply_to are set here; the subject is the
+    original's prefixed "Re: " once. The reply then goes through the same
+    gates, rules, cap, rate window and fan-out (recipients' preferences and
+    blocks apply to replies exactly as to first messages)."""
+    me = await _mail_caller(request, db)
+    mid = _mail_parse_uuid(message_id, "message_id")
+    key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
+    await _mail_lock_sender(db, me["id"])
+    prior = await _mail_prior_send(db, me["id"], key)
+    if prior is not None:
+        return prior
+    await _mail_sender_gates(db, me)
+    orig = (await db.execute(text(
+        "SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
+        "  FROM mail_messages m"
+        " WHERE m.id = :mid"
+        "   AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL)"
+        "        OR EXISTS (SELECT 1 FROM mail_recipients r"
+        "                    WHERE r.message_id = m.id AND r.recipient_id = :me"
+        "                      AND r.delivery = 'delivered' AND r.deleted_at IS NULL))"
+    ), {"mid": mid, "me": me["id"]})).mappings().first()
+    if orig is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    if req.all and orig["kind"] == "system_broadcast":
+        raise HTTPException(status_code=400, detail="reply_all_refused")
+    pairs = [(orig["sender_id"], "to")]
+    if req.all:
+        rows = (await db.execute(text(
+            "SELECT recipient_id, kind FROM mail_recipients"
+            " WHERE message_id = :mid AND delivery = 'delivered'"
+        ), {"mid": mid})).mappings().all()
+        pairs.extend((r["recipient_id"], r["kind"]) for r in rows)
+    addressees = _mail_canonical_ids(me["id"], pairs)
+    subj = orig["subject"] or ""
+    subject = subj if subj.startswith("Re: ") else ("Re: " + subj)[:MAIL_SUBJECT_MAX]
+    return await _mail_finish_send(
+        db, me, subject=subject, body=req.body, addressees=addressees,
+        thread_id=orig["thread_id"], in_reply_to=orig["id"], idempotency_key=key)
+
+
+@app.get("/api/v1/mail/inbox", tags=["Mail"])
+async def mail_inbox(request: Request, cursor: str = Query(""),
+                     limit: int = Query(MAIL_PAGE_DEFAULT, ge=1, le=MAIL_PAGE_MAX),
+                     db: AsyncSession = Depends(get_db)):
+    """Newest first, keyset-paged on (created_at, id). Delivered, undeleted
+    envelopes only — a suppressed copy is never listed (B-7)."""
+    me = await _mail_caller(request, db)
+    c_at, c_id = _mail_cursor_decode(cursor)
+    rows = (await db.execute(text(
+        "SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind, r.read_at,"
+        "       s.steam_id AS sender_steam_id, s.display_name AS sender_name,"
+        "       CAST(s.id AS text) AS sender_pid, COALESCE(gr.rating, 1500) AS rating,"
+        "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku"
+        "  FROM mail_recipients r"
+        "  JOIN mail_messages m ON m.id = r.message_id"
+        "  JOIN players s ON s.id = m.sender_id"
+        "  LEFT JOIN glicko_ratings gr ON gr.player_id = s.id"
+        "  LEFT JOIN shop_items si ON si.id = s.active_title_id"
+        " WHERE r.recipient_id = :me AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
+        "   AND (CAST(:c_at AS timestamptz) IS NULL"
+        "        OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
+        " ORDER BY m.created_at DESC, m.id DESC"
+        " LIMIT CAST(:lim AS integer)"
+    ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1})).mappings().all()
+    page, next_cursor = _mail_page(rows, limit)
+    colors = await _mail_sender_colors(db, page)
+    return {"messages": [{
+        "id": str(r["id"]), "thread_id": str(r["thread_id"]), "kind": r["kind"],
+        "sender": {"steam_id": r["sender_steam_id"], "name": r["sender_name"],
+                   "title_color": colors.get(r["sender_pid"], "")},
+        "subject": r["subject"], "created_at": _mail_iso(r["created_at"]),
+        "read_at": _mail_iso(r["read_at"]),
+    } for r in page], "next_cursor": next_cursor}
+
+
+@app.get("/api/v1/mail/sent", tags=["Mail"])
+async def mail_sent(request: Request, cursor: str = Query(""),
+                    limit: int = Query(MAIL_PAGE_DEFAULT, ge=1, le=MAIL_PAGE_MAX),
+                    db: AsyncSession = Depends(get_db)):
+    """The sender's view: addressees WITHOUT delivery state (B-7). A
+    broadcast's envelope is the whole community, so its addressee list is
+    empty and `kind` says why."""
+    me = await _mail_caller(request, db)
+    c_at, c_id = _mail_cursor_decode(cursor)
+    rows = (await db.execute(text(
+        "SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind"
+        "  FROM mail_messages m"
+        " WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "   AND (CAST(:c_at AS timestamptz) IS NULL"
+        "        OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
+        " ORDER BY m.created_at DESC, m.id DESC"
+        " LIMIT CAST(:lim AS integer)"
+    ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1})).mappings().all()
+    page, next_cursor = _mail_page(rows, limit)
+    addr = await _mail_addressees(db, [r["id"] for r in page if r["kind"] != "system_broadcast"])
+    return {"messages": [{
+        "id": str(r["id"]), "thread_id": str(r["thread_id"]), "kind": r["kind"],
+        "subject": r["subject"], "created_at": _mail_iso(r["created_at"]),
+        "addressees": addr.get(r["id"], []),
+    } for r in page], "next_cursor": next_cursor}
+
+
+@app.get("/api/v1/mail/status", tags=["Mail"])
+async def mail_status(request: Request, db: AsyncSession = Depends(get_db)):
+    """B-6: {unread, revision}. revision is this recipient's delivery
+    COUNTER (mail_inbox_rev.rev, migration 300): bumped once per delivered
+    envelope in the sending transaction, so it moves exactly when new mail
+    arrives and in commit order — never on a read or a delete, and never
+    backwards (the client toasts on a change, never on the count); "" until
+    the first delivery. Carries mail_from so the Settings pane can render
+    the current preference without a second call."""
+    me = await _mail_caller(request, db)
+    row = (await db.execute(text(
+        "SELECT"
+        "  (SELECT COUNT(*) FROM mail_recipients"
+        "    WHERE recipient_id = :me AND delivery = 'delivered'"
+        "      AND read_at IS NULL AND deleted_at IS NULL) AS unread,"
+        "  (SELECT rev FROM mail_inbox_rev WHERE recipient_id = :me) AS revision"
+    ), {"me": me["id"]})).mappings().first()
+    rev = int((row or {}).get("revision") or 0)
+    return {"unread": int((row or {}).get("unread") or 0),
+            "revision": str(rev) if rev > 0 else "",
+            "mail_from": me.get("mail_from") or "everyone"}
+
+
+@app.get("/api/v1/mail/blocks", tags=["Mail"])
+async def mail_blocks_list(request: Request, db: AsyncSession = Depends(get_db)):
+    """Owner-only (B-1): strict session, the caller's own rows, nothing else
+    can read them. The matchmaking block list (~14418) is a different table."""
+    me = await _mail_caller(request, db)
+    rows = (await db.execute(text(
+        "SELECT p.steam_id, p.display_name, b.created_at"
+        "  FROM mail_blocks b JOIN players p ON p.id = b.blocked_id"
+        " WHERE b.blocker_id = :me"
+        " ORDER BY b.created_at DESC"
+        " LIMIT CAST(:lim AS integer)"
+    ), {"me": me["id"], "lim": MAIL_BLOCKS_MAX})).mappings().all()
+    return {"blocks": [{"steam_id": r["steam_id"], "name": r["display_name"],
+                        "created_at": _mail_iso(r["created_at"])} for r in rows]}
+
+
+@app.post("/api/v1/mail/blocks", tags=["Mail"])
+async def mail_block_add(req: _MailBlockReq, request: Request, db: AsyncSession = Depends(get_db)):
+    me = await _mail_caller(request, db)
+    sid = (req.steam_id or "").strip()
+    if len(sid) != 17 or not sid.isdigit():
+        raise HTTPException(status_code=400, detail="steam_id_invalid")
+    if sid == me["steam_id"]:
+        raise HTTPException(status_code=400, detail="cannot_block_self")
+    # Both identities the row names, locked and re-read live (the lattice);
+    # the target's id is the re-read's.
+    rows = await _mail_lock_identities(db, me["steam_id"], sid, missing={sid: (404, "player_unknown")},
+                                       handles={me["steam_id"]: me["id"]})
+    target = rows[sid]["id"]
+    count = (await db.execute(text(
+        "SELECT COUNT(*) FROM mail_blocks WHERE blocker_id = :me"
+    ), {"me": me["id"]})).scalar() or 0
+    if int(count) >= MAIL_BLOCKS_MAX:
+        raise HTTPException(status_code=400, detail="too_many_blocks")
+    await db.execute(text(
+        "INSERT INTO mail_blocks (blocker_id, blocked_id) VALUES (:me, :t)"
+        " ON CONFLICT (blocker_id, blocked_id) DO NOTHING"
+    ), {"me": me["id"], "t": target})
+    await db.commit()
+    return {"status": "blocked", "steam_id": sid}
+
+
+@app.delete("/api/v1/mail/blocks/{steam_id}", tags=["Mail"])
+async def mail_block_remove(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    me = await _mail_caller(request, db)
+    sid = (steam_id or "").strip()
+    if len(sid) != 17 or not sid.isdigit():
+        raise HTTPException(status_code=400, detail="steam_id_invalid")
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
+    await db.execute(text(
+        "DELETE FROM mail_blocks"
+        " WHERE blocker_id = :me"
+        "   AND blocked_id = (SELECT id FROM players WHERE steam_id = :sid)"
+    ), {"me": me["id"], "sid": sid})
+    await db.commit()
+    return {"status": "unblocked", "steam_id": sid}
+
+
+@app.get("/api/v1/mail/settings", tags=["Mail"])
+async def mail_settings_get(request: Request, db: AsyncSession = Depends(get_db)):
+    me = await _mail_caller(request, db)
+    return {"mail_from": me.get("mail_from") or "everyone"}
+
+
+@app.put("/api/v1/mail/settings", tags=["Mail"])
+async def mail_settings_put(req: _MailSettingsReq, request: Request,
+                            db: AsyncSession = Depends(get_db)):
+    """Its own strict-session route rather than the appear_offline one
+    (~22929), which is HMAC-over-the-mod-secret with no ownership gate — a
+    preference that decides who may reach you needs the session."""
+    me = await _mail_caller(request, db)
+    value = (req.mail_from or "").strip().lower()
+    if value not in MAIL_FROM_VALUES:
+        raise HTTPException(status_code=400, detail="mail_from_invalid")
+    await db.execute(text(
+        "UPDATE players SET mail_from = :v WHERE id = :me"
+    ), {"v": value, "me": me["id"]})
+    await db.commit()
+    return {"mail_from": value}
+
+
+@app.get("/api/v1/mail/{message_id}", tags=["Mail"])
+async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """Full message for its sender (until they delete it) or a delivered,
+    undeleted recipient. to/cc carry names only — delivery is NOT exposed.
+    Marks nothing read (the client posts /read explicitly)."""
+    me = await _mail_caller(request, db)
+    mid = _mail_parse_uuid(message_id, "message_id")
+    row = (await db.execute(text(
+        "SELECT m.id, m.thread_id, m.in_reply_to, m.kind, m.subject, m.body, m.created_at,"
+        "       m.sender_id, s.steam_id AS sender_steam_id, s.display_name AS sender_name,"
+        "       CAST(s.id AS text) AS sender_pid, COALESCE(gr.rating, 1500) AS rating,"
+        "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,"
+        "       r.read_at"
+        "  FROM mail_messages m"
+        "  JOIN players s ON s.id = m.sender_id"
+        "  LEFT JOIN glicko_ratings gr ON gr.player_id = s.id"
+        "  LEFT JOIN shop_items si ON si.id = s.active_title_id"
+        "  LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me"
+        "                             AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
+        " WHERE m.id = :mid"
+        "   AND (r.recipient_id IS NOT NULL"
+        "        OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL))"
+    ), {"mid": mid, "me": me["id"]})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    colors = await _mail_sender_colors(db, [row])
+    addr = [] if row["kind"] == "system_broadcast" else (await _mail_addressees(db, [row["id"]])).get(row["id"], [])
+    return {
+        "id": str(row["id"]), "thread_id": str(row["thread_id"]),
+        "in_reply_to": str(row["in_reply_to"]) if row["in_reply_to"] else None,
+        "kind": row["kind"],
+        "sender": {"steam_id": row["sender_steam_id"], "name": row["sender_name"],
+                   "title_color": colors.get(row["sender_pid"], "")},
+        "subject": row["subject"], "body": row["body"],
+        "created_at": _mail_iso(row["created_at"]), "read_at": _mail_iso(row["read_at"]),
+        "to": [{"steam_id": a["steam_id"], "name": a["name"]} for a in addr if a["kind"] == "to"],
+        "cc": [{"steam_id": a["steam_id"], "name": a["name"]} for a in addr if a["kind"] == "cc"],
+    }
+
+
+@app.post("/api/v1/mail/{message_id}/read", tags=["Mail"])
+async def mail_read(message_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    me = await _mail_caller(request, db)
+    mid = _mail_parse_uuid(message_id, "message_id")
+    read_at = (await db.execute(text(
+        "UPDATE mail_recipients SET read_at = COALESCE(read_at, NOW())"
+        " WHERE message_id = :mid AND recipient_id = :me"
+        "   AND delivery = 'delivered' AND deleted_at IS NULL"
+        " RETURNING read_at"
+    ), {"mid": mid, "me": me["id"]})).scalar()
+    if read_at is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    await db.commit()
+    return {"read_at": _mail_iso(read_at)}
+
+
+@app.delete("/api/v1/mail/{message_id}", tags=["Mail"])
+async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """Soft, per party: a recipient's envelope gets deleted_at, the sender's
+    message gets deleted_by_sender_at. Other parties keep their copies; the
+    janitor purges the row once every party has let go (or after
+    MAIL_RETENTION_DAYS once it is read everywhere)."""
+    me = await _mail_caller(request, db)
+    mid = _mail_parse_uuid(message_id, "message_id")
+    as_recipient = (await db.execute(text(
+        "UPDATE mail_recipients SET deleted_at = COALESCE(deleted_at, NOW())"
+        " WHERE message_id = :mid AND recipient_id = :me AND delivery = 'delivered'"
+        " RETURNING 1"
+    ), {"mid": mid, "me": me["id"]})).first()
+    as_sender = (await db.execute(text(
+        "UPDATE mail_messages SET deleted_by_sender_at = COALESCE(deleted_by_sender_at, NOW())"
+        " WHERE id = :mid AND sender_id = :me"
+        " RETURNING 1"
+    ), {"mid": mid, "me": me["id"]})).first()
+    if as_recipient is None and as_sender is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    await db.commit()
+    return {"status": "deleted", "id": str(mid)}
+
+
+@app.post("/api/v1/mail/{message_id}/report", tags=["Mail"])
+async def mail_report(message_id: str, req: _MailReportReq, request: Request,
+                      db: AsyncSession = Depends(get_db)):
+    """B-10: a moderation_cases row of kind mail_report, bucket
+    <message_id>:<reporter_id>, evidence = a SNAPSHOT of the message so a
+    later delete cannot empty it. The reporter is NOT written into the
+    snapshot (B-8 scrubs reporter_id on account deletion; the Discord post
+    names them at post time, which is the moderators' record). A repeat is a
+    200 no-op returning the same case id. A delivered recipient may report
+    whether or not they have since deleted their copy."""
+    me = await _mail_caller(request, db)
+    mid = _mail_parse_uuid(message_id, "message_id")
+    # Judge the free-text reason on the raw text (controls, runs), then trim;
+    # its own length bound is a refusal, not a silent cut (review r1).
+    reason_raw = _mail_normalise(req.reason)
+    problem = _mail_text_problem(reason_raw, subject=False) if reason_raw.strip() else None
+    if problem is not None:
+        raise HTTPException(status_code=400, detail=f"reason_{problem}")
+    reason = reason_raw.strip()
+    if len(reason) > MAIL_REASON_MAX:
+        raise HTTPException(status_code=400, detail="reason_too_long")
+    # The reporter's identity is written on the case row: lock + live re-read
+    # BEFORE the envelope read, so a deletion of this account either swept
+    # first (and this refuses) or waits behind this transaction (and sweeps
+    # the reporter_id it writes).
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
+    row = (await db.execute(text(
+        "SELECT m.id, m.kind, m.subject, m.body, m.created_at, m.sender_id,"
+        "       s.steam_id AS sender_steam_id, s.display_name AS sender_name"
+        "  FROM mail_messages m"
+        "  JOIN players s ON s.id = m.sender_id"
+        "  JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me"
+        "                        AND r.delivery = 'delivered'"
+        " WHERE m.id = :mid"
+    ), {"mid": mid, "me": me["id"]})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    if row["kind"] == "system_broadcast":
+        raise HTTPException(status_code=400, detail="cannot_report_broadcast")
+    evidence = {"subject": row["subject"], "body": row["body"],
+                "sender_id": str(row["sender_id"]), "sender_steam_id": row["sender_steam_id"],
+                "sender_name": row["sender_name"], "sent_at": _mail_iso(row["created_at"]),
+                "reason": reason or None}
+    post = (f"\N{INCOMING ENVELOPE} **Mail report** — "
+            f"**{_mail_discord_safe(row['sender_name'] or '?', 64)}** (`{row['sender_steam_id']}`)"
+            f" reported by **{_mail_discord_safe(me.get('display_name') or '?', 64)}**\n"
+            f"Subject: {_mail_discord_safe(row['subject'], 120)}\n"
+            f"> {_mail_discord_safe(row['body'], 300)}\n"
+            f"Reason: {_mail_discord_safe(reason, 200) or '(none given)'}")
+    case_id, _inserted = await _mail_open_case(
+        db, kind="mail_report", subject_player_id=row["sender_id"], reporter_id=me["id"],
+        message_id=row["id"], evidence=evidence, bucket_key=f"{row['id']}:{me['id']}",
+        bump=False, post_text=post)
+    await db.commit()
+    return {"case_id": str(case_id)}
+
+
+# ── Moderation cases: the act core and its two proofs ─────────────────────
+
+async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id: str,
+                               action: str, hours, reason: str, via: str,
+                               actor_name: str = "") -> dict:
+    """B-2, the ONE transaction behind both /act routes. The SERVER re-reads
+    the actor's CURRENT grant (_chat_moderator_scope: admin_users or a live
+    chat_moderate grant) on every call — a stale grant is a 403 with nothing
+    written. mute and ban require the admin role: a mail mute is a GLOBAL
+    chat mute (channel IS NULL — the only kind that stops mail, B-5), which
+    _chat_scope_allows reserves to admins, and the ban path is admin-only
+    everywhere else. dismiss needs any live grant. The moderation writes are
+    the SAME cores the chat routes use (_chat_mute_apply; _ban_rate_gate_or_
+    raise + _apply_ban_core), then the case row and the AdminAction row.
+    The caller commits. A case that is no longer open answers
+    already_resolved — a double click is harmless."""
+    cid = _mail_parse_uuid(case_id, "case_id")
+    action = (action or "").strip().lower()
+    if action not in _MODCASE_ACTIONS:
+        raise HTTPException(status_code=400, detail="action_invalid")
+    # The lattice (review r1, r2): this transaction writes the ACTOR
+    # (resolved_by, the audit rows, muted_by/banned_by) and the SUBJECT (the
+    # audit rows' target on every action; chat_mutes.steam_id /
+    # player_bans.steam_id on mute/ban). Learn the subject's row id from an
+    # unlocked read, lock BOTH identities in sorted order — identity locks
+    # first, the ban-rate lock only afterwards, the same order admin_ban
+    # keeps — then re-read both rows, the actor's authority and the case row
+    # UNDER the locks, and write the identities the re-read returned. The
+    # actor's authority is the grant (_chat_moderator_scope), not a players
+    # row: an admin acting through the HMAC route need not have one. A
+    # subject deleted meanwhile refuses mute/ban (nothing to write) and lets
+    # dismiss close the case with the tombstone as its target.
+    subject_pre = (await db.execute(text(
+        "SELECT p.id AS subject_id, p.steam_id AS subject_sid"
+        "  FROM moderation_cases c JOIN players p ON p.id = c.subject_player_id"
+        " WHERE c.id = :id"
+    ), {"id": cid})).mappings().first()
+    if subject_pre is None:
+        raise HTTPException(status_code=404, detail="case_not_found")
+    subject_sid_pre = subject_pre["subject_sid"]
+    optional = {actor_steam_id} | ({subject_sid_pre} if action == "dismiss" else set())
+    rows = await _mail_lock_identities(
+        db, actor_steam_id, subject_sid_pre, missing={subject_sid_pre: (400, "subject_deleted")},
+        optional=optional, handles={subject_sid_pre: subject_pre["subject_id"]})
+    actor_w = _mail_identity_to_write(rows, actor_steam_id)
+    subject_w = _mail_identity_to_write(rows, subject_sid_pre)
+    role, _langs = await _chat_moderator_scope(db, actor_steam_id)
+    if role is None:
+        raise HTTPException(status_code=403, detail="not_authorised")
+    if action != "dismiss" and role != "admin":
+        raise HTTPException(status_code=403, detail="admin_required")
+    case = (await db.execute(text(
+        "SELECT c.id, c.kind, c.status, c.resolution, c.subject_player_id, c.message_id,"
+        "       p.steam_id AS subject_steam_id, p.display_name AS subject_name"
+        "  FROM moderation_cases c JOIN players p ON p.id = c.subject_player_id"
+        " WHERE c.id = :id"
+        " FOR NO KEY UPDATE OF c"
+    ), {"id": cid})).mappings().first()
+    if case is None:
+        raise HTTPException(status_code=404, detail="case_not_found")
+    if case["status"] != "open":
+        return {"status": "already_resolved", "case_id": str(cid), "case_status": case["status"],
+                "resolution": case["resolution"], "subject_steam_id": case["subject_steam_id"],
+                "subject_name": case["subject_name"]}
+    # Every identity written below is the lattice re-read's (subject_w,
+    # actor_w) — live rows give the raw ids, a row scrubbed while this
+    # transaction waited gives its tombstone. The ban-rate gate alone keys on
+    # the actor's raw id: it is velocity accounting per admin, not a row
+    # carrying the actor's identity.
+    subject_sid = subject_w
+    reason_txt = (reason or "").strip()[:256] or f"mail moderation case ({case['kind']})"
+    if action == "mute":
+        try:
+            h = int(hours or 0)
+        except Exception:
+            h = 0
+        if h <= 0 or h > 24 * 365:
+            raise HTTPException(status_code=400, detail="hours_invalid")
+        await _chat_mute_apply(db, target_steam_id=subject_sid, channel=None,
+                               by_steam_id=actor_w, reason=reason_txt, minutes=h * 60)
+        await _log_admin_action_strict(
+            db, admin_steam_id=actor_w, action="chat_mute", target_steam_id=subject_sid,
+            details={"channel": "ALL", "duration_minutes": h * 60, "permanent": False,
+                     "reason": reason_txt, "moderator_steam_id": actor_w,
+                     "moderator_role": role, "via": via, "case_id": str(cid)})
+        resolution, new_status = f"mute:{h}h", "resolved"
+    elif action == "ban":
+        await _ban_rate_gate_or_raise(db, actor_steam_id, subject_sid)
+        res = await _apply_ban_core(db, admin_steam_id=actor_w,
+                                    target_steam_id=subject_sid, reason=reason_txt)
+        resolution = "ban" if res.get("status") == "banned" else "ban:already_banned"
+        new_status = "resolved"
+    else:
+        resolution, new_status = "dismissed", "dismissed"
+    await db.execute(text(
+        "UPDATE moderation_cases"
+        "   SET status = :st, resolved_at = NOW(), resolved_by = :by, resolution = :res"
+        " WHERE id = :id"
+    ), {"st": new_status, "by": actor_w[:32], "res": resolution, "id": cid})
+    await _log_admin_action_strict(
+        db, admin_steam_id=actor_w, action="modcase_act", target_steam_id=subject_sid,
+        details={"case_id": str(cid), "kind": case["kind"], "action": action,
+                 "hours": hours, "reason": reason_txt, "via": via,
+                 "actor_name": (actor_name or "")[:64], "role": role})
+    return {"status": "ok", "case_id": str(cid), "kind": case["kind"], "action": action,
+            "resolution": resolution, "subject_steam_id": subject_sid,
+            "subject_name": case["subject_name"]}
+
+
+async def _moderation_case_notified(db: AsyncSession, case_id: str) -> dict:
+    cid = _mail_parse_uuid(case_id, "case_id")
+    stamped = (await db.execute(text(
+        "UPDATE moderation_cases SET notified_at = COALESCE(notified_at, NOW())"
+        " WHERE id = :id RETURNING notified_at"
+    ), {"id": cid})).scalar()
+    if stamped is None:
+        raise HTTPException(status_code=404, detail="case_not_found")
+    await db.commit()
+    return {"status": "ok", "case_id": str(cid), "notified_at": _mail_iso(stamped)}
+
+
+@app.get("/api/v1/admin/moderation-cases", tags=["Admin"])
+async def admin_moderation_cases(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    status: str = Query("open"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_admin(db, admin_steam_id, "modcase_list", "", hmac_signature)
+    st = (status or "open").strip().lower()
+    if st not in ("open", "resolved", "dismissed"):
+        raise HTTPException(status_code=400, detail="status_invalid")
+    rows = (await db.execute(text(
+        "SELECT c.id, c.kind, c.status, c.bucket_key, c.evidence, c.created_at, c.resolved_at,"
+        "       c.resolved_by, c.resolution, c.notified_at, c.message_id,"
+        "       s.steam_id AS subject_steam_id, s.display_name AS subject_name,"
+        "       rp.steam_id AS reporter_steam_id"
+        "  FROM moderation_cases c"
+        "  JOIN players s ON s.id = c.subject_player_id"
+        "  LEFT JOIN players rp ON rp.id = c.reporter_id"
+        " WHERE c.status = :st"
+        " ORDER BY c.created_at DESC"
+        " LIMIT CAST(:lim AS integer)"
+    ), {"st": st, "lim": limit})).mappings().all()
+    out = []
+    for r in rows:
+        ev = r["evidence"]
+        if isinstance(ev, str):
+            try:
+                ev = _json.loads(ev)
+            except Exception:
+                ev = {"raw": ev}
+        out.append({
+            "id": str(r["id"]), "kind": r["kind"], "status": r["status"],
+            "bucket_key": r["bucket_key"], "evidence": ev,
+            "subject_steam_id": r["subject_steam_id"], "subject_name": r["subject_name"],
+            "reporter_steam_id": r["reporter_steam_id"],
+            "message_id": str(r["message_id"]) if r["message_id"] else None,
+            "created_at": _mail_iso(r["created_at"]), "resolved_at": _mail_iso(r["resolved_at"]),
+            "resolved_by": r["resolved_by"], "resolution": r["resolution"],
+            "notified_at": _mail_iso(r["notified_at"]),
+        })
+    return {"cases": out}
+
+
+@app.post("/api/v1/admin/moderation-cases/{case_id}/act", tags=["Admin"])
+async def admin_moderation_case_act(case_id: str, req: _AdminModCaseActReq,
+                                    db: AsyncSession = Depends(get_db)):
+    """Admin-HMAC proof (admin tooling). The signer is the actor."""
+    await _require_admin(db, req.admin_steam_id, "modcase_act", case_id, req.hmac_signature)
+    if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
+        raise HTTPException(status_code=400, detail="actor_mismatch")
+    result = await _moderation_case_act(
+        db, case_id=case_id, actor_steam_id=req.admin_steam_id, action=req.action,
+        hours=req.hours, reason=req.reason, via="admin_hmac")
+    await db.commit()
+    return result
+
+
+@app.post("/api/v1/internal/moderation-cases/{case_id}/act", tags=["Internal"])
+async def internal_moderation_case_act(
+    case_id: str, payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The Discord buttons' proof (the bot cannot sign admin HMAC — it holds
+    no ADMIN_HMAC_SECRET — so, like /internal/chat/discord-mute, it proves
+    itself with the internal key). The bot sends the clicking user's Discord
+    id; THIS side resolves it to a currently linked, live account and then
+    the core re-checks that account's grant — the bot holds no authority and
+    the link is checked at act time, not at post time."""
+    _require_internal_key(x_internal_key)
+    actor_discord_id = str(payload.get("actor_discord_id", "") or "")[:32]
+    if not actor_discord_id:
+        raise HTTPException(status_code=422, detail="actor_discord_id required")
+    linked = (await db.execute(text(
+        "SELECT steam_id FROM players WHERE discord_id = :d AND deleted_at IS NULL"
+    ), {"d": actor_discord_id})).scalar()
+    if not linked:
+        raise HTTPException(status_code=403, detail="not_linked")
+    result = await _moderation_case_act(
+        db, case_id=case_id, actor_steam_id=linked, action=str(payload.get("action", "") or ""),
+        hours=payload.get("hours"), reason=str(payload.get("reason", "") or ""),
+        via=f"discord:{actor_discord_id}", actor_name=str(payload.get("actor_name", "") or ""))
+    await db.commit()
+    return result
+
+
+@app.post("/api/v1/admin/moderation-cases/{case_id}/notified", tags=["Admin"])
+async def admin_moderation_case_notified(case_id: str, req: _AdminModCaseActReq,
+                                         db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "modcase_notified", case_id, req.hmac_signature)
+    return await _moderation_case_notified(db, case_id)
+
+
+@app.post("/api/v1/internal/moderation-cases/{case_id}/notified", tags=["Internal"])
+async def internal_moderation_case_notified(
+    case_id: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_internal_key(x_internal_key)
+    return await _moderation_case_notified(db, case_id)
+
+
+@app.post("/api/v1/admin/mail/broadcast", tags=["Admin"])
+async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = Depends(get_db)):
+    """B-12: kind = 'system_broadcast', explicit and admin-only, audited via
+    AdminAction, bypasses preferences and blocks, targets accounts with
+    mod_seen_at inside MAIL_BROADCAST_SEEN_DAYS set-wise. Same plain-text
+    rules and censor as player mail; no rate window and no spam evaluation
+    (exempt by design); idempotent on (sender, idempotency_key) like every
+    send. The sender row is the admin's own player row."""
+    key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    await _require_admin(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
+    if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
+        raise HTTPException(status_code=400, detail="actor_mismatch")
+    # Identity lock + re-read + grant re-proof BEFORE the sender row is read
+    # (the lattice). A broadcast is a message and needs its sender row
+    # (mail_messages.sender_id) — the one privileged route where admin_users
+    # membership alone is not enough; the re-read decides, under the lock.
+    rows = await _mail_lock_admin(db, req.admin_steam_id)
+    me_row = rows.get(req.admin_steam_id)
+    if me_row is None or me_row.get("deleted_at") is not None:
+        raise HTTPException(status_code=404, detail="admin_player_unknown")
+    sender = (await db.execute(text(
+        "SELECT id, steam_id, display_name, mod_seen_at, mail_from"
+        "  FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+    ), {"sid": req.admin_steam_id})).mappings().first()
+    if sender is None:
+        raise HTTPException(status_code=404, detail="admin_player_unknown")
+    sender = dict(sender)
+    # Lock order and gate order as on every send: identity -> per-sender
+    # lock -> the idempotency replay -> ONLY THEN the mutable gates (review
+    # r2). A retry of a broadcast that already went out must get the stored
+    # answer even if the sender has been muted, banned or censored since:
+    # the message exists, and telling its sender otherwise is false.
+    await _mail_lock_sender(db, sender["id"])
+    prior = await _mail_prior_send(db, sender["id"], key)
+    if prior is not None:
+        return prior
+    # The same sender gates as every other send (review r1): an account that
+    # never ran the mod, an active ban or a GLOBAL mute refuses a broadcast
+    # exactly as it refuses a direct message — a valid admin HMAC is proof of
+    # identity, not an exemption from the sending rules.
+    await _mail_sender_gates(db, sender)
+    subject = _mail_text_or_raise(req.subject, field="subject", subject=True)
+    body = _mail_text_or_raise(req.body, field="body", subject=False)
+    for s in (subject, body):
+        if _chat_censor_hit(s) is not None:
+            raise HTTPException(status_code=400, detail="censored")
+    mid = uuid.uuid4()
+    await db.execute(text(
+        "INSERT INTO mail_messages"
+        "   (id, sender_id, kind, thread_id, in_reply_to, subject, body, idempotency_key)"
+        " VALUES (:id, :sid, 'system_broadcast', :id, NULL, :subj, :body, :key)"
+    ), {"id": mid, "sid": sender["id"], "subj": subject, "body": body, "key": key})
+    delivered = (await db.execute(text(_MAIL_BROADCAST_FANOUT_SQL), {
+        "mid": mid, "sid": sender["id"], "days": MAIL_BROADCAST_SEEN_DAYS})).fetchall()
+    n = len(delivered)
+    # The answer's recipient count is persisted on the row in this same
+    # transaction (migration 300) and replayed verbatim by _mail_prior_send.
+    await db.execute(text(
+        "UPDATE mail_messages SET recipient_count = CAST(:n AS integer) WHERE id = :mid"
+    ), {"n": n, "mid": mid})
+    await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
+    await _log_admin_action_strict(
+        db, admin_steam_id=_mail_identity_to_write(rows, req.admin_steam_id), action="mail_broadcast",
+        target_steam_id=None,
+        details={"message_id": str(mid), "subject": subject[:MAIL_SUBJECT_MAX], "recipients": n,
+                 "seen_days": MAIL_BROADCAST_SEEN_DAYS})
+    await db.commit()
+    print(f"[MAIL] broadcast {mid} by {req.admin_steam_id} -> {n} recipient(s)")
+    return {"id": str(mid), "accepted": True, "recipients": n}
+
+
+@app.post("/api/v1/admin/mail/bulk-grants", tags=["Admin"])
+async def admin_mail_bulk_grant(req: _AdminMailBulkGrantReq, db: AsyncSession = Depends(get_db)):
+    """B-14: an organiser's per-message cap without admin status. Upsert;
+    9..MAIL_ADMIN_RECIPIENT_CAP recipients, 1..365 days; audited."""
+    sid = (req.steam_id or "").strip()
+    await _require_admin(db, req.admin_steam_id, "mail_bulk_grant", sid, req.hmac_signature)
+    if len(sid) != 17 or not sid.isdigit():
+        raise HTTPException(status_code=400, detail="steam_id_invalid")
+    n = int(req.max_recipients or 0)
+    if n <= MAIL_RECIPIENT_CAP or n > MAIL_ADMIN_RECIPIENT_CAP:
+        raise HTTPException(status_code=400, detail="max_recipients_invalid")
+    days = int(req.days or 0)
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="days_invalid")
+    # Two identities are written (the grantee on the row, the admin on
+    # granted_by and the audit row): both locked, both re-read, the admin
+    # grant re-proven under the lock (the lattice; the i18n grant route's
+    # exact shape). The grantee must be live (an unknown or deleted grantee
+    # is a 404: a cap is live authority); the admin's identity is written as
+    # re-read — the admin's players row is not required (review r2).
+    rows = await _mail_lock_admin(db, req.admin_steam_id, sid, missing={sid: (404, "player_unknown")})
+    actor_w = _mail_identity_to_write(rows, req.admin_steam_id)
+    expires = (await db.execute(text(
+        "INSERT INTO mail_bulk_grants (steam_id, max_recipients, expires_at, granted_by)"
+        " VALUES (:sid, :n, NOW() + make_interval(days => CAST(:d AS integer)), :adm)"
+        " ON CONFLICT (steam_id) DO UPDATE"
+        "   SET max_recipients = EXCLUDED.max_recipients, expires_at = EXCLUDED.expires_at,"
+        "       granted_by = EXCLUDED.granted_by, granted_at = NOW()"
+        " RETURNING expires_at"
+    ), {"sid": sid, "n": n, "d": days, "adm": actor_w[:20]})).scalar()
+    await _log_admin_action_strict(
+        db, admin_steam_id=actor_w, action="mail_bulk_grant", target_steam_id=sid,
+        details={"max_recipients": n, "days": days})
+    await db.commit()
+    return {"status": "ok", "steam_id": sid, "max_recipients": n, "expires_at": _mail_iso(expires)}
+
+
+@app.delete("/api/v1/admin/mail/bulk-grants/{steam_id}", tags=["Admin"])
+async def admin_mail_bulk_grant_revoke(
+    steam_id: str,
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    sid = (steam_id or "").strip()
+    await _require_admin(db, admin_steam_id, "mail_bulk_grant_revoke", sid, hmac_signature)
+    # Both identities the audit row carries are locked and re-read (review
+    # r2): the grantee is `optional` so a revoke completes against an account
+    # deleted while this transaction waited — the grant row went with that
+    # deletion, and the audit row is written with the tombstone the re-read
+    # returned, never with the id this request was addressed to. A grantee
+    # with no row at all that was never a player is a 404, the grant
+    # route's own answer: no grant can exist for it. One with no row that
+    # the deletion ledger knows (scrubbed before this lookup) is refused by
+    # the lattice itself, 403 account_deleted, before any audit row (review r3).
+    rows = await _mail_lock_admin(db, admin_steam_id, sid, optional={sid})
+    if rows.get(sid) is None:
+        raise HTTPException(status_code=404, detail="player_unknown")
+    actor_w = _mail_identity_to_write(rows, admin_steam_id)
+    target_w = _mail_identity_to_write(rows, sid)
+    gone = (await db.execute(text(
+        "DELETE FROM mail_bulk_grants WHERE steam_id = :sid RETURNING 1"
+    ), {"sid": target_w})).first()
+    await _log_admin_action_strict(
+        db, admin_steam_id=actor_w, action="mail_bulk_grant_revoke", target_steam_id=target_w,
+        details={"revoked": gone is not None})
+    await db.commit()
+    return {"status": "ok", "steam_id": sid, "revoked": gone is not None}
+
+
+async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int]:
+    """The janitor's mail arm (called hourly from queue_cleanup_loop, so
+    every statement here is in the boot-time EXPLAIN inventory). Policy:
+    read mail older than MAIL_RETENTION_DAYS leaves the inbox (its envelope
+    is soft-expired, which keeps the sender's addressee list intact until
+    the message itself goes); a message is purged once NO delivered envelope
+    is still live AND (the sender deleted it OR it is older than
+    MAIL_RETENTION_DAYS). Unread mail is therefore kept: a live unread
+    envelope blocks the purge. Bounded batches; the cascade removes the
+    envelopes, in_reply_to and moderation_cases.message_id go NULL and the
+    case keeps its snapshot. The censor-hit ledger is pruned after
+    MAIL_CENSOR_HITS_KEEP_DAYS."""
+    expired = (await db.execute(text(
+        "UPDATE mail_recipients SET deleted_at = NOW()"
+        " WHERE (message_id, recipient_id) IN ("
+        "   SELECT r.message_id, r.recipient_id"
+        "     FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id"
+        "    WHERE r.read_at IS NOT NULL AND r.deleted_at IS NULL"
+        "      AND m.created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+        "    LIMIT 2000)"
+        " RETURNING 1"
+    ), {"days": MAIL_RETENTION_DAYS})).fetchall()
+    purged = (await db.execute(text(
+        "DELETE FROM mail_messages"
+        " WHERE id IN ("
+        "   SELECT m.id FROM mail_messages m"
+        "    WHERE NOT EXISTS (SELECT 1 FROM mail_recipients r"
+        "                       WHERE r.message_id = m.id AND r.delivery = 'delivered'"
+        "                         AND r.deleted_at IS NULL)"
+        "      AND (m.deleted_by_sender_at IS NOT NULL"
+        "           OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
+        "    LIMIT 500)"
+        " RETURNING 1"
+    ), {"days": MAIL_RETENTION_DAYS})).fetchall()
+    hits = (await db.execute(text(
+        "DELETE FROM mail_censor_hits"
+        " WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+        " RETURNING 1"
+    ), {"days": MAIL_CENSOR_HITS_KEEP_DAYS})).fetchall()
+    return len(expired), len(purged), len(hits)

@@ -74,11 +74,13 @@ namespace CompetitiveRounds
         private static readonly long[] _hist = new long[HistEdgesMs.Length + 1];
 
         // Per-frame component ledger (r2 MEDIUM 8): named durations measured
-        // INSIDE the frame (music decode, our network callbacks). A component
-        // that owns ≥60% of the frame's wall gap is a cause tag; context flags
-        // (gc/load/f5/spec) are prefixed "ctx:" because they are observations,
-        // not measured owners.
-        private static double _compDecodeMs, _compNetCbMs;
+        // INSIDE the frame (the music engine's streamed clip open, our network
+        // callbacks). A component that owns ≥60% of the frame's wall gap is a
+        // cause tag; context flags (gc/load/f5/spec) are prefixed "ctx:"
+        // because they are observations, not measured owners. The former
+        // "decode" slot is gone with the decode (Sept 7 design v2 §2.3.1): a
+        // streamed open is a 2-5 ms handle and is tagged under its own name.
+        private static double _compMusicOpenMs, _compNetCbMs;
 
         // Window ring (bundle-only): 64 most recent 1 s windows.
         private const int WINDOW_RING = 64;
@@ -88,13 +90,54 @@ namespace CompetitiveRounds
             public long CloseTick;   // r6 LOW 5: monotonic close time — the HUD's recency test; UtcMs is for cross-system correlation only
             public int Writes, Unchanged, Attempted, Accepted, Resent, Discarded, Crc, Fragment, QOut, QIn, Hitch50, Hitch200, WorstMs;
             public string WorstTags;
+            // Release B §4.3 (lag notices): this seat's Photon ping at close
+            // (0 = unavailable), the opponent's self-reported RTT if fresh at
+            // close (0 = not fresh / not a plain 1v1), and the count of
+            // accepted batches on confirmed remote Player views whose DELIVERY
+            // EXCESS (arrival gap minus the sender-stamped gap) reached 300 ms
+            // during the window (NoteLateDelivery, design-review r3 M6; in a
+            // 1v1 that is the opponent's stream). Never the raw arrival gap:
+            // an UnreliableOnChange sender that had nothing new to send makes
+            // a large arrival gap with a matching sender gap and no excess.
+            // Bundle + notices only, never a report field.
+            public int OwnPing, PeerRtt, ObsLate300;
+            // r6 M3: the eligible-opponent key this window was captured under —
+            // actor number + advertised id of the only other fighter — set
+            // only when the seat passed LagNotices.SeatEligible against the
+            // SAME opponent at the window's open and close AND every late
+            // sample in the window came from that actor. 0/null otherwise:
+            // the evaluator never consumes such a window.
+            public int OppActor; public string OppId;
         }
         private static readonly Window[] _ring = new Window[WINDOW_RING];
         private static int _ringCount, _ringHead, _windowSeq;
         private static long _wWrites, _wUnchanged, _wAttempted, _wAccepted, _wHitch50, _wHitch200;
         private static int _wWorstMs, _wQOut, _wQIn;
         private static int _wResent, _wDiscarded, _wCrc, _wFragment;
+        private static int _wObsLate300;
         private static string _wWorstTags = "";
+        // r6 M3: the eligible key sampled when the current window OPENED (the
+        // previous close's sample, or the first TickFrame of the game) and
+        // whether a late sample arrived from any other actor since.
+        private static int _wOpenActor;
+        private static string _wOpenId;
+        private static bool _wLateForeign;
+        // r7 M3: latched the moment any frame INSIDE the current window
+        // sampled an eligible key different from the one it opened under —
+        // eligibility lost, the opponent replaced, a third fighter present.
+        // Sampling only at the two boundaries left a window keyed when the
+        // change happened and reverted between them.
+        private static bool _wKeyBroken;
+        // r8 M4: RoomActors.RosterGeneration as it stood when this window
+        // opened. The key can revert between two frames; this cannot.
+        private static int _wOpenRosterGen;
+
+        /// <summary>The closed-window facts LagNotices reads (§4.3).</summary>
+        internal struct WindowFacts
+        {
+            public int Seq, WorstMs, OwnPing, PeerRtt, ObsLate300;
+            public int OppActor; public string OppId;   // r6 M3: the key the window was captured under; 0 = none
+        }
 
         // Local Player view id — lazily acquired from the first local-Player
         // OnSerializeWrite (v6 §1.3), cleared on room change. Integer only:
@@ -140,6 +183,7 @@ namespace CompetitiveRounds
             try { NetworkReplicaDiagnostics.ResetHookCost(); } catch { }
             _lastUpdateTick = System.Diagnostics.Stopwatch.GetTimestamp();
             _lastFrameWall = 0;
+            try { LagNotices.OnGameStarted(); } catch { }   // Release B §4: fresh states, no carried cooldown
         }
 
         internal static bool GameOpen => _gameOpen;
@@ -150,6 +194,7 @@ namespace CompetitiveRounds
             CloseWindow(force: true);
             SamplePeerDeltas();
             _gameOpen = false;
+            try { LagNotices.OnGameEnded(); } catch { }   // Release B §4: shown states exit here
             try { NetworkReplicaDiagnostics.DrainFrameHookTicks(); } catch { }   // r3 MEDIUM 12: clear at the end edge too
             if (!_spectatorGame)
             {
@@ -177,16 +222,98 @@ namespace CompetitiveRounds
             _ringCount = 0; _ringHead = 0; _windowSeq = 0;
             Array.Clear(_hist, 0, _hist.Length);
             _tickTicks = 0; _tickCalls = 0;
-            _compDecodeMs = 0; _compNetCbMs = 0;
+            _compMusicOpenMs = 0; _compNetCbMs = 0;
             if (!keepFrozen) { _frozenReportFields = null; }
             ResetWindowAccumulators();
+            _wOpenActor = 0; _wOpenId = null;   // r6 M3: the next game's first window samples its key when TickFrame opens it
+            _wOpenRosterGen = RoomActors.RosterGeneration;
         }
 
         private static void ResetWindowAccumulators()
         {
             _wWrites = _wUnchanged = _wAttempted = _wAccepted = _wHitch50 = _wHitch200 = 0;
             _wWorstMs = 0; _wQOut = _wQIn = 0; _wResent = _wDiscarded = _wCrc = _wFragment = 0;
+            _wObsLate300 = 0;
+            _wLateForeign = false;
+            _wKeyBroken = false;
             _wWorstTags = "";
+        }
+
+        /// <summary>Release B §4.3 / r3 M6: one accepted batch on a confirmed
+        /// remote Player view whose delivery excess reached
+        /// LagNotices.LATE_EXCESS_MS, counted into the current window. Called
+        /// from NetworkReplicaDiagnostics' fighter-path commit, once per
+        /// accepted sample, with the batch's sender. Fighter games only — a
+        /// spectator seat's observations are not this seat's opponent stream.
+        /// r6 M3: the count stays per-window for the bundle (every remote
+        /// fighter's stream), but a late sample from any actor other than the
+        /// one the window opened under leaves the window UNKEYED at close, so
+        /// the evaluator never reads it.</summary>
+        internal static void NoteLateDelivery(int actorNumber)
+        {
+            if (!_gameOpen || _spectatorGame) return;
+            if (_wObsLate300 < int.MaxValue) _wObsLate300++;
+            if (actorNumber <= 0 || _wOpenActor == 0 || actorNumber != _wOpenActor) _wLateForeign = true;
+        }
+
+        /// <summary>r6 M3: the eligible-opponent key right now — the actor
+        /// number and advertised id (u_id; "" when absent) of the ONLY other
+        /// fighter — when this seat passes LagNotices.SeatEligible (plain 1v1
+        /// fighter seat, not a spectator, not the broadcast identity); 0/null
+        /// otherwise. The same predicate as the evaluator's own gate, so a
+        /// keyed window and an eligible tick cannot disagree. r7 M3: called
+        /// every frame as well as at the two boundaries, so it reads the
+        /// roster through RoomActors' per-frame fighter cache instead of
+        /// building a fresh list on every call.</summary>
+        private static void SampleEligibleKey(out int actor, out string id)
+        {
+            actor = 0; id = null;
+            try
+            {
+                if (_spectatorGame || !LagNotices.SeatEligible()) return;
+                var all = RoomActors.ActiveFighters();
+                if (all == null) return;
+                int other = -1;
+                for (int i = 0; i < all.Length; i++)
+                {
+                    if (all[i] == null || all[i].IsLocal) continue;
+                    if (other >= 0) return;   // more than one other fighter: no key
+                    other = i;
+                }
+                if (other < 0) return;
+                int a = all[other].ActorNumber;
+                if (a <= 0) return;
+                actor = a;
+                id = RoomActors.SteamIdOf(all[other]);
+            }
+            catch { actor = 0; id = null; }
+        }
+
+        /// <summary>r7 M3: one in-window eligibility sample, taken every frame
+        /// from TickFrame. Eligibility is LATCHED, not re-derived at the
+        /// boundary: any frame whose key differs from the one the window
+        /// opened under marks that whole window unusable, however briefly the
+        /// difference lasts, and the latch clears only when the next window
+        /// opens.</summary>
+        private static void NoteKeySampleInWindow()
+        {
+            if (_wKeyBroken) return;
+            // r8 L4: with lag notices off nothing reads a window's key, and
+            // this runs on every eligible 1v1 frame. Mark the window unkeyed
+            // rather than leaving it to be read as one opponent's whole span
+            // on evidence nobody gathered.
+            if (!LagNotices.WindowKeyingWanted()) { _wKeyBroken = true; return; }
+            // r8 M4: the generation FIRST. A per-frame comparison of the key
+            // can only see differences that are still standing when the frame
+            // runs, and one PUN Dispatch can drain an enter, a late delivery
+            // and a leave between two frames — after which the key sampled on
+            // either side is identical and the window would be admitted as one
+            // opponent's whole span. The counter does not revert.
+            if (RoomActors.RosterGeneration != _wOpenRosterGen) { _wKeyBroken = true; return; }
+            int actor; string id;
+            SampleEligibleKey(out actor, out id);
+            if (actor != _wOpenActor || !string.Equals(id ?? "", _wOpenId ?? "", StringComparison.Ordinal))
+                _wKeyBroken = true;
         }
 
         // ── per-frame (from GameStateWatcher.TickFrame) ──────────────────
@@ -207,9 +334,11 @@ namespace CompetitiveRounds
             catch { return 0; }
         }
 
-        /// <summary>A measured component of this frame (music decode ms, …).
-        /// Called from inside the frame; consumed at the next TickFrame.</summary>
-        internal static void NoteDecodeMs(double ms) { _compDecodeMs += ms; }
+        /// <summary>A measured component of this frame: the music engine's
+        /// streamed clip open (GetContent on a streamAudio handler — a handle,
+        /// not a decode). Called from inside the frame; consumed at the next
+        /// TickFrame; tagged "mopen" when it owns the frame.</summary>
+        internal static void NoteMusicOpenMs(double ms) { _compMusicOpenMs += ms; }
 
         /// <summary>battle = the FIGHTER'S vanilla battleOngoing; a spectator
         /// seat uses the observer's validated battle gate instead. Spectator
@@ -261,9 +390,25 @@ namespace CompetitiveRounds
                     WorstFrameMs = frameMs;
                     WorstFrameTags = _wWorstTags.Length > 0 ? _wWorstTags : BuildTags(frameMs);
                 }
-                _compDecodeMs = 0;
-                if (_windowStartRt < 0f) _windowStartRt = rt;
-                else if (rt - _windowStartRt >= 1f) CloseWindow(force: false);
+                _compMusicOpenMs = 0;
+                if (_windowStartRt < 0f)
+                {
+                    // r6 M3: the game's first window opens under the key sampled now.
+                    _windowStartRt = rt;
+                    SampleEligibleKey(out _wOpenActor, out _wOpenId);
+                    _wOpenRosterGen = RoomActors.RosterGeneration;
+                    _wLateForeign = false;
+                    _wKeyBroken = false;
+                }
+                else
+                {
+                    // r7 M3: this frame is INSIDE the open window, so the key
+                    // is sampled here, where a change happens, and latched —
+                    // an opponent who arrives and leaves between two
+                    // boundaries no longer leaves the window keyed.
+                    NoteKeySampleInWindow();
+                    if (rt - _windowStartRt >= 1f) CloseWindow(force: false);
+                }
             }
             catch { }
             finally { _tickTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0; _tickCalls++; }
@@ -278,7 +423,7 @@ namespace CompetitiveRounds
         {
             var sb = new StringBuilder(40);
             double threshold = _lastFrameWall > 0 ? _lastFrameWall * 0.6 : frameMs * 0.6;
-            if (_compDecodeMs >= threshold && _compDecodeMs > 0) sb.Append("decode");
+            if (_compMusicOpenMs >= threshold && _compMusicOpenMs > 0) sb.Append("mopen");
             if (_compNetCbMs >= threshold && _compNetCbMs > 0) { if (sb.Length > 0) sb.Append('|'); sb.Append("netcb"); }
             if (sb.Length == 0) sb.Append("unattributed");
             sb.Append(_tBattle ? "|ctx:battle" : _tPick ? "|ctx:pick" : "|ctx:between");
@@ -296,8 +441,47 @@ namespace CompetitiveRounds
             SamplePeerDeltas();
             int serverTs = 0;
             try { serverTs = PhotonNetwork.ServerTimestamp; } catch { }
+            // Release B §4.3: sampled at close. Same accessor and 1..3000 bounds
+            // as GameStateWatcher.ReplicaAgeEstimateMs; 0 = unavailable. The
+            // peer value is the opponent's self-report, fresh within 10 s, only
+            // in a plain 1v1 (TryGetPeerRttFresh) — 0 otherwise.
+            int ownPing = 0, peerRtt = 0;
+            try
+            {
+                if (!PhotonNetwork.OfflineMode && PhotonNetwork.InRoom)
+                {
+                    long p = PhotonNetwork.GetPing();
+                    if (p >= 1 && p <= 3000) ownPing = (int)p;
+                }
+            }
+            catch { }
+            try { int r; if (!_spectatorGame && GameStateWatcher.TryGetPeerRttFresh(out r)) peerRtt = r; } catch { }
+            // r6 M3 / r7 M3 / r8 M4: the window is keyed only when it was one
+            // eligible opponent's window for its WHOLE span — the key sampled
+            // at its open, the key sampled at its close, every per-frame sample
+            // in between, and no roster or identity change AT ALL since it
+            // opened (all three latched in _wKeyBroken), and no late batch from
+            // another actor. The generation is what makes "whole span" true
+            // rather than "true at the moments we looked". An unkeyed window is
+            // never consumed by the evaluator.
+            //
+            // BOUND ON THE HARNESS, corrected at r9: LagNotices.WindowKeyed
+            // holds the open/close/late-batch half of the rule and the in-game
+            // self-test drives that half with the code that runs here. The
+            // GENERATION half does not live in WindowKeyed — it is the three
+            // latch sites and the line below, which fold a roster or identity
+            // change into _wKeyBroken before WindowKeyed ever sees it. No
+            // self-test case reaches those, so deleting them leaves every case
+            // green. test_h2h_pairing_and_window_latch.py asserts they exist
+            // instead; that is a source-shape guard, not an executed one.
+            int closeActor; string closeId;
+            SampleEligibleKey(out closeActor, out closeId);
+            if (RoomActors.RosterGeneration != _wOpenRosterGen) _wKeyBroken = true;
+            bool keyed = LagNotices.WindowKeyed(_wOpenActor, _wOpenId, closeActor, closeId, _wLateForeign, _wKeyBroken);
             var w = new Window
             {
+                OwnPing = ownPing, PeerRtt = peerRtt, ObsLate300 = _wObsLate300,
+                OppActor = keyed ? closeActor : 0, OppId = keyed ? closeId : null,
                 Seq = ++_windowSeq,
                 UtcMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds,
                 CloseTick = System.Diagnostics.Stopwatch.GetTimestamp(),
@@ -313,7 +497,30 @@ namespace CompetitiveRounds
             _ringHead = (_ringHead + 1) % WINDOW_RING;
             if (_ringCount < WINDOW_RING) _ringCount++;
             ResetWindowAccumulators();
+            _wOpenActor = closeActor; _wOpenId = closeId;   // r6 M3: the next window opens under the key sampled at this boundary
+            _wOpenRosterGen = RoomActors.RosterGeneration;  // r8 M4: and under the generation standing at it
             _windowStartRt = Time.realtimeSinceStartup;
+            // Release B §4.3: the ONLY tick of the lag-notice machine, after the
+            // window is in the ring — every input it reads is a CLOSED window.
+            // Never on the forced close (r3 M7(a)): OnMatchEnded is the only
+            // force caller — game over, room leave and disconnect all arrive
+            // there — and it ends the states right after (LagNotices.OnGameEnded).
+            if (LagNotices.WindowFeedsEvaluator(force, _gameOpen, _spectatorGame)) { try { LagNotices.OnWindowClosed(); } catch { } }
+        }
+
+        /// <summary>Release B §4.3: the newest CLOSED windows, newest first,
+        /// for LagNotices — never the partial one. Returns the count filled
+        /// (at most buf.Length).</summary>
+        internal static int RecentWindows(WindowFacts[] buf)
+        {
+            int n = 0;
+            if (buf == null) return 0;
+            for (int i = 1; i <= _ringCount && n < buf.Length; i++)
+            {
+                var w = _ring[(_ringHead - i + WINDOW_RING) % WINDOW_RING];
+                buf[n++] = new WindowFacts { Seq = w.Seq, WorstMs = w.WorstMs, OwnPing = w.OwnPing, PeerRtt = w.PeerRtt, ObsLate300 = w.ObsLate300, OppActor = w.OppActor, OppId = w.OppId };
+            }
+            return n;
         }
 
         /// <summary>HUD (r1 MEDIUM 16 / r2 LOW 16 / r3 LOW 14): the windows that
@@ -599,7 +806,7 @@ namespace CompetitiveRounds
             Plugin.Log?.LogInfo(sb.ToString());
             // Window ring: newest last, one line, bounded.
             var wl = new StringBuilder(2048);
-            wl.Append("[NET-SEAT-WINDOWS] n=").Append(_ringCount).Append(" seq@utcMs@serverTs:w/u/att/acc/res/dis/crc/frag/qoMax/qiMax/h50/h200/worst(tags) ");
+            wl.Append("[NET-SEAT-WINDOWS] n=").Append(_ringCount).Append(" seq@utcMs@serverTs:w/u/att/acc/res/dis/crc/frag/qoMax/qiMax/h50/h200/worst(tags)/ping/peerRtt/late300 ");
             int start = (_ringHead - _ringCount + WINDOW_RING) % WINDOW_RING;
             for (int i = 0; i < _ringCount; i++)
             {
@@ -609,7 +816,8 @@ namespace CompetitiveRounds
                   .Append(w.Writes).Append('/').Append(w.Unchanged).Append('/').Append(w.Attempted).Append('/').Append(w.Accepted)
                   .Append('/').Append(w.Resent).Append('/').Append(w.Discarded).Append('/').Append(w.Crc).Append('/').Append(w.Fragment)
                   .Append('/').Append(w.QOut).Append('/').Append(w.QIn).Append('/').Append(w.Hitch50).Append('/').Append(w.Hitch200).Append('/').Append(w.WorstMs)
-                  .Append('(').Append(w.WorstTags ?? "").Append(')');
+                  .Append('(').Append(w.WorstTags ?? "").Append(')')
+                  .Append('/').Append(w.OwnPing).Append('/').Append(w.PeerRtt).Append('/').Append(w.ObsLate300);
             }
             Plugin.Log?.LogInfo(wl.ToString());
             // Self-profiler: this class's per-frame cost + the observer hooks'.

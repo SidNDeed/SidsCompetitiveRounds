@@ -1705,6 +1705,16 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         )
         db.add(series)
         m.series_id = series.id
+        # The server has just put this pair into this sitting, and it says so
+        # here for the same reason the queue, match-report and preflight paths
+        # do: the leave-report rule asks which sitting the server last put a
+        # pair into, and a series born without that record is one neither arm
+        # of the rule will accept a report against. Flushed first so the grant's
+        # foreign key has its series row to point at. Deferred import per this
+        # file's convention.
+        from main import _publish_pair_sitting  # noqa: PLC0415 — file convention
+        await db.flush()
+        await _publish_pair_sitting(db, series)
         # Server-issued Photon room name. Both clients pull this from
         # /api/v1/tournaments/current rather than deriving it from match.id
         # locally — kills the dual-derivation race that could land them

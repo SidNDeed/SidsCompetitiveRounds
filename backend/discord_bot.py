@@ -28,6 +28,11 @@ except Exception as _mpl_ex:
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
 LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
+# Item d: the api hides players not seen for LEADERBOARD_ACTIVE_DAYS days
+# (default 90) unless a fetch passes include_inactive=true. Display-only
+# mirror of that server setting for footer/label text -- the filtering itself
+# is server-side, so a mismatch here can only mislabel, never mis-filter.
+LB_ACTIVE_DAYS = int(os.getenv("LEADERBOARD_ACTIVE_DAYS", "90"))
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
@@ -815,7 +820,8 @@ async def _faq_elo_delta(message):
             f"{pb['display_name']}'s side: win **+{pb['win_delta']:.1f}** / loss **{pb['loss_delta']:.1f}**. "
             f"Win probability for {pa['display_name']}: **{prob * 100:.0f}%**.\n"
             f"*(Glicko-2 — ratings move per completed BO3 series, and swings shrink "
-            f"as your rating settles.)*"
+            f"as your rating settles.)*\n"
+            f"Also `/elo 2v2` and `/elo ffa` preview team and FFA games."
 )
 
 
@@ -4213,7 +4219,11 @@ def _twitch_out_format(entry: dict) -> str:
     # abbreviations the client deliberately retired, and this string is what
     # the Twitch audience reads (owner report, Aug 30).
     tag = {"ingame": "[Game]", "discord": "[Discord]", "youtube": "[YouTube]"}.get(src, "[?]")
-    name = str(entry.get("display_name") or "player")[:40]
+    # Sept 6 (overlay item j review): the broadcast overlay rebuilds this line
+    # into "<name>: <msg>" by splitting at the FIRST ": ", so a colon inside a
+    # name would move the boundary. Names carry U+A789 (modifier letter
+    # colon) instead; the overlay applies the same substitution before pairing.
+    name = str(entry.get("display_name") or "player")[:40].replace(":", "\ua789")
     msg = str(entry.get("message") or "")
     msg = msg.replace("\r", " ").replace("\n", " ").strip()
     # The fixed prefix guarantees user text never LEADS the message, so a
@@ -4665,6 +4675,17 @@ async def get_lb_position(steam_id):
     if not data or not data.get("entries"): return "?"
     for e in data["entries"]:
         if e["steam_id"] == steam_id: return str(e["rank"])
+    # Item d: the default board hides players not seen for LB_ACTIVE_DAYS days.
+    # Look once more with everyone included so a dormant player reads as
+    # "#N (inactive 90d+)" rather than as unranked; "Unranked" is kept only for
+    # a player absent from BOTH lists. The api's limit cap (500) is used here
+    # because the unfiltered list is the longer one.
+    data = await api_get("/leaderboard?limit=500&min_matches=1&include_inactive=true")
+    for e in (data or {}).get("entries") or []:
+        if e["steam_id"] == steam_id:
+            if e.get("inactive"):
+                return f"{e['rank']} (inactive {LB_ACTIVE_DAYS}d+)"
+            return str(e["rank"])
     return "Unranked"
 
 
@@ -4858,9 +4879,17 @@ def _split_lb_descriptions(lines, first_header=""):
     return chunks
 
 
-@bot.hybrid_command(name="lb", description="Show the ranked leaderboard (50 per page)")
-@app_commands.describe(page="Page number (default: 1)")
-async def cmd_leaderboard(ctx, page: int = 1):
+@bot.hybrid_command(name="lb", description="Show the ranked leaderboard (50 per page); add 'all' to include inactive players")
+@app_commands.describe(page=f"Page number (default: 1), or 'all' to include players inactive {LB_ACTIVE_DAYS}+ days",
+                       scope=f"'all' to include players inactive {LB_ACTIVE_DAYS}+ days (e.g. /lb 2 all)")
+async def cmd_leaderboard(ctx, page: str = "1", scope: str = ""):
+    # Item d: `all` in EITHER argument lists everyone, inactive players
+    # included (/lb all, /lb 2 all, /lb all 2). A page that is neither a
+    # number nor `all` falls back to 1. `page` is a str now so the word can
+    # travel in the first slot too.
+    _args = [str(page or "").strip().lower(), str(scope or "").strip().lower()]
+    include_inactive = "all" in _args
+    page = next((int(a) for a in _args if a.isdigit()), 1)
     # 50/page (Sid, v1.32.1): 100 real rows (rank + emoji + bold names +
     # ratings + W/L) blew the splitter's 5700-char whole-message budget around
     # row ~66 and the tail truncated — the "cuts off at #67" report. 50 rows
@@ -4869,7 +4898,8 @@ async def cmd_leaderboard(ctx, page: int = 1):
     per_page = 50  # match the #scr-leaderboard channel board (LB_PAGE_SIZE)
     page = max(1, page)
     offset = (page - 1) * per_page
-    data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1")
+    data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1"
+                         + ("&include_inactive=true" if include_inactive else ""))
     if not data or not data.get("entries"): await ctx.send("❌ No data."); return
     # Rank is derived from offset + position, NOT from entry["rank"] — the
     # server double-adds offset to an already-absolute ROW_NUMBER (see
@@ -4890,7 +4920,9 @@ async def cmd_leaderboard(ctx, page: int = 1):
         )
         if ci == len(descs) - 1:
             em.set_footer(text=f"Page {page}/{total_pages} • {total} ranked players"
-                          + (f" • /lb {page+1} for next page" if page < total_pages else ""))
+                          + (" • incl. inactive" if include_inactive else "")
+                          + (f" • /lb {page+1}{' all' if include_inactive else ''} for next page"
+                             if page < total_pages else ""))
         embeds.append(em)
     await ctx.send(embeds=embeds)
 
@@ -4912,34 +4944,51 @@ _COMPARE_COLORS = ["#5865F2", "#ED4245", "#57F287", "#FEE75C"]  # blurple/red/gr
 _mpl_render_lock = threading.Lock()
 
 
-def _render_rating_history_png(series):
+def _render_rating_history_png(series, axis="calendar", x_label=None):
     """Render the overlay rating-history line chart to a PNG BytesIO.
-    series = [{"name": str, "points": [(datetime, rating), ...]}], each list
-    oldest-first. Runs inside asyncio.to_thread — matplotlib is CPU-bound and
-    must never block the event loop (heartbeat/WS would starve)."""
+    series = [{"name": str, "points": [(x, rating), ...]}], each list
+    oldest-first and already transformed by _rating_axis_points for `axis`
+    (x is a datetime on the calendar axis, a number otherwise). Runs inside
+    asyncio.to_thread — matplotlib is CPU-bound and must never block the
+    event loop (heartbeat/WS would starve)."""
     with _mpl_render_lock:
-        return _render_rating_history_png_locked(series)
+        return _render_rating_history_png_locked(series, axis, x_label)
 
 
-def _render_rating_history_png_locked(series):
+def _render_rating_history_png_locked(series, axis="calendar", x_label=None):
     bg = "#2b2d31"  # Discord embed grey — the chart reads as part of the embed
     fig, ax = plt.subplots(figsize=(10, 5.5), dpi=110)
     try:
         fig.patch.set_facecolor(bg)
         ax.set_facecolor(bg)
+        # The points already carry the step duplication (_rating_axis_points),
+        # so a plain line draws the step. Markers only on the updates axis: on
+        # a step polyline every update is two vertices at the same x, and a
+        # marker per vertex would draw doubled dots.
         for i, sr in enumerate(series):
             xs = [p[0] for p in sr["points"]]
             ys = [p[1] for p in sr["points"]]
             ax.plot(xs, ys, color=_COMPARE_COLORS[i % len(_COMPARE_COLORS)],
-                    linewidth=2.2, marker="o", markersize=2.5, label=str(sr["name"])[:24])
+                    linewidth=2.2, marker="o" if axis == "updates" else None,
+                    markersize=2.5, label=str(sr["name"])[:24])
         ax.set_title("Ranked Rating History", color="#ffffff", fontsize=14, pad=12)
         ax.tick_params(colors="#b5bac1", labelsize=9)
         for spine in ax.spines.values():
             spine.set_color("#4a4d55")
         ax.grid(True, color="#4a4d55", linewidth=0.6, alpha=0.5)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-        fig.autofmt_xdate()
-        ax.legend(facecolor="#232428", edgecolor="#4a4d55", labelcolor="#dbdee1", fontsize=9)
+        if axis == "calendar":
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+            fig.autofmt_xdate()
+        elif axis == "updates":
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        # Axis title + legend title both name the active axis (Sept 6 item f).
+        ax.set_xlabel(x_label or _GRAPH_AXIS_LABELS.get(axis, ""), color="#b5bac1", fontsize=9)
+        legend = ax.legend(facecolor="#232428", edgecolor="#4a4d55", labelcolor="#dbdee1", fontsize=9,
+                           title=f"x axis: {str(axis).replace('_', ' ')}", title_fontsize=8)
+        try:
+            legend.get_title().set_color("#b5bac1")
+        except Exception:
+            pass
         fig.tight_layout()
         buf = io.BytesIO()
         fig.savefig(buf, format="png", facecolor=bg)
@@ -4949,13 +4998,19 @@ def _render_rating_history_png_locked(series):
         plt.close(fig)
 
 
+# Sept 6 (item f): the server serves the NEWEST `limit` rating updates (the
+# window used to be the oldest 500). Named once so the embed footer that
+# describes the window cannot drift from the request that fetches it.
+RATING_HISTORY_FETCH = 500
+
+
 async def _fetch_rating_history(steam_id):
     """History points for one player, newest endpoint first: the lean
     /rating-history endpoint (v1.32 server contract), falling back to the
     heavy /players/{steam} recent_rating_history when it isn't there yet.
     Returns (history_list, stats_or_none) — stats is reused for rating/peak."""
     hist = None
-    lean = await api_get(f"/players/{steam_id}/rating-history?limit=500")
+    lean = await api_get(f"/players/{steam_id}/rating-history?limit={RATING_HISTORY_FETCH}")
     if isinstance(lean, dict):
         hist = lean.get("history")
     stats = await api_get(f"/players/{steam_id}")
@@ -4965,23 +5020,104 @@ async def _fetch_rating_history(steam_id):
 
 
 def _history_to_points(hist):
-    """[{rating, rd, date}] -> sorted [(datetime, rating)], with the client's
-    synthetic 1500 baseline prepended one day before the first snapshot
-    (ApiClient.cs:3187 convention) so lines start from the shared origin."""
+    """[{rating, rd, date | period_end[, rating_before]}] -> sorted
+    [(datetime, rating, rating_before_or_None)], oldest first.
+
+    Sept 6 (item f, design F-L): NO synthetic 1500 baseline any more — the
+    first drawn point is the first fetched row (its pre-update rating when a
+    server ever exposes one, else its rating). rating_history rows carry no
+    pre-update value today, so the third element is None; _rating_axis_points
+    handles both. `period_end` is the column's own name (Sept 6 server),
+    `date` the v1.26.8 alias older servers still emit."""
     pts = []
-    for h in hist:
+    for h in hist or []:
         if not isinstance(h, dict):
             continue
         try:
-            d = datetime.fromisoformat(str(h.get("date")).replace("Z", "+00:00"))
+            raw = h.get("period_end") or h.get("date")
+            d = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             r = float(h.get("rating"))
         except Exception:
             continue
-        pts.append((d, r))
+        before = h.get("rating_before")
+        try:
+            before = float(before) if before is not None else None
+        except Exception:
+            before = None
+        pts.append((d, r, before))
     pts.sort(key=lambda x: x[0])
-    if pts and pts[0][1] != 1500.0:
-        pts.insert(0, (pts[0][0] - timedelta(days=1), 1500.0))
     return pts
+
+
+_GraphAxis = Literal["calendar", "updates", "since_first"]
+
+# Axis captions for the elo chart. F-1 terminology: one rating_history row is
+# one completed ranked series, so the index axis is "rating updates" — never a
+# game count (the server keeps no game ordinal for it).
+_GRAPH_AXIS_LABELS = {
+    "calendar": "Date (step plot: a flat run is a gap in play, not a slope)",
+    "updates": "Rating updates (one per completed ranked series)",
+    "since_first": "Days since each player's first plotted rating update (step plot)",
+}
+
+
+def _rating_axis_points(series, axis):
+    """PURE axis transform for the /graph elo overlay (Sept 6 item f).
+
+    series: one list per player of (period_end, rating[, rating_before])
+    tuples, any order; axis: one of _GraphAxis. Returns (per_player_xy,
+    x_label): per_player_xy[i] is the polyline for series[i] as (x, y)
+    pairs, oldest first.
+
+    - F-1 axes: "calendar" x = period_end (datetime); "updates" x = 1-based
+      count of the rating update within the fetched window; "since_first"
+      x = fractional days since THAT player's first fetched row, so every
+      line starts at x = 0.
+    - F-2 step plots: on the two time axes the previous rating is repeated
+      at each new timestamp before the jump, so a gap in play draws as a
+      flat run, never as a slope invented between two updates. "updates"
+      stays a plain line through the points.
+    - F-L baseline: the first drawn point is the first row's pre-update
+      rating when the row carries one (held at that row's x, then the jump
+      to its rating; on the "updates" axis it sits at x = 0), else that
+      row's rating. Nothing else is prepended — no 1500.
+
+    Empty input yields an empty polyline; a single row yields one point."""
+    if axis not in _GRAPH_AXIS_LABELS:
+        raise ValueError(f"unknown graph axis: {axis!r}")
+    step = axis != "updates"
+    out = []
+    for pts in series or []:
+        rows = []
+        for p in pts or []:
+            if not p or len(p) < 2 or p[0] is None or p[1] is None:
+                continue
+            before = p[2] if len(p) > 2 else None
+            rows.append((p[0], float(p[1]), float(before) if before is not None else None))
+        rows.sort(key=lambda r: r[0])
+        xy = []
+        if not rows:
+            out.append(xy)
+            continue
+        t0 = rows[0][0]
+        prev = rows[0][2]            # the value held BEFORE the first update, when known
+        count = 0
+        if axis == "updates" and prev is not None:
+            xy.append((0, prev))
+        for t, r, _before in rows:
+            if axis == "calendar":
+                x = t
+            elif axis == "since_first":
+                x = (t - t0).total_seconds() / 86400.0
+            else:
+                count += 1
+                x = count
+            if step and prev is not None:
+                xy.append((x, prev))
+            xy.append((x, r))
+            prev = r
+        out.append(xy)
+    return out, _GRAPH_AXIS_LABELS[axis]
 
 
 # Wider palette for pie slices / >4-color needs (first 4 = _COMPARE_COLORS so
@@ -5421,14 +5557,22 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
                     description="Chart a Compare-tab metric for 2-4 players (elo history, hit/block %, top cards, ...)")
 @app_commands.describe(player1="First player", player2="Second player",
                        metric="Which Compare-tab metric to chart (default: elo history)",
-                       player3="Optional third player", player4="Optional fourth player")
+                       player3="Optional third player", player4="Optional fourth player",
+                       # Discord caps an option description at 100 characters (review f-H1):
+                       # the longer wording would fail the whole tree sync and drop the option.
+                       axis="Elo chart x axis: calendar (default), updates (per ranked series), since_first (days since first)")
 async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
                     metric: _GraphMetric = "elo",
-                    player3: discord.Member = None, player4: discord.Member = None):
+                    player3: discord.Member = None, player4: discord.Member = None,
+                    axis: _GraphAxis = "calendar"):
     """All the in-game Compare-tab graphs as PNGs: 'elo' = the rating-history
     overlay line chart (the old /compare); everything else maps to a
     /players/{steam} stats field (see _GRAPH_BAR_METRICS) plus the two
-    specials — 'top-cards' (per-player hbar) and 'region' (per-player pie)."""
+    specials — 'top-cards' (per-player hbar) and 'region' (per-player pie).
+
+    `axis` (Sept 6 item f) only affects 'elo'. It is the LAST parameter on
+    purpose: the prefix form `!graph @a @b elo @c @d` binds positionally, so
+    a new option anywhere earlier would swallow the third player."""
     if not _MPL_AVAILABLE:
         await ctx.send("❌ Chart rendering isn't available on this bot build — redeploy with matplotlib installed.")
         return
@@ -5459,26 +5603,33 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
             hist, stats = await _fetch_rating_history(sid)
             players.append({
                 "name": (stats or {}).get("display_name") or nm,
-                "points": _history_to_points(hist),
+                "rows": _history_to_points(hist),
                 "rating": (stats or {}).get("rating"),
                 "peak": (stats or {}).get("peak_rating"),
             })
-        drawable = [p for p in players if len(p["points"]) >= 2]
+        # Fewer than two rating updates is a dot, not a line: skipped, and said
+        # so in the embed field — the same rule the in-game graphs apply. (Until
+        # Sept 6 a synthetic 1500 point made a one-update player drawable;
+        # design F-L removed the invented baseline.)
+        drawable = [p for p in players if len(p["rows"]) >= 2]
         if not drawable:
-            await ctx.send("❌ None of those players have ranked rating history to plot yet.")
+            await ctx.send("❌ None of those players have two or more ranked rating updates to plot yet.")
             return
-        buf = await asyncio.to_thread(_render_rating_history_png, drawable)
+        per_player_xy, x_label = _rating_axis_points([p["rows"] for p in drawable], axis)
+        series = [{"name": p["name"], "points": pts} for p, pts in zip(drawable, per_player_xy)]
+        buf = await asyncio.to_thread(_render_rating_history_png, series, axis, x_label)
         file = discord.File(buf, filename="graph.png")
         embed = discord.Embed(title="Ranked Rating History", color=0x5865F2)
         for p in players:
             if p["rating"] is not None:
                 val = f"**{p['rating']:.0f}** Elo · Peak **{(p['peak'] or p['rating']):.0f}**"
-                if len(p["points"]) < 2:
-                    val += " · (no history — not plotted)"
+                if len(p["rows"]) < 2:
+                    val += " · (fewer than two rating updates — not plotted)"
             else:
                 val = "(no data)"
             embed.add_field(name=str(p["name"])[:256], value=val, inline=True)
         embed.set_image(url="attachment://graph.png")
+        embed.set_footer(text=(f"x axis: {x_label} • newest {RATING_HISTORY_FETCH} rating updates per player")[:2048])
         await ctx.send(embed=embed, file=file)
         return
 
@@ -5579,6 +5730,214 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
     if footnotes:
         embed.set_footer(text=(" • ".join(footnotes))[:2048])
     await ctx.send(embed=embed, file=file)
+
+
+# ── /elo — rating previews for 1v1, 2v2 and FFA (Sept 6 item k) ─────────────
+# One hybrid GROUP: `/elo 1v1|2v2|ffa` as slash commands, `!elo 1v1 @a @b`
+# etc. as prefix commands, and bare `!elo @a [@b]` falls through to the 1v1
+# preview (a slash group is never invoked bare, so that path is prefix-only).
+# 1v1 IS the FAQ calculator (_faq_elo_delta -- `/faq elo_delta` stays and now
+# points here); 2v2 and FFA call the two read-only preview endpoints that
+# shipped with this command. Slash commands cannot take variadic members, so
+# FFA has fixed optional slots p4..p10 (10 = the lobby cap) plus `me` to count
+# the caller in. Members are deduped by id; bots are dropped.
+
+_ELO_USAGE = ("`/elo 1v1 @player [@player2]` · `/elo 2v2 @teammate @opp1 @opp2 [you:@player]` · "
+              "`/elo ffa @p1 @p2 @p3 [@p4 … @p10] [me:true]`\n"
+              "Every account named must be linked (`/link`).")
+
+
+def _elo_members(*members):
+    """Drop Nones and bots, dedupe by id, keep first-seen order."""
+    out, seen = [], set()
+    for m in members:
+        if m is None or getattr(m, "bot", False) or m.id in seen:
+            continue
+        seen.add(m.id)
+        out.append(m)
+    return out
+
+
+async def _elo_links(members):
+    """Discord -> Steam for every member at once (independent lookups,
+    gathered -- the FAQ calculator's own pattern, so a slash interaction
+    reaches an answer or a friendly failure inside its window). Returns
+    (steam_id by member id, unlinked display names, api_error)."""
+    results = await asyncio.gather(*(_faq_discord_link(m.id) for m in members))
+    steam, unlinked, error = {}, [], False
+    for m, (state, link) in zip(members, results):
+        if state == "ok":
+            steam[m.id] = link["steam_id"]
+        elif state == "unlinked":
+            unlinked.append(m.display_name)
+        else:
+            error = True
+    return steam, unlinked, error
+
+
+async def _elo_refused(ctx, unlinked, error) -> bool:
+    """Send the standard refusal; True means the preview cannot run."""
+    if error:
+        await ctx.send("Couldn't reach the player database right now — try again in a minute.")
+        return True
+    if unlinked:
+        await ctx.send("❌ Not linked yet — they need `/link` first: "
+                       + ", ".join(f"**{n}**" for n in unlinked))
+        return True
+    return False
+
+
+def _elo_num(v, signed=True):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{f:+.1f}" if signed else f"{f:.0f}"
+
+
+async def _elo_1v1(ctx, members):
+    """[a] -> the caller vs a; [a, b] -> a vs b. The FAQ calculator's own code
+    path and markdown: the request dict is what cmd_faq hands it (mentions in
+    content order, the members supplied as its resolution cache)."""
+    if not members:
+        await ctx.send("Mention the opponent, e.g. `/elo 1v1 @player` — or two players to compare them.\n"
+                       + _ELO_USAGE)
+        return
+    pair = members[:2]
+    if len(pair) == 1 and pair[0].id == ctx.author.id:
+        await ctx.send("That's you — mention an opponent, or two players to compare them.")
+        return
+    await _maybe_defer(ctx)
+    request = {
+        "content": " ".join(f"<@{m.id}>" for m in pair),
+        "author": ctx.author,
+        "guild": ctx.guild,
+        "mentions": list(pair),
+    }
+    try:
+        answer = await _faq_elo_delta(request)
+    except Exception as ex:
+        print(f"[ELO] 1v1 preview failed: {ex}")
+        answer = None
+    if not answer:
+        await ctx.send("Couldn't compute that right now — try again in a minute.")
+        return
+    await ctx.send(embed=discord.Embed(title="📈 Elo preview — 1v1",
+                                       description=answer[:4096], color=0x57F287))
+
+
+async def _elo_2v2(ctx, you, teammate, opp1, opp2):
+    side_a = _elo_members(you or ctx.author, teammate)
+    side_b = _elo_members(opp1, opp2)
+    everyone = _elo_members(*side_a, *side_b)
+    if len(side_a) != 2 or len(side_b) != 2 or len(everyone) != 4:
+        await ctx.send("❌ 2v2 needs four different players: you (or `you:`) and a teammate "
+                       "against two opponents.")
+        return
+    await _maybe_defer(ctx)
+    steam, unlinked, error = await _elo_links(everyone)
+    if await _elo_refused(ctx, unlinked, error):
+        return
+    prev = await api_get("/rating-preview/2v2?team_a={}&team_b={}".format(
+        ",".join(steam[m.id] for m in side_a), ",".join(steam[m.id] for m in side_b)))
+    if not prev:
+        await ctx.send("Couldn't compute that right now — try again in a minute.")
+        return
+    p_a = float(prev.get("win_probability", 0.5))
+    lines = []
+    for label, team, prob in (("Team A", prev.get("team_a") or {}, p_a),
+                              ("Team B", prev.get("team_b") or {}, 1.0 - p_a)):
+        lines.append(f"**{label}** — team rating **{_elo_num(team.get('rating'), signed=False)}**, "
+                     f"win chance ~**{prob * 100:.0f}%**")
+        for p in team.get("players") or []:
+            lines.append(f"• **{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+                         f"win **{_elo_num(p.get('win_delta'))}** / loss **{_elo_num(p.get('loss_delta'))}**")
+        lines.append("")
+    lines.append("*(Glicko-2 per completed 2v2 series, each player rated against both opponents. "
+                 "The win chance is an estimate from the team means — the rated path never "
+                 "computes one.)*")
+    await ctx.send(embed=discord.Embed(title="📈 Elo preview — 2v2",
+                                       description="\n".join(lines)[:4096], color=0x57F287))
+
+
+async def _elo_ffa(ctx, members, me, score_target=None):
+    field = _elo_members(*(([ctx.author] if me else []) + list(members)))
+    if len(field) < 3:
+        await ctx.send("❌ FFA needs at least three different players (add `me:true` to count yourself in).")
+        return
+    if len(field) > 10:
+        await ctx.send("❌ An FFA lobby holds at most 10 players.")
+        return
+    await _maybe_defer(ctx)
+    steam, unlinked, error = await _elo_links(field)
+    if await _elo_refused(ctx, unlinked, error):
+        return
+    # r5 M4: the preview's w(N) follows the score target; a first-to-3 lobby
+    # shown at the default target would display the wrong deltas silently.
+    if score_target is not None and not (2 <= int(score_target) <= 50):
+        await ctx.send("❌ Score target must be between 2 and 50.")
+        return
+    target_q = f"&score_target={int(score_target)}" if score_target is not None else ""
+    prev = await api_get("/rating-preview/ffa?ids=" + ",".join(steam[m.id] for m in field) + target_q)
+    if not prev:
+        await ctx.send("Couldn't compute that right now — try again in a minute.")
+        return
+    players = prev.get("players") or []
+    lines = [f"Field of **{len(players)}** — average rating "
+             f"**{_elo_num(prev.get('field_average_rating'), signed=False)}** · first to **{prev.get('score_target')}**", ""]
+    for p in players:
+        lines.append(f"**{p.get('display_name')}** ({_elo_num(p.get('rating'), signed=False)}) — "
+                     f"1st **{_elo_num(p.get('first_delta'))}** · last **{_elo_num(p.get('last_delta'))}**")
+        row = p.get("place_deltas") or []
+        if row:
+            lines.append("`" + " · ".join(f"{i}:{_elo_num(d)}" for i, d in enumerate(row, start=1)) + "`")
+    lines.append("")
+    # The API states its own assumptions (score target included); show them
+    # rather than a fixed footnote that could drift from the computation.
+    assumption = prev.get("assumption") or ("each delta fixes one player's place; the others finish "
+                                            "in rating order -- the n! orderings are not enumerated")
+    lines.append(f"*(Glicko-2 per game against up to 4 placement-adjacent opponents; {assumption}. "
+                 "Add `score_target` for a lobby that is not first-to-default.)*")
+    await ctx.send(embed=discord.Embed(title="📈 Elo preview — FFA",
+                                       description="\n".join(lines)[:4096], color=0x57F287))
+
+
+@bot.hybrid_group(name="elo", description="Preview rating changes for a 1v1, 2v2 or FFA game",
+                  invoke_without_command=True)
+async def cmd_elo(ctx, player1: discord.Member = None, player2: discord.Member = None):
+    """Bare prefix form (`!elo @a [@b]`): the 1v1 preview. Slash callers always
+    land in a subcommand -- Discord never invokes a group bare."""
+    if ctx.invoked_subcommand is not None:
+        return
+    await _elo_1v1(ctx, _elo_members(player1, player2))
+
+
+@cmd_elo.command(name="1v1", description="Rating change if one player beats another in a ranked series")
+@app_commands.describe(player1="Your opponent — or the first player, when player2 is given",
+                       player2="Optional: compare these two players instead of you vs player1")
+async def cmd_elo_1v1(ctx, player1: discord.Member, player2: discord.Member = None):
+    await _elo_1v1(ctx, _elo_members(player1, player2))
+
+
+@cmd_elo.command(name="2v2", description="Rating changes for a 2v2 series: you + teammate vs two opponents")
+@app_commands.describe(teammate="Your teammate", opponent1="First opponent", opponent2="Second opponent",
+                       you="Whose side to compute from (defaults to yourself)")
+async def cmd_elo_2v2(ctx, teammate: discord.Member, opponent1: discord.Member,
+                      opponent2: discord.Member, you: discord.Member = None):
+    await _elo_2v2(ctx, you, teammate, opponent1, opponent2)
+
+
+@cmd_elo.command(name="ffa", description="Rating changes for an FFA game of 3-10 players (1st, last, each place)")
+@app_commands.describe(p1="Player", p2="Player", p3="Player",
+                       p4="Optional player", p5="Optional player", p6="Optional player",
+                       p7="Optional player", p8="Optional player", p9="Optional player",
+                       p10="Optional player", me="Count yourself in the field",
+                       score_target="The lobby's score target (first to N); default: the server's standard")
+async def cmd_elo_ffa(ctx, p1: discord.Member, p2: discord.Member, p3: discord.Member,
+                      p4: discord.Member = None, p5: discord.Member = None, p6: discord.Member = None,
+                      p7: discord.Member = None, p8: discord.Member = None, p9: discord.Member = None,
+                      p10: discord.Member = None, me: bool = False, score_target: int = None):
+    await _elo_ffa(ctx, (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10), me, score_target)
 
 
 # ── /game — one recorded game by its short code (July 22 item 6) ─────────
@@ -7426,7 +7785,8 @@ LB_PAGE_SIZE = 50
 LB_TOTAL_FETCH = 500
 
 
-def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: int) -> list:
+def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: int,
+                     hidden_inactive: int = 0) -> list:
     """Render one page of the auto-posted leaderboard as a LIST of embeds
     (a worst-case 50-row page can exceed a single embed's 4096-char
     description; up to 3 embeds travel in one message). Pure function so the
@@ -7457,7 +7817,12 @@ def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: 
             timestamp=datetime.utcnow() if ci == len(descs) - 1 else None,
         )
         if ci == len(descs) - 1:
-            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players • Auto-updated")
+            # Item d: the board hides players not seen for LB_ACTIVE_DAYS days;
+            # publish_lb passes how many, and 0 (or a failed count) shows nothing.
+            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players"
+                          + (f" • {hidden_inactive} inactive hidden ({LB_ACTIVE_DAYS} days)"
+                             if hidden_inactive > 0 else "")
+                          + " • Auto-updated")
         embeds.append(em)
     return embeds
 
@@ -7467,10 +7832,11 @@ class LeaderboardPaginator(discord.ui.View):
     so page flips don't re-hit the API. Long timeout (24h) — refreshed on every
     publish_lb tick (sync_roles_periodic loop, every 30 min) so users always have
     a working set of buttons within an hour of clicking."""
-    def __init__(self, entries: list, total_players: int):
+    def __init__(self, entries: list, total_players: int, hidden_inactive: int = 0):
         super().__init__(timeout=86400)
         self.entries = entries
         self.total_players = total_players
+        self.hidden_inactive = hidden_inactive   # item d footer suffix, kept across page flips
         self.total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
         self.page = 0
 
@@ -7488,7 +7854,8 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = max(0, self.page - 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages),
+            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
+                                    self.hidden_inactive),
             view=self,
         )
 
@@ -7497,7 +7864,8 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = min(self.total_pages - 1, self.page + 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages),
+            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
+                                    self.hidden_inactive),
             view=self,
         )
 
@@ -7524,9 +7892,20 @@ async def publish_lb(guild):
         return
     entries = data["entries"]
     total_players = data.get("total_players", 0)
+    # Item d: the fetch above is the DEFAULT board, so inactive players are
+    # already hidden. One extra 1-row fetch with everyone included yields the
+    # population; the footer says how many are hidden. A failed fetch or a
+    # non-positive difference just omits the suffix -- never blocks the post.
+    hidden_inactive = 0
+    try:
+        _all = await api_get("/leaderboard?limit=1&min_matches=1&include_inactive=true")
+        if _all:
+            hidden_inactive = int(_all.get("total_players", 0) or 0) - int(total_players or 0)
+    except Exception as e:
+        print(f"[LB] inactive count fetch failed ({e}) — footer suffix skipped")
     total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
-    embeds = _build_lb_embeds(entries, total_players, 0, total_pages)
-    view = LeaderboardPaginator(entries, total_players)
+    embeds = _build_lb_embeds(entries, total_players, 0, total_pages, hidden_inactive)
+    view = LeaderboardPaginator(entries, total_players, hidden_inactive)
     view._update_buttons()
     # Fast path: edit the message we already know about. Logged on success too —
     # a silently-successful loop is indistinguishable from a dead one in the logs
@@ -7666,13 +8045,178 @@ async def poll_new_bans():
             print(f"[BANS] post error: {ex}")
 
 
+# ── Mail moderation cases (Sept 6 item b, B-2) ───────────────────────────
+# The api enqueues each NEW moderation case (a mail report or an automatic
+# spam bucket) through the SAME pending_channel_posts outbox as every other
+# #scr-admin post, with "[MODCASE:<uuid>]" as the FIRST line of the content.
+# poll_channel_posts strips that line, posts the evidence with four buttons
+# whose custom_id carries the case id ONLY, and stamps notified_at. A click
+# is handled by the raw on_interaction listener (restart-safe: nothing but
+# the custom_id persists) and sent to the api's internal act route with the
+# clicker's Discord id — the SERVER resolves that id to a currently linked
+# account and re-checks that account's grant on every click; this bot holds
+# no authority and never decides the outcome, it renders the api's answer.
+
+MODCASE_MARKER = "[MODCASE:"
+# (custom_id key, button label, api action, hours)
+_MODCASE_BUTTONS = (
+    ("mute24", "Mute 24h", "mute", 24),
+    ("mute7d", "Mute 7d", "mute", 168),
+    ("ban", "Ban", "ban", None),
+    ("dismiss", "Dismiss", "dismiss", None),
+)
+
+
+def _modcase_uuid_ok(value):
+    """36-char lowercase hex uuid with hyphens at 8/13/18/23 — no regex
+    module needed at this point of the file."""
+    if not isinstance(value, str) or len(value) != 36:
+        return False
+    for i, ch in enumerate(value):
+        if i in (8, 13, 18, 23):
+            if ch != "-":
+                return False
+        elif ch not in "0123456789abcdef":
+            return False
+    return True
+
+
+def _modcase_parse(content):
+    """(case_id, body) when the post's FIRST line is the api's marker, else
+    (None, content) — an ordinary announcement passes through unchanged."""
+    if not isinstance(content, str) or not content.startswith(MODCASE_MARKER):
+        return None, content
+    nl = content.find("\n")
+    head = content if nl < 0 else content[:nl]
+    if not head.endswith("]"):
+        return None, content
+    cid = head[len(MODCASE_MARKER):-1].strip().lower()
+    if not _modcase_uuid_ok(cid):
+        return None, content
+    return cid, (content[nl + 1:] if nl >= 0 else "")
+
+
+def _modcase_custom_id(key, case_id):
+    return f"modcase:{key}:{case_id}"
+
+
+def _modcase_parse_custom_id(custom_id):
+    """custom_id -> {key, label, action, hours, case_id} or None."""
+    parts = (custom_id or "").split(":")
+    if len(parts) != 3 or parts[0] != "modcase" or not _modcase_uuid_ok(parts[2]):
+        return None
+    for key, label, action, hours in _MODCASE_BUTTONS:
+        if key == parts[1]:
+            return {"key": key, "label": label, "action": action, "hours": hours,
+                    "case_id": parts[2]}
+    return None
+
+
+def _modcase_view(case_id):
+    styles = {"mute24": discord.ButtonStyle.secondary, "mute7d": discord.ButtonStyle.primary,
+              "ban": discord.ButtonStyle.danger, "dismiss": discord.ButtonStyle.success}
+    view = discord.ui.View(timeout=None)
+    for key, label, _action, _hours in _MODCASE_BUTTONS:
+        view.add_item(discord.ui.Button(style=styles[key], label=label,
+                                        custom_id=_modcase_custom_id(key, case_id)))
+    return view
+
+
+def _modcase_render(status, body, spec, actor_name):
+    """Render the api's answer to a button click. 403 = the clicker is not
+    (or no longer) authorised — the server's word, not this bot's."""
+    body = body if isinstance(body, dict) else {}
+    detail = body.get("detail")
+    if isinstance(detail, dict):
+        detail = detail.get("error") or ""
+    detail = str(detail or "")[:180]
+    if status == 200 and body.get("status") == "ok":
+        return (f"\N{WHITE HEAVY CHECK MARK} **{spec['label']}** applied by {actor_name} "
+                f"to **{body.get('subject_name') or '?'}** (`{body.get('subject_steam_id') or '?'}`)"
+                f" — case `{spec['case_id'][:8]}` {body.get('resolution') or ''}".rstrip())
+    if status == 200 and body.get("status") == "already_resolved":
+        return (f"\N{INFORMATION SOURCE} This case was already **{body.get('case_status')}**"
+                f" ({body.get('resolution') or 'no detail'}).")
+    if status == 403:
+        return ("\N{CROSS MARK} You are no longer authorised for this action — it needs a "
+                "Discord account linked in-game (`/link`) that holds an admin or moderator grant.")
+    if status == 404:
+        return "\N{CROSS MARK} Case not found."
+    if status == 429:
+        return f"\N{HOURGLASS WITH FLOWING SAND} Refused by the rate gate. {detail}".rstrip()
+    return f"\N{CROSS MARK} Refused (HTTP {status}). {detail}".rstrip()
+
+
+async def _modcase_click(interaction, custom_id):
+    spec = _modcase_parse_custom_id(custom_id)
+    if spec is None:
+        await interaction.response.send_message("\N{WARNING SIGN} Unrecognized button.", ephemeral=True)
+        return
+    # The internal POST can take longer than Discord's 3-second window.
+    await interaction.response.defer(ephemeral=True)
+    if http_session is None or not API_SECRET_KEY:
+        await interaction.followup.send("API session not ready.", ephemeral=True)
+        return
+    actor_name = getattr(interaction.user, "display_name", "") or interaction.user.name
+    payload = {"actor_discord_id": str(interaction.user.id), "actor_name": actor_name,
+               "action": spec["action"], "reason": f"Discord button: {spec['label']}"}
+    if spec["hours"]:
+        payload["hours"] = spec["hours"]
+    status, body = 0, {}
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/moderation-cases/{spec['case_id']}/act",
+            json=payload,
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            status = resp.status
+            try:
+                body = await resp.json()
+            except Exception:
+                body = {}
+    except Exception as e:
+        await interaction.followup.send(f"Action failed: {e}", ephemeral=True)
+        return
+    rendered = _modcase_render(status, body, spec, actor_name)
+    if status == 200 and isinstance(body, dict) and body.get("status") in ("ok", "already_resolved"):
+        # Retire the buttons on the post and record the outcome on it, so the
+        # channel shows who handled the case; the ephemeral reply repeats it.
+        try:
+            msg = interaction.message
+            if msg is not None:
+                await msg.edit(content=((msg.content or "")[:1800] + "\n\n" + rendered)[:2000],
+                               view=None, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            print(f"[MODCASE] post edit failed for {spec['case_id']}: {e}")
+    await interaction.followup.send(rendered, ephemeral=True,
+                                    allowed_mentions=discord.AllowedMentions.none())
+
+
+# Sent-but-unacked memory for the generic announce queue (the #167 pattern the
+# stream-post loop already uses; Sept 6 item b review r1): post id -> the
+# Discord message id of a send whose ACK (or a later step) has not succeeded.
+# Consulted BEFORE any send, so a tick that retries an un-acked row acks
+# instead of posting the same content (and the same buttons) again. Entries
+# leave when the ack lands. A restart between send and ack can still duplicate
+# ONCE — the documented at-least-once trade-off.
+_channel_post_sent: dict = {}
+
+
 @tasks.loop(seconds=30)
 async def poll_channel_posts():
     """Generic announce queue (v1.30): the API's pending_channel_posts table
     holds messages destined for arbitrary channels (first use: the #scr-faq
     sheet, migration 110). Ack-after-send (learning #105) so a bot restart
     can't drop a queued post; a failed send just retries next tick. Posts are
-    delivered in (sort_order, id) order, one batch per tick."""
+    delivered in (sort_order, id) order, one batch per tick.
+
+    Every step's RESULT is checked (review r1): the ack is the LAST step of a
+    row, so anything before it — the send, and for a moderation case the
+    notified stamp — is retried by the outbox itself on the next tick, while
+    the sent-memory above keeps that retry from posting twice. A row whose
+    ack did not answer "acked" stays pending and is re-driven, never treated
+    as done."""
     if http_session is None or not API_SECRET_KEY:
         return
     data = await api_get("/internal/channel-posts/pending")
@@ -7689,12 +8233,32 @@ async def poll_channel_posts():
             # Explicit allowed_mentions: server-queued posts (tournament
             # signup/leave/pushback etc.) carry <@id> mentions that MUST ping
             # the user — but never let queued content ping @everyone/roles.
-            await ch.send(
-                p["content"][:2000],
-                allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
-            )
-            await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
-            print(f"[CHANNEL-POST] posted {p['id']} to {p['channel_id']}")
+            # Sept 6 item b: a moderation case's post carries the api's
+            # [MODCASE:<uuid>] marker as its first line — strip it, attach the
+            # Mute/Ban/Dismiss buttons (custom_id = case id only, B-2), stamp
+            # notified_at, THEN ack. Any other post is unchanged.
+            case_id, content = _modcase_parse(p["content"])
+            if p["id"] not in _channel_post_sent:
+                send_kw = {"allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False)}
+                if case_id:
+                    send_kw["view"] = _modcase_view(case_id)
+                msg = await ch.send(content[:2000], **send_kw)
+                _channel_post_sent[p["id"]] = getattr(msg, "id", None) or True
+                print(f"[CHANNEL-POST] posted {p['id']} to {p['channel_id']}")
+            if case_id:
+                # The stamp precedes the ack so a failed stamp leaves the row
+                # pending and is retried next tick (the send is remembered,
+                # so the retry stamps without re-posting). The api's stamp is
+                # COALESCE(notified_at, NOW()): re-stamping is a no-op.
+                stamped = await api_post(f"/internal/moderation-cases/{case_id}/notified")
+                if not stamped or stamped.get("status") != "ok":
+                    print(f"[MODCASE] notified stamp failed for {case_id}: {stamped} — will retry")
+                    return
+            ack = await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
+            if not ack or ack.get("status") != "acked":
+                print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, send remembered")
+                return
+            _channel_post_sent.pop(p["id"], None)
         except discord.Forbidden:
             print(f"[CHANNEL-POST] forbidden in channel {p['channel_id']} — leaving post {p['id']} queued")
             return
@@ -10006,6 +10570,11 @@ async def on_interaction(interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
             return
         cid = (interaction.data or {}).get("custom_id", "")
+        if cid.startswith("modcase:"):
+            # Mail moderation buttons (Sept 6 item b, B-2): routed to the api
+            # with the clicker's Discord id; the server decides.
+            await _modcase_click(interaction, cid)
+            return
         if cid.startswith("tdlc:"):
             parts = cid.split(":")
             if len(parts) != 4:

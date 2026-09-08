@@ -2,6 +2,23 @@
 
 Prior sessions' "Completed This Session" entries. Newest dated heading on top. See `docs/CHANGELOG.md` for the version-oriented record; this file is organized by when the work was done, not by what version carried it.
 
+## Archived 2026-09-07 (from TODO.md — Sept 6 triage batch close-out, completed-this-session list)
+
+### ✅ Completed This Session (2026-09-07) — Sept 6 triage batch close-out
+
+- Item c (session report) r2: migration 299 tie rule, byte bound enforced at
+  the serialisation boundary, measured card heights, pins (`6484aa8`).
+- Item b (in-game mail): r1 repairs finished by a second agent and merged
+  (`80b48b4`); Codex r2 NO-GO -> all repaired (`5ed82d0`); Codex r3
+  GO-WITH-CHANGES -> two MEDIUMs repaired (`31fcf30`: migration 300 table
+  lock, deletion-ledger refusal in the identity lattice), ladder CLOSED.
+- i18n: extractor scope +8 files, 2671 keys, generated key file, new scope
+  gate (`4664c8a`, `52bb6df`). Route manifest rebaselined three times.
+- Seat cycle + drop published from `8728bca`; log clean, mail self-test PASS.
+- Learnings #550-#557. Bug comment on 346. `deploy-notes.md` written.
+- Templates fixed at the source of a 2-hour hang: `codex exec` now `< /dev/null`
+  in the global CLAUDE.md and `scripts/lore/core.md`.
+
 ## Archived 2026-07-29 (from TODO.md — previous session status, superseded)
 
 ## 🟢 v1.34.4 — SHIPPED 2026-07-26 ✅ (GitHub release + cosmetics.zip; backend + bot live; migration 150 applied; **HTTPS now live**)
@@ -230,3 +247,36 @@ ready_join rows + close abandoned lobbies + heal 2 display names from chat).
 - **Bug reports/day 3 → 10.**
 - **DC tracer widened to 1v1** — first NetworkRestart→LeaveRoom stack captured (turned out to be a normal end-of-series leave).
 - Posted `bug-comment` audit notes on #15/#17/#18/#20/#22.
+
+## Archived 2026-09-07 (from TODO.md — Completed This Session 2026-08-23, superseded by the v1.39.3–v1.40.1 releases)
+
+### ✅ Completed This Session (2026-08-23) — v1.39.2
+
+- **Shipped v1.39.2** (GitHub + backend + Thunderstore + release notes in
+  five locales). Full text in `docs/CHANGELOG.md`. Contents:
+  - Night pack: 9 map skins + the new `MapSkinEffects` backdrop emitter
+    (embers / rain / stars); broadcast-seat tour levers (`TestMapSkin` list,
+    `TestMapSkinSandbox`, `TestMapSkinTourSeconds`, `TestOpenTab`).
+  - 10 gradient nametags (1500g).
+  - 5 community face cosmetics released + Seasonal Spring rev 3.
+  - Translation portal first-use address binding (Kyltist's "Session
+    expired"); 53 client keys synced + 212 machine translations seeded and
+    bundled.
+  - Server: Glicko tau 0.6 everywhere, heavy-favourite bet fighter tax,
+    history name search, rotation dwell + deferral, presence `last_seen`
+    CAST hotfix (stamps had been failing silently since the auto-raise
+    deploy).
+  - Client: FPS governor rewrite, Mustard pick-body gate, round-sound
+    sweep, #262 decimals + #263 history search, `StatusIndicatorGuard`.
+  - Migrations 244-250 applied. Bug comments on #262, #263, #264.
+- **Three Codex ultra ladders converged:** server r4 -> r5 -> r6 (LOW only);
+  client r3 -> r4 -> r5 GO (zero findings); bot r4 -> r5 with the
+  pre-committed cut firing (dormancy INERT, see item 3 above).
+- **From the 2026-08-20 pickup:** main pushed (item 1 — done, and carried
+  through to the v1.39.2 release). The lobby-roster redesign and the four
+  wrap-off cells shipped in **v1.39.1** (Aug 22, "Lobby and text-cell
+  fixes"); their in-game verification is still open and stays listed below.
+- **From the 2026-08-18 pickup:** the "MIN_MOD_VERSION raise to 1.39.0"
+  item is superseded — the floor is 1.39.1 and `b7fcd72` auto-raises on
+  adoption from here on.
+- Learnings **#415-#421** appended.

@@ -11,6 +11,9 @@ Usage (Sid's PC, needs the admin secret in the environment):
 
 Key identity (localization-design §2.3 / §6.3):
     client: key_id = sha1("client\\0" + source_string)[:16]
+            (a TrC key's source_string IS the composite english + U+0004 +
+            context — Sept 6 item e — so a contextual key is its own row,
+            distinct from the plain English it falls back to)
     game:   key_id = sha1("game\\0" + Table/ENTRY_KEY)[:16]   (identity is the
             TABLE ENTRY, not the English — the four PS/Xbox pairs whose
             English coincides stay separately correctable)
@@ -22,7 +25,8 @@ manifests land or neither does — split across two requests, the client half
 can commit and the game half then fail, leaving a half-updated production
 corpus with nothing to roll back. The payload declares
 namespaces=["client","game"] plus per-namespace expected_counts (and per-key
-context for the game keys); the server's retirement sweep only ever covers
+context: Table/ENTRY_KEY + comment for game keys, "surface · method [· TrC
+context]" for client keys since Sept 6 item e); the server's retirement sweep only ever covers
 the DECLARED namespaces, so an older client-only copy of this tool (no
 "namespaces" field -> server default ['client']) still cannot reach the game
 keys. One HMAC covers the request (canonical action 'i18n_sync', target
@@ -73,6 +77,59 @@ SENSITIVE_MARKERS = (
 )
 
 
+CTX_SEP = "\u0004"   # I18n.ContextSeparator: english + CTX_SEP + context is a TrC key
+
+
+def client_context(key: str, rec) -> str:
+    """The portal's "where is this used" line for one client key (Sept 6
+    item e): "<surface> · <location>" from the extractor's context record,
+    plus " · <ctx>" for a TrC key — the noun the English qualifies, which is
+    the whole reason that key exists. Cut to 160 characters, the width of
+    i18n_keys.context (backend/sql/212_i18n_key_context.sql). None when the
+    source file carries no record (a format-1 file), so the server stores
+    NULL exactly as before."""
+    parts = []
+    if isinstance(rec, dict):
+        parts = [str(rec.get("surface") or ""), str(rec.get("location") or "")]
+    ctx = key.split(CTX_SEP, 1)[1] if CTX_SEP in key else ""
+    text = " · ".join(p for p in parts if p)
+    if ctx:
+        text = f"{text} · {ctx}" if text else ctx
+    return text[:160] or None
+
+
+def build_client_keys(data: dict) -> list:
+    """The client-namespace manifest from a tools/i18n_source.json document.
+    Accepts format 1 (flat "strings") and format 2 ("strings" + "contexts").
+    key_id and source_hash are computed over the FULL key — for a TrC key the
+    composite english + U+0004 + context — so a contextual key is a distinct
+    row from the plain English it falls back to. The sensitive test reads the
+    ENGLISH half only: the context is metadata, and a context such as "ranked
+    lobby" must not put a harmless label behind the admin-only approval gate."""
+    fmt = data.get("format")
+    if fmt not in (1, 2):
+        raise ValueError(f"i18n_source.json format {fmt!r} is not 1 or 2 — re-run tools/i18n_extract.py")
+    contexts = (data.get("contexts") or {}) if fmt == 2 else {}
+    if not isinstance(contexts, dict):
+        raise ValueError("i18n_source.json 'contexts' must be an object")
+    out = []
+    for s in data["strings"]:
+        english = s.split(CTX_SEP, 1)[0]
+        low = english.lower()
+        rec = {
+            "key_id": hashlib.sha1(("client\0" + s).encode("utf-8")).hexdigest()[:16],
+            "namespace": "client",
+            "msgctxt": s,
+            "source_hash": hashlib.sha1(s.encode("utf-8")).hexdigest(),
+            "sensitive": any(m in low for m in SENSITIVE_MARKERS),
+        }
+        ctx = client_context(s, contexts.get(s))
+        if ctx:
+            rec["context"] = ctx
+        out.append(rec)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="https://competitive-rounds.duckdns.org:8444")
@@ -86,17 +143,7 @@ def main() -> int:
         return 2
 
     data = json.load(io.open(SRC, encoding="utf-8"))
-    client_keys = []
-    for s in data["strings"]:
-        kid = hashlib.sha1(("client\0" + s).encode("utf-8")).hexdigest()[:16]
-        low = s.lower()
-        client_keys.append({
-            "key_id": kid,
-            "namespace": "client",
-            "msgctxt": s,
-            "source_hash": hashlib.sha1(s.encode("utf-8")).hexdigest(),
-            "sensitive": any(m in low for m in SENSITIVE_MARKERS),
-        })
+    client_keys = build_client_keys(data)
 
     # Game namespace: FAIL LOUD if the dump is missing (the same rule the
     # extractor applies to shop_strings.json) — a missing file here would
@@ -142,7 +189,8 @@ def main() -> int:
         return 2
 
     print(f"{len(client_keys)} client keys "
-          f"({sum(1 for k in client_keys if k['sensitive'])} sensitive), "
+          f"({sum(1 for k in client_keys if k['sensitive'])} sensitive, "
+          f"{sum(1 for k in client_keys if k.get('context'))} with context), "
           f"{len(game_keys)} game keys")
     if args.dry_run:
         return 0

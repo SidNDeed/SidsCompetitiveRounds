@@ -24,7 +24,7 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class TabStatsOverlay
     {
-        private static GUIStyle stTitle, stName, stLabel, stCell, stCards;
+        private static GUIStyle stTitle, stName, stLabel, stCell, stCards, stH2H;
         private static readonly List<Player> cachedPlayers = new List<Player>(4);
         private static readonly List<string> cachedNames = new List<string>(4);
         private static readonly List<CardRow> cachedCards = new List<CardRow>(4);
@@ -757,7 +757,14 @@ namespace CompetitiveRounds
                     cardLayoutDirty = false;
                 }
                 float cardsH = cachedCardsHeight;
-                float h = 34f + 26f + ROWS.Length * rowH + cardsH + 16f;
+                // Release B §1: the head-to-head header line ("vs NAME · last
+                // played · H2H · ranked series") sits under the title for the
+                // whole sitting once H2HSummary is Ready; "" (no row) before
+                // that and in any room that is not a plain 1v1. Cached text,
+                // richText OFF (the name is server-returned free text).
+                string h2hLine = H2HSummary.TabLine;
+                float h2hH = string.IsNullOrEmpty(h2hLine) ? 0f : 20f;
+                float h = 34f + h2hH + 26f + ROWS.Length * rowH + cardsH + 16f;
                 float x = (Screen.width - w) / 2f;
                 float y = Mathf.Max(24f, (Screen.height - h) * 0.5f);
 
@@ -765,6 +772,8 @@ namespace CompetitiveRounds
                     ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.88f), 0, 0);
                 GUI.Label(new Rect(x + 12, y + 6, w - 24, 24),
                     trTitle ?? "MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>", stTitle);
+                if (h2hH > 0f)
+                    GUI.Label(new Rect(x + 12, y + 30, w - 24, 20), h2hLine, stH2H);
 
                 // Player name headers, team-colored.
                 float cx = x + 12 + labelW;
@@ -772,13 +781,13 @@ namespace CompetitiveRounds
                 {
                     var prev = GUI.contentColor;
                     GUI.contentColor = cachedColors[i];
-                    GUI.Label(new Rect(cx, y + 34, colW - 6, 22), cachedNames[i], stName);
+                    GUI.Label(new Rect(cx, y + 34 + h2hH, colW - 6, 22), cachedNames[i], stName);
                     GUI.contentColor = prev;
                     cx += colW;
                 }
 
                 // Stat rows.
-                float ry = y + 34 + 26;
+                float ry = y + 34 + h2hH + 26;
                 for (int r = 0; r < ROWS.Length; r++)
                 {
                     if ((r & 1) == 0)
@@ -817,6 +826,8 @@ namespace CompetitiveRounds
         {
             if (stTitle != null) return;
             stTitle = new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold, richText = true };
+            stH2H = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, richText = false };
+            stH2H.normal.textColor = new Color(0.82f, 0.82f, 0.82f);
             stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             stLabel = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
             stLabel.normal.textColor = new Color(0.75f, 0.78f, 0.85f);

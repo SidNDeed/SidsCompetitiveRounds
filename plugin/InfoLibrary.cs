@@ -107,8 +107,8 @@ namespace CompetitiveRounds
                 // findings (byline in part 1) - the factual claims are his
                 // sandbox research, faithfully reproduced from his PDF, not
                 // re-derived from the decompile like the house articles.
-                new Article { Key = "damage-buffs", Title = () => I18n.Tr("Damage types & buffs"),     Body = () => DamageBuffsP1 + "\n\n" + DamageBuffsP2 + "\n\n" + DamageBuffsP3,
-                              Segments = () => new[] { Seg.V("refresh-flow"), Seg.T(DamageBuffsP1 + "\n\n" + DamageBuffsP2 + "\n\n" + DamageBuffsP3) } },
+                new Article { Key = "damage-buffs", Title = () => I18n.Tr("Damage types & buffs"),     Body = () => DamageBuffsP1a + "\n\n" + DamageBuffsP1b + "\n\n" + DamageBuffsP2a + "\n\n" + DamageBuffsP2b + "\n\n" + DamageBuffsP2c + "\n\n" + DamageBuffsP3a + "\n\n" + DamageBuffsP3b + "\n\n" + DamageBuffsP3c,
+                              Segments = () => new[] { Seg.T(DamageBuffsP1a), Seg.V("damage-matrix"), Seg.T(DamageBuffsP1b + "\n\n" + DamageBuffsP2a), Seg.V("refresh-gate"), Seg.T(DamageBuffsP2b), Seg.V("refresh-sequences"), Seg.T(DamageBuffsP2c + "\n\n" + DamageBuffsP3a), Seg.V("refresh-window-sequences"), Seg.T(DamageBuffsP3b), Seg.V("refresh-flow"), Seg.T(DamageBuffsP3c) } },
                 new Article { Key = "movement-tech",Title = () => I18n.Tr("Movement & shield tech"),   Body = () => MovementTech,
                               Segments = () => new[] { Seg.V("movement-window"), Seg.T(MovementTech) } },
                 new Article { Key = "netcode",      Title = () => I18n.Tr("Netcode & Photon"),         Body = () => Netcode,
@@ -202,7 +202,7 @@ If something looks wrong mid-match, file the report right after that session - t
         private static string ControlsOutro => I18n.Tr(@"<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
 F5 works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, Space does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
 
-Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode.
+Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode. While typing, a tap of Alt switches the language channel your message goes to - global, then each language channel in turn, then back to global; the Home tab dropdown sets it too.
 
 Holding E opens the emote wheel - even mid-battle: point at a dance you own and release to play it for everyone running the mod. Your own controls lock until the dance ends, and the dance stops if you get knocked around or fire. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
 
@@ -230,7 +230,7 @@ Blocking is the skill that decides close games, and it has a cost model worth re
 - Every client simulates every bullet, and damage is shooter-authoritative: what a shot takes off you is decided on the shooter's machine. Their screen sees your movement late, which is why you can die a step after reaching cover - and why the player who peeks first sees the other before being seen.
 - Your block is the mirror image: it happens on your machine first and reaches the opponent's simulation a beat later. A block raised slightly early on reaction protects you in situations where a frame-perfect one does not, because your last frame is already the past on their screen.
 - What reads as a broken hitbox is almost always this mismatch: ping, interpolation, size cards, and bounced shots. The mod never touches hitboxes (see <color=#7FD4FF>Netcode & Photon</color>).
-- Frame rate is a hidden gameplay stat in vanilla ROUNDS. Vanilla Grow compounds its damage per frame: around x1.5 for a 60 FPS shooter against x1.07 at 400 FPS for a single copy, and stacking widens the gap fast. In mod rooms - and in private matches where everyone is modded, current, and has Ranked enabled - Grow is normalized so frame rate stops deciding the damage (a heavy stutter can still under-grow a little - the error only ever points down); against vanilla or outdated clients the vanilla rule stands. <color=#7FE87F>A stable frame rate is a real competitive edge</color> - the Settings tab has a performance section for exactly this.
+- Frame rate is a hidden gameplay stat in vanilla ROUNDS. Vanilla Grow compounds its damage per frame: around x9.4 for a 60 FPS shooter against x1.4 at 400 FPS for a single copy, and stacking widens the gap fast. In mod rooms - and in private matches where everyone is modded, current, and has Ranked enabled - Grow is normalized so frame rate stops deciding the damage (a heavy stutter can still under-grow a little - the error only ever points down); against vanilla or outdated clients the vanilla rule stands. <color=#7FE87F>A stable frame rate is a real competitive edge</color> - the Settings tab has a performance section for exactly this.
 
 <color=#FFD94D><b>DRAFT FOR A BUILD</b></color>
 
@@ -351,17 +351,17 @@ Where it is active: any online room - queue rooms, private room codes, quickplay
 
 <color=#FFD94D><b>THE REAL MATH</b></color>
 
-Grow multiplies the bullet's damage a little every rendered frame while it flies, through roughly the first 30 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.
+Grow multiplies the bullet's damage a little every rendered frame while it flies, through the first 40 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.
 
 Un-stacked, over a full flight:
 
-- 400 FPS shooter: about <color=#7FD4FF>x1.07</color>
-- 60 FPS shooter: about <color=#7FD4FF>x1.53</color>
-- 30 FPS shooter: about <color=#7FD4FF>x2.31</color>
+- 400 FPS shooter: about <color=#7FD4FF>x1.4</color>
+- 60 FPS shooter: about <color=#7FD4FF>x9.4</color>
+- 30 FPS shooter: about <color=#7FD4FF>x82</color>
 
-Stacking multiplies the growth rate, so the gap explodes. At four stacks: about x1.29 at 400 FPS, <color=#FF6666>x5.47 at 60 FPS, and x28.5 at 30 FPS</color>.
+Stacking multiplies the growth rate, so the gap explodes. At three copies: about x2.8 at 400 FPS, <color=#FF6666>x737 at 60 FPS, and x285,000 at 30 FPS</color>.
 
-Hitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x2.16 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.
+Hitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x5.6 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.
 
 <color=#FFD94D><b>WHY THEIR FPS BECOMES YOUR PROBLEM</b></color>
 
@@ -369,7 +369,7 @@ Damage in ROUNDS is shooter-authoritative: the shooter's machine computes what t
 
 <color=#FFD94D><b>THE MOD'S NORMALIZATION</b></color>
 
-In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 240 FPS, on every machine</color>. Against a very-high-FPS baseline that means about +11 percent over a full flight un-stacked, +23 percent at two stacks, +53 percent at four - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
+In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. One copy is about x3.1 over a full flight, two copies x9.6, three x30 - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
 
 Where it applies:
 
@@ -388,52 +388,15 @@ One honest residual: at very low frame rates a normalized bullet can grow slight
         // the authorship explicit. Tables use <pos=NN%> columns (the body
         // font is proportional, so space-alignment cannot work); comparison
         // signs are written as words because a bare '<' can open a TMP tag.
-        private static string DamageBuffsP1 => I18n.Tr(@"<color=#8A8A93>Research and write-up by Spirit - 'On Damage Types and Buff Activation', University of Rounds. Reproduced for this library with light reformatting; the testing, the findings and the voice are all his.</color>
+        private static string DamageBuffsP1a => I18n.Tr(@"<color=#8A8A93>Research and write-up by Spirit - 'On Damage Types and Buff Activation', University of Rounds. Reproduced for this library with light reformatting; the testing, the findings and the voice are all his.</color>
 
-Via thorough testing in the sandbox game mode with an additional controller player, I have catalogued which types of damage trigger which cards and buffs. The main cards in question are Scavenger, Refresh, Brawler, and Taste of Blood. Lifesteal as a character stat bestowed by numerous cards has also been considered. My results split damage into three main categories: opponent damage, self-damage, and Conditional damage. Damage to your opponent via nearly any means will trigger all cards and buffs, with the exception of specific types of Conditional damage. For various reasons, some Conditional damage, typically from block cards, will not consistently trigger Refresh but will still trigger all other buffs. Finally, any form of self-damage will always activate Scavenger, but nothing else. There are, of course, numerous oddities and exceptions.
+Via thorough testing in the sandbox game mode with an additional controller player, I have catalogued which types of damage trigger which cards and buffs. The main cards in question are Scavenger, Refresh, Brawler, and Taste of Blood. Lifesteal as a character stat bestowed by numerous cards has also been considered. My results split damage into three main categories: opponent damage, self-damage, and Conditional damage. Damage to your opponent via nearly any means will trigger all cards and buffs, with the exception of specific types of Conditional damage. For various reasons, some Conditional damage, typically from block cards, will not consistently trigger Refresh but will still trigger all other buffs. Finally, any form of self-damage will always activate Scavenger, but nothing else. There are, of course, numerous oddities and exceptions.");
 
-<color=#FFD94D><b>THE TABLE OF DAMAGE INTERACTIONS</b></color>
-
-Columns: Scav = Scavenger, Brawl = Brawler, ToB = Taste of Blood, Steal = lifesteal, Refr = Refresh. Cond = triggers conditionally (explained below).
-
-<color=#FFD94D>Damage source<pos=34%>Scav<pos=45%>Brawl<pos=56%>ToB<pos=67%>Steal<pos=78%>Refr</color>
-Bullet damage<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Yes
-Bullet damage (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Abyssal Countdown<pos=34%>No<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Bombs Away<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Bombs Away (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Decay<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Decay (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Demonic Pact (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Demonic Pact (AoE)<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-EMP<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-EMP (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Explosive Bullet<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Explosive Bullet (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Frost Slam<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>No
-Lifestealer<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Overpower<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Yes
-Parasite<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Parasite (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Poison<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Poison (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Radiance<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Saw<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Shield Charge<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Yes
-Silence<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Shockwave<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>No
-Static Field<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Supernova<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Yes
-Timed Detonation<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Timed Detonation (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-Toxic Cloud<pos=34%>Yes<pos=45%>Yes<pos=56%>Yes<pos=67%>Yes<pos=78%>Cond
-Toxic Cloud (self)<pos=34%>Yes<pos=45%>No<pos=56%>No<pos=67%>No<pos=78%>No
-
-All of these tests were carried out in the sandbox gamemode using two players, one on keyboard, the other on controller. Each test was repeated multiple times to ensure the results were consistent, or at least consistently inconsistent. No distinction was made between Timed Detonation AoE damage latched onto a player vs latched onto a surface.
+        private static string DamageBuffsP1b => I18n.Tr(@"All of these tests were carried out in the sandbox gamemode using two players, one on keyboard, the other on controller. Each test was repeated multiple times to ensure the results were consistent, or at least consistently inconsistent. No distinction was made between Timed Detonation AoE damage latched onto a player vs latched onto a surface.
 
 Promising potential damage dealers, such as Chilling Presence, were excluded due to both their failure to trigger any cards or buffs and their failure to deal any damage. Every entry on the list deals damage in some form, and every unique way to deal damage has an entry. Thus, there are no methods to trigger any damage-dealing cards or buffs without dealing some amount of damage. That might seem obvious but, given the weirdness of the rest of the system, one can never be too sure.");
 
-        private static string DamageBuffsP2 => I18n.Tr(@"<color=#FFD94D><b>SELF VS OPPONENT DAMAGE</b></color>
+        private static string DamageBuffsP2a => I18n.Tr(@"<color=#FFD94D><b>SELF VS OPPONENT DAMAGE</b></color>
 
 From the table it is pretty clear that most damage falls into two categories: damage dealt to your opponent and damage dealt to yourself. Damage dealt to your opponent will almost always trigger all cards and buffs, whereas damage dealt to yourself will only ever trigger Scavenger. This fundamental remains true whether it be damage directly from bullets, AoE effects, or even niche effects like Demonic Pact's life drain.
 
@@ -446,39 +409,19 @@ From the table it is pretty clear that most damage falls into two categories: da
 
 <color=#FFD94D><b>REFRESH AND CONDITIONAL DAMAGE</b></color>
 
-Now we come to Conditional damage. To put it simply, Conditional damage 'balances' Refresh, such that you can never trigger two Refreshes in a row using Conditional damage. From my research it has become clear that every player holds an invisible boolean value which I will call RefreshValid. As a boolean it can occupy two states, true or false. When RefreshValid is true, the next time you deal Conditional damage you get a successful Refresh, but RefreshValid then flips to false. If you deal Conditional damage while RefreshValid is false, you do not receive a Refresh - but RefreshValid flips back to true, so your next instance of Conditional damage will trigger one. Already having a block ready, and so not needing a Refresh, has no impact on this flipping.
+Now we come to Conditional damage. To put it simply, Conditional damage 'balances' Refresh, such that you can never trigger two Refreshes in a row using Conditional damage. From my research it has become clear that every player holds an invisible boolean value which I will call RefreshValid. As a boolean it can occupy two states, true or false. When RefreshValid is true, the next time you deal Conditional damage you get a successful Refresh, but RefreshValid then flips to false. If you deal Conditional damage while RefreshValid is false, you do not receive a Refresh - but RefreshValid flips back to true, so your next instance of Conditional damage will trigger one. Already having a block ready, and so not needing a Refresh, has no impact on this flipping.");
 
-The gameplay ramifications are best illustrated through Silence. Beginning a game, RefreshValid is set to false, so your first Silence fails to trigger a Refresh. (I have not been able to test whether the bool resets between rounds - it does not reset on death, resurrection or new card picks, so I suspect it does not.) After your first failed Refresh, RefreshValid is set to true. Thus your next Silence triggers a Refresh but resets RefreshValid to false. So it continues in an endless loop where every other Silence triggers a successful Refresh. Each column below is one action; the top row is the RefreshValid state BEFORE it:
+        private static string DamageBuffsP2b => I18n.Tr(@"The gameplay ramifications are best illustrated through Silence. Beginning a game, RefreshValid is set to false, so your first Silence fails to trigger a Refresh. (I have not been able to test whether the bool resets between rounds - it does not reset on death, resurrection or new card picks, so I suspect it does not.) After your first failed Refresh, RefreshValid is set to true. Thus your next Silence triggers a Refresh but resets RefreshValid to false. So it continues in an endless loop where every other Silence triggers a successful Refresh. Each column below is one action; the top row is the RefreshValid state BEFORE it:");
 
-<color=#FFD94D>RefreshValid</color><pos=30%>False<pos=44%>True<pos=58%>False<pos=72%>True<pos=86%>False
-<color=#FFD94D>Action</color><pos=30%>Silence<pos=44%>Silence<pos=58%>Silence<pos=72%>Silence<pos=86%>Silence
-<color=#FFD94D>Refresh?</color><pos=30%>No<pos=44%>Yes<pos=58%>No<pos=72%>Yes<pos=86%>No
-
-However, this is if you only use Silence. Other Refresh activators can disrupt the every-other pattern: hit your opponent with a bullet (non-Conditional damage) and you receive a successful Refresh AND reset RefreshValid to false. Depending on where in the pattern you put your shot, you can snag an extra Refresh:
-
-<color=#FFD94D>RefreshValid</color><pos=30%>False<pos=44%>True<pos=58%>False<pos=72%>True<pos=86%>False
-<color=#FFD94D>Action</color><pos=30%>Silence<pos=44%>Shoot<pos=58%>Silence<pos=72%>Silence<pos=86%>Silence
-<color=#FFD94D>Refresh?</color><pos=30%>No<pos=44%>Yes<pos=58%>No<pos=72%>Yes<pos=86%>No
-
-<color=#FFD94D>RefreshValid</color><pos=30%>False<pos=44%>True<pos=58%>False<pos=72%>False<pos=86%>True
-<color=#FFD94D>Action</color><pos=30%>Silence<pos=44%>Silence<pos=58%>Shoot<pos=72%>Silence<pos=86%>Silence
-<color=#FFD94D>Refresh?</color><pos=30%>No<pos=44%>Yes<pos=58%>Yes<pos=72%>No<pos=86%>Yes
+        private static string DamageBuffsP2c => I18n.Tr(@"However, this is if you only use Silence. Other Refresh activators can disrupt the every-other pattern: hit your opponent with a bullet (non-Conditional damage) and you receive a successful Refresh AND reset RefreshValid to false. Depending on where in the pattern you put your shot, you can snag an extra Refresh (the second and third sequences above).
 
 Sadly, this is not the end of the document, because the ROUNDS developers saw fit to introduce another mechanic. I do hope you, dear reader, appreciate the relative ease with which you get to possess this information as compared to the hours of madness I spent obtaining it.");
 
-        private static string DamageBuffsP3 => I18n.Tr(@"<color=#FFD94D><b>THE 0.35 SECOND WINDOW</b></color>
+        private static string DamageBuffsP3a => I18n.Tr(@"<color=#FFD94D><b>THE 0.35 SECOND WINDOW</b></color>
 
-To prepare you for this knowledge, I must first admit that I lied in the table. Where it states that Bullet Damage triggers a Refresh with a plain Yes, it should carry an asterisk: it does most of the time, but not all of the time. Presumably to help balance cards like Burst and Spray, the developers put a system in place that turns quickly repeated non-Conditional damage into Conditional damage. Shoot an opponent once and you get non-Conditional damage; shoot them again within a window of around 0.35 seconds and that second shot is Conditional. The window resets after every shot. Below, quick secondary (and tertiary) shots are denoted QShoot:
+To prepare you for this knowledge, I must first admit that I lied in the table. Where it states that Bullet Damage triggers a Refresh with a plain Yes, it should carry an asterisk: it does most of the time, but not all of the time. Presumably to help balance cards like Burst and Spray, the developers put a system in place that turns quickly repeated non-Conditional damage into Conditional damage. Shoot an opponent once and you get non-Conditional damage; shoot them again within a window of around 0.35 seconds and that second shot is Conditional. The window resets after every shot. Below, quick secondary (and tertiary) shots are denoted QShoot:");
 
-<color=#FFD94D>RefreshValid</color><pos=30%>False<pos=44%>False<pos=58%>True<pos=72%>False<pos=86%>True
-<color=#FFD94D>Action</color><pos=30%>Shoot<pos=44%>QShoot<pos=58%>Silence<pos=72%>QShoot<pos=86%>Silence
-<color=#FFD94D>Refresh?</color><pos=30%>Yes<pos=44%>No<pos=58%>Yes<pos=72%>No<pos=86%>Yes
-
-<color=#FFD94D>RefreshValid</color><pos=30%>False<pos=44%>False<pos=58%>True<pos=72%>False<pos=86%>True
-<color=#FFD94D>Action</color><pos=30%>Shoot<pos=44%>Silence<pos=58%>QShoot<pos=72%>Silence<pos=86%>QShoot
-<color=#FFD94D>Refresh?</color><pos=30%>Yes<pos=44%>No<pos=58%>Yes<pos=72%>No<pos=86%>Yes
-
-<color=#FFD94D><b>THERE ARE NO DAMAGE TYPES</b></color>
+        private static string DamageBuffsP3b => I18n.Tr(@"<color=#FFD94D><b>THERE ARE NO DAMAGE TYPES</b></color>
 
 Now that you understand this, I must admit that I lied a second time. I misled you, cajoled you, into believing that Conditional and non-Conditional damage are two separate damage types, individually bestowed upon certain attacks by the developers. This is incorrect. Damage is treated the same regardless of its source. In reality there are no damage types at all. So how is damage decided to be Conditional or not? The damage decides it. Literally. How many points of damage you are trying to deal determines whether Refresh will not activate at all, activate Conditionally, or activate always (unless it lands inside the 0.35 second window, in which case it becomes Conditional).
 
@@ -486,18 +429,9 @@ I discovered this when stacking Silence. While a regular Silence has a max damag
 
 The magical thing is that this range applies to every single damage source. Stack enough Frost Slams or Shockwaves and you can produce the same result. The same holds for AoE explosion damage from Timed Detonation or Explosive Bullet. Regular bullets have a minimum damage of 14, so you cannot reach Conditional with damage reduction alone - but if your opponent gets Decay, the individual ticks each carry such low damage that you get no Refreshes back. Or at least you should not: due to tick inconsistency you might occasionally get one or two, at a vastly reduced rate. Conversely, stack enough damage and even when it is divided between ticks you still have enough for constant Refreshes. For cards like EMP and Bombs Away, which cannot change their damage, this revelation means nothing. It also means little for Demonic Pact, Frost Slam and Shockwave, as the stacking needed to raise their damage to the next band is not realistic within a normal game.
 
-<color=#FFD94D><b>THE FULL DECISION, AS A FLOW</b></color>
+Below is a flow chart of all damage possibilities:");
 
-Deal damage:
-- Under 5 damage: nothing happens.
-- Between 5 and 10 damage (Conditional):
-   If RefreshValid is true - a Refresh triggers, and RefreshValid flips to false.
-   If RefreshValid is false - no Refresh, and RefreshValid flips to true.
-- Over 10 damage:
-   Inside the 0.35 second window - the window resets and the hit is treated like the 5-to-10 case above.
-   Outside the window - a Refresh always triggers, the window begins, and RefreshValid is set to false.
-
-That amounts to all my current understanding of Conditional damage. My model of what is going on behind the scenes is entirely a construction (I have not seen the source code), but it correctly predicts all currently tested behaviour, and I have been thorough. Still, there are limits: I do not know whether the RefreshValid bool is held by the attacker or the target - that is, whether every player has a cap on the Refreshes they can trigger for themselves, or every target has a cap on the Refreshes they can trigger for others. In a 1v1 this makes no difference, but in an FFA it would. If only there was a free-to-play type gamemode I could use to test this feature out!
+        private static string DamageBuffsP3c => I18n.Tr(@"That amounts to all my current understanding of Conditional damage. My model of what is going on behind the scenes is entirely a construction (I have not seen the source code), but it correctly predicts all currently tested behaviour, and I have been thorough. Still, there are limits: I do not know whether the RefreshValid bool is held by the attacker or the target - that is, whether every player has a cap on the Refreshes they can trigger for themselves, or every target has a cap on the Refreshes they can trigger for others. In a 1v1 this makes no difference, but in an FFA it would. If only there was a free-to-play type gamemode I could use to test this feature out!
 
 <color=#FFD94D><b>CONCLUSION</b></color>
 
@@ -1432,7 +1366,7 @@ These change the shared simulation. Grow, the crate rescale and the same-card de
 
 <color=#7FD4FF>Poison sync</color> - vanilla runs poison separately on every client, each judging your block by its own timing - screens permanently disagree about which ticks landed ('ghost HP'). Now the victim's own client decides every tick and publishes the verdict; every modded client applies exactly that set. An unmodded victim gets the pure vanilla loop instead. Works in any online room. <color=#8A8A93>In mod-issued rooms with an incapable client present, the modded clients instead agree blocking does not negate poison - agreement beats the ghost-HP split.</color>
 
-<color=#7FD4FF>Grow normalization</color> - Grow's damage compounds per FRAME on the shooter's machine: about x1.07 over a full flight at 400 FPS, x1.53 at 60, x2.31 at 30 unstacked, worse stacked - which is how low-FPS players one-shot with Grow plus any explosive. Normalized bullets grow at one fixed rate. Gate: every fighter modded and current, AND a mod-issued room or everyone's Ranked ON at connect. Otherwise vanilla growth for everyone.
+<color=#7FD4FF>Grow normalization</color> - Grow's damage compounds per FRAME on the shooter's machine: about x1.4 over a full flight at 400 FPS, x9.4 at 60, x82 at 30 for one copy, far worse stacked - which is how low-FPS players one-shot with Grow plus any explosive. Normalized bullets grow at one fixed rate. Gate: every fighter modded and current, AND a mod-issued room or everyone's Ranked ON at connect. Otherwise vanilla growth for everyone.
 
 <color=#7FD4FF>Falling crates on big FFA maps</color> - on scaled FFA maps vanilla respawns networked crates and saws too small, ropes miss, and they drop at round start. Rescaled only when every fighter is capable; FFA queue rooms only.
 

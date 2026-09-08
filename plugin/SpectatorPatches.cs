@@ -232,6 +232,18 @@ namespace CompetitiveRounds
                                    int p1PointsSet, int p2PointsSet,
                                    int p1RoundsSet, int p2RoundsSet)
         {
+            // Measurement window for the round-teardown question, opened
+            // ABOVE the gate on purpose: the seat under suspicion is the one
+            // this prefix suppresses, and a diagnostic placed inside the
+            // mitigation it judges is dead exactly where it is needed (#376).
+            // A fighter seat runs vanilla's own stop straight after and is the
+            // positive control, in the same line format.
+            try
+            {
+                SpectatorTeardownProbe.OpenWindow(
+                    SpectatorPatchSupport.Suppress ? "spectator" : "fighter");
+            }
+            catch { }
             if (!SpectatorPatchSupport.Suppress) return true;
             // FFA (Codex r1 find 8): NEVER let the participant transition
             // engine run on a spectator — HandleNextRound drives visibility,

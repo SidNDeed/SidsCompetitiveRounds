@@ -318,6 +318,45 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Bug 341: the LOCAL seat's dance progress for the countdown
+        /// ring — seconds remaining, the dance's duration, and the body to
+        /// anchor to. False when no dance of ours is running. The same
+        /// wrap-safe ServerTimestamp math as LocalDanceActive, keyed by the
+        /// local install key (LocalPlayer.ActorNumber), so it never answers
+        /// for a remote actor: only the dancer sees the ring (Sid's
+        /// constraint). The body resolves exactly as the pose does.</summary>
+        internal static bool TryGetLocalDanceProgress(out float remaining, out float duration, out Transform body)
+        {
+            remaining = 0f; duration = 0f; body = null;
+            try
+            {
+                if (active.Count == 0) return false;
+                int a = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
+                (int idx, int ts) d;
+                if (!active.TryGetValue(a, out d)) return false;
+                if (d.idx < 0 || d.idx >= Defs.Length) return false;
+                float t = unchecked(PhotonNetwork.ServerTimestamp - d.ts) / 1000f;
+                duration = Defs[d.idx].Duration;
+                if (t < 0f || t > duration) return false;
+                remaining = duration - t;
+                var p = ResolveActorPlayer(a);
+                body = p != null ? p.transform : null;
+                return body != null;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Bug 341: the duration of the dance sold under
+        /// <paramref name="sku"/>, 0 when the sku is not a dance we know. The
+        /// shop row appends it; there is no server column for it.</summary>
+        internal static float DurationForSku(string sku)
+        {
+            if (string.IsNullOrEmpty(sku)) return 0f;
+            for (int i = 0; i < Defs.Length; i++)
+                if (Defs[i].Sku == sku) return Defs[i].Duration;
+            return 0f;
+        }
+
         private const float CANCEL_VEL = 2.5f;    // world units/s; run speed is ~9-11, residual slide decays well below this
         private const int CANCEL_STRIKES = 2;     // consecutive Tick frames over threshold (or unresolvable)
         private const float VEL_GRACE_S = 0.35f;  // pre-dance momentum may still be bleeding off at start

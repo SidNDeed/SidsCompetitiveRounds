@@ -80,18 +80,72 @@ def _row(pid, status="matched", matched_with=None, ready=False, room=None, regio
             "ready": ready, "room_name": room, "room_region": region, "matched_at": None}
 
 
+class _Savepoint:
+    """The savepoint the retention sweep runs inside.
+
+    It exists so the sweep's isolation is EXECUTED rather than asserted about.
+    Without it `db.begin_nested()` raised AttributeError on the fake, the
+    caller's `except Exception` swallowed that, and the DELETE never ran in any
+    test while every gate here stayed green -- which is the same shape as the
+    findings this file exists to catch.
+
+    `__aexit__` never swallows: whether a failed sweep is survivable is the
+    CALLER's decision, and the whole point of these tests is to check that the
+    caller makes it correctly.
+    """
+
+    def __init__(self, session):
+        self.session = session
+
+    async def __aenter__(self):
+        self.session.savepoints += 1
+        self.session.in_savepoint = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.session.in_savepoint = False
+        return False
+
+
 class FakeQueueSession:
     """Emulates exactly the four pair-writer statements over an in-memory
     ranked_queue, verifying each statement still carries its predicates."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, raise_on_insert=False, raise_on_prune=False):
         self.rows = {r["player_id"]: dict(r) for r in rows}
         self.statements = []
+        # r13 HIGH: the issued room -> region binding the stamp now records, so
+        # the region a later match report is credited with is the one this
+        # server chose rather than one the client named.
+        self.issued_bindings = []
+        # r14 LOW 6: the retention sweep's own execution, so "it ran" is a
+        # signal rather than an inference from nothing having gone wrong.
+        self.savepoints = 0
+        self.in_savepoint = False
+        self.pruned = 0
+        self.raise_on_insert = raise_on_insert
+        self.raise_on_prune = raise_on_prune
+
+    def begin_nested(self):
+        return _Savepoint(self)
 
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         self.statements.append(sql)
         params = params or {}
+        if "INSERT INTO issued_room_regions" in sql:
+            assert "ON CONFLICT (room_name) DO NOTHING" in sql, (
+                "a reused room name must keep the issuance that sent players somewhere"
+            )
+            assert not self.in_savepoint, (
+                "the issuance INSERT is inside the sweep's savepoint. It is not "
+                "best-effort: it is the binding a later match report is judged "
+                "against, and swallowing its failure would undo r14 HIGH silently"
+            )
+            if self.raise_on_insert:
+                raise RuntimeError("issued_room_regions insert failed")
+            self.issued_bindings.append((params["room"], params["region"]))
+            return _Result([])
         if "SET room_name = :room, room_region = :region" in sql:
             for p in STAMP_PREDICATES:
                 assert " ".join(p.split()) in sql, f"stamp lost predicate: {p}"
@@ -130,6 +184,31 @@ class FakeQueueSession:
             if r:
                 r.update(status="searching", matched_with=None, room_name=None, room_region=None,
                          ready=False, matched_at=None)
+            return _Result([])
+        if "DELETE FROM issued_room_regions" in sql:
+            # Migration 292 promised rows are deleted past 30 days and nothing
+            # deleted them. The issuance path is where it happens: there is no
+            # cron for this table, and a promised prune with no pruner is a
+            # table that grows forever while the comment says it does not.
+            assert "issued_at <" in sql and "30 days" in sql, (
+                f"the prune is not bounded by age: {sql}"
+            )
+            # ...and it runs while the stamp UPDATE above holds both queue
+            # rows' locks, so it must be bounded in ROWS, must not queue behind
+            # another issuance, and must not be able to fail the issuance.
+            assert "LIMIT" in sql and "ORDER BY issued_at" in sql, (
+                f"the prune is not bounded in rows: {sql}"
+            )
+            assert "SKIP LOCKED" in sql, (
+                f"two concurrent issuances would serialise over old rows: {sql}"
+            )
+            assert self.in_savepoint, (
+                "the sweep is not savepoint-isolated; a statement error would "
+                "abort the room-issuance transaction it runs inside"
+            )
+            if self.raise_on_prune:
+                raise RuntimeError("prune failed")
+            self.pruned += 1
             return _Result([])
         raise AssertionError(f"unexpected statement: {sql[:100]}")
 
@@ -230,7 +309,11 @@ def test_fake_session_refuses_statements_that_lost_a_predicate():
     _run(main._queue_delete_partner_if_reciprocal(recorder, ME, PARTNER))
     stamp_sql = next(q for q in recorder.statements if "SET room_name = :room" in q)
     reset_sql = next(q for q in recorder.statements if "WHERE player_id = :partner AND status = 'matched' AND matched_with = :me AND room_name IS NULL" in q)
-    delete_sql = next(q for q in recorder.statements if q.startswith("DELETE"))
+    # Specific, because the issuance path now also emits the age-bounded
+    # prune of issued_room_regions and "the first DELETE" stopped being
+    # the partner delete this test mutates. The control above caught it.
+    delete_sql = next(q for q in recorder.statements
+                      if q.startswith("DELETE") and "matched_with = :me" in q)
     mutations = (
         stamp_sql.replace("AND status = 'matched' AND ready = true AND room_name IS NULL", "AND status = 'matched' AND ready = true"),
         stamp_sql.replace("OR (player_id = :b AND matched_with = :a))", "OR player_id = :b)"),
@@ -351,6 +434,17 @@ def test_strict_session_gate_is_fail_closed_for_the_poll():
     class _S:
         def __init__(self, row):
             self.row = row
+            # _Savepoint counts on its session, so the double has to carry the
+            # two fields it touches.
+            self.savepoints = 0
+            self.in_savepoint = False
+
+        def begin_nested(self):
+            # The classifier reads inside a SAVEPOINT so that returning
+            # "unbound" from its except is genuinely fail-soft: under asyncpg a
+            # caught statement error still leaves the TRANSACTION aborted
+            # (#235), and this gate now runs on a write path.
+            return _Savepoint(self)
 
         async def execute(self, statement, params):
             assert "FROM steam_sessions" in str(statement)
@@ -368,3 +462,94 @@ def test_strict_session_gate_is_fail_closed_for_the_poll():
                                               _S(dict(good, expires_at=now - timedelta(seconds=1))))) is False
     assert _run(main._strict_steam_session_ok(req("t"), "76561198000000001", _S(dict(good, verified=False)))) is False
     assert _run(main._strict_steam_session_ok(None, "76561198000000001", _S(good))) is False
+
+
+def test_the_issued_region_is_recorded_only_when_the_stamp_took():
+    """r13 HIGH. The region-corroboration map used to believe the report's own
+    `region` field, which is outside the seven-field match HMAC. It reads the
+    server's issuance instead, so the issuance has to be written down -- and
+    written down only when the stamp actually took, because a stamp that did
+    not take sent nobody anywhere.
+
+    Executed both ways against the same fake."""
+    intact = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="matched", ready=True, matched_with=ME),
+    ])
+    assert _run(main._queue_stamp_room_reciprocal(intact, ME, PARTNER, "ranked_abc", "eu")) is True
+    assert intact.issued_bindings == [("ranked_abc", "eu")]
+
+    # the negative control: a pair that is not reciprocal writes nothing
+    broken = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="searching", ready=False, matched_with=None),
+    ])
+    assert _run(main._queue_stamp_room_reciprocal(broken, ME, PARTNER, "ranked_xyz", "eu")) is False
+    assert broken.issued_bindings == [], (
+        "a stamp that did not take recorded an issuance anyway"
+    )
+
+
+# ── the retention sweep the issuance path carries (r14 LOW 6) ───────────────
+
+def test_the_sweep_actually_runs_on_the_issuing_path():
+    """A POSITIVE signal that the sweep executed.
+
+    Migration 292 promised a 30-day deletion and for months nothing deleted
+    anything; the gate written afterwards checked that main.py CONTAINED a
+    DELETE, which is a different claim. This one runs the writer and asserts
+    the statement was executed, inside its savepoint, exactly once.
+    """
+    session = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="matched", ready=True, matched_with=ME),
+    ])
+    assert _run(main._queue_stamp_room_reciprocal(session, ME, PARTNER, "ranked_abc", "eu")) is True
+    assert session.pruned == 1, "the retention sweep did not execute"
+    assert session.savepoints == 1, "the sweep did not open a savepoint"
+    assert session.in_savepoint is False, "the savepoint was never left"
+
+
+def test_a_stamp_that_did_not_take_sweeps_nothing():
+    """The negative control. The sweep rides the path that ADDS rows; a stamp
+    that dissolved adds none and must sweep none, or the sweep has become an
+    unconditional side effect of every queue poll."""
+    broken = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="searching", ready=False, matched_with=None),
+    ])
+    assert _run(main._queue_stamp_room_reciprocal(broken, ME, PARTNER, "r", "eu")) is False
+    assert broken.pruned == 0 and broken.savepoints == 0
+
+
+def test_a_failed_sweep_does_not_cost_the_issuance():
+    """Maintenance must never fail room issuance. The savepoint is what makes
+    that true: without it the statement error aborts the whole transaction and
+    catching the exception changes nothing."""
+    session = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="matched", ready=True, matched_with=ME),
+    ], raise_on_prune=True)
+    assert _run(main._queue_stamp_room_reciprocal(session, ME, PARTNER, "ranked_abc", "eu")) is True
+    assert session.issued_bindings == [("ranked_abc", "eu")], (
+        "a failed retention sweep lost the issuance binding"
+    )
+    assert session.rows[ME]["room_name"] == "ranked_abc"
+    assert session.rows[PARTNER]["room_name"] == "ranked_abc"
+
+
+def test_a_failed_issuance_is_not_swallowed():
+    """The other side of the same scoping, and the one that matters more.
+
+    If the isolation were widened to cover the INSERT, a failing INSERT would
+    be swallowed, the stamp would return True, and `submit_match`'s region
+    lookup would find no binding for the pair -- silently undoing the r14 HIGH
+    region-evidence repair with nothing to show for it. The INSERT is not
+    best-effort and its failure must reach the caller.
+    """
+    session = FakeQueueSession([
+        _row(ME, status="matched", ready=True, matched_with=PARTNER),
+        _row(PARTNER, status="matched", ready=True, matched_with=ME),
+    ], raise_on_insert=True)
+    with pytest.raises(RuntimeError):
+        _run(main._queue_stamp_room_reciprocal(session, ME, PARTNER, "ranked_abc", "eu"))
