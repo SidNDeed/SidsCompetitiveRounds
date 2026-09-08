@@ -1198,7 +1198,7 @@ _DC_LEGACY_TERM = (
     "                   OR (s2.player1_id = :dp AND s2.player2_id = :rp))"
     "               ORDER BY s2.created_at DESC LIMIT 1))"
     " AND COALESCE(s.last_activity_at, s.created_at)"
-    "     >= NOW() - CAST(:live_window AS interval))")
+    "     >= NOW() - make_interval(secs => CAST(:live_window AS integer)))")
 
 # BRACKET. A forfeit or double-forfeit terminalises the tournament match and
 # deliberately leaves the RankedSeries active, so every row-shape test above
@@ -1404,7 +1404,7 @@ async def _refuse_named_series(db, series_id, reporter_id, disconnected_id,
     answer is only used to pick a status code for a request that is about to
     fail either way."""
     binds = {"sid": str(series_id), "rp": reporter_id, "dp": disconnected_id,
-             "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS}
+             "live_window": int(DC_LIVE_WINDOW_SECONDS)}
     binds.update(extra_binds or {})
     try:
         row = (await db.execute(text(
@@ -1415,7 +1415,7 @@ async def _refuse_named_series(db, series_id, reporter_id, disconnected_id,
             # also produce in one of them.
             "SELECT 1 AS authority_only,"
             "       (COALESCE(s.last_activity_at, s.created_at)"
-            "        < NOW() - CAST(:live_window AS interval)) AS idle"
+            "        < NOW() - make_interval(secs => CAST(:live_window AS integer))) AS idle"
             "  FROM ranked_series s"
             " WHERE s.id = CAST(:sid AS uuid)"
             + (("   AND " + row_terms) if row_terms else "") +
@@ -6579,13 +6579,18 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         _issued_region = (await db.execute(text(
             "SELECT region FROM issued_room_regions"
             " WHERE (room_name = :room_full OR room_name = :room_base)"
-            "   AND issued_at >= NOW() - CAST(:ttl AS interval)"
+            # make_interval with an INTEGER bind, never CAST(:p AS interval)
+            # with a string (#275/#448): the CAST types the placeholder as PG
+            # `interval`, so asyncpg hands the str to its interval codec and
+            # raises DataError('str' object has no attribute 'days') during
+            # bind encoding — uncaught here, so the whole match report 500s.
+            "   AND issued_at >= NOW() - make_interval(secs => CAST(:ttl AS integer))"
             "   AND player1_id IS NOT NULL AND player2_id IS NOT NULL"
             "   AND ((player1_id = :pa AND player2_id = :pb)"
             "     OR (player1_id = :pb AND player2_id = :pa))"
         ), {"room_full": _rooms[0], "room_base": _rooms[-1],
             "pa": p1.id, "pb": p2.id,
-            "ttl": "%d seconds" % int(_REGION_SEEN_TTL_SECONDS)})).scalar() if _rooms else None
+            "ttl": int(_REGION_SEEN_TTL_SECONDS)})).scalar() if _rooms else None
         if _issued_region:
             _region_sighting = (_issued_region, report.reported_by_steam_id)
 
@@ -15690,7 +15695,7 @@ async def _report_disconnect_once(
             "   AND " + _DC_ELIGIBLE_TERMS +
             " LIMIT 1"
         ), {"sid": str(series.id), "rp": reporter.id, "dp": disconnected.id,
-            "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+            "live_window": int(DC_LIVE_WINDOW_SECONDS),
             "require_verified_seat": _dc_require_verified_seat(),
             "min_points": DC_MIN_LIVE_POINTS})).first()
         if nameable is None:
@@ -15763,7 +15768,7 @@ async def _report_disconnect_once(
         " FOR NO KEY UPDATE OF s"
     ), {"sid": str(resolved_series_id), "rp": reporter.id, "dp": disconnected.id,
         "exempt": PRUNE_REASON_NO_MATCH,
-        "live_window": "%d seconds" % DC_LIVE_WINDOW_SECONDS,
+        "live_window": int(DC_LIVE_WINDOW_SECONDS),
         "require_verified_seat": _dc_require_verified_seat(),
         "min_points": DC_MIN_LIVE_POINTS})).first()
     if still_eligible is None:
@@ -24164,9 +24169,9 @@ async def _prune_stale_series(db: AsyncSession) -> int:
             "               WHERE b.series_id = rs.id AND b.settled_at IS NULL) "
             "  AND COALESCE(("
             "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
-            "      ), rs.created_at) < NOW() - CAST(:stalled AS interval) "
+            "      ), rs.created_at) < NOW() - make_interval(mins => CAST(:stalled AS integer)) "
             "FOR NO KEY UPDATE OF rs"), {"sid": str(sid),
-                                         "stalled": "%d minutes" % int(stalled_min)})).first()
+                                         "stalled": int(stalled_min)})).first()
         if _still_b is None:
             await db.commit()
             continue
@@ -24199,11 +24204,11 @@ async def _prune_stale_series(db: AsyncSession) -> int:
             " WHERE rs.id = :sid "
             "   AND rs.status = 'active' AND rs.invalidated_at IS NULL "
             "   AND rs.is_tournament = FALSE "
-            "   AND rs.created_at < NOW() - CAST(:cutoff AS interval) "
+            "   AND rs.created_at < NOW() - make_interval(mins => CAST(:cutoff AS integer)) "
             "   AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
             "FOR NO KEY UPDATE"
         ), {"sid": str(sid),
-            "cutoff": "%d minutes" % int(cutoff_min)})).first()
+            "cutoff": int(cutoff_min)})).first()
         if _still_a is None:
             await db.commit()
             continue
