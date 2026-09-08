@@ -1,0 +1,558 @@
+-- 302: i18n client keys for the Sept 6/7/8 batches (204 NEW keys): the in-game mail feature,
+-- the session report, the hover profile card, the ranked region finder, the chat ALT key, the
+-- Grow 120 FPS clock texts and the other UI strings the branch added since v1.40.1. This is the
+-- additive half of what POST /admin/i18n/sync-keys does, written through the migration channel
+-- because this seat's tooling cannot sign the admin HMAC (learning #443).
+-- Additive-only (per 248/266/282/286/288 precedent): reworded strings get NEW key_ids (key_id
+-- derives from the source string); their predecessors are left for the real sync tool's retire
+-- pass. key_id = sha1("client\0" + English)[:16], source_hash = sha1(English), sensitive and
+-- context per tools/i18n_sync_keys.py (imported, not copied; context = the portal's "where is
+-- this used" line the Sept 6 sync tool now sends, cut to 160). Idempotent AND
+-- contract-convergent: the conflict arm is the sync endpoint's own full update, and the
+-- post-check RAISES if any expected key is missing, retired, or carries a different
+-- source_hash / context or a stray max_px. Explicit transaction (#340). The game namespace
+-- is unchanged. Run order: deploy API -> apply this file -> apply 303.
+
+BEGIN;
+
+INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, context, updated_at)
+SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.context, NOW()
+  FROM (VALUES
+('0125ae7de9164286', 'client', $k302$Not allowed.$k302$, 'd88f9041650a4d8f92e3861108e431cc08f12866', FALSE, E'MailClient · ErrorDetail'),
+('02121f673902efda', 'client', $k302$Report$k302$, 'ee45c30326b750387589752c0f75e1dd87ddc7e4', FALSE, E'MailUI · BuildReaderView'),
+('03859cd272da4deb', 'client', $k302$ (inactive)$k302$, 'f6ce7b7762e1def879ef1a477d73d657b3325ce4', FALSE, E'NativeUI · InactiveName'),
+('04e2a526f0ea6093', 'client', $k302$Sign-in is not ready yet - try again in a moment.$k302$, '7fd7ede55c126b5c8bafea313a5d9e58aa4d2489', FALSE, E'MailClient · ErrorDetail'),
+('0500528ae3344450', 'client', $k302${0} - {1} games - {2} played$k302$, '4d002c2ce0b90e49202eaef503544ce33e4ced50', FALSE, E'SessionReportModel · Build'),
+('050a5b01e285120b', 'client', $k302$You are muted - mail is unavailable while the mute lasts.$k302$, '3116b2c0ca286eb2b0b8f489d30f590d39889ec9', FALSE, E'MailClient · ErrorDetail'),
+('070cd827ff0f27b0', 'client', $k302$1v2 as duo$k302$, '55d3549ba04984e1f35cae57af200a60c3427388', FALSE, E'ProfileCard · Render'),
+('0c9d1a4a99b9465b', 'client', $k302$days since first rating update ->$k302$, '141d8664db867feb557c919b90eac6b3dc23ab84', FALSE, E'RatingGraphAxis · Caption'),
+('0d33d936b58cfb81', 'client', $k302$Music files not installed$k302$, '1023fe321ab265873416208f997e537a44eec66a', FALSE, E'MusicEngine · MusicStatusLine'),
+('0e7db6723e7a522d', 'client', $k302$Kills$k302$, '9ec34025b6db16bb4bd06189361b2632e0310b10', FALSE, E'SessionReportModel · BuildTotals'),
+('11be5c0c2809d4fe', 'client', $k302$Sent.$k302$, '03c6d014658f7f8a730e57e9909f65ab3754d68a', FALSE, E'MailUI · SendCurrent'),
+('13957c44445cf07e', 'client', $k302$Block %$k302$, '3dbed7ad205139f8e9f45caed19c3c4e914e1ef1', FALSE, E'SessionReportModel · BuildTotals'),
+('153eaf29f07c21c2', 'client', $k302$Inbox ({0})$k302$, '80c0d9037c516293b1095cc23493046c1ce2d324', FALSE, E'MailUI · PaintNav'),
+('16540f87011c669f', 'client', $k302$Your block list is full - unblock someone first.$k302$, 'ef6344b64f4741812805f017ac356d6ef622e9f4', FALSE, E'MailClient · ErrorDetail'),
+('16ffec92acf9452e', 'client', $k302$Back$k302$, 'b52b36b7269fbfc58ec24bb724691951a3decbe8', FALSE, E'MailUI · BuildReaderView'),
+('1a4a2a0320860132', 'client', $k302$Too many messages - try again in {0} minutes.$k302$, 'b4add5d9c65f50ace2999c72928bd14e6613fb85', FALSE, E'MailClient · RateLimitText'),
+('1aebe6ec03ea6cce', 'client', $k302$Show inactive players (90d+): <color=#FF9966>OFF</color>$k302$, 'e794f8666bdefdf409eda47776df2864f78a3c5c', FALSE, E'NativeUI · RefreshSettings'),
+('1d57224fd1a0098c', 'client', $k302$no build recorded for these games$k302$, 'a1ab96766fdd1c8827af3c5700e41d3acd7a8c6b', FALSE, E'SessionReportModel · Build'),
+('1d64e1a51771666e', 'client', $k302${0} active players (90d)$k302$, '7127b856ebda742527d9803d650094327e9ed15b', FALSE, E'NativeUI · RefreshLeaderboard'),
+('1dc746156cbb6d34', 'client', $k302$Delete$k302$, 'f6fdbe48dc54dd86f63097a03bd24094dedd713a', TRUE, E'MailUI · BuildReaderView'),
+('201957b56ba2eae8', 'client', $k302$ALT$k302$, 'a85e90f9835e6411e691ebde65582614cea81732', FALSE, E'InfoViz · BuildKeyboard'),
+('20cca7cfec3ff4f6', 'client', $k302$Details (optional)$k302$, '138a572192dc85876194243521dc344836f4d3f6', FALSE, E'MailUI · DrawReportModal'),
+('211d46a26008e6ad', 'client', $k302$Sending...$k302$, 'c338c191ab1e9319ba354d56467b938e0ba4e119', FALSE, E'MailUI · DrawReportModal, SendCurrent'),
+('23327ceb1b355548', 'client', $k302$Rolling block % (15 s window)$k302$, '9c7dd1d11383f73528a063432ad7775e2309df3c', FALSE, E'SessionReportModel · Build'),
+('23c0525166453713', 'client', $k302$Score race (points per game)$k302$, '5942f27987dc0247c5c9dbffdb596fbcd333e322', FALSE, E'SessionReportModel · Build'),
+('2506a4c323852259', 'client', $k302$The subject must be a single line.$k302$, '0967c16f2f49c7ed6c3f978cad149d2741eaf58d', FALSE, E'MailClient · ErrorDetail'),
+('253b8816f895e0e3', 'client', $k302$just now$k302$, 'a7f8e7cc0d43d21e5d1a4d0a3b0d5ff66a5da1ed', FALSE, E'ProfileCard · Ago'),
+('262268f71a753d5a', 'client', $k302$Blocked {0}.$k302$, '2adf1cea6deccbe555f4ad52ef17b059f7011585', FALSE, E'MailUI · BlockCurrentSender'),
+('266f789c58930781', 'client', $k302$The message contains a word that is not allowed.$k302$, '30645a4e58536be0d40c45c60f3bc502e77f369a', FALSE, E'MailClient · ErrorDetail'),
+('267110bd9e31f755', 'client', $k302$Previous track is not loaded yet — use Previous at the main menu$k302$, '27410e6659b89a7cb61e84f1f7fa41ee862fbce5', FALSE, E'MusicEngine · PlayPrevious'),
+('277adba289bdb3bc', 'client', ($k302$Uncommon$k302$ || chr(4) || $k302$card rarity$k302$), '1b25b1def15facfdbd36fe3ebb0382030e196693', FALSE, E'NativeUI · RefreshCardStats · card rarity'),
+('27e2b3adc21ab492', 'client', $k302$Music failed to load ({0}) — play the track to retry$k302$, '37e552ceec0a96e656492df9d275920a5c1798a2', FALSE, E'MusicEngine · MusicStatusLine'),
+('28608dd429bf4959', 'client', $k302$<color=#CCCCCC>Players in: <b>{0}</b>. Your player is in, but the other player has not pressed Jump to join — their game may be unfocused or stuck on its ready prompt. Leaving here costs nothing: no match has started.</color>$k302$, '7d30cf4fe7e8dc4bc93d9abb5e3a5cc140b6ac2c', FALSE, E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+('28cbbcc2706cca77', 'client', $k302$Mail$k302$, '92379cbb8ecf696194b47b619a87e9e4f9a75db2', FALSE, E'MailUI, NativeUI · (file scope), BuildHeader, TabLabel'),
+('2db6030694b0d1aa', 'client', $k302$Blocked senders ({0})$k302$, '07db9111fff3a8c59035ece97d19b3f4ab8dad66', FALSE, E'MailUI · RefreshSettingsRow'),
+('2fb1c1d57870c7c8', 'client', $k302$Reply$k302$, '6c2bb735a46a8ff307fe2e638d581295b2a49e09', FALSE, E'MailUI · BuildReaderView, PaintComposer'),
+('3074c53943319b67', 'client', $k302$One of the recipients could not be found.$k302$, '2b704ce6aa67a96d1f0d0fea4523fd2263f2901f', FALSE, E'MailClient · ErrorDetail'),
+('30c705a5b9565018', 'client', ($k302$Other$k302$ || chr(4) || $k302$report reason$k302$), 'a08428d584d214df32ded6b0efd35e8feada35b2', FALSE, E'MailUI · DrawReportModal · report reason'),
+('33492062006fafe0', 'client', $k302$Send$k302$, '9bc2575c3930437e80555f78757b783c842e8e66', FALSE, E'MailUI · BuildComposerView'),
+('34097f6a51a2eff8', 'client', $k302$The server refused this request ({0}).$k302$, '8bb5dbbad00cb39d4c4de4ce8473abfc6c82a2d7', FALSE, E'MailClient · ErrorDetail'),
+('3490ced9bd0b4480', 'client', $k302$Rating History  ({0} Elo, {1} rating updates)$k302$, 'bb36dd65f9c640c3c35a2f6b91117d03cab7ead6', FALSE, E'NativeUI · BuildFormGraph'),
+('3552fe19b992d0c5', 'client', $k302$Ranked 1v1 series$k302$, 'a9c4991f02d068f244e91619d5201b4a1dddc220', TRUE, E'ProfileCard · Render'),
+('3a6f424c1475be3b', 'client', $k302$Blocked senders: show$k302$, '7d8440f824543eaf6b42f14e6c3ac3aeccdbd139', FALSE, E'MailUI · RefreshSettingsRow'),
+('3a9e2a2db7d4115e', 'client', $k302${0} GOT HALF A POINT$k302$, '0628f47a69f660375da687357d797c395f669618', FALSE, E'TeamColorIdentity · AfterDoShowPoints'),
+('3c7e9cb47fd1e6c7', 'client', $k302$Showing: Elo$k302$, '575fb28d1b6dfec7b0c600da4c775614efafc076', FALSE, E'NativeUI · BuildCompareTab'),
+('3c7fc094e9393991', 'client', $k302${0}: rating {1}$k302$, 'dda3e8d0871cf0a2bac1b6a9d34507877a1246cf', FALSE, E'SessionReportModel · BuildTotals'),
+('3c85c6b1e187fb93', 'client', ($k302$LOCKED$k302$ || chr(4) || $k302$betting window$k302$), '92c5a22cba39cecfb28e19eab491c7bcfb365f26', FALSE, E'InfoViz · BuildBetWindow · betting window'),
+('3e1107290adf5ba0', 'client', $k302$+ Add$k302$, '109b936ad40f2cfaffa7b09b8d8850665e810a4c', FALSE, E'MailUI · BuildComposerView'),
+('3efbc953c91b440b', 'client', $k302$Hit %$k302$, '48a77eef568007e361b85fee51b594fea15ff0df', FALSE, E'SessionReportModel · BuildTotals'),
+('3fa8eb32ef19e443', 'client', $k302$Tell the moderators why. The message is attached to the report as it was sent.$k302$, 'd7e95c1c1c4e8a3c0f7ee0a7fd17f5e67b15fd49', FALSE, E'MailUI · DrawReportModal'),
+('3ffbbdeb8f6513b1', 'client', $k302$pts$k302$, '4abdfc6d463e258e55447ae65fe85cae5593113b', FALSE, E'SessionReportModel · Build'),
+('44b5d154e10fd438', 'client', $k302$From:$k302$, 'c4d63e4c56f1d2b74aaf3de1c3943ce348748d84', FALSE, E'MailUI · PaintReader'),
+('4635963f683e47cd', 'client', $k302$Write a message first.$k302$, '89da64f4fb77bd76ddec45e4ea6ccb27e52dd8a7', FALSE, E'MailClient, MailUI · ErrorDetail, SendCurrent'),
+('492b0e14064a334a', 'client', $k302$Could not load this report$k302$, 'eb7a493539c5d8c3a22ebc8f570229cbe4fbbf5c', FALSE, E'SessionReportView · ErrorMessage'),
+('4998b15922fb8ea2', 'client', $k302$Updates$k302$, 'c76d18079a076ee34ffc62b5b9bd0909da356dce', FALSE, E'RatingGraphAxis · Label'),
+('4a045cc8b4541843', 'client', $k302$Unblocked {0}.$k302$, '8ee98a7371967a4625215adb4dec48b751251f76', FALSE, E'MailUI · Unblock'),
+('4b44c291102565eb', 'client', $k302${0} unread$k302$, '28724d54e1d94f4f2e39c4dbe273e5ff00477c44', FALSE, E'MailUI · PaintNav'),
+('4c5dddf9072c1d87', 'client', $k302$Who can mail me: <color=#FFD94D>People I have played</color>$k302$, '4c26a5fb4569b0f70bf12735e201ac8ff2f124e2', FALSE, E'MailUI · RefreshSettingsRow'),
+('4e6e14ae3e05648c', 'client', $k302$Session report$k302$, '95e134257841536da4f97f7fec31a53ea3bb16bb', FALSE, E'SessionReportView · Draw'),
+('4eabfc99622a78b2', 'client', $k302$Too many messages - try again in {0} seconds.$k302$, 'f7bc8ed90c03af9250594c0be5bc2443a08fdf5e', FALSE, E'MailClient · RateLimitText'),
+('4f1e57957913d56d', 'client', $k302$FFA Elo$k302$, '477b094b85e09367aa6ff21fad7719819b83e85d', FALSE, E'NativeUI · TrMetric'),
+('5178e08b586191ad', 'client', $k302$Data sharing is disabled in your settings$k302$, '5443261f4adb51b49ffb9503b4f259c89b3987aa', FALSE, E'SessionReportView · ErrorMessage'),
+('518ccda06f29838b', 'client', $k302$Casual 1v1$k302$, '2a966d4f0dcf6f67d0ab1296b2b3a9b500f504b7', FALSE, E'ProfileCard · ModeName, Render'),
+('52d71200ba95c9f2', 'client', $k302$no rating or gold recorded for this set$k302$, '2da59d3e2b18218ba83846343bf863046d5ad17b', TRUE, E'SessionReportModel · BuildTotals'),
+('52f70ee24279cc15', 'client', $k302$Report this message$k302$, '080b46978fbe937fe9486bfd39ca94188e218eb8', FALSE, E'MailUI · DrawReportModal'),
+('53a64dc000e592f9', 'client', $k302$The message is too long ({0} characters max).$k302$, 'd238602f14d5c048c4c327e48cf6bedf5d3c8ff5', FALSE, E'MailClient · ErrorDetail'),
+('53cc81ae7216d5f5', 'client', $k302$That's you - pick someone else.$k302$, '4f78ec8afdf19de3929660d707d8d28699f73ac6', FALSE, E'MailUI · AddRecipient'),
+('5456b31749dd96ed', 'client', $k302${0}: {1} gold$k302$, '69d21100feea50e41fe91389fdfa15c8645c4d2f', TRUE, E'SessionReportModel · BuildTotals'),
+('54f9fc8b48b22c94', 'client', $k302$Could not load this report (error {0})$k302$, 'e85a2435937a0b9f1512d33700080775d15b2ff6', FALSE, E'SessionReportView · ErrorMessage'),
+('572c49153567a8b1', 'client', $k302${0} d ago$k302$, '4a93a5aeeee725aff10b0cf88441c452e85cb806', FALSE, E'ProfileCard · Ago'),
+('5a6a862a3fe38072', 'client', $k302$no cards recorded$k302$, 'ea42e0f58f16d642275677edc0ba3dc66ee8b595', FALSE, E'SessionReportModel · Build'),
+('5d91a2b3e46d532b', 'client', $k302$Rates$k302$, 'f04cad5a95ab116b04cd918d0a81bf35b63296f0', FALSE, E'SessionReportModel · Build'),
+('5f82a7a4a2210951', 'client', $k302$Delete this message?$k302$, 'e0a26141796cf26afdd14dd52e267fc90cf56c48', TRUE, E'MailUI · DeleteCurrent'),
+('5f8988e0e570273b', 'client', $k302$Keys/s$k302$, '812d465d4b71db71c2ed2a07e20a6504b807ff57', FALSE, E'SessionReportModel · BuildTotals'),
+('60eeb9051d434a93', 'client', $k302$Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).$k302$, '8f080546a2a2bd13529ef27e602361b2b5e34076', FALSE, E'NativeUI · BuildSettingsTab'),
+('622d1aecdaadf508', 'client', $k302$dmg$k302$, '7ff9ab96af63157f5eb7ba53993ddb4cb0fe8079', FALSE, E'SessionReportModel · Build'),
+('64a794dbef16b882', 'client', $k302$Copied to clipboard.$k302$, '46322ff3b9d0282b788c84b88c7b446f619a3c01', FALSE, E'MailUI · CopyCurrent'),
+('6a215df0cfb67121', 'client', $k302$+{0} more$k302$, '61f571ca939a07334ed7f8c7937a84ac7580443d', FALSE, E'MailUI, SessionReportModel · AddresseeNames, FfaScoreLabel'),
+('6e08c396abf6b6c7', 'client', $k302$To: {0} and {1} others$k302$, '1b4230aae70d4644132b63d836debb79cdaeb608', FALSE, E'MailUI · PaintComposer'),
+('6e56266160067f83', 'client', $k302$Win$k302$, '4973f4c599d5f42cf7bde52d66c3ed8ef77accb1', FALSE, E'ProfileCard · ResultName'),
+('6e62951fdb93563c', 'client', $k302$Ranked 1v1 games$k302$, '82033c4926ccf7525a9e7b5a5b8dcaf3e1951b27', TRUE, E'ProfileCard · Render'),
+('6e66d7d7cab7c6c0', 'client', $k302$<color=#7788AA><i>subject</i></color>$k302$, 'a83c8ce6d2d11546990d6520e589bb3fbb661c01', FALSE, E'MailUI · DrawComposerFields'),
+('7122492c4d94cb89', 'client', $k302$This account cannot send mail.$k302$, '980f8f7a005ea297b36863b4f9dc5af47a107e40', FALSE, E'MailClient · ErrorDetail'),
+('72612ea13e63f955', 'client', $k302$Sent$k302$, '35f49dcfbfb2e03fdce327671e82bf173b1ccb8b', FALSE, E'MailUI · BuildHeader'),
+('743a4b3b46182cb7', 'client', $k302$rolled out: {0}$k302$, '1aef7a2df972ed920cb3bc283f3a1cdee7a3846d', FALSE, E'SessionReportModel · Build'),
+('74a20714cad97636', 'client', $k302$Add a subject.$k302$, '16ecfef56ef460e948a4a7706fed0e166a2fc249', FALSE, E'MailClient, MailUI · ErrorDetail, SendCurrent'),
+('75b4b05477f8d8c0', 'client', $k302$Last met: {0}  -  {1}  -  {2}$k302$, '09c8f45b288212b02726036d5becce603cfb6c57', FALSE, E'ProfileCard · Render'),
+('75bcd02e9e724da4', 'client', $k302${0}: rating {1} -> {2} ({3})$k302$, '6b488e114d476ea92695f7a3aacf06eb4b04a817', FALSE, E'SessionReportModel · BuildTotals'),
+('789787560aa00ad7', 'client', $k302$New message$k302$, '1ed2e7b50fa1dbbf1693d1c38adf270c04db10c6', FALSE, E'MailUI · BuildComposerView, BuildHeader, PaintComposer'),
+('78e822807f556d30', 'client', $k302$Online$k302$, 'c3e839df608469149df1ef34a1c9bb26b62b5452', FALSE, E'ProfileCard · Render'),
+('7933cc65e1e43cc3', 'client', $k302$Reported - thank you. A moderator will review it.$k302$, '61835ff8c458f2741640d8fd27608b925ba3e297', FALSE, E'MailUI · SubmitReport'),
+('7a0f8011c1cb0624', 'client', $k302$Rolling DPS (15 s window)$k302$, 'b1f400711752a533e91773aacef324f6ab1a4486', FALSE, E'SessionReportModel · Build'),
+('7b800da30a6628fa', 'client', $k302$No blocked senders.$k302$, '0e60f4e5c3500fc10fcc0ddc8425fb2d5bc47444', FALSE, E'MailUI · RefreshSettingsRow'),
+('7b96b5a23f982716', 'client', $k302${0} min ago$k302$, 'b9e7312c9f0f882c9d389eabbd62129e6fefa8c4', FALSE, E'ProfileCard · Ago'),
+('7ba47858481b8cb5', 'client', $k302$Add at least one recipient.$k302$, '7a474745d680ea5776d07b77326820530491bc6e', FALSE, E'MailClient, MailUI · ErrorDetail, SendCurrent'),
+('7cf8613cdf7c7bf4', 'client', $k302$Rolling hit % (15 s window)$k302$, '0c9e1f450655084f429f432f487e8f61b3e8d4f7', FALSE, E'SessionReportModel · Build'),
+('7eb30f41f4540f2b', 'client', $k302$Mail ({0})$k302$, '9119f6e8e1e6380ce9ae6abc7eba8196a1e5cd41', FALSE, E'MailUI · TabLabel'),
+('8075c62d30edbd36', 'client', $k302$Show inactive players (90d+): <color=#88FF88>ON</color>$k302$, '5431669ad787be0e5026cb47c0a80f0e35a8ed03', FALSE, E'NativeUI · RefreshSettings'),
+('80f0534cf1f71ba0', 'client', $k302$Game {0}: team 1 {1}-{2} team 2$k302$, '158534c6676ad9aedfbcacf43b97f8809a97e71d', FALSE, E'SessionReportModel · TeamScoreLabel'),
+('811402dd376f04ae', 'client', $k302$Average game length: {0}$k302$, '4cc6a572d559cdbf480b824afb0007841198d5f9', FALSE, E'SessionReportModel · BuildTotals'),
+('822d0a2200219e04', 'client', $k302$You$k302$, '905cb326c779f0123e079bf8ccb223176a3cf32d', FALSE, E'MailUI · PaintReader'),
+('827a88f35b373700', 'client', $k302$Block {0}? Their mail will no longer reach you. You can unblock them in Settings.$k302$, '887e9e617777d27403a4aa8d881cc77d1011ae6f', FALSE, E'MailUI · BlockCurrentSender'),
+('82897577963eb1c9', 'client', $k302$Discard this draft?$k302$, '6dbafbade29323ae87541f01dd921ed9a1c49604', FALSE, E'MailUI · DiscardCurrent'),
+('854d11d214604952', 'client', $k302$The report details are too long.$k302$, '6f43b8da2c4d3c96806b20f83bce26bcc81f7f96', FALSE, E'MailClient · ErrorDetail'),
+('87c44957aed78d1e', 'client', $k302$Calendar$k302$, 'adab5090ac6a1b7b5420faac7be86c41721ba27c', FALSE, E'RatingGraphAxis · Label'),
+('8ad309ec5640652e', 'client', $k302$Blocked senders: loading...$k302$, 'b9628a47f4a34705ea3fccd1efbbbe2ee4980644', FALSE, E'MailUI · RefreshSettingsRow'),
+('8b7f3f68f2b2a6be', 'client', ($k302$Common$k302$ || chr(4) || $k302$card rarity$k302$), '4fc0b8faff24d53cee4e9e20d595ec38dd3c45a9', FALSE, E'NativeUI · RefreshCardStats · card rarity'),
+('8c252468d45ccbb9', 'client', $k302$Builds$k302$, 'b82b3fe83d42765d8aa437ed8d9b48e92d7a0db6', FALSE, E'SessionReportModel · Build'),
+('8cb0abda4da05fc5', 'client', $k302$Net rating vs them: {0}$k302$, 'd456ddfb83e177467b0deaa21a8bcdd1cebf0452', FALSE, E'ProfileCard · Render'),
+('8ce94a58f23f5ead', 'client', $k302$The report request could not be started$k302$, 'd2ba265f2e2a73f932728d264800fe63975bc5e8', FALSE, E'SessionReportView · ErrorMessage'),
+('8d8ad70aea0723e5', 'client', $k302$Not found - it may have been deleted.$k302$, '9fe67b4b5c012200b5a02bd87d93116ea8f99fc9', TRUE, E'MailClient · ErrorDetail'),
+('8f174f2aaacd01b6', 'client', $k302$This report is not available$k302$, '50227628c89ba9e09dcc721b8680e92633d9de04', FALSE, E'SessionReportView · ErrorMessage'),
+('90d8e4236c3a916c', 'client', $k302$Set summary$k302$, 'd33f5119f64611dcdc545a52668df4cdebadec76', FALSE, E'SessionReportView · DrawTotals'),
+('91a1e4d8d8097fcc', 'client', $k302$The subject is too long ({0} characters max).$k302$, '9b3afe4da74b7727b11fa0e01d3fbcaeccf17258', FALSE, E'MailClient · ErrorDetail'),
+('9297cc8ea92d7959', 'client', $k302$Return to menu$k302$, '9c3fe9f3b161a19b09056dd1ff4b1cfe7b045af8', FALSE, E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+('92dd612a8d621c97', 'client', $k302$System notices cannot be reported.$k302$, 'ecee915ad4e312b5d3bc2f39a0db0f8598539fd5', FALSE, E'MailClient · ErrorDetail'),
+('960f92ec35a855c6', 'client', $k302$Reply all is not available for this message.$k302$, '82727ae5be7bff2bef34a61abe1734751baa5136', FALSE, E'MailClient · ErrorDetail'),
+('963e1688108c8e04', 'client', $k302$Loading music ({0}%)$k302$, 'd5fc55fa69fbb26b458e4848d46af7d19dbecce6', FALSE, E'MusicEngine · MusicStatusLine'),
+('96ed30b1a4ff872b', 'client', $k302$Series streak: you x{0}$k302$, '19da838577485f27f870de99e7b8669bbe69e1eb', FALSE, E'ProfileCard · Render'),
+('99d3e800e6c6e7ac', 'client', $k302$Session$k302$, 'f7f1997c6cd1aa051279675742272a956e7db628', FALSE, E'NativeUI · CreateFfaRecentMatchRow, CreateHistoryRow, CreateTeamHistRow +1'),
+('99db5e6326bcafea', 'client', $k302$report version {0} - some panels may be missing$k302$, 'b9c9cc53149d9fbd53f10c4e00a4aa4d3e672822', FALSE, E'SessionReportModel · Build'),
+('99e460a3a11278c5', 'client', $k302$Shots$k302$, '2179f8207fe678c2bcef7cd520ce0a989d78a467', FALSE, E'SessionReportModel · BuildTotals'),
+('9baea7ac09c3203f', 'client', $k302$not recorded (older block format)$k302$, 'ab72048da17149f931cb904c904a44a9367463ab', FALSE, E'SessionReportModel · Build'),
+('9dd953313fc75502', 'client', $k302$showing the newest {0} games of this sitting$k302$, '3dfd2e885692b06244c1ab4a2f5815cff81aed53', FALSE, E'SessionReportModel · Build'),
+('a0362a9ecb56c463', 'client', $k302$<color=#FFD080>The other player has not joined the game yet</color>$k302$, 'd3682704bbf56ff0650f46942c92131cc592b36f', FALSE, E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+('a0a058f44c557587', 'client', $k302$2v2 lobby never filled — returning to menu. Requeue when ready.$k302$, 'a623f9b68fd164cab4112acbb19b9a49034c04a4', FALSE, E'GameStateWatcher · PollRoomState'),
+('a3166b9081b8142a', 'client', $k302$Too many messages - wait a minute and try again.$k302$, '3a10c33de5c861b4c12ad993ccc3038a6c158a64', FALSE, E'MailClient · RateLimitText'),
+('a32a4df1d80c7611', 'client', $k302$No mail yet.$k302$, 'd5204921aec730c6f98de36c500e8f5a7ab72db9', FALSE, E'MailUI · PaintList'),
+('a4036f830a92a60a', 'client', $k302${0} GOT A POINT$k302$, 'eb511260e4db899255c5755b6c52fadda28a8606', FALSE, E'TeamColorIdentity · AfterDoShowPoints'),
+('a4fe34ab4908634e', 'client', $k302$Loading music ({0} of {1} ready)$k302$, '9f70dc8f53163d9a15ca78ac3ef031d6577aa6d0', FALSE, E'MusicEngine · MusicStatusLine'),
+('a70a5fb2ba646559', 'client', $k302$Reply to all$k302$, 'df424aaa0ba06e961297ef5bd0e1638062440a0f', FALSE, E'MailUI · PaintComposer'),
+('a8a84cc00a76ea0f', 'client', $k302$fps$k302$, 'ee4c907f5db26515b9abd64046331b63a0d445e5', FALSE, E'SessionReportModel · Build'),
+('a9668913261f1513', 'client', $k302$Already a recipient.$k302$, '20f5ec2c72cb088069f990da60c6335373f7e0c0', FALSE, E'MailUI · AddRecipient'),
+('a9b069824b3e0bcd', 'client', $k302$Tie$k302$, '7d075f169d648523eaa03bb2a98984e48aa65769', FALSE, E'ProfileCard · ResultName'),
+('aa14ab7e25714c02', 'client', $k302$Announcement$k302$, 'cf84a98d6cf7f156862a08ba8236467b6f471004', FALSE, E'MailUI · PaintReader, RowLabel'),
+('ab55045db14ec90e', 'client', $k302$No games together yet$k302$, '345712868273f6a81bf0b3a50649c948c0da982e', FALSE, E'ProfileCard · Render'),
+('ac7fc61d4452be7b', 'client', $k302$FFA (placed above / below)$k302$, '87f5c954be7baafdb07f9e51044d333702d933d1', FALSE, E'ProfileCard · Render'),
+('acd99861498c86bc', 'client', ($k302$Unknown$k302$ || chr(4) || $k302$card rarity$k302$), 'cba56bc5bb2f58f1481c22801b7fe24b52339b1f', FALSE, E'NativeUI · RefreshCardStats · card rarity'),
+('ae366cc0d2f0a1f5', 'client', $k302$The report details repeat one character too many times.$k302$, '54b495e75060e8c4ded9f4302f039146b8fd1191', FALSE, E'MailClient · ErrorDetail'),
+('ae5bd76f574f358f', 'client', $k302$Request failed - try again.$k302$, '48336ec0bad6a9a4573ca7b75930b7ee5f6c2012', FALSE, E'MailClient · ErrorDetail'),
+('aeb4bae924db54ad', 'client', $k302$The report could not be read$k302$, '5a7fbd2ce825994a05331d9cf2e88921d6240f41', FALSE, E'SessionReportView · ErrorMessage'),
+('b23a6d6dc64dde43', 'client', $k302$Too many messages - try again in {0} hours.$k302$, 'fd7a242888698ca0f0bcbf366fe4bc6c18f34e71', FALSE, E'MailClient · RateLimitText'),
+('b29134ecca9d1209', 'client', $k302$Elo$k302$, 'b2bba6145b37e301dea598b4d23970ddc6e2f1a7', FALSE, E'NativeUI · TrMetric'),
+('b2e2bf41f013e8fd', 'client', $k302$Series streak: them x{0}$k302$, 'd285ca1b47468299f4afac9cb03ceae3b7b63c3c', FALSE, E'ProfileCard · Render'),
+('b547112036e4389a', 'client', $k302$New mail from {0}: {1}$k302$, '6aba550b2fa626600ec7e40752abf1f2d0eb42b5', FALSE, E'MailUI · OnStatus'),
+('b571a0883abbc576', 'client', $k302$Since first$k302$, '85aeadc8e1b43a5992e71f4c7cd53e3abeab1458', FALSE, E'RatingGraphAxis · Label'),
+('b5e48c8390617067', 'client', $k302$Steam sign-in is required to view session reports$k302$, '1432201b40fabc68678895cefb04563659d50408', FALSE, E'SessionReportView · ErrorMessage'),
+('b7155d1c23b36e80', 'client', $k302$Mail needs a secure connection to the server - it is unavailable on this connection.$k302$, 'e431694e93597eafe1c43c5938ed4e70152f7e96', FALSE, E'MailClient · ErrorDetail'),
+('b72853819816a32d', 'client', $k302$Unavailable until the game restarts$k302$, '7e5925410b95b8d08940c6d0bc28ddc1fa89e808', FALSE, E'MusicEngine · MusicStatusLine'),
+('b74e9797538db825', 'client', $k302$Spam$k302$, 'd8628a5259c97b78ad43f83b1f91e47936e7e7d1', FALSE, E'MailUI · DrawReportModal'),
+('b787becd085c029c', 'client', $k302$Last seen {0}$k302$, '625e31be269df28853a13df859f62ab7c71a841f', FALSE, E'ProfileCard · Render'),
+('b7adc58cf20616e9', 'client', $k302$Update the mod to use mail.$k302$, '0b4257d9a89e14f4f46f5f3b21ee5fb370ec1473', FALSE, E'MailClient · ErrorDetail'),
+('b94ec4c29383c067', 'client', $k302$Nothing sent yet.$k302$, '6fa60471c5d8a896756bcae367bd6d491ca9b400', FALSE, E'MailUI · PaintList'),
+('ba9c002f190ceca1', 'client', $k302$<color=#FFD94D><b>WHOLE-LOBBY GATED - REAL GAMEPLAY CHANGES</b></color>
+
+These change the shared simulation. Grow, the crate rescale and the same-card dealer are whole-room gated: <color=#7FE87F>one vanilla or outdated fighter and everyone gets vanilla, symmetrically.</color> Poison sync is per-victim, with its own mixed-room fallbacks.
+
+<color=#7FD4FF>Poison sync</color> - vanilla runs poison separately on every client, each judging your block by its own timing - screens permanently disagree about which ticks landed ('ghost HP'). Now the victim's own client decides every tick and publishes the verdict; every modded client applies exactly that set. An unmodded victim gets the pure vanilla loop instead. Works in any online room. <color=#8A8A93>In mod-issued rooms with an incapable client present, the modded clients instead agree blocking does not negate poison - agreement beats the ghost-HP split.</color>
+
+<color=#7FD4FF>Grow normalization</color> - Grow's damage compounds per FRAME on the shooter's machine: about x1.4 over a full flight at 400 FPS, x9.4 at 60, x82 at 30 for one copy, far worse stacked - which is how low-FPS players one-shot with Grow plus any explosive. Normalized bullets grow at one fixed rate. Gate: every fighter modded and current, AND a mod-issued room or everyone's Ranked ON at connect. Otherwise vanilla growth for everyone.
+
+<color=#7FD4FF>Falling crates on big FFA maps</color> - on scaled FFA maps vanilla respawns networked crates and saws too small, ropes miss, and they drop at round start. Rescaled only when every fighter is capable; FFA queue rooms only.
+
+<color=#7FD4FF>FFA same-card dealer</color> - the Same Cards rule deals identical draws; needs every member current, else each client rolls privately.
+
+<color=#FFD94D><b>MODE ROOMS ONLY</b></color>
+
+Vanilla ROUNDS is built for exactly two teams, so FFA rooms replace the round engine outright: round end, scoring, card targeting (vanilla aimed 'other team' cards at the first player), spawns, leaver tolerance. None of it can run outside FFA rooms.
+
+<color=#7FD4FF>Radiance in FFA</color> - vanilla's wave hit its own caster the moment they moved, and stopped after ONE hit while visibly sweeping everyone else. The FFA version excludes the caster and hits each opponent the ring sweeps, once, ending when the ring ends.
+
+<color=#7FD4FF>Crown in 2v2</color> - vanilla can't move the crown past the first two players; the leading TEAM wears it, both members.
+
+<color=#7FD4FF>Card-pick stage in 2v2/1v2</color> - vanilla shows only ONE picker's body per round (sometimes the wrong one), leaving the second picker on an empty stage. Each picker is re-staged in turn; the 1v2 solo's extra pick also fixes a vanilla crash that hung the round.
+
+<color=#7FD4FF>Auto-continue</color> - mod rooms auto-confirm the rematch prompt. Room-code games deliberately keep the vanilla prompt: after one side clicks Yes, vanilla starts a 10-second timer that kicks that side to the menu if the other never answers - one-sided auto-Yes kills the player it tries to help.$k302$, 'bb4b5f529fff1174466c166584f96ddab94e587c', TRUE, E'InfoLibrary · (file scope)'),
+('bb83c24df96aeb64', 'client', $k302$Too many recipients for one message.$k302$, '6f9591653d343912dc73f0b8b4ad276449b5ee51', FALSE, E'MailClient · ErrorDetail'),
+('bd06028e66d68a8b', 'client', $k302$Who can mail me: <color=#FF9966>Nobody</color>$k302$, '8d0da7eaad5c45b2f590870091cc37062c052a1a', FALSE, E'MailUI · RefreshSettingsRow'),
+('bf44afebebb3f83a', 'client', $k302$To: {0}$k302$, 'a88aedfc4f2bb81fcbc57c4cf66c266d7fad07c6', FALSE, E'MailUI · PaintComposer'),
+('c02b7eb396601c2f', 'client', $k302$Inbox$k302$, '44caf74675ceb79ba5cc13bafa102509369c2b53', FALSE, E'MailUI · BuildHeader, PaintNav'),
+('c0deaa90cca7799d', 'client', $k302$That player could not be found.$k302$, 'a844ef80805e9e2dba1e9a2d6a2a1f02dedf1902', FALSE, E'MailClient · ErrorDetail'),
+('c406b8b7f5981a4d', 'client', $k302$Loss$k302$, '12e24a7d8ac40579e8a0aef4869288afe7ed6745', FALSE, E'ProfileCard · ResultName'),
+('c855be95c9b870e4', 'client', $k302$Who may send you in-game mail. Blocked senders never reach you.$k302$, '4efa38c1176679a155455493a3340eb9ad0f8b1f', FALSE, E'MailUI · BuildSettingsRow'),
+('c8b8c9f66518f658', 'client', $k302$This account is not ready for mail yet - try again later.$k302$, '0bf3d6b67e43f2f4ab78212f925262b8fec5ba12', FALSE, E'MailClient · ErrorDetail'),
+('c9a5ea03566f65f1', 'client', $k302$The subject contains characters that are not allowed.$k302$, 'eb0ca29fad7ce89cf3bb17409c868be370ee1c79', FALSE, E'MailClient · ErrorDetail'),
+('cae11518b35c01a5', 'client', $k302$not recorded for this mode$k302$, '6d03d89dc843abae6b32d3494112fa04fd206058', FALSE, E'SessionReportModel · Build'),
+('cbdfe2e3f3409118', 'client', $k302$Harassment$k302$, '8fddd79e1918745ff44d284f37e6f5f49191ffb4', FALSE, E'MailUI · DrawReportModal'),
+('cc72dae7e378ae92', 'client', $k302$date ->$k302$, 'bbe8e50ce0d4d8b4bd3623810d2f59ade4778727', FALSE, E'RatingGraphAxis · Caption'),
+('cdbe5987ff49cf3d', 'client', $k302$Block sender$k302$, 'ae07ebf540bffabc1fd30108d4e541e4f6381ef7', FALSE, E'MailUI · BuildReaderView'),
+('cf19303e97ba6241', 'client', $k302$Copy$k302$, 'af74f7c5362aaee985bf8cda3dd75fc80751ce51', FALSE, E'MailUI · BuildReaderView'),
+('cf3dbad5f408d103', 'client', $k302$Data sharing is off - allow it in Settings to use mail.$k302$, 'eed4f80814b5b7895e0a78d63424dabcbf625646', FALSE, E'MailClient · ErrorDetail'),
+('d0098e42bc70b57c', 'client', $k302$You cannot block yourself.$k302$, 'bd408e8d9fe13b04edf6829e4dc5f1f9ceba08b4', FALSE, E'MailClient · ErrorDetail'),
+('d1f566a9226d07e1', 'client', $k302$Game {0}: {1}$k302$, 'a3143c792dd243b332d5946a9630efa050cfb0e8', FALSE, E'SessionReportModel · FfaScoreLabel'),
+('d3a6bce744430b25', 'client', $k302$Send report$k302$, 'a5b32af957ef73ce072ce21599ce7cd7bf2212ba', FALSE, E'MailUI · DrawReportModal'),
+('d4f8ae22554cca00', 'client', $k302$<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
+F5 works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, Space does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
+
+Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode. While typing, a tap of Alt switches the language channel your message goes to - global, then each language channel in turn, then back to global; the Home tab dropdown sets it too.
+
+Holding E opens the emote wheel - even mid-battle: point at a dance you own and release to play it for everyone running the mod. Your own controls lock until the dance ends, and the dance stops if you get knocked around or fire. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
+
+Hold Tab during a match for the live scoreboard: score, cards, accuracy and connection info for everyone in the room, without opening the full menu.
+
+Shift swaps between your equipped map color skins as a new round paints in. If you have none equipped, it does nothing.
+
+Vanilla rebinding lives in the game options; the mod keys themselves are fixed. For what to practice with all of this, read <color=#7FD4FF>Getting better</color>.$k302$, 'bceb5f723e36bb6507cde87f4f07e2cc5992e6d3', FALSE, E'InfoLibrary · (file scope)'),
+('d5bf8531fbbdc484', 'client', $k302$The message contains characters that are not allowed.$k302$, '91b8f58e21a0eaa877618fd5517384166a5a71f3', FALSE, E'MailClient · ErrorDetail'),
+('d6b721431ce9f5db', 'client', $k302$showing the newest {0} games of this sitting ({1} not shown)$k302$, '6d2b7548ed0a229c3022f463d6ecfc1c074ed549', FALSE, E'SessionReportModel · Build'),
+('d6ddb3145c092024', 'client', $k302$Add recipient$k302$, 'a989d1f178daf1628c77e5deaed5fa68ff871312', FALSE, E'MailUI · AddRecipient'),
+('d848abd7ea062801', 'client', $k302$One copy, full flight, bars on a log scale. The mod pins every eligible Grow bullet to the same 120 FPS growth clock: about x3.1.$k302$, 'cc3336e5827f767e2874b5b2b213028b4631f96f', FALSE, E'InfoViz · BuildGrowCurve'),
+('d896225c4b934865', 'client', $k302${0} h ago$k302$, 'f29997e604005ce5aa841d40a0fe3a77ae4c6980', FALSE, E'ProfileCard · Ago'),
+('da496c66b15da7fa', 'client', $k302$The report details contain characters that are not allowed.$k302$, '5a09ef793c04d82aaa1cf575a57a9045530421d0', FALSE, E'MailClient · ErrorDetail'),
+('dae269dd1ca70a7d', 'client', $k302$Subject$k302$, '8d183dbdcea3b29906090bd83fa6fa37923cc8ec', FALSE, E'MailUI · BuildComposerView'),
+('dca1b81b5132c44f', 'client', $k302$The subject repeats one character too many times.$k302$, '6f3f20c0701e938f7844a2a2913e49a69f8cd20e', FALSE, E'MailClient · ErrorDetail'),
+('dca283e5bc87a20c', 'client', $k302$Getting better at competitive ROUNDS is mechanical, not mystical: blocking discipline, netcode awareness, drafting, and reading the numbers the mod already keeps on you. Every tip below is tied to a real mechanic you can go test.
+
+<color=#FFD94D><b>BLOCKING DISCIPLINE</b></color>
+
+Blocking is the skill that decides close games, and it has a cost model worth respecting.
+
+- A block that absorbs nothing still spends its full cooldown. <color=#FF6666>Panic-blocking at the sound of a trigger buys you nothing and hands your opponent a free window while it recharges.</color>
+- React to the bullet, not the trigger: watch the opponent's gun and the shot itself, and drill on-reaction blocks until they're reflex.
+- One activation can absorb several bullets. A block held for a burst or a bounced volley does far more work than one spent on a lone pellet.
+- Block-effect cards multiply timing skill: Echo repeats and Shield Charge dashes all belong to the right-click that started them, so one well-timed block fires the whole chain.
+- A poison or burn tick that lands inside your block is consumed - erased, not postponed - so blocking while poisoned is real damage prevention. <color=#8A8A93>(A room mixing current and outdated mod versions can fall back to poison ignoring blocks, for everyone equally - see <color=#7FD4FF>Vanilla stays vanilla</color>.)</color>
+
+<color=#FFD94D><b>PLAY WITH THE NETCODE</b></color>
+
+- ROUNDS is not peer-to-peer. Both players talk to a Photon relay server in the room's region; the orange player is not a host and has no host advantage. <color=#7FE87F>Your ping to the region is the number that matters.</color>
+- Every client simulates every bullet, and damage is shooter-authoritative: what a shot takes off you is decided on the shooter's machine. Their screen sees your movement late, which is why you can die a step after reaching cover - and why the player who peeks first sees the other before being seen.
+- Your block is the mirror image: it happens on your machine first and reaches the opponent's simulation a beat later. A block raised slightly early on reaction protects you in situations where a frame-perfect one does not, because your last frame is already the past on their screen.
+- What reads as a broken hitbox is almost always this mismatch: ping, interpolation, size cards, and bounced shots. The mod never touches hitboxes (see <color=#7FD4FF>Netcode & Photon</color>).
+- Frame rate is a hidden gameplay stat in vanilla ROUNDS. Vanilla Grow compounds its damage per frame: around x9.4 for a 60 FPS shooter against x1.4 at 400 FPS for a single copy, and stacking widens the gap fast. In mod rooms - and in private matches where everyone is modded, current, and has Ranked enabled - Grow is normalized so frame rate stops deciding the damage (a heavy stutter can still under-grow a little - the error only ever points down); against vanilla or outdated clients the vanilla rule stands. <color=#7FE87F>A stable frame rate is a real competitive edge</color> - the Settings tab has a performance section for exactly this.
+
+<color=#FFD94D><b>DRAFT FOR A BUILD</b></color>
+
+- Cards are a plan, not a stat sheet. Lifesteal heals off the damage-dealt chain, and damage-over-time ticks route through that same chain - lifesteal plus poison is an engine, not a coincidence. Echo and Shield Charge turn blocking skill into offense. Draft the second card for the first one.
+- Read what a card actually does, then test it. Card text and card behavior are separate things: Chase displayed a '+30% Health' line for years that the vanilla card never actually granted (the mod removed the line). Sandbox games are never recorded, so experiment freely there.
+- The FFA Same Cards rule is the best draft teacher in the mod: when it's on, everyone's Nth draw offers the same candidates in the same order, so a loss can't be blamed on draw luck - the difference was choices. The Recent FFAs list keeps every pick in pick order (hover a player's card line), so you can replay the winner's draft against yours.
+- Your 1v1 match history stores both players' picks in order for every game. After a close loss, re-read the draft before you re-queue.
+
+<color=#FFD94D><b>USE YOUR OWN NUMBERS</b></color>
+
+My Stats tracks more about your play than you probably realize. What the headline stats mean:
+
+- <color=#7FD4FF>Hit %</color> - counts bullets, not clicks: one Buckshot click counts every pellet, and only direct, unblocked hits on enemies count - poison and burn ticks, explosions and self-hits never do. A shotgun build reads low by construction. <color=#FF6666>Compare a build against itself over time, never against a sniper's number.</color>
+- <color=#7FD4FF>Block success</color> - one off-cooldown right-click is one attempt, and at most one success per attempt no matter how many bullets it absorbed. Preemptive blocks that meet no bullet are normal, not a mistake - watch the trend across games, not one game.
+- Timeline graphs sample every 3 to 5 seconds and always span the whole game. Use them to find where games turn: the score timeline shows when a lead slipped, and the hit and damage lines show what changed when it did.
+- A 1v1 game records average and worst ping plus freeze events (frame stalls over half a second); team and FFA games carry lighter connection data. Before blaming your aim for one bad game, check whether the connection numbers already explain it (see <color=#7FD4FF>How stats are tracked</color>).
+
+<color=#FFD94D><b>WATCH BETTER PLAYERS</b></color>
+
+- Live games on the Leaderboard tab carry a WATCH button when they're spectatable. A spectator seat shows the real match from inside the room, and how a top player spends blocks and drafts under pressure teaches faster than queueing blind. FFA lobbies can be watched from the FFA tab the same way.
+- The Discord bot answers mechanics questions with live data: ask it 'how does blocking work', or ask how much elo you'd gain against a named player and it computes the real Glicko preview for both sides, win probability included (both accounts need linked Discord).$k302$, '6445cd59694006f1d517add0b13f8d6c4739e5ca', TRUE, E'InfoLibrary · (file scope)'),
+('de18f3040b883b5b', 'client', ($k302$Rare$k302$ || chr(4) || $k302$card rarity$k302$), 'ada8fa22929d535cad04b537fd39614612ad9d59', FALSE, E'NativeUI · RefreshCardStats · card rarity'),
+('df3806a1ee67bdc4', 'client', $k302$1v2 as solo$k302$, 'af0f53f17c39c17c2adcd86b083333090f0857e2', FALSE, E'ProfileCard · Render'),
+('e02a47417843ba5d', 'client', $k302$Game {0}: solo {1}-{2} duo$k302$, '5da06bf7bb67a08a9073612752a6c656a5720b5c', FALSE, E'SessionReportModel · TeamScoreLabel'),
+('e3fbf8064a0d9f01', 'client', $k302$The message repeats one character too many times.$k302$, '66a8da6b04bab2ac0d06784253b757821788991f', FALSE, E'MailClient · ErrorDetail'),
+('e5988ac9e0383fc1', 'client', $k302$Who can mail me: <color=#88FF88>Everyone</color>$k302$, '1f64f5776b09e9278851caffb89e4f96db612e27', FALSE, E'MailUI · RefreshSettingsRow'),
+('e605035a007d4521', 'client', $k302$Damage dealt (cumulative per game)$k302$, 'fb0aee06de4f9faa59a99f65e1ec00a10f6999d6', FALSE, E'SessionReportModel · Build'),
+('e84b62487348bc8f', 'client', $k302$dmg/s$k302$, '28ac0476b5890ad8e1cab72ee2faf0155c4799cb', FALSE, E'SessionReportModel · Build'),
+('e9c5e68200294591', 'client', $k302$Deaths$k302$, '41cd883d2e19f7e12b81005813dcd06b656887ef', FALSE, E'SessionReportModel · BuildTotals'),
+('ea277f5d769c2bec', 'client', $k302$Reason$k302$, 'f219cc0614ae6860f43a3cd84b5cf31fc312cd9d', FALSE, E'MailUI · DrawReportModal'),
+('ee07ec619e9b5a35', 'client', $k302$Totals$k302$, '65222d7991f9e7382b74e8ff980f6ebabdf1cb5a', FALSE, E'SessionReportModel · Build'),
+('f150f5fc47ef1b43', 'client', $k302$Timeline$k302$, '018514a3d58aa08353dd5e387ee29de45981c409', FALSE, E'SessionReportModel · Build'),
+('f3d270720ff3a166', 'client', $k302$Reply all$k302$, '84c27c09b6a8df1ece7757f54242c1f32da3b559', FALSE, E'MailUI · BuildReaderView'),
+('f603297ac334cf12', 'client', $k302$More$k302$, '4bab2d8fe13fa6ab57f80098b414f0f734c5dd25', FALSE, E'MailUI · PaintList'),
+('f6a68c6300794435', 'client', $k302$Grow is the one card whose damage depends on the shooter's FRAME RATE. In vanilla, the same Grow bullet fired by a 60 FPS player hits far harder than one fired at 400 FPS - and the mod normalizes it in competitive play.
+
+<color=#FFD94D><b>THE REAL MATH</b></color>
+
+Grow multiplies the bullet's damage a little every rendered frame while it flies, through the first 40 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.
+
+Un-stacked, over a full flight:
+
+- 400 FPS shooter: about <color=#7FD4FF>x1.4</color>
+- 60 FPS shooter: about <color=#7FD4FF>x9.4</color>
+- 30 FPS shooter: about <color=#7FD4FF>x82</color>
+
+Stacking multiplies the growth rate, so the gap explodes. At three copies: about x2.8 at 400 FPS, <color=#FF6666>x737 at 60 FPS, and x285,000 at 30 FPS</color>.
+
+Hitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x5.6 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.
+
+<color=#FFD94D><b>WHY THEIR FPS BECOMES YOUR PROBLEM</b></color>
+
+Damage in ROUNDS is shooter-authoritative: the shooter's machine computes what the victim takes, and everyone else applies that number (see <color=#7FD4FF>Netcode & Photon</color>). Grow's growth happens on the shooter's frames, so a low-FPS or stuttering opponent's Grow bullets genuinely hit harder. It is not lag, it is not your imagination, and in vanilla it is not cheating either - it is the card's math.
+
+<color=#FFD94D><b>THE MOD'S NORMALIZATION</b></color>
+
+In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. One copy is about x3.1 over a full flight, two copies x9.6, three x30 - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
+
+Where it applies:
+
+- Every fighter in the room must run a current mod build (spectators don't count). <color=#FF6666>One vanilla or outdated fighter means vanilla growth for the whole room</color>, the same on every screen - a mixed lobby is never half-normalized.
+- Mod queue rooms (ranked 1v1, 2v2, 1v2, FFA, tournament rooms) normalize whenever everyone is current.
+- Private room-code and quickplay games normalize only when, on top of that, every fighter had the Ranked toggle ON when they connected.
+- The decision is locked per bullet at launch and never flips mid-flight. It is never active offline.
+
+One honest residual: at very low frame rates a normalized bullet can grow slightly LESS than the target (a few percent stacked; more on a heavy hitch). The error always points down - never toward the one-shot.$k302$, '1ff0e513c66b189e143ecd00dcfe0154b828aacb', TRUE, E'InfoLibrary · (file scope)'),
+('f6db22d3c2bc80be', 'client', $k302$rating updates ->$k302$, '95b76d40aaa4f50c07c2e2235514f88dafcb74cb', FALSE, E'RatingGraphAxis · Caption'),
+('f81f26ce4b5af021', 'client', $k302$competitive clock: 120 FPS$k302$, 'f89dbad40ddd7997cc2643ea0dd31f5156b2c380', FALSE, E'InfoViz · BuildGrowCurve'),
+('f8c3b1654dc27879', 'client', $k302$Requeue$k302$, 'e37b50a99f9235f172f8c37781b0f2f6f1d82221', FALSE, E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+('fad65cb9bd9fbc64', 'client', $k302$ALT (tap, while typing in chat) - switch the chat language channel$k302$, '9a36624f1ee1a5e95a3068fa7235369803261294', FALSE, E'InfoViz · BuildKeyboard'),
+('fb7745c00b2d52ff', 'client', $k302$Chat has language channels - use the dropdown on the Home tab, or tap Alt while typing, to switch.$k302$, 'ebc78f21b3224fa060eed08983da3a29b8b5e7e9', FALSE, E'NativeUI · BuildSettingsTab'),
+('fc4a094646e0cee6', 'client', $k302$Steam identity is not available yet$k302$, 'c5204c5f55978ef13589b2a101b390b13c7e8349', FALSE, E'SessionReportView · ErrorMessage'),
+('fcf20a7af023ab9b', 'client', $k302$<color=#7788AA><i>write your message... (plain text, no formatting)</i></color>$k302$, 'be046cfb0183635a90ad04d5a776d4c198233fb2', FALSE, E'MailUI · DrawComposerFields'),
+('fe8dcad5ec7ffc84', 'client', $k302$2v2 (opposite teams)$k302$, '093a5fa19b99991b70d20413d1a4d7e5173ffddf', FALSE, E'ProfileCard · Render')
+  ) AS v(key_id, namespace, msgctxt, source_hash, sensitive, context)
+ON CONFLICT (key_id) DO UPDATE
+   SET namespace = EXCLUDED.namespace, msgctxt = EXCLUDED.msgctxt,
+       source_hash = EXCLUDED.source_hash, sensitive = EXCLUDED.sensitive,
+       max_px = EXCLUDED.max_px, context = EXCLUDED.context,
+       retired_at = NULL, updated_at = NOW();
+
+-- Post-check (enforcing): every expected key live with the expected source_hash and context.
+DO $$
+DECLARE
+    v_expected INT := 204;
+    v_ok INT;
+BEGIN
+    SELECT COUNT(*) INTO v_ok
+      FROM i18n_keys k
+      JOIN (VALUES
+        ('0125ae7de9164286', 'd88f9041650a4d8f92e3861108e431cc08f12866', E'MailClient · ErrorDetail'),
+        ('02121f673902efda', 'ee45c30326b750387589752c0f75e1dd87ddc7e4', E'MailUI · BuildReaderView'),
+        ('03859cd272da4deb', 'f6ce7b7762e1def879ef1a477d73d657b3325ce4', E'NativeUI · InactiveName'),
+        ('04e2a526f0ea6093', '7fd7ede55c126b5c8bafea313a5d9e58aa4d2489', E'MailClient · ErrorDetail'),
+        ('0500528ae3344450', '4d002c2ce0b90e49202eaef503544ce33e4ced50', E'SessionReportModel · Build'),
+        ('050a5b01e285120b', '3116b2c0ca286eb2b0b8f489d30f590d39889ec9', E'MailClient · ErrorDetail'),
+        ('070cd827ff0f27b0', '55d3549ba04984e1f35cae57af200a60c3427388', E'ProfileCard · Render'),
+        ('0c9d1a4a99b9465b', '141d8664db867feb557c919b90eac6b3dc23ab84', E'RatingGraphAxis · Caption'),
+        ('0d33d936b58cfb81', '1023fe321ab265873416208f997e537a44eec66a', E'MusicEngine · MusicStatusLine'),
+        ('0e7db6723e7a522d', '9ec34025b6db16bb4bd06189361b2632e0310b10', E'SessionReportModel · BuildTotals'),
+        ('11be5c0c2809d4fe', '03c6d014658f7f8a730e57e9909f65ab3754d68a', E'MailUI · SendCurrent'),
+        ('13957c44445cf07e', '3dbed7ad205139f8e9f45caed19c3c4e914e1ef1', E'SessionReportModel · BuildTotals'),
+        ('153eaf29f07c21c2', '80c0d9037c516293b1095cc23493046c1ce2d324', E'MailUI · PaintNav'),
+        ('16540f87011c669f', 'ef6344b64f4741812805f017ac356d6ef622e9f4', E'MailClient · ErrorDetail'),
+        ('16ffec92acf9452e', 'b52b36b7269fbfc58ec24bb724691951a3decbe8', E'MailUI · BuildReaderView'),
+        ('1a4a2a0320860132', 'b4add5d9c65f50ace2999c72928bd14e6613fb85', E'MailClient · RateLimitText'),
+        ('1aebe6ec03ea6cce', 'e794f8666bdefdf409eda47776df2864f78a3c5c', E'NativeUI · RefreshSettings'),
+        ('1d57224fd1a0098c', 'a1ab96766fdd1c8827af3c5700e41d3acd7a8c6b', E'SessionReportModel · Build'),
+        ('1d64e1a51771666e', '7127b856ebda742527d9803d650094327e9ed15b', E'NativeUI · RefreshLeaderboard'),
+        ('1dc746156cbb6d34', 'f6fdbe48dc54dd86f63097a03bd24094dedd713a', E'MailUI · BuildReaderView'),
+        ('201957b56ba2eae8', 'a85e90f9835e6411e691ebde65582614cea81732', E'InfoViz · BuildKeyboard'),
+        ('20cca7cfec3ff4f6', '138a572192dc85876194243521dc344836f4d3f6', E'MailUI · DrawReportModal'),
+        ('211d46a26008e6ad', 'c338c191ab1e9319ba354d56467b938e0ba4e119', E'MailUI · DrawReportModal, SendCurrent'),
+        ('23327ceb1b355548', '9c7dd1d11383f73528a063432ad7775e2309df3c', E'SessionReportModel · Build'),
+        ('23c0525166453713', '5942f27987dc0247c5c9dbffdb596fbcd333e322', E'SessionReportModel · Build'),
+        ('2506a4c323852259', '0967c16f2f49c7ed6c3f978cad149d2741eaf58d', E'MailClient · ErrorDetail'),
+        ('253b8816f895e0e3', 'a7f8e7cc0d43d21e5d1a4d0a3b0d5ff66a5da1ed', E'ProfileCard · Ago'),
+        ('262268f71a753d5a', '2adf1cea6deccbe555f4ad52ef17b059f7011585', E'MailUI · BlockCurrentSender'),
+        ('266f789c58930781', '30645a4e58536be0d40c45c60f3bc502e77f369a', E'MailClient · ErrorDetail'),
+        ('267110bd9e31f755', '27410e6659b89a7cb61e84f1f7fa41ee862fbce5', E'MusicEngine · PlayPrevious'),
+        ('277adba289bdb3bc', '1b25b1def15facfdbd36fe3ebb0382030e196693', E'NativeUI · RefreshCardStats · card rarity'),
+        ('27e2b3adc21ab492', '37e552ceec0a96e656492df9d275920a5c1798a2', E'MusicEngine · MusicStatusLine'),
+        ('28608dd429bf4959', '7d30cf4fe7e8dc4bc93d9abb5e3a5cc140b6ac2c', E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+        ('28cbbcc2706cca77', '92379cbb8ecf696194b47b619a87e9e4f9a75db2', E'MailUI, NativeUI · (file scope), BuildHeader, TabLabel'),
+        ('2db6030694b0d1aa', '07db9111fff3a8c59035ece97d19b3f4ab8dad66', E'MailUI · RefreshSettingsRow'),
+        ('2fb1c1d57870c7c8', '6c2bb735a46a8ff307fe2e638d581295b2a49e09', E'MailUI · BuildReaderView, PaintComposer'),
+        ('3074c53943319b67', '2b704ce6aa67a96d1f0d0fea4523fd2263f2901f', E'MailClient · ErrorDetail'),
+        ('30c705a5b9565018', 'a08428d584d214df32ded6b0efd35e8feada35b2', E'MailUI · DrawReportModal · report reason'),
+        ('33492062006fafe0', '9bc2575c3930437e80555f78757b783c842e8e66', E'MailUI · BuildComposerView'),
+        ('34097f6a51a2eff8', '8bb5dbbad00cb39d4c4de4ce8473abfc6c82a2d7', E'MailClient · ErrorDetail'),
+        ('3490ced9bd0b4480', 'bb36dd65f9c640c3c35a2f6b91117d03cab7ead6', E'NativeUI · BuildFormGraph'),
+        ('3552fe19b992d0c5', 'a9c4991f02d068f244e91619d5201b4a1dddc220', E'ProfileCard · Render'),
+        ('3a6f424c1475be3b', '7d8440f824543eaf6b42f14e6c3ac3aeccdbd139', E'MailUI · RefreshSettingsRow'),
+        ('3a9e2a2db7d4115e', '0628f47a69f660375da687357d797c395f669618', E'TeamColorIdentity · AfterDoShowPoints'),
+        ('3c7e9cb47fd1e6c7', '575fb28d1b6dfec7b0c600da4c775614efafc076', E'NativeUI · BuildCompareTab'),
+        ('3c7fc094e9393991', 'dda3e8d0871cf0a2bac1b6a9d34507877a1246cf', E'SessionReportModel · BuildTotals'),
+        ('3c85c6b1e187fb93', '92c5a22cba39cecfb28e19eab491c7bcfb365f26', E'InfoViz · BuildBetWindow · betting window'),
+        ('3e1107290adf5ba0', '109b936ad40f2cfaffa7b09b8d8850665e810a4c', E'MailUI · BuildComposerView'),
+        ('3efbc953c91b440b', '48a77eef568007e361b85fee51b594fea15ff0df', E'SessionReportModel · BuildTotals'),
+        ('3fa8eb32ef19e443', 'd7e95c1c1c4e8a3c0f7ee0a7fd17f5e67b15fd49', E'MailUI · DrawReportModal'),
+        ('3ffbbdeb8f6513b1', '4abdfc6d463e258e55447ae65fe85cae5593113b', E'SessionReportModel · Build'),
+        ('44b5d154e10fd438', 'c4d63e4c56f1d2b74aaf3de1c3943ce348748d84', E'MailUI · PaintReader'),
+        ('4635963f683e47cd', '89da64f4fb77bd76ddec45e4ea6ccb27e52dd8a7', E'MailClient, MailUI · ErrorDetail, SendCurrent'),
+        ('492b0e14064a334a', 'eb7a493539c5d8c3a22ebc8f570229cbe4fbbf5c', E'SessionReportView · ErrorMessage'),
+        ('4998b15922fb8ea2', 'c76d18079a076ee34ffc62b5b9bd0909da356dce', E'RatingGraphAxis · Label'),
+        ('4a045cc8b4541843', '8ee98a7371967a4625215adb4dec48b751251f76', E'MailUI · Unblock'),
+        ('4b44c291102565eb', '28724d54e1d94f4f2e39c4dbe273e5ff00477c44', E'MailUI · PaintNav'),
+        ('4c5dddf9072c1d87', '4c26a5fb4569b0f70bf12735e201ac8ff2f124e2', E'MailUI · RefreshSettingsRow'),
+        ('4e6e14ae3e05648c', '95e134257841536da4f97f7fec31a53ea3bb16bb', E'SessionReportView · Draw'),
+        ('4eabfc99622a78b2', 'f7bc8ed90c03af9250594c0be5bc2443a08fdf5e', E'MailClient · RateLimitText'),
+        ('4f1e57957913d56d', '477b094b85e09367aa6ff21fad7719819b83e85d', E'NativeUI · TrMetric'),
+        ('5178e08b586191ad', '5443261f4adb51b49ffb9503b4f259c89b3987aa', E'SessionReportView · ErrorMessage'),
+        ('518ccda06f29838b', '2a966d4f0dcf6f67d0ab1296b2b3a9b500f504b7', E'ProfileCard · ModeName, Render'),
+        ('52d71200ba95c9f2', '2da59d3e2b18218ba83846343bf863046d5ad17b', E'SessionReportModel · BuildTotals'),
+        ('52f70ee24279cc15', '080b46978fbe937fe9486bfd39ca94188e218eb8', E'MailUI · DrawReportModal'),
+        ('53a64dc000e592f9', 'd238602f14d5c048c4c327e48cf6bedf5d3c8ff5', E'MailClient · ErrorDetail'),
+        ('53cc81ae7216d5f5', '4f78ec8afdf19de3929660d707d8d28699f73ac6', E'MailUI · AddRecipient'),
+        ('5456b31749dd96ed', '69d21100feea50e41fe91389fdfa15c8645c4d2f', E'SessionReportModel · BuildTotals'),
+        ('54f9fc8b48b22c94', 'e85a2435937a0b9f1512d33700080775d15b2ff6', E'SessionReportView · ErrorMessage'),
+        ('572c49153567a8b1', '4a93a5aeeee725aff10b0cf88441c452e85cb806', E'ProfileCard · Ago'),
+        ('5a6a862a3fe38072', 'ea42e0f58f16d642275677edc0ba3dc66ee8b595', E'SessionReportModel · Build'),
+        ('5d91a2b3e46d532b', 'f04cad5a95ab116b04cd918d0a81bf35b63296f0', E'SessionReportModel · Build'),
+        ('5f82a7a4a2210951', 'e0a26141796cf26afdd14dd52e267fc90cf56c48', E'MailUI · DeleteCurrent'),
+        ('5f8988e0e570273b', '812d465d4b71db71c2ed2a07e20a6504b807ff57', E'SessionReportModel · BuildTotals'),
+        ('60eeb9051d434a93', '8f080546a2a2bd13529ef27e602361b2b5e34076', E'NativeUI · BuildSettingsTab'),
+        ('622d1aecdaadf508', '7ff9ab96af63157f5eb7ba53993ddb4cb0fe8079', E'SessionReportModel · Build'),
+        ('64a794dbef16b882', '46322ff3b9d0282b788c84b88c7b446f619a3c01', E'MailUI · CopyCurrent'),
+        ('6a215df0cfb67121', '61f571ca939a07334ed7f8c7937a84ac7580443d', E'MailUI, SessionReportModel · AddresseeNames, FfaScoreLabel'),
+        ('6e08c396abf6b6c7', '1b4230aae70d4644132b63d836debb79cdaeb608', E'MailUI · PaintComposer'),
+        ('6e56266160067f83', '4973f4c599d5f42cf7bde52d66c3ed8ef77accb1', E'ProfileCard · ResultName'),
+        ('6e62951fdb93563c', '82033c4926ccf7525a9e7b5a5b8dcaf3e1951b27', E'ProfileCard · Render'),
+        ('6e66d7d7cab7c6c0', 'a83c8ce6d2d11546990d6520e589bb3fbb661c01', E'MailUI · DrawComposerFields'),
+        ('7122492c4d94cb89', '980f8f7a005ea297b36863b4f9dc5af47a107e40', E'MailClient · ErrorDetail'),
+        ('72612ea13e63f955', '35f49dcfbfb2e03fdce327671e82bf173b1ccb8b', E'MailUI · BuildHeader'),
+        ('743a4b3b46182cb7', '1aef7a2df972ed920cb3bc283f3a1cdee7a3846d', E'SessionReportModel · Build'),
+        ('74a20714cad97636', '16ecfef56ef460e948a4a7706fed0e166a2fc249', E'MailClient, MailUI · ErrorDetail, SendCurrent'),
+        ('75b4b05477f8d8c0', '09c8f45b288212b02726036d5becce603cfb6c57', E'ProfileCard · Render'),
+        ('75bcd02e9e724da4', '6b488e114d476ea92695f7a3aacf06eb4b04a817', E'SessionReportModel · BuildTotals'),
+        ('789787560aa00ad7', '1ed2e7b50fa1dbbf1693d1c38adf270c04db10c6', E'MailUI · BuildComposerView, BuildHeader, PaintComposer'),
+        ('78e822807f556d30', 'c3e839df608469149df1ef34a1c9bb26b62b5452', E'ProfileCard · Render'),
+        ('7933cc65e1e43cc3', '61835ff8c458f2741640d8fd27608b925ba3e297', E'MailUI · SubmitReport'),
+        ('7a0f8011c1cb0624', 'b1f400711752a533e91773aacef324f6ab1a4486', E'SessionReportModel · Build'),
+        ('7b800da30a6628fa', '0e60f4e5c3500fc10fcc0ddc8425fb2d5bc47444', E'MailUI · RefreshSettingsRow'),
+        ('7b96b5a23f982716', 'b9e7312c9f0f882c9d389eabbd62129e6fefa8c4', E'ProfileCard · Ago'),
+        ('7ba47858481b8cb5', '7a474745d680ea5776d07b77326820530491bc6e', E'MailClient, MailUI · ErrorDetail, SendCurrent'),
+        ('7cf8613cdf7c7bf4', '0c9e1f450655084f429f432f487e8f61b3e8d4f7', E'SessionReportModel · Build'),
+        ('7eb30f41f4540f2b', '9119f6e8e1e6380ce9ae6abc7eba8196a1e5cd41', E'MailUI · TabLabel'),
+        ('8075c62d30edbd36', '5431669ad787be0e5026cb47c0a80f0e35a8ed03', E'NativeUI · RefreshSettings'),
+        ('80f0534cf1f71ba0', '158534c6676ad9aedfbcacf43b97f8809a97e71d', E'SessionReportModel · TeamScoreLabel'),
+        ('811402dd376f04ae', '4cc6a572d559cdbf480b824afb0007841198d5f9', E'SessionReportModel · BuildTotals'),
+        ('822d0a2200219e04', '905cb326c779f0123e079bf8ccb223176a3cf32d', E'MailUI · PaintReader'),
+        ('827a88f35b373700', '887e9e617777d27403a4aa8d881cc77d1011ae6f', E'MailUI · BlockCurrentSender'),
+        ('82897577963eb1c9', '6dbafbade29323ae87541f01dd921ed9a1c49604', E'MailUI · DiscardCurrent'),
+        ('854d11d214604952', '6f43b8da2c4d3c96806b20f83bce26bcc81f7f96', E'MailClient · ErrorDetail'),
+        ('87c44957aed78d1e', 'adab5090ac6a1b7b5420faac7be86c41721ba27c', E'RatingGraphAxis · Label'),
+        ('8ad309ec5640652e', 'b9628a47f4a34705ea3fccd1efbbbe2ee4980644', E'MailUI · RefreshSettingsRow'),
+        ('8b7f3f68f2b2a6be', '4fc0b8faff24d53cee4e9e20d595ec38dd3c45a9', E'NativeUI · RefreshCardStats · card rarity'),
+        ('8c252468d45ccbb9', 'b82b3fe83d42765d8aa437ed8d9b48e92d7a0db6', E'SessionReportModel · Build'),
+        ('8cb0abda4da05fc5', 'd456ddfb83e177467b0deaa21a8bcdd1cebf0452', E'ProfileCard · Render'),
+        ('8ce94a58f23f5ead', 'd2ba265f2e2a73f932728d264800fe63975bc5e8', E'SessionReportView · ErrorMessage'),
+        ('8d8ad70aea0723e5', '9fe67b4b5c012200b5a02bd87d93116ea8f99fc9', E'MailClient · ErrorDetail'),
+        ('8f174f2aaacd01b6', '50227628c89ba9e09dcc721b8680e92633d9de04', E'SessionReportView · ErrorMessage'),
+        ('90d8e4236c3a916c', 'd33f5119f64611dcdc545a52668df4cdebadec76', E'SessionReportView · DrawTotals'),
+        ('91a1e4d8d8097fcc', '9b3afe4da74b7727b11fa0e01d3fbcaeccf17258', E'MailClient · ErrorDetail'),
+        ('9297cc8ea92d7959', '9c3fe9f3b161a19b09056dd1ff4b1cfe7b045af8', E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+        ('92dd612a8d621c97', 'ecee915ad4e312b5d3bc2f39a0db0f8598539fd5', E'MailClient · ErrorDetail'),
+        ('960f92ec35a855c6', '82727ae5be7bff2bef34a61abe1734751baa5136', E'MailClient · ErrorDetail'),
+        ('963e1688108c8e04', 'd5fc55fa69fbb26b458e4848d46af7d19dbecce6', E'MusicEngine · MusicStatusLine'),
+        ('96ed30b1a4ff872b', '19da838577485f27f870de99e7b8669bbe69e1eb', E'ProfileCard · Render'),
+        ('99d3e800e6c6e7ac', 'f7f1997c6cd1aa051279675742272a956e7db628', E'NativeUI · CreateFfaRecentMatchRow, CreateHistoryRow, CreateTeamHistRow +1'),
+        ('99db5e6326bcafea', 'b9c9cc53149d9fbd53f10c4e00a4aa4d3e672822', E'SessionReportModel · Build'),
+        ('99e460a3a11278c5', '2179f8207fe678c2bcef7cd520ce0a989d78a467', E'SessionReportModel · BuildTotals'),
+        ('9baea7ac09c3203f', 'ab72048da17149f931cb904c904a44a9367463ab', E'SessionReportModel · Build'),
+        ('9dd953313fc75502', '3dfd2e885692b06244c1ab4a2f5815cff81aed53', E'SessionReportModel · Build'),
+        ('a0362a9ecb56c463', 'd3682704bbf56ff0650f46942c92131cc592b36f', E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+        ('a0a058f44c557587', 'a623f9b68fd164cab4112acbb19b9a49034c04a4', E'GameStateWatcher · PollRoomState'),
+        ('a3166b9081b8142a', '3a10c33de5c861b4c12ad993ccc3038a6c158a64', E'MailClient · RateLimitText'),
+        ('a32a4df1d80c7611', 'd5204921aec730c6f98de36c500e8f5a7ab72db9', E'MailUI · PaintList'),
+        ('a4036f830a92a60a', 'eb511260e4db899255c5755b6c52fadda28a8606', E'TeamColorIdentity · AfterDoShowPoints'),
+        ('a4fe34ab4908634e', '9f70dc8f53163d9a15ca78ac3ef031d6577aa6d0', E'MusicEngine · MusicStatusLine'),
+        ('a70a5fb2ba646559', 'df424aaa0ba06e961297ef5bd0e1638062440a0f', E'MailUI · PaintComposer'),
+        ('a8a84cc00a76ea0f', 'ee4c907f5db26515b9abd64046331b63a0d445e5', E'SessionReportModel · Build'),
+        ('a9668913261f1513', '20f5ec2c72cb088069f990da60c6335373f7e0c0', E'MailUI · AddRecipient'),
+        ('a9b069824b3e0bcd', '7d075f169d648523eaa03bb2a98984e48aa65769', E'ProfileCard · ResultName'),
+        ('aa14ab7e25714c02', 'cf84a98d6cf7f156862a08ba8236467b6f471004', E'MailUI · PaintReader, RowLabel'),
+        ('ab55045db14ec90e', '345712868273f6a81bf0b3a50649c948c0da982e', E'ProfileCard · Render'),
+        ('ac7fc61d4452be7b', '87f5c954be7baafdb07f9e51044d333702d933d1', E'ProfileCard · Render'),
+        ('acd99861498c86bc', 'cba56bc5bb2f58f1481c22801b7fe24b52339b1f', E'NativeUI · RefreshCardStats · card rarity'),
+        ('ae366cc0d2f0a1f5', '54b495e75060e8c4ded9f4302f039146b8fd1191', E'MailClient · ErrorDetail'),
+        ('ae5bd76f574f358f', '48336ec0bad6a9a4573ca7b75930b7ee5f6c2012', E'MailClient · ErrorDetail'),
+        ('aeb4bae924db54ad', '5a7fbd2ce825994a05331d9cf2e88921d6240f41', E'SessionReportView · ErrorMessage'),
+        ('b23a6d6dc64dde43', 'fd7a242888698ca0f0bcbf366fe4bc6c18f34e71', E'MailClient · RateLimitText'),
+        ('b29134ecca9d1209', 'b2bba6145b37e301dea598b4d23970ddc6e2f1a7', E'NativeUI · TrMetric'),
+        ('b2e2bf41f013e8fd', 'd285ca1b47468299f4afac9cb03ceae3b7b63c3c', E'ProfileCard · Render'),
+        ('b547112036e4389a', '6aba550b2fa626600ec7e40752abf1f2d0eb42b5', E'MailUI · OnStatus'),
+        ('b571a0883abbc576', '85aeadc8e1b43a5992e71f4c7cd53e3abeab1458', E'RatingGraphAxis · Label'),
+        ('b5e48c8390617067', '1432201b40fabc68678895cefb04563659d50408', E'SessionReportView · ErrorMessage'),
+        ('b7155d1c23b36e80', 'e431694e93597eafe1c43c5938ed4e70152f7e96', E'MailClient · ErrorDetail'),
+        ('b72853819816a32d', '7e5925410b95b8d08940c6d0bc28ddc1fa89e808', E'MusicEngine · MusicStatusLine'),
+        ('b74e9797538db825', 'd8628a5259c97b78ad43f83b1f91e47936e7e7d1', E'MailUI · DrawReportModal'),
+        ('b787becd085c029c', '625e31be269df28853a13df859f62ab7c71a841f', E'ProfileCard · Render'),
+        ('b7adc58cf20616e9', '0b4257d9a89e14f4f46f5f3b21ee5fb370ec1473', E'MailClient · ErrorDetail'),
+        ('b94ec4c29383c067', '6fa60471c5d8a896756bcae367bd6d491ca9b400', E'MailUI · PaintList'),
+        ('ba9c002f190ceca1', 'bb4b5f529fff1174466c166584f96ddab94e587c', E'InfoLibrary · (file scope)'),
+        ('bb83c24df96aeb64', '6f9591653d343912dc73f0b8b4ad276449b5ee51', E'MailClient · ErrorDetail'),
+        ('bd06028e66d68a8b', '8d0da7eaad5c45b2f590870091cc37062c052a1a', E'MailUI · RefreshSettingsRow'),
+        ('bf44afebebb3f83a', 'a88aedfc4f2bb81fcbc57c4cf66c266d7fad07c6', E'MailUI · PaintComposer'),
+        ('c02b7eb396601c2f', '44caf74675ceb79ba5cc13bafa102509369c2b53', E'MailUI · BuildHeader, PaintNav'),
+        ('c0deaa90cca7799d', 'a844ef80805e9e2dba1e9a2d6a2a1f02dedf1902', E'MailClient · ErrorDetail'),
+        ('c406b8b7f5981a4d', '12e24a7d8ac40579e8a0aef4869288afe7ed6745', E'ProfileCard · ResultName'),
+        ('c855be95c9b870e4', '4efa38c1176679a155455493a3340eb9ad0f8b1f', E'MailUI · BuildSettingsRow'),
+        ('c8b8c9f66518f658', '0bf3d6b67e43f2f4ab78212f925262b8fec5ba12', E'MailClient · ErrorDetail'),
+        ('c9a5ea03566f65f1', 'eb0ca29fad7ce89cf3bb17409c868be370ee1c79', E'MailClient · ErrorDetail'),
+        ('cae11518b35c01a5', '6d03d89dc843abae6b32d3494112fa04fd206058', E'SessionReportModel · Build'),
+        ('cbdfe2e3f3409118', '8fddd79e1918745ff44d284f37e6f5f49191ffb4', E'MailUI · DrawReportModal'),
+        ('cc72dae7e378ae92', 'bbe8e50ce0d4d8b4bd3623810d2f59ade4778727', E'RatingGraphAxis · Caption'),
+        ('cdbe5987ff49cf3d', 'ae07ebf540bffabc1fd30108d4e541e4f6381ef7', E'MailUI · BuildReaderView'),
+        ('cf19303e97ba6241', 'af74f7c5362aaee985bf8cda3dd75fc80751ce51', E'MailUI · BuildReaderView'),
+        ('cf3dbad5f408d103', 'eed4f80814b5b7895e0a78d63424dabcbf625646', E'MailClient · ErrorDetail'),
+        ('d0098e42bc70b57c', 'bd408e8d9fe13b04edf6829e4dc5f1f9ceba08b4', E'MailClient · ErrorDetail'),
+        ('d1f566a9226d07e1', 'a3143c792dd243b332d5946a9630efa050cfb0e8', E'SessionReportModel · FfaScoreLabel'),
+        ('d3a6bce744430b25', 'a5b32af957ef73ce072ce21599ce7cd7bf2212ba', E'MailUI · DrawReportModal'),
+        ('d4f8ae22554cca00', 'bceb5f723e36bb6507cde87f4f07e2cc5992e6d3', E'InfoLibrary · (file scope)'),
+        ('d5bf8531fbbdc484', '91b8f58e21a0eaa877618fd5517384166a5a71f3', E'MailClient · ErrorDetail'),
+        ('d6b721431ce9f5db', '6d2b7548ed0a229c3022f463d6ecfc1c074ed549', E'SessionReportModel · Build'),
+        ('d6ddb3145c092024', 'a989d1f178daf1628c77e5deaed5fa68ff871312', E'MailUI · AddRecipient'),
+        ('d848abd7ea062801', 'cc3336e5827f767e2874b5b2b213028b4631f96f', E'InfoViz · BuildGrowCurve'),
+        ('d896225c4b934865', 'f29997e604005ce5aa841d40a0fe3a77ae4c6980', E'ProfileCard · Ago'),
+        ('da496c66b15da7fa', '5a09ef793c04d82aaa1cf575a57a9045530421d0', E'MailClient · ErrorDetail'),
+        ('dae269dd1ca70a7d', '8d183dbdcea3b29906090bd83fa6fa37923cc8ec', E'MailUI · BuildComposerView'),
+        ('dca1b81b5132c44f', '6f3f20c0701e938f7844a2a2913e49a69f8cd20e', E'MailClient · ErrorDetail'),
+        ('dca283e5bc87a20c', '6445cd59694006f1d517add0b13f8d6c4739e5ca', E'InfoLibrary · (file scope)'),
+        ('de18f3040b883b5b', 'ada8fa22929d535cad04b537fd39614612ad9d59', E'NativeUI · RefreshCardStats · card rarity'),
+        ('df3806a1ee67bdc4', 'af0f53f17c39c17c2adcd86b083333090f0857e2', E'ProfileCard · Render'),
+        ('e02a47417843ba5d', '5da06bf7bb67a08a9073612752a6c656a5720b5c', E'SessionReportModel · TeamScoreLabel'),
+        ('e3fbf8064a0d9f01', '66a8da6b04bab2ac0d06784253b757821788991f', E'MailClient · ErrorDetail'),
+        ('e5988ac9e0383fc1', '1f64f5776b09e9278851caffb89e4f96db612e27', E'MailUI · RefreshSettingsRow'),
+        ('e605035a007d4521', 'fb0aee06de4f9faa59a99f65e1ec00a10f6999d6', E'SessionReportModel · Build'),
+        ('e84b62487348bc8f', '28ac0476b5890ad8e1cab72ee2faf0155c4799cb', E'SessionReportModel · Build'),
+        ('e9c5e68200294591', '41cd883d2e19f7e12b81005813dcd06b656887ef', E'SessionReportModel · BuildTotals'),
+        ('ea277f5d769c2bec', 'f219cc0614ae6860f43a3cd84b5cf31fc312cd9d', E'MailUI · DrawReportModal'),
+        ('ee07ec619e9b5a35', '65222d7991f9e7382b74e8ff980f6ebabdf1cb5a', E'SessionReportModel · Build'),
+        ('f150f5fc47ef1b43', '018514a3d58aa08353dd5e387ee29de45981c409', E'SessionReportModel · Build'),
+        ('f3d270720ff3a166', '84c27c09b6a8df1ece7757f54242c1f32da3b559', E'MailUI · BuildReaderView'),
+        ('f603297ac334cf12', '4bab2d8fe13fa6ab57f80098b414f0f734c5dd25', E'MailUI · PaintList'),
+        ('f6a68c6300794435', '1ff0e513c66b189e143ecd00dcfe0154b828aacb', E'InfoLibrary · (file scope)'),
+        ('f6db22d3c2bc80be', '95b76d40aaa4f50c07c2e2235514f88dafcb74cb', E'RatingGraphAxis · Caption'),
+        ('f81f26ce4b5af021', 'f89dbad40ddd7997cc2643ea0dd31f5156b2c380', E'InfoViz · BuildGrowCurve'),
+        ('f8c3b1654dc27879', 'e37b50a99f9235f172f8c37781b0f2f6f1d82221', E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
+        ('fad65cb9bd9fbc64', '9a36624f1ee1a5e95a3068fa7235369803261294', E'InfoViz · BuildKeyboard'),
+        ('fb7745c00b2d52ff', 'ebc78f21b3224fa060eed08983da3a29b8b5e7e9', E'NativeUI · BuildSettingsTab'),
+        ('fc4a094646e0cee6', 'c5204c5f55978ef13589b2a101b390b13c7e8349', E'SessionReportView · ErrorMessage'),
+        ('fcf20a7af023ab9b', 'be046cfb0183635a90ad04d5a776d4c198233fb2', E'MailUI · DrawComposerFields'),
+        ('fe8dcad5ec7ffc84', '093a5fa19b99991b70d20413d1a4d7e5173ffddf', E'ProfileCard · Render')
+      ) AS e(key_id, source_hash, context) ON e.key_id = k.key_id
+     WHERE k.namespace = 'client' AND k.retired_at IS NULL
+       AND k.source_hash = e.source_hash
+       AND k.max_px IS NULL AND k.context IS NOT DISTINCT FROM e.context;
+    IF v_ok <> v_expected THEN
+        RAISE EXCEPTION 'post-check FAILED: % of % expected sept8 client keys are live with the expected source_hash and context', v_ok, v_expected;
+    END IF;
+    RAISE NOTICE 'post-check OK: % sept8 client keys live', v_ok;
+END $$;
+
+COMMIT;
