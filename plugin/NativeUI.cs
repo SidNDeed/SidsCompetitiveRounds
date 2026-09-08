@@ -5729,6 +5729,10 @@ namespace CompetitiveRounds
                 // not tabs — the lever keeps its tab-number grammar and opens the
                 // matching popup (SwitchTab would show no panel for either).
                 if (idx == 16 || idx == TAB_MAIL) { OpenUtilityPopup(idx == 16 ? UtilKind.Music : UtilKind.Mail); return; }
+                // Sept 8: a tab request takes the page back from a header popup. A player
+                // can only reach a tab after closing the popup; the lever and the idle
+                // showcase skip that step, so the popup would sit over every tab they open.
+                if (utilKind != UtilKind.None) CloseUtilityPopup();
                 if (idx >= 0 && idx < NUM_TABS && idx != currentTab) SwitchTab(idx);
                 if (idx == TAB_INFO && !string.IsNullOrEmpty(infoArticleKey))
                 {
