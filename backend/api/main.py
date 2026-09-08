@@ -17147,14 +17147,24 @@ async def _bridge_identity_muted(platform: str, author_id: str | None,
     try:
         from database import async_session
         async with async_session() as db:
+            # Every bind that appears in an IS [NOT] NULL test is CAST
+            # explicitly. A bare `:p IS NOT NULL` gives the driver no type and
+            # Postgres refuses the whole statement with "could not determine
+            # data type of parameter" (#275's class, same defect the last_seen
+            # stamp carried). That parse failure is deterministic, so before
+            # this fix the except branch below was the ONLY path here and a
+            # bridge identity mute never matched. Old and new shapes were both
+            # PREPAREd against prod: the old one errors, this one prepares.
             hit = (await db.execute(text(
                 "SELECT 1 FROM bridge_mutes"
                 " WHERE platform = :p AND revoked_at IS NULL"
                 "   AND (expires_at IS NULL OR expires_at > NOW())"
                 "   AND (channel IS NULL OR channel = :chan)"
-                "   AND ((:aid IS NOT NULL AND platform_user_id = :aid)"
-                "        OR (platform_user_id IS NULL AND :login IS NOT NULL"
-                "            AND platform_login = :login))"
+                "   AND ((CAST(:aid AS text) IS NOT NULL"
+                "         AND platform_user_id = CAST(:aid AS text))"
+                "        OR (platform_user_id IS NULL"
+                "            AND CAST(:login AS text) IS NOT NULL"
+                "            AND platform_login = CAST(:login AS text)))"
                 " LIMIT 1"
             ), {"p": platform, "chan": (channel or "global").lower(),
                 "aid": (author_id or None),
@@ -18538,8 +18548,10 @@ async def _bridge_mute_upsert(db, *, platform: str, user_id: str | None,
         "UPDATE bridge_mutes SET revoked_at = NOW()"
         " WHERE platform = :p AND revoked_at IS NULL"
         "   AND channel IS NOT DISTINCT FROM :chan"
-        "   AND ((:aid IS NOT NULL AND platform_user_id = :aid)"
-        "        OR (:aid IS NULL AND platform_user_id IS NULL AND platform_login = :login))"
+        "   AND ((CAST(:aid AS text) IS NOT NULL"
+        "         AND platform_user_id = CAST(:aid AS text))"
+        "        OR (CAST(:aid AS text) IS NULL AND platform_user_id IS NULL"
+        "            AND platform_login = :login))"
     ), {"p": platform, "chan": channel, "aid": user_id, "login": login})
     new_id = (await db.execute(text(
         "INSERT INTO bridge_mutes (platform, platform_user_id, platform_login, channel,"
