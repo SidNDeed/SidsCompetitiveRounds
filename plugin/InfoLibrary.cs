@@ -202,7 +202,7 @@ If something looks wrong mid-match, file the report right after that session - t
         private static string ControlsOutro => I18n.Tr(@"<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
 F5 works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, Space does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
 
-Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode.
+Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode. While typing, a tap of Alt switches the language channel your message goes to - global, then each language channel in turn, then back to global; the Home tab dropdown sets it too.
 
 Holding E opens the emote wheel - even mid-battle: point at a dance you own and release to play it for everyone running the mod. Your own controls lock until the dance ends, and the dance stops if you get knocked around or fire. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
 
@@ -369,7 +369,7 @@ Damage in ROUNDS is shooter-authoritative: the shooter's machine computes what t
 
 <color=#FFD94D><b>THE MOD'S NORMALIZATION</b></color>
 
-In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 240 FPS, on every machine</color>. Against a very-high-FPS baseline that means about +11 percent over a full flight un-stacked, +23 percent at two stacks, +53 percent at four - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
+In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. Against a very-high-FPS baseline that means about +24 percent over a full flight un-stacked, +53 percent at two stacks, +134 percent at four - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
 
 Where it applies:
 

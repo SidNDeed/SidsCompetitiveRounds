@@ -770,6 +770,12 @@ class MatchHistoryEntry(BaseModel):
     # groups consecutive casual games by it for the "Session" button. An
     # opaque UUID string, NOT a room identifier; None on every row without one.
     session_uuid: str | None = None
+    # Sept 8 item 5: true on the newest valid game of this (sitting, opponent)
+    # group in this box (ranked or casual) - the row that carries the one
+    # "Session" button; it opens /report?sitting=<this match>. A sitting is the
+    # viewer's finished games in any mode split at 3 h gaps (main.SITTING_GAP_HOURS,
+    # the My Stats Session Info rule). Additive; absent on older servers = False.
+    sitting_head: bool = False
 
     model_config = {"from_attributes": True}
 

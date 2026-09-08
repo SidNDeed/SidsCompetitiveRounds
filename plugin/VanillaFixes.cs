@@ -2017,9 +2017,13 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class GrowNormalize
     {
-        /// <summary>Capability prop. cr_grow1 must never be reused for changed
-        /// semantics — a semantic change gets cr_grow2 (the PoisonSync rule).</summary>
-        internal const string CapabilityProp = "cr_grow1";
+        /// <summary>Capability prop. A key is never reused for changed semantics
+        /// (the PoisonSync rule): cr_grow1 was the 240 FPS clock (v1.40.1 and
+        /// earlier, retired Sept 8); cr_grow2 is the 120 FPS clock. A seat that
+        /// looks for the other key sees no quorum, so a mixed room falls back
+        /// to vanilla growth on EVERY seat - never two clocks in one room.
+        /// The next clock change gets cr_grow3.</summary>
+        internal const string CapabilityProp = "cr_grow2";
         internal const int CapabilityValue = 1;
 
         /// <summary>Ranked-INTENT prop (private-arm design r4, Codex-shaped):
@@ -2051,7 +2055,7 @@ namespace CompetitiveRounds
         /// bullets in a casual room — and a modified HOST can additionally
         /// spoof a mod-issued identity (a recognized prefix or the cr_ff
         /// prop) to bypass a victim's ranked-off intent entirely. All of it
-        /// is the same class as forging cr_grow1/cr_pois2 or patching one's
+        /// is the same class as forging cr_grow2/cr_pois2 or patching one's
         /// own damage code: no client-attested protocol prevents it,
         /// server-side anti-cheat is the only real answer (#166 family), and
         /// the honest claim here is only that HONEST clients always agree.</summary>
@@ -2115,13 +2119,15 @@ namespace CompetitiveRounds
 
         /// <summary>THE BALANCE KNOB — the growth rate every shooter gets,
         /// expressed as the scaled frame time of a reference-FPS player
-        /// (TimeHandler.deltaTime = Time.deltaTime × 0.85). At 240-FPS-equivalent
-        /// a full 30-unit flight gives +11% base, +23% at s·m=2, +53% at s·m=4 —
-        /// the high-FPS experience Sid described as sane, and the card stays
-        /// meaningful. MUST remain a compiled constant: a config value would let
-        /// any client legally buff its own damage (shooter authority). Changing
-        /// it later changes rated-game balance → release-notes-worthy.</summary>
-        internal const float RefScaledDt = 0.85f / 240f;
+        /// (TimeHandler.deltaTime = Time.deltaTime × 0.85). At 120-FPS-equivalent
+        /// a full 30-unit flight gives +24% base, +53% at s·m=2, +134% at s·m=4
+        /// (Sept 8: 240 -> 120 per Sid; the 240 clock gave +11/+23/+53). The card
+        /// stays meaningful and still never pays for a worse computer. MUST
+        /// remain a compiled constant: a config value would let any client
+        /// legally buff its own damage (shooter authority). Changing it changes
+        /// rated-game balance → release-notes-worthy AND a new CapabilityProp
+        /// key, so two clocks can never meet in one room.</summary>
+        internal const float RefScaledDt = 0.85f / 120f;
 
         /// <summary>Set by the patch class's [HarmonyCleanup] only when the
         /// TrickShot patch really attached — never advertise an authority we
@@ -2153,7 +2159,7 @@ namespace CompetitiveRounds
                 // completes seconds after startup, long before any human can
                 // join a room, so staging still always precedes the first
                 // connect. (This is why there is no "Awake" stage call for
-                // cr_grow1, unlike cr_pois2.)
+                // cr_grow2, unlike cr_pois2.)
                 if (!Plugin.compatCheckComplete) return;
 
                 if (PhotonNetwork.InRoom)
@@ -2167,7 +2173,7 @@ namespace CompetitiveRounds
                 // landing after LoadBalancingClient snapshots enterRoomParams
                 // but before room entry is silently undelivered). PoisonSync
                 // stages at Awake where Disconnected/PeerCreated suffices;
-                // cr_grow1 stages AFTER the compat verdict (see above), by
+                // cr_grow2 stages AFTER the compat verdict (see above), by
                 // which time ROUNDS may already sit idle on the master server
                 // — an equally safe state (no join in flight; the local merge
                 // rides the next join op's snapshot). Idle states only:
@@ -2259,7 +2265,7 @@ namespace CompetitiveRounds
         /// DIFFERENTLY, splitting rules in steady state for as long as the
         /// intruder stays. With the raw list, every seat counts the same
         /// actors from the same replicated data: an uninvited prop-less actor
-        /// (no cr_spec, no cr_grow1 — indistinguishable by props from an
+        /// (no cr_spec, no cr_grow2 — indistinguishable by props from an
         /// unmodded quickplay opponent, which MUST read as incapable) makes
         /// allCap false on EVERY seat symmetrically — the whole room drops to
         /// vanilla, today's baseline, until the spectator system kicks it.

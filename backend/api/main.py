@@ -9656,6 +9656,64 @@ async def get_player_matches_summary(steam_id: str, db: AsyncSession = Depends(g
 
 # ── Routes: Match History ──────────────────────────────────────
 
+# Sept 8 item 5: a player's SITTINGS - the server twin of the My Stats "Session
+# Info" rule (plugin/GameStateWatcher.cs SESSION_INACTIVITY_HOURS): a new sitting
+# starts where the gap since the player's previous finished game exceeds this
+# many hours. The two literals are pinned to each other by
+# test_session_report.py (grep both sides of a shared contract, #341/#152).
+SITTING_GAP_HOURS = 3
+
+# The ONE definition of a sitting, shared by the history projection (sitting_head)
+# and the report's `sitting` selector. {pid} is the bind of the player whose
+# sittings these are (:pid in the history, :cpid in the report); the use site
+# substitutes it through _sitting_ctes(). Activity = every finished game the
+# player took part in, in ANY mode - 1v1 (matches, the legacy team_ rows included,
+# a game is activity whatever box shows it), 2v2 (team_matches), 1v2 (ovt_matches)
+# and FFA (present seats only - an absent FFA seat is a frozen-roster ghost, not
+# activity) - invalidated games excluded. Window functions only, no LATERAL
+# (asyncpg); the gap is a typed make_interval, never a text-concatenated
+# interval (#275/#448). No room column is named anywhere in it (the report's
+# statements are pinned room-free).
+_SITTING_CTES = """acts AS (
+            SELECT DISTINCT a.ended_at FROM (
+                SELECT m.ended_at FROM matches m
+                 WHERE CAST({pid} AS uuid) IN (m.player1_id, m.player2_id)
+                   AND m.invalidated_at IS NULL AND m.ended_at IS NOT NULL
+                UNION ALL
+                SELECT t.ended_at FROM team_matches t
+                 WHERE CAST({pid} AS uuid) IN (t.t1a_id, t.t1b_id, t.t2a_id, t.t2b_id)
+                   AND t.invalidated_at IS NULL AND t.ended_at IS NOT NULL
+                UNION ALL
+                SELECT o.ended_at FROM ovt_matches o
+                 WHERE CAST({pid} AS uuid) IN (o.solo_id, o.duo_a_id, o.duo_b_id)
+                   AND o.invalidated_at IS NULL AND o.ended_at IS NOT NULL
+                UNION ALL
+                SELECT f.ended_at FROM ffa_matches f
+                  JOIN ffa_match_players fp ON fp.match_id = f.id
+                 WHERE fp.player_id = CAST({pid} AS uuid) AND NOT fp.absent
+                   AND f.invalidated_at IS NULL AND f.ended_at IS NOT NULL
+            ) a
+        ),
+        seq AS (
+            SELECT ended_at,
+                   CASE WHEN LAG(ended_at) OVER (ORDER BY ended_at) IS NULL
+                          OR ended_at - LAG(ended_at) OVER (ORDER BY ended_at)
+                             > make_interval(hours => GAP_HOURS)
+                        THEN 1 ELSE 0 END AS brk
+              FROM acts
+        ),
+        sit AS (
+            SELECT ended_at, SUM(brk) OVER (ORDER BY ended_at ROWS UNBOUNDED PRECEDING) AS sn
+              FROM seq
+        )""".replace("GAP_HOURS", str(SITTING_GAP_HOURS))
+
+
+def _sitting_ctes(pid_bind: str) -> str:
+    """The sitting CTEs for one bind name (":pid" / ":cpid"); the caller types the
+    value it binds there as a uuid."""
+    return _SITTING_CTES.replace("{pid}", pid_bind)
+
+
 @app.get("/api/v1/players/{steam_id}/matches", response_model=list[MatchHistoryEntry], tags=["Players"])
 async def get_player_matches(
     steam_id: str,
@@ -9693,12 +9751,24 @@ async def get_player_matches(
                     "ELSE p1.display_name END) ILIKE :namepat ESCAPE '\\'\n")
 
     query = text(f"""
+        WITH {_sitting_ctes(':pid')}
         SELECT
             m.id AS match_id,
             m.ended_at,
             m.winner_id,
             m.is_ranked,
             m.session_uuid,
+            -- Sept 8 item 5. ONE Session button per (sitting, opponent) in each box,
+            -- on the newest valid game of the group. The partition keys on the
+            -- opponent by the same CASE the projection uses (there is no opponent
+            -- column), on is_ranked (the two boxes) and on validity, so an
+            -- invalidated row (sn NULL, its own partition) never takes the head
+            -- from a live one and is itself never a head.
+            (m.invalidated_at IS NULL AND ROW_NUMBER() OVER (
+                PARTITION BY sit.sn,
+                             CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END,
+                             m.is_ranked, (m.invalidated_at IS NULL)
+                ORDER BY m.ended_at DESC, m.created_at DESC, m.id DESC) = 1) AS sitting_head,
             CASE WHEN m.player1_id = :pid THEN m.p1_rounds_won ELSE m.p2_rounds_won END AS player_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p2_rounds_won ELSE m.p1_rounds_won END AS opp_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p1_points_total ELSE m.p2_points_total END AS player_points,
@@ -9785,6 +9855,7 @@ async def get_player_matches(
                   AND m.series_id IS NOT NULL
             ), 0) AS series_gold_gained
         FROM matches m
+        LEFT JOIN sit ON sit.ended_at = m.ended_at
         JOIN players p1 ON p1.id = m.player1_id
         JOIN players p2 ON p2.id = m.player2_id
         LEFT JOIN shop_items si1 ON si1.id = p1.active_title_id
@@ -9916,6 +9987,9 @@ async def get_player_matches(
             # box can group a casual sitting for its "Session" button. None on
             # every row without one; never a room identifier.
             session_uuid=str(row["session_uuid"]) if row["session_uuid"] else None,
+            # Sept 8 item 5: the row that carries this box's one Session button for
+            # its (sitting, opponent) group; the button opens ?sitting=<this match>.
+            sitting_head=bool(row["sitting_head"]),
         ))
 
     return entries
@@ -46529,6 +46603,29 @@ _REPORT_1V1_WHERE = {
     "series": "m.series_id = CAST(:key AS uuid)",
     "session": "m.session_uuid = CAST(:key AS uuid)",
     "match": "m.id = CAST(:key AS uuid)",
+    # Sept 8 item 5: every 1v1 game between the anchor game's two players whose
+    # end time lies inside the CALLER's sitting that contains the anchor
+    # (_SITTING_CTES, 3 h gap rule) - both boxes' games, so the one report per
+    # (sitting, opponent) is reachable from either box. The anchor must be a
+    # valid game of the caller (else the set is empty and the route 404s).
+    "sitting": """m.id IN (
+        WITH """ + _sitting_ctes(":cpid") + """,
+        anchor AS (
+            SELECT a.player1_id, a.player2_id, a.ended_at FROM matches a
+             WHERE a.id = CAST(:key AS uuid) AND a.invalidated_at IS NULL
+               AND CAST(:cpid AS uuid) IN (a.player1_id, a.player2_id)
+        ),
+        span AS (
+            SELECT MIN(s.ended_at) AS lo, MAX(s.ended_at) AS hi
+              FROM sit s
+             WHERE s.sn = (SELECT s1.sn FROM sit s1 JOIN anchor an ON an.ended_at = s1.ended_at)
+        )
+        SELECT g.id FROM matches g, anchor an, span sp
+         WHERE g.ended_at >= sp.lo AND g.ended_at <= sp.hi
+           AND LEAST(g.player1_id, g.player2_id) = LEAST(an.player1_id, an.player2_id)
+           AND GREATEST(g.player1_id, g.player2_id) = GREATEST(an.player1_id, an.player2_id)
+           AND g.invalidated_at IS NULL
+    )""",
 }
 _REPORT_RS_SQL = """
     SELECT rs.id, rs.player1_id, rs.player2_id, rs.status, rs.completed_at,
@@ -47278,6 +47375,7 @@ async def _report_set_summary(db, kind, selector, key, set_row, games, roster):
 async def get_set_report(request: Request, steam_id: str = "",
                          series: str | None = None, match: str | None = None,
                          session: str | None = None,
+                         sitting: str | None = None,
                          db: AsyncSession = Depends(get_db)):
     """The session report envelope (v1) for one set — see the block comment
     above. Errors: 401 "session_required" (fail-closed session check, first
@@ -47290,11 +47388,18 @@ async def get_set_report(request: Request, steam_id: str = "",
     in the row), then the games are reduced to ONE roster: the set row's for
     a series, the newest game's otherwise. `games_omitted` counts every game
     of the set the envelope does not carry — dropped for a different roster
-    or beyond _REPORT_MAX_GAMES — and `truncated` is its boolean."""
+    or beyond _REPORT_MAX_GAMES — and `truncated` is its boolean.
+
+    `sitting=<match uuid>` (Sept 8 item 5): the 1v1 games between that game's
+    two players whose end time falls inside the CALLER's sitting containing it
+    (_SITTING_CTES: the viewer's finished games in any mode, split at gaps over
+    SITTING_GAP_HOURS). Kind and summary follow the `session` rules: ranked only
+    when every game is, per-game gold, no rating."""
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     chosen = [(name, val) for name, val in
-              (("series", series), ("match", match), ("session", session)) if val]
+              (("series", series), ("match", match), ("session", session),
+               ("sitting", sitting)) if val]
     if len(chosen) != 1:
         raise HTTPException(status_code=400, detail="bad_request")
     selector, raw = chosen[0]
@@ -47342,9 +47447,9 @@ async def get_set_report(request: Request, steam_id: str = "",
                 roster_pids = [set_row["solo_id"], set_row["duo_a_id"], set_row["duo_b_id"]]
                 team_of = {str(set_row["solo_id"]): 1, str(set_row["duo_a_id"]): 2,
                            str(set_row["duo_b_id"]): 2}
-    elif selector == "session":
+    elif selector in ("session", "sitting"):
         kind, mode = "casual", "1v1"
-        games, total = await _report_load_1v1(db, "session", key, cpid)
+        games, total = await _report_load_1v1(db, selector, key, cpid)
         if games and all(g["is_ranked"] for g in games):
             kind = "ranked"
     else:  # match

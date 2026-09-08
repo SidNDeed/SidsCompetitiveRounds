@@ -871,7 +871,7 @@
           ],
           "main",
           "get_player_matches",
-          "75e6bd02721c06795bd92dca4c94121581ffb189"
+          "7f20edc9677bad8871f429b3cf0c07f87222c063"
         ],
         [
           "/api/v1/players/{steam_id}/matches/summary",
@@ -2891,7 +2891,7 @@
           ],
           "main",
           "get_set_report",
-          "6e213f910c4fadf453d226c4cb1c9fc30c5f0322"
+          "7b1b96588583cdcd4739758c5f8d50bd4c8ae283"
         ]
       ]
     },

@@ -597,9 +597,11 @@ namespace CompetitiveRounds
             group.AddComponent<RectTransform>();
             UIFactory.AddVLG(group, spacing: 3);
             UIFactory.AddLE(group, flexH: 0);
-            btnMailFrom = Btn(group.transform, "SMailFrom", "", CycleMailFrom, 340, 28);
+            // Sept 8 item 4: SettingsButton pins the 340 px width behind a flex spacer;
+            // a bare Btn inside this VLG was stretched to the full panel width.
+            btnMailFrom = NativeUI.SettingsButton(group.transform, "SMailFrom", "", C_WHITE, C_BTN, new Vector2(340, 28), CycleMailFrom);
             UIFactory.CreateText("SMailFrom_d", group.transform, "Who may send you in-game mail. Blocked senders never reach you.", 13f, C_DIM, sizeDelta: new Vector2(700, 18));
-            btnBlocked = Btn(group.transform, "SMailBlocked", "", ToggleBlockedList, 340, 28);
+            btnBlocked = NativeUI.SettingsButton(group.transform, "SMailBlocked", "", C_WHITE, C_BTN, new Vector2(340, 28), ToggleBlockedList);
             blockedList = new GameObject("SMailBlockedList");
             blockedList.transform.SetParent(group.transform, false);
             blockedList.AddComponent<RectTransform>();

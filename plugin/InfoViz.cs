@@ -291,8 +291,13 @@ namespace CompetitiveRounds
             });
             // ANSI stagger, measured from "1": Q +22, A +33, Z +55 pixels.
             // The home row is widest and ends at x=563, leaving 77px before
-            // the mouse block at x=640. Space x=137 centers it under A-L.
-            KeyRow(p, 137f, top - 5f * pitch, new[] { new KeyDef(I18n.Tr("SPACE"), 300f, KEY_GAME) });
+            // the mouse block at x=640. Space x=137 centers it under A-L; ALT sits
+            // right of it (x 441-511, inside the home-row edge) - Sept 8 item 3.
+            KeyRow(p, 137f, top - 5f * pitch, new[]
+            {
+                new KeyDef(I18n.Tr("SPACE"), 300f, KEY_GAME),
+                new KeyDef(I18n.Tr("ALT"), 70f, KEY_MOD),
+            });
             // Mouse, to the right of the board.
             float mx = 640f, my = top - 3f * pitch;
             Box(p, mx, my, 46f, 66f, KEY_GAME);
@@ -313,6 +318,7 @@ namespace CompetitiveRounds
                 I18n.Tr("Q (hold) - quick-chat wheel, release to send"),
                 I18n.Tr("E (hold) - dance wheel; dancing locks your controls"),
                 I18n.Tr("M - cycle the chat overlay mode"),
+                I18n.Tr("ALT (tap, while typing in chat) - switch the chat language channel"),
                 I18n.Tr("TAB (hold, in a match) - live scoreboard"),
                 I18n.Tr("SHIFT - cycle your equipped map skins"),
             };
@@ -687,7 +693,7 @@ namespace CompetitiveRounds
 
         // -- Grow frame-rate curve ------------------------------------------
         // The three bars restate the article's unstacked full-flight table.
-        // The competitive reference is 240 FPS; the article does not state
+        // The competitive reference is 120 FPS (240 until Sept 8); the article does not state
         // the internal 0.85 constant, so it is deliberately not drawn.
 
         private static GameObject BuildGrowCurve(Transform parent)
@@ -713,9 +719,9 @@ namespace CompetitiveRounds
                 Lbl(p, mult[i], 13f, Color.white, 160f + w, y, 80f, 22f);
             }
             Box(p, 880f, H - 64f, 250f, 28f, new Color(0.25f, 0.62f, 0.38f, 0.82f));
-            Lbl(p, I18n.Tr("competitive clock: 240 FPS"), 12f, Color.white,
+            Lbl(p, I18n.Tr("competitive clock: 120 FPS"), 12f, Color.white,
                 880f, H - 61f, 250f, 22f, UIFactory.AlignMidCenter);
-            Lbl(p, I18n.Tr("Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 240 FPS growth clock."),
+            Lbl(p, I18n.Tr("Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 120 FPS growth clock."),
                 13f, TXT_DIM, 24f, 6f, 1110f, 20f);
             return p;
         }

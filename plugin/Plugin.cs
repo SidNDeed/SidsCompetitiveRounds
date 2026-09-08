@@ -263,7 +263,7 @@ namespace CompetitiveRounds
         private static bool spawned = false;
         internal static bool modDisabled = false;
         /// <summary>True once DoInitialize's other-mods check has produced its
-        /// verdict (either way). GrowNormalize refuses to advertise cr_grow1
+        /// verdict (either way). GrowNormalize refuses to advertise cr_grow2
         /// before this — an advertise-then-revoke-in-room sequence reaches
         /// peers late (Codex Grow code review find 6).</summary>
         internal static bool compatCheckComplete = false;
@@ -888,7 +888,7 @@ namespace CompetitiveRounds
             // "all" = merged view of every subscribed channel (the historical
             // behavior); "global"/"es"/"ru"/"uk"/"sv" show only that channel.
             // The SEND channel defaults to the mod language's channel and is
-            // changed from the same Home dropdown or with Tab while typing.
+            // changed from the same Home dropdown or with a tap of Alt while typing.
             // The description text below is cosmetic for existing installs
             // (#190: Config.Bind writes the default once and never revisits a
             // written entry) — the uk/sv values are legal regardless.
@@ -903,7 +903,7 @@ namespace CompetitiveRounds
             // language (Spanish -> es, Russian -> ru, Ukrainian -> uk,
             // Swedish -> sv, everything else -> global/English). A concrete
             // value here is an explicit player pick made from the Home tab or
-            // by pressing Shift while typing.
+            // by tapping Alt while typing.
             // "all" is deliberately not a legal value — you cannot type into
             // the merged view. NEW key (#190: changing ChatDisplayChannel's
             // meaning would have migrated nobody, since its value is already
@@ -1129,7 +1129,7 @@ namespace CompetitiveRounds
             // call via RoomActors.CooperativeClose — while WE are master, an
             // incoming event 203 can only be honored from "the master",
             // which is us, so the transient window is not exploitable.
-            // cr_grow1 deliberately has NO Awake stage call: GrowNormalize
+            // cr_grow2 deliberately has NO Awake stage call: GrowNormalize
             // refuses to advertise before the compat verdict (Codex find 6),
             // so its staging rides the persistent tick a few seconds later —
             // still long before any human can join a room.

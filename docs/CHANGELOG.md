@@ -1,5 +1,54 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — 2026-09-08 (Sept 8 polish batch; version to be named at the bump)
+
+**One Session button per sitting, beside the ID button**
+
+- The Ranked and Casual history boxes carry ONE Session button per opponent per
+  sitting, on the newest game you played them in that sitting, directly right
+  of the ID button; W/L and the score moved right to make room. A sitting is the
+  My Stats "Session Info" rule applied on the server: your finished games in any
+  mode, split where more than 3 hours passed between two of them. Playing someone
+  else in between keeps the sitting alive, so the button sits on the last game
+  the two of you played in it. The report it opens covers every game of that
+  pair in that sitting, ranked and casual together, with gold per game and no
+  rating (the session rules). Time in the menu is not activity on the server: a
+  break of over 3 hours with the game open splits the server's sitting where the
+  panel's session would not. 2v2, 1v2 and FFA rows keep their per-series and
+  per-game buttons.
+- Needs the new server: against an older server the 1v1 rows show no Session
+  buttons at all.
+
+**Grow competitive clock: 240 FPS -> 120 FPS**
+
+- Every eligible Grow bullet now grows as if its shooter ran at 120 FPS (it was
+  240): about +24% over a full flight un-stacked, +53% at two stacks, +134% at
+  four (was +11 / +23 / +53). The room capability key changed with the clock, so
+  a room that mixes this version with an older one falls back to vanilla growth
+  on every seat instead of pinning two clocks; that lasts as long as older
+  versions are in play. A spectator on an older version renders vanilla-scale
+  Grow visuals until they update (damage is the shooter's and unaffected). The
+  Info chart badge, the Grow article and docs/grow-mechanics.md say 120.
+
+**Popups, keys, settings**
+
+- Page overlays (the search boxes, hover graphs, the session report, the shop
+  effect/dance/trail previews, the ranked-hint callout, the profile card) no
+  longer paint over the Music and Mail popups, the Info and tournament popups,
+  the metric picker or the full-screen card preview.
+- Info > Controls & keys shows ALT: a tap while typing in chat switches the
+  language channel (global, each language channel in turn, back to global). The
+  Settings chat note says Alt (it said Tab).
+- Settings: "Who can mail me" and "Blocked senders" are button-sized like their
+  neighbours instead of spanning the panel.
+
+**Server**
+
+- `/players/{id}/matches` rows carry `sitting_head`; `/report` accepts
+  `sitting=<match uuid>`. Migrations 302 (the client keys new since v1.40.1,
+  with their portal context lines) and 303 (machine-translation seeds for the
+  keys that have bundled translations).
+
 ## Unreleased — 2026-09-07 (Sept 7 polish batch; version to be named at the bump)
 
 **Mail and Music are icons now, not tabs**

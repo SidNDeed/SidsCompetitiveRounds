@@ -297,6 +297,31 @@ class FakeDb:
                 rows = [m for m in self.matches if str(m["session_uuid"]) == key]
             elif "m.id = CAST(:key AS uuid)" in sql:
                 rows = [m for m in self.matches if str(m["id"]) == key]
+            elif "anchor AS (" in sql and "make_interval(hours => " in sql:
+                # Sept 8 item 5: the caller's sitting that contains the anchor
+                # (gaps over SITTING_GAP_HOURS between the caller's finished
+                # games split sittings), then the anchor pair's games inside it.
+                # The fake's activity is its matches table only.
+                assert f"make_interval(hours => {main.SITTING_GAP_HOURS})" in sql
+                assert "CAST(:cpid AS uuid) IN (a.player1_id, a.player2_id)" in sql, \
+                    "the anchor lost the caller predicate"
+                mine = [m for m in self.matches if m["invalidated_at"] is None
+                        and cpid in (str(m["player1_id"]), str(m["player2_id"]))]
+                anchor = next((m for m in mine if str(m["id"]) == key), None)
+                rows = []
+                if anchor is not None:
+                    sittings, cur = [], []
+                    for t in sorted({m["ended_at"] for m in mine}):
+                        if cur and t - cur[-1] > timedelta(hours=main.SITTING_GAP_HOURS):
+                            sittings.append(cur)
+                            cur = []
+                        cur.append(t)
+                    sittings.append(cur)
+                    span = next(s for s in sittings if anchor["ended_at"] in s)
+                    pair = {str(anchor["player1_id"]), str(anchor["player2_id"])}
+                    rows = [m for m in self.matches
+                            if span[0] <= m["ended_at"] <= span[-1]
+                            and {str(m["player1_id"]), str(m["player2_id"])} == pair]
             else:
                 raise AssertionError("1v1 statement lost its selector predicate")
             rows = [m for m in rows if m["invalidated_at"] is None
@@ -553,6 +578,118 @@ def test_the_same_uuid_gives_the_other_pair_only_their_own_game(session_ok):
     assert [g["match_id"] for g in resp_c["games"]] == [CX]
     assert {p["id"] for p in resp_c["players"]} == {CALLER, OTHER}
     assert OPP not in json.dumps(resp_c)
+
+
+# ── Sept 8 item 5: the sitting selector and the head flag ──────────────
+
+S1, S2, S3, S4, S5 = (str(uuid.uuid4()) for _ in range(5))
+
+
+def _sitting_world():
+    """A's day, minutes after T0: A-B at 0 and 100, A-C at 200 (A stays active),
+    A-B at 330 (230 min after the previous A-B game - only the A-C game keeps
+    A's sitting alive), a break, then A-B at 560 (a new sitting for A). For B
+    the 100 -> 330 gap is 230 min, so B's sitting at 330 holds that game alone."""
+    return [
+        match_row(S1, PID_A, PID_B, minute=0, ranked=False),
+        match_row(S2, PID_B, PID_A, minute=100, ranked=True),
+        match_row(S3, PID_A, PID_C, minute=200, ranked=False),
+        match_row(S4, PID_A, PID_B, minute=330, ranked=False),
+        match_row(S5, PID_A, PID_B, minute=560, ranked=False),
+    ]
+
+
+def test_sitting_selector_groups_the_pair_across_other_opponents_until_a_gap(session_ok):
+    db = FakeDb(matches=_sitting_world())
+    resp = _call(db, CALLER, sitting=S4)
+    assert _no_room_leak(resp)
+    assert [g["match_id"] for g in resp["games"]] == [S1, S2, S4], \
+        "oldest first; the A-C game bridged A's sitting but is not a pair game, so it is not in the set"
+    assert [p["id"] for p in resp["players"]] == [CALLER, OPP]
+    assert resp["games_omitted"] == 0 and resp["truncated"] is False
+    assert resp["kind"] == "casual", "one ranked game among casual ones: the session rule"
+    stmt, params = next((s, p) for s, p in db.statements if "FROM matches m" in s)
+    assert "anchor AS (" in stmt and params["key"] == S4 and params["cpid"] == PID_A
+    assert "m.invalidated_at IS NULL" in stmt
+    blob = json.dumps(resp)
+    assert OTHER not in blob and "Bystander" not in blob and S3 not in blob and S5 not in blob
+    # the summary follows the session rules: no rating, per-game gold only
+    assert resp["set_summary"]["rating"] == {}
+    assert db.count("FROM rating_history rh") == 0
+
+    # after the break the pair's next game is a sitting of its own
+    resp2 = _call(FakeDb(matches=_sitting_world()), CALLER, sitting=S5)
+    assert [g["match_id"] for g in resp2["games"]] == [S5]
+
+    # the sitting is the CALLER's: for B the 100 -> 330 gap split it, so B's
+    # report on the same anchor holds that game alone (no foreign data either way)
+    resp_b = _call(FakeDb(matches=_sitting_world()), OPP, sitting=S4)
+    assert [g["match_id"] for g in resp_b["games"]] == [S4]
+    assert {p["id"] for p in resp_b["players"]} == {CALLER, OPP}
+
+
+def test_sitting_anchor_must_be_a_valid_game_of_the_caller(session_ok):
+    with pytest.raises(HTTPException) as ei:
+        _call(FakeDb(matches=_sitting_world()), OTHER, sitting=S4)
+    assert ei.value.status_code == 404
+    world = _sitting_world()
+    world[3]["invalidated_at"] = T0
+    with pytest.raises(HTTPException) as ei:
+        _call(FakeDb(matches=world), CALLER, sitting=S4)
+    assert ei.value.status_code == 404
+    with pytest.raises(HTTPException) as ei:
+        _call(FakeDb(matches=_sitting_world()), CALLER, sitting=S4, session=SESSION)
+    assert ei.value.status_code == 400, "one selector at a time, sitting included"
+
+
+def test_sitting_gap_is_the_clients_session_window():
+    """Both halves of the contract carry the same literal (#341/#152): the
+    server's gap and the client's SESSION_INACTIVITY_HOURS (My Stats Session Info)."""
+    src = (PLUGIN / "GameStateWatcher.cs").read_text(encoding="utf-8")
+    m = re.search(r"SESSION_INACTIVITY_HOURS\s*=\s*([0-9.]+)", src)
+    assert m, "the client's session window constant moved"
+    assert float(m.group(1)) == float(main.SITTING_GAP_HOURS)
+    assert f"make_interval(hours => {main.SITTING_GAP_HOURS})" in main._SITTING_CTES
+    assert "|| " not in main._SITTING_CTES and "::interval" not in main._SITTING_CTES, \
+        "the gap must stay a typed make_interval (#275/#448)"
+
+
+def test_sitting_ctes_count_every_mode_and_never_a_ghost_or_an_invalid_game():
+    ctes = main._SITTING_CTES
+    for src in ("FROM matches m", "FROM team_matches t", "FROM ovt_matches o", "FROM ffa_matches f"):
+        assert src in ctes, src
+    assert "NOT fp.absent" in ctes, "an absent FFA seat is not activity"
+    assert ctes.count("invalidated_at IS NULL") == 4, "every mode excludes invalidated games"
+    assert ctes.count("CAST({pid} AS uuid)") == 4 and "{pid}" not in main._sitting_ctes(":pid")
+    assert "LATERAL" not in ctes.upper()
+    for bad in ("photon_room", "room_id", "room_name"):
+        assert bad not in ctes.lower() and bad not in main._REPORT_1V1_WHERE["sitting"].lower()
+    history = inspect.getsource(main.get_player_matches)
+    assert "LEFT JOIN sit ON sit.ended_at = m.ended_at" in history, \
+        "an inner join would drop invalidated rows (not in acts) from the history"
+    assert "PARTITION BY sit.sn," in history and "AS sitting_head" in history
+    assert "CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END" in history
+    assert "m.is_ranked, (m.invalidated_at IS NULL)" in history
+    assert "(m.invalidated_at IS NULL AND ROW_NUMBER() OVER (" in history
+    assert 'sitting_head=bool(row["sitting_head"])' in history
+    assert MatchHistoryEntry.model_fields["sitting_head"].default is False, \
+        "additive: an older server's rows (no field) read as not-a-head"
+    assert MatchHistoryEntry.model_fields["sitting_head"].annotation is bool
+
+
+def test_the_plugin_consumes_the_head_flag_and_nothing_else_arms_a_session_button():
+    api = (PLUGIN / "ApiClient.cs").read_text(encoding="utf-8")
+    assert 'selector != "sitting"' in api, "the report fetch must let the sitting selector through"
+    assert 'entry.sitting_head = chunk.Contains("\\"sitting_head\\":true")' in api
+    ui = (PLUGIN / "NativeUI.cs").read_text(encoding="utf-8")
+    assert 'SetSessionButton(casualRows[ri],"sitting",casual[i].match_id)' in ui
+    assert 'SetSessionButton(rankedRows[ri],"sitting",m.match_id)' in ui
+    assert 'SetSessionButton(rankedRows[ri],"sitting",first.match_id)' in ui
+    # zero survivors of the per-series / per-session-uuid arming
+    for gone in ('hasSes?"session":"match"', 'SetSessionButton(rankedRows[firstRi],"series"',
+                 'SetSessionButton(rankedRows[ri],"match"'):
+        assert gone not in ui, gone
+    assert "sesSlot.transform.SetSiblingIndex(1);" in ui, "ID, Session, then W/L + score"
 
 
 def test_control_roster_rule_is_what_drops_the_foreign_roster(session_ok, monkeypatch):

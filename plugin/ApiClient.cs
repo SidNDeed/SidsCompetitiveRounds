@@ -437,6 +437,11 @@ namespace CompetitiveRounds
             // without one. The Casual box groups consecutive games by it for the
             // "Session" button.
             public string session_uuid;
+            // Sept 8 item 5: true on the NEWEST game of this (sitting, opponent) in
+            // this box (ranked or casual) - the server's sitting = the viewer's games
+            // in any mode split at 3 h gaps, the My Stats Session Info rule. The
+            // history box arms its one "Session" button per group on this row.
+            public bool sitting_head;
             public string series_score; // e.g. "2-0", "1-1"
             public float series_rating_change; // Elo change for completed series
             public int xp_gained; // XP earned for this match
@@ -9177,6 +9182,7 @@ namespace CompetitiveRounds
             entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
             entry.series_id = ExtractJsonString(chunk, "series_id");
             entry.session_uuid = ExtractJsonString(chunk, "session_uuid");   // Sept 6 item c: JSON null reads as ""
+            entry.sitting_head = chunk.Contains("\"sitting_head\":true") || chunk.Contains("\"sitting_head\": true");   // Sept 8 item 5: absent (old api) reads false
             entry.series_score = ExtractJsonString(chunk, "series_score");
             entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
             entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
@@ -11209,7 +11215,7 @@ namespace CompetitiveRounds
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { callback(false, "no-identity"); return; }
             if (string.IsNullOrEmpty(SteamAuth.SessionToken)) { callback(false, "session_required"); return; }   // strict-session endpoint
-            if (selector != "series" && selector != "match" && selector != "session") { callback(false, "bad-selector"); return; }
+            if (selector != "series" && selector != "match" && selector != "session" && selector != "sitting") { callback(false, "bad-selector"); return; }   // Sept 8 item 5: ?sitting=<match uuid>
             Guid parsed;
             if (!Guid.TryParse(key ?? "", out parsed)) { callback(false, "bad-key"); return; }
             string url = $"{baseUrl}/api/v1/report?steam_id={Uri.EscapeDataString(sid)}&{selector}={parsed.ToString("D")}";

@@ -317,6 +317,24 @@ namespace CompetitiveRounds
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
+        // Sept 8 item 1: IMGUI is painted after the mod's uGUI canvases, so a page's
+        // IMGUI (the search boxes, the hover graphs, the session report, the shop
+        // previews, the ranked-hint callout) drew OVER the Music/Mail popup's
+        // backdrop and box. Input was already gated (AnyModalOwnsInput); only the
+        // paint order was wrong. Every PAGE-level IMGUI draw checks this ONE
+        // predicate - the popups' own IMGUI (the mail composer, confirms, the
+        // recipient picker) and the global overlays do not.
+        // PopupCoversPage = a uGUI surface on the overlay canvas covers the page.
+        // The metric/card picker is such a surface too (design round HIGH: with
+        // both fields painted, typing reached the Compare filter under the
+        // picker), so PageImguiHidden includes it and the picker's OWN field is
+        // drawn alone, after the block, while no popup covers the picker.
+        internal static bool PopupCoversPage =>
+               NativeUI.UtilityPopupOpen || NativeUI.InfoPopupOpen
+            || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
+            || NativeUI.CardPreviewOpen;
+        internal static bool PageImguiHidden => PopupCoversPage || NativeUI.PickerOpen;
+
         /// <summary>Called from OnGUI. FPS + notifications + match status. The server-down
         /// banner moved to the F5 menu (NativeUI.RefreshServerBanner) — it was constantly
         /// firing in-game during quiet periods + felt obtrusive.</summary>
@@ -345,8 +363,11 @@ namespace CompetitiveRounds
             DrawH2HBanner();          // Release B §1: "vs NAME · last played · H2H" (10 s)
             DrawLagNotices();   // Release B §4: opt-in network notices under the corner label
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
-            PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
-            DrawDancePreview();   // dance shop preview puppet (Aug 31 item 5)
+            if (!PageImguiHidden)   // Sept 8 item 1: page IMGUI never paints over a popup
+            {
+                PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
+                DrawDancePreview();   // dance shop preview puppet (Aug 31 item 5)
+            }
             DrawSpawnSpotlight();
             // Item 10: the horizontal multi-entry band draws BEFORE the single
             // slot, because DrawNotification reads NotificationSetLift() to
@@ -375,16 +396,29 @@ namespace CompetitiveRounds
             // positived during normal matchmaking (being in the queue room legitimately
             // looks like "in a room with no match"), which is the flicker Sid reported.
             // DrawMatchFoundStuckOverlay();  // intentionally not called — kept for reference
-            DrawCardHoverTooltip();
-            DrawScoreHoverGraph();
-            DrawFpsHoverGraph();
-            SessionReportView.Draw();   // Sept 6 item c: above the F5 hover popups, below the search overlays
-            DrawCompareSearch();
-            DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
-            DrawLeaderboardSearch();
-            DrawCardStatsSearch();   // Aug 31 — Card Stats card search
-            DrawHistorySearch();  // Bug 263 — My Stats opponent search
-            DrawInfoSearch();     // Aug 23 r2 — Info library article search
+            // Sept 8 item 1: the page-level IMGUI block. Painted only while no
+            // overlay-canvas popup is up (PageImguiHidden) - IMGUI would otherwise
+            // draw over the popup. The popups' own IMGUI below is NOT inside.
+            if (!PageImguiHidden)
+            {
+                DrawCardHoverTooltip();
+                DrawScoreHoverGraph();
+                DrawFpsHoverGraph();
+                SessionReportView.Draw();   // Sept 6 item c: above the F5 hover popups, below the search overlays
+                DrawCompareSearch();
+                DrawLeaderboardSearch();
+                DrawCardStatsSearch();   // Aug 31 — Card Stats card search
+                DrawHistorySearch();  // Bug 263 — My Stats opponent search
+                DrawInfoSearch();     // Aug 23 r2 — Info library article search
+            }
+            // The picker's own search field, alone: the picker is one of the surfaces
+            // the block hides under (its field and the page's must not share focus).
+            if (NativeUI.PickerOpen && !PopupCoversPage)
+                DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
+            // The shop's trail preview lives on a uGUI canvas ABOVE the popups'
+            // (30001 vs 30000) and follows the cursor: end it the frame a popup
+            // covers the page instead of painting through the popup.
+            if (PageImguiHidden && TrailPreview.IsActive) TrailPreview.Stop();
             DrawMapColorToast();
             DrawCustomBetPrompt();
             DrawLfpPrompt();
@@ -392,7 +426,7 @@ namespace CompetitiveRounds
             DrawArtistPicker();
             DrawPlayerSearch();
             MailUI.DrawImgui();   // Sept 6 mail: composer fields over their uGUI anchors + the report modal
-            DrawCosmeticTestPreview();
+            if (!PageImguiHidden) DrawCosmeticTestPreview();   // Sept 8 item 1
             DrawCosmeticReview();
             DrawCosmeticReleaseQueue();
             DrawFlagEvidence();
@@ -412,7 +446,7 @@ namespace CompetitiveRounds
             // Wave-2 find 10: the quick-chat popup can overlap live F5 buttons —
             // a phrase click must not ALSO fire the shop/queue control
             // underneath, on EITHER input path.
-            DrawRankedHintCallout();
+            if (!PageImguiHidden) DrawRankedHintCallout();   // Sept 8 item 1: the callout is IMGUI too
             bool anyModal = BackdroplessModalOpen || quickChatOpen || danceWheelOpen;
             NativeUI.SetClickBlocker(anyModal);
             // The raw-poll half additionally covers the modals that DO raise
@@ -3931,7 +3965,7 @@ namespace CompetitiveRounds
         // ── "chat muted" marker, published to the room (bug 213) ──────────
         // A courtesy indicator, NOT a capability gate: it carries no gameplay
         // meaning, so eventual consistency is fine and it does not need the
-        // pre-join staging discipline (#287) that cr_pois2 / cr_grow1 do.
+        // pre-join staging discipline (#287) that cr_pois2 / cr_grow2 do.
         internal const string CHAT_MUTE_PROP = "cr_cmute";
         private static string chatMuteLine = "";
         private static float chatMuteLineCachedAt = -999f;
@@ -6734,7 +6768,7 @@ namespace CompetitiveRounds
                 }
                 else if (ev.keyCode == KeyCode.Tab)
                 {
-                    // Tab no longer cycles (Shift does), but keep swallowing it:
+                    // Tab no longer cycles (a tap of Alt does), but keep swallowing it:
                     // unconsumed, IMGUI treats Tab as focus navigation and would
                     // yank the caret out of the box mid-message.
                     ev.Use();

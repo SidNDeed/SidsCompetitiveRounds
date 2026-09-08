@@ -233,7 +233,9 @@ namespace CompetitiveRounds
         {
             MaybeRunParseSelfTest();
             if (!NativeUI.IsOpen) { if (pinned || openFor != null) CloseCard(); return; }
-            bool blocked = ClickHandler.ModalBlockInput || MatchTracker.IsInMatch;
+            // Sept 8 item 1: PageImguiHidden is the LIVE popup state; ModalBlockInput is
+            // written a frame later, which left this 30001 canvas above a popup for a frame.
+            bool blocked = ClickHandler.ModalBlockInput || MatchTracker.IsInMatch || CompetitiveUI.PageImguiHidden;
             float now = Time.realtimeSinceStartup;
             Vector3 mp = Input.mousePosition;
             if (pinned)
