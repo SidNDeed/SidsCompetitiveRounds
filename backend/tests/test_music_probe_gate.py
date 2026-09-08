@@ -71,7 +71,12 @@ def _code(block):
 def test_the_gate_is_a_config_key_and_not_a_seat_identity():
     gate = _cs_method_body(PROBE_CS, "private static bool SeatAllowed()")
     assert "Plugin.MusicProbeEnabled" in gate
-    assert "IsBroadcastIdentity" not in PROBE_CS.read_text(encoding="utf-8"), (
+    # Scoped to the gate, not the file. The property is "whether the probe RUNS
+    # is a config key"; the file-wide ban this replaces was a proxy for that,
+    # and it outlawed every other use of the identity too. The Sept 7 rewrite
+    # added three NON-gating ones (verdict labelling and end-bar filtering), so
+    # the ban failed while the property it stood for was intact.
+    assert "IsBroadcastIdentity" not in _code(gate), (
         "the identity gate is what stopped this measurement reaching player hardware"
     )
 
@@ -195,6 +200,28 @@ def test_the_probe_reloads_its_own_config_and_does_not_borrow_another_seats_tick
     assert "TickTestOpenTab" not in probe, "the probe still claims another tick reloads for it"
 
 
+def test_the_native_memory_row_is_measured_everywhere_but_only_judged_where_its_bound_is_valid():
+    """The counterpart the scoped ban above no longer covers, made explicit.
+
+    The native-memory bound is an absolute megabyte figure calibrated on the
+    broadcast rig. On arbitrary player hardware the same number means nothing,
+    so the row is still MEASURED and still printed there — carrying the real
+    delta and an explicit `measured-only` tag — but it is not allowed to decide
+    pass/FAIL, and it is kept out of the end bar. That is deliberate. The thing
+    it must never become is a row that quietly reports `pass` on a seat whose
+    bound was never valid; the tag is what keeps it honest, so assert the tag.
+    """
+    src = _code(PROBE_CS.read_text(encoding="utf-8"))
+    assert '"measured-only"' in src, (
+        "a seat whose bound is not valid must SAY so rather than report a pass"
+    )
+    assert 'Dmb(d) + "(measured-only)"' in src, (
+        "the end record carries the measured number, not a blank or a pass"
+    )
+    # ...and the bar only takes the row on the seat where the bound holds.
+    assert "if (!pass && BroadcastMode.IsBroadcastIdentity) fails.Add(row);" in src
+
+
 def test_turning_the_key_off_ends_a_live_run_instead_of_stranding_it():
     """The tick is the sole releaser of the request, clip, source and host
     object, so an early return there strands all four."""
@@ -203,7 +230,11 @@ def test_turning_the_key_off_ends_a_live_run_instead_of_stranding_it():
     # ...and it is reached only after the maintenance work, which must keep
     # running so a stop in progress can finish releasing.
     assert tick.index("RetryReleases") < tick.index('Stop("probe key turned off")')
-    assert tick.index("_cleanupSampleAt") < tick.index('Stop("probe key turned off")')
+    # The deferred post-cleanup sample this line also checked was DELETED in
+    # 003b161 ("no release while the engine lives"); see the header note at
+    # MusicStreamProbe.cs — "No post-cleanup sample exists: nothing is cleaned
+    # up." Asserting an ordering against a member that no longer exists tested
+    # nothing, so it is gone rather than re-pointed at some nearby symbol.
     # a START, by contrast, simply requires the key, and forgetting the last
     # run is what lets the key itself re-trigger the current command
     assert "if (!SeatAllowed()) { _lastRun = null; return; }" in tick
@@ -313,7 +344,11 @@ def test_the_pause_mask_is_taken_at_the_call_and_not_at_the_next_poll():
     assert "MaskCallbacks(true); _src.Pause();" not in controls
     # leaving: cleared BEFORE the resume, which cannot lose one — a paused
     # source produces no callbacks at all.
-    assert "MaskCallbacks(false);\n                    _src.UnPause();" in controls
+    # Ordering, not adjacency: the Sept 7 rewrite put `_wallFromTicks =
+    # Stopwatch.GetTimestamp();` between the two, which is harmless to the
+    # property (no callback can land while the source is still paused) but
+    # broke an assertion that demanded the two statements touch.
+    assert controls.index("MaskCallbacks(false);") < controls.index("_src.UnPause();")
     # The natural end clears the mask too, and it is asserted by the CODE
     # around it. Until 2026-09-06 this assertion carried the site's trailing
     # COMMENT in the needle, so the comment text was what satisfied it - a
@@ -323,11 +358,8 @@ def test_the_pause_mask_is_taken_at_the_call_and_not_at_the_next_poll():
     assert controls.count("MaskCallbacks(false);") == 2, (
         "two sites clear the mask: the resume, and the natural end"
     )
-    natural_end = re.search(
-        r"_src\.loop = true; _src\.time = 0f;\s*MaskCallbacks\(false\);\s*_src\.Play\(\);",
-        controls,
-    )
-    assert natural_end, (
+    tail = controls[controls.index("_src.loop = true; _src.time = 0f;"):]
+    assert tail.index("MaskCallbacks(false);") < tail.index("_src.Play();"), (
         "the natural end must clear the mask BEFORE restarting play, so the "
         "intended silence is not differenced against as a dropout"
     )
@@ -488,15 +520,21 @@ def test_the_online_refusal_precedes_the_work_it_refuses():
     afterwards. GetContent decodes a whole track, so the answer taken at the top
     of the method is milliseconds old by the time anything is audible — it is
     asked again on the line before Play()."""
+    # PumpRequest's tail was extracted to BindAndPlay in the Sept 7 rewrite, so
+    # the two questions now live in two methods. The PROPERTY is unchanged and
+    # is still asserted end to end: one refusal before the decode, one on the
+    # line before the first audible sample, and no third path to Play().
     pump = _code(_cs_method_body(PROBE_CS, "private static void PumpRequest(float now)"))
+    bind = _code(_cs_method_body(
+        PROBE_CS, "private static void BindAndPlay(AudioClip clip, float now, Stopwatch block)"))
     assert pump.index("RefusalNow()") < pump.index("GetContent"), (
         "the refusal must come before the completion block, not after it"
     )
-    assert "string refuseAtPlay = RefusalNow();" in pump
-    assert pump.index("string refuseAtPlay") < pump.index("_src.Play();"), (
+    assert "string refuseAtPlay = RefusalNow();" in bind
+    assert bind.index("string refuseAtPlay") < bind.index("_src.Play();"), (
         "the last question must be asked before the first audible sample"
     )
-    assert pump.count("RefusalNow()") == 2
+    assert pump.count("RefusalNow()") + bind.count("RefusalNow()") == 2
 
 
 def test_the_longest_silent_run_belongs_to_the_run_not_to_the_last_tap():
@@ -511,7 +549,13 @@ def test_the_longest_silent_run_belongs_to_the_run_not_to_the_last_tap():
     assert "if (_tap.SilentRunMax > _runSilentRunMax) _runSilentRunMax = _tap.SilentRunMax;" in close
     assert close.index("_runSilentRunMax") < close.index('Release(_tap, "tap")')
     stop = _code(_cs_method_body(PROBE_CS, "private static void Stop(string why)"))
-    assert "Math.Max(_runSilentRunMax, _tap.SilentRunMax)" in stop
+    # Stop used to re-take Math.Max against the live tap, which was already
+    # folded and nulled by CloseObjects. It now reads the run-scoped static
+    # only, so the tap cannot contribute twice or vanish between the two reads.
+    assert '" silent_run_max=" + silentRunMax' in stop
+    assert "_tap." not in stop, (
+        "Stop must not read the tap: CloseObjects has already folded and released it"
+    )
 
 
 def test_an_unknown_mode_suffix_is_refused_rather_than_defaulted():
@@ -521,8 +565,11 @@ def test_an_unknown_mode_suffix_is_refused_rather_than_defaulted():
     generation bump and before a pending cleanup is dropped — so a rejected
     lever costs the previous run nothing."""
     start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
-    assert 'LogWarning("[MUSIC-PROBE] unknown mode ' in start
-    assert 'LogWarning("[MUSIC-PROBE] too many fields ' in start
+    # Asserted on the operator-visible text, not on the logger call shape: the
+    # rewrite moved these from LogWarning(...) to MusicEngine.SafeLog(...,
+    # LogLevel.Warning, ...), which changes nothing about the refusal.
+    assert '"[MUSIC-PROBE] unknown mode ' in start
+    assert '"[MUSIC-PROBE] too many fields ' in start
     assert "Mode wanted = Mode.Normal;" in start
     assert "_mode = wanted;" in start
     assert start.index("Mode wanted") < start.index("_gen++;"), (
@@ -545,32 +592,42 @@ def test_sandbox_means_a_live_sandbox_round_and_not_two_photon_flags():
 
 def test_no_blocking_collection_runs_while_a_room_is_live():
     """Entering an online room ends the run and schedules the cleanup; a full
-    blocking collection five seconds later is a hitch inside somebody's game."""
-    tick = _code(_cs_method_body(PROBE_CS, "internal static void Tick()"))
-    gc_at = tick.index("_cleanupGcAt > 0f && now >= _cleanupGcAt")
-    block = tick[gc_at:]
-    # r12 MEDIUM: stated as the contexts that are SAFE, not as the one that is
-    # not. "?" is an unreadable context, not a proof of anything, and it used
-    # to run the collection because it is not equal to "online-room".
-    gate = 'if (ctxNow != "menu" && ctxNow != "sandbox" && ctxNow != "offline-idle")'
-    assert gate in block
-    assert block.index(gate) < block.index("GC.Collect()"), (
-        "the context gate must precede the collection, not follow it"
+    blocking collection five seconds later is a hitch inside somebody's game.
+
+    The deferred collection this guarded was DELETED in 003b161 ("no release
+    while the engine lives") along with the whole post-cleanup sample; the file
+    header now states "No post-cleanup sample exists: nothing is cleaned up."
+    So the guard is not merely satisfied, its subject is gone — and the
+    strongest form of the original property is that the probe never forces a
+    collection at all. Asserted that way, this survives the next rewrite too.
+    """
+    src = _code(PROBE_CS.read_text(encoding="utf-8"))
+    assert "GC.Collect" not in src, (
+        "a forced collection anywhere in the probe is a hitch inside somebody's "
+        "game; if a deferred cleanup is ever reintroduced, the context gate and "
+        "its bounded deadline have to come back with it"
     )
-    assert 'ctxNow == "online-room"' not in block, (
-        "an unreadable context must defer too"
-    )
-    assert "_cleanupGcDeadline" in block, "a deferral with no bound never ends"
-    stop = _code(_cs_method_body(PROBE_CS, "private static void Stop(string why)"))
-    assert "_cleanupGcDeadline = Time.realtimeSinceStartup + 120f;" in stop
+    # Reading the counter is fine and is what the memory rows are built from.
+    assert "GC.GetTotalMemory(false)" in src
 
 
 def test_a_pending_cleanup_belongs_to_the_run_that_scheduled_it():
     """Starting run B inside run A's cleanup window overwrote A's memory
     baselines, so A's cleanup compared against B's and forced a collection
-    inside B."""
+    inside B.
+
+    There is no pending cleanup any more (003b161 deleted the whole deferred
+    sample), so the ownership rule has nothing to own and cannot be asserted
+    directly. What is left is a tripwire: if a deferred cleanup is ever
+    reintroduced, this fails and sends the author back to the rule above,
+    which is the only reason the test still exists.
+    """
+    src = _code(PROBE_CS.read_text(encoding="utf-8"))
+    assert "_cleanup" not in src, (
+        "a deferred cleanup is back — it must be stamped with the generation "
+        "that scheduled it, or run B will service run A's window"
+    )
     start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
-    assert "_cleanupSampleAt = -1f; _cleanupGcAt = -1f;" in start
     assert "_gen++;" in start
 
 
@@ -583,7 +640,9 @@ def test_a_refused_command_moves_no_state_at_all():
     could not happen."""
     start = _code(_cs_method_body(PROBE_CS, "private static void Start(string raw, float now)"))
     refusal = start.index("if (refuse != null)")
-    for mutation in ("_gen++;", "_cleanupSampleAt = -1f; _cleanupGcAt = -1f;",
+    # The pending-cleanup member is gone (003b161); every other mutation the
+    # refusal has to precede is unchanged.
+    for mutation in ("_gen++;",
                      "_key = key;", "_audioWallSeconds = 0f;", "_mode = wanted;"):
         assert mutation in start, mutation
         assert start.index(mutation) > refusal, (
@@ -600,8 +659,12 @@ def test_a_late_tap_destruction_cannot_stop_a_later_run():
     OnDestroy sets a static flag that the owner reads as "release everything"."""
     tap = _code(_cs_method_body(PROBE_CS, "private sealed class ProbeTap : MonoBehaviour"))
     assert "private void OnDestroy() { if (Gen == _gen) HostDestroyed = true; }" in tap
-    open_block = _code(_cs_method_body(PROBE_CS, "private static void PumpRequest(float now)"))
-    assert "_tap.Gen = _gen;" in open_block
+    # The stamp moved with the rest of PumpRequest's tail into BindAndPlay, and
+    # it must still happen before the source can produce a callback.
+    bind = _code(_cs_method_body(
+        PROBE_CS, "private static void BindAndPlay(AudioClip clip, float now, Stopwatch block)"))
+    assert "_tap.Gen = _gen;" in bind
+    assert bind.index("_tap.Gen = _gen;") < bind.index("_src.Play();")
 
 
 def test_the_probe_keeps_its_own_audio_source_and_never_drives_the_engine():
@@ -665,8 +728,15 @@ def test_stop_releases_before_it_reports():
         assert stop.index(release) < stop.index("[MUSIC-PROBE] end key="), (
             f"{release} runs after the record it can be prevented by"
         )
-    # the one value that does not survive the release is read first
-    assert stop.index("int silentRunMax") < stop.index("CloseObjects();")
+    # Deliberately INVERTED since the Sept 7 rewrite, and correct: silent_run_max
+    # is no longer read off the live tap. CloseObjects quiesces the tap, folds
+    # its maximum into the run-scoped static and sets _runHadTap, so the total
+    # is only final AFTER the release. Reading it first would now print a stale
+    # run maximum that omits the last cycle. The release-before-record ordering
+    # asserted above is the property this test is named for and is unchanged.
+    assert stop.index("CloseObjects();") < stop.index("int silentRunMax"), (
+        "the fold happens in CloseObjects, so the total is read after it"
+    )
 
 
 def test_the_starvation_claim_is_scoped_to_the_source_callback():
@@ -713,7 +783,7 @@ def test_a_tap_that_reported_a_clean_zero_is_not_no_measurement():
     whose tap reported a clean zero — the best possible result — came out as
     -1, i.e. as no measurement at all."""
     stop = _code(_cs_method_body(PROBE_CS, "private static void Stop(string why)"))
-    assert "(_runHadTap ? _runSilentRunMax : -1)" in stop
+    assert "_runHadTap ? _runSilentRunMax : -1" in stop
     assert "_runSilentRunMax > 0 ? _runSilentRunMax : -1" not in stop
     close = _code(_cs_method_body(PROBE_CS, "private static void CloseObjects()"))
     assert "_runHadTap = true;" in close, "the flag is set where the tap is folded in"
