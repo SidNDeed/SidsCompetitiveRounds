@@ -22,13 +22,19 @@
 **Grow competitive clock: 240 FPS -> 120 FPS**
 
 - Every eligible Grow bullet now grows as if its shooter ran at 120 FPS (it was
-  240): about +24% over a full flight un-stacked, +53% at two stacks, +134% at
-  four (was +11 / +23 / +53). The room capability key changed with the clock, so
+  240): one copy is about x3.1 over a full flight (was x1.8), two copies x9.6
+  (was x3.1), three x30 (was x5.5). The room capability key changed with the clock, so
   a room that mixes this version with an older one falls back to vanilla growth
   on every seat instead of pinning two clocks; that lasts as long as older
   versions are in play. A spectator on an older version renders vanilla-scale
   Grow visuals until they update (damage is the shooter's and unaffected). The
   Info chart badge, the Grow article and docs/grow-mechanics.md say 120.
+- The Grow article's vanilla numbers were wrong and are corrected: they had been
+  computed from the C# field defaults (multiplier 1 over 30 units), but the
+  shipped A_Grow prefab carries multiplier 4 over 40 units (read straight out of
+  the asset file). One vanilla copy is about x1.4 at 400 FPS, x9.4 at 60 and x82
+  at 30; the article said x1.07 / x1.53 / x2.31. docs/grow-mechanics.md already
+  had the right constants; the Info chart is now on a log scale.
 
 **Popups, keys, settings**
 

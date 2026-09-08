@@ -1980,21 +1980,23 @@ namespace CompetitiveRounds
     ///   num2 = 1 + num · TimeHandler.deltaTime · localScale.x · muiltiplier
     ///   projectileHit.damage *= num2;  shake *= num2;
     ///
-    /// Over the 30-unit growth window bullet speed cancels and the total
-    /// multiplier is  M = exp(30 · dt · s · m)  — exponential in the SHOOTER's
+    /// Over the 40-unit growth window bullet speed cancels and the total
+    /// multiplier is  M = exp(40 · dt · s · m)  — exponential in the SHOOTER's
     /// frame time (damage is shooter-authoritative: the value crosses the wire
-    /// once via RPCA_SendTakeDamage). At s·m=1 that is ×1.07 at 400 FPS but
-    /// ×1.53 at 60 FPS and ×2.31 at 30 FPS; stacked builds SQUARE the gap
-    /// (s·m=4: ×1.29 vs ×5.47 vs ×28.5). A single 200 ms hitch frame multiplies
-    /// ×2.16 on its own (Δd and dt both spike). Hence "60-FPS players one-shot
-    /// with Grow + any explosive" while 400-FPS players see +20-40%.
+    /// once via RPCA_SendTakeDamage). One copy is s·m=4: the A_Grow prefab's
+    /// muiltiplier is 4 and removeAt 40 (read from sharedassets0.assets on Sept 8;
+    /// the C# defaults 1/30 are NOT what ships) - about ×1.4 at 400 FPS but ×9.4
+    /// at 60 FPS and ×82 at 30 FPS, and every extra copy raises that to the next
+    /// power (three: ×2.8 vs ×737 vs ×285,000). A single 200 ms hitch frame
+    /// multiplies ×5.6 on its own (Δd and dt both spike). Hence "60-FPS players
+    /// one-shot with Grow + any explosive" while 400-FPS players see +40%.
     ///
     /// Fix: a one-load TRANSPILER on TrickShot.Update swaps its single
     /// TimeHandler.deltaTime read for <see cref="GrowFpsNormalizePatch.EffectiveDt"/>,
     /// which returns the compiled constant <see cref="RefScaledDt"/> for
     /// normalized bullets and the live vanilla value otherwise — growth
     /// becomes (to first order — see the patch-class residual note) a function
-    /// of distance flown (M ≈ exp(30·REF·s·m) for every shooter at every frame
+    /// of distance flown (M ≈ exp(40·REF·s·m) for every shooter at every frame
     /// rate), the dt² hitch amplifier disappears, and remote simulations of
     /// the same bullet converge instead of drifting. Vanilla's body otherwise
     /// runs untouched (distance window, stacking, slow-mo pause via Δd→0,
@@ -2120,8 +2122,10 @@ namespace CompetitiveRounds
         /// <summary>THE BALANCE KNOB — the growth rate every shooter gets,
         /// expressed as the scaled frame time of a reference-FPS player
         /// (TimeHandler.deltaTime = Time.deltaTime × 0.85). At 120-FPS-equivalent
-        /// a full 30-unit flight gives +24% base, +53% at s·m=2, +134% at s·m=4
-        /// (Sept 8: 240 -> 120 per Sid; the 240 clock gave +11/+23/+53). The card
+        /// a full 40-unit flight gives ×3.11 for one copy (s·m=4), ×9.65 for two,
+        /// ×30 for three (Sept 8: 240 -> 120 per Sid; the 240 clock gave
+        /// ×1.76/×3.11/×5.48; the +24/+53/+134% figures quoted before Sept 8 used
+        /// the C# defaults 1/30 instead of the prefab's 4/40). The card
         /// stays meaningful and still never pays for a worse computer. MUST
         /// remain a compiled constant: a config value would let any client
         /// legally buff its own damage (shooter authority). Changing it changes
@@ -2411,7 +2415,7 @@ namespace CompetitiveRounds
     /// Residual, documented not fixed (Codex find 9): the growth product
     /// Π(1+k·Δd) is partition-dependent to second order — very coarse frames
     /// UNDER-grow slightly (~4% at s·m=4, 60 FPS vs fine partitions), and a
-    /// hitch that crosses the 30-unit cap loses the final segment (~13%
+    /// hitch that crosses the 40-unit cap loses the final segment (~13%
     /// worst observed direction). Both err SMALLER, never toward the nuke.</summary>
     [HarmonyPatch(typeof(TrickShot), "Update")]
     internal static class GrowFpsNormalizePatch

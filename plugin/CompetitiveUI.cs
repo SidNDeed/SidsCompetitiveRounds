@@ -314,6 +314,10 @@ namespace CompetitiveRounds
             || NativeUI.InfoPopupOpen || NativeUI.TournBetsPopupOpen
             || NativeUI.RecentTournPopupOpen
             || NativeUI.PickerOpen || NativeUI.LangPromptOpen
+            // Sept 8 r1b M1: the card preview's backdrop is a raw ClickHandler with
+            // no occlusion test, so the Card Stats rows under it stayed live and a
+            // backdrop click could open ANOTHER preview instead of dismissing this one.
+            || NativeUI.CardPreviewOpen
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
@@ -332,7 +336,10 @@ namespace CompetitiveRounds
         internal static bool PopupCoversPage =>
                NativeUI.UtilityPopupOpen || NativeUI.InfoPopupOpen
             || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
-            || NativeUI.CardPreviewOpen;
+            || NativeUI.CardPreviewOpen
+            // Sept 8 r1b L2: the language chooser is a backdrop modal too (Home has the
+            // ranked-hint callout + caret as page IMGUI).
+            || NativeUI.LangPromptOpen;
         internal static bool PageImguiHidden => PopupCoversPage || NativeUI.PickerOpen;
 
         /// <summary>Called from OnGUI. FPS + notifications + match status. The server-down

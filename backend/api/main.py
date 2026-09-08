@@ -9865,7 +9865,7 @@ async def get_player_matches(
         LEFT JOIN ranked_series rs ON rs.id = m.series_id
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
-{name_sql}        ORDER BY m.ended_at DESC
+{name_sql}        ORDER BY m.ended_at DESC, m.created_at DESC, m.id DESC
         LIMIT :limit OFFSET :offset
     """)
     rows = (await db.execute(query, params)).mappings().all()
@@ -46592,6 +46592,7 @@ _REPORT_1V1_SQL = """
            m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
            m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
            m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           BOOL_AND(m.is_ranked) OVER () AS all_ranked,
            COUNT(*) OVER () AS total_rows
       FROM matches m
      WHERE {where} AND m.invalidated_at IS NULL
@@ -47089,6 +47090,13 @@ async def _report_load_1v1(db, selector, key, cpid):
     rows = await _report_rows(db, _REPORT_1V1_SQL.format(where=_REPORT_1V1_WHERE[selector]),
                               {"key": key, "cpid": cpid, "lim": _REPORT_MAX_GAMES + 1})
     rows, total = _report_take(rows)
+    # Sept 8 r1b M2: the ranked/casual label is a claim about the WHOLE set, and
+    # the statement keeps only the newest _REPORT_MAX_GAMES rows - so the label
+    # comes from the set-wide window (BOOL_AND OVER ()), never from the retained
+    # rows. The row-scan fallback covers a statement without the window column.
+    all_ranked = all(bool(r["is_ranked"]) for r in rows)
+    if rows and rows[0].get("all_ranked") is not None:
+        all_ranked = bool(rows[0]["all_ranked"])
     games = []
     for r in rows:
         games.append({
@@ -47112,7 +47120,7 @@ async def _report_load_1v1(db, selector, key, cpid):
                                             r["p2_damage_dealt"], r["p2_deaths"])),
             ],
         })
-    return games, total
+    return games, total, all_ranked
 
 
 async def _report_load_team(db, selector, key, cpid):
@@ -47422,7 +47430,7 @@ async def get_set_report(request: Request, steam_id: str = "",
             if set_row["invalidated_at"] is not None:
                 raise HTTPException(status_code=404, detail=_REPORT_NOT_FOUND)
             kind, mode = "ranked", "1v1"
-            games, total = await _report_load_1v1(db, "series", key, cpid)
+            games, total, _ = await _report_load_1v1(db, "series", key, cpid)
             roster_pids = [set_row["player1_id"], set_row["player2_id"]]
         else:
             ts = await _report_rows(db, _REPORT_TS_SQL, {"key": key})
@@ -47449,11 +47457,11 @@ async def get_set_report(request: Request, steam_id: str = "",
                            str(set_row["duo_b_id"]): 2}
     elif selector in ("session", "sitting"):
         kind, mode = "casual", "1v1"
-        games, total = await _report_load_1v1(db, selector, key, cpid)
-        if games and all(g["is_ranked"] for g in games):
+        games, total, all_ranked = await _report_load_1v1(db, selector, key, cpid)
+        if games and all_ranked:
             kind = "ranked"
     else:  # match
-        games, total = await _report_load_1v1(db, "match", key, cpid)
+        games, total, _ = await _report_load_1v1(db, "match", key, cpid)
         if games:
             mode = "1v1"
             kind = "ranked" if games[0]["is_ranked"] else "casual"

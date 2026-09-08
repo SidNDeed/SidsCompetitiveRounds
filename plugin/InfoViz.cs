@@ -692,7 +692,9 @@ namespace CompetitiveRounds
         }
 
         // -- Grow frame-rate curve ------------------------------------------
-        // The three bars restate the article's unstacked full-flight table.
+        // The three bars restate the article's one-copy full-flight table (A_Grow prefab:
+        // multiplier 4 over 40 units, read from the asset Sept 8), on a LOG scale - the
+        // values span x1.4..x82 and a linear bar would make two of them slivers.
         // The competitive reference is 120 FPS (240 until Sept 8); the article does not state
         // the internal 0.85 constant, so it is deliberately not drawn.
 
@@ -702,8 +704,8 @@ namespace CompetitiveRounds
             var p = Panel(parent, "VizGrow", H);
             Header(p, H, I18n.Tr("VANILLA GROW: FRAME RATE CHANGES DAMAGE"));
             string[] fps = { I18n.Tr("400 FPS"), I18n.Tr("60 FPS"), I18n.Tr("30 FPS") };
-            string[] mult = { I18n.Tr("x1.07"), I18n.Tr("x1.53"), I18n.Tr("x2.31") };
-            float[] values = { 1.07f, 1.53f, 2.31f };
+            string[] mult = { I18n.Tr("x1.4"), I18n.Tr("x9.4"), I18n.Tr("x82") };
+            float[] values = { 1.4f, 9.4f, 82f };
             Color[] colors =
             {
                 new Color(0.30f, 0.68f, 0.95f, 0.85f),
@@ -714,14 +716,14 @@ namespace CompetitiveRounds
             {
                 float y = H - 82f - i * 40f;
                 Lbl(p, fps[i], 13f, TXT_MAIN, 24f, y, 120f, 22f);
-                float w = values[i] * 360f;
+                float w = 700f * Mathf.Log(values[i]) / Mathf.Log(values[values.Length - 1]);   // log scale, widest bar 700
                 Box(p, 150f, y + 1f, w, 22f, colors[i]);
                 Lbl(p, mult[i], 13f, Color.white, 160f + w, y, 80f, 22f);
             }
             Box(p, 880f, H - 64f, 250f, 28f, new Color(0.25f, 0.62f, 0.38f, 0.82f));
             Lbl(p, I18n.Tr("competitive clock: 120 FPS"), 12f, Color.white,
                 880f, H - 61f, 250f, 22f, UIFactory.AlignMidCenter);
-            Lbl(p, I18n.Tr("Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 120 FPS growth clock."),
+            Lbl(p, I18n.Tr("One copy, full flight, bars on a log scale. The mod pins every eligible Grow bullet to the same 120 FPS growth clock: about x3.1."),
                 13f, TXT_DIM, 24f, 6f, 1110f, 20f);
             return p;
         }

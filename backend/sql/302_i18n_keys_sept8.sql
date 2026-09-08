@@ -1,4 +1,4 @@
--- 302: i18n client keys for the Sept 6/7/8 batches (202 NEW keys): the in-game mail feature,
+-- 302: i18n client keys for the Sept 6/7/8 batches (204 NEW keys): the in-game mail feature,
 -- the session report, the hover profile card, the ranked region finder, the chat ALT key, the
 -- Grow 120 FPS clock texts and the other UI strings the branch added since v1.40.1. This is the
 -- additive half of what POST /admin/i18n/sync-keys does, written through the migration channel
@@ -162,7 +162,6 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.con
 ('b23a6d6dc64dde43', 'client', $k302$Too many messages - try again in {0} hours.$k302$, 'fd7a242888698ca0f0bcbf366fe4bc6c18f34e71', FALSE, E'MailClient · RateLimitText'),
 ('b29134ecca9d1209', 'client', $k302$Elo$k302$, 'b2bba6145b37e301dea598b4d23970ddc6e2f1a7', FALSE, E'NativeUI · TrMetric'),
 ('b2e2bf41f013e8fd', 'client', $k302$Series streak: them x{0}$k302$, 'd285ca1b47468299f4afac9cb03ceae3b7b63c3c', FALSE, E'ProfileCard · Render'),
-('b39e6f71b9eb5aee', 'client', $k302$Un-stacked, full flight. The mod pins every eligible Grow bullet to the same 120 FPS growth clock.$k302$, 'b8a882a44e53375306a932c3daa7f72a063fe4ff', FALSE, E'InfoViz · BuildGrowCurve'),
 ('b547112036e4389a', 'client', $k302$New mail from {0}: {1}$k302$, '6aba550b2fa626600ec7e40752abf1f2d0eb42b5', FALSE, E'MailUI · OnStatus'),
 ('b571a0883abbc576', 'client', $k302$Since first$k302$, '85aeadc8e1b43a5992e71f4c7cd53e3abeab1458', FALSE, E'RatingGraphAxis · Label'),
 ('b5e48c8390617067', 'client', $k302$Steam sign-in is required to view session reports$k302$, '1432201b40fabc68678895cefb04563659d50408', FALSE, E'SessionReportView · ErrorMessage'),
@@ -172,6 +171,29 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.con
 ('b787becd085c029c', 'client', $k302$Last seen {0}$k302$, '625e31be269df28853a13df859f62ab7c71a841f', FALSE, E'ProfileCard · Render'),
 ('b7adc58cf20616e9', 'client', $k302$Update the mod to use mail.$k302$, '0b4257d9a89e14f4f46f5f3b21ee5fb370ec1473', FALSE, E'MailClient · ErrorDetail'),
 ('b94ec4c29383c067', 'client', $k302$Nothing sent yet.$k302$, '6fa60471c5d8a896756bcae367bd6d491ca9b400', FALSE, E'MailUI · PaintList'),
+('ba9c002f190ceca1', 'client', $k302$<color=#FFD94D><b>WHOLE-LOBBY GATED - REAL GAMEPLAY CHANGES</b></color>
+
+These change the shared simulation. Grow, the crate rescale and the same-card dealer are whole-room gated: <color=#7FE87F>one vanilla or outdated fighter and everyone gets vanilla, symmetrically.</color> Poison sync is per-victim, with its own mixed-room fallbacks.
+
+<color=#7FD4FF>Poison sync</color> - vanilla runs poison separately on every client, each judging your block by its own timing - screens permanently disagree about which ticks landed ('ghost HP'). Now the victim's own client decides every tick and publishes the verdict; every modded client applies exactly that set. An unmodded victim gets the pure vanilla loop instead. Works in any online room. <color=#8A8A93>In mod-issued rooms with an incapable client present, the modded clients instead agree blocking does not negate poison - agreement beats the ghost-HP split.</color>
+
+<color=#7FD4FF>Grow normalization</color> - Grow's damage compounds per FRAME on the shooter's machine: about x1.4 over a full flight at 400 FPS, x9.4 at 60, x82 at 30 for one copy, far worse stacked - which is how low-FPS players one-shot with Grow plus any explosive. Normalized bullets grow at one fixed rate. Gate: every fighter modded and current, AND a mod-issued room or everyone's Ranked ON at connect. Otherwise vanilla growth for everyone.
+
+<color=#7FD4FF>Falling crates on big FFA maps</color> - on scaled FFA maps vanilla respawns networked crates and saws too small, ropes miss, and they drop at round start. Rescaled only when every fighter is capable; FFA queue rooms only.
+
+<color=#7FD4FF>FFA same-card dealer</color> - the Same Cards rule deals identical draws; needs every member current, else each client rolls privately.
+
+<color=#FFD94D><b>MODE ROOMS ONLY</b></color>
+
+Vanilla ROUNDS is built for exactly two teams, so FFA rooms replace the round engine outright: round end, scoring, card targeting (vanilla aimed 'other team' cards at the first player), spawns, leaver tolerance. None of it can run outside FFA rooms.
+
+<color=#7FD4FF>Radiance in FFA</color> - vanilla's wave hit its own caster the moment they moved, and stopped after ONE hit while visibly sweeping everyone else. The FFA version excludes the caster and hits each opponent the ring sweeps, once, ending when the ring ends.
+
+<color=#7FD4FF>Crown in 2v2</color> - vanilla can't move the crown past the first two players; the leading TEAM wears it, both members.
+
+<color=#7FD4FF>Card-pick stage in 2v2/1v2</color> - vanilla shows only ONE picker's body per round (sometimes the wrong one), leaving the second picker on an empty stage. Each picker is re-staged in turn; the 1v2 solo's extra pick also fixes a vanilla crash that hung the round.
+
+<color=#7FD4FF>Auto-continue</color> - mod rooms auto-confirm the rematch prompt. Room-code games deliberately keep the vanilla prompt: after one side clicks Yes, vanilla starts a 10-second timer that kicks that side to the menu if the other never answers - one-sided auto-Yes kills the player it tries to help.$k302$, 'bb4b5f529fff1174466c166584f96ddab94e587c', TRUE, E'InfoLibrary · (file scope)'),
 ('bb83c24df96aeb64', 'client', $k302$Too many recipients for one message.$k302$, '6f9591653d343912dc73f0b8b4ad276449b5ee51', FALSE, E'MailClient · ErrorDetail'),
 ('bd06028e66d68a8b', 'client', $k302$Who can mail me: <color=#FF9966>Nobody</color>$k302$, '8d0da7eaad5c45b2f590870091cc37062c052a1a', FALSE, E'MailUI · RefreshSettingsRow'),
 ('bf44afebebb3f83a', 'client', $k302$To: {0}$k302$, 'a88aedfc4f2bb81fcbc57c4cf66c266d7fad07c6', FALSE, E'MailUI · PaintComposer'),
@@ -205,10 +227,51 @@ Vanilla rebinding lives in the game options; the mod keys themselves are fixed. 
 ('d5bf8531fbbdc484', 'client', $k302$The message contains characters that are not allowed.$k302$, '91b8f58e21a0eaa877618fd5517384166a5a71f3', FALSE, E'MailClient · ErrorDetail'),
 ('d6b721431ce9f5db', 'client', $k302$showing the newest {0} games of this sitting ({1} not shown)$k302$, '6d2b7548ed0a229c3022f463d6ecfc1c074ed549', FALSE, E'SessionReportModel · Build'),
 ('d6ddb3145c092024', 'client', $k302$Add recipient$k302$, 'a989d1f178daf1628c77e5deaed5fa68ff871312', FALSE, E'MailUI · AddRecipient'),
+('d848abd7ea062801', 'client', $k302$One copy, full flight, bars on a log scale. The mod pins every eligible Grow bullet to the same 120 FPS growth clock: about x3.1.$k302$, 'cc3336e5827f767e2874b5b2b213028b4631f96f', FALSE, E'InfoViz · BuildGrowCurve'),
 ('d896225c4b934865', 'client', $k302${0} h ago$k302$, 'f29997e604005ce5aa841d40a0fe3a77ae4c6980', FALSE, E'ProfileCard · Ago'),
 ('da496c66b15da7fa', 'client', $k302$The report details contain characters that are not allowed.$k302$, '5a09ef793c04d82aaa1cf575a57a9045530421d0', FALSE, E'MailClient · ErrorDetail'),
 ('dae269dd1ca70a7d', 'client', $k302$Subject$k302$, '8d183dbdcea3b29906090bd83fa6fa37923cc8ec', FALSE, E'MailUI · BuildComposerView'),
 ('dca1b81b5132c44f', 'client', $k302$The subject repeats one character too many times.$k302$, '6f3f20c0701e938f7844a2a2913e49a69f8cd20e', FALSE, E'MailClient · ErrorDetail'),
+('dca283e5bc87a20c', 'client', $k302$Getting better at competitive ROUNDS is mechanical, not mystical: blocking discipline, netcode awareness, drafting, and reading the numbers the mod already keeps on you. Every tip below is tied to a real mechanic you can go test.
+
+<color=#FFD94D><b>BLOCKING DISCIPLINE</b></color>
+
+Blocking is the skill that decides close games, and it has a cost model worth respecting.
+
+- A block that absorbs nothing still spends its full cooldown. <color=#FF6666>Panic-blocking at the sound of a trigger buys you nothing and hands your opponent a free window while it recharges.</color>
+- React to the bullet, not the trigger: watch the opponent's gun and the shot itself, and drill on-reaction blocks until they're reflex.
+- One activation can absorb several bullets. A block held for a burst or a bounced volley does far more work than one spent on a lone pellet.
+- Block-effect cards multiply timing skill: Echo repeats and Shield Charge dashes all belong to the right-click that started them, so one well-timed block fires the whole chain.
+- A poison or burn tick that lands inside your block is consumed - erased, not postponed - so blocking while poisoned is real damage prevention. <color=#8A8A93>(A room mixing current and outdated mod versions can fall back to poison ignoring blocks, for everyone equally - see <color=#7FD4FF>Vanilla stays vanilla</color>.)</color>
+
+<color=#FFD94D><b>PLAY WITH THE NETCODE</b></color>
+
+- ROUNDS is not peer-to-peer. Both players talk to a Photon relay server in the room's region; the orange player is not a host and has no host advantage. <color=#7FE87F>Your ping to the region is the number that matters.</color>
+- Every client simulates every bullet, and damage is shooter-authoritative: what a shot takes off you is decided on the shooter's machine. Their screen sees your movement late, which is why you can die a step after reaching cover - and why the player who peeks first sees the other before being seen.
+- Your block is the mirror image: it happens on your machine first and reaches the opponent's simulation a beat later. A block raised slightly early on reaction protects you in situations where a frame-perfect one does not, because your last frame is already the past on their screen.
+- What reads as a broken hitbox is almost always this mismatch: ping, interpolation, size cards, and bounced shots. The mod never touches hitboxes (see <color=#7FD4FF>Netcode & Photon</color>).
+- Frame rate is a hidden gameplay stat in vanilla ROUNDS. Vanilla Grow compounds its damage per frame: around x9.4 for a 60 FPS shooter against x1.4 at 400 FPS for a single copy, and stacking widens the gap fast. In mod rooms - and in private matches where everyone is modded, current, and has Ranked enabled - Grow is normalized so frame rate stops deciding the damage (a heavy stutter can still under-grow a little - the error only ever points down); against vanilla or outdated clients the vanilla rule stands. <color=#7FE87F>A stable frame rate is a real competitive edge</color> - the Settings tab has a performance section for exactly this.
+
+<color=#FFD94D><b>DRAFT FOR A BUILD</b></color>
+
+- Cards are a plan, not a stat sheet. Lifesteal heals off the damage-dealt chain, and damage-over-time ticks route through that same chain - lifesteal plus poison is an engine, not a coincidence. Echo and Shield Charge turn blocking skill into offense. Draft the second card for the first one.
+- Read what a card actually does, then test it. Card text and card behavior are separate things: Chase displayed a '+30% Health' line for years that the vanilla card never actually granted (the mod removed the line). Sandbox games are never recorded, so experiment freely there.
+- The FFA Same Cards rule is the best draft teacher in the mod: when it's on, everyone's Nth draw offers the same candidates in the same order, so a loss can't be blamed on draw luck - the difference was choices. The Recent FFAs list keeps every pick in pick order (hover a player's card line), so you can replay the winner's draft against yours.
+- Your 1v1 match history stores both players' picks in order for every game. After a close loss, re-read the draft before you re-queue.
+
+<color=#FFD94D><b>USE YOUR OWN NUMBERS</b></color>
+
+My Stats tracks more about your play than you probably realize. What the headline stats mean:
+
+- <color=#7FD4FF>Hit %</color> - counts bullets, not clicks: one Buckshot click counts every pellet, and only direct, unblocked hits on enemies count - poison and burn ticks, explosions and self-hits never do. A shotgun build reads low by construction. <color=#FF6666>Compare a build against itself over time, never against a sniper's number.</color>
+- <color=#7FD4FF>Block success</color> - one off-cooldown right-click is one attempt, and at most one success per attempt no matter how many bullets it absorbed. Preemptive blocks that meet no bullet are normal, not a mistake - watch the trend across games, not one game.
+- Timeline graphs sample every 3 to 5 seconds and always span the whole game. Use them to find where games turn: the score timeline shows when a lead slipped, and the hit and damage lines show what changed when it did.
+- A 1v1 game records average and worst ping plus freeze events (frame stalls over half a second); team and FFA games carry lighter connection data. Before blaming your aim for one bad game, check whether the connection numbers already explain it (see <color=#7FD4FF>How stats are tracked</color>).
+
+<color=#FFD94D><b>WATCH BETTER PLAYERS</b></color>
+
+- Live games on the Leaderboard tab carry a WATCH button when they're spectatable. A spectator seat shows the real match from inside the room, and how a top player spends blocks and drafts under pressure teaches faster than queueing blind. FFA lobbies can be watched from the FFA tab the same way.
+- The Discord bot answers mechanics questions with live data: ask it 'how does blocking work', or ask how much elo you'd gain against a named player and it computes the real Glicko preview for both sides, win probability included (both accounts need linked Discord).$k302$, '6445cd59694006f1d517add0b13f8d6c4739e5ca', TRUE, E'InfoLibrary · (file scope)'),
 ('de18f3040b883b5b', 'client', ($k302$Rare$k302$ || chr(4) || $k302$card rarity$k302$), 'ada8fa22929d535cad04b537fd39614612ad9d59', FALSE, E'NativeUI · RefreshCardStats · card rarity'),
 ('df3806a1ee67bdc4', 'client', $k302$1v2 as solo$k302$, 'af0f53f17c39c17c2adcd86b083333090f0857e2', FALSE, E'ProfileCard · Render'),
 ('e02a47417843ba5d', 'client', $k302$Game {0}: solo {1}-{2} duo$k302$, '5da06bf7bb67a08a9073612752a6c656a5720b5c', FALSE, E'SessionReportModel · TeamScoreLabel'),
@@ -222,21 +285,21 @@ Vanilla rebinding lives in the game options; the mod keys themselves are fixed. 
 ('f150f5fc47ef1b43', 'client', $k302$Timeline$k302$, '018514a3d58aa08353dd5e387ee29de45981c409', FALSE, E'SessionReportModel · Build'),
 ('f3d270720ff3a166', 'client', $k302$Reply all$k302$, '84c27c09b6a8df1ece7757f54242c1f32da3b559', FALSE, E'MailUI · BuildReaderView'),
 ('f603297ac334cf12', 'client', $k302$More$k302$, '4bab2d8fe13fa6ab57f80098b414f0f734c5dd25', FALSE, E'MailUI · PaintList'),
-('f6aadcc70032390e', 'client', $k302$Grow is the one card whose damage depends on the shooter's FRAME RATE. In vanilla, the same Grow bullet fired by a 60 FPS player hits far harder than one fired at 400 FPS - and the mod normalizes it in competitive play.
+('f6a68c6300794435', 'client', $k302$Grow is the one card whose damage depends on the shooter's FRAME RATE. In vanilla, the same Grow bullet fired by a 60 FPS player hits far harder than one fired at 400 FPS - and the mod normalizes it in competitive play.
 
 <color=#FFD94D><b>THE REAL MATH</b></color>
 
-Grow multiplies the bullet's damage a little every rendered frame while it flies, through roughly the first 30 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.
+Grow multiplies the bullet's damage a little every rendered frame while it flies, through the first 40 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.
 
 Un-stacked, over a full flight:
 
-- 400 FPS shooter: about <color=#7FD4FF>x1.07</color>
-- 60 FPS shooter: about <color=#7FD4FF>x1.53</color>
-- 30 FPS shooter: about <color=#7FD4FF>x2.31</color>
+- 400 FPS shooter: about <color=#7FD4FF>x1.4</color>
+- 60 FPS shooter: about <color=#7FD4FF>x9.4</color>
+- 30 FPS shooter: about <color=#7FD4FF>x82</color>
 
-Stacking multiplies the growth rate, so the gap explodes. At four stacks: about x1.29 at 400 FPS, <color=#FF6666>x5.47 at 60 FPS, and x28.5 at 30 FPS</color>.
+Stacking multiplies the growth rate, so the gap explodes. At three copies: about x2.8 at 400 FPS, <color=#FF6666>x737 at 60 FPS, and x285,000 at 30 FPS</color>.
 
-Hitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x2.16 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.
+Hitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x5.6 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.
 
 <color=#FFD94D><b>WHY THEIR FPS BECOMES YOUR PROBLEM</b></color>
 
@@ -244,7 +307,7 @@ Damage in ROUNDS is shooter-authoritative: the shooter's machine computes what t
 
 <color=#FFD94D><b>THE MOD'S NORMALIZATION</b></color>
 
-In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. Against a very-high-FPS baseline that means about +24 percent over a full flight un-stacked, +53 percent at two stacks, +134 percent at four - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
+In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. One copy is about x3.1 over a full flight, two copies x9.6, three x30 - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
 
 Where it applies:
 
@@ -253,7 +316,7 @@ Where it applies:
 - Private room-code and quickplay games normalize only when, on top of that, every fighter had the Ranked toggle ON when they connected.
 - The decision is locked per bullet at launch and never flips mid-flight. It is never active offline.
 
-One honest residual: at very low frame rates a normalized bullet can grow slightly LESS than the target (a few percent stacked; more on a heavy hitch). The error always points down - never toward the one-shot.$k302$, 'b3c9e95927a0652365c01644ca86eb2e5220af9f', TRUE, E'InfoLibrary · (file scope)'),
+One honest residual: at very low frame rates a normalized bullet can grow slightly LESS than the target (a few percent stacked; more on a heavy hitch). The error always points down - never toward the one-shot.$k302$, '1ff0e513c66b189e143ecd00dcfe0154b828aacb', TRUE, E'InfoLibrary · (file scope)'),
 ('f6db22d3c2bc80be', 'client', $k302$rating updates ->$k302$, '95b76d40aaa4f50c07c2e2235514f88dafcb74cb', FALSE, E'RatingGraphAxis · Caption'),
 ('f81f26ce4b5af021', 'client', $k302$competitive clock: 120 FPS$k302$, 'f89dbad40ddd7997cc2643ea0dd31f5156b2c380', FALSE, E'InfoViz · BuildGrowCurve'),
 ('f8c3b1654dc27879', 'client', $k302$Requeue$k302$, 'e37b50a99f9235f172f8c37781b0f2f6f1d82221', FALSE, E'CompetitiveUI · DrawMatchFoundStuckOverlay'),
@@ -272,7 +335,7 @@ ON CONFLICT (key_id) DO UPDATE
 -- Post-check (enforcing): every expected key live with the expected source_hash and context.
 DO $$
 DECLARE
-    v_expected INT := 202;
+    v_expected INT := 204;
     v_ok INT;
 BEGIN
     SELECT COUNT(*) INTO v_ok
@@ -422,7 +485,6 @@ BEGIN
         ('b23a6d6dc64dde43', 'fd7a242888698ca0f0bcbf366fe4bc6c18f34e71', E'MailClient · RateLimitText'),
         ('b29134ecca9d1209', 'b2bba6145b37e301dea598b4d23970ddc6e2f1a7', E'NativeUI · TrMetric'),
         ('b2e2bf41f013e8fd', 'd285ca1b47468299f4afac9cb03ceae3b7b63c3c', E'ProfileCard · Render'),
-        ('b39e6f71b9eb5aee', 'b8a882a44e53375306a932c3daa7f72a063fe4ff', E'InfoViz · BuildGrowCurve'),
         ('b547112036e4389a', '6aba550b2fa626600ec7e40752abf1f2d0eb42b5', E'MailUI · OnStatus'),
         ('b571a0883abbc576', '85aeadc8e1b43a5992e71f4c7cd53e3abeab1458', E'RatingGraphAxis · Label'),
         ('b5e48c8390617067', '1432201b40fabc68678895cefb04563659d50408', E'SessionReportView · ErrorMessage'),
@@ -432,6 +494,7 @@ BEGIN
         ('b787becd085c029c', '625e31be269df28853a13df859f62ab7c71a841f', E'ProfileCard · Render'),
         ('b7adc58cf20616e9', '0b4257d9a89e14f4f46f5f3b21ee5fb370ec1473', E'MailClient · ErrorDetail'),
         ('b94ec4c29383c067', '6fa60471c5d8a896756bcae367bd6d491ca9b400', E'MailUI · PaintList'),
+        ('ba9c002f190ceca1', 'bb4b5f529fff1174466c166584f96ddab94e587c', E'InfoLibrary · (file scope)'),
         ('bb83c24df96aeb64', '6f9591653d343912dc73f0b8b4ad276449b5ee51', E'MailClient · ErrorDetail'),
         ('bd06028e66d68a8b', '8d0da7eaad5c45b2f590870091cc37062c052a1a', E'MailUI · RefreshSettingsRow'),
         ('bf44afebebb3f83a', 'a88aedfc4f2bb81fcbc57c4cf66c266d7fad07c6', E'MailUI · PaintComposer'),
@@ -454,10 +517,12 @@ BEGIN
         ('d5bf8531fbbdc484', '91b8f58e21a0eaa877618fd5517384166a5a71f3', E'MailClient · ErrorDetail'),
         ('d6b721431ce9f5db', '6d2b7548ed0a229c3022f463d6ecfc1c074ed549', E'SessionReportModel · Build'),
         ('d6ddb3145c092024', 'a989d1f178daf1628c77e5deaed5fa68ff871312', E'MailUI · AddRecipient'),
+        ('d848abd7ea062801', 'cc3336e5827f767e2874b5b2b213028b4631f96f', E'InfoViz · BuildGrowCurve'),
         ('d896225c4b934865', 'f29997e604005ce5aa841d40a0fe3a77ae4c6980', E'ProfileCard · Ago'),
         ('da496c66b15da7fa', '5a09ef793c04d82aaa1cf575a57a9045530421d0', E'MailClient · ErrorDetail'),
         ('dae269dd1ca70a7d', '8d183dbdcea3b29906090bd83fa6fa37923cc8ec', E'MailUI · BuildComposerView'),
         ('dca1b81b5132c44f', '6f3f20c0701e938f7844a2a2913e49a69f8cd20e', E'MailClient · ErrorDetail'),
+        ('dca283e5bc87a20c', '6445cd59694006f1d517add0b13f8d6c4739e5ca', E'InfoLibrary · (file scope)'),
         ('de18f3040b883b5b', 'ada8fa22929d535cad04b537fd39614612ad9d59', E'NativeUI · RefreshCardStats · card rarity'),
         ('df3806a1ee67bdc4', 'af0f53f17c39c17c2adcd86b083333090f0857e2', E'ProfileCard · Render'),
         ('e02a47417843ba5d', '5da06bf7bb67a08a9073612752a6c656a5720b5c', E'SessionReportModel · TeamScoreLabel'),
@@ -471,7 +536,7 @@ BEGIN
         ('f150f5fc47ef1b43', '018514a3d58aa08353dd5e387ee29de45981c409', E'SessionReportModel · Build'),
         ('f3d270720ff3a166', '84c27c09b6a8df1ece7757f54242c1f32da3b559', E'MailUI · BuildReaderView'),
         ('f603297ac334cf12', '4bab2d8fe13fa6ab57f80098b414f0f734c5dd25', E'MailUI · PaintList'),
-        ('f6aadcc70032390e', 'b3c9e95927a0652365c01644ca86eb2e5220af9f', E'InfoLibrary · (file scope)'),
+        ('f6a68c6300794435', '1ff0e513c66b189e143ecd00dcfe0154b828aacb', E'InfoLibrary · (file scope)'),
         ('f6db22d3c2bc80be', '95b76d40aaa4f50c07c2e2235514f88dafcb74cb', E'RatingGraphAxis · Caption'),
         ('f81f26ce4b5af021', 'f89dbad40ddd7997cc2643ea0dd31f5156b2c380', E'InfoViz · BuildGrowCurve'),
         ('f8c3b1654dc27879', 'e37b50a99f9235f172f8c37781b0f2f6f1d82221', E'CompetitiveUI · DrawMatchFoundStuckOverlay'),

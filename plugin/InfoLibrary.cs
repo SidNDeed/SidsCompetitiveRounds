@@ -230,7 +230,7 @@ Blocking is the skill that decides close games, and it has a cost model worth re
 - Every client simulates every bullet, and damage is shooter-authoritative: what a shot takes off you is decided on the shooter's machine. Their screen sees your movement late, which is why you can die a step after reaching cover - and why the player who peeks first sees the other before being seen.
 - Your block is the mirror image: it happens on your machine first and reaches the opponent's simulation a beat later. A block raised slightly early on reaction protects you in situations where a frame-perfect one does not, because your last frame is already the past on their screen.
 - What reads as a broken hitbox is almost always this mismatch: ping, interpolation, size cards, and bounced shots. The mod never touches hitboxes (see <color=#7FD4FF>Netcode & Photon</color>).
-- Frame rate is a hidden gameplay stat in vanilla ROUNDS. Vanilla Grow compounds its damage per frame: around x1.5 for a 60 FPS shooter against x1.07 at 400 FPS for a single copy, and stacking widens the gap fast. In mod rooms - and in private matches where everyone is modded, current, and has Ranked enabled - Grow is normalized so frame rate stops deciding the damage (a heavy stutter can still under-grow a little - the error only ever points down); against vanilla or outdated clients the vanilla rule stands. <color=#7FE87F>A stable frame rate is a real competitive edge</color> - the Settings tab has a performance section for exactly this.
+- Frame rate is a hidden gameplay stat in vanilla ROUNDS. Vanilla Grow compounds its damage per frame: around x9.4 for a 60 FPS shooter against x1.4 at 400 FPS for a single copy, and stacking widens the gap fast. In mod rooms - and in private matches where everyone is modded, current, and has Ranked enabled - Grow is normalized so frame rate stops deciding the damage (a heavy stutter can still under-grow a little - the error only ever points down); against vanilla or outdated clients the vanilla rule stands. <color=#7FE87F>A stable frame rate is a real competitive edge</color> - the Settings tab has a performance section for exactly this.
 
 <color=#FFD94D><b>DRAFT FOR A BUILD</b></color>
 
@@ -351,17 +351,17 @@ Where it is active: any online room - queue rooms, private room codes, quickplay
 
 <color=#FFD94D><b>THE REAL MATH</b></color>
 
-Grow multiplies the bullet's damage a little every rendered frame while it flies, through roughly the first 30 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.
+Grow multiplies the bullet's damage a little every rendered frame while it flies, through the first 40 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.
 
 Un-stacked, over a full flight:
 
-- 400 FPS shooter: about <color=#7FD4FF>x1.07</color>
-- 60 FPS shooter: about <color=#7FD4FF>x1.53</color>
-- 30 FPS shooter: about <color=#7FD4FF>x2.31</color>
+- 400 FPS shooter: about <color=#7FD4FF>x1.4</color>
+- 60 FPS shooter: about <color=#7FD4FF>x9.4</color>
+- 30 FPS shooter: about <color=#7FD4FF>x82</color>
 
-Stacking multiplies the growth rate, so the gap explodes. At four stacks: about x1.29 at 400 FPS, <color=#FF6666>x5.47 at 60 FPS, and x28.5 at 30 FPS</color>.
+Stacking multiplies the growth rate, so the gap explodes. At three copies: about x2.8 at 400 FPS, <color=#FF6666>x737 at 60 FPS, and x285,000 at 30 FPS</color>.
 
-Hitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x2.16 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.
+Hitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x5.6 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.
 
 <color=#FFD94D><b>WHY THEIR FPS BECOMES YOUR PROBLEM</b></color>
 
@@ -369,7 +369,7 @@ Damage in ROUNDS is shooter-authoritative: the shooter's machine computes what t
 
 <color=#FFD94D><b>THE MOD'S NORMALIZATION</b></color>
 
-In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. Against a very-high-FPS baseline that means about +24 percent over a full flight un-stacked, +53 percent at two stacks, +134 percent at four - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
+In eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. One copy is about x3.1 over a full flight, two copies x9.6, three x30 - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.
 
 Where it applies:
 
@@ -1366,7 +1366,7 @@ These change the shared simulation. Grow, the crate rescale and the same-card de
 
 <color=#7FD4FF>Poison sync</color> - vanilla runs poison separately on every client, each judging your block by its own timing - screens permanently disagree about which ticks landed ('ghost HP'). Now the victim's own client decides every tick and publishes the verdict; every modded client applies exactly that set. An unmodded victim gets the pure vanilla loop instead. Works in any online room. <color=#8A8A93>In mod-issued rooms with an incapable client present, the modded clients instead agree blocking does not negate poison - agreement beats the ghost-HP split.</color>
 
-<color=#7FD4FF>Grow normalization</color> - Grow's damage compounds per FRAME on the shooter's machine: about x1.07 over a full flight at 400 FPS, x1.53 at 60, x2.31 at 30 unstacked, worse stacked - which is how low-FPS players one-shot with Grow plus any explosive. Normalized bullets grow at one fixed rate. Gate: every fighter modded and current, AND a mod-issued room or everyone's Ranked ON at connect. Otherwise vanilla growth for everyone.
+<color=#7FD4FF>Grow normalization</color> - Grow's damage compounds per FRAME on the shooter's machine: about x1.4 over a full flight at 400 FPS, x9.4 at 60, x82 at 30 for one copy, far worse stacked - which is how low-FPS players one-shot with Grow plus any explosive. Normalized bullets grow at one fixed rate. Gate: every fighter modded and current, AND a mod-issued room or everyone's Ranked ON at connect. Otherwise vanilla growth for everyone.
 
 <color=#7FD4FF>Falling crates on big FFA maps</color> - on scaled FFA maps vanilla respawns networked crates and saws too small, ropes miss, and they drop at round start. Rescaled only when every fighter is capable; FFA queue rooms only.
 

@@ -208,6 +208,12 @@ Everything above was read out of the shipped game rather than inferred:
 | how `scale` is set at spawn | `Gun.cs` projectile-object attach block |
 | `frametime = Time.deltaTime × 0.85` | `TimeHandler.Update` |
 
+Re-verified 2026-09-08 by reading the serialized `TrickShot` component straight out of
+`sharedassets0.assets` (the one instance in the game, path id 11248): `muiltiplier = 4.0`,
+`removeAt = 40.0`. The C# field defaults (`1f`, `30f`) are what a decompile shows and are
+NOT what ships; the in-game article and the code comments were corrected to these
+constants in the same pass.
+
 Multipliers in the tables are the real frame-by-frame product (which also accounts for
 the engine clamping bullet movement to 0.02 s per frame), not just the exponential
 approximation — the two agree within a few percent everywhere except the extreme

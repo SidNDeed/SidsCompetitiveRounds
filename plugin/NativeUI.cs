@@ -7024,6 +7024,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 var bdImg = bd.GetComponent(UIFactory.tImage);
                 if (bdImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(bdImg, true);
                 var bdClick = bd.AddComponent<ClickHandler>();
+                bdClick.bypassModalBlock = true;   // Sept 8 r1b M1: CardPreviewOpen now owns input (ModalBlockInput); the dismiss must still run
                 bdClick.onClick = () => { if (ClickGuard.Claim()) HideCardPreview(); };
 
                 // Image-first popup: if we have card art on disk, show

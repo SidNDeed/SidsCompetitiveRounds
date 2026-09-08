@@ -276,6 +276,8 @@ class FakeDb:
         for r in rows:
             r = dict(r)
             r["total_rows"] = len(rows)
+            # the set-wide ranked flag rides every row like total_rows does
+            r["all_ranked"] = all(bool(x.get("is_ranked", True)) for x in rows)   # team/ovt rows carry no flag
             out.append(r)
         return out
 
@@ -290,6 +292,8 @@ class FakeDb:
             assert "CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)" in sql, \
                 "1v1 statement lost the participant predicate"
             assert "COUNT(*) OVER () AS total_rows" in sql, "1v1 statement lost its set count"
+            assert "BOOL_AND(m.is_ranked) OVER () AS all_ranked" in sql, (
+                "1v1 statement lost its set-wide ranked flag (the label must not depend on the retained rows)")
             key, cpid = params["key"], params["cpid"]
             if "m.series_id = CAST(:key AS uuid)" in sql:
                 rows = [m for m in self.matches if str(m["series_id"]) == key]
@@ -1301,3 +1305,19 @@ def test_build_blocks_measure_their_card_text():
     assert ", 40f), b.Cards" not in draw, "the fixed 40 px card strip is gone"
     styles = _cs_body(src, "private static void EnsureStyles()")
     assert "stCards = Mk(14, TextAnchor.UpperLeft" in styles, "UpperLeft is the wrapping anchor in Mk"
+
+def test_sitting_label_counts_the_games_the_report_omits(session_ok):
+    """r1b M2: the ranked/casual label is a claim about the WHOLE sitting. The statement
+    keeps only the newest _REPORT_MAX_GAMES rows, so a casual game old enough to be
+    omitted must still make the set casual; the negative control flips it."""
+    import uuid as _uuid
+    ids = [str(_uuid.UUID(int=0x5E551 + i)) for i in range(main._REPORT_MAX_GAMES + 2)]
+    world = [match_row(ids[0], PID_A, PID_B, minute=0, ranked=False)]
+    world += [match_row(ids[i], PID_A, PID_B, minute=5 * i, ranked=True) for i in range(1, len(ids))]
+    resp = _call(FakeDb(matches=world), CALLER, sitting=ids[-1])
+    assert resp["truncated"] is True and resp["games_omitted"] >= 1
+    assert ids[0] not in {g["match_id"] for g in resp["games"]}, "the casual game is among the omitted"
+    assert resp["kind"] == "casual", "label over the whole sitting, not the retained rows"
+    world[0] = match_row(ids[0], PID_A, PID_B, minute=0, ranked=True)
+    resp2 = _call(FakeDb(matches=world), CALLER, sitting=ids[-1])
+    assert resp2["truncated"] is True and resp2["kind"] == "ranked", "negative control"
