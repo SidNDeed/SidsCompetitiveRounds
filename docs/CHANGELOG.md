@@ -41,6 +41,8 @@
   Settings chat note says Alt (it said Tab).
 - Settings: "Who can mail me" and "Blocked senders" are button-sized like their
   neighbours instead of spanning the panel.
+- Broadcast seat: a tab request from the test lever or the idle showcase closes an
+  open Music/Mail popup first (it used to stay over every tab opened after it).
 
 **Server**
 
