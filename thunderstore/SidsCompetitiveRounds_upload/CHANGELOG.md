@@ -1,3 +1,485 @@
+## v1.40.2 — 2026-09-08
+
+**One Session button per sitting, beside the ID button**
+
+- The Ranked and Casual history boxes carry ONE Session button per opponent per
+  sitting, on the newest game you played them in that sitting, directly right
+  of the ID button; W/L and the score moved right to make room. A sitting is the
+  My Stats "Session Info" rule applied on the server: your finished games in any
+  mode, split where more than 3 hours passed between two of them. Playing someone
+  else in between keeps the sitting alive, so the button sits on the last game
+  the two of you played in it. The report it opens covers every game of that
+  pair in that sitting, ranked and casual together, with gold per game and no
+  rating (the session rules). Time in the menu is not activity on the server: a
+  break of over 3 hours with the game open splits the server's sitting where the
+  panel's session would not. 2v2, 1v2 and FFA rows keep their per-series and
+  per-game buttons.
+- Needs the new server: against an older server the 1v1 rows show no Session
+  buttons at all.
+
+**Grow competitive clock: 240 FPS -> 120 FPS**
+
+- Every eligible Grow bullet now grows as if its shooter ran at 120 FPS (it was
+  240): one copy is about x3.1 over a full flight (was x1.8), two copies x9.6
+  (was x3.1), three x30 (was x5.5). The room capability key changed with the clock, so
+  a room that mixes this version with an older one falls back to vanilla growth
+  on every seat instead of pinning two clocks; that lasts as long as older
+  versions are in play. A spectator on an older version renders vanilla-scale
+  Grow visuals until they update (damage is the shooter's and unaffected). The
+  Info chart badge, the Grow article and docs/grow-mechanics.md say 120.
+- The Grow article's vanilla numbers were wrong and are corrected: they had been
+  computed from the C# field defaults (multiplier 1 over 30 units), but the
+  shipped A_Grow prefab carries multiplier 4 over 40 units (read straight out of
+  the asset file). One vanilla copy is about x1.4 at 400 FPS, x9.4 at 60 and x82
+  at 30; the article said x1.07 / x1.53 / x2.31. docs/grow-mechanics.md already
+  had the right constants; the Info chart is now on a log scale.
+
+**Popups, keys, settings**
+
+- Page overlays (the search boxes, hover graphs, the session report, the shop
+  effect/dance/trail previews, the ranked-hint callout, the profile card) no
+  longer paint over the Music and Mail popups, the Info and tournament popups,
+  the metric picker or the full-screen card preview.
+- Info > Controls & keys shows ALT: a tap while typing in chat switches the
+  language channel (global, each language channel in turn, back to global). The
+  Settings chat note says Alt (it said Tab).
+- Settings: "Who can mail me" and "Blocked senders" are button-sized like their
+  neighbours instead of spanning the panel.
+- Broadcast seat: a tab request from the test lever or the idle showcase closes an
+  open Music/Mail popup first (it used to stay over every tab opened after it).
+
+**Server**
+
+- `/players/{id}/matches` rows carry `sitting_head`; `/report` accepts
+  `sitting=<match uuid>`. Migrations 302 (the client keys new since v1.40.1,
+  with their portal context lines) and 303 (machine-translation seeds for the
+  keys that have bundled translations).
+
+**Mail and Music are icons now, not tabs**
+
+- The Mail and Music pages left the tab strip. Two icons sit at the top right,
+  above the tabs; the mail icon carries a red badge with your unread count. Each
+  opens as a popup over a dimmed backdrop instead of taking over the page: Escape
+  or a click on the backdrop closes it, the page underneath is untouched, and a
+  half-written message survives closing and reopening. Confirmations and the
+  report form still sit on top of the popup and take Escape first. The box sizes
+  itself to the screen (down to a 32:9 monitor) and every mail view fits inside
+  it — the message body and the composer's text area shrink before anything else
+  does. A mail action that finishes after its popup closed (a delete, a block, a
+  report, a send) still updates your inbox data, but its toast belongs to the
+  popup that issued it and is not shown to a later one.
+
+**Music plays on the first click (bug 346)**
+
+- There is no prepare step any more: a track opens as a streamed clip in a few
+  milliseconds and is decoded on the audio thread while it plays. Tracks opened
+  during a session stay loaded (about 4 MB each) until the game closes, so
+  switching back to a track is instant and nothing is torn down under a playing
+  clip. A track whose file fails to open after the read is marked "Unavailable
+  until the game restarts"; a failure before the read is retried on the next
+  click. A delivery watchdog stops a track that has gone silent and moves on.
+  Testing levers: `[Music] TestScript` (the self-test runner, including the
+  `openall` memory gate) and the `compressed_mb` / `native_delta_mb` fields on
+  the `[MUSIC-RESIDENCY]` log line.
+**Ranked 1v1: the room region is picked from both players' pings**
+
+- After the mod connects to Photon (and again every five minutes in the menu,
+  every 90 seconds while a search is running) it pings each region on a
+  background thread and sends the results along with the queue join and its
+  polls. When both players' maps are fresh
+  (under three minutes old) and overlap, the room goes to the region that is best
+  for the pair under one rule: neither player is moved more than 20 ms beyond
+  their own best region. When a map is missing or stale the previous ladder
+  decides, as before. 2v2 and FFA rooms are unchanged for now. Log lines:
+  `[REGION-PINGS] sweep started …` and the completion line with per-region ms;
+  the server records `[QUEUE-REGION]` with the rung that decided. Needs
+  migration 301 (two nullable columns on the queue row) before the api.
+
+**Matched but never connected (bugs 335, 336, 340)**
+
+- The first player into a queue-issued room is no longer moved out of it after
+  15 seconds. The game's own region-rotation timer runs in every room the mod
+  issues (the mod's search type is not one of the two the game exempts), and
+  the mod's earlier guards only engaged once both fighters were present, so a
+  partner who needed more than about 15 seconds to arrive found an empty room
+  while the waiter had been swept into a public quick-match search — which is
+  how a queued player ended up in a casual game against a random unmodded
+  opponent. The timer is now frozen on joining any mod-issued room and its
+  rotation is refused there; the mod's own 60-second wait (toast at 15 s now,
+  was 25 s) is the only exit. Log line: `[QUICKPLAY-GUARD] churn timer frozen -
+  mod-issued room <name>`. Room-code private games keep the game's timing.
+- Queueing from the menu right after an online match (the game parks the menu
+  in an offline room) made the join fire while Photon was still connecting,
+  twice, then give up after 60 seconds ("JoinOrCreateRoom failed … State:
+  ConnectingToNameServer"). The game's connect-wait keyed on a flag that stays
+  set after offline mode; the joiner now clears it before connecting and issues
+  the join only from the master-server state. Log lines: `[QUEUE-JOINER]
+  connect flag reset (was=…)` and the result of every JoinOrCreateRoom call.
+- Queue-issued 2v2 rooms now share the 1v1 rooms' wait: a lobby that has not
+  filled after 90 seconds (toast at 30 s) returns you to the menu and leaves
+  the team queue, instead of sitting on a notification with no way out.
+
+**Overpower with a box in the blast (bug 327)**
+
+- The game hands Overpower's per-player handler every damageable object in
+  range, including boxes, which carry no player data; the handler threw and the
+  rest of the explosion was skipped, so a player processed after the box was
+  not hit. Non-player targets are now skipped, and one collider's exception can
+  no longer abort the others. Applies in every room type.
+
+**Press Jump to Join (bug 329)**
+
+- The stall where the other player is standing in the lobby and the match
+  never starts is fixed at its source. The game creates a player's body before
+  it publishes which slot that player holds, and every other seat reads the
+  slot exactly once, the frame after the body appears. When the two messages
+  land a frame apart the slot reads as 0 — the host's — so the guest's body
+  takes the host's place in the player list, the list never reaches two, and
+  the game never starts; no error is raised anywhere. The mod now holds a
+  newly arrived body's setup until its slot has landed (bounded, then derived
+  from the host/guest rule), and publishes its own slot before its own body so
+  an unmodded opponent never sees the reverse order either. Applies to every
+  online 1v1 room, ranked included. Log lines: `[VANILLA-FIX]
+  RemotePlayerIdOrder attached`, `[VANILLA-FIX] LocalPlayerIdPublish attached`,
+  and `remote player body arrived before its p_id/t_id … deferring` when the
+  race is caught.
+- The other shape — a full room where the other player's body never appears
+  at all (a seat that never pressed Jump, or whose game is stuck on its ready
+  prompt) — had no exit but Esc. After 20 seconds in that state the escape
+  hatch appears with Requeue (quick match only) and Return to menu; nothing
+  counts against you. Mod-issued rooms are unaffected — they have their own
+  wait.
+
+**Match history rows**
+
+- The stray "repli" at the end of the Ping cell is gone: it was the start of a
+  peer-reported replica-age estimate added with the v1.40.1 telemetry, clipped
+  by the cell. The opponent cell is wider (296 px, was 240) and is fitted by
+  pixels rather than by a character count, so a name is only shortened when the
+  cell genuinely cannot hold it; when the name plus title do not fit, the title
+  is dropped from the row instead of rendering as "[Beginne..]". The ranked
+  series header gets the same treatment.
+
+**Online players on the leaderboards (bug 342)**
+
+- A green dot marks players who are online on the 1v1, 2v2, FFA and 1v2
+  leaderboards. Online means the mod's presence heartbeat was seen within the
+  last 3 minutes and the player has not enabled Appear Offline. The boards are
+  served from a read replica, so the marker also checks that the replica is
+  fresh (within 90 seconds) and shows no dots rather than stale ones when it is
+  not. Presence now has its own column (`presence_seen_at`, migration 296),
+  written by the heartbeat alone — a match report that mentions a player no
+  longer counts as that player being present. Only a heartbeat carrying the
+  player's own verified session moves the marker or the 90-day activity clock,
+  and a change to Appear Offline reaches the boards within replication delay,
+  at most the 90-second freshness gate.
+- The 2v2 leaderboard refreshes every 30 seconds while it is open; it used to
+  load once per session.
+
+**Dance emotes (bug 341)**
+
+- The shop lists each dance with its duration, the emote wheel shows it on the
+  highlighted slice, and while your emote plays a thin ring above your own
+  player counts down the time remaining. Only you see the ring; nothing extra
+  is sent over the network.
+
+**No sound effects (bug 337)**
+
+- A report of "no SFX" carried no fault signature anywhere in the log. The mod
+  now writes one line describing the audio stack's current settings at every
+  match start and at the end of every bug-report bundle, plus a line whenever
+  the listener volume changes that names the writer when it was the mod's own
+  (the background focus mute included). Read-only: nothing here changes audio.
+
+**Minimised chat (bug 333)**
+
+- The minimised chat is drawn with TextMeshPro instead of the IMGUI font, so
+  emoji and non-Latin names render there the way they do in the full chat
+  (monochrome for now; colour emoji is a separate follow-up). Long lines are
+  shortened on character boundaries with a translated "[see F5]" suffix.
+
+**Leaderboards hide inactive players**
+
+- Players with no contact in the last 90 days are hidden from the leaderboards
+  by default. A toggle on the board shows everyone (their rows are marked
+  inactive), and the Discord `/lb` command gains an option to include them.
+  Podium places, and the titles that come with them, are held by shown players
+  only. Tournament sign-up and seeding lists are not filtered, and a player's
+  own position is still reported while they are inactive.
+
+**Rating previews**
+
+- New read-only endpoints preview rating changes before a game:
+  `GET /api/v1/rating-preview/ffa?ids=` (what first, last and each place would
+  do to every listed player) and `GET /api/v1/rating-preview/2v2?team_a=&team_b=`
+  (its response says when the win probability is an estimate). The FFA preview
+  takes the lobby's score target (`score_target`, also an option on `/elo ffa`)
+  and states the assumption it computed under. The Discord
+  `/elo` command becomes a group: `/elo 1v1`, `/elo 2v2`, `/elo ffa`. The live
+  FFA settlement runs through the same helper the preview uses; the two were
+  checked bit-identical on every recorded settlement.
+
+**Translations**
+
+- Strings whose translation depends on context (the card rarity words, the
+  betting window's LOCKED) now carry a context so they can be translated
+  separately; the portal shows the context as a badge. Five strings need one
+  re-translation; every other string keeps its existing translation.
+
+**Broadcast seat**
+
+- A config-driven quit lever (`[Broadcast] TestQuit`, broadcast identity only)
+  for the seat's maintenance workflow.
+
+**Hover profile card**
+
+- Hover a player's name on the F5 page — the 1v1 ranked and casual history
+  rows, the four leaderboards, the 1v2 solo and duo boards and the
+  leaderboard's selected-player panel — and after a short pause a mini-profile
+  card opens: name and title, tier, 1v1 rating and level, online status (hidden
+  for players who appear offline) and your head-to-head in every mode: ranked
+  series and games, casual, 2v2 on opposite teams, FFA placings, 1v2 as solo
+  and as duo, plus your last meeting, the current ranked-series streak and your
+  net rating change against them. Click the name to pin the card; Escape, a
+  click elsewhere or any popup closes it. An open card refreshes every 15
+  seconds. Labels that carry several names (Online now, Recent Ranked Series,
+  the 2v2/FFA/1v2 recents, Session opponents) and names that already have a
+  hover (tournament brackets, Records, 2v2 telemetry cells) open no card in
+  this release.
+- Server: the in-room head-to-head read gains the card's two members
+  additively; per-mode aggregates are cached for 60 seconds, the profile is
+  read fresh so Appear Offline applies at once, and the card reads the podium
+  titles from the boards' cache without refreshing it.
+
+**In-game mail**
+
+- A new Mail tab: write to other players (up to 8 recipients, a 120-character
+  subject and a 2,000-character plain-text body), read, reply, select and copy,
+  report, block and delete messages, with a toast and a tone when new mail
+  arrives. Settings gains "Who can mail me" (everyone by default, or only
+  players you have played) and a blocked-sender list. Admins may address any
+  number of recipients, or every recently active player at once.
+- Server: send, reply, inbox, blocks and the "who may mail me" setting, with
+  per-sender rate limits, plain-text enforcement (no code or markup) and
+  idempotent retries. Reports and automatic spam detection open moderation
+  cases in the admin channel that already logs suspicious game behaviour, with
+  one-click mute, ban or dismiss; each click is re-checked against the
+  clicker's current grant. A retention sweep removes old mail. Admin actions
+  refuse a deleted account as actor or target instead of recording its former
+  id. Migrations 297 and 300.
+
+**Session reports**
+
+- A Session button on the ranked, casual, 2v2, FFA and 1v2 history rows opens
+  a per-game report of that sitting for its participants: damage and score
+  over time, DPS, hit and block rates, ping and FPS, totals and builds. Games
+  from one sitting are grouped without exposing any room information; only
+  games the viewer played, with one consistent roster, are shown, and FFA
+  players who had left are not counted as players. The rating line is tied to
+  the exact series; FFA rows carry damage, kills, score and rolled-out picks;
+  long sittings page their builds instead of cutting them off; the newest
+  games are shown, at most 24 and fewer when the report would exceed its size
+  limit, and the report says how many older ones were left out. Requires
+  Steam sign-in; games recorded before telemetry show what exists. Migrations
+  298 and 299.
+
+**Rating graph axes**
+
+- Rating graphs now compare players over time on a common footing. In-game,
+  the leaderboard profile graph and the Compare tab's Elo charts gain an axis
+  toggle — Updates (one point per completed ranked series, the default),
+  Calendar, or Since first (days since each player's first plotted update, so
+  every line starts together) — remembered between sessions. The two time axes
+  are step plots: a player idle for weeks shows a flat run, never a slope. The
+  graphs start at the first recorded update instead of an assumed 1500 and
+  always show a player's most recent 500 rating updates (long histories used to
+  stop at the oldest 500; FFA histories now use the same window). The Compare
+  metrics "Elo over games/over time" are now simply "Elo" and "FFA Elo". The
+  Discord `/graph` command gains the same `axis` option.
+
+**In-game library: Spirit's charts**
+
+- The "On Damage Types and Buff Activation" article now carries five drawn
+  charts redrawn from Spirit's diagrams: the damage interaction matrix, the
+  RefreshValid Silence sequences, the 0.35 s window sequences, the Refresh
+  gate, and the full damage flow. The text tables they replace are removed,
+  the article is split into shorter pages, and library search still finds the
+  chart contents. Card names inside the charts stay English in every language.
+
+**Head-to-head line at match start**
+
+- Joining a two-player room (quick queue, ranked queue or a room code) shows a
+  corner line for ten seconds and a Tab-Info line for the match: "vs NAME ·
+  Last played 3 days ago · H2H 12-8 · Ranked series 4", "First time playing
+  NAME", or "First played today" when the only games are from today. The
+  numbers come from a new session-authenticated read that returns totals only;
+  the name shown is the one the server holds for the opponent. In an ordinary
+  room the line follows the seat: if the other player is replaced, it clears and
+  re-fetches for whoever is there now, using the id that player's game
+  advertises. In the room the ranked queue most recently issued, the line waits
+  for the other player's game to name the opponent, and appears only when that
+  name matches the one the queue assigned; it then follows the first game that
+  matched, so if someone else takes that seat afterwards the line clears rather
+  than showing the assigned player's record beside a different player. If the
+  queue moves you on, the room you are actually sitting in keeps that
+  protection. It is an agreement between two games about who is present, not a
+  check of who really is.
+
+**Lag notices (opt-in, default off)**
+
+- Settings → "Lag notices" turns on short corner lines under the FPS label while
+  a state holds: your game dropping frames (worst N ms), your ping to the relay
+  high (N ms), the opponent's updates arriving late, or the
+  opponent's game reporting a high ping. Several can show at once. Each state
+  needs a few one-second windows to enter, three clean windows to clear, and
+  waits thirty seconds before re-announcing. 1v1 fighter seats only; nothing is
+  sent anywhere; the broadcast seat never shows them. A cfg self-test key logs
+  the evaluator's canned cases at startup for verification.
+
+**Music**
+
+- Deselecting every track now plays the game's own music instead of silence.
+  (Silence is the game's music volume slider.)
+
+**Queue and shop**
+
+- The queue's ready call requires the caller's own session, the same rule the
+  poll already applied; a refused ready writes nothing and the seat returns to
+  searching.
+- A purchase re-checks that the item is still available under the same lock it
+  reads the price with.
+- The region a ranked room is created in no longer depends on which of the two
+  clients happened to ask for the room first. Two players whose games agree on
+  a region still land there, as before; when the two signals disagree, the
+  choice goes to the region that recent finished games were actually played in,
+  rather than to the seat that reached us first. When neither region has that
+  evidence — which includes every pick made shortly after a server restart — or
+  when both do, the tie falls to a fixed order: still arbitrary,
+  but identical for both of you and no longer an advantage for the faster
+  connection. For the 1v1 ranked queue there is now a measurement too: at the
+  menu and while you wait in the queue, the game pings each Photon region
+  itself and sends the numbers with your queue entry. When both of you have
+  recent numbers, the room goes to the region with the lowest worst-case ping
+  between you, provided that costs neither of you more than 20 ms by your own
+  measurements; otherwise the rules above stand. 2v2 and FFA rooms are
+  unchanged.
+
+**Diagnostics and small fixes**
+
+- The music watchdog's "vanilla re-entry UNVERIFIED" line now records what it
+  saw (the mod's guard flags and the game's own menu/in-game music flags) so
+  the next occurrence can be diagnosed from the log.
+- The footer's version comparison is ordered: a local build newer than the
+  advertised version no longer reads as outdated.
+- The Phoenix sound fix no longer attempts an exact-method lookup that always
+  missed (it produced 46 HarmonyX warnings per session and patched nothing).
+- When an opponent leaves a ranked series part-way through, the report of that
+  leave now survives a failed send. It records which series it belongs to and
+  is retried in the background, across a restart if need be, so a single
+  refused request no longer loses the record that feeds leave %. The retries
+  are bounded, and the bound is now the same six hours the server itself will
+  still accept the report in — it used to run out after about an hour, which
+  threw away reports the server would have taken. A relaunch gives a
+  still-queued report a fresh set rather than resuming a spent one. The
+  server accepts one such report per series per player however many times it
+  arrives. A report that names the wrong series is not thrown away: the server
+  falls back to working out which series the two of you are in, exactly as it
+  does for a report that names none. What it will not accept is a leave filed
+  against a sitting the server has since replaced — because the two of you have
+  started a newer one — or against a tournament match the bracket has already
+  decided. A leave queued while the server was unreachable is no longer refused
+  for arriving late: it is judged on whether that sitting is still the one you
+  were last put into, not on how long the report took to be delivered.
+- **What counts as proof that a leave happened.** A leave reported before any
+  game in the series has finished used to be accepted on the running score
+  alone — and the running score is sent by your own game, so the score that
+  proved the match was real could come from the same player filing the report.
+  For that case the server now wants the score post from the LEAVER's game,
+  which the reporter has no way to send. It asks this only of accounts that
+  have signed in through Steam at least once, since those are the only ones
+  that can produce it; everyone else is judged exactly as before, and a leave
+  after any completed game is judged exactly as before either way. Nothing
+  changes for the ordinary case: both games send the score as it changes, so by
+  the time a leave is reportable, the leaver's own game has already said it was
+  there.
+- **A leave report is no longer thrown away for arriving before its proof.**
+  "The server has no record yet that anything happened here" used to be a
+  permanent refusal, and your mod deletes a permanent refusal — but the
+  leaver's own score post can still be in flight when you file, since their
+  game keeps re-sending it after they drop out of the room. That refusal is now
+  a retry while the sitting is live, and becomes permanent once the sitting has
+  been quiet for hours. The server decides that, not the mod: a queued report
+  gets a fresh set of attempts on every relaunch, so only the server can retire
+  one that will never qualify.
+  A leave seen in the moment between one game being recorded and the next
+  starting has no series to name, and is still a single attempt.
+- The background queue of unsent match reports no longer stops for the rest of
+  a session if one pass over it fails, and a report that lands on its first
+  attempt can no longer make the queue drop a different one.
+- A leave that could not be sent at the time is retried in the background on
+  the same bounded budget as any other queued report, across a restart if need
+  be, and is filed against the series it was
+  watched in rather than whatever series is current when the retry lands. A
+  report the game cannot tie to a series is sent once and not queued, so
+  nothing is filed against a guess.
+- New diagnostic keys in the config file, both off by default and only useful
+  if you have been asked for a measurement: `[Music] StreamProbe` plays one
+  track on its own private audio source and writes timing, output and memory
+  readings to the log, and `[Music] StreamProbeRun` says which track. It never
+  runs inside an online room and never touches your music settings.
+
+**Broadcast seat only**
+
+- The overlay closes itself when left open with nobody at the seat: after
+  30 s without input inside a room, after 60 s at the menu; showcase-owned
+  pages are left to the showcase; an open prompt counts as presence. Player
+  seats are not affected (a player version was reviewed and deferred).
+- The `TestOpenTab` lever accepts a click form that runs the Music tab's
+  Prepare click in the tick that reads it, only with the page already open
+  on the Music tab and the seat idle at the menu; anything else is refused
+  with a logged reason, and transport actions are not lever-driven.
+
+**Schema changes:** migrations **292** (`issued_room_regions` — the region and
+player pair this server issued for a ranked room), **293**
+(`series_dc_grants` — which sitting the server last put a pair into) and **295**
+(`series_progress` — which seat posted an observation of a sitting) BEFORE the
+API deploy. After it, in numeric order: **288** (client i18n keys for the new
+library strings), **289** (machine-translation proposals for es/ru/uk/sv for
+those keys), **290** (client i18n keys for the head-to-head and lag-notice
+strings), **291** (their es/ru/uk/sv proposals) and **294** (one grant per
+sitting that was already live when 293 shipped). The same translations ship
+bundled in the client.
+
+**292, 293 and 295 go first, and the order is not cosmetic.** The new
+match-report path SELECTs from `issued_room_regions`; `series_dc_grants` is
+wider than that — every path that puts a pair into a series writes a grant, so
+an API deployed ahead of 293 would fail **match reporting, queue ready, queue
+poll, preflight and leave reports** with `undefined_table` until the table
+landed. That is the whole ranked hot path, not one endpoint. `series_progress`
+is narrower — the leave-report predicate reads it and all three live-points
+endpoints write it — but an API ahead of 295 would fail every leave report on
+`undefined_table` and record no attestations, so it goes with the other two.
+The i18n seeds only add rows the client already carries bundled, which is why
+those four stay after.
+
+**Two switches ship OFF and are armed from `.env` plus a container restart.**
+`DC_REQUIRE_VERIFIED_SEAT` drops the fallback that judges accounts without a
+verified Steam session by the old rule; do not arm it until verified sessions
+are broadly held (162 of 4663 accounts have ever held one), or genuine reports
+start failing. `LIVE_POINTS_REFUSE_MISMATCHED_SEAT` refuses a live-points post
+whose session token names a different player than the post claims. Both are
+mapped under `api:` in `docker-compose.yml`, which is what actually delivers
+them: this project has no `env_file:`, so a key in `.env` that is not named
+there reaches compose and never reaches the process.
+
+**294 goes LAST, after the API is running on both boxes,** and that order is
+also load-bearing but in the opposite direction. It backfills a grant for every
+sitting that was live at deploy time, and only the new API writes grants — run
+before the deploy, every pair who started a series in the gap would have none,
+which is the exact window the backfill exists to close. It is idempotent
+(`ON CONFLICT DO NOTHING`), so re-running it cannot disturb a sitting the live
+code has since re-stamped.
+
 ## v1.40.1 — 2026-09-03
 
 **Clavar la Bala: two more tracks**
@@ -935,347 +1417,5 @@ seeds for the new shop/vocab keys; applied).
   pack download (which had been failing quietly) is gone, and the mod's
   Thunderstore package shrinks by ~15 MB. The tier-list export shows a
   progress note the first time while it renders each card.
-
-## v1.38.5 — 2026-08-13
-
-**New**
-
-- **Your end-of-game build is now recorded and shown in match history.** Hover a
-  game's card names and you get the full card list *and* the build those cards
-  produced — damage, attack speed, reload, ammo, blocks, move speed, HP and the
-  rest. Works in 1v1, 2v2, 1v2 and FFA. Older games have no build recorded and
-  simply show their cards as before.
-- **The rating box now covers every mode.** My Stats and the leaderboard detail
-  show your 2v2 and FFA rating, RD, peak and board position alongside 1v1, with
-  your rank role shown next to your 1v1 peak in its own colour. 1v2 has no elo,
-  so it shows its win/loss record with the other records instead of pretending.
-- **2v2 and FFA podium titles.** Top three on either board get a placement title
-  of their own, and both boards now paint the top three gold/silver/bronze the
-  way the 1v1 board always has.
-- **Chat controls.** Press **M** in game to cycle chat between normal, pinned
-  (stays on screen) and muted — and when you mute, other players can see that in
-  the chat panel, so nobody wastes a message on you. Settings gains a "chat fade
-  after" knob from 0 (never show chat during play) up to 90 seconds.
-- **FFA card toasts show the whole round.** Every player's pick, and every card
-  that rolled off the 5-card cap, laid out in a single strip across the bottom
-  instead of one name at a time over the play area.
-- **Animated cosmetics can be uploaded as GIFs.** Artists can submit a GIF
-  directly (2-16 frames, 0.5-15 fps) instead of exporting numbered PNGs.
-
-**Fixed**
-
-- **FFA opening cards going missing (bug 214).** In a 6-player game four players
-  lost their first card. A spectator seat had been leaking a counter into the
-  pick protocol; the room then split into two numbering schemes and every pick
-  made under the "wrong" one was silently discarded. Both the cause and the
-  amplifier are fixed, and a drift now names exactly who lost a card in the log.
-- **Betting staying open long after a match was decided (bug 212).** The lock for
-  private-room series was set to a threshold the metric could never reach, so it
-  had never once fired since it shipped. Bets now close at 2 points as intended,
-  and the same rule is enforced in game and in Discord.
-- **God Build (and every other achievement) in room-code and quickplay games
-  (bug 209).** Achievements were only evaluated in rooms the mod itself created,
-  which is a minority of real play — a genuinely earned achievement in a private
-  or public lobby simply never fired.
-- **Server-side achievements now tell you when you earn them (bug 201).** Silent
-  Drill, Clutch, Lumberjack, the sweeps, the slayers and the rank thresholds are
-  granted by the server, and the client had no path to announce any of them.
-- **Muffled audio while spectating (bug 210).** A failed sound event was never
-  retired, so its voices leaked until the pool ran dry and started stealing
-  voices from healthy sounds — quiet layers first, which is what made it sound
-  muffled rather than silent.
-- **Discord FFA results show half points (bug 215)**, matching the in-game score.
-- **Rage Quit %** now measures what it was always meant to: how often your
-  quickplay opponents quit on *you*, not how often you quit.
-- **Spectating**: the connect screen explains itself instead of looking like a
-  blank cover, cards are cleared between games so nobody appears to start with
-  extra ones, and titles render bracketed in their real colours.
-- **Async tournaments work the way they were designed.** No room code, no region,
-  no ready-up — you and your opponent play a private lobby whenever suits you
-  before the deadline and it counts automatically. The lock DM no longer tells
-  async players to be online at a start time. Sync tournaments are unchanged and
-  now pick a Photon region per match that suits both players, instead of one
-  region for the whole bracket.
-- **Layout**: the FFA start-button countdown no longer clips (in any language),
-  the 1v2/2v2/FFA tabs share one scale, the chat input no longer covers the
-  messages above it, and tournament bets live behind a button instead of filling
-  the tab.
-
-**Security**
-
-- Uploaded cosmetic images are now fully validated and re-encoded server-side, so
-  nothing can ride along inside an image file.
-
-## v1.38.6 — 2026-08-14
-
-**Fixed**
-
-- **The mid-fight hitch in busy games (bug 217).** When a bullet's hit
-  notification arrived for something this client had already cleaned up, the
-  error it threw took the rest of that network packet batch down with it —
-  every other player's position update queued behind it arrived late. That is
-  the "bullets and player positions lag while ping looks fine" feel. The error
-  is now contained (17 hits in the two reported FFA games; the previous
-  night's session had 87), and a companion guard quiets the bullet-pool
-  teardown error that rode the same stacks.
-- **Spectator join is far cleaner (bug 216).** Replayed leftovers from the
-  room's past can no longer collide with anything during the join (they are
-  made physics-inert the moment they appear), and the thousands of harmless
-  "no such PhotonView" warnings a spectator seat used to burn CPU and log
-  space on are silenced and counted instead.
-- **Poison now shows on the spectator seat.** A stale local dead/respawning
-  flag on one replica could eat every accepted poison verdict for that player
-  — their health bar never moved for the whole observation. The observer no
-  longer vetoes the victim's own authority using local lifecycle bits.
-- **FFA scoreboard log lines carry names again** instead of nametag markup,
-  and the stale-projectile sweep's diagnostic no longer goes quiet after the
-  first game.
-- **"I poisoned him and nothing happened" at round ends (bug 221).** A poison
-  hit landing in the round-transition window starts a stream no client will
-  ever honor (the revive already cancelled it — vanilla behaviour), but the
-  watchdog treated that silence as a possible cheat and logged accusations
-  against innocent players. Boundary-window streams are now recognized for
-  what they are; genuine mid-fight silence still gets flagged.
-- **Map skins did their full recolor work twice at every round transition.**
-  Two code paths each scheduled the same deferred tint pass, so every client
-  with a map skin walked all renderers and particles twice back-to-back at
-  exactly the moment rounds change — measured in two players' logs at 2x per
-  transition. Now it runs once.
-
-**New**
-
-- **Network health line in the log.** Every 10 seconds in an online room the
-  log records ping, effective fps, actor count and dispatch-guard counters —
-  so the next "it felt laggy" report can be diagnosed from the bundle instead
-  of guessed at.
-
-## v1.38.4 (2026-08-11) — Translator titles and portal progress
-
-Schema: migration **214**.
-
-- **Three new achievement titles for translators** — **Rosetta** (10 strings),
-  **Dragoman** (100) and **Babel** (1000), paying 100g / 300g / 1000g. A
-  string counts once it is APPROVED, and both people behind it earn it: the
-  translator who proposed it and the moderator who reviewed it. Doing both
-  yourself on the same string still counts once, and moderators still cannot
-  approve their own work. Existing contributors were back-granted.
-- **Progress bars in the translation portal**, one per language. The green
-  fill is approved and live; the lighter bar behind it is everything with a
-  draft awaiting review; the dark remainder is what has no usable
-  translation at all — so rejecting a bad machine draft correctly pushes the
-  bar back and shows the work that is genuinely left. Ukrainian and Swedish
-  count the base-game strings too, since the game does not ship those
-  languages; Spanish and Russian do not, because it does.
-- The Compare tab's achievement grid now sizes its columns to the space
-  available — at 50 achievements the old fixed two columns ran off the
-  bottom of the panel on common resolutions.
-- Granting an achievement from the admin panel now also grants its title.
-  This was missed for Sid Slayer and Stan Slayer too, and re-granting repairs
-  an old one.
-
-## v1.38.3 (2026-08-11) — Ukrainian + Swedish
-
-Two new full mod languages, plus first-of-its-kind base-game localization.
-
-- **Ukrainian (ÃÂ£ÃÂºÃ‘â‚¬ÃÂ°Ã‘â€”ÃÂ½Ã‘ÂÃ‘Å’ÃÂºÃÂ°) and Swedish (Svenska)** join English, Spanish and
-  Russian as complete mod languages: every UI string (1,708 keys per
-  language), machine-drafted, independently reviewed, seeded into the
-  translation portal for community moderation, and selectable from the
-  first-launch prompt or Settings.
-- **The base game itself speaks Ukrainian and Swedish now.** ROUNDS ships 9
-  official languages — Ukrainian and Swedish are not among them (the vanilla
-  files even contain an unused "Svenska" label, so this one is overdue). With
-  the mod language set to uk/sv, all 242 vanilla strings — menus, prompts,
-  card names and descriptions — render translated via a runtime-injected
-  locale. Fully reversible, zero effect on any other language setting, and
-  card text in the mod's own panels follows automatically.
-- **Release notes in four languages**: every release's notes are now
-  published in es/ru/uk/sv (machine-translated, labeled as such), and the
-  current three releases were back-filled.
-- Translation portal upgrades that came out of the review rounds: base-game
-  strings are moderatable with their table/entry context shown (including
-  Landfall's own translator notes), stale proposals against reworded English
-  are refused at approval, and the shop-string snapshot now has a proper
-  refresh tool.
-- **Ukrainian and Swedish chat channels** join the in-game chat split: pick
-  them in the chat view/typing pickers, and messages bridge to the matching
-  Discord rooms (English/Spanish/Russian unchanged).
-- Spanish/Russian catch-up: 13 recently-added strings (lobby betting, new
-  shop cosmetics) translated, plus consistency fixes from the review pass.
-
-Known limits, accepted for this release: a language chat channel that has
-been quiet for a while can look empty when you switch to it (the in-game log
-keeps one shared 60-message buffer; the server still has the history), and
-changing ROUNDS' own language from the vanilla Options screen during the
-few seconds the mod is setting up uk/sv will not stick.
-
-## v1.38.2 (2026-08-11)
-
-Mini-release: the Aug 11 playtest minor-bug batch (spectator polish + portal
-fix). Also raises the server's minimum mod version to 1.38.1, which restores
-2v2/FFA bettability for everyone.
-
-- **Stuck pick cards are gone for spectators** (bug 197). A fast join could
-  collapse the cleanup window to zero, leaving the room's cache-replayed card
-  table standing for the whole sitting — the burial now runs synchronously
-  the moment the join replay provably ends. Live leftovers (cards whose local
-  destruction never got scheduled) are swept a few seconds after each round
-  boundary, and the card-picker avatar is hidden at the boundary instead of
-  lingering over the next battle.
-- **Poison and Decay now move health bars on spectator seats.** The
-  spectator's round lifecycle runs slightly behind the fighters', and the
-  damage engine silently ate every DOT verdict that arrived in that gap —
-  then the late revive erased the rest of the stream. Spectator seats now
-  render DOT verdicts directly (display only, clamped above zero — a
-  spectator can never broadcast a death; kills only show via the fighters'
-  own death event), and live streams survive the spectator's late revive.
-- Dark team-color stamps (Charcoal, Obsidian, Midnight) get a readability
-  lift wherever they paint **text** — 2v2 recent-series names, FFA history
-  score counters — while dots and graphs keep the true color.
-- **Team-identity colors reach the last hardcoded surfaces**: the spectator
-  score bar, the hold-Tab match-stats header (fighters had this bug too — a
-  Midnight team read as "blue"), and the 2v2 live-bets rows in the F5 menu
-  (which now also name a stamped side "Team Midnight" instead of "Team 1").
-- **The 15-FPS deep idle no longer engages mid-spectate** — the spectator
-  seat was invisible to both of its "never during online play" gates.
-- **A sound-engine guard** stops one broken voice from aborting every other
-  sound's update each frame (555 errors in one spectator session's log).
-- **Translation portal**: the review queue now shows proposer display names
-  instead of raw Steam IDs (machine drafts still read "by claude-mt").
-
-## v1.38.1 (2026-08-10)
-
-New community cosmetic: **Twisted Topper** (detail slot) joins the shop
-catalog this release.
-
-### Spectator mode — the desync is fixed (bugs 187/188/190/192/194)
-
-- **The spectator's game clock is fixed.** It was never armed on the spectate
-  join path, and every round-ending kill ratcheted it further down with
-  nothing restoring it — bullets, gun timers, character limb IK, the floating
-  nametag follower and gravity all run on that clock, which is why everything
-  visibly trailed the (real-time) position stream: slow-motion bullets,
-  instant hits, lagging names, floating bodies.
-- **Removed a vanilla trap** where the spectator client silently dropped into
-  TEST-MAP mode on its first map load — which teleport-revived dead fighters
-  at random spawn points on the spectator's screen 2.5 seconds after every
-  death, and contaminated map bookkeeping for the whole session.
-- **Fixed the ghost-object registry.** The join-time cleanup hid the room's
-  inherited object history but left its Photon view registrations alive, so
-  from game 2 of a sitting every new object collided with a ghost view ID and
-  live boxes/bullets stopped updating for spectators (the doubled/desynced
-  string-box reports). Ghosts are now buried AND locally unregistered at
-  source — which also removes the join-time error wall (700+ exceptions in
-  one burst) that correlated with the "lag spike when you joined" reports.
-- **Map loads are serialized on spectators** (vanilla corrupts its own
-  scene-wrapper handoff when two additive loads overlap — routine for a
-  chronically-behind spectator), with boundary reconciles that supersede
-  cleanly instead of stacking, and deck rebuilds that tolerate mid-apply
-  leavers.
-- **Spectating no longer touches fighter gameplay.** A spectator joining or
-  leaving used to arm a 3-second poison "roster quarantine" that disabled
-  block-honoring on live poison streams — spectator churn was changing
-  fighter damage. The poison census now runs on replicated data identically
-  on every seat. Ejecting an unauthorized watcher can also no longer end the
-  fighters' match through the vanilla disconnect cascade.
-- **Kicks are honest now.** Stock Photon ships CloseConnection DISABLED on
-  both ends — every spectator "kick" to date was a silent no-op. Kicks now
-  work cooperatively between mod clients (revoked leases, wrong protocols,
-  unauthorized entrants), fighters remain un-kickable by design, and the
-  server-side lease system stays the real enforcement.
-- **Spectate protocol floor -> 2** (migration 210): old-protocol clients carry
-  the hazards above, so mixed rooms are excluded. Between the backend deploy
-  and the client release, spectate grants are refused on purpose.
-
-### Spectator mode — quality of life (Sid's list + bugs 184/191/193)
-
-- **No more black flashes between points.** The fullscreen "Synchronizing"
-  cover now exists only before the first sync; after that the live arena
-  stays visible, and vanilla's own between-points score sequence (the
-  orange/blue orbs with HALF/ROUND pips) plays for spectators exactly as
-  fighters see it. Round starts are no longer hidden behind a reconcile.
-- **The top bar shows the full picture**: team-colored names with the game
-  score including half points ("Archnith 2.5 - 3 NotNic"), the current
-  series score, and the SESSION series tally between the two fighters (how
-  many series each has won this sitting — carried in the snapshot protocol).
-- **Spectators can see who else is spectating** (the same bottom-right roster
-  fighters already had — it was explicitly gated off for spectators).
-- **Escape is deconflicted** (bug 191): an open chat box or F5 menu consumes
-  Esc first; the leave-spectating dialog only opens from the base state.
-- **The F5 menu no longer force-closes** when a round starts while
-  spectating (bug 193), and the whole log-driven match tracker is quiescent
-  on spectator clients (watched picks can no longer leak into a later
-  fighter session's telemetry).
-- The FFA phantom "card picking ends in Xs" banner fix (bug 184) ships in
-  this release.
-
-### Fighter-side (spectator-adjacent)
-
-- Removed every identified spectator-conditional cost on fighter clients: a
-  master-side bookkeeping loop ran at 100x its intended cadence, spectate
-  attest state leaked across rooms, a master handoff could starve spectator
-  validation for a minute, and misc handlers misread spectator joins as
-  "opponent joined". Fighters' own fps/ping telemetry was flat through the
-  playtest; if lag persists at 1-2 spectators after this batch, the
-  remaining suspect is Photon relay fan-out.
-
-### Changed
-
-- **Spectators can bet.** The old rule blocked anyone holding a spectator
-  seat from placing bets (plus a 5-minute cooldown after leaving). Removed:
-  the bet-close windows are the information gate — bets lock once a game is
-  decided (or the FFA time window closes), so watching live can't out-inform
-  a locked bet. Spectators watch from the beginning of a series until
-  disconnect and bet under the same windows as everyone else.
-
-### Fixed
-
-- **2v2 betting now actually closes at 1-0 on the server.** The live-bets
-  panel has always shown 1-0 series as locked, but the endpoint itself only
-  refused bets at 2 wins — a crafted request could bet on the leader after
-  game 1. The server now enforces the same first-decided-game close as 1v1.
-
-- **GROW's damage no longer depends on frame rate in competitive play.** The
-  card's growth compounded per rendered frame, making its total multiplier
-  exponential in frame TIME: a 60 FPS shooter dealt ~1.4Ãƒâ€” the Grow damage of a
-  400 FPS shooter before stacking, several times more with stacked copies, and
-  a single 200 ms hitch frame multiplied damage Ãƒâ€”2.16 by itself — the "low-FPS
-  Grow nukes" reports. In queue-matched ranked 1v1, 2v2, 1v2, FFA and
-  sync-tournament rooms — and in private/quickplay rooms where BOTH players
-  had Ranked enabled when they connected — growth is now normalized to
-  a fixed 240-FPS-equivalent rate — near-identical growth per unit of distance
-  flown for every player (the small remaining frame-granularity differences
-  always err toward LESS growth, never more). Private/quickplay rooms with a
-  ranked-off player, rooms with an unmodded player, and the sandbox keep
-  vanilla behavior (mode rooms — queue, tournament, hosted lobbies — apply it
-  regardless of the 1v1 Ranked toggle, since entering the mode is the mode's
-  consent); the fix only activates when EVERY player in the room runs a
-  version that has it (mixed rooms stay vanilla on all seats).
-- **Drill bullets fired point-blank into a wall/box no longer vanish for the
-  other players.** A same-frame race on the receiving client could drop the
-  drill effect from the bullet's hit processing, so the remote copy died at
-  the wall while the shooter's bullet drilled through and kept hitting —
-  an invisible bullet. The hit is now deferred one frame and the drill
-  re-registered (bug #186's second half; extends the v1.37 drill-position
-  fix).
-- **FFA: Phoenix no longer respawns players "into thin air"** (bug #185). The
-  vanilla respawn coroutine looks the player up by list POSITION, which broke
-  after any leaver in an FFA lobby — the crash left the player alive-flagged,
-  invisible and unhittable on every client (opponents had to suicide to
-  advance the round). The lookup is now by player ID, and a Phoenix whose
-  charge crosses a round transition defers to the round's own mass revive
-  instead of firing into the next round.
-- **Spectators no longer see phantom "card picking ends in Xs" banners** when
-  nobody is picking (bug #184), and a closed pick window no longer lingers at
-  0s for non-pickers.
-- **The top status strip no longer cuts off** ("2 onli", "(2 in q") — the
-  queue/online text now takes the full remaining row width (bug from the Aug 8
-  screenshots).
-- **Jump/land dust puffs now match an equipped body color** instead of staying
-  vanilla orange/blue, and the **end-of-game VICTORY / REMATCH? text** follows
-  the custom team color too (in FFA it uses the winner's color).
-- **Block stat graph uses one y-axis** (bug #182, Stan): the activated and
-  successful lines share a scale like the shots graph; only legacy
-  damage-vs-blocks rows keep dual axes.
 
 _(older entries trimmed - full history on GitHub)_
