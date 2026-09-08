@@ -253,6 +253,8 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_eyes_phoneix_gaze",      DisplayName = "Phoneix Gaze",     Slot = CharacterItemType.Eyes,   PngFile = "eyes_phoneix_gaze.png",      Scale = 1.8f,  Offset = Vector2.zero, Fps = 5f },
             new CosmeticDef { Sku = "face_eyes_smart_specs",       DisplayName = "Smart Specs",      Slot = CharacterItemType.Eyes,   PngFile = "eyes_smart_specs.png",       Scale = 1.55f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_eyes_the_cryptid",       DisplayName = "The Cryptid",      Slot = CharacterItemType.Eyes,   PngFile = "eyes_the_cryptid.png",       Scale = 1.45f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_straw_hat",       DisplayName = "Straw Hat",        Slot = CharacterItemType.Detail, PngFile = "detail_straw_hat.png",       Scale = 1.75f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_florabelle",      DisplayName = "FloraBelle",       Slot = CharacterItemType.Detail, PngFile = "detail_florabelle.png",      Scale = 1.6f,  Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();
