@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — 2026-09-08 (Sept 8 polish batch; version to be named at the bump)
+## v1.40.2 — 2026-09-08
 
 **One Session button per sitting, beside the ID button**
 
@@ -57,8 +57,6 @@
   with their portal context lines) and 303 (machine-translation seeds for the
   keys that have bundled translations).
 
-## Unreleased — 2026-09-07 (Sept 7 polish batch; version to be named at the bump)
-
 **Mail and Music are icons now, not tabs**
 
 - The Mail and Music pages left the tab strip. Two icons sit at the top right,
@@ -98,8 +96,6 @@
   `[REGION-PINGS] sweep started …` and the completion line with per-region ms;
   the server records `[QUEUE-REGION]` with the rung that decided. Needs
   migration 301 (two nullable columns on the queue row) before the api.
-
-## Unreleased — 2026-09-06 (Sept 6 triage batch; version to be named at the bump)
 
 **Matched but never connected (bugs 335, 336, 340)**
 
@@ -302,18 +298,6 @@
   stop at the oldest 500; FFA histories now use the same window). The Compare
   metrics "Elo over games/over time" are now simply "Elo" and "FFA Elo". The
   Discord `/graph` command gains the same `axis` option.
-
-**Colour emoji in chat (bug 333, step 2)**
-
-- Emoji in the in-game chat and the F5 chat pane render in colour. The mod
-  fetches a small emoji sprite sheet (Noto Color Emoji, SIL Open Font License
-  1.1; the licence text ships with it) once, the first time it is idle at the
-  main menu, and keeps the previous monochrome glyphs while the sheet is
-  absent, on low-memory seats, or when decoding would take too long. Skin-tone
-  variants show the neutral emoji. Other text and other mods are unchanged.
-  `[Chat] ColourEmoji` turns it off.
-
-## Unreleased — 2026-09-04 (version to be named at the bump)
 
 **In-game library: Spirit's charts**
 
