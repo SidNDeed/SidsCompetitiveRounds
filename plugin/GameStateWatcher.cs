@@ -139,8 +139,6 @@ namespace CompetitiveRounds
         // their own mod report, so we never populate opponentOffers.
         private static List<MatchTracker.CardOfferData> localOffers = new List<MatchTracker.CardOfferData>();
         private static readonly List<MatchTracker.CardOfferData> emptyOffers = new List<MatchTracker.CardOfferData>();
-        private static int lastKnownP1CardCount = 0;
-        private static int lastKnownP2CardCount = 0;
 
         // Card sharing via Photon custom properties
         private static List<string> broadcastCardNames = new List<string>();
@@ -424,7 +422,6 @@ namespace CompetitiveRounds
         private static int achMaxOpponentRounds = 0;      // highest round count opponent reached (for comeback)
         private static bool achWasDown04 = false;         // opponent had 4 rounds while local had 0
         private static bool lastDeadState = false;
-        private static int lastRemainingRespawns = -1;
         private static bool achFiredShot = false;         // left mouse clicked during match
         private static bool achMoved = false;              // WASD or Space pressed during match
         private static bool achJumped = false;             // jump keys (W/Space/Up) pressed during match (v1.30 Grounded)
@@ -5080,7 +5077,6 @@ namespace CompetitiveRounds
             achMaxOpponentRounds = 0;
             achWasDown04 = false;
             lastDeadState = false;
-            lastRemainingRespawns = -1;
             achFiredShot = false;
             achMoved = false;
             achJumped = false;
@@ -5115,8 +5111,6 @@ namespace CompetitiveRounds
             localCards.Clear();
             opponentCards.Clear();
             localOffers.Clear();
-            lastKnownP1CardCount = 0;
-            lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
 
             // Clear our broadcast for the new match
@@ -7914,8 +7908,6 @@ namespace CompetitiveRounds
             localCards.Clear();
             opponentCards.Clear();
             localOffers.Clear();
-            lastKnownP1CardCount = 0;
-            lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
             broadcastCardNames.Clear();
             lastKnownOpponentBroadcastCount = 0;
@@ -7936,7 +7928,6 @@ namespace CompetitiveRounds
             achMaxOpponentRounds = 0;
             achWasDown04 = false;
             lastDeadState = false;
-            lastRemainingRespawns = -1;
             achFiredShot = false;
             achMoved = false;
             achJumped = false;
