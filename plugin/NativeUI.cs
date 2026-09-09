@@ -1822,7 +1822,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){CloseLobbyOptions();try{ProfileCard.Teardown();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
+        private static void TeardownOverlaySurfaces(){HideReleaseNotes();CloseLobbyOptions();try{ProfileCard.Teardown();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
         public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;PageGeneration++;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -1979,6 +1979,12 @@ namespace CompetitiveRounds
             // ClickHandler blocked, so it expires instead — #276/#430.)
             if(utilKind!=UtilKind.None&&(utilPopupGO==null||!utilPopupGO.activeSelf)){Plugin.Log.LogWarning("[UTIL-POPUP] flag set with no visible popup - closing");CloseUtilityPopup();}
             if(UtilityPopupOpen&&Input.GetKeyDown(KeyCode.Escape)){EscConsumedFrame=Time.frameCount;bool took=false;try{took=MailUI.ConsumeEscape();}catch{}if(!took){try{took=CompetitiveUI.ConsumePromptEscape();}catch{}}if(!took)CloseUtilityPopup();return;}
+            if (ReleaseNotesOpen && Input.GetKeyDown(KeyCode.Escape))
+            {
+                EscConsumedFrame = Time.frameCount;
+                DismissReleaseNotes();
+                return;
+            }
             if (LobbyOptionsOpen && Input.GetKeyDown(KeyCode.Escape))
             {
                 EscConsumedFrame=Time.frameCount;
@@ -2034,6 +2040,7 @@ namespace CompetitiveRounds
             MaybeRefreshOvtTab();
             MaybeRefreshFfaTab();
             MaybeRefreshHomeTab();
+            MaybeOpenReleaseNotes();
             MaybeRefreshInfoGold();
             MaybeRefreshCompareRecords();
             MaybeRefreshMusicTab();
@@ -6465,7 +6472,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        private static void SwitchTab(int idx){if(idx==8||idx==11||idx==12)idx=TAB_HOME;CloseLobbyOptions();if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){if(unifiedBoard!=0)FetchSelectedBoard();if(unifiedRecent!=0)FetchSelectedRecent();lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
+        private static void SwitchTab(int idx){if(idx==8||idx==11||idx==12)idx=TAB_HOME;HideReleaseNotes();CloseLobbyOptions();if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){if(unifiedBoard!=0)FetchSelectedBoard();if(unifiedRecent!=0)FetchSelectedRecent();lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
 tournaments"): the My Match panel — Ready Up / Play Now / FORFEIT — is gated by the
 sub-tab kind fence, so a participant whose live match sits under the OTHER kind's
 sub-tab opened the tab and saw nothing concedable. On tab entry only (manual sub-tab
@@ -6615,17 +6622,10 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
             homeCosRows.Clear();for(int i=0;i<HOME_COS_ROWS;i++)homeCosRows.Add(CreateHomeCosRow(cosSV.content.transform,i));
             var right=new GameObject("HRight");right.transform.SetParent(cols.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);
             var relBox=UIFactory.CreatePanel("HRel",right.transform,C_PANEL);UIFactory.AddVLG(relBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(relBox,flexH:1);
-            homeReleasesCard=relBox;
-            homeReleasesToggle=UIFactory.CreateButton("HRelH",relBox.transform,"- Latest Releases",19f,C_GOLD,C_PANEL,()=>{Plugin.CollapseLatestReleases.Value=!Plugin.CollapseLatestReleases.Value;RefreshHomeCardVisibility();},sizeDelta:new Vector2(300,28));
-            var relSV=UIFactory.CreateScrollView("HRelSV",relBox.transform,spacing:0);UIFactory.AddLE(relSV.scrollGO,flexH:1);homeReleasesBody=relSV.scrollGO;
-            txtHomeReleases=UIFactory.CreateText("HRelT",relSV.content.transform,"<color=#888><i>Loading release notes...</i></color>",14f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(560,24));
-            UIFactory.SetWordWrap(txtHomeReleases,true);UIFactory.SetTextAutoHeight(txtHomeReleases);
-            /* Bug #160, second half: this column is flexW:1, so its width tracks
-             * the resolution while the text sat at a fixed 560px and wrapped
-             * there on every monitor. Stretch the element across the scroll
-             * viewport instead of guessing a width — the ScrollView content is
-             * anchored to the viewport, so anchoring x here follows it. */
-            try{var _relGO=(txtHomeReleases as Component)?.gameObject;if(_relGO!=null){var _rrt=_relGO.GetComponent<RectTransform>();_rrt.anchorMin=new Vector2(0,_rrt.anchorMin.y);_rrt.anchorMax=new Vector2(1,_rrt.anchorMax.y);_rrt.offsetMin=new Vector2(0,_rrt.offsetMin.y);_rrt.offsetMax=new Vector2(0,_rrt.offsetMax.y);}}catch{}
+            SetLayoutFlexHeight(relBox, 0);
+            UIFactory.CreateButton("HRelH", relBox.transform, "Latest release notes", 19f, C_GOLD, C_PANEL,
+                OpenReleaseNotes, sizeDelta: new Vector2(300, 32));
+            BuildReleaseNotesModal();
             // Channel controls remain available without a second chat transcript.
             // The shared overlay handles messages, fading, mute and pinning on Home too.
             txtChatLog=null;chatScrollRect=null;chatContentRT=null;chatViewportRT=null;
@@ -6644,7 +6644,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
             return panel;
         }
         private static GameObject homeDiscordCard, homeDiscordRestore;
-        private static GameObject homeReleasesCard, homeReleasesBody, homeReleasesToggle;
+
 
         private static void SetLayoutFlexHeight(GameObject go, float value)
         {
@@ -6658,12 +6658,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
             bool hidden = Plugin.HideDiscordCard.Value;
             homeDiscordCard?.SetActive(!hidden);
             homeDiscordRestore?.SetActive(hidden);
-            bool collapsed = Plugin.CollapseLatestReleases.Value;
-            homeReleasesBody?.SetActive(!collapsed);
-            SetLayoutFlexHeight(homeReleasesCard, collapsed ? 0f : 1f);
 
-            if (homeReleasesToggle != null)
-                UIFactory.SetText(UIFactory.GetButtonText(homeReleasesToggle), collapsed ? I18n.Tr("+ Latest Releases") : I18n.Tr("- Latest Releases"));
         }
 
         private static void RefreshHomeTab()
@@ -6707,6 +6702,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
             if(txtHomeReleases!=null)
             {
                 var rel=ApiClient.CachedReleaseNotes;
+                if (rel == null || rel.Count == 0) releaseNotesFingerprint = null;
                 /* Bug #160 ("still squished to the left"): this was never a
                  * layout bug. GitHub release BODIES are authored with hard line
                  * breaks around column 78, so the English text carries its own
@@ -6731,7 +6727,10 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
                     }
                     // Release-notes BODIES are external GitHub content — stay
                     // untranslated by policy; Raw makes the bypass explicit.
-                    UIFactory.SetTextRaw(txtHomeReleases,sb.ToString());
+                    string content = sb.ToString();
+                    UIFactory.SetTextRaw(txtHomeReleases, content);
+                    using (var hash = System.Security.Cryptography.SHA256.Create())
+                        releaseNotesFingerprint = Convert.ToBase64String(hash.ComputeHash(Encoding.UTF8.GetBytes(content)));
                 }
             }
             /* Newest cosmetics — art thumbnails (animated where available). */

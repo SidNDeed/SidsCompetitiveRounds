@@ -313,7 +313,7 @@ namespace CompetitiveRounds
             lobbyOptionsRoot = UIFactory.CreatePanel("LobbyOptionsModal", pageGO.transform, new Color(0, 0, 0, 0.75f));
             lobbyOptionsBox = UIFactory.CreatePanel("LobbyOptionsBox", lobbyOptionsRoot.transform, C_PANEL);
             var rt = lobbyOptionsBox.GetComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0.1f, 0.12f); rt.anchorMax = new Vector2(0.9f, 0.88f);
+            rt.anchorMin = new Vector2(0.25f, 0.24f); rt.anchorMax = new Vector2(0.75f, 0.76f);
             rt.offsetMin = rt.offsetMax = Vector2.zero;
             UIFactory.AddVLG(lobbyOptionsBox, spacing: 12, padL: 20, padR: 20, padT: 16, padB: 16);
             var header = LayoutRow("LobbyOptionsHeader", lobbyOptionsBox.transform, 36);
@@ -322,8 +322,7 @@ namespace CompetitiveRounds
             SetSectionWidth((title as Component).gameObject, 0, 0, 1);
             UIFactory.CreateButton("CloseLobbyOptions", header.transform, I18n.Tr("Close"), 16, C_WHITE, C_BTN, CloseLobbyOptions, new Vector2(100, 32));
             lobbyModeButton = UIFactory.CreateButton("LobbyMode", lobbyOptionsBox.transform, "", 18, C_WHITE, C_BTN,
-                () => PickLayoutChoice(I18n.Tr("Lobby mode"), new[] { I18n.Tr("2v2"), I18n.Tr("1v2"), I18n.Tr("FFA") }, value =>
-                { lobbyOptionsMode = value; RefreshLobbyOptions(); }), new Vector2(300, 34));
+                () => { lobbyOptionsMode = (lobbyOptionsMode + 1) % 3; RefreshLobbyOptions(); }, new Vector2(300, 34));
             var scroll = UIFactory.CreateScrollView("LobbyOptionsScroll", lobbyOptionsBox.transform, spacing: 10);
             UIFactory.AddLE(scroll.scrollGO, flexH: 1);
             lobbyOptionBodies = new GameObject[3];
@@ -337,9 +336,10 @@ namespace CompetitiveRounds
             MoveSection(ovtSideBtn, lobbyOptionBodies[1].transform); MoveSection(ovtExtraBtn, lobbyOptionBodies[1].transform);
             var ffaRow = LayoutRow("CreateFfaLobby", lobbyOptionBodies[2].transform);
             MoveSection(ffaJoinBtn, ffaRow.transform); MoveSection(ffaCreatePrivBtn, ffaRow.transform);
-            UIFactory.CreateText("FfaConfigHelp", lobbyOptionBodies[2].transform,
+            var ffaHelp = UIFactory.CreateText("FfaConfigHelp", lobbyOptionBodies[2].transform,
                 I18n.Tr("Create an FFA lobby to configure its rules below. Only the host can change rules."), 16, C_LABEL,
                 sizeDelta: new Vector2(900, 28));
+            UIFactory.SetWordWrap(ffaHelp, true); UIFactory.SetTextAutoHeight(ffaHelp);
             MoveSection(ffaSettingsRow, lobbyOptionBodies[2].transform);
             // Replace the wide inline settings strip with one row per setting.
             var oldLayout = ffaSettingsRow.GetComponent("HorizontalLayoutGroup");
@@ -367,7 +367,7 @@ namespace CompetitiveRounds
         private static void RefreshLobbyOptions()
         {
             for (int i = 0; i < lobbyOptionBodies.Length; i++) lobbyOptionBodies[i].SetActive(i == lobbyOptionsMode);
-            UIFactory.SetText(UIFactory.GetButtonText(lobbyModeButton), I18n.TrF("Mode: {0}  v", new[] { "2v2", "1v2", "FFA" }[lobbyOptionsMode]));
+            UIFactory.SetText(UIFactory.GetButtonText(lobbyModeButton), I18n.TrF("Mode: {0}", new[] { "2v2", "1v2", "FFA" }[lobbyOptionsMode]));
         }
 
         private static void CloseLobbyOptions()

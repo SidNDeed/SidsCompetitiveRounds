@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -317,9 +317,9 @@ namespace CompetitiveRounds
             // Sept 8 r1b M1: the card preview's backdrop is a raw ClickHandler with
             // no occlusion test, so the Card Stats rows under it stayed live and a
             // backdrop click could open ANOTHER preview instead of dismissing this one.
-            || NativeUI.CardPreviewOpen || NativeUI.LobbyOptionsOpen
+            || NativeUI.CardPreviewOpen || NativeUI.LobbyOptionsOpen || NativeUI.ReleaseNotesOpen
             || !Plugin.DataConsentAsked;
-        private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen || NativeUI.LobbyOptionsOpen;
+        private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen || NativeUI.LobbyOptionsOpen || NativeUI.ReleaseNotesOpen;
 
         internal static bool MenuNavigationBlocked => AnyModalOwnsInput || quickChatOpen
             || danceWheelOpen || chatInputOpen || IsVanillaChatTyping()
@@ -342,7 +342,7 @@ namespace CompetitiveRounds
         // picker), so PageImguiHidden includes it and the picker's OWN field is
         // drawn alone, after the block, while no popup covers the picker.
         internal static bool PopupCoversPage =>
-               NativeUI.UtilityPopupOpen || NativeUI.LobbyOptionsOpen || NativeUI.InfoPopupOpen
+               NativeUI.UtilityPopupOpen || NativeUI.LobbyOptionsOpen || NativeUI.ReleaseNotesOpen || NativeUI.InfoPopupOpen
             || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
             || NativeUI.CardPreviewOpen
             // Sept 8 r1b L2: the language chooser is a backdrop modal too (Home has the
