@@ -34,9 +34,11 @@ namespace CompetitiveRounds
     ///    its socket on every failure path (PingMono's catch nulls the socket
     ///    without closing it) and validates replies exactly as PingMono does.
     ///  * Triggers: 3 s after ConnectedToMaster (not in OfflineMode); every
-    ///    5 min at the main menu while connected and not in a live room; every
-    ///    90 s while the 1v1 queue is searching; at JoinQueue when the last map
-    ///    is older than 5 min (serves the NEXT join — a join never waits on
+    ///    5 min at the main menu, the ONE trigger that requires a Photon
+    ///    connection (an idle player has no consumer for the map); every 90 s
+    ///    while a 1v1 queue lifecycle is live AND polling (searching, matched
+    ///    or ready-sent) — connected or not; at JoinQueue when the last map
+    ///    is older than 60 s (serves the NEXT upload — a join never waits on
     ///    pings). Never started while PUN's RegionHandler is pinging, and a
     ///    running sweep yields to it (the worker waits in 50 ms steps behind
     ///    a flag the main thread mirrors every frame; a round PUN interrupts
@@ -60,8 +62,18 @@ namespace CompetitiveRounds
         const float POLL_S = 0.25f;
         const float CONNECT_DELAY_S = 3f;
         const float MENU_CADENCE_S = 300f;
-        const float SEARCH_CADENCE_S = 90f;
-        const float JOIN_STALE_S = 300f;
+        const float QUEUE_CADENCE_S = 90f;
+        // 60 s. The join body is the only upload a match found on the NEXT poll
+        // can use: issuance then trails the join by at most READY_TIMEOUT_SECONDS
+        // (90) plus one 3 s poll, and the server refuses a map stamped more than
+        // REGION_PINGS_ISSUANCE_MAX_AGE_S (180) before issuance, in
+        // _region_pings_at_issuance() — so a map older than ~87 s at join can
+        // be refused with nothing uploaded in between. A LONGER queue wait is not
+        // covered by this number at all; it is served by the queue cadence and the
+        // poll header. The sweep this starts serves the next upload, not this join.
+        const float JOIN_STALE_S = 60f;
+        // Left at 15 min: a >180 s map on the join body costs one JSONB write and
+        // is judged stale by the server on ITS clock. It is never mistaken for fresh.
         const float UPLOAD_MAX_AGE_S = 900f;
         const int ATTEMPTS = 4;
         const int ATTEMPT_MS = 500;
@@ -70,7 +82,13 @@ namespace CompetitiveRounds
         const int MAX_TARGETS = 24;
         const int MIN_SUCCESSES = 2;
         const int MAX_MS = 700;
-        const int HEADER_POLLS = 3;
+        // Mirrors main.py's REGION_PINGS_ISSUANCE_MAX_AGE_S — NOT its
+        // REGION_PINGS_MAX_AGE_S (900), which is the acceptance limit and sits
+        // on the very next line there; the SERVER still
+        // judges the age itself — this only avoids paying for an upload it cannot use.
+        const float HEADER_MAX_AGE_S = 180f;
+        // A REFUSED start retries here, not a whole cadence later.
+        const float SKIP_RETRY_S = 15f;
         const int DEFAULT_PORT = 5055;
         const int YIELD_STEP_MS = 50;
 
@@ -115,8 +133,9 @@ namespace CompetitiveRounds
         static float scheduledAt = -1f;    // trigger (a): fire time, < 0 = none
         static float lastTriggerRt = -1f;  // cadence anchor
         static float nextPollRt;
-        static int announcedRevision;
-        static int headerSendsLeft;
+        static float skipUntilRt = -1f;    // set on entry to TryStart, cleared only by a start that happens
+        static string blockedWhy;
+        static float blockedLoggedRt = -1f;
         static volatile bool punPinging;   // RegionHandler.IsPinging, mirrored by Tick for the worker (impl r1 M3)
         static readonly Dictionary<string, DnsEntry> dnsCache = new Dictionary<string, DnsEntry>(StringComparer.OrdinalIgnoreCase);
         static readonly object dnsLock = new object();
@@ -132,17 +151,26 @@ namespace CompetitiveRounds
             try { if (PhotonNetwork.OfflineMode) return; } catch { return; }
             float rt = Time.realtimeSinceStartup;
             scheduledAt = rt + CONNECT_DELAY_S;
-            lastTriggerRt = rt;
+            // Deliberately NOT lastTriggerRt. That anchor is the cadence, and
+            // only a sweep that actually STARTED may spend it. Stamping it here
+            // spent a whole period on a trigger TryStart can still refuse — PUN's
+            // own region ping outlives the 3 s delay often enough to matter — and
+            // the refusal then waited out QUEUE_CADENCE_S instead of retrying
+            // after SKIP_RETRY_S. scheduledAt already stops this trigger
+            // re-arming; TryStart stamps the anchor once a thread is running.
         }
 
         /// <summary>Trigger (c): the 1v1 JoinQueue body builder. Starts a sweep
-        /// when the last completed map is older than 5 min; the join in flight
-        /// never waits for it — the result serves the next join and the poll
-        /// header.</summary>
+        /// when the last completed map is older than 60 s; the join in flight
+        /// never waits for it — the result serves the next upload (the poll
+        /// header, or a later join).</summary>
         public static void NoteJoinQueue()
         {
             float rt = Time.realtimeSinceStartup;
-            if (LastCompletedAt >= 0f && rt - LastCompletedAt < JOIN_STALE_S) return;
+            bool fresh = LastCompletedAt >= 0f && rt - LastCompletedAt < JOIN_STALE_S;
+            bool refreshing = !fresh && current == null;
+            Plugin.Log?.LogInfo($"[REGION-PINGS] join age={(LastCompletedAt < 0f ? -1 : AgeSeconds())} rev={Revision} refresh={(refreshing ? "yes" : "no")}");
+            if (fresh) return;
             if (current != null) return;
             TryStart("join");
         }
@@ -196,16 +224,25 @@ namespace CompetitiveRounds
                 return;
             }
 
-            // (b) + 7/3-1: cadence while at the menu, connected, not in a live
-            // room — 90 s while the 1v1 queue is searching, 5 min otherwise.
-            bool searching = false;
-            try { searching = ApiClient.CurrentQueueState == ApiClient.QueueState.Searching; } catch { }
-            float cadence = searching ? SEARCH_CADENCE_S : MENU_CADENCE_S;
+            // (b) + 7/3-1 + D1: cadence. 90 s while the 1v1 queue is live, else 5 min.
+            bool queueLive = QueueLive();
+            float cadence = queueLive ? QUEUE_CADENCE_S : MENU_CADENCE_S;
             float anchor = Math.Max(lastTriggerRt, LastCompletedAt);
             if (anchor >= 0f && rt - anchor < cadence) return;
-            if (!searching && !AtMainMenu()) return;
-            if (!ConnectedToMaster()) return;
-            TryStart(searching ? "searching" : "menu");
+            if (skipUntilRt >= 0f && rt < skipUntilRt) return;
+            // The queue-live path is NOT gated on a Photon connection: this sweep
+            // resolves its own DNS and sends raw UDP, and PUN's region list is a
+            // plain field on the one NetworkingClient (assigned at
+            // LoadBalancingClient.cs:1527) that no disconnect path clears. The
+            // menu path keeps both gates — an idle player has no consumer.
+            bool menuIdleOk = AtMainMenu() && ConnectedToMaster();
+            if (!queueLive && !menuIdleOk)
+            {
+                NoteBlocked(!AtMainMenu() ? "not-at-menu" : "not-connected", rt);
+                return;
+            }
+            blockedWhy = null;
+            TryStart(queueLive ? "queue" : "menu");
         }
 
         // ── upload shapes ──
@@ -233,21 +270,24 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The <c>X-Region-Pings</c> header value
-        /// (<c>us=42,eu=31;age=12</c>) for the next three polls after each new
-        /// publication, else null. Call once per poll.</summary>
+        /// (<c>us=42,eu=31;age=12</c>) on every poll while the map is young
+        /// enough that the server could still take it, else null. The server
+        /// judges the age on its own clock, in _region_pings_at_issuance(); this
+        /// cap only avoids paying for an upload it cannot use.
+        ///
+        /// NOT pure — an earlier draft of this line said it was. AgeSeconds()
+        /// re-reads the clock, so two calls a second apart return different
+        /// strings, and eventually null. What IS stable is the instant the
+        /// server derives from it: the stamp is now - age, and age and the
+        /// server's clock advance together, so re-sending an unrefreshed map
+        /// re-derives the same absolute instant. Nothing here can freshen a
+        /// stale map, which is the property that actually matters.</summary>
         public static string PollHeaderValue()
         {
-            if (Revision != announcedRevision)
-            {
-                announcedRevision = Revision;
-                headerSendsLeft = HEADER_POLLS;
-            }
-            if (headerSendsLeft <= 0) return null;
             var map = LastMap;
             if (map == null || map.Count == 0 || LastCompletedAt < 0f) return null;
             int age = AgeSeconds();
-            if (age > UPLOAD_MAX_AGE_S) return null;
-            headerSendsLeft--;
+            if (age > HEADER_MAX_AGE_S) return null;
             var sb = new StringBuilder(120);
             bool first = true;
             foreach (var kv in map)
@@ -264,7 +304,13 @@ namespace CompetitiveRounds
         {
             float age = Time.realtimeSinceStartup - LastCompletedAt;
             if (age < 0f) age = 0f;
-            return (int)age;
+            // Round UP. Truncation reported a map genuinely 180.9 s old as 180,
+            // which is inside the server's issuance window and is then
+            // stamped as if it really were that age — so the truncation did not
+            // merely mis-report, it bought the map a fresh lease on the strength
+            // of a rounding error. Over-reporting is the safe direction: the
+            // worst it costs is one upload declined a second early.
+            return (int)Math.Ceiling((double)age);
         }
 
         // ── start / finish (main thread) ──
@@ -272,19 +318,40 @@ namespace CompetitiveRounds
         static void TryStart(string why)
         {
             float rt = Time.realtimeSinceStartup;
-            lastTriggerRt = rt;
             scheduledAt = -1f;
+            // Set BEFORE the guards, not at each refusal: every exit that is not
+            // a started sweep — including ones not enumerated here and the catch
+            // below — then costs SKIP_RETRY_S instead of re-entering at Tick's
+            // 250 ms rate. Cleared only once a thread is actually running.
+            skipUntilRt = rt + SKIP_RETRY_S;
             try
             {
                 if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode) return;      // (e), re-checked at start
                 if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom)) return;
-                RegionHandler rh = PhotonNetwork.NetworkingClient?.RegionHandler;
-                if (rh == null || rh.EnabledRegions == null || rh.EnabledRegions.Count == 0)
+                if (current != null)
                 {
+                    // Tick refuses every trigger while a sweep is in flight (d),
+                    // but NoteCatalogReady arrives on a Photon callback and never
+                    // passes through Tick. Without this, a sweep whose thread has
+                    // finished but whose result Tick has not published yet would
+                    // be REPLACED here and its map lost with no line saying so.
+                    Plugin.Log?.LogInfo($"[REGION-PINGS] skipped why={why}: a sweep is already in flight");
+                    return;
+                }
+                RegionHandler rh = PhotonNetwork.NetworkingClient?.RegionHandler;
+                bool punHasList = rh != null && rh.EnabledRegions != null && rh.EnabledRegions.Count > 0;
+                // D2: PUN builds a region list only from an OpGetRegions response,
+                // and a ranked-only session never triggers one. RegionCatalog
+                // fetches the same list from the NameServer itself; when neither
+                // has one this returns exactly as it did before, having asked for
+                // a fetch that serves the next trigger.
+                if (!punHasList && (RegionCatalog.Entries == null || RegionCatalog.Entries.Length == 0))
+                {
+                    try { RegionCatalog.NoteWanted(); } catch { }
                     Plugin.Log?.LogInfo($"[REGION-PINGS] skipped why={why}: no region list yet");
                     return;
                 }
-                if (rh.IsPinging)
+                if (punHasList && rh.IsPinging)
                 {
                     // (f): PUN's own sweep has priority; the next trigger retries.
                     Plugin.Log?.LogInfo($"[REGION-PINGS] skipped why={why}: RegionHandler is pinging");
@@ -297,29 +364,26 @@ namespace CompetitiveRounds
                     Plugin.Log?.LogWarning($"[REGION-PINGS] skipped why={why}: previous sweep thread still alive");
                     return;
                 }
-                int portOverride = RegionHandler.PortToPingOverride;
-                var targets = new List<Target>(Math.Min(MAX_TARGETS, rh.EnabledRegions.Count));
-                foreach (var region in rh.EnabledRegions)
+                // ONE construction body for both sources (#432): PUN's list when it
+                // has one, else the catalog's. The catalog carries the port ITS
+                // addresses were built for, so a catalog-sourced sweep does not
+                // depend on the process-wide static that anyone may rewrite.
+                var pairs = new List<KeyValuePair<string, string>>();
+                string source;
+                if (punHasList)
                 {
-                    if (targets.Count >= MAX_TARGETS) break;
-                    if (region == null) continue;
-                    string code = SafeCode(region.Code);
-                    string host; int addrPort; bool webSocket;
-                    if (code == null || !ParseHostAndPort(region.HostAndPort, out host, out addrPort, out webSocket)) continue;
-                    // 7/3-4, refined (impl r1 M2): the override first; else the port the
-                    // address carries when it is a UDP address (on Photon Cloud that is
-                    // the master's 5055 PingMono assumes; a self-hosted server's own
-                    // port otherwise); else 5055. A ws:// or wss:// port is a TCP/TLS
-                    // listener, never a UDP ping target — PUN's PingMono pings UDP 5055
-                    // on those hosts too, and so do we.
-                    int port = portOverride != 0 ? portOverride
-                             : (!webSocket && addrPort != 0) ? addrPort
-                             : DEFAULT_PORT;
-                    bool dup = false;
-                    foreach (var t in targets) if (t.Code == code) { dup = true; break; }
-                    if (dup) continue;
-                    targets.Add(new Target { Code = code, Host = host, Port = port });
+                    source = "pun";
+                    foreach (var region in rh.EnabledRegions)
+                        if (region != null) pairs.Add(new KeyValuePair<string, string>(region.Code, region.HostAndPort));
                 }
+                else
+                {
+                    source = "catalog";
+                    foreach (var e in RegionCatalog.Entries)
+                        if (e != null) pairs.Add(new KeyValuePair<string, string>(e.Code, e.HostAndPort));
+                }
+                int portOverride = punHasList ? RegionHandler.PortToPingOverride : RegionCatalog.PortOverride;
+                List<Target> targets = BuildTargets(pairs, portOverride);
                 if (targets.Count == 0)
                 {
                     Plugin.Log?.LogInfo($"[REGION-PINGS] skipped why={why}: no usable targets");
@@ -340,12 +404,17 @@ namespace CompetitiveRounds
                     Name = "CR_RegionPingSweep",
                 };
                 th.Start();
+                lastTriggerRt = rt;   // only a start that HAPPENS consumes the cadence
+                skipUntilRt = -1f;
+                // A sweep that starts and publishes nothing (Finish) still consumes
+                // a full cadence period — that is the bound's real failure step:
+                // one fruitless cycle costs 90 s, not SKIP_RETRY_S.
                 lastThread = th;
                 current = sweep;
                 int port0 = targets[0].Port;
                 bool mixedPorts = false;
                 foreach (var t in targets) if (t.Port != port0) { mixedPorts = true; break; }
-                Plugin.Log?.LogInfo($"[REGION-PINGS] sweep started why={why} n={targets.Count} port={(mixedPorts ? "mixed" : port0.ToString())}");
+                Plugin.Log?.LogInfo($"[REGION-PINGS] sweep started why={why} src={source} n={targets.Count} port={(mixedPorts ? "mixed" : port0.ToString())}");
             }
             catch (Exception ex)
             {
@@ -632,7 +701,7 @@ namespace CompetitiveRounds
 
         // ── predicates and parsing (main thread) ──
 
-        static bool AtMainMenu()
+        internal static bool AtMainMenu()
         {
             try
             {
@@ -640,6 +709,90 @@ namespace CompetitiveRounds
                 return mm != null && mm.isOpen;
             }
             catch { return false; }
+        }
+
+        /// <summary>The ping targets for a list of (code, hostAndPort) pairs —
+        /// the ONE construction body, whichever source the pairs came from.
+        /// <paramref name="portOverride"/> is the master-port override those
+        /// addresses were built for: PUN's process-wide static for PUN's list,
+        /// the catalog's own captured value for the catalog's.</summary>
+        static List<Target> BuildTargets(List<KeyValuePair<string, string>> pairs, int portOverride)
+        {
+            var targets = new List<Target>(Math.Min(MAX_TARGETS, pairs.Count));
+            foreach (var pair in pairs)
+            {
+                if (targets.Count >= MAX_TARGETS) break;
+                string code = SafeCode(pair.Key);
+                string host; int addrPort; bool webSocket;
+                if (code == null || !ParseHostAndPort(pair.Value, out host, out addrPort, out webSocket)) continue;
+                // 7/3-4, refined (impl r1 M2): the override first; else the port the
+                // address carries when it is a UDP address (on Photon Cloud that is
+                // the master's 5055 PingMono assumes; a self-hosted server's own
+                // port otherwise); else 5055. A ws:// or wss:// port is a TCP/TLS
+                // listener, never a UDP ping target — PUN's PingMono pings UDP 5055
+                // on those hosts too, and so do we.
+                int port = portOverride != 0 ? portOverride
+                         : (!webSocket && addrPort != 0) ? addrPort
+                         : DEFAULT_PORT;
+                bool dup = false;
+                foreach (var t in targets) if (t.Code == code) { dup = true; break; }
+                if (dup) continue;
+                targets.Add(new Target { Code = code, Host = host, Port = port });
+            }
+            return targets;
+        }
+
+        /// <summary>A catalog fetch published a list. Nothing consumes that edge
+        /// otherwise: the join trigger has already fired by then and the cadence
+        /// would wait out a full period, so the first ranked queue of a
+        /// ranked-only session would still sweep nothing.</summary>
+        public static void NoteCatalogReady()
+        {
+            float rt = Time.realtimeSinceStartup;
+            if (LastMap != null && LastCompletedAt >= 0f
+                && rt - LastCompletedAt < JOIN_STALE_S) return;
+            // This edge arrives on a Photon callback, not through Tick, so it has
+            // to re-apply Tick's policy rather than inherit it. TryStart exempts
+            // an OfflineMode room from its in-room guard on purpose (a lingering
+            // Sandbox flag, #122, must not wedge the sweep shut at the menu), so
+            // without this a fetch begun at the menu and answered after the
+            // player entered Sandbox would run the whole raw-UDP sweep inside a
+            // local game where nothing can consume the result.
+            bool consumer;
+            try { consumer = QueueLive() || (AtMainMenu() && !PhotonNetwork.InRoom); }
+            catch { return; }
+            if (!consumer) { NoteBlocked("catalog-no-consumer", rt); return; }
+            skipUntilRt = -1f;
+            TryStart("catalog");
+        }
+
+        /// <summary>True while a 1v1 queue lifecycle is live AND polling. The
+        /// poll header is this map's only delivery channel, so a sweep with
+        /// polling off would serve nothing; the conjunction also means a
+        /// CurrentQueueState left non-Idle cannot license sweeps on its own.
+        /// Matched/ReadySent are in because the room is issued at the ready
+        /// branch (main.py:15192), up to READY_TIMEOUT_SECONDS after the match.</summary>
+        static bool QueueLive()
+        {
+            try
+            {
+                if (!ApiClient.IsQueuePolling) return false;
+                var qs = ApiClient.CurrentQueueState;
+                return qs == ApiClient.QueueState.Searching
+                    || qs == ApiClient.QueueState.Matched
+                    || qs == ApiClient.QueueState.ReadySent;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>One line per distinct reason, at most once a minute: a
+        /// cadence that returns silently is why the shipped gate went unnoticed,
+        /// and a log at Tick's rate would be worse than none.</summary>
+        static void NoteBlocked(string why, float rt)
+        {
+            if (why == blockedWhy && blockedLoggedRt >= 0f && rt - blockedLoggedRt < 60f) return;
+            blockedWhy = why; blockedLoggedRt = rt;
+            Plugin.Log?.LogInfo($"[REGION-PINGS] cadence blocked why={why} age={(LastCompletedAt < 0f ? -1 : AgeSeconds())} rev={Revision}");
         }
 
         static bool ConnectedToMaster()

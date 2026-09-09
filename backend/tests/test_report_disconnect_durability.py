@@ -47,6 +47,42 @@ import main
 from sqlalchemy.exc import DBAPIError
 
 
+def _typed_interval(param, unit):
+    """The spelling a CAST-typed interval bind must take here (#448/#588).
+
+    Scope, because the wording used to overreach: this is the required form
+    wherever the bind is CAST at all. Queries that pass an integer straight
+    into `make_interval(secs => :ttl)` with no CAST are also correct and are
+    not what this helper judges — it is applied to named sites, never swept
+    across the file.
+
+    These tests used to assert `CAST(:p AS interval)`, which is the BROKEN
+    form and was asserted as though it were the correct one. That CAST types
+    the PLACEHOLDER as PostgreSQL `interval`, so asyncpg hands the bound value
+    to its interval codec and raises DataError at bind-encoding when the value
+    is a str. It reached production on 2026-09-08 and returned HTTP 500 for
+    every match report for three and a half hours. Concatenation
+    (`:p || ' minutes'`) types the parameter as text and does work, but it is
+    the form #448 rejects. `make_interval(<unit> => CAST(:p AS integer))` is
+    the only spelling that is both typed and correct.
+    """
+    return "make_interval(%s => CAST(:%s AS integer))" % (unit, param)
+
+
+def _assert_typed_interval(sql, param, unit, where):
+    """Require the house form AND reject the form that broke production, so a
+    future rewrite cannot satisfy this by removing the bound altogether."""
+    assert _typed_interval(param, unit) in sql, (
+        "%s: the :%s bound must be built in SQL from a typed integer bind, "
+        "%s (#448/#588)" % (where, param, _typed_interval(param, unit))
+    )
+    assert "CAST(:%s AS interval)" % param not in sql, (
+        "%s: CAST(:%s AS interval) types the placeholder as interval, so a "
+        "non-timedelta bind raises DataError before the query runs (#588)"
+        % (where, param)
+    )
+
+
 REPORTER_SID = "76561198000000011"
 LEAVER_SID = "76561198000000012"
 REPORTER = UUID("11111111-1111-4111-8111-111111111111")
@@ -159,7 +195,12 @@ class SeriesFixture:
         if "ORDER BY s2.created_at DESC LIMIT 1" in sql:
             legacy = (not self.any_grant_for_pair) or "series_dc_grants g3" not in sql
             legacy = legacy and (not self.completed or self.is_most_recent)
-            if "CAST(:live_window AS interval)" in sql:
+            # Keyed on the BIND NAME, not on how the interval is spelled:
+            # this gate used to test for "CAST(:live_window AS interval)" and
+            # so stopped applying self.fresh the moment that SQL was corrected
+            # — the fake went on modelling every legacy series as fresh and
+            # nothing failed to say so (#342/#441/#588).
+            if ":live_window" in sql:
                 legacy = legacy and self.fresh
             arms.append(legacy)
         if not arms:
@@ -265,6 +306,7 @@ class FakeSession:
         self.rollbacks = 0
         self.series_loads = 0
         self.freshness_checks = 0
+        self.freshness_params = {}
         self.count_reads = 0
         self.insert_params = None
         self.dedup_params = None
@@ -385,9 +427,11 @@ class FakeSession:
                         sql, main.DC_MIN_LIVE_POINTS,
                         main._dc_require_verified_seat()) else [])
                 return _Result([(1,)] if self.series_still_eligible else [])
-            assert "CAST(:live_window AS interval)" in sql, (
-                "an interval bind has to be CAST, never concatenated (#448)"
-            )
+            _assert_typed_interval(sql, "live_window", "secs",
+                                   "the freshness arm")
+            # The spelling is one half of #588. The bound VALUE is the other,
+            # and this executed arm is the only place a test can see it.
+            self.freshness_params = dict(params or {})
             self.freshness_checks += 1
             if self.series_fixture is not None:
                 return _Result([(1,)] if self.series_fixture.evaluate(
@@ -767,6 +811,11 @@ def test_a_series_the_name_cannot_reach_is_refused_and_asked_in_sql():
         _call(session, str(NAMED_SERIES))
     assert caught.value.status_code == 403
     assert session.freshness_checks == 1
+    assert isinstance(session.freshness_params.get("live_window"), int), (
+        "the live window must reach the driver as an int: the SQL types the "
+        "placeholder as integer, so a str bind raises DataError at bind-encoding "
+        "before the query runs (#588). The spelling alone does not prove it."
+    )
     assert session.inserts == 0
 
 
@@ -828,9 +877,7 @@ def test_the_name_reaches_one_series_that_is_live_and_has_been_played():
     assert "COALESCE(s.last_activity_at, s.created_at)" in query, (
         "liveness is asked of the column the server stamps, not of a null"
     )
-    assert "CAST(:live_window AS interval)" in query, (
-        "an interval bind has to be CAST, never concatenated (#448)"
-    )
+    _assert_typed_interval(query, "live_window", "secs", "the compatibility arm")
 
     # ...and the delivery clock is on the COMPATIBILITY arm only. A grant ends
     # when the server observes the sitting end, not when a client failed to get
@@ -2029,8 +2076,10 @@ def test_each_prune_mode_re_asks_its_whole_selection_under_its_own_lock():
             "rs.status = 'active'",
             "rs.invalidated_at IS NULL",
             "rs.is_tournament = FALSE",
-            "rs.created_at < NOW() - CAST(:cutoff AS interval)",
+            "rs.created_at < NOW() - make_interval(mins => CAST(:cutoff AS integer))",
             "NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id)",
+            # ...and the bound value, not only the SQL spelling (#588).
+            '"cutoff": int(',
         ],
         "_still_b = ": [
             "rs.status = 'active'",
@@ -2039,7 +2088,8 @@ def test_each_prune_mode_re_asks_its_whole_selection_under_its_own_lock():
             "rs.p1_series_wins < 2 AND rs.p2_series_wins < 2",
             "EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id)",
             "b.settled_at IS NULL",
-            "CAST(:stalled AS interval)",
+            "make_interval(mins => CAST(:stalled AS integer))",
+            '"stalled": int(',
         ],
     }
     for marker, terms in mode_terms.items():
@@ -2731,8 +2781,27 @@ def test_a_sitting_nothing_has_happened_in_for_hours_settles_instead():
         "a sitting idle past the live window still answers retryable, so a "
         "report that can never become eligible never leaves the client"
     )
-    assert "CAST(:live_window AS interval)" in session.authority_sql, (
-        "the idle bound is not asked in SQL against the database clock (#448)"
+    _assert_typed_interval(session.authority_sql, "live_window", "secs",
+                           "the authority statement's idle bound")
+
+
+def test_every_live_window_bind_is_an_int_and_not_only_spelled_right():
+    """The SQL half of #588 is pinned at four named sites; this is the bind half.
+    `make_interval(secs => CAST(:live_window AS integer))` types the PLACEHOLDER
+    as integer, so a str value still raises DataError at bind-encoding and the
+    statement never runs -- which is exactly what broke production on
+    2026-09-08. No spelling assertion can see that, and the binds live at
+    several call sites, so this is asked of the CLASS rather than of a line
+    (#432): no :live_window bind anywhere in the module may be untyped."""
+    src = inspect.getsource(main)
+    bare = re.findall(r'"live_window":(?!\s*int\()[^\n]*', src)
+    assert not bare, (
+        "every :live_window bind must be int(...); untyped: %r (#588)" % (bare,)
+    )
+    # ...and the sweep must not be able to pass by there being nothing to find.
+    assert len(re.findall(r'"live_window":\s*int\(', src)) >= 3, (
+        "the :live_window binds have moved or vanished, so the sweep above would "
+        "pass vacuously -- re-point it before trusting it (#342)"
     )
 
 
@@ -2747,10 +2816,8 @@ def test_the_idle_bound_is_computed_from_the_sitting_and_not_asserted_about():
         "the diagnostic reports idleness without reading when anything last "
         "happened in the sitting"
     )
-    assert "CAST(:live_window AS interval)" in stmt, (
-        "the idle bound is not asked against the database clock, or is not "
-        "asked at all (#448)"
-    )
+    _assert_typed_interval(stmt, "live_window", "secs",
+                           "the idle diagnostic")
     assert "AS idle" in stmt
 
 

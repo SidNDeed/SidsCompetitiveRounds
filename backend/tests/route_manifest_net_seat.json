@@ -376,7 +376,7 @@
           ],
           "main",
           "submit_bug_report",
-          "45e143eba1c1d5598ebae691f8139902002e7b37"
+          "debbebfe865e442ade58d19967176a241c3dfb89"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -583,7 +583,7 @@
           ],
           "main",
           "submit_match",
-          "b8102384626e42c6444ad9fcf0dc0486079ff856"
+          "7c4154898735128fa5189942f894f54586975fed"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -988,7 +988,7 @@
           ],
           "main",
           "get_active_series",
-          "febdd0f1400a1b3f897166befc7d044597a083cf"
+          "c83b9468d82c3926c41357f5b4e8ee0c462a2506"
         ],
         [
           "/api/v1/series/preflight",
@@ -997,7 +997,7 @@
           ],
           "main",
           "series_preflight",
-          "65d365946a34946e1e4594c44ddf25a21d80937e"
+          "eae783502363ff4a0e77b6b1bfff10a4c7697aea"
         ],
         [
           "/api/v1/series/recent",
@@ -1051,7 +1051,7 @@
           ],
           "main",
           "submit_team_match",
-          "788f28e6d153cab5f0f7ac562f7a0d7596d15b4c"
+          "96a0d23d5bd2e59fbea46fa2f68c46f74ce7ebe8"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1156,7 +1156,7 @@
           ],
           "main",
           "unlock_achievement",
-          "0f014a7bfec76daa37ea7c69f32478a90c1161a8"
+          "7aa0252d643e3239e12db4524ac6d7c509832311"
         ],
         [
           "/api/v1/achievements/{key}/earners",
@@ -1426,7 +1426,7 @@
           ],
           "main",
           "chat_moderate_mute_by_message",
-          "20f8b34847a83f05afc8fbba47f014446d94df93"
+          "a360047e443355930e24d439860bc00d6e1bc6cf"
         ],
         [
           "/api/v1/chat/moderate/mutes",
@@ -1480,7 +1480,7 @@
           ],
           "main",
           "post_chat_from_discord",
-          "821dfdec36b86b1d72b8c288e3c387e30be429b3"
+          "677f7157d85ca4b1d69a101b72f996dee222c788"
         ],
         [
           "/api/v1/chat/recent",
@@ -1831,7 +1831,7 @@
           ],
           "main",
           "bridge_stream_chat",
-          "1e051ab174ff5af9bdeef318bcf3e15ef249d95e"
+          "faa26ba012df4951f824da43f2f9c96c87eda13c"
         ],
         [
           "/api/v1/internal/chat/bridge-moderation",
@@ -1840,7 +1840,7 @@
           ],
           "main",
           "internal_chat_bridge_moderation",
-          "105efa7d2f49cd5bb1dfce1e5fcdc54665a7d59a"
+          "5daa4986d270073a7c0632a4498c452518bc91ed"
         ],
         [
           "/api/v1/internal/chat/discord-deleted",
@@ -1858,7 +1858,7 @@
           ],
           "main",
           "internal_chat_discord_mute",
-          "6e1120b5db8e58ab3f638ea864e7b4e1123556b8"
+          "57e092a0866f54c7a3fb00ba4c576de3538310ee"
         ],
         [
           "/api/v1/internal/chat/lockdown",
@@ -2065,7 +2065,7 @@
           ],
           "main",
           "get_mod_version",
-          "d2ea136eb2bd84b90d2fb6de68f954df0e5f4889"
+          "9c8cacc9ad75ff42f99b8ef2865a18c00a35eaf4"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
@@ -2083,7 +2083,7 @@
           ],
           "main",
           "toggle_ranked",
-          "ddcf24b3e01cb9212664953dc08708620501cf5d"
+          "6a9db293a837a7594713ce3a77e4afaf1ef7d063"
         ],
         [
           "/api/v1/music/rate",
@@ -2263,7 +2263,7 @@
           ],
           "main",
           "presence_ping",
-          "0e28c8278b11b1cf910eec0156d71ac72607568b"
+          "0808b05c5694c4219c3bb01afa26b7655927ae8e"
         ],
         [
           "/api/v1/queue/count",
@@ -2290,7 +2290,7 @@
           ],
           "main",
           "queue_join",
-          "11ca819248328c94961c86eaf87c8bc60b2e1e6c"
+          "81550e3a0df1a87229dacfe2174f78467de94596"
         ],
         [
           "/api/v1/queue/leave",
@@ -2308,7 +2308,7 @@
           ],
           "main",
           "queue_poll",
-          "878f80dfd45062cbd46fb03026bee2b1b082b1b4"
+          "70e9244e263924d898074233802e43e9d3321e29"
         ],
         [
           "/api/v1/queue/ready",
@@ -2317,7 +2317,7 @@
           ],
           "main",
           "queue_ready",
-          "26e128a70dc808139860d64a763e0f213e1193ce"
+          "7360d6c606407415c2bd6df25ec35279ed45a81a"
         ],
         [
           "/api/v1/queue/recent-joins",
@@ -2380,7 +2380,7 @@
           ],
           "main",
           "report_disconnect",
-          "644c1ffa4d280105be8f618cd40ee27750193a10"
+          "4d79635a01d502d302a67c69bd2fca392dc8eb96"
         ],
         [
           "/api/v1/settings/allow-spectators",
@@ -2596,7 +2596,7 @@
           ],
           "main",
           "team_queue_join",
-          "d88fc6b5bfc9259371cdb3382e9d682e3cf27d16"
+          "ac369336fe0d6b5c3d9dfa816c1290bcf68ed3d2"
         ],
         [
           "/api/v1/team/queue/leave",
@@ -3065,7 +3065,7 @@
       [
         "main",
         "lifespan",
-        "0589378d0180a09488f2611b9c7f3eeae743f26f"
+        "6cbb13d6c1ab10ce9e34198fc72ea985cb4ac355"
       ]
     ]
   },

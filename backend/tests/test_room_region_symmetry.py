@@ -32,18 +32,28 @@ cover. The evidence is therefore "the server sent two players here and a game
 from that room was reported and accepted", and it is published only once that
 report has committed.
 
-AND WHEN CORROBORATION CANNOT DECIDE, `min(a, b)` does — the alphabet, chosen
-because a pair has no comparable latency measurement and a stable coin flip is
-better than one that depends on which seat asked. That is written down as a
+AND WHEN CORROBORATION CANNOT DECIDE, `min(a, b)` settles the LADDER's answer
+— the alphabet, chosen because no latency measurement reaches that rung and a
+stable coin flip is better than one that depends on which seat asked. That is written down as a
 coin flip rather than a preference, and a test below pins that it is not
 described as anything else.
 
 What none of this claims: that the chosen region is the BEST one for a
 cross-region pair. Steering on a stored home region was refused because an
 untimestamped best-region cache steers a player who relocated by where they
-used to be, and the measurement that would settle it does not exist yet.
+used to be. A real measurement now exists as rung 0
+(`_pick_region_by_pings`): when BOTH seats have sent a ping map no older
+than 180 s it may replace the ladder's answer, but only with a region that
+costs NEITHER seat more than 20 ms over that seat's own measured baseline.
+That is a bound, not a best -- and whenever either map is absent, stale or
+malformed (a client without the ping sweep sends none at all), whenever the
+two maps share no region, and whenever no candidate clears that bound, the
+ladder decides the room by itself, which is why the ladder is what every
+test in this file is about. Rung 0 has its own file,
+test_queue_region_pings.py.
 """
 
+import ast
 import inspect
 import itertools
 import io
@@ -838,6 +848,56 @@ def test_the_comment_no_longer_claims_no_client_supplied_the_region():
     assert "IT IS NOT READ FROM THE REPORT" in src, "the true, narrower claim is missing"
     assert "the candidates come" in src and "from clients" in src, (
         "the correction must say where the candidates actually come from"
+    )
+
+
+def test_the_pickers_comment_names_the_real_and_only_sighting_source():
+    """The picker's comment claims a sighting has exactly ONE source and names
+    it: the accepted-match path in `submit_match`. It replaced a sentence that
+    named `queue_join` -- which had not been a source since r12, while the
+    comment went on saying so, and the picker is the one place a reader checks
+    before trusting the corroboration rung.
+
+    Both halves of the replacement can go stale independently: a second writer
+    could be added, or that function renamed, and the prose would lie with a
+    green suite. So this pins the FACT rather than the sentence -- the wording
+    is free to change, the arrangement it describes is not.
+
+    THE MUTATIONS THIS MUST FAIL ON: adding a second `_note_region_seen(` call
+    anywhere; moving the existing one out of `submit_match`; and dropping the
+    function's name from the comment."""
+    src = MAIN_PY.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_note_region_seen"
+    ]
+    assert len(calls) == 1, (
+        f"the comment says ONE source; found {len(calls)} call sites at "
+        f"{[c.lineno for c in calls]}"
+    )
+
+    # The innermost function spanning the call -- walking every def rather than
+    # trusting a line number, so this survives the file moving underneath it.
+    holders = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= calls[0].lineno <= (node.end_lineno or node.lineno)
+    ]
+    assert holders, "the sole sighting call is not inside any function"
+    enclosing = max(holders, key=lambda node: node.lineno).name
+    assert enclosing == "submit_match", (
+        f"the comment names submit_match; the call now lives in {enclosing}"
+    )
+
+    picker = inspect.getsource(main._pick_room_region)
+    assert "submit_match" in picker, (
+        "the picker's comment no longer names the source it claims to"
     )
 
 

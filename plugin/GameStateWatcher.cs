@@ -1571,6 +1571,10 @@ namespace CompetitiveRounds
                     : mode == "1v2" ? (ApiClient.ActiveOvt1v2SeriesId ?? "")
                     : (ApiClient.ActiveFfaLobbyId ?? "");
                 string region = "";
+                // Raw read on purpose: unreachable in OfflineMode, because this
+                // method already returned at its InRoom/OfflineMode gate above.
+                // Routing it through LiveOnlineRegion would add a guard that can
+                // never fire, which is worse than no guard (#431/#342).
                 try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { }
                 int actor = -1;
                 try { actor = PhotonNetwork.LocalPlayer?.ActorNumber ?? -1; } catch { }

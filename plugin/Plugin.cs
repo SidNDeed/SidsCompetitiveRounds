@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.40.2";   // Sep 4-8: one Session button per sitting; the Grow competitive clock 240 -> 120 FPS (room key cr_grow2); Mail and Music as header icons over page IMGUI; the ranked room region picked from both players' pings; matched-but-never-connected (bugs 335/336/340); hover profile card, in-game mail, session reports; Spirit's charts in the library; the es/ru/uk/sv translations for the 198 strings that still rendered English. Colour emoji (bug 333 step 2) is in the tree but INERT: EmojiSprites.INDEX_SHA256 is unpinned until the atlas release exists, and that is a terminal Disabled state -- it is not in this changelog. Previous (1.40.1, Sep 3): Clavar la Bala tracks 13-14 (music ar3), 1v1 queue poll session requirement + reciprocal pair writers, Release A network diagnostics. Floors riding this release: DANCES_MIN_VERSION=1.39.7, MUSIC_PURCHASE_MIN_VERSION=1.40.0 — both satisfied.
+        public const string ModVersion = "1.40.3";   // Sep 8-9: the ranked room's region. A client refreshed its Photon ping map only when older than 300 s while the server refuses any map stamped more than 180 s before the room is issued, and the one trigger that could refresh mid-queue required a Photon connection the main menu does not have -- so the maps that were supposed to decide the room were routinely too old to be used. A ranked-only session was worse off still: PUN builds its region list only from an OpGetRegions response, which a forced ranked connect skips, so those players had no list to ping at all and the measurement never ran once. The client now refreshes on a 60 s join threshold and a 90 s queue cadence that no longer asks Photon's connection state, and fetches its own region list from the NameServer when PUN has none. Also: a region left behind by the Sandbox's offline mode is no longer reported as the region you are on. Bug 351 (the thicker-menu-text toggle bricking chat) and bug 350 (a spectator's point orb opening already full) ride along, with match reports no longer failing on untyped interval parameters. Previous (1.40.2, Sep 8): one Session button per sitting; the Grow competitive clock 240 -> 120 FPS. Floors riding this release: DANCES_MIN_VERSION=1.39.7, MUSIC_PURCHASE_MIN_VERSION=1.40.0 -- both satisfied.
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -2712,6 +2712,13 @@ namespace CompetitiveRounds
             // request per room incarnation.
             try { H2HSummary.Tick(); } catch { }
 
+            /* [FONT] HeavyTextSelfTest (bug #351). Driven from THIS persistent
+             * tick and not from NativeUI.Tick, which early-returns unless the
+             * settings page is already open — the whole point is to reach the
+             * toggle path without a click. Self-gating: one run per process,
+             * and it returns immediately unless the cfg lever is on. */
+            try { UIFactory.EnsureWeightSelfTest(); } catch { }
+
             // SCR Broadcast director + §2c identity fence (design §3a). Runs
             // from THIS persistent tick — never a coroutine host that
             // NetworkRestart can destroy (#16/#270c). Self-gating: one
@@ -2725,6 +2732,7 @@ namespace CompetitiveRounds
             try { OverlayIdleClose.Tick(); } catch { }
             try { MusicStreamProbe.Tick(); } catch { }
             try { RegionPingSweep.Tick(); } catch { }   // Sept 7 item 3: 250 ms self-throttled main-thread poll
+            try { RegionCatalog.Tick(); } catch { }     // D2: services a live NameServer fetch every call
             // D13: a host-less music engine has no Update of its own; this
             // persistent poll respawns the host once the dying one is observed
             // destroyed — stateless, uncapped, every frame.

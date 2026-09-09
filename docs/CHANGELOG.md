@@ -1,5 +1,51 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.40.3 — 2026-09-09
+
+**The ranked room's region is measured again**
+
+- The room a ranked match lands in is supposed to be chosen from both players'
+  own Photon pings. In practice those measurements were usually too old to be
+  used, and for some players they never ran at all. Three things were wrong and
+  all three are fixed.
+- The client refreshed its ping map only once it was older than 300 seconds,
+  while the server refuses any map stamped more than 180 seconds before the room
+  is issued. Everything in that gap was measured, uploaded, and then declined.
+  The refresh threshold is now 60 seconds.
+- The only trigger that could refresh the map while you were queueing was gated
+  on being connected to Photon's master server — which you are not, at the main
+  menu, which is where ranked players queue from. The queue-side refresh no
+  longer asks about Photon's connection state; the idle menu sweep still does.
+- A player who only ever queues ranked had no region list to ping in the first
+  place. Photon builds that list solely from a name-server request it issues
+  while it has no region set, and a ranked join sets one before that ever
+  happens — so the ping never ran once for the whole session. The mod now
+  fetches its own copy of the list from Photon's name server when the game has
+  none. It is a separate, short-lived connection that reads the list and closes;
+  it does not touch the game's own.
+- A region left behind by the Sandbox no longer reports as the region you are
+  connected to. Photon keeps the last region on the client after the Sandbox's
+  offline mode ends, and it looks live: the connected flag and the server name
+  both read normal, so a stale value was sent as a live one and outranked both
+  players' real caches. The same read also went out mid-disconnect, naming the
+  region being torn down.
+- If the measurement still cannot run, nothing changes from before: the map is
+  simply absent and the server picks the room from the regions it already knows.
+
+**Fixes**
+
+- Turning the thicker menu text setting back off no longer breaks chat. Every
+  label the mod draws shared one font material, and the toggle destroyed it
+  while the chat overlay and the hover profile card were still pointing at it —
+  so their panels kept painting and their text did not, permanently. The toggle
+  now re-points those labels instead of destroying anything. (Bug 351)
+- Watching a match no longer opens the round winner's point orb already full.
+  Nothing on a spectator seat ever returned the orb fills to zero between
+  sequences, so a scored point carried over into the next one. Covers 1v2 and
+  2v2 as well as 1v1. (Bug 350)
+- Match reports no longer fail on the interval parameters used to age a report,
+  which had to be typed explicitly for the database driver to accept them.
+
 ## v1.40.2 — 2026-09-08
 
 **One Session button per sitting, beside the ID button**
