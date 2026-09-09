@@ -298,6 +298,14 @@ namespace CompetitiveRounds
             FighterNames = new string[0];
             FighterTeams = new int[0];
             SpectatorViewState.Reset();
+            /* Bug 350, sibling: this Reset clears the watched mode, names and teams
+             * but left the point-orb FILLS alone. Belt-and-braces on THIS path: a
+             * spectate exit reloads scene 0 (NetworkRestart -> GoToMenu), which
+             * destroys and re-creates PointVisualizer along with its fills, so
+             * nothing here can carry state into the next match either way. The
+             * between-match guarantee is the 0-0 pre-state reset in
+             * PlayPointSequence, not this call. */
+            try { var pvz = PointVisualizer.instance; if (pvz != null) pvz.ResetPoints(); } catch { }
             try { CardChoiceEndPickPatch.ClearPending(); } catch { }
         }
 
@@ -1232,6 +1240,34 @@ namespace CompetitiveRounds
                     _seqCo = null;
                     try { pv.Close(); } catch { }   // publicized — vanilla's own overlay reset
                 }
+                /* Bug 350: on an OBSERVER seat the round-winner's point orb opens
+                 * already FULL and then corrects. The orb fills are written only by
+                 * PointVisualizer.DoShowPoints, and there are exactly TWO paths that
+                 * put them back to zero: ResetPoints(), whose sole caller in the
+                 * game is GM_ArmsRace.ResetMatch(), and DoWinSequence's own
+                 * DoShowPoints(0,0) tail. ResetMatch is suppressed on a spectator
+                 * outright. The tail is reachable here, but only down ONE branch —
+                 * the `conversion && oneVone` call a few lines below — so an
+                 * observed 1v1 conversion does self-correct, while every other
+                 * path through this method (DoSequence: team modes, and 1v1
+                 * non-conversion points) leaves the fills exactly as the last
+                 * sequence left them. That is the gap: for as long as the seat stays
+                 * in the room, nothing returns them to 0 between point sequences that
+                 * do not convert. (Across matches the scene reload rebuilds the
+                 * visualizer, so that half is not this method's to hold.)
+                 * A missing reset, not a vanilla-then-mod ordering race.
+                 * Derive the PRE-event totals by inverting the increment applied in
+                 * SpectatorPatches, and zero the fills only when the sequence is
+                 * about to start from 0-0 — the state in which a full orb is
+                 * unambiguously wrong. Any mis-derivation (a dropped RPC, a mid-round
+                 * join) can then only move the display toward correct (#276/#430).
+                 * Placed ABOVE the oneVone branch on purpose: the class is "every
+                 * observed team mode", so this covers 1v2 and 2v2 too (#432). FFA
+                 * never reaches here (SpectatorPatches returns into
+                 * FfaMode.SpectatorObserveRound first). */
+                int preP1 = visP1 - (winningTeamID == 0 ? 1 : 0);
+                int preP2 = visP2 - (winningTeamID == 1 ? 1 : 0);
+                if (preP1 <= 0 && preP2 <= 0) { try { pv.ResetPoints(); } catch { } }
                 bool orangeWinner = winningTeamID == 0;
                 bool oneVone = WatchedMode == "1v1"
                                && FighterTeams != null && FighterTeams.Length == 2;

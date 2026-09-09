@@ -10627,17 +10627,23 @@ namespace CompetitiveRounds
                 }
                 CurrentQueueState = QueueState.Idle;
             }
-            // Use current Photon region if not specified
+            // Use current Photon region if not specified. LIVE-ONLY on purpose:
+            // this body carries `region` and `home_region` as two separate
+            // signals the server ranks against each other, so answering this one
+            // from the PlayerPrefs cache would double-weight that cache.
             if (string.IsNullOrEmpty(region))
             {
-                try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+                region = LiveOnlineRegion();
             }
             // Aug 15 item 5 (Jarvis/Nix, both-Asian pair on a US room): also
             // send Photon's cached BEST region — the player's HOME region from
             // the ping cache. CloudRegion above is a join-time snapshot that
             // casual region-churn (#82) or a not-connected menu state (#122)
-            // makes wrong or empty, and the server's room-region pick trusted
-            // it blindly (empty+empty fell through to "us"). Summary format is
+            // makes EMPTY — it used to be able to come back STALE instead, from
+            // a lingering post-Sandbox OfflineMode, which the server could not
+            // tell from an honest snapshot; LiveOnlineRegion closes that.
+            // The server's room-region pick trusted it
+            // blindly (empty+empty fell through to "us"). Summary format is
             // "code;ping;available,codes" — or just the comma list when no
             // best region is cached (RegionHandler.SummaryToCache), hence the
             // semicolon and comma guards.
@@ -10651,6 +10657,12 @@ namespace CompetitiveRounds
             try { RegionPingSweep.NoteJoinQueue(); regionPings = RegionPingSweep.JoinBodyFields(); } catch { regionPings = ""; }
             string safeName = Escape(displayName ?? steamId);
             string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"home_region\":\"{Escape(homeRegion)}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}{regionPings}}}";
+            // The two region fields the server's ladder ranks against each other,
+            // as SENT. Without this line neither the live-only rule nor an empty
+            // live field is observable from a client log, and "it should be empty
+            // now" is not something a reader can check (#438/#443: acceptance is a
+            // positive signal the feature emits, not the absence of a symptom).
+            Plugin.Log?.LogInfo($"[QUEUE] join region='{region}' home='{homeRegion}'");
 
             int gen = ++queueGen;  // new lifecycle starts at SEND, not at the ack
             Plugin.Instance.StartCoroutine(PostRequest(
@@ -10884,9 +10896,15 @@ namespace CompetitiveRounds
 
             int gen = queueGen;
             string sentTok = SteamAuth.SessionToken;   // the credential THIS poll rides out with
-            // Sept 7 item 3: a completed sweep with a new revision rides the next
-            // three polls as the X-Region-Pings header (a header, never a query
-            // string); null on every other poll and nothing is stamped.
+            // Sept 7 item 3: the latest completed map rides the X-Region-Pings
+            // header (a header, never a query string) on EVERY poll while it is
+            // younger than the server's issuance window, and null once it is not.
+            // It used to ride only the three polls after a new sweep; that
+            // send-counter is gone, so the server re-stamps region_pings_at on
+            // every accepted poll. That costs a write per poll and cannot freshen
+            // anything: the stamp is derived as now - age, and age and the server
+            // clock advance together, so re-sending an unrefreshed map re-derives
+            // the same absolute instant it already had.
             string regionPingsHeader = null;
             try { regionPingsHeader = RegionPingSweep.PollHeaderValue(); } catch { regionPingsHeader = null; }
             Plugin.Instance.StartCoroutine(GetRequest(
@@ -12298,7 +12316,7 @@ namespace CompetitiveRounds
             }
             if (string.IsNullOrEmpty(region))
             {
-                try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+                region = BestKnownPhotonRegion();
             }
             // F2 (Codex r3): last gate before the send — one enrollment in
             // flight per mode, shared with the hosted Create/Join paths.
@@ -13890,8 +13908,7 @@ namespace CompetitiveRounds
             string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
             // Region rides along like 2v2's JoinTeamQueue — without it the
             // server pins every 1v2 room to "us" even for an all-EU trio.
-            string region = "";
-            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            string region = BestKnownPhotonRegion();
             // F2 (Codex r3): last gate before the send — one enrollment in
             // flight per mode, shared with the hosted Create/Join paths.
             if (!EnrollGateBegin("ovt")) return;
@@ -15004,8 +15021,7 @@ namespace CompetitiveRounds
                 return;
             }
             string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
-            string region = "";
-            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            string region = BestKnownPhotonRegion();
             string body = $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"}}";
             int gen = ++ffaGen;
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/queue/join", body, (ok, resp) =>
@@ -15065,8 +15081,7 @@ namespace CompetitiveRounds
         private static string FfaLobbyBody(string sid, string lobbyId = null, string password = null)
         {
             string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
-            string region = "";
-            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            string region = BestKnownPhotonRegion();
             string lob = lobbyId == null ? "" : $",\"lobby_id\":\"{Escape(lobbyId)}\"";
             // v1.37 private lobbies: password rides create AND join; the server
             // ignores it on public lobbies, so a stale value is harmless.
@@ -16186,8 +16201,7 @@ namespace CompetitiveRounds
             private string EnrollBody(string sid, string lobbyId, string password, string extras)
             {
                 string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
-                string region = "";
-                try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+                string region = BestKnownPhotonRegion();
                 string lob = lobbyId == null ? "" : $",\"lobby_id\":\"{Escape(lobbyId)}\"";
                 string pw = string.IsNullOrEmpty(password) ? "" : $",\"password\":\"{Escape(password)}\"";
                 return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}{extras ?? ""}}}";
@@ -20668,15 +20682,51 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>The region this client is CONNECTED TO right now, or "" when
+        /// it is not connected to one. PhotonNetwork.CloudRegion already returns
+        /// null unless IsConnected and Server != NameServer — but OfflineMode
+        /// makes both of those lie (IsConnected hardcoded true; Server reports
+        /// MasterServer/GameServer), so a lingering post-Sandbox OfflineMode
+        /// (#122) hands back NetworkingClient.CloudRegion, which Disconnect()
+        /// never clears — only ConnectToNameServer does.
+        ///
+        /// Ruling out OfflineMode is not enough on its own. IsConnected — the
+        /// flag CloudRegion's own getter leans on — is true for EVERY state but
+        /// PeerCreated and Disconnected (LoadBalancingClient.cs:186), so a client
+        /// in Disconnecting, or part-way through reconnecting, still reports the
+        /// region of the connection it is tearing down. The settled states are
+        /// therefore named positively instead of filtering the transitional ones
+        /// out, because the two failure directions are not symmetric: an
+        /// allow-list that is too strict returns "" and the ladder falls back to
+        /// the cached home, while a deny-list that misses one state reports a
+        /// region this client is not on. This does NOT claim the value is the
+        /// player's best region, only that the process is settled on it now.</summary>
+        public static string LiveOnlineRegion()
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode) return "";
+                var st = PhotonNetwork.NetworkClientState;
+                if (st != Photon.Realtime.ClientState.ConnectedToMasterServer
+                    && st != Photon.Realtime.ClientState.JoinedLobby
+                    && st != Photon.Realtime.ClientState.Joined) return "";
+                string r = (PhotonNetwork.CloudRegion ?? "").Replace("/*", "").Trim().ToLowerInvariant();
+                return IsPlausibleRegionCode(r) ? r : "";
+            }
+            catch { return ""; }
+        }
+
         /// <summary>The best Photon region code we can name for THIS client
         /// right now, or "" when there is genuinely nothing to report.
         ///
-        /// PhotonNetwork.CloudRegion returns NetworkingClient.CloudRegion, which
-        /// is populated only while CONNECTED — so a player signing up for a
-        /// tournament from the main menu reports "". That is not an edge case:
-        /// 24 of the 25 signups ever recorded in production carry no region, and
-        /// because the lock picks the MODE of the non-empty values, the single
-        /// legacy outlier decided an entire tournament's region on its own.
+        /// PhotonNetwork.CloudRegion is null unless IsConnected and Server is not
+        /// NameServer, so a menu-time signup normally reports "". That is not an
+        /// edge case: 24 of the 25 signups ever recorded in production carry no
+        /// region, and because the lock picks the MODE of the non-empty values,
+        /// the single legacy outlier decided an entire tournament's region on its
+        /// own. Those two checks are NOT a connectivity guarantee: OfflineMode
+        /// makes both of them pass (#122), which is why the live read below goes
+        /// through LiveOnlineRegion rather than touching CloudRegion directly.
         ///
         /// PUN caches its own best-region verdict across launches in PlayerPrefs
         /// (PhotonNetwork.BestRegionSummaryInPreferences, key
@@ -20696,24 +20746,22 @@ namespace CompetitiveRounds
         /// (the middle field must parse as the ping) and the code is validated
         /// before it is used.
         ///
-        /// SCOPE: used by the tournament signup only, and NOT because the other
-        /// CloudRegion reads in this file are safe from the same emptiness —
-        /// they are the queue joins, which also run from the menu and also send
-        /// "". The difference is what the server does with it: every queue-lock
-        /// path coerces the room's region with `or "us"`, so a queue room is
-        /// never issued without one, while the tournament lock takes the MODE of
-        /// the reported values and a population of one legacy row wins it
-        /// outright. Feeding this to the queue joins would improve matchmaking
-        /// region accuracy and is worth doing deliberately, with its own review
-        /// of what the server infers from that field — it is not a drive-by.</summary>
+        /// SCOPE: the tournament signup, and every mode whose join body carries a
+        /// SINGLE region field — the team, 1v2, FFA and enrol bodies. Those all
+        /// run from the menu and used to send "" for the same reason the signup
+        /// did; the server coerces a missing queue region with `or "us"`, so the
+        /// cost there was a wrong room rather than a wrong tournament, but it was
+        /// never a reason the read was correct.
+        ///
+        /// Deliberately NOT the 1v1 join. That body carries `region` AND
+        /// `home_region` as two separate fields and the server's ladder ranks one
+        /// against the other, so `region` there must stay live-only — answering it
+        /// from the PlayerPrefs cache would make the two fields the same signal
+        /// wearing two hats and quietly double-weight a stale cache.</summary>
         public static string BestKnownPhotonRegion()
         {
-            try
-            {
-                string live = (PhotonNetwork.CloudRegion ?? "").Replace("/*", "").Trim().ToLowerInvariant();
-                if (IsPlausibleRegionCode(live)) return live;
-            }
-            catch { }
+            string live = LiveOnlineRegion();
+            if (live.Length > 0) return live;
             try
             {
                 string summary = PhotonNetwork.BestRegionSummaryInPreferences ?? "";

@@ -5179,7 +5179,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA)
 
 
-LATEST_MOD_VERSION = "1.40.2"
+LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -13605,8 +13605,9 @@ def _region_agreed(a, b):
     retired region from winning by sorting first. With both corroborated or
     neither, the tie goes to a fixed order: a coin flip made stable, not a
     latency decision, and written down as such so nobody reads the result as a
-    preference. The pair has no comparable latency measurement, which is the
-    whole reason region steering was cut.
+    preference. No latency measurement reaches this rung: rung 0 runs after
+    it, on the answer this rung produced, and only when both seats sent a
+    fresh map.
     """
     if a and b:
         if a == b:
@@ -13624,7 +13625,9 @@ def _region_agreed(a, b):
 # A client carrying the sweep (Sept 7 batch) pings Photon's region list with its own UDP pinger and
 # sends the result twice: on the 1v1 /queue/join body (`region_pings`,
 # `region_pings_age_s`) and, while it keeps polling, as the request header
-# `X-Region-Pings: us=42,eu=31;age=12` for the three polls after a new sweep.
+# `X-Region-Pings: us=42,eu=31;age=12` on every poll while the map is young
+# enough to be worth sending (the client stopped counting sends; it now caps on
+# age instead, mirroring the issuance window below).
 # Both arrive through ONE validator; a map that fails it is stored as NULL at
 # join and ignored at poll (a poll never clears the columns). The columns are
 # deliberately NOT declared on the RankedQueue ORM model — raw SQL on both
@@ -13790,11 +13793,14 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     """
     mr, orr = _region_token(my_region), _region_token(opp_region)
     mh, oh = _region_token(my_home), _region_token(opp_home)
-    # NOTHING is recorded here. Only queue_join feeds the corroboration map,
-    # and only with a player id attached: refreshing a token's timestamp from
-    # issuance would keep a region the picker itself chose looking recent
-    # forever, so a retired one could never age out of the map that is there
-    # to notice exactly that.
+    # NOTHING is recorded here, and nothing should be: a sighting has exactly
+    # ONE source, the accepted-match path in submit_match, which credits the
+    # region this server issued for the room to the reporter's own steam id
+    # and only after that report has committed. queue_join is not a source
+    # either and says so at its own site. Issuance must stay out because
+    # refreshing a token's timestamp from the pick would keep a region the
+    # picker itself chose looking recent forever, so a retired one could never
+    # age out of the map that is there to notice exactly that.
     if mh and mh == oh:
         ladder = mh
     else:
@@ -14531,9 +14537,12 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
     _presence_touch(steam_id)
-    # Sept 7 item 3: a fresh ping map rides the poll as a header for the three
-    # polls after each new sweep. Same validator as the join; a refused or
+    # Sept 7 item 3: the client's latest ping map rides EVERY poll as a header
+    # while it is young enough to matter, so this runs at the poll rate rather
+    # than a few times per sweep. Same validator as the join; a refused or
     # absent header leaves the heartbeat UPDATE below exactly as it was.
+    # Re-accepting the same map is idempotent: the stamp is re-derived as
+    # now - age, which is the instant it already carried.
     _hdr_pings, _hdr_age = _region_pings_from_header(request.headers.get("x-region-pings"))
     # Clean up expired blocks opportunistically without waiting on a concurrent
     # decline/account cleanup that is touching another block row.

@@ -67,19 +67,369 @@ namespace CompetitiveRounds
          * own material and are unaffected — which is the point: this brings
          * English UP to the weight Russian already had. */
         private static Material weightMat; private static bool weightMatTried;
+        /* The font asset's OWN default material — what a label created with the
+         * setting off is rendering. Cached because the OFF path assigns it
+         * directly; see RepointWeightLabels for why re-assigning the font does
+         * not do this. */
+        private static Material baseFontMat;
+        /* The UiFontWeight the cached clone was baked at. The clone is built
+         * ONCE and kept for the process (see ResetWeightMaterial); this is the
+         * single reason it is ever rebuilt, so a cfg tune still takes effect on
+         * the next toggle without a rebuild happening on every toggle. */
+        private static float weightMatBuiltFor = float.NaN;
         private static PropertyInfo pTmpFontSharedMat;
         private static MethodInfo mTmpPreferredValues;
         private static MethodInfo mTmpPreferredValuesWH;   // GetPreferredValues(string,float,float) — bug 333
 
+        /* Bug 351 ("changing the menu settings from thick to not thick permanently
+         * bricks chat — just a dark box, no text"). ApplyWeightMaterial is called
+         * from CreateText, so EVERY label the mod has ever made points its
+         * fontSharedMaterial at the ONE shared "SCR heavy" clone. Destroying that
+         * clone on a toggle and then rebuilding only pageGO left every label the
+         * toggle does not rebuild — the chat overlay above all — holding a
+         * DESTROYED Material: the panel still paints, the text does not, and it
+         * never comes back because nothing rebuilds those surfaces.
+         *
+         * So the clone is not destroyed any more, and the toggle RE-POINTS the
+         * labels instead. They are tracked here rather than discovered with
+         * FindObjectsOfType, which returns only ACTIVE objects and therefore
+         * cannot see the very labels this repairs: ChatOverlayTmp leaves its
+         * panel (:122/:220) and its unused lines (:100) inactive, and the hover
+         * profile card (TmpOverlayPanel.cs:115) is inactive essentially always.
+         * A walk that repaired the 3-4 visible lines while logging a healthy
+         * count would be a check that cannot fail (#342/#431). This is the single
+         * choke point through which the material is ever applied, so the list IS
+         * the blast radius, not an approximation of it (#432). */
+        private static readonly List<object> weightLabels = new List<object>();
+        private static int weightLabelAddsSincePrune;
+
+        private static void TrackWeightLabel(object tmp)
+        {
+            try
+            {
+                weightLabels.Add(tmp);
+                if (++weightLabelAddsSincePrune < 512) return;
+                weightLabelAddsSincePrune = 0;
+                for (int i = weightLabels.Count - 1; i >= 0; i--)
+                    if ((weightLabels[i] as Component) == null) weightLabels.RemoveAt(i);
+            }
+            catch { }
+        }
+
         internal static void ResetWeightMaterial()
         {
-            try { if (weightMat != null) UnityEngine.Object.Destroy(weightMat); } catch { }
-            weightMat = null; weightMatTried = false; weightApplyLogged = false;
+            /* Deliberately NO Destroy, and — Sept 8 review — no REBUILD either.
+             *
+             * No Destroy: the old clone is what every not-yet-repointed label is
+             * still holding, and a destroyed Material is exactly what bricked
+             * chat in the first place.
+             *
+             * No rebuild: the clone is taken from whatever label happens to be
+             * rendering on our font when it is built, so rebuilding it on every
+             * toggle did two bad things. It leaked one HideAndDontSave material
+             * per click, unbounded across a session of testing; and it gave a
+             * live nametag glow/outline clone — same font asset, so it passes
+             * the source filter — a fresh chance each time to become the source
+             * and push a coloured outline onto every label in the mod. Built
+             * once, kept for the process. Turning the setting OFF does not need
+             * the material gone; it needs the labels pointed somewhere else,
+             * which is the whole job of the re-point below.
+             *
+             * The one thing that DOES force a rebuild is a change to
+             * UiFontWeight, handled in GetWeightMaterial. */
+            weightApplyLogged = false;
+            RepointWeightLabels();
+        }
+
+        /// <summary>Point every label the mod has created at the material the
+        /// CURRENT setting implies: the (re-built) heavy clone when the setting is
+        /// on, and the font's own default when it is off. Runs on the settings
+        /// toggle only.</summary>
+        private static void RepointWeightLabels()
+        {
+            Material m = GetWeightMaterial();   // null when the setting is OFF
+            int repointed = 0, pruned = 0;
+            try
+            {
+                if (pTmpFontSharedMat == null)
+                    pTmpFontSharedMat = tTMP.GetProperty("fontSharedMaterial",
+                        BindingFlags.Public | BindingFlags.Instance);
+                var dirty = tTMP.GetMethod("SetAllDirty", BindingFlags.Public | BindingFlags.Instance);
+                for (int i = weightLabels.Count - 1; i >= 0; i--)
+                {
+                    // Unity's overloaded null: a destroyed component compares equal
+                    // to null, which is how dead page labels leave the list.
+                    var comp = weightLabels[i] as Component;
+                    if (comp == null) { weightLabels.RemoveAt(i); pruned++; continue; }
+                    try
+                    {
+                        /* A label wearing a cosmetic typeface is not ours to
+                         * re-point: ApplyFontToLabel moved it off tmpFont and owns
+                         * it from then on. Both materials this method assigns are
+                         * Gravity's, and TMP's fontSharedMaterial setter accepts a
+                         * foreign atlas without complaint (the decompilation note in
+                         * GetWeightMaterial), so assigning one to a cosmetic-font
+                         * label renders that asset's glyph indices through the wrong
+                         * atlas. GetWeightMaterial already applies this same filter
+                         * when it picks a base. The `pTmpFont != null` half is
+                         * deliberate: an unresolved PropertyInfo must skip the
+                         * filter, not silently skip every label. */
+                        if (pTmpFont != null && pTmpFont.GetValue(comp) != tmpFont) continue;
+
+                        /* OFF assigns the font asset's DEFAULT material directly.
+                         *
+                         * It used to re-assign `font` and lean on TMP resetting
+                         * fontSharedMaterial as a side effect. Decompiled from the
+                         * Unity.TextMeshPro.dll this game ships: the setter body is
+                         * `if (!(m_fontAsset == value)) { m_fontAsset = value;
+                         * LoadFontAsset(); ... }`, and LoadFontAsset is the thing
+                         * that does `m_sharedMaterial = m_fontAsset.material`. Every
+                         * label that reaches here is on tmpFont — CreateText put it
+                         * there and the filter above re-checks it — so the guard held,
+                         * LoadFontAsset never ran, and the material was never reset. The page labels only looked
+                         * right because the toggle rebuilds the page; the chat and
+                         * overlay labels, which are the whole point of bug #351,
+                         * silently stayed heavy.
+                         *
+                         * So assign what LoadFontAsset would have assigned. The
+                         * value is identical — `m_fontAsset.material` IS the asset
+                         * default — and it does not depend on the guard. */
+                        if (m != null) pTmpFontSharedMat?.SetValue(comp, m);
+                        else if (FontDefaultMaterial() != null)
+                            pTmpFontSharedMat?.SetValue(comp, baseFontMat);
+                        else continue;
+                        try { dirty?.Invoke(comp, null); } catch { }
+                        repointed++;
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { Plugin.Log?.LogWarning("[FONT] re-point: " + ex.Message); }
+            Plugin.Log?.LogInfo($"[FONT] heavy text -> {(m != null ? "ON" : "OFF")}: "
+                + $"re-pointed {repointed} label(s), pruned {pruned}");
+        }
+
+        // ── heavy-text self-test ────────────────────────────────────────
+        /* [FONT] HeavyTextSelfTest. Bug #351's real acceptance test is "toggle
+         * the setting OFF while the chat overlay is HIDDEN, then show it" —
+         * a state no seat here can reach by clicking, and precisely the state
+         * in which the FIRST repair silently did nothing: the OFF path
+         * re-assigned `font` and leaned on TMP resetting fontSharedMaterial,
+         * but TMP's setter is `if (!(m_fontAsset == value)) {...}` and every
+         * label was already on that asset, so the reset never ran. The page
+         * labels came back correct because the toggle rebuilds the page; the
+         * hidden ones stayed heavy and nothing said so.
+         *
+         * So drive the same path over labels under an INACTIVE parent and
+         * assert the material after each step. Case 4 is the negative control
+         * (#391): it is the one that FAILS on the pre-repair code, which is
+         * what makes the other cases worth reading. */
+        private static bool weightSelfTestDone;
+        private static BepInEx.Configuration.ConfigEntry<bool> weightSelfTestLever;
+
+        /// <summary>Once per process, from Plugin's persistent tick — never from
+        /// NativeUI.Tick, which early-returns unless the settings page is already
+        /// open, and the point of this is to reach the toggle path with no click.
+        /// Binds [FONT] HeavyTextSelfTest and runs WeightSelfTest when it is true.
+        /// The run logs and does nothing else — it restores the player's own
+        /// setting and destroys everything it created.</summary>
+        internal static void EnsureWeightSelfTest()
+        {
+            if (weightSelfTestDone) return;
+            // Needs the font resolved before it can assert anything about
+            // materials; keep re-arming until it is, rather than burning the
+            // one run on an early tick.
+            if (tmpFont == null) return;
+            weightSelfTestDone = true;
+            try
+            {
+                BepInEx.Configuration.ConfigFile cf = Plugin.ConfigFileForLevers;
+                if (cf != null)
+                    weightSelfTestLever = cf.Bind(
+                        "UI", "HeavyTextSelfTest", false,
+                        "Development only: once at startup, drive the thicker-menu-text toggle over throwaway labels — including labels that are HIDDEN, which is the case bug #351 was about — and log one [FONT] selftest line per case plus a summary. Restores your own setting; nothing is shown, sent or persisted.");
+            }
+            catch (Exception ex) { Plugin.Log?.LogWarning("[FONT] self-test bind failed: " + ex.Message); }
+            bool run = false;
+            try { run = weightSelfTestLever != null && weightSelfTestLever.Value; } catch { }
+            if (!run) return;
+            try
+            {
+                int fail;
+                int ran = WeightSelfTest(s => Plugin.Log?.LogInfo(s), out fail);
+                /* This verdict is bug #351's acceptance signal, and a FAIL logged
+                 * at Info reads as a clean run to any level-filtered scan. */
+                if (fail > 0 || ran != WEIGHT_SELFTEST_CASES)
+                    Plugin.Log?.LogError("[FONT] selftest FAILED: ran " + ran + "/"
+                                         + WEIGHT_SELFTEST_CASES + ", " + fail + " case(s) failed");
+            }
+            catch (Exception ex)
+            { Plugin.Log?.LogWarning("[FONT] self-test failed to run: " + ex.GetType().Name + ": " + ex.Message); }
+        }
+
+        internal const int WEIGHT_SELFTEST_CASES = 7;
+
+        /// <summary>Drives ON -> OFF -> ON over visible and hidden labels.
+        /// Returns the number of cases RUN and sets <paramref name="fail"/>.
+        /// A run passes when run == WEIGHT_SELFTEST_CASES and fail == 0.</summary>
+        internal static int WeightSelfTest(Action<string> log, out int fail)
+        {
+            /* `fail` is an out-parameter and C# forbids capturing one in a
+             * lambda, so the cases count into a local and the out is assigned
+             * once in the finally — which runs on every exit path here. */
+            int run = 0, nFail = 0;
+            fail = 0;
+            bool original = true;
+            GameObject root = null;
+            try { original = Plugin.UiHeavyFont.Value; } catch { }
+            /* The lever's own description promises the run persists nothing, and
+             * every `UiHeavyFont.Value = ...` below would otherwise rewrite the cfg
+             * file — SaveOnConfigSet is on by default. Suppress the writes for the
+             * duration; the finally puts the player's value back first and this flag
+             * second, so what is on disk never leaves their own setting. */
+            BepInEx.Configuration.ConfigFile selfTestCfg = null;
+            bool selfTestSaveOnSet = true;
+            try
+            {
+                selfTestCfg = Plugin.ConfigFileForLevers;
+                if (selfTestCfg != null)
+                {
+                    selfTestSaveOnSet = selfTestCfg.SaveOnConfigSet;
+                    selfTestCfg.SaveOnConfigSet = false;
+                }
+            }
+            catch { }
+            Func<object, Material> matOf = c =>
+            {
+                try { return pTmpFontSharedMat?.GetValue(c) as Material; } catch { return null; }
+            };
+            Action<string, bool> Case = (name, ok) =>
+            {
+                run++; if (!ok) nFail++;
+                log?.Invoke("[FONT] selftest case=" + name + (ok ? " PASS" : " FAIL"));
+            };
+            try
+            {
+                root = new GameObject("SCR_WeightSelfTest");
+                root.hideFlags = HideFlags.HideAndDontSave;
+                var shownGO = new GameObject("shown"); shownGO.transform.SetParent(root.transform, false);
+                var hiddenGO = new GameObject("hidden"); hiddenGO.transform.SetParent(root.transform, false);
+
+                // The whole point: this branch is INACTIVE, the way a closed
+                // chat overlay is, before either label is created.
+                hiddenGO.SetActive(false);
+
+                object shown = CreateText("selftestShown", shownGO.transform, "shown", 16f, Color.white);
+                object hidden = CreateText("selftestHidden", hiddenGO.transform, "hidden", 16f, Color.white);
+                if (shown == null || hidden == null)
+                { log?.Invoke("[FONT] selftest harness failed: labels not created"); nFail++; return run; }
+
+                Material assetDefault = FontDefaultMaterial();
+
+                // ON
+                try { Plugin.UiHeavyFont.Value = true; } catch { }
+                ResetWeightMaterial();
+                Material heavy = GetWeightMaterial();
+                Case("on-visible", heavy != null && matOf(shown) == heavy);
+                Case("on-hidden", heavy != null && matOf(hidden) == heavy);
+
+                // OFF — cases 3 and 4. Case 4 is the negative control: it is
+                // the one the pre-repair OFF path could not pass.
+                try { Plugin.UiHeavyFont.Value = false; } catch { }
+                ResetWeightMaterial();
+                Case("off-visible", assetDefault != null && matOf(shown) == assetDefault);
+                Case("off-hidden(control)", assetDefault != null && matOf(hidden) == assetDefault);
+
+                // Back ON — proves the transition is real in both directions
+                // rather than the labels simply never having moved.
+                try { Plugin.UiHeavyFont.Value = true; } catch { }
+                ResetWeightMaterial();
+                Material heavy2 = GetWeightMaterial();
+                Case("on-hidden-again", heavy2 != null && matOf(hidden) == heavy2);
+
+                // The clone is built once and kept: same instance across the
+                // whole cycle. This is what makes the toggle leak-free.
+                Case("material-not-rebuilt", heavy != null && ReferenceEquals(heavy, heavy2));
+
+                // And the evidence for using a registration list rather than
+                // FindObjectsOfType: the hidden label is invisible to the
+                // latter, so the obvious fix would have repaired a fraction of
+                // the labels while logging a healthy-looking count.
+                bool seenByActive = false, seenByAll = false;
+                try
+                {
+                    foreach (var o in UnityEngine.Object.FindObjectsOfType(tTMP))
+                        if (ReferenceEquals(o, hidden)) { seenByActive = true; break; }
+                    foreach (var o in Resources.FindObjectsOfTypeAll(tTMP))
+                        if (ReferenceEquals(o, hidden)) { seenByAll = true; break; }
+                }
+                catch { }
+                Case("hidden-label-needs-registration", !seenByActive && seenByAll);
+            }
+            catch (Exception ex)
+            {
+                nFail++;
+                log?.Invoke("[FONT] selftest harness failed: " + ex.GetType().Name + ": " + ex.Message);
+            }
+            finally
+            {
+                fail = nFail;
+                if (root != null) { try { UnityEngine.Object.Destroy(root); } catch { } }
+                // Put the player's own setting back, and re-point the REAL
+                // labels to match it — the run drove them through three
+                // transitions and must not leave them on the wrong material.
+                try { Plugin.UiHeavyFont.Value = original; } catch { }
+                try { if (selfTestCfg != null) selfTestCfg.SaveOnConfigSet = selfTestSaveOnSet; } catch { }
+                try { ResetWeightMaterial(); } catch { }
+                /* The summary is emitted HERE rather than after the try, so that
+                 * every exit path produces exactly one — including the early return
+                 * when the harness cannot create its labels, which used to end a run
+                 * with no verdict line at all. */
+                bool all = run == WEIGHT_SELFTEST_CASES && nFail == 0;
+                log?.Invoke("[FONT] selftest summary run=" + run + " expected=" + WEIGHT_SELFTEST_CASES
+                            + " fail=" + nFail + (all ? " PASS" : " FAIL"));
+            }
+            return run;
+        }
+
+        /// <summary>The font asset's own default material — what a label looks
+        /// like with the heavy setting off. Resolved once, then cached.</summary>
+        private static Material FontDefaultMaterial()
+        {
+            if (baseFontMat != null || tmpFont == null) return baseFontMat;
+            try
+            {
+                /* A FIELD, not a property. TMP_Asset declares `public Material
+                 * material` and nothing in the TMP_FontAsset chain promotes it to a
+                 * property — read out of the Unity.TextMeshPro.dll this game ships
+                 * — so the GetProperty lookup that used to be here returned null on
+                 * every call, and the OFF branch of the toggle re-pointed nothing.
+                 * EmojiSprites reads the same member with GetField and names it
+                 * TMP_Asset.material. The property lookup stays as a second chance
+                 * for a future TMP that promotes it. */
+                baseFontMat = tmpFont.GetType()
+                    .GetField("material", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(tmpFont) as Material;
+                if (baseFontMat == null)
+                    baseFontMat = tmpFont.GetType()
+                        .GetProperty("material", BindingFlags.Public | BindingFlags.Instance)
+                        ?.GetValue(tmpFont) as Material;
+            }
+            catch { }
+            return baseFontMat;
         }
 
         private static Material GetWeightMaterial()
         {
             if (!Plugin.UiHeavyFont.Value) return null;
+            /* The clone is built once and kept for the life of the process
+             * (ResetWeightMaterial explains why it is no longer rebuilt per
+             * toggle). A change to the configured weight is the one thing that
+             * genuinely invalidates it — UiFontWeight is cfg-only, so this is
+             * what makes a hand tune take effect on the next toggle. */
+            float want = Mathf.Clamp(Plugin.UiFontWeight.Value, 0f, 0.5f);
+            if (weightMat != null && want != weightMatBuiltFor)
+            { weightMat = null; weightMatTried = false; }
             if (weightMat != null || weightMatTried) return weightMat;
             weightMatTried = true;
             try
@@ -97,28 +447,44 @@ namespace CompetitiveRounds
                     if (pTmpFontSharedMat == null)
                         pTmpFontSharedMat = tTMP.GetProperty("fontSharedMaterial",
                             BindingFlags.Public | BindingFlags.Instance);
-                    /* The label MUST be on OUR font asset. TMP's
+                    /* The label MUST be on OUR font asset — but NOT for the
+                     * reason this comment used to give. It claimed TMP's
                      * fontSharedMaterial setter rejects a material whose atlas
-                     * texture does not match the component's font asset — it
-                     * logs a warning and leaves the old material in place. So
-                     * cloning the first TMP component we happen to find (which
-                     * may be a ROUNDS label on a different font, or one of our
-                     * own nametag typeface clones) would produce a material
-                     * that every assignment silently refuses: a no-op with a
-                     * different cause than the one we just fixed. */
+                     * does not match the component's font asset and logs a
+                     * warning. Decompiled from the shipped assembly, the
+                     * singular setter is `if (!(m_sharedMaterial == value))
+                     * SetSharedMaterial(value)` and SetSharedMaterial is
+                     * `m_sharedMaterial = mat; m_padding = ...;
+                     * SetMaterialDirty();` — no atlas check, no rejection, no
+                     * warning. It ACCEPTS the mismatch.
+                     *
+                     * Which makes the filter more important, not less: a clone
+                     * taken from a label on a different font asset would be
+                     * assigned happily and then render the WRONG GLYPHS out of
+                     * the wrong atlas, instead of failing loudly. Keep the
+                     * check; the reason is corrupted output, not a no-op. */
                     foreach (var live in UnityEngine.Object.FindObjectsOfType(tTMP))
                     {
                         if (pTmpFont?.GetValue(live) != tmpFont) continue;
                         var lm = pTmpFontSharedMat?.GetValue(live) as Material;
-                        if (lm != null && lm.name.IndexOf("SCR heavy", StringComparison.Ordinal) < 0)
+                        /* And it must not be one of OUR OWN runtime clones. Every
+                         * material this mod builds at runtime is HideAndDontSave
+                         * (the heavy clone here, NametagGlowRenderer's per-SKU glow
+                         * and podium-outline clones); ROUNDS' own materials are
+                         * loaded assets and are not. Cloning a glow clone would
+                         * bake somebody's coloured outline into every mod label —
+                         * and the top-left nametag is on our font asset, so it
+                         * passes the font test above. A flags test rather than a
+                         * name test: a name grep for each clone spelling is a
+                         * check that silently stops matching the day one of them
+                         * is renamed (#342). */
+                        if (lm != null && lm.hideFlags != HideFlags.HideAndDontSave
+                            && lm.name.IndexOf("SCR heavy", StringComparison.Ordinal) < 0)
                         { baseMat = lm; break; }
                     }
                 }
                 catch { }
-                if (baseMat == null)
-                    baseMat = tmpFont.GetType()
-                        .GetProperty("material", BindingFlags.Public | BindingFlags.Instance)
-                        ?.GetValue(tmpFont) as Material;
+                if (baseMat == null) baseMat = FontDefaultMaterial();
                 if (baseMat == null)
                 {
                     // No live label yet AND no default: not a failure, just too
@@ -129,7 +495,8 @@ namespace CompetitiveRounds
                 var clone = new Material(baseMat);
                 clone.name = baseMat.name + " (SCR heavy)";
                 clone.hideFlags = HideFlags.HideAndDontSave;
-                float extra = Mathf.Clamp(Plugin.UiFontWeight.Value, 0f, 0.5f);
+                float extra = want;
+                weightMatBuiltFor = extra;
 
                 /* WHICH property actually thickens an SDF glyph (first pass got
                  * this wrong and did nothing at all — learning #262/#263's shape,
@@ -188,8 +555,14 @@ namespace CompetitiveRounds
         private static bool weightApplyLogged;
         private static void ApplyWeightMaterial(object tmp)
         {
+            if (tmp == null) return;
+            /* Tracked BEFORE the null-material early-return, so labels created while
+             * the setting is OFF are repaired too when it is switched ON. Without
+             * that, only the F5 page (which the toggle rebuilds) ever changed weight
+             * and the persistent surfaces kept the old look until a game restart. */
+            TrackWeightLabel(tmp);
             var m = GetWeightMaterial();
-            if (m == null || tmp == null) return;
+            if (m == null) return;
             try
             {
                 if (pTmpFontSharedMat == null)
@@ -13711,10 +14084,17 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "How dates are written across the mod's menus (history rows, leaderboards, tournaments).", 18f);
             dateFmtTxt = UIFactory.GetButtonText(dateFmtBtn);
-            /* Bug #159: heavier menu text, on by request. The whole page is
-             * rebuilt rather than repainted because the weight lives on each
-             * label's material, assigned once at creation — a repaint would
-             * leave every existing label on the old material. */
+            /* Bug #159: heavier menu text, on by request.
+             * Sept 8 (bug #351): the weight still lives on each label's
+             * material, but ResetWeightMaterial no longer DESTROYS the shared
+             * clone — it re-points every label the mod has ever created
+             * (UIFactory.RepointWeightLabels). Destroying it stranded every
+             * label this handler does not rebuild — the chat overlay above
+             * all — on a destroyed Material: the panel paints and the text
+             * does not, until the game restarts. So the page rebuild below is
+             * no longer what makes the weight change take effect; it is kept
+             * because this tab page also re-lays-out on this path, and it is
+             * the same PUBLIC path the language switch uses. */
             heavyFontBtn = SettingsToggle(langBox.transform, "SHeavyFont", new Vector2(260, 28),
                 () =>
                 {
@@ -14783,7 +15163,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 {string hitLine=s.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0:F1}% ({1}/{2})",(float)s.bullets_hit*100f/s.bullets_fired,s.bullets_hit,s.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=s.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0:F1}% ({1}/{2})",(float)s.blocks_successful*100f/s.blocks_activated,s.blocks_successful,s.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");UIFactory.SetText(txtAccuracy,$"{hitLine}\n{blkLine}");}RefreshHistory(hR,hC);RefreshSession();}
         private static void RefreshHistory(List<ApiClient.MatchHistoryEntry> ranked,List<ApiClient.MatchHistoryEntry> casual){/* Bug 263: while searching, the summary totals describe the UNFILTERED history — pages that don't exist under the filter (recon risk 1: the pager would advertise them and the prefetch-at-end trigger would loop). Use loaded counts only, and route the end-of-pages prefetch at the search cache instead. */bool hSearch=!string.IsNullOrEmpty(histSearch?.Trim());/* Review r1 find 5: the search stream is one chronological 400-row window split into two mode lists — an EMPTY category has no pager to reach older rows, so a mode whose matches sit beyond the window would falsely render as "none". Chain-fetch while either category is empty and rows remain (self-limiting: one in-flight fetch at a time; stops at loaded-all or first hit). */if(hSearch&&!ApiClient.MatchHistorySearchLoadedAll&&(ranked.Count==0||casual.Count==0))ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);CompetitiveUI.ClearCardHoverRegions();foreach(var r in rankedRows){r.root.SetActive(false);r.seriesGO.SetActive(false);}if(ranked.Count>0){var groups=GroupBySeries(ranked);int gpp=3,totalP=(groups.Count+gpp-1)/gpp;/* v1.33 lazy history (item 8): pager shows the FULL page count from the
  * server summary while only a window of matches is loaded; nearing the end
- * of the loaded window prefetches the next chunk. */int fullGroups=hSearch?groups.Count:Math.Max(groups.Count,ApiClient.HistoryTotalRankedGroups);int fullRankedP=Math.Max(totalP,(fullGroups+gpp-1)/gpp);rankedPage=Math.Max(0,Math.Min(rankedPage,totalP-1));if(rankedPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=rankedPage*gpp,end=Math.Min(start+gpp,groups.Count);int ri=0;for(int g=start;g<end&&ri<rankedRows.Count;g++){var grp=groups[g];if(grp.matches.Count==0)continue;var first=grp.matches[0];if(grp.series_id!=null&&ri<rankedRows.Count){var row=rankedRows[ri];string score=first.series_score??"?-?";bool complete=false,won=false;try{var p=score.Split('-');int mw=int.Parse(p[0]),tw=int.Parse(p[1]);complete=mw>=2||tw>=2;won=mw>tw;}catch{}UIFactory.SetTextRaw(row.txtSeriesHead,ComposeOpponentCell(row.txtSeriesHead,first,s=>complete?I18n.TrF("Series {0} {1}  vs {2}",won?"W":"L",score,s):I18n.TrF("Series {0}  vs {1}  (in progress)",score,s),HIST_OPP_SERIES_PX,HIST_OPP_BUDGET_SERIES));UIFactory.SetColor(row.txtSeriesHead,complete?(won?C_GREEN:C_RED):C_GOLD);/* The per-match row shows XP->gold (typically 4-5g/match); the series-win bonus (10-12g) was invisible because the history row never referenced series_gold_gained. Find the populated value across matches in this group (server sets it on the last-match-of-series row) and append to the elo line. */int grpSeriesGold=0;foreach(var mm in grp.matches)if(mm.series_gold_gained>grpSeriesGold)grpSeriesGold=mm.series_gold_gained;/* July 20 item 6: also show series gold when the elo delta is 0/absent — losers now
+ * of the loaded window prefetches the next chunk. */int fullGroups=hSearch?groups.Count:Math.Max(groups.Count,ApiClient.HistoryTotalRankedGroups);int fullRankedP=Math.Max(totalP,(fullGroups+gpp-1)/gpp);rankedPage=Math.Max(0,Math.Min(rankedPage,totalP-1));if(rankedPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=rankedPage*gpp,end=Math.Min(start+gpp,groups.Count);int ri=0;for(int g=start;g<end&&ri<rankedRows.Count;g++){var grp=groups[g];if(grp.matches.Count==0)continue;var first=grp.matches[0];if(grp.series_id!=null&&ri<rankedRows.Count){var row=rankedRows[ri];string score=first.series_score??"?-?";bool complete=false,won=false;try{var p=score.Split('-');int mw=int.Parse(p[0]),tw=int.Parse(p[1]);complete=mw>=2||tw>=2;won=mw>tw;}catch{}UIFactory.SetTextRaw(row.txtSeriesHead,ComposeOpponentCell(row.txtSeriesHead,first,s=>complete?I18n.TrF("Series {0} {1}  vs {2}",won?"W":"L",score,s):I18n.TrF("Series {0}  vs {1}  (in progress)",score,s),HIST_OPP_SERIES_PX,HIST_OPP_BUDGET_SERIES));UIFactory.SetColor(row.txtSeriesHead,complete?(won?C_GREEN:C_RED):C_GOLD);/* Sept 8: the series HEADER is the only place a ranked group renders the opponent's name — every game row under it is filled with indent:true, which nulls opponentSteamId and writes an empty name cell (FillRow below). Without this the hover profile card, which every other player-name surface registers, was unreachable for the whole Ranked History box while Casual (indent:false) and the leaderboard had it. One label = ONE player, which is what RegisterNameHover's contract requires; the 2v2/1v2/FFA history headers name 2-4 players in a single label and so cannot use it as-is. */ProfileCard.RegisterNameHover(row.txtSeriesHead,first.opponent_steam_id);/* The per-match row shows XP->gold (typically 4-5g/match); the series-win bonus (10-12g) was invisible because the history row never referenced series_gold_gained. Find the populated value across matches in this group (server sets it on the last-match-of-series row) and append to the elo line. */int grpSeriesGold=0;foreach(var mm in grp.matches)if(mm.series_gold_gained>grpSeriesGold)grpSeriesGold=mm.series_gold_gained;/* July 20 item 6: also show series gold when the elo delta is 0/absent — losers now
  * earn series gold (tier multipliers) and their rows previously hid it entirely. */if(complete&&(first.series_rating_change!=0f||grpSeriesGold>0)){float rc=first.series_rating_change;string goldStr=grpSeriesGold>0?$" <color=#FFD94D>+{grpSeriesGold}g</color>":"";string eloStr=rc!=0f?I18n.TrF("{0} elo",RatingDeltaText(rc)):"";UIFactory.SetText(row.txtSeriesElo,(eloStr+goldStr).TrimStart());UIFactory.SetColor(row.txtSeriesElo,rc>0?C_GREEN:rc<0?C_RED:C_GOLD);}else UIFactory.SetText(row.txtSeriesElo,"");row.seriesGO.SetActive(true);foreach(var m in grp.matches){if(ri>=rankedRows.Count)break;FillRow(rankedRows[ri],m,true);/* Sept 8 item 5: ONE "Session" per sitting+opponent in this box, on the NEWEST game of the group; the server flags that row (sitting_head, 3 h gap rule = My Stats Session Info) -> ?sitting=<match uuid>. Rows without the flag (old api) get no button. */if(m.sitting_head)SetSessionButton(rankedRows[ri],"sitting",m.match_id);ri++;}}else{FillRow(rankedRows[ri],first,false);if(first.sitting_head)SetSessionButton(rankedRows[ri],"sitting",first.match_id);ri++;}}rPrev.SetActive(rankedPage>0);rNext.SetActive(rankedPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtRankedPage,fullRankedP>1?$"{rankedPage+1}/{fullRankedP}":"");}else{rPrev.SetActive(false);rNext.SetActive(false);UIFactory.SetText(txtRankedPage,"");}foreach(var r in casualRows)r.root.SetActive(false);if(casual.Count>0){int mpp=6,totalP=(casual.Count+mpp-1)/mpp;int fullCasual=hSearch?casual.Count:Math.Max(casual.Count,ApiClient.HistoryTotalCasual);int fullCasualP=Math.Max(totalP,(fullCasual+mpp-1)/mpp);casualPage=Math.Max(0,Math.Min(casualPage,totalP-1));if(casualPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=casualPage*mpp,end=Math.Min(start+mpp,casual.Count);for(int i=start;i<end;i++){int ri=i-start;if(ri<casualRows.Count){FillRow(casualRows[ri],casual[i],false);/* Sept 8 item 5: ONE "Session" per sitting+opponent, on the NEWEST game of the group (server flag sitting_head) -> ?sitting=<match uuid>; the Sept 6 per-room session_uuid runs put a button on every quick-queue game. */if(casual[i].sitting_head)SetSessionButton(casualRows[ri],"sitting",casual[i].match_id);}}cPrev.SetActive(casualPage>0);cNext.SetActive(casualPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtCasualPage,fullCasualP>1?$"{casualPage+1}/{fullCasualP}":"");}else{cPrev.SetActive(false);cNext.SetActive(false);UIFactory.SetText(txtCasualPage,"");}}
 
         /// <summary>Half-point score format (item 4): each point is half a round, so
@@ -25602,8 +25982,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         CompetitiveUI.ShowNotification("Steam ID not ready yet — try again in a few seconds", new Color(1f, 0.6f, 0.2f), 4f);
                         return;
                     }
-                    string region = "";
-                    try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { }
+                    string region = ApiClient.BestKnownPhotonRegion();
                     Plugin.Log.LogInfo($"[TEAM-QUEUE-UI] joining auto team queue sid={sid} region='{region}'");
                     ApiClient.JoinTeamQueue(sid, MatchTracker.LocalDisplayName, region, "auto");
                 },

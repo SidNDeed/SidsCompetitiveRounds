@@ -7750,7 +7750,11 @@ namespace CompetitiveRounds
                 {
                     try
                     {
-                        if (PhotonNetwork.IsConnected && PhotonNetwork.InRoom)
+                        // !OfflineMode is load-bearing, not belt-and-braces: both
+                        // IsConnected and InRoom report true for the Sandbox's
+                        // synthetic room (#122), so without it this renders a
+                        // ping and a region for a session that does not exist.
+                        if (PhotonNetwork.IsConnected && PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode)
                         {
                             int ping = PhotonNetwork.GetPing();
                             string region = PhotonNetwork.CloudRegion ?? "";
