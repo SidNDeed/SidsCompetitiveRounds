@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -317,9 +317,17 @@ namespace CompetitiveRounds
             // Sept 8 r1b M1: the card preview's backdrop is a raw ClickHandler with
             // no occlusion test, so the Card Stats rows under it stayed live and a
             // backdrop click could open ANOTHER preview instead of dismissing this one.
-            || NativeUI.CardPreviewOpen
+            || NativeUI.CardPreviewOpen || NativeUI.LobbyOptionsOpen || NativeUI.ReleaseNotesOpen
             || !Plugin.DataConsentAsked;
-        private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
+        private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen || NativeUI.LobbyOptionsOpen || NativeUI.ReleaseNotesOpen;
+
+        internal static bool MenuNavigationBlocked => AnyModalOwnsInput || quickChatOpen
+            || danceWheelOpen || chatInputOpen || IsVanillaChatTyping()
+            || compareSearchFocused || lbSearchFocused || pickerSearchFocused
+            || histSearchFocused || infoSearchFocused || cardStatsSearchFocused
+            || shopSearchFocused
+            || MailUI.AnyFieldFocused;
+
 
         // Sept 8 item 1: IMGUI is painted after the mod's uGUI canvases, so a page's
         // IMGUI (the search boxes, the hover graphs, the session report, the shop
@@ -334,7 +342,7 @@ namespace CompetitiveRounds
         // picker), so PageImguiHidden includes it and the picker's OWN field is
         // drawn alone, after the block, while no popup covers the picker.
         internal static bool PopupCoversPage =>
-               NativeUI.UtilityPopupOpen || NativeUI.InfoPopupOpen
+               NativeUI.UtilityPopupOpen || NativeUI.LobbyOptionsOpen || NativeUI.ReleaseNotesOpen || NativeUI.InfoPopupOpen
             || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
             || NativeUI.CardPreviewOpen
             // Sept 8 r1b L2: the language chooser is a backdrop modal too (Home has the
@@ -416,6 +424,7 @@ namespace CompetitiveRounds
                 DrawLeaderboardSearch();
                 DrawCardStatsSearch();   // Aug 31 — Card Stats card search
                 DrawHistorySearch();  // Bug 263 — My Stats opponent search
+                DrawShopSearch();     //  — Shop listing search
                 DrawInfoSearch();     // Aug 23 r2 — Info library article search
             }
             // The picker's own search field, alone: the picker is one of the surfaces
@@ -1730,7 +1739,7 @@ namespace CompetitiveRounds
             lbSearchFocused = false;
             try
             {
-                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 1) return;
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 1 || !NativeUI.RankedLeaderboardVisible) return;
                 Rect r = NativeUI.GetLbSearchScreenRect();
                 if (r.width < 1f || r.height < 1f) return;
                 if (compareSearchStyle == null)
@@ -1826,6 +1835,39 @@ namespace CompetitiveRounds
                               I18n.Tr("<color=#7788AA><i>search...</i></color>"), compareSearchHintStyle);
                 if (next != cur)
                     NativeUI.InfoSearch = next;   // setter filters the nav list
+            }
+            catch { /* search is best-effort cosmetic */ }
+        }
+
+        // Shop search  — 7th instance of the IMGUI-over-anchor clone,
+        // gated to tab 4, own focus flag feeding the T-chat mutex. Client-side
+        // filter only (the shop catalogue is already fully cached).
+        private static bool shopSearchFocused = false;
+        public static bool IsShopSearchFocused => shopSearchFocused;
+        private const string SHOP_SEARCH_CTRL = "ShopSearchField";
+        private static void DrawShopSearch()
+        {
+            shopSearchFocused = false;
+            try
+            {
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 4) return;
+                Rect r = NativeUI.GetShopSearchScreenRect();
+                if (r.width < 1f || r.height < 1f) return;
+                if (compareSearchStyle == null)
+                    compareSearchStyle = new GUIStyle(GUI.skin.textField) { fontSize = 13, alignment = TextAnchor.MiddleLeft };
+                if (compareSearchHintStyle == null)
+                    compareSearchHintStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleLeft, richText = true };
+                float h = Mathf.Max(r.height, 22f);
+                var fieldRect = new Rect(r.x, r.y, Mathf.Max(r.width, 120f), h);
+                string cur = NativeUI.ShopSearch ?? "";
+                GUI.SetNextControlName(SHOP_SEARCH_CTRL);
+                string next = GUI.TextField(fieldRect, cur, compareSearchStyle);
+                shopSearchFocused = GUI.GetNameOfFocusedControl() == SHOP_SEARCH_CTRL;
+                if (string.IsNullOrEmpty(next))
+                    GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
+                              I18n.Tr("<color=#7788AA><i>search the shop...</i></color>"), compareSearchHintStyle);
+                if (next != cur)
+                    NativeUI.ShopSearch = next;   // setter marks the tab dirty
             }
             catch { /* search is best-effort cosmetic */ }
         }
@@ -2052,7 +2094,7 @@ namespace CompetitiveRounds
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             // July 22: tab 8 (2v2) hosts hover graphs too.
-            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8)) return;
+            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 1 && NativeUI.CurrentTab != 8)) return;
             if (_scoreGraphRegions.Count == 0) return;
             Vector2 mp = Input.mousePosition;
             ScoreGraphRegion? hit = null;
@@ -2376,7 +2418,7 @@ namespace CompetitiveRounds
             // FPS/ping cells). Safe because SwitchTab clears every region list
             // on tab change, so allowing a tab here can't resurrect stale
             // regions from another tab's last render.
-            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8 && NativeUI.CurrentTab != 12)) return;
+            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 1 && NativeUI.CurrentTab != 8 && NativeUI.CurrentTab != 12)) return;
             if (_fpsGraphRegions.Count == 0) return;
             Vector2 mp = Input.mousePosition;
             FpsGraphRegion? hit = null;
@@ -2931,7 +2973,7 @@ namespace CompetitiveRounds
             // also clears the regions on tab change; this is the cheap
             // belt-and-suspenders.
             if (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 7
-                && NativeUI.CurrentTab != 8 && NativeUI.CurrentTab != 9) return;
+                && NativeUI.CurrentTab != 1 && NativeUI.CurrentTab != 8 && NativeUI.CurrentTab != 9) return;
             // Review F11 (Aug 17): while any modal owns input, a region under
             // the popup must not draw its tooltip through it. ModalBlockInput
             // is the single per-frame assignment of exactly that condition.
@@ -4118,15 +4160,7 @@ namespace CompetitiveRounds
             var chatMode = CurrentChatOverlayMode();
             if (chatMode == ChatOverlayMode.Muted) { ChatOverlayTmp.Hide(); return; }
             if (!Plugin.DataConsentGranted) { ChatOverlayTmp.Hide(); return; }
-            /* Aug 7 item 3: the old `if (NativeUI.IsOpen) return;` assumed "the
-             * F5 chat panel covers this" — true only on the Home tab. Now chat
-             * stays visible on every OTHER menu tab, repositioned to the right
-             * edge so it sits over dead chrome instead of the left-column
-             * tables. Display-only IMGUI (no input path), so #141/#200 are
-             * moot; IMGUI paints above the uGUI page, and DrawUI order keeps
-             * every modal painting above THIS. */
-            if (NativeUI.HomeChatPaneVisible) { ChatOverlayTmp.Hide(); return; }  // the Home tab chat pane covers this
-
+            // All pages, including Home, use the shared chat overlay.
             NativeUI.CopyChatTail(_chatEntryScratch, 8);
             var entries = _chatEntryScratch;
             if (entries.Count == 0) { ChatOverlayTmp.Hide(); return; }
@@ -4175,8 +4209,7 @@ namespace CompetitiveRounds
             if (visibleCount == 0) { ChatOverlayTmp.Hide(); return; }
 
             // Anchor bottom-left always (Sid, Aug 8: the right-edge menu
-            // placement was jarring — chat lives on the left everywhere except
-            // the Home tab, where the dedicated pane shows instead). Bug 333:
+            // placement was jarring — chat lives on the left on every page). Bug 333:
             // the panel itself is TextMeshPro (ChatOverlayTmp) — the same text
             // system as the F5 pane, so emoji and non-Latin glyphs render
             // through the OS fallback chain instead of as boxes. This method
@@ -6618,6 +6651,8 @@ namespace CompetitiveRounds
                 || infoSearchFocused
                 // Aug 31: the Card Stats search field, same contract.
                 || cardStatsSearchFocused
+                //  the Shop search field, same contract.
+                || shopSearchFocused
                 // Sept 6: the mail composer's subject/body fields, same contract (design B-4).
                 || MailUI.AnyFieldFocused) { quickChatOpen = false; DwClose(); CloseChatInput(discardDraft: false); return; }
 
@@ -7127,6 +7162,7 @@ namespace CompetitiveRounds
                 || compareSearchFocused || lbSearchFocused
                 || histSearchFocused || infoSearchFocused
                 || pickerSearchFocused || cardStatsSearchFocused
+                || shopSearchFocused
                 || MailUI.AnyFieldFocused) { DwClose(); return; }
             if (IsVanillaChatTyping()) { DwClose(); return; }
 
@@ -7414,6 +7450,7 @@ namespace CompetitiveRounds
                 || infoSearchFocused
                 || pickerSearchFocused
                 || cardStatsSearchFocused
+                || shopSearchFocused
                 || MailUI.AnyFieldFocused) { QcClose(); return; }
             if (IsVanillaChatTyping()) { QcClose(); return; }
 

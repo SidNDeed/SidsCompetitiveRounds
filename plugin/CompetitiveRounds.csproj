@@ -210,7 +210,7 @@
     <MusicPreviewsToCopy Include="music\*_preview.ogg" />
     <MusicPreviewsToCopy Include="music\*.png" />
     <MusicFullToCopy Include="music\*.ogg" Exclude="music\*_preview.ogg" />
-    <MusicManifestToCopy Include="music\manifest.json" />
+    <MusicManifestToCopy Include="music\manifest.json" Condition="Exists('$(MSBuildProjectDirectory)\music\manifest.json')" />
   </ItemGroup>
 
   <!-- Home-tab logo: EMBEDDED in the DLL (not a loose file) because the

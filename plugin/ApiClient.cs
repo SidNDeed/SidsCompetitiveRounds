@@ -15,8 +15,6 @@ namespace CompetitiveRounds
     public static class ApiClient
     {
         private static string baseUrl = "";
-        private static float lastFetchTime = 0f;
-        private static float fetchCooldown = 5f; // Min seconds between refreshes
 
         // Cached data for UI
         public static LeaderboardData CachedLeaderboard { get; private set; }
@@ -14977,7 +14975,6 @@ namespace CompetitiveRounds
         }
         public static List<FfaQueueListEntry> CachedFfaQueueList = null;
         private static float _ffaListLastAt = -999f;
-        private static float _ffaLastAutoRejoinAt = -999f;
         // July 28 trapped-lobby loop-breaker: the same dead room re-firing
         // ready_join forever (server wedge, join failure, any loop shape) —
         // after 3 fires for one lobby+room, leave the queue instead of
@@ -18740,7 +18737,6 @@ namespace CompetitiveRounds
         // ── Player Blocks (permanent, from leaderboard) ──────────
 
         public static HashSet<string> BlockedSteamIds { get; private set; } = new HashSet<string>();
-        private static bool blocksLoaded = false;
 
         public static void FetchBlockedPlayers(string steamId)
         {
@@ -18767,7 +18763,6 @@ namespace CompetitiveRounds
                                 }
                             }
                         }
-                        blocksLoaded = true;
                         NativeUI.MarkDirty();
                         Plugin.Log.LogInfo($"[BLOCKS] Loaded {BlockedSteamIds.Count} blocked players");
                     }

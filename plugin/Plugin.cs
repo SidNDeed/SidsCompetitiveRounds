@@ -50,6 +50,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> RankedEnabled;
         internal static ConfigEntry<bool> RankedDisabledByConsent;
         internal static ConfigEntry<bool> ShowNotifications;
+        internal static ConfigEntry<bool> CollapseLatestReleases;
+        internal static ConfigEntry<bool> HideDiscordCard;
         internal static ConfigEntry<bool> ShowFps;
         internal static ConfigEntry<bool> CapFpsUnfocused;
         internal static ConfigEntry<bool> MuteAudioInBackground;
@@ -271,8 +273,6 @@ namespace CompetitiveRounds
         // Ranked queue auto-join state (on Plugin so it survives scene changes)
         private static string pendingRankedRoom = null;
         private static string pendingRankedRegion = null;
-        private static bool pendingRoomLeaving = false;
-        private static float pendingRoomLogTimer = 0f;
         public static string PendingRankedRoom => pendingRankedRoom;
         public static string PendingRankedRegion => pendingRankedRegion;
 
@@ -294,7 +294,6 @@ namespace CompetitiveRounds
         {
             pendingRankedRoom = null;
             pendingRankedRegion = null;
-            pendingRoomLeaving = false;
         }
 
         // 2v2 slot 0-3 the server-side balancer assigned to us. Set when the
@@ -509,6 +508,9 @@ namespace CompetitiveRounds
                 false,
                 "Internal: ranked was auto-disabled by a data-consent revoke, not by the user"
             );
+
+            CollapseLatestReleases = Config.Bind("UI", "CollapseLatestReleases", false, "Collapse the Home page release notes card");
+            HideDiscordCard = Config.Bind("UI", "HideDiscordCard", false, "Hide the Home page Discord link card");
 
             ShowNotifications = Config.Bind(
                 "UI", "ShowNotifications",
